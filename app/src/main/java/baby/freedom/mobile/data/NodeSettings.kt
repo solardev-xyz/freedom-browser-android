@@ -212,6 +212,21 @@ class NodeSettings private constructor(
     }
 
     /**
+     * Settings → Tor → Tor client (#275): `""` for the embedded Arti
+     * client (the default), else an external Tor SOCKS proxy on this
+     * device as `host:port` (`TorProxy.parse` accepted and normalized it),
+     * e.g. Orbot's `127.0.0.1:9050`. `MainActivity` relays it to
+     * `TorRouting` and runs the matching client.
+     */
+    val torExternalProxy: Flow<String> = store.data.map { prefs ->
+        prefs[Keys.TOR_EXTERNAL_PROXY] ?: ""
+    }
+
+    suspend fun setTorExternalProxy(value: String) {
+        store.edit { it[Keys.TOR_EXTERNAL_PROXY] = value }
+    }
+
+    /**
      * Whether any IPFS UI is rendered. Off by default — IPFS support
      * is a hidden capability surfaced only from Settings → Other. The
      * IPFS node still runs regardless of this flag.
@@ -713,6 +728,7 @@ class NodeSettings private constructor(
         fun myotisStartOnLaunch(network: MyotisNetwork) = MYOTIS_START_ON_LAUNCH.getValue(network)
         val TOR_ENABLED = booleanPreferencesKey("tor_enabled")
         val TOR_START_ON_LAUNCH = booleanPreferencesKey("tor_start_on_launch")
+        val TOR_EXTERNAL_PROXY = stringPreferencesKey("tor_external_proxy")
         val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
         val RADICLE_ENABLED = booleanPreferencesKey("radicle_enabled")
         val IPFS_LOW_POWER = booleanPreferencesKey("ipfs_low_power")

@@ -191,6 +191,8 @@ fun SettingsScreen(
     var addAllowlistSite by remember { mutableStateOf(false) }
     val torEnabled by settings.torEnabled.collectAsState(initial = false)
     val torStartOnLaunch by settings.torStartOnLaunch.collectAsState(initial = false)
+    val torExternalProxy by settings.torExternalProxy.collectAsState(initial = "")
+    var editTorClient by remember { mutableStateOf(false) }
 
     var confirmClearHistory by remember { mutableStateOf(false) }
     var confirmClearBookmarks by remember { mutableStateOf(false) }
@@ -253,7 +255,7 @@ fun SettingsScreen(
         query, SECTION_NODES,
         nodeRows(externalSwarm, externalIpfs, showIpfsUi) + radicleSettingsRow(radicle),
     )
-    val torRows = visibleSettingsRows(query, SECTION_TOR, torRows(torEnabled, torStartOnLaunch))
+    val torRows = visibleSettingsRows(query, SECTION_TOR, torRows(torEnabled, torStartOnLaunch, torExternalProxy))
     val chainRows = visibleSettingsRows(query, SECTION_CHAINS, chainSettingsRows(chains))
     val aboutRows = visibleSettingsRows(
         query, SECTION_ABOUT, aboutRows(appVersion, context.packageName, appUpdate, checkForUpdates),
@@ -448,6 +450,8 @@ fun SettingsScreen(
                         visible = torRows,
                         enabled = torEnabled,
                         startOnLaunch = torStartOnLaunch,
+                        externalProxy = torExternalProxy,
+                        onEditClient = { editTorClient = true },
                         onEnabled = { on -> scope.launch { settings.setTorEnabled(on) } },
                         onStartOnLaunch = { on -> scope.launch { settings.setTorStartOnLaunch(on) } },
                     )
@@ -525,6 +529,16 @@ fun SettingsScreen(
                 pickAppearance = false
             },
             onDismiss = { pickAppearance = false },
+        )
+    }
+    if (editTorClient) {
+        TorClientDialog(
+            saved = torExternalProxy,
+            onSave = { value ->
+                scope.launch { settings.setTorExternalProxy(value) }
+                editTorClient = false
+            },
+            onDismiss = { editTorClient = false },
         )
     }
     editEndpoint?.let { endpoint ->
@@ -969,10 +983,21 @@ private const val TOR_ENABLED_DETAIL =
     "Only .onion sites use Tor; every other site connects directly. While off, onion sites are refused."
 private const val TOR_ON_LAUNCH = "Start Tor at launch"
 private const val TOR_ON_LAUNCH_SUBTITLE = "Otherwise start it on the Nodes page"
+private const val TOR_CLIENT = "Tor client"
+private const val TOR_CLIENT_EMBEDDED = "Embedded (Arti)"
+private const val TOR_CLIENT_EXTERNAL = "External SOCKS proxy"
+private const val TOR_CLIENT_HELPER = "A Tor SOCKS port on this device, e.g. Orbot's 127.0.0.1:9050"
 
-/** Settings → Tor (#143), for settings search. */
-internal fun torRows(enabled: Boolean, startOnLaunch: Boolean) = listOf(
+private fun torClientSubtitle(externalProxy: String) =
+    if (externalProxy.isEmpty()) TOR_CLIENT_EMBEDDED else TOR_CLIENT_EXTERNAL
+
+/** Settings → Tor (#143, #275), for settings search. */
+internal fun torRows(enabled: Boolean, startOnLaunch: Boolean, externalProxy: String = "") = listOf(
     settingsRow("tor-enabled", TOR_ENABLED, if (enabled) "On" else "Off", TOR_ENABLED_DETAIL, "Arti"),
+    settingsRow(
+        "tor-client", TOR_CLIENT, torClientSubtitle(externalProxy), externalProxy,
+        TOR_CLIENT_EMBEDDED, TOR_CLIENT_EXTERNAL, "Orbot", "SOCKS",
+    ),
     settingsRow("tor-launch", TOR_ON_LAUNCH, TOR_ON_LAUNCH_SUBTITLE, if (startOnLaunch) "On" else "Off", "onion"),
 )
 
@@ -986,6 +1011,8 @@ private fun TorSettingsSection(
     visible: Set<Any>,
     enabled: Boolean,
     startOnLaunch: Boolean,
+    externalProxy: String,
+    onEditClient: () -> Unit,
     onEnabled: (Boolean) -> Unit,
     onStartOnLaunch: (Boolean) -> Unit,
 ) {
@@ -999,6 +1026,15 @@ private fun TorSettingsSection(
             leadingIcon = Icons.Filled.VpnLock,
             onClick = { onEnabled(!enabled) },
             trailing = { Switch(checked = enabled, onCheckedChange = onEnabled) },
+        )
+        if ("tor-client" in visible) PageRow(
+            title = TOR_CLIENT,
+            subtitle = torClientSubtitle(externalProxy),
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Tune,
+            // The whole host:port, never cut.
+            thirdLine = externalProxy.ifEmpty { null },
+            onClick = onEditClient,
         )
         if ("tor-launch" in visible) PageRow(
             title = TOR_ON_LAUNCH,
@@ -1170,6 +1206,138 @@ private fun EndpointDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         },
     )
+}
+
+/**
+ * Settings → Tor → Tor client (#275): "Embedded (Arti)" applies at once;
+ * "External SOCKS proxy" takes a loopback `host:port` ([TorProxy.parse])
+ * and applies on Save. Test runs [TorProxy.probe] — a CONNECT to a
+ * `.onion` service through it — and, with Orbot installed and nothing
+ * answering, offers to start it. Saving doesn't need a passing test (Orbot
+ * may simply not be running yet): Freedom routes `.onion` to the proxy
+ * only once the same probe passes.
+ */
+@Composable
+private fun TorClientDialog(
+    saved: String,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var externalSelected by remember { mutableStateOf(saved.isNotEmpty()) }
+    var draft by remember { mutableStateOf(saved.ifEmpty { TorProxy.DEFAULT.authority }) }
+    val parsed = TorProxy.parse(draft)
+    val endpoint = parsed.endpoint
+    // The test's endpoint and verdict (null while running); a new draft drops it.
+    var test by remember { mutableStateOf<Pair<SocksEndpoint, TorProxy.Probe?>?>(null) }
+    val shown = test?.takeIf { it.first == endpoint }
+    val orbotInstalled = remember { TorProxy.orbotInstalled(context) }
+    fun runTest(target: SocksEndpoint, delayMs: Long = 0) {
+        test = target to null
+        scope.launch {
+            if (delayMs > 0) kotlinx.coroutines.delay(delayMs)
+            val result = TorProxy.probe(target)
+            if (test?.first == target) test = target to result
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(TOR_CLIENT) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                EngineRadioRow(
+                    label = TOR_CLIENT_EMBEDDED,
+                    selected = !externalSelected,
+                    onClick = { onSave("") },
+                )
+                EngineRadioRow(
+                    label = TOR_CLIENT_EXTERNAL,
+                    selected = externalSelected,
+                    onClick = { externalSelected = true },
+                )
+                if (externalSelected) {
+                    NoSuggestionsTextInput {
+                        OutlinedTextField(
+                            value = draft,
+                            onValueChange = { draft = it.take(TOR_PROXY_MAX_LENGTH) },
+                            label = { Text("host:port") },
+                            placeholder = { Text(TorProxy.DEFAULT.authority) },
+                            isError = endpoint == null,
+                            supportingText = {
+                                Text(parsed.rejection?.let(::torProxyHint) ?: TOR_CLIENT_HELPER)
+                            },
+                            singleLine = true,
+                            keyboardOptions = urlKeyboardOptions(),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(
+                            onClick = { endpoint?.let { runTest(it) } },
+                            enabled = endpoint != null && !(shown != null && shown.second == null),
+                        ) { Text("Test") }
+                        if (endpoint != null && orbotInstalled &&
+                            (shown?.second == TorProxy.Probe.NotListening)
+                        ) {
+                            TextButton(onClick = {
+                                TorProxy.requestOrbotStart(context)
+                                runTest(endpoint, delayMs = 3_000)
+                            }) { Text("Start Orbot") }
+                        }
+                    }
+                    if (shown != null && endpoint != null) {
+                        val result = shown.second
+                        Text(
+                            if (result == null) {
+                                "Testing: connecting to a .onion site through $endpoint…"
+                            } else {
+                                TorProxy.describe(result, endpoint)
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = when (result) {
+                                null -> MaterialTheme.colorScheme.onSurfaceVariant
+                                TorProxy.Probe.Tor -> Color(0xFF22C55E)
+                                else -> MaterialTheme.colorScheme.error
+                            },
+                        )
+                        if (result == TorProxy.Probe.NotListening && orbotInstalled) {
+                            Text(
+                                ORBOT_START_NOTE,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (externalSelected) {
+                TextButton(
+                    onClick = { endpoint?.let { onSave(it.authority) } },
+                    enabled = endpoint != null,
+                ) { Text("Save") }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+/** A `host:port` is short; the field takes no more. */
+private const val TOR_PROXY_MAX_LENGTH = 64
+
+/** What to fix, for each reason [TorProxy.parse] refuses a proxy. */
+private fun torProxyHint(rejection: TorProxy.Rejection): String = when (rejection) {
+    TorProxy.Rejection.EMPTY,
+    TorProxy.Rejection.FORMAT -> "Use host:port, e.g. 127.0.0.1:9050"
+    TorProxy.Rejection.SCHEME -> "Only socks5:// (or no scheme)"
+    TorProxy.Rejection.NOT_LOOPBACK -> "Only a proxy on this device: 127.0.0.1, localhost or [::1]"
+    TorProxy.Rejection.PORT -> "Needs a port from 1 to 65535"
 }
 
 /** What to fix, for each reason [ExternalEndpoints.validate] refuses a URL. */
