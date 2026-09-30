@@ -1,6 +1,8 @@
 package baby.freedom.mobile.ens
 
 import android.util.Log
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import java.net.URI
 import java.net.URLDecoder
 import java.security.MessageDigest
@@ -180,7 +182,7 @@ class TezosDomainsResolver internal constructor(
     private suspend fun resolveUncached(name: String): Outcome {
         val endpoints = rpcEndpoints.take(3)
         val reachable = settle(endpoints) { fetchHead(it) }
-        if (reachable.isEmpty()) return Outcome.Failed("all Tezos RPC providers failed")
+        if (reachable.isEmpty()) return Outcome.Failed(Strings.get(R.string.names_tezos_all_failed))
 
         // A provider whose head is hours old is a stuck node, not a
         // provider that disagrees about the chain: comparing its head with
@@ -232,7 +234,7 @@ class TezosDomainsResolver internal constructor(
         // just the lower one — so neither side can be trusted.
         if (heads.size * 2 <= allHeads.size) {
             val groups = allHeads.groupBy { it.level }.entries.sortedByDescending { it.value.size }.map { (level, hs) ->
-                EnsResult.Conflict.Group("chain head #$level", hs.map { hostOf(it.endpoint) })
+                EnsResult.Conflict.Group(Strings.get(R.string.names_tezos_chain_head, level.toString()), hs.map { hostOf(it.endpoint) })
             }
             return Outcome.Conflict(
                 "Tezos RPC providers disagree about the chain head",
@@ -243,7 +245,7 @@ class TezosDomainsResolver internal constructor(
 
         val anchorLevel = heads.minOf { it.level } - ANCHOR_DEPTH
         val anchors = settle(heads) { fetchAnchor(it.endpoint, anchorLevel) }
-        if (anchors.isEmpty()) return Outcome.Failed("Tezos RPC providers could not anchor a block")
+        if (anchors.isEmpty()) return Outcome.Failed(Strings.get(R.string.names_tezos_no_anchor))
         val anchorGroups = anchors.groupBy { it.hash }.values.sortedByDescending { it.size }
         val best = anchorGroups.first()
         // The hash at a settled depth isn't negotiable: without a strict
@@ -261,7 +263,7 @@ class TezosDomainsResolver internal constructor(
         }
 
         val legs = settle(best) { anchor -> anchor.endpoint to resolveAtBlock(anchor.endpoint, anchor.hash, name) }
-        if (legs.isEmpty()) return Outcome.Failed("Tezos Domains registry lookup failed")
+        if (legs.isEmpty()) return Outcome.Failed(Strings.get(R.string.names_tezos_registry_failed))
 
         val groups = legs.groupBy { it.second }.values.sortedByDescending { it.size }
         val winner = groups.first()
@@ -492,7 +494,7 @@ class TezosDomainsResolver internal constructor(
             contentUrl = entries["web:content_url"]?.let(::decodeJsonBytes)
             ttl = entries["td:ttl"]?.let(::decodeJsonBytes)?.toString()
         } catch (e: Exception) {
-            return Leg(Leg.Type.UNSUPPORTED, reason = "invalid Tezos Domains metadata: ${e.message}")
+            return Leg(Leg.Type.UNSUPPORTED, reason = Strings.get(R.string.names_tezos_invalid_metadata, e.message.toString()))
         }
         // Presence, not value, decides precedence: a malformed redirect
         // record is unsupported, not a fallback to the content record.
@@ -576,18 +578,18 @@ class TezosDomainsResolver internal constructor(
          */
         internal fun parsePublishedUri(raw: Any?, redirect: Boolean): Leg {
             fun unsupported(reason: String) = Leg(Leg.Type.UNSUPPORTED, reason = reason)
-            if (raw !is String || raw.length > 8_192) return unsupported("invalid website URI")
+            if (raw !is String || raw.length > 8_192) return unsupported(Strings.get(R.string.names_tezos_invalid_website_uri))
             val uri = raw.trim()
             val protocol = schemeRegex.find(uri)?.groupValues?.get(1)?.lowercase()
-                ?: return unsupported("invalid website URI")
+                ?: return unsupported(Strings.get(R.string.names_tezos_invalid_website_uri))
             if (redirect && protocol != "http" && protocol != "https") {
-                return unsupported("redirect URL must use HTTP(S)")
+                return unsupported(Strings.get(R.string.names_tezos_redirect_http))
             }
             when (protocol) {
                 "http", "https" -> {
                     val parsed = runCatching { URI(uri) }.getOrNull()
                     if (parsed?.host.isNullOrEmpty() || parsed?.rawUserInfo != null) {
-                        return unsupported("invalid HTTP(S) website URI")
+                        return unsupported(Strings.get(R.string.names_tezos_invalid_http_uri))
                     }
                     // `https://kukai.app` → `https://kukai.app/`, as a WHATWG parser would.
                     val normalized = if (parsed!!.rawPath.isNullOrEmpty()) {
@@ -602,13 +604,13 @@ class TezosDomainsResolver internal constructor(
                 "ipfs", "ipns" -> {
                     val label = protocol.uppercase()
                     if (!uri.substring(protocol.length + 1).startsWith("//")) {
-                        return unsupported("invalid $label website URI")
+                        return unsupported(Strings.get(R.string.names_tezos_invalid_protocol_uri, label))
                     }
                     val rest = uri.substring(protocol.length + 3)
                     val end = rest.indexOfFirst { it == '/' || it == '?' || it == '#' }
                     val host = if (end >= 0) rest.substring(0, end) else rest
                     if (host.isEmpty() || host.contains('@') || host.contains(':')) {
-                        return unsupported("invalid $label website URI")
+                        return unsupported(Strings.get(R.string.names_tezos_invalid_protocol_uri, label))
                     }
                     // A trailing dot or a percent-encoded dot is the same
                     // name to a resolver — check the normalized form.
@@ -616,14 +618,14 @@ class TezosDomainsResolver internal constructor(
                         runCatching { URLDecoder.decode(it, "UTF-8") }.getOrDefault(it)
                     }.lowercase()
                     if (NameSystem.navigableSuffixes.any { forNameCheck.endsWith(it) }) {
-                        return unsupported("$label website URI must reference content, not a name")
+                        return unsupported(Strings.get(R.string.names_tezos_uri_names_a_name, label))
                     }
                     val path = if (end >= 0) rest.substring(end).substringBefore('?').substringBefore('#') else ""
                     val basePath = path.trimEnd('/')
                     return Leg(Leg.Type.OK, protocol = protocol, uri = "$protocol://$host$basePath")
                 }
             }
-            return unsupported("unsupported website protocol: $protocol")
+            return unsupported(Strings.get(R.string.names_tezos_unsupported_protocol, protocol))
         }
 
         /**

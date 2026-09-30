@@ -41,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -50,12 +51,14 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.RpcUrls
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsQuorum
 import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ens.KeyedRpcProvider
 import baby.freedom.mobile.ens.RpcEndpointCheck
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.isLight
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -70,29 +73,25 @@ import kotlinx.coroutines.withContext
  * for each lookup, so it applies to the next name without a restart.
  */
 
-internal const val SECTION_ENS = "Name resolution"
-internal const val SECTION_RPC = "RPC providers"
+internal val SECTION_ENS: String get() = Strings.get(R.string.names_section_ens)
+internal val SECTION_RPC: String get() = Strings.get(R.string.names_section_rpc)
 
-private const val ENS_ABOUT =
-    "How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. With Colibri proofs on, an answer is proven first: checked on this device against Ethereum's own consensus. An answer that can't be proven is cross-checked: it's only trusted when at least two RPC endpoints return exactly the same one. An answer only one endpoint gave is shown to you before anything loads."
-private const val ROW_COLIBRI = "Colibri proofs"
-private const val COLIBRI_HELP =
-    "Each name's record is proven by corpus.core's Colibri prover (colibri-proof.tech) and the proof checked on this device against Ethereum's sync committee, so no server can make up the answer. The prover learns which contract storage a lookup reads; the reads themselves go to the endpoints in the resolution order. If no proof comes back within a few seconds, the endpoints are cross-checked instead. Off: every name is cross-checked."
-private const val ROW_ORDER = "Resolution order"
-private const val ORDER_HELP =
-    "The first three providers in this order that are reachable read each name, so the order decides who answers; the rest are asked, in order, when those can't agree or don't answer. Two endpoints of one provider count once: the first that answers. Change it under RPC providers."
-private const val ROW_CCIP = "Off-chain lookups (CCIP-Read)"
-private const val CCIP_HELP =
-    "Some names (base.eth and cb.id subnames, NameStone names) are answered by a gateway their resolver names. The gateway sees the name you look up. Off: those names don't resolve."
+private val ENS_ABOUT: String get() = Strings.get(R.string.names_ens_about)
+private val ROW_COLIBRI: String get() = Strings.get(R.string.names_colibri_title)
+private val COLIBRI_HELP: String get() = Strings.get(R.string.names_colibri_help)
+private val ROW_ORDER: String get() = Strings.get(R.string.names_order_title)
+private val ORDER_HELP: String get() = Strings.get(R.string.names_order_help)
+private val ROW_CCIP: String get() = Strings.get(R.string.names_ccip_title)
+private val CCIP_HELP: String get() = Strings.get(R.string.names_ccip_help)
 
-private const val SUB_CUSTOM = "Your endpoints"
-private const val CUSTOM_HELP = "First in the resolution order, as listed here. These are Ethereum's own RPCs (Settings → Chains → Ethereum), so every mainnet read uses them too."
-private const val ROW_ADD_ENDPOINT = "Add endpoint"
-private const val SUB_KEYED = "Keyed providers"
-private const val KEYED_HELP = "Next in the resolution order, with your own API key."
-private const val SUB_PUBLIC = "Public endpoints"
-private const val PUBLIC_HELP = "Last in the resolution order. Switch off any you'd rather not send lookups to."
-private const val LAST_ENDPOINT_HELP = "At least one endpoint has to stay on."
+private val SUB_CUSTOM: String get() = Strings.get(R.string.names_custom_title)
+private val CUSTOM_HELP: String get() = Strings.get(R.string.names_custom_help)
+private val ROW_ADD_ENDPOINT: String get() = Strings.get(R.string.names_add_endpoint)
+private val SUB_KEYED: String get() = Strings.get(R.string.names_keyed_title)
+private val KEYED_HELP: String get() = Strings.get(R.string.names_keyed_help)
+private val SUB_PUBLIC: String get() = Strings.get(R.string.names_public_title)
+private val PUBLIC_HELP: String get() = Strings.get(R.string.names_public_help)
+private val LAST_ENDPOINT_HELP: String get() = Strings.get(R.string.names_last_endpoint_help)
 
 /**
  * The warning under the lists when the quorum (#96) can't run: fewer
@@ -106,16 +105,25 @@ internal fun tooFewEndpointsHint(enabled: Int, endpoints: Int = enabled, colibri
     if (enabled >= EnsQuorum.MIN_PROVIDERS) return null
     // A proven answer (#100) needs no cross-check and loads without
     // asking; only one Colibri can't prove falls to a single endpoint.
-    val which = if (colibri) "an answer Colibri can't prove" else "answers"
-    val asked = if (colibri) "you'll be asked before that name loads" else "you'll be asked before each name loads"
-    val isnt = if (colibri) "isn't" else "aren't"
+    val min = EnsQuorum.MIN_PROVIDERS
     return when {
-        endpoints > enabled ->
-            "The $endpoints endpoints that are on come from only $enabled ${if (enabled == 1) "provider" else "different providers"}, and a provider's answer counts once. Cross-checking needs ${EnsQuorum.MIN_PROVIDERS} different providers (to agree on a block), so $which $isnt cross-checked: $asked."
-        enabled == 1 ->
-            "Only one endpoint is on, so $which can't be cross-checked: $asked. Turn on ${EnsQuorum.MIN_PROVIDERS} or more to cross-check."
-        else ->
-            "Only $enabled endpoints are on. Cross-checking needs ${EnsQuorum.MIN_PROVIDERS} (to agree on a block), so $which $isnt cross-checked: $asked."
+        endpoints > enabled -> Strings.plural(
+            if (colibri) R.plurals.names_too_few_providers_colibri else R.plurals.names_too_few_providers,
+            enabled,
+            endpoints,
+            enabled,
+            min,
+        )
+        enabled == 1 -> Strings.get(
+            if (colibri) R.string.names_one_endpoint_colibri else R.string.names_one_endpoint,
+            min,
+        )
+        else -> Strings.plural(
+            if (colibri) R.plurals.names_too_few_endpoints_colibri else R.plurals.names_too_few_endpoints,
+            enabled,
+            enabled,
+            min,
+        )
     }
 }
 
@@ -134,12 +142,22 @@ internal fun ensSectionRows(config: EnsRpcConfig) = listOf(
         tooFewEndpointsHint(config.providerCount, config.sources.size, config.colibri),
         *config.sources.map(::sourceLine).toTypedArray(),
     ),
-    settingsRow("colibri", ROW_COLIBRI, if (config.colibri) "On" else "Off", COLIBRI_HELP, "proof", "verified"),
-    settingsRow("ccip", ROW_CCIP, if (config.ccipRead) "On" else "Off", CCIP_HELP, "EIP-3668"),
+    settingsRow(
+        "colibri",
+        ROW_COLIBRI,
+        onOff(config.colibri),
+        COLIBRI_HELP,
+        Strings.get(R.string.names_search_proof),
+        Strings.get(R.string.names_search_verified),
+    ),
+    settingsRow("ccip", ROW_CCIP, onOff(config.ccipRead), CCIP_HELP, "EIP-3668"),
 )
 
+private fun onOff(on: Boolean): String = Strings.get(if (on) R.string.names_on else R.string.names_off)
+
 private fun keyedSubtitle(config: EnsRpcConfig, provider: KeyedRpcProvider): String =
-    config.apiKeys[provider.id]?.let { "Key ${EnsRpcConfig.maskKey(it)}" } ?: "No key"
+    config.apiKeys[provider.id]?.let { Strings.get(R.string.names_key_masked, EnsRpcConfig.maskKey(it)) }
+        ?: Strings.get(R.string.names_no_key)
 
 internal fun rpcSectionRows(config: EnsRpcConfig) = listOf(
     settingsRow(
@@ -155,7 +173,7 @@ internal fun rpcSectionRows(config: EnsRpcConfig) = listOf(
         SUB_KEYED,
         provider.name,
         keyedSubtitle(config, provider),
-        "API key",
+        Strings.get(R.string.names_api_key),
     )
 } + settingsRow(
     "public",
@@ -241,7 +259,7 @@ internal fun RpcProvidersSection(
     // if it was saved.
     fun report(edit: NodeSettings.EnsEdit) {
         val why = ensEditError(edit) ?: return
-        Toast.makeText(context, "Not changed: $why", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, Strings.get(R.string.names_not_changed, why), Toast.LENGTH_SHORT).show()
     }
 
     SectionCard(title = SECTION_RPC) {
@@ -268,24 +286,24 @@ internal fun RpcProvidersSection(
                         IconButton(
                             onClick = { scope.launch { report(settings.moveEnsRpcEndpoint(url, -1)) } },
                             enabled = i > 0,
-                        ) { Icon(Icons.Filled.ArrowUpward, contentDescription = "Move $url up") }
+                        ) { Icon(Icons.Filled.ArrowUpward, contentDescription = stringResource(R.string.names_move_up, url)) }
                         IconButton(
                             onClick = { scope.launch { report(settings.moveEnsRpcEndpoint(url, +1)) } },
                             enabled = i < custom.lastIndex,
-                        ) { Icon(Icons.Filled.ArrowDownward, contentDescription = "Move $url down") }
+                        ) { Icon(Icons.Filled.ArrowDownward, contentDescription = stringResource(R.string.names_move_down, url)) }
                     }
                     IconButton(
                         onClick = {
                             scope.launch { report(settings.removeEnsRpcEndpoint(url)) }
                         },
                         enabled = config.canRemoveCustom(url),
-                    ) { Icon(Icons.Filled.Close, contentDescription = "Remove $url") }
+                    ) { Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.names_remove_item, url)) }
                 }
             }
             if (custom.size < EnsRpcConfig.MAX_CUSTOM_ENDPOINTS) {
                 PageRow(
                     title = ROW_ADD_ENDPOINT,
-                    subtitle = "Your own node or a provider URL",
+                    subtitle = stringResource(R.string.names_add_endpoint_subtitle),
                     style = PageRowStyle.Inset,
                     leadingIcon = Icons.Filled.Add,
                     onClick = {
@@ -385,12 +403,16 @@ internal fun RpcProvidersSection(
                             addingEndpoint = false
                             null
                         }
-                        NodeSettings.AddEndpointResult.DUPLICATE -> "Not added: already in your endpoints"
-                        NodeSettings.AddEndpointResult.PUBLIC -> "Not added: ${publicEndpointHint(url)}"
-                        NodeSettings.AddEndpointResult.FULL ->
-                            "Not added: at most ${EnsRpcConfig.MAX_CUSTOM_ENDPOINTS} endpoints"
-                        NodeSettings.AddEndpointResult.INVALID -> "Not added: not a valid endpoint URL"
-                        NodeSettings.AddEndpointResult.FAILED -> "Not added: couldn't save it. Try again."
+                        NodeSettings.AddEndpointResult.DUPLICATE -> Strings.get(R.string.names_not_added_duplicate)
+                        NodeSettings.AddEndpointResult.PUBLIC ->
+                            Strings.get(R.string.names_not_added_reason, publicEndpointHint(url))
+                        NodeSettings.AddEndpointResult.FULL -> Strings.plural(
+                            R.plurals.names_not_added_full,
+                            EnsRpcConfig.MAX_CUSTOM_ENDPOINTS,
+                            EnsRpcConfig.MAX_CUSTOM_ENDPOINTS,
+                        )
+                        NodeSettings.AddEndpointResult.INVALID -> Strings.get(R.string.names_not_added_invalid)
+                        NodeSettings.AddEndpointResult.FAILED -> Strings.get(R.string.names_not_added_failed)
                     }
                 }
             },
@@ -410,7 +432,7 @@ internal fun RpcProvidersSection(
                 scope.launch {
                     // The dialog closes only once the change is saved.
                     val edit = settings.setRpcApiKey(provider.id, key)
-                    keyError = ensEditError(edit)?.let { "Not saved: $it" }
+                    keyError = ensEditError(edit)?.let { Strings.get(R.string.names_not_saved, it) }
                     if (keyError == null) editingProvider = null
                 }
             },
@@ -479,19 +501,18 @@ private fun SwitchRow(
 internal fun ensEditError(edit: NodeSettings.EnsEdit): String? = when (edit) {
     NodeSettings.EnsEdit.DONE -> null
     NodeSettings.EnsEdit.LAST_ENDPOINT -> LAST_ENDPOINT_HELP
-    NodeSettings.EnsEdit.FAILED -> "couldn't save it. Try again."
+    NodeSettings.EnsEdit.FAILED -> Strings.get(R.string.names_edit_failed)
 }
 
 /** The same hints as the chain page's RPC field: it's the same list ([rpcUrlHint]). */
 private fun endpointHint(rejection: RpcUrls.Rejection): String =
-    if (rejection == RpcUrls.Rejection.EMPTY) "An Ethereum mainnet JSON-RPC URL" else rpcUrlHint(rejection)
+    if (rejection == RpcUrls.Rejection.EMPTY) Strings.get(R.string.names_endpoint_hint) else rpcUrlHint(rejection)
 
 /** The "Test" button's verdict, as the dialogs show it. */
 private fun checkLabel(outcome: RpcEndpointCheck.Outcome): String = when (outcome) {
-    is RpcEndpointCheck.Outcome.Ok -> "Works: Ethereum mainnet, ${outcome.latencyMs} ms"
-    is RpcEndpointCheck.Outcome.WrongChain ->
-        "Not Ethereum mainnet (chain ${outcome.chainId}) — names won't resolve"
-    is RpcEndpointCheck.Outcome.Failed -> "Didn't answer: ${outcome.message}"
+    is RpcEndpointCheck.Outcome.Ok -> Strings.get(R.string.names_check_works, outcome.latencyMs)
+    is RpcEndpointCheck.Outcome.WrongChain -> Strings.get(R.string.names_check_wrong_chain, outcome.chainId)
+    is RpcEndpointCheck.Outcome.Failed -> Strings.get(R.string.names_check_failed, outcome.message)
 }
 
 /**
@@ -516,7 +537,7 @@ private fun EndpointTestRow(url: String?) {
                     testing = false
                 }
             },
-        ) { Text(if (testing) "Testing…" else "Test") }
+        ) { Text(stringResource(if (testing) R.string.names_testing else R.string.names_test)) }
         outcome?.let {
             Text(
                 checkLabel(it),
@@ -540,8 +561,11 @@ private fun EndpointTestRow(url: String?) {
  */
 internal fun publicEndpointHint(url: String): String {
     val host = (EnsRpcConfig.normalizeEndpoint(url) ?: url).let(EnsRpcConfig::publicEndpointHost)
-    val by = host?.let { "already provided by $it" } ?: "already provided"
-    return "$by, one of the built-in public endpoints; turn it on or off under $SUB_PUBLIC"
+    return if (host != null) {
+        Strings.get(R.string.names_public_endpoint_hint_host, host, SUB_PUBLIC)
+    } else {
+        Strings.get(R.string.names_public_endpoint_hint, SUB_PUBLIC)
+    }
 }
 
 /**
@@ -553,14 +577,13 @@ internal fun publicEndpointHint(url: String): String {
  * public one isn't asked at all, [twin] being on its very host.
  */
 internal fun publicTwinHelp(twin: EnsRpcConfig.Source, asked: Boolean = true): String {
-    val what = if (twin.kind == EnsRpcConfig.Kind.KEYED) {
-        "your ${twin.label} key"
-    } else {
-        "your endpoint ${EnsRpcConfig.redact(twin.url)}"
-    }
+    val keyed = twin.kind == EnsRpcConfig.Kind.KEYED
+    val what = if (keyed) twin.label else EnsRpcConfig.redact(twin.url)
     // Not [asked]: [twin] is on this very host, the same server.
-    if (!asked) return "Not asked: same server as $what, which is asked in its place"
-    return "Same provider as $what: one vote between them — this one casts it when that one fails to answer"
+    if (!asked) {
+        return Strings.get(if (keyed) R.string.names_twin_not_asked_key else R.string.names_twin_not_asked_endpoint, what)
+    }
+    return Strings.get(if (keyed) R.string.names_twin_same_provider_key else R.string.names_twin_same_provider_endpoint, what)
 }
 
 @Composable
@@ -584,19 +607,19 @@ private fun AddEndpointDialog(
                 OutlinedTextField(
                     value = draft,
                     onValueChange = { draft = it },
-                    label = { Text("RPC URL") },
-                    placeholder = { Text("https://your-node.example") },
+                    label = { Text(stringResource(R.string.names_rpc_url)) },
+                    placeholder = { Text(stringResource(R.string.names_endpoint_placeholder)) },
                     isError = draft.isNotBlank() && url == null,
                     supportingText = {
                         Text(
                             when {
-                                duplicate -> "Already in your endpoints"
+                                duplicate -> stringResource(R.string.names_endpoint_duplicate)
                                 public -> publicEndpointHint(validation.url).replaceFirstChar { it.uppercase() }
                                 draft.isNotBlank() && validation.rejection != null ->
                                     endpointHint(validation.rejection)
                                 url != null && url.startsWith("http://", ignoreCase = true) ->
-                                    "Unencrypted http://, allowed only to a node on this device"
-                                else -> "An Ethereum mainnet JSON-RPC URL"
+                                    stringResource(R.string.names_endpoint_unencrypted)
+                                else -> stringResource(R.string.names_endpoint_hint)
                             },
                         )
                     },
@@ -612,10 +635,12 @@ private fun AddEndpointDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { url?.let(onAdd) }, enabled = url != null) { Text("Add") }
+            TextButton(onClick = { url?.let(onAdd) }, enabled = url != null) {
+                Text(stringResource(R.string.common_add))
+            }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }
@@ -648,14 +673,14 @@ private fun ApiKeyDialog(
                 OutlinedTextField(
                     value = draft,
                     onValueChange = { draft = it },
-                    label = { Text("API key") },
+                    label = { Text(stringResource(R.string.names_api_key)) },
                     isError = key.isNotEmpty() && !usable,
                     supportingText = {
                         Text(
                             if (key.isNotEmpty() && !usable) {
-                                "Just the key, not the whole URL"
+                                stringResource(R.string.names_api_key_not_url)
                             } else {
-                                "Stored on this device only"
+                                stringResource(R.string.names_api_key_stored)
                             },
                         )
                     },
@@ -669,7 +694,9 @@ private fun ApiKeyDialog(
                         IconButton(onClick = { reveal = !reveal }) {
                             Icon(
                                 if (reveal) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                contentDescription = if (reveal) "Hide key" else "Show key",
+                                contentDescription = stringResource(
+                                    if (reveal) R.string.names_hide_key else R.string.names_show_key,
+                                ),
                             )
                         }
                     },
@@ -696,7 +723,7 @@ private fun ApiKeyDialog(
                     Icon(Icons.Filled.Link, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        "Get a key: ${provider.website}",
+                        stringResource(R.string.names_get_a_key, provider.website),
                         textDecoration = TextDecoration.Underline,
                     )
                 }
@@ -706,7 +733,11 @@ private fun ApiKeyDialog(
                         enabled = canRemove,
                     ) {
                         Text(
-                            if (canRemove) "Remove key" else "Remove key — $LAST_ENDPOINT_HELP",
+                            if (canRemove) {
+                                stringResource(R.string.names_remove_key)
+                            } else {
+                                stringResource(R.string.names_remove_key_locked, LAST_ENDPOINT_HELP)
+                            },
                             color = if (canRemove) MaterialTheme.colorScheme.error else Color.Unspecified,
                         )
                     }
@@ -718,10 +749,10 @@ private fun ApiKeyDialog(
             TextButton(
                 onClick = { onSave(key) },
                 enabled = usable && key != savedKey,
-            ) { Text("Save") }
+            ) { Text(stringResource(R.string.common_save)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }
