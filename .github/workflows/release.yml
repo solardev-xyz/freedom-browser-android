@@ -16,8 +16,13 @@
 # a hit too (scripts/check-native-libs.sh, and the Radicle bindings
 # compared with the generated copy cached alongside the library), so a
 # stale or wrong artefact still fails the job. A cache miss builds as
-# before, the two ABIs side by side, and caches the result only once
-# those checks pass.
+# before, the two ABIs side by side, and caches the result once the
+# library check passes. The bindings comparison runs after the save, so a
+# FFI_REF bump that needs regenerated bindings still caches its (correct)
+# library and generated bindings: the commit that updates the committed
+# copy then hits the cache instead of rebuilding. The matrix doesn't fail
+# fast either, so that failure in the arm64 job doesn't cancel x86_64's
+# build before it's cached.
 #
 # Why actions/cache rather than publishing the .so files as assets on
 # the freedom-mobile-ffi release: that needs a token with write access to
@@ -51,11 +56,6 @@
 # that here (this workflow refuses to build otherwise) and reports it on
 # every PR (ffi-ref.yml — a status check only, since main has no branch
 # protection).
-# UNRELEASED: pinned to the alan/arti-tor commit that adds the Tor client
-# (#143, freedom-mobile-ffi#4), one commit on top of v0.12.2 (tag-pinned
-# ant v0.5.47 / freedom-ipfs v0.4.4), until freedom-mobile-ffi merges and
-# tags it, so that check fails (and this workflow refuses to build) until
-# it's retagged.
 # The library is built with ant's `chain` feature, the Radicle node and
 # the Tor client, and with fat LTO (see the build step).
 #
@@ -79,6 +79,9 @@ on:
       - scripts/build-colibri.sh
       - scripts/generate-radicle-bindings.sh
       - scripts/check-native-libs.sh
+      # A bindings-only fix after a stale-bindings failure: re-run the
+      # check (a cache hit by then) so main goes green again.
+      - swarmnode/src/main/java/uniffi/libradicle_uniffi/libradicle_uniffi.kt
   schedule:
     - cron: "23 4 * * 1,4"
   workflow_dispatch:
@@ -97,6 +100,9 @@ jobs:
     name: libfreedom_mobile_ffi.so (${{ matrix.abi }})
     runs-on: ubuntu-latest
     strategy:
+      # One ABI's failure must not cancel the other mid-build: each
+      # caches its own library (see above).
+      fail-fast: false
       matrix:
         abi: [arm64-v8a, x86_64]
     steps:
@@ -177,6 +183,16 @@ jobs:
       - name: Check the library
         run: scripts/check-native-libs.sh native-out/jniLibs ${{ matrix.abi }}
 
+      # Only a library that passed its check is cached. Before the
+      # bindings check, on purpose: stale committed bindings are a fault
+      # of this repo, not of the build, and a hit re-runs that check.
+      - name: Cache the built library
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: native-out
+          key: ${{ steps.key.outputs.key }}
+
       - name: Check the Radicle UniFFI bindings are current
         if: matrix.abi == 'arm64-v8a'
         run: |
@@ -189,14 +205,6 @@ jobs:
             exit 1
           fi
           echo "committed bindings match the build"
-
-      # Only a build that passed the checks is cached.
-      - name: Cache the built library
-        if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: native-out
-          key: ${{ steps.key.outputs.key }}
 
       - name: Upload the library
         uses: actions/upload-artifact@v6

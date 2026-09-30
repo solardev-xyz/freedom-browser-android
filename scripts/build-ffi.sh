@@ -18,9 +18,11 @@
 # keeps serving a library built the old way.
 #
 # build-android.sh builds every ABI in its `declare -A ABI=(…)` table; to
-# build one, this rewrites that table in place to the one entry, and fails
-# unless exactly that entry is left, so a future FFI_REF that reshapes the
-# table can't quietly build the wrong ABI (or none).
+# build one, this rewrites that table to the one entry for the build, and
+# fails unless exactly that entry is left, so a future FFI_REF that
+# reshapes the table can't quietly build the wrong ABI (or none). The
+# table is put back when the script exits, however it exits, so a later
+# run for the other ABI (or both) in the same checkout sees it whole.
 set -euo pipefail
 
 FFI_DIR="$(cd "${1:?usage: $0 <path-to-freedom-mobile-ffi> [arm64-v8a|x86_64]}" && pwd)"
@@ -34,6 +36,9 @@ SCRIPT="$FFI_DIR/scripts/build-android.sh"
 "$HERE/enable-ffi-fat-lto.sh" "$FFI_DIR"
 
 if [ -n "$ONLY" ]; then
+  ORIG="$(mktemp "$FFI_DIR/scripts/.build-android.sh.XXXXXX")"
+  cp -p "$SCRIPT" "$ORIG"
+  trap 'mv -f "$ORIG" "$SCRIPT"' EXIT
   python3 - "$SCRIPT" "$ONLY" <<'PY'
 import re, sys
 
