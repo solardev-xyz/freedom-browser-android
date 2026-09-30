@@ -6,6 +6,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Test
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.runBlocking
 
 class SwarmModeTest {
     @Test
@@ -67,5 +70,20 @@ class SwarmModeTest {
         boot.boot { swarmBootKey("0xabc", light) to null }
         assertFalse(reload(light))
         assertEquals(1, restarts)
+    }
+
+    @Test
+    fun `a chain store read error relays nothing, so the user's Gnosis RPC isn't dropped`() = runBlocking {
+        val mine = BuiltInChains.ALL.map {
+            if (it.id == 100L) it.copy(userRpcUrls = listOf("https://my.gnosis.example/k")) else it
+        }
+        val relayed = swarmRelays(flowOf(true), flowOf(mine, null, mine)).toList()
+        // One relay: the unreadable moment in between neither relays the
+        // shipped RPCs nor repeats the same mode.
+        assertEquals(1, relayed.size)
+        assertEquals("https://my.gnosis.example/k", relayed.single().first.gnosisRpc)
+        assertEquals(listOf("https://my.gnosis.example/k"), relayed.single().second.userRpcUrls)
+        // Unreadable from the start: nothing until it reads (`:node` reads the store itself).
+        assertEquals(emptyList<Any>(), swarmRelays(flowOf(true), flowOf<List<baby.freedom.mobile.chains.Chain>?>(null)).toList())
     }
 }

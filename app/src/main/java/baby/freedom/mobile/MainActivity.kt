@@ -60,8 +60,7 @@ import baby.freedom.mobile.node.INodeService
 import baby.freedom.mobile.node.MyotisLink
 import baby.freedom.mobile.node.MyotisService
 import baby.freedom.mobile.node.NodeService
-import baby.freedom.mobile.node.gnosisChainFor
-import baby.freedom.mobile.node.swarmModeFor
+import baby.freedom.mobile.node.swarmRelays
 import baby.freedom.mobile.node.ITorCallback
 import baby.freedom.mobile.node.ITorService
 import baby.freedom.mobile.node.TorService
@@ -387,12 +386,10 @@ class MainActivity : ComponentActivity() {
         }
 
         // The Swarm node's mode (#114) follows its setting and the Gnosis
-        // RPCs live: `:node` restarts the node when it changes.
+        // RPCs live: `:node` restarts the node when it changes. A chain
+        // store read error relays nothing ([swarmRelays]).
         lifecycleScope.launch {
-            combine(settings.swarmLightMode, ChainStore.get(this@MainActivity).chains) { light, chains ->
-                swarmModeFor(light, chains) to gnosisChainFor(chains)
-            }
-                .distinctUntilChanged()
+            swarmRelays(settings.swarmLightMode, ChainStore.get(this@MainActivity).chainsOrUnreadable)
                 .collect { mode ->
                     swarmMode = mode
                     relaySwarmMode(binder, mode)

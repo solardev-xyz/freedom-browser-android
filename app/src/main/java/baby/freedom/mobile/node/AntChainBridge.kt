@@ -85,7 +85,7 @@ internal class AntChainBridge(
 
     /**
      * End every request in flight at once, each with an error (the node
-     * is stopping, [baby.freedom.swarm.AntChainTransport.cancelInFlight]);
+     * is stopping, [baby.freedom.swarm.AntChainTransport.whileStopping]);
      * requests that come after are answered as usual.
      */
     fun cancelInFlight() {

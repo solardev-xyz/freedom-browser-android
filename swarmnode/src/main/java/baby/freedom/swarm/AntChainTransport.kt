@@ -1,5 +1,6 @@
 package baby.freedom.swarm
 
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -22,23 +23,59 @@ object AntChainTransport {
      * Answer ant's reads with [read] (a JSON-RPC request body in, a
      * response body out) from now on, in place of any earlier reader.
      * [cancelInFlight] ends every read [read] is working on at once, each
-     * with an error; reads that come after are answered as usual.
+     * with an error; reads that come after are answered as usual
+     * ([whileStopping] refuses those itself).
      */
     fun install(read: (String) -> String, cancelInFlight: () -> Unit = {}) {
         reader.set(Reader(read, cancelInFlight))
     }
 
+    /** How many [whileStopping] blocks are running; reads are refused while any is. */
+    private val stopping = AtomicInteger(0)
+
+    /** Reads that got past the first [stopping] check and haven't returned yet. */
+    private val serving = AtomicInteger(0)
+
     /**
-     * A node is about to stop ([SwarmNode.stop]): end the reads it's
-     * waiting on now rather than let ant's gateway stop and shutdown —
-     * which wait for every read inside the transport — sit behind them
-     * for up to the reader's own deadline. Only called once no storage
-     * call (a spend) is using the node any more.
+     * Run [block] — ant's gateway stop or shutdown, which wait for every
+     * read inside the transport — with no read holding it up (#273,
+     * #300 R2-M1): reads already in the reader are ended at once (its
+     * cancel, repeated until none is left, for at most [DRAIN_MS]), and
+     * every read that comes in while [block] runs is refused at once with
+     * an error rather than served, so none can start after the cancel and
+     * hold the stop for the reader's whole deadline. Reads after [block]
+     * are served as usual. Only for a node going away ([SwarmNode.stop],
+     * under its write lock, so no storage call — a spend — is using it any
+     * more): the transport is process-wide, and a spend still reading its
+     * nonce or receipt must never be failed by it.
      */
-    fun cancelInFlight() {
+    fun <T> whileStopping(block: () -> T): T {
+        stopping.incrementAndGet()
         try {
-            reader.get()?.cancelInFlight?.invoke()
-        } catch (_: Throwable) {
+            drain()
+            return block()
+        } finally {
+            stopping.decrementAndGet()
+        }
+    }
+
+    private fun drain() {
+        val until = System.nanoTime() + DRAIN_MS * 1_000_000
+        while (true) {
+            try {
+                reader.get()?.cancelInFlight?.invoke()
+            } catch (_: Throwable) {
+            }
+            // A read counted here passed its check before [stopping] went
+            // up, so it may have reached the reader after the cancel: cancel
+            // again until it's gone.
+            if (serving.get() == 0 || System.nanoTime() >= until) return
+            try {
+                Thread.sleep(DRAIN_POLL_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
         }
     }
 
@@ -49,10 +86,20 @@ object AntChainTransport {
      */
     @JvmStatic
     fun serve(request: ByteArray): ByteArray {
+        if (stopping.get() > 0) return STOPPING.toByteArray(Charsets.UTF_8)
+        serving.incrementAndGet()
         val answer = try {
-            reader.get()?.read?.invoke(String(request, Charsets.UTF_8)) ?: NOT_READY
+            // Checked again once counted: a [whileStopping] that began in
+            // between either shows here or waits for this read (drain).
+            if (stopping.get() > 0) {
+                STOPPING
+            } else {
+                reader.get()?.read?.invoke(String(request, Charsets.UTF_8)) ?: NOT_READY
+            }
         } catch (t: Throwable) {
             FAILED
+        } finally {
+            serving.decrementAndGet()
         }
         return answer.toByteArray(Charsets.UTF_8)
     }
@@ -60,6 +107,12 @@ object AntChainTransport {
     // ant reads neither the id nor the code but for -32000 (can't serve).
     private const val NOT_READY =
         """{"jsonrpc":"2.0","id":null,"error":{"code":-32002,"message":"Chain request failed: Freedom's chain reads aren't available"}}"""
+    private const val STOPPING =
+        """{"jsonrpc":"2.0","id":null,"error":{"code":-32002,"message":"Chain request failed: the Swarm node is stopping"}}"""
     private const val FAILED =
         """{"jsonrpc":"2.0","id":null,"error":{"code":-32002,"message":"Chain request failed"}}"""
+
+    /** The longest [whileStopping] keeps cancelling a read that won't end before stopping anyway. */
+    internal const val DRAIN_MS = 2_000L
+    private const val DRAIN_POLL_MS = 5L
 }
