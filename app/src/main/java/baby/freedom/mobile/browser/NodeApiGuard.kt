@@ -99,10 +99,26 @@ internal object NodeApiGuard {
         Log.w(TAG, "refused a page's request to the Swarm node's API: ${method.uppercase()} /${segment.orEmpty()}")
         return WebResourceResponse(
             "text/plain", "utf-8", 403, "Forbidden",
-            mapOf("Access-Control-Allow-Origin" to "*", "Cache-Control" to "no-store"),
+            mapOf(
+                "Access-Control-Allow-Origin" to "*",
+                "Cache-Control" to "no-store",
+                REFUSAL_HEADER to "1",
+            ),
             ByteArrayInputStream(text.toByteArray(Charsets.UTF_8)),
         )
     }
+
+    /**
+     * Marks [refusalFor]'s answer, so `onReceivedHttpError` leaves a
+     * refused navigation showing the refusal itself rather than covering
+     * it with the "content not found yet" error page — the node isn't the
+     * problem, and Try Again would only be refused again (R4-F1).
+     */
+    internal const val REFUSAL_HEADER = "X-Node-Api-Refused"
+
+    /** Is a response with [headers] this guard's refusal? */
+    internal fun isRefusal(headers: Map<String, String>?): Boolean =
+        headers?.keys?.any { it.equals(REFUSAL_HEADER, ignoreCase = true) } == true
 
     /**
      * Is a [method] request to [url] one for the node's gateway, outside the

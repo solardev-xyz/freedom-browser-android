@@ -57,6 +57,15 @@ class NodeApiGuardTest {
     }
 
     @Test
+    fun `the refusal is recognised by its header, whatever its case, and nothing else is`() {
+        assertTrue(NodeApiGuard.isRefusal(mapOf(NodeApiGuard.REFUSAL_HEADER to "1")))
+        assertTrue(NodeApiGuard.isRefusal(mapOf("x-node-api-refused" to "1")))
+        assertFalse(NodeApiGuard.isRefusal(mapOf("Content-Type" to "text/plain")))
+        assertFalse(NodeApiGuard.isRefusal(emptyMap()))
+        assertFalse(NodeApiGuard.isRefusal(null))
+    }
+
+    @Test
     fun `the dapp surface stays open`() {
         for ((method, path) in listOf(
             "GET" to "/bzz/ab/index.html",

@@ -3402,6 +3402,13 @@ private fun buildRefreshableWebView(
                     Log.i(LOG_TAG, "main-frame HTTP $status for $failed → name refused in place")
                     return
                 }
+                // Likewise the node-API guard's refusal (#283): its text says
+                // why; the "not found yet, node still connecting" page would
+                // blame the node and retry a request that is always refused.
+                if (NodeApiGuard.isRefusal(errorResponse?.responseHeaders)) {
+                    Log.i(LOG_TAG, "main-frame HTTP $status for $failed → node API refused in place")
+                    return
+                }
                 val errorCode =
                     if (status == 502) "ERR_CONNECTION_REFUSED"
                     else "swarm_content_not_found"
