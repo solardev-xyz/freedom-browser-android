@@ -1779,11 +1779,13 @@ private fun buildRefreshableWebView(
     // frame's `onReceivedError`, cleared by the next `onPageStarted`.
     var failedLoad: FailedLoad? = null
 
-    // A certificate error the main frame may be about to die of: the
-    // cancelled navigation's synthetic `onPageFinished` for this URL
-    // turns it into the "connection isn't secure" page (#259), issued
-    // on the redirect chain's entry ([MainFrameChain], R2-F1).
-    var pendingCertError: PendingCertError? = null
+    // Certificate errors the main frame may be about to die of, by URL
+    // (a subresource's lands here too, and must not displace the main
+    // frame's — R4-F1): the cancelled navigation's synthetic
+    // `onPageFinished` for one of these URLs turns it into the
+    // "connection isn't secure" page (#259), issued on the redirect
+    // chain's entry ([MainFrameChain], R2-F1).
+    val pendingCertErrors = PendingCertErrors()
 
     // The main-frame navigation in flight, from its start through each
     // redirect hop (#259 R2-F1, [certPageReissue]).
@@ -2756,7 +2758,7 @@ private fun buildRefreshableWebView(
                 // certificate error was pending belonged to another
                 // navigation (#259).
                 failedLoad = null
-                pendingCertError = null
+                pendingCertErrors.clear()
                 certRefusal.committed(url)
                 mainFrameChain.committed()
                 (view as? PageWebView)?.historyStepCommitted()
@@ -3022,9 +3024,8 @@ private fun buildRefreshableWebView(
                 // previous document would stay on screen under no
                 // warning at all (#259). Matched by URL alone, never
                 // against `view.url` ([certErrorEndsLoad]).
-                val cert = pendingCertError
-                if (view != null && cert != null && certErrorEndsLoad(url, cert.url)) {
-                    pendingCertError = null
+                val cert = if (view != null) pendingCertErrors.takeFor(url) else null
+                if (view != null && cert != null) {
                     // Posted: issued from here, the load would already
                     // be the WebView's `getUrl()` for the rest of this
                     // finish, which would record the refused address
@@ -3717,7 +3718,10 @@ private fun buildRefreshableWebView(
                     issuedBy = cert?.issuedBy?.let { it.cName.ifBlank { it.oName } },
                 )
                 Log.i(LOG_TAG, "SSL error ${facts.errors} for $url → refused")
-                pendingCertError = PendingCertError(url, facts, mainFrameChain.endingAt(url))
+                pendingCertErrors.record(
+                    PendingCertError(url, facts, mainFrameChain.endingAt(url)),
+                    inFlight = mainFrameChain.reaches(url),
+                )
             }
 
             override fun onReceivedHttpError(

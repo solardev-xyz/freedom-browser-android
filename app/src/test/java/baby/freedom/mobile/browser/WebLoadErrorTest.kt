@@ -113,6 +113,45 @@ class WebLoadErrorTest {
     }
 
     @Test
+    fun `a subresource refusal landing before the main frame's finish doesn't hide the page`() {
+        val facts = CertFacts(setOf(SSL_UNTRUSTED), null, null, null, null)
+        val target = "https://10.0.2.2:8721/target"
+        val pending = PendingCertErrors(capacity = 4)
+        pending.record(PendingCertError(target, facts, listOf(target)), inFlight = true)
+        // The page still on screen keeps loading refused images (R4-F1),
+        // more of them than the map holds.
+        repeat(10) {
+            val img = "https://10.0.2.2:8722/img?$it"
+            pending.record(PendingCertError(img, facts, listOf(img)), inFlight = false)
+        }
+        assertEquals(4, pending.size)
+        // An unrelated finish takes nothing.
+        assertEquals(null, pending.takeFor("https://example.com/"))
+        assertEquals(target, pending.takeFor(target)?.url)
+        // Once only.
+        assertEquals(null, pending.takeFor(target))
+        // A later refusal of the same URL replaces the earlier one.
+        pending.record(PendingCertError(target, facts(SSL_EXPIRED), listOf(target)), inFlight = true)
+        assertEquals(setOf(SSL_EXPIRED), pending.takeFor(target)?.facts?.errors)
+        // A commit drops the rest.
+        pending.clear()
+        assertEquals(0, pending.size)
+        assertEquals(null, pending.takeFor("https://10.0.2.2:8722/img?9"))
+    }
+
+    @Test
+    fun `the main-frame chain tells whether a refused URL is on the navigation in flight`() {
+        val chain = MainFrameChain()
+        chain.started("http://a.example/b")
+        chain.redirected("https://bad.example/")
+        assertTrue(chain.reaches("https://bad.example/"))
+        assertTrue(chain.reaches("http://a.example/b#x"))
+        assertFalse(chain.reaches("https://tracker.example/pixel"))
+        chain.committed()
+        assertFalse(chain.reaches("https://bad.example/"))
+    }
+
+    @Test
     fun `a refused history step's page goes in the entry it was for`() {
         val a = "https://a.example/"
         val b = "https://b.example/"

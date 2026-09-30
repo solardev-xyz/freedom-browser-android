@@ -287,6 +287,50 @@ internal fun certPageStep(entryUrls: List<String?>, currentIndex: Int, refusedUr
 internal data class PendingCertError(val url: String, val facts: CertFacts, val chain: List<String>)
 
 /**
+ * The certificate refusals since the last commit, keyed by URL, each
+ * awaiting its load's finish (#259 R4-F1). WebView's
+ * `onReceivedSslError` doesn't say which frame a refusal is for, and
+ * the page still on screen goes on loading while a navigation is in
+ * flight — its own refused images, trackers, every https host on a
+ * hostile network — so a single slot would be overwritten by whichever
+ * subresource refusal landed between the main frame's refusal and its
+ * finish, and the finish would find nothing to match. Only a main-frame
+ * load gets a finish ([takeFor]); a subresource's refusal just sits here
+ * until the next commit [clear]s it all.
+ *
+ * Bounded: a page refusing endless subresources can't grow it without
+ * limit, and it drops its oldest refusal *not* on [MainFrameChain]'s
+ * navigation in flight first, so a flood of those can't push the main
+ * frame's out either. Main thread only.
+ */
+internal class PendingCertErrors(private val capacity: Int = 32) {
+    private class Entry(val error: PendingCertError, val inFlight: Boolean)
+
+    private val entries = LinkedHashMap<String, Entry>()
+
+    /** A refusal of [error]'s URL; [inFlight] if that URL is on the main-frame navigation in flight. */
+    fun record(error: PendingCertError, inFlight: Boolean) {
+        entries.remove(error.url)
+        entries[error.url] = Entry(error, inFlight)
+        while (entries.size > capacity) {
+            val drop = entries.entries.firstOrNull { !it.value.inFlight } ?: entries.entries.first()
+            entries.remove(drop.key)
+        }
+    }
+
+    /** The refusal a finish for [finishedUrl] ends, taken ([certErrorEndsLoad]). */
+    fun takeFor(finishedUrl: String?): PendingCertError? {
+        val key = entries.keys.firstOrNull { certErrorEndsLoad(finishedUrl, it) } ?: return null
+        return entries.remove(key)?.error
+    }
+
+    /** A document committed: every refusal pending belonged to another navigation or a subresource. */
+    fun clear() = entries.clear()
+
+    val size: Int get() = entries.size
+}
+
+/**
  * The main-frame URLs of the navigation in flight, from the one it
  * started at through each redirect hop the WebView followed — so a
  * certificate refusal on a redirect target can be issued again on the
@@ -333,6 +377,10 @@ internal class MainFrameChain {
     @Synchronized
     fun endingAt(refusedUrl: String): List<String> =
         if (has(refusedUrl)) urls.toList() else listOf(refusedUrl)
+
+    /** Is [url] on the navigation in flight? */
+    @Synchronized
+    fun reaches(url: String): Boolean = has(url)
 }
 
 /**
