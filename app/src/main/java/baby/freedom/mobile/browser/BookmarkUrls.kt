@@ -22,19 +22,50 @@ import baby.freedom.mobile.ens.EnsInput
  *    (`ipfs://vitalik.eth` and `vitalik.eth` are one bookmark), which
  *    depends on how the name resolves today, not on what was saved.
  *
- * `key(canonical(x)) == key(x)` for every address.
+ * `canonical(canonical(x)) == canonical(x)` and
+ * `key(canonical(x)) == key(x)` for every address (a malformed one is
+ * iterated to a fixed point).
  */
 internal object BookmarkUrls {
 
     private val contentSchemes = listOf("bzz", "ipfs", "ipns")
 
     fun canonical(url: String): String {
-        val trimmed = url.trim()
-        EnsInput.parse(trimmed)?.let { return dweb("ens://${it.name}${it.suffix}") ?: (it.name + tail(it.suffix)) }
-        EnsInput.parseConstrained(trimmed)?.let {
-            return "${it.protocol}://${it.name}${tail(it.suffix.substringBefore('#'))}"
+        // Settle on a fixed point (#296 R5-M2): a malformed address can
+        // canonicalise to a spelling that itself reads differently the
+        // second time (`ipfs:// /` → `ipfs:// ` → `ipfs://`), and the
+        // spelling saved must be the one [key] later recomputes.
+        var c = once(url)
+        repeat(MAX_PASSES) {
+            val next = once(c)
+            if (next == c) return c
+            c = next
         }
-        RadUrl.parse(trimmed)?.let { (rid, rest) -> return "${RadUrl.SCHEME}://$rid$rest" }
+        return c
+    }
+
+    private const val MAX_PASSES = 4
+
+    private fun once(url: String): String {
+        val trimmed = url.trim()
+        EnsInput.parse(trimmed)?.let {
+            // The fragment too (#296 R5-M1): a name's page is shown through
+            // its override ([DisplayUrl.forActualUrl]), which keeps it.
+            val path = it.suffix.substringBefore('#')
+            val base = dweb("ens://${it.name}$path") ?: (it.name + tail(path))
+            return (base + fragment(it.suffix, root = tail(path).isEmpty())).trim()
+        }
+        EnsInput.parseConstrained(trimmed)?.let {
+            return "${it.protocol}://${it.name}${tail(it.suffix)}".trim()
+        }
+        RadUrl.parse(trimmed)?.let { (rid, rest) ->
+            // The way a rad page reports itself (#296 R5-F1): the WebView
+            // loads [RadUrl.toVirtualUrl], serialises it ([web]: escapes,
+            // dot-segments) and the bar shows [RadUrl.displayUrlFor] of
+            // that, fragment included.
+            RadUrl.toVirtualUrl(trimmed)?.let(::web)?.let(RadUrl::displayUrlFor)?.let { return it }
+            return "${RadUrl.SCHEME}://$rid$rest"
+        }
         contentSchemes.firstOrNull { trimmed.startsWith("$it://", ignoreCase = true) }?.let { scheme ->
             val rest = trimmed.substring(scheme.length + 3)
             dweb("$scheme://$rest")?.let { return it }
@@ -43,9 +74,21 @@ internal object BookmarkUrls {
             val end = rest.indexOfFirst { it == '/' || it == '?' || it == '#' }
             val id = if (end < 0) rest else rest.substring(0, end)
             val root = if (scheme == "bzz") id.lowercase() else id
-            return "$scheme://$root${tail(if (end < 0) "" else rest.substring(end))}"
+            return "$scheme://$root${tail(if (end < 0) "" else rest.substring(end))}".trim()
         }
         return web(trimmed) ?: trimmed
+    }
+
+    /**
+     * The `#fragment` of a name's [suffix] as Chromium serialises it —
+     * after a `/` when the rest of the address is the root, the way the
+     * WebView reports `vitalik.eth/#x` — or `""` for none.
+     */
+    private fun fragment(suffix: String, root: Boolean): String {
+        val hash = suffix.indexOf('#')
+        if (hash < 0) return ""
+        val f = pathQueryFragment("/" + suffix.substring(hash)).substring(1)
+        return if (root) "/$f" else f
     }
 
     /**

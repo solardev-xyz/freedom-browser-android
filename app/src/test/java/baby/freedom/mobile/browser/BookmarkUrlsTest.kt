@@ -61,9 +61,12 @@ class BookmarkUrlsTest {
             "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/a",
         "ipns://Docs.IPFS.tech/x?q=1#frag" to "ipns://docs.ipfs.tech/x?q=1",
         "bzz://" + "AB".repeat(32) + "/p#f" to "bzz://" + "ab".repeat(32) + "/p",
-        "vitalik.eth/#section" to "vitalik.eth",
-        "ens://Vitalik.eth/a#b" to "vitalik.eth/a",
-        "ipfs://vitalik.eth/p#b" to "ipfs://vitalik.eth/p",
+        // A name's page keeps its fragment (#296 R5-M1): it is shown
+        // through the name's override, not the virtual origin.
+        "vitalik.eth/#section" to "vitalik.eth/#section",
+        "vitalik.eth#section" to "vitalik.eth/#section",
+        "ens://Vitalik.eth/a#b c" to "vitalik.eth/a#b%20c",
+        "ipfs://vitalik.eth/p#b" to "ipfs://vitalik.eth/p#b",
     )
 
     @Test
@@ -151,5 +154,53 @@ class BookmarkUrlsTest {
         same("ipfs://vitalik.eth/a%20b", "ens://vitalik.eth/a b")
         same("vitalik.eth", "vitalik.eth/x/..")
         differ("https://example.com/%41", "https://example.com/A")
+    }
+
+    /**
+     * A rad page reports `RadUrl.displayUrlFor` of the WebView's own
+     * serialisation of its virtual URL (#296 R5-F1).
+     */
+    @Test
+    fun `an edited rad address is saved the way its page reports it`() {
+        val rid = "z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        fun page(typed: String): String {
+            val loaded = BookmarkUrls.pathQueryFragment(RadUrl.pathOf(RadUrl.toVirtualUrl(typed)!!)!!)
+            return RadUrl.displayUrlFor(RadUrl.ORIGIN + loaded)!!
+        }
+        for ((typed, shown) in listOf(
+            "rad://$rid/tree/a b" to "rad://$rid/tree/a%20b",
+            "rad://$rid/tree/Straße" to "rad://$rid/tree/Stra%C3%9Fe",
+            "rad://$rid/tree/x/../y" to "rad://$rid/tree/y",
+            "rad://$rid/tree/x/%2e%2E/y" to "rad://$rid/tree/y",
+            "rad:$rid?q=ä" to "rad://$rid/?q=%C3%A4",
+            "rad://$rid/tree#x y" to "rad://$rid/tree#x%20y",
+            "rad://$rid/" to "rad://$rid",
+        )) {
+            assertEquals(typed, shown, BookmarkUrls.canonical(typed))
+            assertEquals(typed, shown, page(typed))
+            same(typed, shown)
+        }
+        differ("rad://$rid/tree/a b", "rad://$rid/tree/a")
+    }
+
+    @Test
+    fun `canonical is a fixed point, and keeps the key, for any input`() {
+        for (s in listOf("ipfs:// /", "ens:// ..eth", "bzz:// ?x", "ipns://\u00a0/", " x.eth /")) {
+            val c = BookmarkUrls.canonical(s)
+            assertEquals(s, c, BookmarkUrls.canonical(c))
+            assertEquals(s, BookmarkUrls.key(s), BookmarkUrls.key(c))
+        }
+        val parts = listOf(
+            "ipfs://", "ipns://", "bzz://", "ens://", "rad:", "rad://", "http://", "HTTPS://", "z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+            "x.eth", ".eth", "..", ".", "/", "?", "#", " ", "\t", "%2e", "%", "a", "ß", "ä", "A", "-", ":", "@", "[", "]",
+            "\\", "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi", "ab".repeat(32), "\u00a0", "😀",
+        )
+        val rnd = java.util.Random(296)
+        repeat(30_000) {
+            val s = buildString { repeat(1 + rnd.nextInt(7)) { append(parts[rnd.nextInt(parts.size)]) } }
+            val c = BookmarkUrls.canonical(s)
+            assertEquals(s, c, BookmarkUrls.canonical(c))
+            assertEquals(s, BookmarkUrls.key(s), BookmarkUrls.key(c))
+        }
     }
 }

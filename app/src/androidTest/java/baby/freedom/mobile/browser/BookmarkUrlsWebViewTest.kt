@@ -43,4 +43,21 @@ class BookmarkUrlsWebViewTest {
             assertEquals(url, chromium.getString(i), BookmarkUrls.canonical(url))
         }
     }
+
+    /** A rad page's address is [RadUrl.displayUrlFor] of the WebView's own URL (#296 R5-F1). */
+    @Test
+    fun radAddressesMatchTheirPage() {
+        harness.load("about:blank")
+        val rid = "z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        val typed = listOf(
+            "rad://$rid/tree/a b", "rad://$rid/tree/Straße", "rad://$rid/tree/x/../y",
+            "rad://$rid/tree/x/%2e%2E/y", "rad:$rid?q=ä", "rad://$rid/tree#x y", "rad://$rid/",
+        )
+        val virtual = typed.map { RadUrl.toVirtualUrl(it)!! }
+        val script = "JSON.stringify(" + JSONArray(virtual) + ".map(u => new URL(u).href))"
+        val chromium = JSONArray(JSONArray("[" + harness.js(script) + "]").getString(0))
+        typed.forEachIndexed { i, url ->
+            assertEquals(url, RadUrl.displayUrlFor(chromium.getString(i)), BookmarkUrls.canonical(url))
+        }
+    }
 }
