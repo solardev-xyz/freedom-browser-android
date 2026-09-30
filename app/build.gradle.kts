@@ -137,6 +137,9 @@ android {
     // `-Plint.checkAll` for the full report (it fails on those errors).
     //   HardcodedUiText: our own check (:lint-checks), user-visible string
     //     literals in Kotlin; see docs/localisation.md § The lint check.
+    //   DevicePluralRules: also ours, a plural form chosen by the phone's
+    //     language instead of the text's (pluralStringResource,
+    //     getQuantityString; #313 R1-F1).
     //   HardcodedText: the same for XML layouts and menus (a warning by
     //     default, made an error here).
     //   MissingTranslation / ExtraTranslation (an error and a fatal error
@@ -144,13 +147,17 @@ android {
     //     one values/ doesn't.
     lint {
         if (!project.hasProperty("lint.checkAll")) {
-            checkOnly += setOf("HardcodedUiText", "HardcodedText", "MissingTranslation", "ExtraTranslation")
+            checkOnly += setOf("HardcodedUiText", "DevicePluralRules", "HardcodedText", "MissingTranslation", "ExtraTranslation")
         }
-        error += setOf("HardcodedUiText", "HardcodedText")
+        error += setOf("HardcodedUiText", "DevicePluralRules", "HardcodedText")
         abortOnError = true
-        // Test code isn't UI: its literals are fixtures. And :swarmnode
-        // has no UI text of its own.
+        // Test code isn't UI: its literals are fixtures.
         ignoreTestSources = true
+        // Not :swarmnode: MissingTranslation doesn't see its strings from
+        // here even with checkDependencies (it judges the library by the
+        // library's own values-<lang> folders, and it has none), so a
+        // translation that leaves them out is caught by
+        // TranslationCoverageTest instead (#313 R1-M2).
         checkDependencies = false
     }
 

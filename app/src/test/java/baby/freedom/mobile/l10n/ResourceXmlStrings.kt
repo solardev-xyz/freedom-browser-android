@@ -40,6 +40,9 @@ class ResourceXmlStrings internal constructor(
         dir.listFiles { f -> f.name.endsWith(".xml") }!!.sorted().forEach { load(it) }
     }
 
+    /** Whether [id] is one of this R class's strings. */
+    internal fun has(id: Int): Boolean = id in stringNames
+
     override fun string(id: Int, vararg args: Any?): String {
         val name = stringNames[id] ?: error("no string resource $id")
         val text = strings[name] ?: error("string/$name not in res/values")
@@ -137,6 +140,11 @@ class ResourceXmlSwarmStrings : SwarmStringSource {
         listOf("../swarmnode/src/main/res/values", "swarmnode/src/main/res/values"),
     )
 
-    override fun string(id: Int, vararg args: Any?): String = xml.string(id, *args)
+    // An app string held in a node's state (a HeldText in TorInfo) resolves
+    // through SwarmStrings too, as it does on a device: the app's own.
+    private val app by lazy { ResourceXmlStrings() }
+
+    override fun string(id: Int, vararg args: Any?): String =
+        if (xml.has(id)) xml.string(id, *args) else app.string(id, *args)
     override fun plural(id: Int, count: Int, vararg args: Any?): String = xml.plural(id, count, *args)
 }

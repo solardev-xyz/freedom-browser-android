@@ -6,6 +6,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.TextLocale
 import java.io.ByteArrayInputStream
 import java.net.URLDecoder
 import java.util.Locale
@@ -554,8 +555,11 @@ object RadApi {
             .put("plurals", plurals)
     }
 
+    // The language the text is in, not the phone's (#313 R1-F1): English
+    // text on a phone Freedom has no translation for counts with English
+    // rules ("1 minute ago", not Russian's "21 minute ago").
     private fun viewerLocale(): Locale =
-        appContext?.resources?.configuration?.locales?.takeIf { !it.isEmpty }?.get(0) ?: Locale.getDefault()
+        appContext?.resources?.let(TextLocale::of) ?: Locale.US
 
     /**
      * A whole number in each plural category [locale] has (`one` → 1,

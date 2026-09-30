@@ -36,11 +36,14 @@ internal object AppLanguage {
 
     /** [showLanguageRow] for this device and build. */
     fun available(context: Context): Boolean {
-        val sdk = Build.VERSION.SDK_INT
-        if (sdk < Build.VERSION_CODES.TIRAMISU) return false
-        val count = runCatching { LocaleConfig(context).supportedLocales?.size() ?: 0 }.getOrDefault(0)
-        return showLanguageRow(sdk, count)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
+        return showLanguageRow(Build.VERSION.SDK_INT, localeCount(context))
     }
+
+    /** How many languages the generated locale config lists. */
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    private fun localeCount(context: Context): Int =
+        runCatching { LocaleConfig(context).supportedLocales?.size() ?: 0 }.getOrDefault(0)
 
     /** The language picked for the app, by its own name ("Deutsch"), or "System default" for none. */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)

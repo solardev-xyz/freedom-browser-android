@@ -49,7 +49,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
@@ -57,6 +56,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.GasOracle
 import baby.freedom.mobile.wallet.SendAmounts
@@ -433,7 +433,7 @@ private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, tap: ArmedTap
     AddressRow(stringResource(if (data.isEmpty()) R.string.send_label_to else R.string.send_label_contract), request.to)
     Row0(stringResource(R.string.send_label_amount), "${SendAmounts.exact(request.amount, chain.decimals)} ${chain.symbol}", mono = true)
     if (data.isNotEmpty()) {
-        Label(pluralStringResource(R.plurals.send_eth_data_bytes, data.size, data.size))
+        Label(pluralText(R.plurals.send_eth_data_bytes, data.size, data.size))
         // Only the bytes the sheet shows are turned into hex, not megabytes of them.
         val head = remember(data) { "0x" + hexOf(data, SHEET_MAX_CHARS / 2) }
         Block(head, mono = true, maxHeight = 120, omitted = maxOf(0, data.size - SHEET_MAX_CHARS / 2) * 2, whole = stringResource(R.string.send_eth_tx_whole))
@@ -545,7 +545,7 @@ private fun AddChainBody(ask: EthAsk.AddChain) {
     Row0(
         stringResource(R.string.send_eth_currency_label),
         // The site's decimals in plain digits, like the chain ID (#313 R1-M4).
-        pluralStringResource(R.plurals.send_eth_currency, chain.decimals, chain.currencyName, chain.symbol, chain.decimals.toString()),
+        pluralText(R.plurals.send_eth_currency, chain.decimals, chain.currencyName, chain.symbol, chain.decimals.toString()),
     )
     Row0(stringResource(R.string.send_eth_rpc), chain.rpcUrls.joinToString("\n") { hostOf(it) }, mono = true)
     chain.explorerUrl?.let { Row0(stringResource(R.string.send_eth_explorer), hostOf(it), mono = true) }
@@ -650,7 +650,7 @@ private fun Block(text: String, mono: Boolean, maxHeight: Int = 240, omitted: In
     if (more > 0) {
         Spacer(Modifier.height(4.dp))
         Note(
-            pluralStringResource(R.plurals.send_eth_too_long, more, NumberFormat.getIntegerInstance().format(more), whole ?: ""),
+            pluralText(R.plurals.send_eth_too_long, more, NumberFormat.getIntegerInstance().format(more), whole ?: ""),
             warn = true,
         )
     }

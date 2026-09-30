@@ -40,14 +40,14 @@
 
     <!-- MyotisNode.kt: why the light client or one chain's engine didn't start -->
     <!-- %1$d: the engine's ABI version; %2$d: the one this app was built for -->
-    <string name="swarmnode_myotis_abi_mismatch">Light client engine ABI %1$d, this app expects %2$d</string>
+    <string name="swarmnode_myotis_abi_mismatch">Light client engine ABI %1$s, this app expects %2$s</string>
     <!-- %1$s: a folder path -->
     <string name="swarmnode_myotis_cant_create">Can\'t create %1$s</string>
     <string name="swarmnode_myotis_engine_didnt_start">Engine didn\'t start</string>
     <string name="swarmnode_myotis_unsupported_network">Network not supported by this engine</string>
     <string name="swarmnode_myotis_anchor_mismatch">Saved sync data doesn\'t match the engine\'s checkpoint</string>
     <!-- %1$d: the engine's error code -->
-    <string name="swarmnode_myotis_create_failed">Engine couldn\'t be created (%1$d)</string>
+    <string name="swarmnode_myotis_create_failed">Engine couldn\'t be created (%1$s)</string>
 
     <!-- TorNode.kt: the built-in Tor client's error line -->
     <string name="swarmnode_tor_unavailable">This build of Freedom has no Tor client</string>
@@ -90,7 +90,7 @@
     <string name="swarmnode_deposit_maybe_sent_detail">%1$s (%2$s). Check the chequebook\'s balance before depositing again</string>
     <string name="swarmnode_gateway_no_answer">the node\'s gateway didn\'t answer</string>
     <!-- %1$d: the HTTP status code -->
-    <string name="swarmnode_deposit_failed_http">the deposit failed (HTTP %1$d)</string>
+    <string name="swarmnode_deposit_failed_http">the deposit failed (HTTP %1$s)</string>
     <!-- Replaces the Gnosis RPC address (which can carry an API key) in an error -->
     <string name="swarmnode_gnosis_rpc">the Gnosis RPC</string>
 </resources>

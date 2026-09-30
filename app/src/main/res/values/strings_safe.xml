@@ -155,7 +155,7 @@
     <string name="safe_propose_insufficient">The Safe holds %1$s %2$s. Fund it first: send %2$s to %3$s.</string>
     <string name="safe_propose_asset">Asset</string>
     <string name="safe_recipient_is_safe">That’s the Safe itself.</string>
-    <string name="safe_amount_invalid">Not an amount of %1$s: at most %2$d digits after the point.</string>
+    <string name="safe_amount_invalid">Not an amount of %1$s: at most %2$s digits after the point.</string>
     <string name="safe_message_hint">Signed as personal_sign text by the Safe (EIP-1271): an app checks it with the Safe’s isValidSignature.</string>
     <!-- Joins account names: "Account 1 and Account 2". -->
     <string name="safe_names_and">%1$s and %2$s</string>

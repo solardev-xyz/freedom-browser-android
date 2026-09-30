@@ -92,6 +92,7 @@ import baby.freedom.mobile.wallet.WalletSender
 import baby.freedom.mobile.wallet.PhraseBackup
 import baby.freedom.mobile.wallet.PhraseBackupJob
 import baby.freedom.mobile.wallet.Vault
+import baby.freedom.swarm.HeldText
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.MyotisInfo
@@ -1151,7 +1152,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                                     TorInfo(
                                         status = TorStatus.Starting,
                                         socksPort = proxy.port,
-                                        summary = getString(R.string.browser_tor_reaching_onion, proxy.toString()),
+                                        summaryText = HeldText.res(R.string.browser_tor_reaching_onion, proxy.toString()),
                                     ),
                                     confirmed = false,
                                     unreached = watch.unreached,
@@ -1175,7 +1176,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                                     status = TorStatus.Running,
                                     progress = 100,
                                     socksPort = proxy.port,
-                                    summary = getString(R.string.browser_tor_onion_unreached_checking),
+                                    summaryText = HeldText.res(R.string.browser_tor_onion_unreached_checking),
                                 )
                                 else -> externalTorError(proxy, result, watch.unreached)
                             },
@@ -1237,14 +1238,14 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     }
 
     private fun externalTorChecking(proxy: SocksEndpoint) =
-        TorInfo(status = TorStatus.Starting, socksPort = proxy.port, summary = getString(R.string.browser_tor_checking_proxy, proxy.toString()))
+        TorInfo(status = TorStatus.Starting, socksPort = proxy.port, summaryText = HeldText.res(R.string.browser_tor_checking_proxy, proxy.toString()))
 
     private fun externalTorError(proxy: SocksEndpoint, result: TorProxy.Probe, unreached: Boolean = false) =
         TorInfo(
             status = TorStatus.Error,
             socksPort = proxy.port,
-            errorMessage = TorProxy.describe(result, proxy).let { described ->
-                if (unreached) getString(R.string.browser_tor_error_checking_again, described) else described
+            error = TorProxy.describeHeld(result, proxy).let { described ->
+                if (unreached) HeldText.res(R.string.browser_tor_error_checking_again, described) else described
             },
         )
 
@@ -1308,7 +1309,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
             publishTor(TorInfo(status = TorStatus.Starting))
         } else {
             runCatching { applicationContext.unbindService(torConnection) }
-            publishTor(TorInfo(status = TorStatus.Error, errorMessage = getString(R.string.browser_tor_start_failed)))
+            publishTor(TorInfo(status = TorStatus.Error, error = HeldText.res(R.string.browser_tor_start_failed)))
         }
     }
 

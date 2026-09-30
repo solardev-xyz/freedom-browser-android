@@ -7,7 +7,7 @@ import com.android.tools.lint.detector.api.Issue
 
 /** Freedom's own lint checks, run by `./gradlew :app:lintDebug`. */
 class FreedomIssueRegistry : IssueRegistry() {
-    override val issues: List<Issue> = listOf(HardcodedUiTextDetector.ISSUE)
+    override val issues: List<Issue> = listOf(HardcodedUiTextDetector.ISSUE, DevicePluralRulesDetector.ISSUE)
 
     override val api: Int = CURRENT_API
 

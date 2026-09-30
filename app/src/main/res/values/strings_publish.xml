@@ -22,11 +22,11 @@
     <!-- %1$s: the node's own (English) message. -->
     <string name="publish_error_http_too_big_detail">It\'s too big for one upload (%1$s)</string>
     <string name="publish_error_http_stamp_unusable">The postage stamp can\'t be used for this: %1$s</string>
-    <string name="publish_error_http_stamp_unusable_code">The postage stamp can\'t be used for this: HTTP %1$d</string>
+    <string name="publish_error_http_stamp_unusable_code">The postage stamp can\'t be used for this: HTTP %1$s</string>
     <string name="publish_error_http_unavailable">The node can\'t upload right now</string>
     <string name="publish_error_http_unavailable_detail">The node can\'t upload right now: %1$s</string>
     <string name="publish_error_http_refused_detail">The node refused the upload: %1$s</string>
-    <string name="publish_error_http_refused_code">The node refused the upload (HTTP %1$d)</string>
+    <string name="publish_error_http_refused_code">The node refused the upload (HTTP %1$s)</string>
     <string name="publish_error_send_failed">Couldn\'t hand the upload to the Swarm node</string>
     <string name="publish_error_timeout">The Swarm node didn\'t finish the upload in time</string>
     <string name="publish_error_no_text">There\'s no text to publish</string>

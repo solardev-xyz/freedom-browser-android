@@ -674,7 +674,7 @@ class DownloadManager private constructor(context: Context) {
             current.copy(
                 status = DownloadStatus.FAILED,
                 contentUri = null,
-                error = Strings.get(R.string.library_download_file_deleted),
+                error = DownloadNote.of(R.string.library_download_file_deleted),
             ),
         )
     }
@@ -750,13 +750,13 @@ class DownloadManager private constructor(context: Context) {
                 throw notEnoughStorage()
             }
             val uri = insertPendingDownload(resolver, "Download/$DOWNLOAD_SUBDIR", "dl$id", entry.fileName, entry.mimeType)
-                ?: throw DownloadFailure(Strings.get(R.string.library_download_create_file_failed))
+                ?: throw DownloadFailure(DownloadNote.of(R.string.library_download_create_file_failed))
             pending = uri
             entry = entry.copy(contentUri = uri.toString())
             dao.update(entry)
             copyToDownloads(partial, uri)
             if (!publishPendingDownload(resolver, uri, entry.fileName)) {
-                throw DownloadFailure(Strings.get(R.string.library_download_save_file_failed))
+                throw DownloadFailure(DownloadNote.of(R.string.library_download_save_file_failed))
             }
             pending = null
             published = true
@@ -841,13 +841,16 @@ class DownloadManager private constructor(context: Context) {
         val lost = !stopped && canGoOn && (fetching && unreachable || noSpace)
         val pause = stop == DownloadStop.PAUSE || lost
         if (!stopped) Log.w(LOG_TAG, "download $id ${if (pause) "paused" else "failed"}", t)
-        val reason = when {
+        // Stored as a DownloadNote, so the row follows a language change;
+        // the event gets it resolved.
+        val storedReason = when {
             stopped || pause -> null
-            t is DownloadFailure -> t.message ?: Strings.get(R.string.library_download_failed)
-            t is IOException -> t.message?.takeIf { it.isNotBlank() }?.let { Strings.get(R.string.library_download_network_error_detail, it) }
-                ?: Strings.get(R.string.library_download_network_error)
-            else -> Strings.get(R.string.library_download_failed)
+            t is DownloadFailure -> t.stored
+            t is IOException -> t.message?.takeIf { it.isNotBlank() }?.let { DownloadNote.of(R.string.library_download_network_error_detail, it) }
+                ?: DownloadNote.of(R.string.library_download_network_error)
+            else -> DownloadNote.of(R.string.library_download_failed)
         }
+        val reason = DownloadNote.shown(storedReason)
         pending?.let { deleteQuietly(it.toString()) }
         val received = _progress.value[id]?.received ?: entry.receivedBytes
         cancellation.release(id, job)
@@ -865,7 +868,7 @@ class DownloadManager private constructor(context: Context) {
                     receivedBytes = if (partial.exists()) partial.length() else 0L,
                     note = when {
                         !lost -> null
-                        t is DownloadFailure -> t.message
+                        t is DownloadFailure -> t.stored
                         else -> DOWNLOAD_CONNECTION_LOST_NOTE
                     },
                     error = null,
@@ -878,7 +881,7 @@ class DownloadManager private constructor(context: Context) {
                     status = if (stopped) DownloadStatus.CANCELLED else DownloadStatus.FAILED,
                     contentUri = null,
                     receivedBytes = received,
-                    error = reason,
+                    error = storedReason,
                     note = null,
                     finishedAt = System.currentTimeMillis(),
                 ),
@@ -922,7 +925,7 @@ class DownloadManager private constructor(context: Context) {
             answer = resumeAnswer(src.status, 0, src.contentRange, src.length)
             if (answer !is ResumeAnswer.FromStart) {
                 src.close()
-                throw DownloadFailure(Strings.get(R.string.library_download_partial_file))
+                throw DownloadFailure(DownloadNote.of(R.string.library_download_partial_file))
             }
         }
         src.use {
@@ -973,7 +976,7 @@ class DownloadManager private constructor(context: Context) {
             // new file's validator, which a later resume would continue,
             // splicing the two.
             if (fromStart && partial.exists() && !partial.delete()) {
-                throw DownloadFailure(Strings.get(R.string.library_download_write_failed))
+                throw DownloadFailure(DownloadNote.of(R.string.library_download_write_failed))
             }
             save(entry)
             val received = copyWithProgress(id, src.stream, partial, startAt, total)
@@ -1022,7 +1025,8 @@ class DownloadManager private constructor(context: Context) {
      * its partial file kept, rather than failing.
      */
     private class DownloadFailure(
-        message: String,
+        /** What the row keeps ([DownloadNote]); the message is it resolved. */
+        val stored: String,
         val retriable: Boolean = false,
         /**
          * The device ran out of room. A download whose partial file a
@@ -1031,9 +1035,9 @@ class DownloadManager private constructor(context: Context) {
          * freed some space.
          */
         val noSpace: Boolean = false,
-    ) : IOException(message)
+    ) : IOException(DownloadNote.shown(stored))
 
-    private fun notEnoughStorage() = DownloadFailure(Strings.get(R.string.library_download_not_enough_storage), noSpace = true)
+    private fun notEnoughStorage() = DownloadFailure(DownloadNote.of(R.string.library_download_not_enough_storage), noSpace = true)
 
     private suspend fun openBody(
         target: DownloadTarget,
@@ -1046,7 +1050,7 @@ class DownloadManager private constructor(context: Context) {
         rangeHeaders: Map<String, String>,
     ): Body = when (target) {
         is DownloadTarget.Data -> {
-            val payload = parseDataUri(target.uri) ?: throw DownloadFailure(Strings.get(R.string.library_download_malformed_data_uri))
+            val payload = parseDataUri(target.uri) ?: throw DownloadFailure(DownloadNote.of(R.string.library_download_malformed_data_uri))
             Body(
                 stream = payload.bytes.inputStream(),
                 length = payload.bytes.size.toLong(),
@@ -1058,8 +1062,8 @@ class DownloadManager private constructor(context: Context) {
         is DownloadTarget.Dweb -> {
             val gatewayUrl = Gateways.gatewayUrlFor(target.root, target.pathAndQuery)
                 ?: throw DownloadFailure(
-                    if (target.root is ContentRoot.Ens) Strings.get(R.string.library_download_ens_unresolved, target.root.name)
-                    else Strings.get(R.string.library_download_node_not_running),
+                    if (target.root is ContentRoot.Ens) DownloadNote.of(R.string.library_download_ens_unresolved, target.root.name)
+                    else DownloadNote.of(R.string.library_download_node_not_running),
                     retriable = true,
                 )
             // Name the file after the dweb path, not the gateway URL
@@ -1072,7 +1076,7 @@ class DownloadManager private constructor(context: Context) {
             fetchDweb(target.url, nameUrl = target.displayUrl, track = track, rangeHeaders = rangeHeaders)
         is DownloadTarget.Web -> fetchWeb(target.url, userAgent, refererOrigin, cookies, track, rangeHeaders)
         is DownloadTarget.Unsupported ->
-            throw DownloadFailure(Strings.get(R.string.library_download_scheme_unsupported, target.scheme))
+            throw DownloadFailure(DownloadNote.of(R.string.library_download_scheme_unsupported, target.scheme))
     }
 
     private suspend fun fetchDweb(
@@ -1105,7 +1109,7 @@ class DownloadManager private constructor(context: Context) {
                     rangeHeaders.forEach { (k, v) -> setRequestProperty(k, v) }
                 }
             } catch (_: java.net.ConnectException) {
-                throw DownloadFailure(Strings.get(R.string.library_download_node_not_running), retriable = true)
+                throw DownloadFailure(DownloadNote.of(R.string.library_download_node_not_running), retriable = true)
             } catch (e: IOException) {
                 currentCoroutineContext().ensureActive()
                 Log.i(LOG_TAG, "dweb download attempt failed: $gatewayUrl", e)
@@ -1121,9 +1125,9 @@ class DownloadManager private constructor(context: Context) {
         }
         throw DownloadFailure(
             when (lastStatus) {
-                0 -> Strings.get(R.string.library_download_gateway_no_answer)
-                404 -> Strings.get(R.string.library_download_content_not_found)
-                else -> Strings.get(R.string.library_download_gateway_error, lastStatus)
+                0 -> DownloadNote.of(R.string.library_download_gateway_no_answer)
+                404 -> DownloadNote.of(R.string.library_download_content_not_found)
+                else -> DownloadNote.of(R.string.library_download_gateway_error, lastStatus)
             },
             retriable = true,
         )
@@ -1183,11 +1187,11 @@ class DownloadManager private constructor(context: Context) {
             if (status == 416 && rangeHeaders.isNotEmpty()) return bodyOf(conn, current)
             if (status !in 200..299) {
                 conn.disconnect()
-                throw DownloadFailure(Strings.get(R.string.library_download_server_error, status), retriable = true)
+                throw DownloadFailure(DownloadNote.of(R.string.library_download_server_error, status), retriable = true)
             }
             return bodyOf(conn, current)
         }
-        throw DownloadFailure(Strings.get(R.string.library_download_too_many_redirects))
+        throw DownloadFailure(DownloadNote.of(R.string.library_download_too_many_redirects))
     }
 
     private fun bodyOf(conn: HttpURLConnection, nameUrl: String): Body {
@@ -1240,7 +1244,7 @@ class DownloadManager private constructor(context: Context) {
         val out = try {
             FileOutputStream(file, startAt > 0)
         } catch (_: IOException) {
-            throw DownloadFailure(Strings.get(R.string.library_download_write_failed))
+            throw DownloadFailure(DownloadNote.of(R.string.library_download_write_failed))
         }
         var received = startAt
         var lastPublish = 0L
@@ -1257,7 +1261,7 @@ class DownloadManager private constructor(context: Context) {
                 try {
                     sink.write(buffer, 0, n)
                 } catch (e: IOException) {
-                    throw if (isNoSpace(e)) notEnoughStorage() else DownloadFailure(Strings.get(R.string.library_download_write_failed))
+                    throw if (isNoSpace(e)) notEnoughStorage() else DownloadFailure(DownloadNote.of(R.string.library_download_write_failed))
                 }
                 received += n
                 if (received >= nextStorageCheck) {
@@ -1280,7 +1284,7 @@ class DownloadManager private constructor(context: Context) {
 
     /** Copy the finished partial [file] into the pending Downloads item [uri]. */
     private suspend fun copyToDownloads(file: File, uri: Uri) {
-        val out = resolver.openOutputStream(uri) ?: throw DownloadFailure(Strings.get(R.string.library_download_write_to_downloads_failed))
+        val out = resolver.openOutputStream(uri) ?: throw DownloadFailure(DownloadNote.of(R.string.library_download_write_to_downloads_failed))
         out.use { sink ->
             file.inputStream().use { src ->
                 val buffer = ByteArray(64 * 1024)

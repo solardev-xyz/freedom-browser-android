@@ -3,7 +3,7 @@ package baby.freedom.mobile.browser
 import android.content.Context
 import android.content.Intent
 import baby.freedom.mobile.R
-import baby.freedom.mobile.l10n.Strings
+import baby.freedom.swarm.HeldText
 import java.io.IOException
 import java.io.InputStream
 import java.net.ConnectException
@@ -562,15 +562,18 @@ object TorProxy {
     }
 
     /** One line on what [probe] found at [endpoint], for Settings and the Nodes page. */
-    fun describe(result: Probe, endpoint: SocksEndpoint): String = when (result) {
-        Probe.Tor -> Strings.get(R.string.node_tor_probe_tor, endpoint.authority)
-        Probe.NotListening -> Strings.get(R.string.node_tor_probe_not_listening, endpoint.authority)
-        Probe.NotSocks -> Strings.get(R.string.node_tor_probe_not_socks, endpoint.authority)
-        Probe.NotTor -> Strings.get(R.string.node_tor_probe_not_tor, endpoint.authority)
+    fun describe(result: Probe, endpoint: SocksEndpoint): String = describeHeld(result, endpoint).text
+
+    /** [describe] kept as a [HeldText], for a state that should follow a language change (#313 R1-M5). */
+    fun describeHeld(result: Probe, endpoint: SocksEndpoint): HeldText = when (result) {
+        Probe.Tor -> HeldText.res(R.string.node_tor_probe_tor, endpoint.authority)
+        Probe.NotListening -> HeldText.res(R.string.node_tor_probe_not_listening, endpoint.authority)
+        Probe.NotSocks -> HeldText.res(R.string.node_tor_probe_not_socks, endpoint.authority)
+        Probe.NotTor -> HeldText.res(R.string.node_tor_probe_not_tor, endpoint.authority)
         is Probe.NoOnion -> if (result.code < 0) {
-            Strings.get(R.string.node_tor_probe_no_onion_timeout, endpoint.authority)
+            HeldText.res(R.string.node_tor_probe_no_onion_timeout, endpoint.authority)
         } else {
-            Strings.get(R.string.node_tor_probe_no_onion, endpoint.authority, result.code)
+            HeldText.res(R.string.node_tor_probe_no_onion, endpoint.authority, result.code)
         }
     }
 }

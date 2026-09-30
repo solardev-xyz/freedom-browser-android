@@ -117,7 +117,6 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -152,6 +151,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.NodeInfo
 import kotlin.math.ceil
@@ -3315,7 +3315,7 @@ private fun OverflowMenuButton(
                                 onOpenSettings()
                             },
                         )
-                        val peersLabel = pluralStringResource(R.plurals.browser_menu_peers, peerCount.toInt(), peerCount)
+                        val peersLabel = pluralText(R.plurals.browser_menu_peers, peerCount.toInt(), peerCount)
                         NodesMenuItem(peersLabel) {
                             menuExpanded = false
                             onOpenNode()

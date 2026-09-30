@@ -46,7 +46,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -69,6 +68,7 @@ import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.pluralText
 import java.io.IOException
 import java.text.NumberFormat
 import kotlinx.coroutines.CancellationException
@@ -357,7 +357,7 @@ internal fun ChainDetailPage(
                 DetailLine(stringResource(R.string.names_chain_id), "${chain.id} (${chain.hexId})")
                 DetailLine(
                     stringResource(R.string.names_currency),
-                    pluralStringResource(
+                    pluralText(
                         R.plurals.names_currency_detail,
                         chain.decimals,
                         chain.currencyName,

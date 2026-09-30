@@ -22,6 +22,7 @@ import android.system.StructPollfd
 import android.util.Log
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.TextLocale
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
@@ -883,7 +884,8 @@ class NodeService : Service() {
         val text = when (info.status) {
             NodeStatus.Stopped -> getString(R.string.node_status_stopped)
             NodeStatus.Starting -> info.errorMessage ?: getString(R.string.node_status_starting)
-            NodeStatus.Running -> resources.getQuantityString(
+            NodeStatus.Running -> TextLocale.plural(
+                this,
                 R.plurals.node_notification_running,
                 info.connectedPeers.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
                 info.connectedPeers,

@@ -13,7 +13,7 @@ import java.util.ServiceLoader
  * Where user-visible text comes from outside Compose (#280): logic that
  * builds a line for the UI (an error message, a status line, a
  * notification) without a `Context` at hand. Compose code uses
- * `stringResource` / `pluralStringResource` instead, which also redraws
+ * `stringResource` / [pluralText] instead, which also redraws
  * when the language changes.
  *
  * Every string lives in `res/values/strings*.xml`; a translation is a
@@ -67,6 +67,13 @@ object Strings {
     )
 
     /**
+     * The language the app's text is in ([TextLocale]): for a rule of
+     * that language a resource can't carry (English lowers a note's first
+     * letter after "Paused:"; German wouldn't).
+     */
+    fun language(): Locale = source().language()
+
+    /**
      * Tests only: resolve through [test] instead (null: back to the usual
      * source), to check what a translated build shows and sends.
      */
@@ -106,6 +113,9 @@ interface StringSource {
 
     /** [string] in English. The default suits a source that only has English. */
     fun english(@StringRes id: Int, vararg args: Any?): String = string(id, *args)
+
+    /** The language [string]'s text is in. The default suits a source that only has English. */
+    fun language(): Locale = Locale.US
 }
 
 private class ResourcesStringSource(private val context: Context) : StringSource {
@@ -114,9 +124,9 @@ private class ResourcesStringSource(private val context: Context) : StringSource
     override fun string(id: Int, vararg args: Any?): String =
         if (args.isEmpty()) context.resources.getString(id) else context.resources.getString(id, *args)
 
+    // The rules of the language the text is in, not the phone's (#313 R1-F1).
     override fun plural(id: Int, count: Int, vararg args: Any?): String =
-        if (args.isEmpty()) context.resources.getQuantityString(id, count)
-        else context.resources.getQuantityString(id, count, *args)
+        TextLocale.plural(context, id, count, *args)
 
     // `values/` is en-US (res/resources.properties); formatted with en-US's digits too.
     private val englishResources: Resources by lazy {
@@ -126,6 +136,8 @@ private class ResourcesStringSource(private val context: Context) : StringSource
 
     override fun english(id: Int, vararg args: Any?): String =
         if (args.isEmpty()) englishResources.getString(id) else englishResources.getString(id, *args)
+
+    override fun language(): Locale = TextLocale.of(context.resources)
 }
 
 /**

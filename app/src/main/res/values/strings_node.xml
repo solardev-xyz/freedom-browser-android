@@ -189,7 +189,7 @@
     <string name="node_tor_probe_not_tor">The proxy on %1$s isn\'t Tor: it claims to connect even to a .onion address that can\'t exist, as shadowsocks, v2ray or clash proxies do. Freedom sends onion sites only to Tor.</string>
     <string name="node_tor_probe_no_onion_timeout">The proxy on %1$s didn\'t reach a .onion site in time. Is it Tor, and connected?</string>
     <!-- %2$d is the proxy's SOCKS reply code. -->
-    <string name="node_tor_probe_no_onion">The proxy on %1$s couldn\'t reach a .onion site (SOCKS error %2$d). Is it Tor, and connected?</string>
+    <string name="node_tor_probe_no_onion">The proxy on %1$s couldn\'t reach a .onion site (SOCKS error %2$s). Is it Tor, and connected?</string>
 
     <!-- node/SpendStopGate.kt: the node page's Status line while a restart waits for a payment -->
     <string name="node_waiting_for_spend">Waiting for a payment (a postage stamp or a chequebook deposit) to finish; the node starts once it\'s done</string>

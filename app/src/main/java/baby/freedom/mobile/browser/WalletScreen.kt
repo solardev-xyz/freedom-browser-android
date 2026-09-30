@@ -72,7 +72,6 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalWindowInfo
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
@@ -89,6 +88,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.DuplicateAccountException
@@ -1986,7 +1986,7 @@ private fun RecoveryPhrasePage(
                 val shown = words
                 SectionCard(
                     title = if (shown != null) {
-                        pluralStringResource(R.plurals.wallet_phrase_your_words, shown.size, shown.size)
+                        pluralText(R.plurals.wallet_phrase_your_words, shown.size, shown.size)
                     } else {
                         stringResource(R.string.wallet_phrase_hidden)
                     },

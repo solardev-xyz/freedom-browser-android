@@ -8,18 +8,29 @@ resources-only change.
 
 ## Adding a language
 
-1. Copy each `app/src/main/res/values/strings*.xml` into
-   `app/src/main/res/values-<lang>/` (e.g. `values-de`, `values-pt-rBR`)
+1. Copy each `app/src/main/res/values/strings*.xml` **and**
+   `swarmnode/src/main/res/values/strings_swarmnode.xml` into a
+   `values-<lang>/` folder next to it (e.g. `values-de`, `values-pt-rBR`)
    and translate the `<string>` and `<plurals>` entries. Leave out
    anything marked `translatable="false"`. Give every `<plurals>` the
    quantities the language needs (`zero`, `one`, `two`, `few`, `many`,
    `other`).
-2. Nothing else. The per-app language list Android 13+ shows in
+2. Set `l10n_language` (in `strings_common.xml`) to the folder's language
+   as a BCP 47 tag (`de`, `pt-BR`). Plural forms, and the digits a count is
+   written in, follow this language rather than the phone's (see
+   *Plurals* below), so it must name the language the text is in.
+3. Nothing else. The per-app language list Android 13+ shows in
    *Settings → Apps → Freedom → Language* is generated from the
    `values-<lang>` folders (`generateLocaleConfig` in
    `app/build.gradle.kts`; `res/resources.properties` says the default
    `values/` is English), and *Settings → Appearance → Language* in the
    app appears as soon as there is more than one language.
+
+`./gradlew :app:lintDebug` (MissingTranslation) fails on an app string
+the translation leaves out. Lint can't see `:swarmnode`'s from the app,
+so `TranslationCoverageTest` (`:app:testDebugUnitTest`) fails on a
+`:swarmnode` string left out, or an `l10n_language` that doesn't match its
+folder.
 
 ## Where strings live
 
@@ -43,7 +54,8 @@ app's files.
 
 - **Compose**: `stringResource(R.string.x)`,
   `stringResource(R.string.x, arg)`,
-  `pluralStringResource(R.plurals.x, count, count)`.
+  `pluralText(R.plurals.x, count, count)` (from `baby.freedom.mobile.l10n`,
+  not Compose's `pluralStringResource`; see *Plurals*).
 - **Outside Compose** (a function building a status line, an error
   message a screen shows, a notification): `Strings.get(R.string.x, …)` and
   `Strings.plural(R.plurals.x, count, …)` from `baby.freedom.mobile.l10n`.
@@ -101,8 +113,27 @@ app's files.
   SOME_STRING`, `startsWith(…)`): the text is translated and can change
   while the value is held. Carry a flag, a type or an enum instead.
 - **Numbers the user checks against a site or peer** (chain IDs, token
-  decimals, a Safe threshold from a request): pass them as `%1$s` with
-  `toString()`, in plain digits like the fixed-format amounts.
+  decimals, a Safe threshold from a request) and **numbers that are
+  identifiers** (HTTP and SOCKS status codes, RPC error codes, build and
+  list-update numbers, ABI versions, a stamp's depth): `%1$s` in the
+  resource, not `%1$d`, so they stay in plain digits like the
+  fixed-format amounts.
+- **Text held in a node's state** (`TorInfo`'s summary and error, which
+  cross to the node processes): a `HeldText` (resource id and arguments),
+  read in the app language when shown. A download row's note and error
+  are stored as a `DownloadNote` key for the same reason.
+
+## Plurals
+
+Android picks a `<plurals>` form with the plural rules of the phone's
+language, whichever `values-<lang>` folder the text came from: on a
+Japanese phone the English text would read "1 matches", on a French one
+"0 match", on a Russian one "21 minute ago". So the app picks forms with
+the rules of the language the text is in (`TextLocale`, from
+`l10n_language`): `pluralText` in Compose, `Strings.plural` elsewhere,
+`TextLocale.plural` with a `Context`. The Radicle viewer's table uses the
+same language. Lint's `DevicePluralRules` (ours) flags
+`pluralStringResource` and `Resources.getQuantityString`.
 
 ## Pages Freedom serves
 
@@ -152,7 +183,8 @@ Text that genuinely isn't language (a symbol, a sample address, a
 `0x…` placeholder) can be suppressed with `@Suppress("HardcodedUiText")`
 on the declaration and a comment saying why.
 
-`lintDebug` runs only this check, Android's `HardcodedText` (XML
+`lintDebug` runs only this check, `DevicePluralRules` (see *Plurals*),
+Android's `HardcodedText` (XML
 layouts), `MissingTranslation` and `ExtraTranslation` (a `values-<lang>`
 file missing a string, or with one `values/` doesn't have), so it is
 fast and fails only for localisation; `-Plint.checkAll` runs full lint

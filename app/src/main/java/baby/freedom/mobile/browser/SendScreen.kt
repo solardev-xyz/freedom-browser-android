@@ -45,7 +45,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
@@ -55,6 +54,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.ens.EnsAddressResult
 import baby.freedom.mobile.ens.toHex
@@ -546,7 +546,7 @@ internal fun SendPage(
                             if (token != null) {
                                 when {
                                     amount.isNotEmpty() && parsedAmount == null -> FieldNote(
-                                        pluralStringResource(R.plurals.send_amount_invalid, token.decimals, token.decimals),
+                                        pluralText(R.plurals.send_amount_invalid, token.decimals, token.decimals),
                                         error = true,
                                     )
                                     all && token.isNative -> FieldNote(

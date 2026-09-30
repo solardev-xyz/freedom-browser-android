@@ -17,7 +17,7 @@
     <string name="wallet_gms_restore_needs_screen_lock">set a screen lock first</string>
     <string name="wallet_gms_unavailable">Google Play services isn’t available</string>
     <!-- %1$d: Google Play services' status code -->
-    <string name="wallet_gms_status">Google Play services: %1$d</string>
+    <string name="wallet_gms_status">Google Play services: %1$s</string>
     <string name="wallet_gms_cancelled">Google Play services cancelled the call</string>
     <string name="wallet_gms_failed">Google Play services failed</string>
 

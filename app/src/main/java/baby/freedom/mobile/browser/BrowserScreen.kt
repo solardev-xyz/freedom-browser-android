@@ -2663,7 +2663,7 @@ fun BrowserScreen(
                     // The fetch itself is bounded by IMAGE_FETCH_DEADLINE_MS.
                     val progress = launch {
                         delay(IMAGE_FETCH_PROGRESS_DELAY_MS)
-                        Toast.makeText(context, context.getString(R.string.browser_image_loading), Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, R.string.browser_image_loading, Toast.LENGTH_SHORT).show()
                     }
                     val image = try {
                         fetchImage(url, request.pageUrl, WebSettings.getDefaultUserAgent(context), owner.private)
@@ -2671,7 +2671,7 @@ fun BrowserScreen(
                         progress.cancel()
                     }
                     val ok = image != null && action(image)
-                    if (!ok) Toast.makeText(context, context.getString(failure), Toast.LENGTH_SHORT).show()
+                    if (!ok) Toast.makeText(context, failure, Toast.LENGTH_SHORT).show()
                 }
             }
             key(request) {
@@ -2689,7 +2689,7 @@ fun BrowserScreen(
                         withImage(url, { image ->
                             saveImage(context, image, url).also { saved ->
                                 if (saved) {
-                                    Toast.makeText(context, context.getString(R.string.browser_image_saved), Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, R.string.browser_image_saved, Toast.LENGTH_SHORT).show()
                                 }
                             }
                         }, R.string.browser_image_save_failed)

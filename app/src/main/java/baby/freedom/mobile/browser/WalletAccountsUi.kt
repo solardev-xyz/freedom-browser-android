@@ -80,11 +80,28 @@ internal fun trustLabel(trust: ChainTrust): String = when (trust.level) {
 
 /** An account's name as lists show it, with where its key is when that's a Ledger and the name doesn't say so (#142). */
 internal fun accountLabel(account: WalletAccount): String =
-    if (account.ledger != null && !account.name.contains("Ledger", ignoreCase = true)) {
+    if (account.ledger != null && !namesLedger(account.name)) {
         Strings.get(R.string.wallet_accounts_label_ledger, account.name)
     } else {
         account.name
     }
+
+/**
+ * Whether [name] already says its key is on a Ledger: it has the brand
+ * in it, or it's the default Ledger-account name ("Ledger 2") in the app
+ * language, which a translation may write in its own script (#313 R1-M4).
+ */
+private fun namesLedger(name: String): Boolean {
+    if (name.contains("Ledger", ignoreCase = true)) return true
+    val sample = Strings.get(R.string.wallet_account_default_ledger_name, DEFAULT_NAME_SAMPLE)
+    val number = Regex("\\p{Nd}+").findAll(sample).maxByOrNull { it.value.length } ?: return false
+    val pattern = Regex.escape(sample.substring(0, number.range.first)) + "\\p{Nd}+" +
+        Regex.escape(sample.substring(number.range.last + 1))
+    return Regex(pattern).matches(name.trim())
+}
+
+/** A number no default name has, to find where the number goes in one. */
+private const val DEFAULT_NAME_SAMPLE = 987654321
 
 /** Where [account]'s key is and at which path — the line under its address. */
 internal fun accountPathLine(account: WalletAccount): String = account.ledger?.let {

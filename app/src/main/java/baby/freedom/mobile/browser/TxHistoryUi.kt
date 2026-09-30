@@ -33,7 +33,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -41,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.SendAmounts
 import baby.freedom.mobile.wallet.TxRecord
@@ -153,7 +153,7 @@ internal fun TxHistorySection(records: List<TxRecord>, onOpen: (TxRecord) -> Uni
             if (records.size > TX_HISTORY_PREVIEW) {
                 PageRow(
                     title = stringResource(R.string.wallet_history_all),
-                    subtitle = pluralStringResource(R.plurals.wallet_history_all_count, records.size, records.size),
+                    subtitle = pluralText(R.plurals.wallet_history_all_count, records.size, records.size),
                     style = PageRowStyle.Inset,
                     leadingIcon = Icons.Filled.History,
                     onClick = onShowAll,

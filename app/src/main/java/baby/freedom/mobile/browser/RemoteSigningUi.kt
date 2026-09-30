@@ -43,7 +43,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -52,6 +51,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.OpenLvSession
 import baby.freedom.mobile.wallet.SendAmounts
@@ -122,7 +122,7 @@ internal fun HexRow(label: String, hex: String, selector: Boolean, detail: Strin
                 }
             }
         }
-        val more = if (lines.size > HEX_INLINE_LINES) pluralStringResource(R.plurals.signing_hex_lines_scroll, lines.size, lines.size) else null
+        val more = if (lines.size > HEX_INLINE_LINES) pluralText(R.plurals.signing_hex_lines_scroll, lines.size, lines.size) else null
         listOfNotNull(detail, more).joinToString(" · ").takeIf { it.isNotEmpty() }?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -375,7 +375,7 @@ private fun PersonalSignBody(request: OpenLvSession.Request.PersonalSign) {
             stringResource(R.string.signing_review_message),
             "0x" + request.message.toHex(),
             selector = false,
-            detail = pluralStringResource(R.plurals.signing_review_binary_bytes, request.message.size, request.message.size),
+            detail = pluralText(R.plurals.signing_review_binary_bytes, request.message.size, request.message.size),
         )
     }
     Spacer(Modifier.height(4.dp))
@@ -473,7 +473,7 @@ private fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) 
         data,
         selector = true,
         detail = if (data.length > 2) {
-            pluralStringResource(R.plurals.signing_review_call_bytes, (data.length - 2) / 2, (data.length - 2) / 2)
+            pluralText(R.plurals.signing_review_call_bytes, (data.length - 2) / 2, (data.length - 2) / 2)
         } else {
             stringResource(R.string.signing_review_plain_transfer)
         },

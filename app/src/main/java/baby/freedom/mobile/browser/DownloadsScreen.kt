@@ -41,7 +41,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -50,6 +49,7 @@ import baby.freedom.mobile.R
 import baby.freedom.mobile.data.DownloadEntry
 import baby.freedom.mobile.data.DownloadStatus
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.pluralText
 import kotlinx.coroutines.delay
 import java.text.DateFormat
 import java.util.Date
@@ -132,11 +132,14 @@ internal fun downloadStatusLine(entry: DownloadEntry, live: DownloadProgress?, t
             }
             // "Restarted from the beginning: …" after a resume that
             // couldn't pick up where it left off.
-            entry.note?.let { Strings.get(R.string.library_download_status_with_note, line, it) } ?: line
+            DownloadNote.shown(entry.note)?.let { Strings.get(R.string.library_download_status_with_note, line, it) } ?: line
         }
         DownloadStatus.PAUSED -> {
-            val why = entry.note?.let {
-                Strings.get(R.string.library_download_status_paused_reason, it.replaceFirstChar(Char::lowercaseChar))
+            // "Paused: connection lost": lowering the note's first letter
+            // is English's rule, not every language's (#313 R1-M5).
+            val why = DownloadNote.shown(entry.note)?.let {
+                val note = if (Strings.language().language == "en") it.replaceFirstChar(Char::lowercaseChar) else it
+                Strings.get(R.string.library_download_status_paused_reason, note)
             } ?: Strings.get(R.string.library_download_status_paused)
             val bytes = downloadBytesLine(entry.receivedBytes, entry.totalBytes.takeIf { it > 0 })
             // No validator to check a range against: Resume starts over.
@@ -152,7 +155,7 @@ internal fun downloadStatusLine(entry: DownloadEntry, live: DownloadProgress?, t
         DownloadStatus.CANCELLED -> Strings.get(R.string.library_download_status_cancelled, timestamp)
         else -> Strings.get(
             R.string.library_download_status_failed,
-            entry.error ?: Strings.get(R.string.library_download_unknown_error),
+            DownloadNote.shown(entry.error) ?: Strings.get(R.string.library_download_unknown_error),
             timestamp,
         )
     }
@@ -343,7 +346,7 @@ internal fun DownloadOfferDialog(
                 }
                 if (othersWaiting > 0) {
                     Text(
-                        pluralStringResource(R.plurals.library_download_offer_more_waiting, othersWaiting, othersWaiting),
+                        pluralText(R.plurals.library_download_offer_more_waiting, othersWaiting, othersWaiting),
                         color = secondary,
                         style = MaterialTheme.typography.bodySmall,
                     )

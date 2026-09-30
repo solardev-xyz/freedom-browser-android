@@ -118,7 +118,7 @@
     <!-- Check failed. %1$s: chain ID -->
     <string name="names_check_unknown_chain">Unknown chain %1$s</string>
     <!-- %1$d: JSON-RPC error code, %2$s: the node's message -->
-    <string name="names_check_rpc_error">RPC error %1$d: %2$s</string>
+    <string name="names_check_rpc_error">RPC error %1$s: %2$s</string>
     <!-- %1$s: why each source failed (technical, as the router wrote it) -->
     <string name="names_check_no_source">No chain source answered (%1$s)</string>
     <!-- %2$s: the error the last node answered with -->
@@ -148,7 +148,7 @@
     <string name="names_add_chain_built_in">Chain ID %1$s is built in already.</string>
     <string name="names_add_chain_duplicate">A chain with ID %1$s is already added. Remove it first to replace it.</string>
     <string name="names_add_chain_failed">Couldn\'t save the chain. Try again.</string>
-    <string name="names_chain_id_hint">A whole number from 1 to %1$d (or 0x hex)</string>
+    <string name="names_chain_id_hint">A whole number from 1 to %1$s (or 0x hex)</string>
     <string name="names_chain_name">Name</string>
     <string name="names_chain_name_hint">1 to %1$d characters</string>
     <string name="names_currency_symbol">Symbol</string>

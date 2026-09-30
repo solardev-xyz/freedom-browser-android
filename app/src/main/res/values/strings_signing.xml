@@ -213,7 +213,7 @@
     <string name="signing_x402_status_refused">Refused</string>
     <string name="signing_x402_status_refused_detail">The site answered the paid request with an error. It may still collect the payment until the authorization runs out.</string>
     <!-- %1$d: the HTTP status code -->
-    <string name="signing_x402_status_refused_detail_http">The site answered the paid request with an error (HTTP %1$d). It may still collect the payment until the authorization runs out.</string>
+    <string name="signing_x402_status_refused_detail_http">The site answered the paid request with an error (HTTP %1$s). It may still collect the payment until the authorization runs out.</string>
     <string name="signing_x402_status_unconfirmed">Unconfirmed</string>
     <string name="signing_x402_status_unconfirmed_detail">The site\'s answer to the paid request wasn\'t seen. It may have collected the payment.</string>
     <string name="signing_x402_approval_automatic">automatic</string>

@@ -103,7 +103,7 @@
     <string name="stamps_extend_other_active">Only the stamp the node uploads with can be extended in this version of Freedom, and that\'s another one.</string>
     <string name="stamps_extend_intro">Add time to this stamp before it runs out: once it expires, what was published with it is no longer paid for.</string>
     <string name="stamps_size">Size</string>
-    <string name="stamps_depth_n">Depth %1$d</string>
+    <string name="stamps_depth_n">Depth %1$s</string>
     <string name="stamps_duration">Duration</string>
     <string name="stamps_buy">Buy</string>
     <string name="stamps_buy_confirm_title">Buy this postage stamp?</string>

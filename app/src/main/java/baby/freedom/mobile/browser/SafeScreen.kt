@@ -54,7 +54,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
@@ -68,6 +67,7 @@ import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.Eip712
@@ -234,8 +234,8 @@ internal fun SafeCreatePage(accounts: List<WalletAccount>, onCreated: (SafeAccou
             item("preset") {
                 SectionCard(title = stringResource(R.string.safe_create_who_must_sign)) {
                     for ((t, title, detail) in listOf(
-                        Triple(1, pluralStringResource(R.plurals.safe_create_preset, 2, 1, 2), stringResource(R.string.safe_create_preset_1of2_detail)),
-                        Triple(2, pluralStringResource(R.plurals.safe_create_preset, 3, 2, 3), stringResource(R.string.safe_create_preset_2of3_detail)),
+                        Triple(1, pluralText(R.plurals.safe_create_preset, 2, 1, 2), stringResource(R.string.safe_create_preset_1of2_detail)),
+                        Triple(2, pluralText(R.plurals.safe_create_preset, 3, 2, 3), stringResource(R.string.safe_create_preset_2of3_detail)),
                     )) {
                         Row(
                             verticalAlignment = Alignment.Top,
@@ -389,7 +389,7 @@ internal fun SafeCreatePage(accounts: List<WalletAccount>, onCreated: (SafeAccou
                             if (owners.size == needed) {
                                 stringResource(R.string.safe_create_button)
                             } else {
-                                pluralStringResource(R.plurals.safe_create_choose_more, needed - owners.size, needed - owners.size)
+                                pluralText(R.plurals.safe_create_choose_more, needed - owners.size, needed - owners.size)
                             },
                         )
                     }
@@ -1195,7 +1195,7 @@ private fun SafeRequestPage(
                 }
             }
             item("owners") {
-                SectionCard(title = pluralStringResource(R.plurals.safe_signature_count, p.threshold, p.collected, p.threshold)) {
+                SectionCard(title = pluralText(R.plurals.safe_signature_count, p.threshold, p.collected, p.threshold)) {
                     ObscuredTapNotice(tap)
                     safe.owners.forEach { owner ->
                         val signed = p.hasSigned(owner)
@@ -1247,7 +1247,7 @@ private fun SafeRequestPage(
                 q != null -> item("review") {
                     SafeCallReview(
                         quote = q,
-                        what = pluralStringResource(R.plurals.safe_execute_what, p.collected, p.collected, safePendingTitle(p)),
+                        what = pluralText(R.plurals.safe_execute_what, p.collected, p.collected, safePendingTitle(p)),
                         busy = busy,
                         notice = notice,
                         error = error,

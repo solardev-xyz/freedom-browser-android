@@ -28,9 +28,9 @@
     <string name="library_download_gateway_no_answer">Gateway didn\'t answer</string>
     <string name="library_download_content_not_found">Content not found</string>
     <!-- %1$d: an HTTP status code -->
-    <string name="library_download_gateway_error">Gateway error %1$d</string>
+    <string name="library_download_gateway_error">Gateway error %1$s</string>
     <!-- %1$d: an HTTP status code -->
-    <string name="library_download_server_error">Server error %1$d</string>
+    <string name="library_download_server_error">Server error %1$s</string>
     <string name="library_download_too_many_redirects">Too many redirects</string>
     <string name="library_download_write_to_downloads_failed">Couldn\'t write to Downloads</string>
 

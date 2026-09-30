@@ -113,28 +113,28 @@
     <string name="settings_adblock_lists_builtin">Using the built-in lists</string>
     <!-- %1$s: the reasons, joined by settings_clause_separator. -->
     <string name="settings_adblock_lists_builtin_because">Using the built-in lists (%1$s)</string>
-    <string name="settings_adblock_reason_all_newer">newer than update %1$d</string>
+    <string name="settings_adblock_reason_all_newer">newer than update %1$s</string>
     <!-- %1$s: list names. -->
-    <string name="settings_adblock_reason_some_newer">%1$s newer than update %2$d\'s</string>
-    <string name="settings_adblock_reason_all_damaged">update %1$d\'s copies failed their hash check</string>
-    <string name="settings_adblock_reason_some_damaged">update %1$d\'s %2$s failed its hash check</string>
-    <string name="settings_adblock_reason_none_included">update %1$d doesn\'t include them</string>
-    <string name="settings_adblock_reason_some_not_included">update %1$d doesn\'t include %2$s</string>
-    <string name="settings_adblock_using_update">Using update %1$d</string>
+    <string name="settings_adblock_reason_some_newer">%1$s newer than update %2$s\'s</string>
+    <string name="settings_adblock_reason_all_damaged">update %1$s\'s copies failed their hash check</string>
+    <string name="settings_adblock_reason_some_damaged">update %1$s\'s %2$s failed its hash check</string>
+    <string name="settings_adblock_reason_none_included">update %1$s doesn\'t include them</string>
+    <string name="settings_adblock_reason_some_not_included">update %1$s doesn\'t include %2$s</string>
+    <string name="settings_adblock_using_update">Using update %1$s</string>
     <!-- %2$s: the day the update was built, as yyyy-mm-dd. -->
-    <string name="settings_adblock_using_update_of">Using update %1$d of %2$s</string>
+    <string name="settings_adblock_using_update_of">Using update %1$s of %2$s</string>
     <!-- %1$s: settings_adblock_using_update(_of); %2$s: the lists it serves; %3$s: the built-in ones. -->
     <string name="settings_adblock_using_update_and_builtin">%1$s for %2$s; the built-in %3$s</string>
-    <string name="settings_adblock_using_update_and_builtin_damaged">%1$s for %2$s; the built-in %3$s (update %4$d\'s %5$s failed its hash check)</string>
+    <string name="settings_adblock_using_update_and_builtin_damaged">%1$s for %2$s; the built-in %3$s (update %4$s\'s %5$s failed its hash check)</string>
     <string name="settings_checking">Checking…</string>
-    <string name="settings_adblock_updated">Updated to version %1$d</string>
+    <string name="settings_adblock_updated">Updated to version %1$s</string>
     <!-- The count is the number of built-in lists named in %2$s. -->
     <plurals name="settings_adblock_updated_builtin_newer">
         <item quantity="one">Updated to version %1$d; the built-in %2$s stays, it\'s newer</item>
         <item quantity="other">Updated to version %1$d; the built-in %2$s stay, they\'re newer</item>
     </plurals>
-    <string name="settings_adblock_builtin_newer">Version %1$d on the feed is older than the built-in lists; they stay in use</string>
-    <string name="settings_adblock_up_to_date_version">Up to date (version %1$d)</string>
+    <string name="settings_adblock_builtin_newer">Version %1$s on the feed is older than the built-in lists; they stay in use</string>
+    <string name="settings_adblock_up_to_date_version">Up to date (version %1$s)</string>
     <string name="settings_adblock_up_to_date">Up to date</string>
     <string name="settings_adblock_feed_unavailable">Couldn\'t reach the update feed on Swarm — is the Swarm node running? Tap to try again</string>
     <!-- %1$s: a technical reason code, e.g. wrong_signer. -->
@@ -185,7 +185,7 @@
     <string name="settings_permission_remove">Remove %1$s permission for %2$s</string>
 
     <!-- SettingsScreen.kt: About -->
-    <string name="settings_app_version">%1$s (build %2$d)</string>
+    <string name="settings_app_version">%1$s (build %2$s)</string>
     <string name="settings_app_version_unknown">unknown</string>
     <string name="settings_about_tagline">Swarm-native browser for Android</string>
     <string name="settings_about_blurb">Loads regular https:// sites plus decentralised content via bzz:// hashes and ENS names (vitalik.eth), served through embedded nodes.</string>

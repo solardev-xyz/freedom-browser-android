@@ -31,7 +31,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -40,6 +39,7 @@ import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.data.X402Store
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.SendAmounts
 import java.text.DateFormat
@@ -126,7 +126,7 @@ internal fun X402Section(
         }
         PageRow(
             title = stringResource(R.string.signing_x402_payment_history),
-            subtitle = if (payments == 0) stringResource(R.string.signing_x402_no_payments) else pluralStringResource(R.plurals.signing_x402_payments, payments, payments),
+            subtitle = if (payments == 0) stringResource(R.string.signing_x402_no_payments) else pluralText(R.plurals.signing_x402_payments, payments, payments),
             style = PageRowStyle.Inset,
             leadingIcon = Icons.Filled.ReceiptLong,
             onClick = onOpenHistory,

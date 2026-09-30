@@ -2,6 +2,7 @@ package baby.freedom.swarm
 
 import android.content.Context
 import android.content.res.Configuration
+import android.content.res.Resources
 import androidx.annotation.PluralsRes
 import androidx.annotation.StringRes
 import androidx.annotation.VisibleForTesting
@@ -26,10 +27,15 @@ object SwarmStrings {
     @Volatile
     private var source: SwarmStringSource? = null
 
-    /** Resolve from [context]'s application resources (their locale follows the app language). */
-    fun init(context: Context) {
+    /**
+     * Resolve from [context]'s application resources (their locale follows
+     * the app language). [pluralResources] gives the resources to choose a
+     * plural form with: set to the language the text is in, which the app
+     * knows and this module doesn't (the app's `TextLocale`, #313 R1-F1).
+     */
+    fun init(context: Context, pluralResources: (Context) -> Resources = { it.resources }) {
         val app = context.applicationContext ?: context
-        source = ResourcesSource(app)
+        source = ResourcesSource(app, pluralResources)
     }
 
     /** The text of [id], with [args] filled in (`%1$s`, `%1$d`, …, locale-formatted). */
@@ -77,15 +83,20 @@ interface SwarmStringSource {
     fun englishPlural(@PluralsRes id: Int, count: Int, vararg args: Any?): String = plural(id, count, *args)
 }
 
-private class ResourcesSource(private val context: Context) : SwarmStringSource {
+@Suppress("DevicePluralRules") // plural(): resources in the text's language; englishPlural(): en-US
+private class ResourcesSource(
+    private val context: Context,
+    private val pluralResources: (Context) -> Resources,
+) : SwarmStringSource {
     // `context.resources` each time, not kept: the per-app language
     // (Android 13+) updates the application's resources in place.
     override fun string(id: Int, vararg args: Any?): String =
         if (args.isEmpty()) context.resources.getString(id) else context.resources.getString(id, *args)
 
-    override fun plural(id: Int, count: Int, vararg args: Any?): String =
-        if (args.isEmpty()) context.resources.getQuantityString(id, count)
-        else context.resources.getQuantityString(id, count, *args)
+    override fun plural(id: Int, count: Int, vararg args: Any?): String {
+        val res = pluralResources(context)
+        return if (args.isEmpty()) res.getQuantityString(id, count) else res.getQuantityString(id, count, *args)
+    }
 
     // `values/` is en-US (the app's res/resources.properties); formatted with en-US's digits too.
     // Built each time: cheap next to a seed line, and it follows a configuration change.
