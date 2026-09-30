@@ -137,4 +137,30 @@ class IncomingLinksTest {
         assertEquals("https://example.com/x", IncomingLinks.displayUrl("https://example.com/x"))
         assertEquals("bzz://abcd", IncomingLinks.displayUrl("bzz://abcd"))
     }
+
+    @Test
+    fun percentEncodedEnsNameIsDecodedForTheAddressBar() {
+        // How `Uri` and most apps write a non-ASCII authority.
+        assertEquals("ens://🦊.eth", IncomingLinks.displayUrl("ens://%F0%9F%A6%8A.eth"))
+        assertEquals("ens://ñandú.eth/a%20b?q=%41#f", IncomingLinks.displayUrl("ens://%C3%B1and%C3%BA.eth/a%20b?q=%41#f"))
+        assertEquals("ens://🦊.eth", IncomingLinks.displayUrl(IncomingLinks.link("ENS://%f0%9f%a6%8a.eth")!!))
+        // Already plain: as it is.
+        assertEquals("ens://ñandú.eth", IncomingLinks.displayUrl("ens://ñandú.eth"))
+        // Nothing the name decodes to may become a delimiter, whitespace,
+        // a control character or garbage: those stay encoded.
+        for (url in listOf(
+            "ens://evil.eth%2Fvitalik.eth",
+            "ens://a%3Fb.eth",
+            "ens://a%23b.eth",
+            "ens://user%40vitalik.eth",
+            "ens://a%3A1.eth",
+            "ens://a%20b.eth",
+            "ens://a%0Ab.eth",
+            "ens://a%2541.eth",
+            "ens://%FF.eth",
+            "ens://a%5Cb.eth",
+        )) {
+            assertEquals(url, url, IncomingLinks.displayUrl(url))
+        }
+    }
 }

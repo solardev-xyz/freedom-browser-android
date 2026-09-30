@@ -177,8 +177,33 @@ object IncomingLinks {
     /**
      * The address-bar form of an incoming link: a virtual-origin share
      * link (`https://<label>.bzz.freedom.baby/…`) back to the content it
-     * names, anything else as it is. May decode the ENSIP-15 tables
+     * names, an `ens://` link with its name percent-decoded, anything else
+     * as it is. May decode the ENSIP-15 tables
      * ([VirtualOrigin.needsEnsTables]).
      */
-    fun displayUrl(url: String): String = VirtualOrigin.displayUrlFor(url) ?: url
+    fun displayUrl(url: String): String =
+        VirtualOrigin.displayUrlFor(url) ?: decodedEnsName(url) ?: url
+
+    /**
+     * An `ens://` link whose name another app percent-encoded
+     * (`ens://%F0%9F%A6%8A.eth`, the way `Uri` and most apps write a
+     * non-ASCII authority) with the name decoded: the address bar reads
+     * `ens://🦊.eth` as that name, but the encoded form as an invalid one.
+     * Null when there's nothing to decode, or when the decoded name isn't
+     * one the address bar could take as typed — a delimiter, whitespace,
+     * a control character, a stray `%` or invalid UTF-8 — so an encoded
+     * `/` can't turn part of the name into a path.
+     */
+    private fun decodedEnsName(url: String): String? {
+        if (!url.startsWith("ens://")) return null
+        val rest = url.substring(6)
+        val end = rest.indexOfFirst { it == '/' || it == '?' || it == '#' }.let { if (it < 0) rest.length else it }
+        val name = rest.substring(0, end)
+        if ('%' !in name) return null
+        val decoded = WhatwgHost.percentDecode(name)
+        val usable = decoded.isNotEmpty() && decoded.none {
+            it in "/?#@:%\\\uFFFD" || it.isWhitespace() || it.isISOControl()
+        }
+        return if (usable) "ens://" + decoded + rest.substring(end) else null
+    }
 }

@@ -10,6 +10,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.viewModels
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -26,8 +27,6 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import baby.freedom.mobile.browser.BrowserScreen
-import baby.freedom.mobile.browser.DeepLinkQueue
-import baby.freedom.mobile.browser.Incoming
 import baby.freedom.mobile.browser.IncomingLinks
 import baby.freedom.mobile.browser.EthereumProviders
 import baby.freedom.mobile.browser.X402Payments
@@ -46,7 +45,6 @@ import baby.freedom.mobile.browser.RadicleControls
 import baby.freedom.mobile.browser.TorControls
 import baby.freedom.mobile.browser.TorRouting
 import baby.freedom.mobile.browser.UnverifiedOrigins
-import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.browser.statusBarIconsDark
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
@@ -124,17 +122,10 @@ class MainActivity : ComponentActivity() {
     /**
      * Links, shares and searches from other apps (#268, handed on by
      * [IncomingLinkActivity]) waiting to be opened in tabs, oldest first:
-     * the one the app was cold-started from, and each [onNewIntent].
+     * the one the app was cold-started from, and each [onNewIntent]. In a
+     * ViewModel, so a relaunch before one has its tab doesn't drop it.
      */
-    private val deepLinkQueue = DeepLinkQueue()
-
-    /** Publishes incoming links into [deepLinkQueue] in arrival order. */
-    private val deepLinks = OrderedDeepLinks<Incoming>(lifecycleScope, Dispatchers.Default) {
-        when (it) {
-            is Incoming.Open -> deepLinkQueue.offer(it.url)
-            is Incoming.Search -> deepLinkQueue.offer(it.query, search = true)
-        }
-    }
+    private val incomingSession: IncomingSession by viewModels()
 
     // The page theme colour the browser paints behind the status bar,
     // as ARGB, or null when it shows the app background there (#92).
@@ -484,7 +475,13 @@ class MainActivity : ComponentActivity() {
         // was first started with.
         val ownLaunch = savedInstanceState == null &&
             intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY == 0
-        val coldLink = if (ownLaunch) submitIncoming(intent) else null
+        // A relaunch while that link is still parsing ([IncomingSession])
+        // waits for it the same way, so it still gets the first tab.
+        val coldLink = if (ownLaunch) {
+            submitIncoming(intent).also { incomingSession.coldStart = it }
+        } else {
+            incomingSession.coldStart
+        }
         if (coldLink != null) {
             lifecycleScope.launch {
                 coldLink.join()
@@ -514,7 +511,7 @@ class MainActivity : ComponentActivity() {
                     val myotisInfo by myotisInfoFlow.collectAsState()
                     val myotisEnabled by settings.myotisEnabled
                         .collectAsState(initial = false)
-                    val pendingLinks by deepLinkQueue.pending.collectAsState()
+                    val pendingLinks by incomingSession.queue.pending.collectAsState()
                     val torInfo by torInfoFlow.collectAsState()
                     val torEnabled by settings.torEnabled.collectAsState(initial = false)
                     BrowserScreen(
@@ -545,7 +542,7 @@ class MainActivity : ComponentActivity() {
                             onRun = ::onToggleTor,
                         ),
                         deepLink = pendingLinks.firstOrNull(),
-                        onDeepLinkHandled = deepLinkQueue::handled,
+                        onDeepLinkHandled = incomingSession.queue::handled,
                         onRecoverNodes = ::onRecoverNodes,
                         ipfsProgressSnapshot = ::ipfsProgressSnapshot,
                         ipfsCounters = ::ipfsCounters,
@@ -622,28 +619,14 @@ class MainActivity : ComponentActivity() {
     /**
      * Queue what [intent] asks to open (#268), read through the same
      * gate [IncomingLinkActivity] used — any app can start this exported
-     * activity directly. A virtual-origin share link maps back to its
-     * content ([IncomingLinks.displayUrl], through [VirtualOrigin], so the
-     * deep-link path can't drift from the mapping the WebView and the
-     * redirector use); off Main if that needs the ENSIP-15 tables still
-     * decoding (a link tapped right after launch), and [deepLinks] keeps a
-     * later ASCII link from overtaking it.
+     * activity directly — and mapped to its address-bar form by
+     * [IncomingSession.submit].
      *
      * Returns the job still parsing it, or null once it's queued (or
      * there was nothing to queue).
      */
-    private fun submitIncoming(intent: Intent?): Job? {
-        val incoming = IncomingLinks.from(intent) ?: return null
-        val slow = incoming is Incoming.Open &&
-            !EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(incoming.url)
-        return deepLinks.submit(slow) {
-            if (slow) EnsNormalize.warm()
-            when (incoming) {
-                is Incoming.Open -> Incoming.Open(IncomingLinks.displayUrl(incoming.url))
-                is Incoming.Search -> incoming
-            }
-        }
-    }
+    private fun submitIncoming(intent: Intent?): Job? =
+        IncomingLinks.from(intent)?.let(incomingSession::submit)
 
     /**
      * Foreground / background transitions are relayed to the `:node`
