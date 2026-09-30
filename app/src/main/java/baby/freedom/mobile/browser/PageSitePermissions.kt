@@ -28,10 +28,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -76,21 +72,25 @@ private val InUseGreen = Color(0xFF34A853)
  *
  * Removing the camera or microphone from a page that is using it
  * doesn't take away what it already holds — WebView has no way to — so
- * the sheet says so and offers a reload, which ends the page's use.
+ * the sheet says so and offers a reload, which ends the page's use —
+ * for as long as that document holds it ([revokedHeld], kept by the
+ * broker per document, so reopening the sheet still says it).
  */
 @Composable
 fun PageSitePermissionsSheet(
     pageOrigin: String?,
     entries: List<SitePermissionEntry>,
     inUse: Set<SitePermission>,
+    revokedHeld: Set<SitePermission>,
     private: Boolean,
     onRevoke: (SitePermissionEntry) -> Unit,
     onReload: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    // Camera/microphone removed while the page kept using them.
-    var revokedInUse by remember(pageOrigin) { mutableStateOf(emptySet<SitePermission>()) }
-    val stillHeld = revokedInUse.intersect(inUse)
+    // Camera/microphone removed while the page kept using them — kept
+    // with the tab's document, not this dialog, so it's still said after
+    // the sheet is closed and opened again.
+    val stillHeld = revokedHeld.intersect(inUse)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -124,11 +124,7 @@ fun PageSitePermissionsSheet(
                         pageOrigin = pageOrigin,
                         inUse = entry.permission in inUse && entry.decision == PermissionDecision.ALLOW,
                         private = private,
-                        onRevoke = {
-                            val p = entry.permission
-                            if (p is SitePermission && p in inUse) revokedInUse = revokedInUse + p
-                            onRevoke(entry)
-                        },
+                        onRevoke = { onRevoke(entry) },
                     )
                 }
                 if (stillHeld.isNotEmpty()) {

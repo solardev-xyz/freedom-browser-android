@@ -263,7 +263,11 @@ class SitePermissionBroker private constructor(
     /**
      * What a tab's current document has to do with site permissions:
      * [origins] that asked for something from it (its own, or an
-     * embedded frame's), and the camera/microphone it was [granted].
+     * embedded frame's), the camera/microphone it was [granted], and
+     * which of those the user has since removed from the sheet while the
+     * document still holds them ([revokedHeld]: WebView can't take a grant
+     * back, so the sheet keeps saying so, and offering a reload, however
+     * often it's closed and reopened over this document).
      * [doc] is the tab's document number ([documents]), so a sheet opened
      * over one document can tell when another has replaced it.
      */
@@ -271,7 +275,25 @@ class SitePermissionBroker private constructor(
         val doc: Int,
         val origins: Set<String> = emptySet(),
         val granted: Set<SitePermission> = emptySet(),
-    )
+        val revokedHeld: Set<SitePermission> = emptySet(),
+    ) {
+        /** After this document gets [more] (again): no longer revoked. */
+        fun granting(origin: String, more: Collection<SitePermission>) =
+            copy(origins = origins + origin, granted = granted + more, revokedHeld = revokedHeld - more.toSet())
+
+        /**
+         * After [entry] is removed from the sheet over this document: its
+         * camera/microphone, if this document was given it, is still held.
+         */
+        fun revoking(entry: SitePermissionEntry): DocumentPermissions {
+            val p = entry.permission
+            return if (p is SitePermission && p in granted && entry.origin in origins) {
+                copy(revokedHeld = revokedHeld + p)
+            } else {
+                this
+            }
+        }
+    }
 
     private val documentActivity = MutableStateFlow<Map<Long, DocumentPermissions>>(emptyMap())
 
@@ -283,7 +305,7 @@ class SitePermissionBroker private constructor(
         if ((documents[tabId] ?: 0) != doc) return
         documentActivity.update { all ->
             val cur = all[tabId]?.takeIf { it.doc == doc } ?: DocumentPermissions(doc)
-            all + (tabId to cur.copy(origins = cur.origins + origin, granted = cur.granted + granted))
+            all + (tabId to cur.granting(origin, granted))
         }
     }
 
@@ -351,6 +373,11 @@ class SitePermissionBroker private constructor(
      */
     fun revokeOnTab(tab: BrowserState, entry: SitePermissionEntry) {
         if (tab.private) privateSession.revoke(entry.origin, entry.permission) else revoke(entry)
+        val doc = documents[tab.id] ?: 0
+        documentActivity.update { all ->
+            val cur = all[tab.id]?.takeIf { it.doc == doc } ?: return@update all
+            all + (tab.id to cur.revoking(entry))
+        }
     }
 
     // ---------------------------------------------------------------

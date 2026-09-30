@@ -561,6 +561,24 @@ class SitePermissionsTest {
     }
 
     @Test
+    fun `a camera removed while the document holds it stays noted with the document until granted again`() {
+        val page = "https://page.example"
+        val doc = SitePermissionBroker.DocumentPermissions(doc = 3)
+            .granting(page, listOf(SitePermission.CAMERA))
+        val revoked = doc.revoking(entry(page, SitePermission.CAMERA))
+        // Kept on the document, not the sheet: reading it again (a
+        // reopened sheet) still says the camera is held.
+        assertEquals(setOf(SitePermission.CAMERA), revoked.revokedHeld)
+        // Location was never a held grant; another site's camera isn't this document's.
+        assertEquals(revoked, revoked.revoking(entry(page, SitePermission.LOCATION)))
+        assertEquals(revoked, revoked.revoking(entry("https://other.example", SitePermission.CAMERA)))
+        // A microphone the document was never given isn't held either.
+        assertEquals(revoked, revoked.revoking(entry(page, SitePermission.MICROPHONE)))
+        // Asked and allowed again: no longer removed.
+        assertEquals(emptySet<SitePermission>(), revoked.granting(page, listOf(SitePermission.CAMERA)).revokedHeld)
+    }
+
+    @Test
     fun `in-use label names what is in use`() {
         assertNull(mediaInUseLabel(emptySet()))
         assertEquals("Camera in use", mediaInUseLabel(setOf(SitePermission.CAMERA)))

@@ -2505,6 +2505,7 @@ fun BrowserScreen(
             pageOrigin = target.origin,
             entries = pagePermissions,
             inUse = mediaInUse,
+            revokedHeld = pageDocument?.revokedHeld.orEmpty(),
             private = state.private,
             onRevoke = { entry -> sitePermissions.revokeOnTab(state, entry) },
             onReload = reloadPage,
