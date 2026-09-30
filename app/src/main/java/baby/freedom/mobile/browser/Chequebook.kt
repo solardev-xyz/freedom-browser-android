@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.SpendPermit
@@ -60,10 +62,9 @@ internal fun walletBzzFrom(body: String): BigInteger? =
 
 /** Why the chequebook page can't read anything now, or null when it can. */
 internal fun chequebookBlockedReason(node: NodeInfo): String? = when {
-    node.status == NodeStatus.Starting -> "The Swarm node is starting…"
-    node.status != NodeStatus.Running -> "Turn on the Swarm node to see its chequebook."
-    !node.lightMode -> "The chequebook needs light mode, which connects the node to Gnosis Chain. " +
-        "Switch it on under Publishing on the node page."
+    node.status == NodeStatus.Starting -> Strings.get(R.string.stamps_node_starting)
+    node.status != NodeStatus.Running -> Strings.get(R.string.stamps_chequebook_node_off)
+    !node.lightMode -> Strings.get(R.string.stamps_chequebook_need_light_mode)
     else -> null
 }
 
@@ -74,22 +75,19 @@ internal fun chequebookBlockedReason(node: NodeInfo): String? = when {
  */
 internal fun depositBlockedReason(node: NodeInfo, state: ChequebookState, amountPlur: BigInteger?): String? =
     chequebookBlockedReason(node) ?: when {
-        !node.walletIdentity -> "Set up a wallet first, so the node runs as your wallet's identity " +
-            "(publish setup, step 1)."
-        state.address == null -> "Checking the node's chequebook…"
-        state.address.isEmpty() -> "The node has no chequebook yet. It sets one up with its first postage stamp."
-        state.walletPlur == null -> "Checking the node's xBZZ…"
-        state.walletPlur.signum() == 0 -> "The node's account holds no xBZZ. Send xBZZ on Gnosis Chain to the " +
-            "node's address first: a deposit moves xBZZ the node already holds, it doesn't swap xDAI."
-        amountPlur == null -> "Choose an amount."
-        amountPlur > state.walletPlur -> "The node's account holds only ${formatBzz(state.walletPlur)}. Choose a " +
-            "smaller amount, or send xBZZ on Gnosis Chain to the node's address first."
+        !node.walletIdentity -> Strings.get(R.string.stamps_need_wallet_identity)
+        state.address == null -> Strings.get(R.string.stamps_chequebook_checking)
+        state.address.isEmpty() -> Strings.get(R.string.stamps_chequebook_none)
+        state.walletPlur == null -> Strings.get(R.string.stamps_chequebook_checking_xbzz)
+        state.walletPlur.signum() == 0 -> Strings.get(R.string.stamps_chequebook_no_xbzz)
+        amountPlur == null -> Strings.get(R.string.stamps_chequebook_choose_amount)
+        amountPlur > state.walletPlur -> Strings.get(R.string.stamps_chequebook_holds_only, formatBzz(state.walletPlur))
         else -> null
     }
 
 /** The confirmation's body: the amount, where it goes, and the most it can cost in gas. */
 internal fun depositConfirmText(amountPlur: BigInteger, chequebook: String): String =
-    "The node moves ${formatBzzExact(amountPlur)} from its account into its chequebook at $chequebook, " +
-        "and pays up to ${formatXdai(SpendPermit.DEPOSIT_MAX_GAS_WEI)} of gas for the one transaction. " +
-        "The xBZZ then pays other nodes for pushing what you publish. This is a real transaction on " +
-        "Gnosis Chain and can't be undone."
+    Strings.get(
+        R.string.stamps_chequebook_deposit_confirm,
+        formatBzzExact(amountPlur), chequebook, formatXdai(SpendPermit.DEPOSIT_MAX_GAS_WEI),
+    )

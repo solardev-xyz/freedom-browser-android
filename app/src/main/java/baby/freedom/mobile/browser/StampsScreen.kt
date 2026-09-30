@@ -42,10 +42,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.SwarmNode
@@ -62,10 +65,9 @@ import org.json.JSONObject
  * the node's batches and prices come from its light-mode gateway.
  */
 internal fun stampsBlockedReason(node: NodeInfo): String? = when {
-    node.status == NodeStatus.Starting -> "The Swarm node is starting…"
-    node.status != NodeStatus.Running -> "Turn on the Swarm node to see its postage stamps."
-    !node.lightMode -> "Postage stamps need light mode, which connects the node to Gnosis Chain. " +
-        "Switch it on under Publishing on the node page."
+    node.status == NodeStatus.Starting -> Strings.get(R.string.stamps_node_starting)
+    node.status != NodeStatus.Running -> Strings.get(R.string.stamps_node_off)
+    !node.lightMode -> Strings.get(R.string.stamps_need_light_mode)
     else -> null
 }
 
@@ -75,26 +77,24 @@ internal fun stampsBlockedReason(node: NodeInfo): String? = when {
  * anywhere, so what it bought would be lost with the device.
  */
 internal fun stampSpendBlockedReason(node: NodeInfo): String? = stampsBlockedReason(node) ?: when {
-    !node.walletIdentity -> "Set up a wallet first, so the node runs as your wallet's identity " +
-        "(publish setup, step 1)."
+    !node.walletIdentity -> Strings.get(R.string.stamps_need_wallet_identity)
     else -> null
 }
 
 /** What a search for the account's own stamps found. */
 internal fun discoverOutcomeText(found: Int): String = when (found) {
-    0 -> "No other stamps: this account owns none that are still paid for."
-    1 -> "Found 1 stamp this account owns; it's in the list below."
-    else -> "Found $found stamps this account owns; they're in the list below."
+    0 -> Strings.get(R.string.stamps_discover_none)
+    else -> Strings.plural(R.plurals.stamps_discover_found, found, found)
 }
 
 /** The line under "Find stamps you already own": the search running, or what it found. */
 internal fun discoverStatusText(discovery: StampClient.Discovery): String? = when (discovery) {
     StampClient.Discovery.Idle -> null
-    StampClient.Discovery.Running -> "Searching Gnosis Chain for stamps this account bought…"
+    StampClient.Discovery.Running -> Strings.get(R.string.stamps_discover_running)
     is StampClient.Discovery.Finished -> discovery.found.fold(
         onSuccess = { ids -> discoverOutcomeText(ids.size) },
         // It ran on after the page stopped waiting, and its outcome never reached the app.
-        onFailure = { if (it.message == StampClient.DISCOVER_OVERRAN) it.message else "Couldn't look: ${it.message}" },
+        onFailure = { if (it.message == StampClient.DISCOVER_OVERRAN) it.message else Strings.get(R.string.stamps_discover_failed, it.message) },
     )
 }
 
@@ -102,36 +102,35 @@ internal fun discoverStatusText(discovery: StampClient.Discovery): String? = whe
 internal fun spendStatusText(spend: StampClient.Spend): String? = when (spend) {
     StampClient.Spend.Idle -> null
     is StampClient.Spend.Running -> when (spend.kind) {
-        StampClient.Kind.Buy -> "Buying the stamp… The node swaps xDAI for the xBZZ it needs, buys the stamp, and waits for " +
-            "each transaction to confirm on Gnosis Chain. This takes a minute or two."
-        StampClient.Kind.Extend -> "Extending the stamp… The node swaps xDAI for the xBZZ it needs, tops the stamp up, and " +
-            "waits for each transaction to confirm. This takes a minute or two."
-        StampClient.Kind.Deposit -> "Depositing… The node moves the xBZZ into its chequebook and waits for the " +
-            "transaction to confirm on Gnosis Chain. This takes up to a minute."
-        StampClient.Kind.Connect -> "Connecting the stamp your wallet bought… The node checks it on Gnosis Chain and, " +
-            "the first time, sets up its chequebook. This takes up to a few minutes."
+        StampClient.Kind.Buy -> Strings.get(R.string.stamps_spend_running_buy)
+        StampClient.Kind.Extend -> Strings.get(R.string.stamps_spend_running_extend)
+        StampClient.Kind.Deposit -> Strings.get(R.string.stamps_spend_running_deposit)
+        StampClient.Kind.Connect -> Strings.get(R.string.stamps_spend_running_connect)
     }
     is StampClient.Spend.Done -> when (spend.kind) {
-        StampClient.Kind.Buy -> "Stamp bought. It becomes usable once the network has seen it, usually within a minute."
-        StampClient.Kind.Extend -> "Stamp extended."
-        StampClient.Kind.Deposit -> "Deposited into the chequebook."
-        StampClient.Kind.Connect -> "Stamp connected: the node publishes with it."
+        StampClient.Kind.Buy -> Strings.get(R.string.stamps_spend_done_buy)
+        StampClient.Kind.Extend -> Strings.get(R.string.stamps_spend_done_extend)
+        StampClient.Kind.Deposit -> Strings.get(R.string.stamps_spend_done_deposit)
+        StampClient.Kind.Connect -> Strings.get(R.string.stamps_spend_done_connect)
     }
-    is StampClient.Spend.Failed -> when (spend.kind) {
-        // Outlived the page's wait (#222 R4-F1): no answer, so not a failure either.
-        StampClient.Kind.Buy ->
-            if (spend.message == StampClient.BUY_OVERRAN) "The stamp purchase didn't report back: " else "Buying the stamp failed: "
-        StampClient.Kind.Extend -> "Extending the stamp failed: "
-        StampClient.Kind.Connect ->
-            if (spend.message == StampClient.CONNECT_OVERRAN) "Connecting the stamp didn't report back: " else "Connecting the stamp your wallet bought failed: "
-        // Ended without a clear answer (#117): not a failure, it may be out.
-        StampClient.Kind.Deposit ->
-            if (spend.message.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT)) "The deposit didn't report back: " else "The deposit failed: "
-    } + spend.message
+    is StampClient.Spend.Failed -> Strings.get(
+        when (spend.kind) {
+            // Outlived the page's wait (#222 R4-F1): no answer, so not a failure either.
+            StampClient.Kind.Buy ->
+                if (spend.message == StampClient.BUY_OVERRAN) R.string.stamps_spend_buy_no_report else R.string.stamps_spend_buy_failed
+            StampClient.Kind.Extend -> R.string.stamps_spend_extend_failed
+            StampClient.Kind.Connect ->
+                if (spend.message == StampClient.CONNECT_OVERRAN) R.string.stamps_spend_connect_no_report else R.string.stamps_spend_connect_failed
+            // Ended without a clear answer (#117): not a failure, it may be out.
+            StampClient.Kind.Deposit ->
+                if (spend.message.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT)) R.string.stamps_spend_deposit_no_report else R.string.stamps_spend_deposit_failed
+        },
+        spend.message,
+    )
 }
 
 /** Why Buy and Find stamps wait: the gateway they may restart is carrying a publish. */
-internal const val PUBLISH_RUNNING_NOTE = "A publish is uploading. Buy or search for stamps once it has finished."
+internal val PUBLISH_RUNNING_NOTE: String get() = Strings.get(R.string.stamps_publish_running_note)
 
 /**
  * The postage stamps pages (#116), over the node page: the node's
@@ -190,10 +189,10 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
     BackHandler(onBack = back)
 
     val title = when {
-        route == "buy" -> "Buy a postage stamp"
-        route.startsWith("extend:") -> "Extend stamp"
-        route.startsWith("detail:") -> "Postage stamp"
-        else -> "Postage stamps"
+        route == "buy" -> stringResource(R.string.stamps_title_buy)
+        route.startsWith("extend:") -> stringResource(R.string.stamps_title_extend)
+        route.startsWith("detail:") -> stringResource(R.string.stamps_title_detail)
+        else -> stringResource(R.string.stamps_title_list)
     }
     FullScreenScaffold(title = title, onDismiss = back) {
         LazyColumn(
@@ -222,7 +221,7 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
                     val batch = batches?.firstOrNull { it.id == id }
                     item("batch") {
                         when {
-                            batch == null -> MutedText(if (batches == null) "Reading the node's stamps…" else "The node no longer lists this stamp.")
+                            batch == null -> MutedText(stringResource(if (batches == null) R.string.stamps_reading else R.string.stamps_no_longer_listed))
                             route.startsWith("extend:") -> ExtendPage(nodeInfo, batch, connected, canSpendNow) { quote ->
                                 if (StampClient.extend(batch.id, quote)) route = "detail:${batch.id}"
                             }
@@ -250,11 +249,8 @@ private fun androidx.compose.foundation.lazy.LazyListScope.listPage(
     onOpen: (PostageBatch) -> Unit,
 ) {
     item("intro") {
-        SectionCard(title = "Postage stamps") {
-            MutedText(
-                "A postage stamp pre-pays the Swarm network for storing what you publish: a capacity, " +
-                    "for a time. The node pays for stamps from its own account on Gnosis Chain.",
-            )
+        SectionCard(title = stringResource(R.string.stamps_title_list)) {
+            MutedText(stringResource(R.string.stamps_intro))
             val cantSpend = stampSpendBlockedReason(nodeInfo)
             if (cantSpend != null) {
                 Spacer(Modifier.height(6.dp))
@@ -266,14 +262,14 @@ private fun androidx.compose.foundation.lazy.LazyListScope.listPage(
             }
             Spacer(Modifier.height(8.dp))
             Button(onClick = onBuy, enabled = cantSpend == null && canBuyNow) {
-                Text("Buy a stamp")
+                Text(stringResource(R.string.stamps_buy_a_stamp))
             }
             FindOwnedStamps(nodeInfo.accountAddress, discovery, canStart = canBuyNow)
         }
     }
     when {
-        batches == null -> item("loading") { MutedText("Reading the node's stamps…") }
-        batches.isEmpty() -> item("empty") { MutedText("No stamps yet.") }
+        batches == null -> item("loading") { MutedText(stringResource(R.string.stamps_reading)) }
+        batches.isEmpty() -> item("empty") { MutedText(stringResource(R.string.stamps_none_yet)) }
         else -> items(batches, key = { it.id }) { batch -> BatchCard(batch) { onOpen(batch) } }
     }
 }
@@ -289,20 +285,20 @@ private fun androidx.compose.foundation.lazy.LazyListScope.listPage(
 @Composable
 private fun FindOwnedStamps(account: String, discovery: StampClient.Discovery, canStart: Boolean) {
     Spacer(Modifier.height(4.dp))
-    TextButton(enabled = canStart, onClick = { StampClient.discover(account) }) { Text("Find stamps you already own") }
+    TextButton(enabled = canStart, onClick = { StampClient.discover(account) }) { Text(stringResource(R.string.stamps_find_owned)) }
     discoverStatusText(discovery)?.let { SubLine(it) }
 }
 
 @Composable
 private fun BatchCard(batch: PostageBatch, onClick: () -> Unit) {
-    Column(modifier = Modifier.clickable(onClickLabel = "Open stamp", onClick = onClick)) {
+    Column(modifier = Modifier.clickable(onClickLabel = stringResource(R.string.stamps_open_stamp), onClick = onClick)) {
         SectionCard(title = shortBatchId(batch.id)) {
             UsableBadge(batch.usable)
-            DetailRow("Capacity", formatStampBytes(batch.capacityBytes))
-            DetailRow("Used", usedText(batch))
-            DetailRow("Time left", batch.ttlSeconds?.let(::formatStampTtl) ?: "Unknown")
+            DetailRow(stringResource(R.string.stamps_capacity), formatStampBytes(batch.capacityBytes))
+            DetailRow(stringResource(R.string.stamps_used), usedText(batch))
+            DetailRow(stringResource(R.string.stamps_time_left), batch.ttlSeconds?.let(::formatStampTtl) ?: stringResource(R.string.stamps_unknown))
             batch.ttlSeconds?.let { ttl ->
-                SubLine("Until ${expiryText(ttl)}")
+                SubLine(stringResource(R.string.stamps_until, expiryText(ttl)))
             }
         }
     }
@@ -317,41 +313,39 @@ private fun DetailPage(
     onExtend: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionCard(title = "Stamp") {
+        SectionCard(title = stringResource(R.string.stamps_stamp)) {
             UsableBadge(batch.usable)
             Spacer(Modifier.height(4.dp))
             Text(
-                "Batch ID",
+                stringResource(R.string.stamps_batch_id),
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
             )
             SelectionContainer {
                 Text(batch.id, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
             }
             Spacer(Modifier.height(6.dp))
-            DetailRow("Capacity", formatStampBytes(batch.capacityBytes))
-            SubLine("Up to ${formatStampBytes(batch.theoreticalBytes)} if every bucket fills evenly")
-            DetailRow("Used", usedText(batch))
-            DetailRow("Time left", batch.ttlSeconds?.let(::formatStampTtl) ?: "Unknown")
-            batch.ttlSeconds?.let { SubLine("Until ${expiryText(it)}") }
-            DetailRow("Depth", batch.depth.toString())
-            DetailRow("Immutable", if (batch.immutable) "Yes" else "No")
+            DetailRow(stringResource(R.string.stamps_capacity), formatStampBytes(batch.capacityBytes))
+            SubLine(stringResource(R.string.stamps_up_to_if_even, formatStampBytes(batch.theoreticalBytes)))
+            DetailRow(stringResource(R.string.stamps_used), usedText(batch))
+            DetailRow(stringResource(R.string.stamps_time_left), batch.ttlSeconds?.let(::formatStampTtl) ?: stringResource(R.string.stamps_unknown))
+            batch.ttlSeconds?.let { SubLine(stringResource(R.string.stamps_until, expiryText(it))) }
+            DetailRow(stringResource(R.string.stamps_depth), batch.depth.toString())
+            DetailRow(stringResource(R.string.stamps_immutable), stringResource(if (batch.immutable) R.string.stamps_yes else R.string.stamps_no))
         }
         val cantSpend = stampSpendBlockedReason(nodeInfo)
         val active = connected == batch.id
-        SectionCard(title = "Extend") {
+        SectionCard(title = stringResource(R.string.stamps_extend)) {
             MutedText(
                 when {
                     cantSpend != null -> cantSpend
-                    connected == null -> "Checking which stamp the node uploads with…"
-                    !active -> "Only the stamp the node uploads with can be extended in this version of Freedom, " +
-                        "and that's another one."
-                    else -> "Add time to this stamp before it runs out: once it expires, what was " +
-                        "published with it is no longer paid for."
+                    connected == null -> stringResource(R.string.stamps_checking_connected)
+                    !active -> stringResource(R.string.stamps_extend_other_active)
+                    else -> stringResource(R.string.stamps_extend_intro)
                 },
             )
             Spacer(Modifier.height(8.dp))
             Button(onClick = onExtend, enabled = cantSpend == null && active && canSpendNow) {
-                Text("Extend")
+                Text(stringResource(R.string.stamps_extend))
             }
         }
     }
@@ -366,16 +360,16 @@ private fun BuyPage(nodeInfo: NodeInfo, canBuyNow: Boolean, publishingNote: Stri
     val cantSpend = stampSpendBlockedReason(nodeInfo)
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionCard(title = "Size") {
+        SectionCard(title = stringResource(R.string.stamps_size)) {
             STAMP_DEPTHS.forEach { d ->
                 ChoiceRow(
                     selected = d == depth,
                     label = formatStampBytes(effectiveStampBytes(d)),
-                    sub = "Depth $d",
+                    sub = stringResource(R.string.stamps_depth_n, d),
                 ) { depth = d }
             }
         }
-        SectionCard(title = "Duration") {
+        SectionCard(title = stringResource(R.string.stamps_duration)) {
             STAMP_BUY_DAYS.forEach { n -> ChoiceRow(selected = n == days, label = daysLabel(n)) { days = n } }
         }
         QuoteCard(quote, deposit = true)
@@ -384,17 +378,23 @@ private fun BuyPage(nodeInfo: NodeInfo, canBuyNow: Boolean, publishingNote: Stri
         Button(
             onClick = { confirming = q },
             enabled = cantSpend == null && q != null && q.sufficientFunds && canBuyNow,
-        ) { Text("Buy") }
+        ) { Text(stringResource(R.string.stamps_buy)) }
     }
     confirming?.let { q ->
         SpendConfirmDialog(
-            title = "Buy this postage stamp?",
-            body = "${formatStampBytes(effectiveStampBytes(q.depth))} for ${daysLabel(q.days)}, for " +
-                withUnit(q.totalCostBzz, "xBZZ") +
-                (q.depositBzz?.let { ", plus ${withUnit(it, "xBZZ")} into the node's new chequebook" } ?: "") +
-                ". " + spendCostText(q, buy = true) + " These are real transactions on Gnosis Chain " +
-                "and can't be undone.",
-            confirmLabel = "Buy",
+            title = stringResource(R.string.stamps_buy_confirm_title),
+            body = q.depositBzz?.let { deposit ->
+                stringResource(
+                    R.string.stamps_buy_confirm_body_deposit,
+                    formatStampBytes(effectiveStampBytes(q.depth)), daysLabel(q.days), withUnit(q.totalCostBzz, "xBZZ"),
+                    withUnit(deposit, "xBZZ"), spendCostText(q, buy = true),
+                )
+            } ?: stringResource(
+                R.string.stamps_buy_confirm_body,
+                formatStampBytes(effectiveStampBytes(q.depth)), daysLabel(q.days), withUnit(q.totalCostBzz, "xBZZ"),
+                spendCostText(q, buy = true),
+            ),
+            confirmLabel = stringResource(R.string.stamps_buy),
             onConfirm = {
                 confirming = null
                 onConfirmed(q)
@@ -418,14 +418,14 @@ private fun ExtendPage(
     }
     var confirming by remember { mutableStateOf<StampQuote?>(null) }
     val cantSpend = stampSpendBlockedReason(nodeInfo)
-        ?: if (connected != batch.id) "Only the stamp the node uploads with can be extended in this version of Freedom." else null
+        ?: if (connected != batch.id) stringResource(R.string.stamps_extend_only_active) else null
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SectionCard(title = shortBatchId(batch.id)) {
-            DetailRow("Capacity", formatStampBytes(batch.capacityBytes))
-            DetailRow("Time left", batch.ttlSeconds?.let(::formatStampTtl) ?: "Unknown")
+            DetailRow(stringResource(R.string.stamps_capacity), formatStampBytes(batch.capacityBytes))
+            DetailRow(stringResource(R.string.stamps_time_left), batch.ttlSeconds?.let(::formatStampTtl) ?: stringResource(R.string.stamps_unknown))
         }
-        SectionCard(title = "Add") {
+        SectionCard(title = stringResource(R.string.stamps_add)) {
             STAMP_EXTEND_DAYS.forEach { n -> ChoiceRow(selected = n == days, label = daysLabel(n)) { days = n } }
         }
         QuoteCard(quote, deposit = false)
@@ -434,15 +434,16 @@ private fun ExtendPage(
         Button(
             onClick = { confirming = q },
             enabled = cantSpend == null && q != null && q.sufficientFunds && canSpendNow,
-        ) { Text("Extend") }
+        ) { Text(stringResource(R.string.stamps_extend)) }
     }
     confirming?.let { q ->
         SpendConfirmDialog(
-            title = "Extend this postage stamp?",
-            body = "${daysLabel(q.days)} more for ${shortBatchId(batch.id)}, for ${withUnit(q.totalCostBzz, "xBZZ")}. " +
-                spendCostText(q, buy = false) + " These are real transactions on Gnosis Chain " +
-                "and can't be undone.",
-            confirmLabel = "Extend",
+            title = stringResource(R.string.stamps_extend_confirm_title),
+            body = stringResource(
+                R.string.stamps_extend_confirm_body,
+                daysLabel(q.days), shortBatchId(batch.id), withUnit(q.totalCostBzz, "xBZZ"), spendCostText(q, buy = false),
+            ),
+            confirmLabel = stringResource(R.string.stamps_extend),
             onConfirm = {
                 confirming = null
                 onConfirmed(q)
@@ -467,13 +468,13 @@ private fun rememberQuote(key1: Any, key2: Any, request: () -> Pair<String, JSON
         value = try {
             when (val a = withContext(Dispatchers.IO) { StampClient.call(method, args) }) {
                 is StampClient.Answer.Ok -> stampQuoteFrom(a.json)?.let { QuoteState.Ready(it) }
-                    ?: QuoteState.Failed("The node's price couldn't be read")
+                    ?: QuoteState.Failed(Strings.get(R.string.stamps_price_unreadable))
                 is StampClient.Answer.Failed -> QuoteState.Failed(a.message)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            QuoteState.Failed("The node's price couldn't be read")
+            QuoteState.Failed(Strings.get(R.string.stamps_price_unreadable))
         }
     }
     return state
@@ -481,26 +482,26 @@ private fun rememberQuote(key1: Any, key2: Any, request: () -> Pair<String, JSON
 
 @Composable
 private fun QuoteCard(state: QuoteState, deposit: Boolean) {
-    SectionCard(title = "Estimated cost") {
+    SectionCard(title = stringResource(R.string.stamps_estimated_cost)) {
         when (state) {
-            QuoteState.Loading -> MutedText("Asking the node for today's price…")
-            is QuoteState.Failed -> MutedText("No price right now: ${state.message}")
+            QuoteState.Loading -> MutedText(stringResource(R.string.stamps_asking_price))
+            is QuoteState.Failed -> MutedText(stringResource(R.string.stamps_no_price_reason, state.message))
             is QuoteState.Ready -> {
                 val q = state.quote
-                DetailRow("Cost", withUnit(q.totalCostBzz, "xBZZ"))
+                DetailRow(stringResource(R.string.stamps_cost), withUnit(q.totalCostBzz, "xBZZ"))
                 if (deposit && q.depositBzz != null) {
-                    DetailRow("Chequebook deposit", withUnit(q.depositBzz, "xBZZ"))
-                    SubLine("Once, with the first stamp: backs what the node pays other nodes for storing your data.")
+                    DetailRow(stringResource(R.string.stamps_chequebook_deposit), withUnit(q.depositBzz, "xBZZ"))
+                    SubLine(stringResource(R.string.stamps_deposit_first_stamp_note))
                 }
-                DetailRow("Node's xBZZ", withUnit(q.accountBzz, "xBZZ"))
-                DetailRow("Swapped from xDAI", withUnit(q.neededBzz, "xBZZ"))
-                DetailRow("xDAI needed", withUnit(q.xdaiRequiredDisplay, "xDAI"))
-                SubLine("The swap plus gas. What isn't used stays in the node's account.")
-                DetailRow("Node's xDAI", withUnit(q.accountXdai, "xDAI"))
+                DetailRow(stringResource(R.string.stamps_node_xbzz), withUnit(q.accountBzz, "xBZZ"))
+                DetailRow(stringResource(R.string.stamps_swapped_from_xdai), withUnit(q.neededBzz, "xBZZ"))
+                DetailRow(stringResource(R.string.stamps_xdai_needed), withUnit(q.xdaiRequiredDisplay, "xDAI"))
+                SubLine(stringResource(R.string.stamps_xdai_needed_note))
+                DetailRow(stringResource(R.string.stamps_node_xdai), withUnit(q.accountXdai, "xDAI"))
                 if (!q.sufficientFunds) {
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "Send ${withUnit(q.xdaiToSend, "xDAI")} more to the node's address first (publish setup, step 3).",
+                        stringResource(R.string.stamps_send_more_xdai, withUnit(q.xdaiToSend, "xDAI")),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
@@ -546,7 +547,7 @@ internal fun SpendConfirmDialog(
             ) { Text(confirmLabel) }
         },
         dismissButton = {
-            TextButton(enabled = armed, onClick = { if (guard.accepts()) onDismiss() }) { Text("Cancel") }
+            TextButton(enabled = armed, onClick = { if (guard.accepts()) onDismiss() }) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }
@@ -555,20 +556,20 @@ internal fun SpendConfirmDialog(
 internal fun SpendBanner(spend: StampClient.Spend, text: String) {
     SectionCard(
         title = when (spend) {
-            is StampClient.Spend.Running -> "In progress"
-            is StampClient.Spend.Failed -> "Didn't finish"
-            else -> "Done"
+            is StampClient.Spend.Running -> stringResource(R.string.stamps_banner_in_progress)
+            is StampClient.Spend.Failed -> stringResource(R.string.stamps_banner_failed)
+            else -> stringResource(R.string.stamps_banner_done)
         },
     ) {
         Row(verticalAlignment = Alignment.Top) {
             when (spend) {
                 is StampClient.Spend.Running -> CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
                 is StampClient.Spend.Failed -> Icon(
-                    Icons.Filled.ErrorOutline, contentDescription = "Failed",
+                    Icons.Filled.ErrorOutline, contentDescription = stringResource(R.string.stamps_cd_failed),
                     tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp),
                 )
                 else -> Icon(
-                    Icons.Filled.CheckCircle, contentDescription = "Done",
+                    Icons.Filled.CheckCircle, contentDescription = stringResource(R.string.stamps_cd_done),
                     tint = Color(0xFF22C55E), modifier = Modifier.size(20.dp),
                 )
             }
@@ -576,7 +577,7 @@ internal fun SpendBanner(spend: StampClient.Spend, text: String) {
             Column(modifier = Modifier.weight(1f)) {
                 SelectionContainer { Text(text, style = MaterialTheme.typography.bodyMedium) }
                 if (spend !is StampClient.Spend.Running) {
-                    TextButton(onClick = StampClient::acknowledge) { Text("OK") }
+                    TextButton(onClick = StampClient::acknowledge) { Text(stringResource(R.string.common_ok)) }
                 }
             }
         }
@@ -604,7 +605,7 @@ internal fun ChoiceRow(selected: Boolean, label: String, sub: String? = null, on
 @Composable
 private fun UsableBadge(usable: Boolean) {
     Text(
-        if (usable) "Usable" else "Not usable yet",
+        stringResource(if (usable) R.string.stamps_usable else R.string.stamps_not_usable_yet),
         style = MaterialTheme.typography.labelMedium,
         fontWeight = FontWeight.SemiBold,
         color = if (usable) Color(0xFF22C55E) else Color(0xFFF59E0B),
@@ -626,7 +627,7 @@ internal fun SubLine(text: String) {
     )
 }
 
-private fun usedText(batch: PostageBatch): String = "${Math.round(batch.usedFraction * 100)}%"
+private fun usedText(batch: PostageBatch): String = Strings.get(R.string.stamps_used_percent, Math.round(batch.usedFraction * 100).toInt())
 
 private fun expiryText(ttlSeconds: Long): String =
     DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(System.currentTimeMillis() + ttlSeconds * 1000))

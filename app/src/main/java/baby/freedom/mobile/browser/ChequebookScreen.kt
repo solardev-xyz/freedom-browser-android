@@ -20,7 +20,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.swarm.NodeInfo
 import java.math.BigInteger
 import kotlinx.coroutines.delay
@@ -79,7 +81,7 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
     // What the confirmation shows, captured when it opens: that's what's sent.
     var confirming by remember { mutableStateOf<Pair<String, BigInteger>?>(null) }
 
-    FullScreenScaffold(title = "Chequebook", onDismiss = onDismiss) {
+    FullScreenScaffold(title = stringResource(R.string.stamps_chequebook_title), onDismiss = onDismiss) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -95,31 +97,28 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
                 return@LazyColumn
             }
             item("chequebook") {
-                SectionCard(title = "Chequebook") {
-                    MutedText(
-                        "The chequebook pays other nodes for pushing what you publish into Swarm. The node's " +
-                            "cheques are only as good as what it holds.",
-                    )
+                SectionCard(title = stringResource(R.string.stamps_chequebook_title)) {
+                    MutedText(stringResource(R.string.stamps_chequebook_intro))
                     Spacer(Modifier.height(6.dp))
                     DetailRow(
-                        "Address",
+                        stringResource(R.string.stamps_chequebook_address),
                         when (state.address) {
-                            null -> "Checking…"
-                            "" -> "None yet"
+                            null -> stringResource(R.string.stamps_checking)
+                            "" -> stringResource(R.string.stamps_chequebook_none_yet)
                             else -> state.address
                         },
                         mono = !state.address.isNullOrEmpty(),
                         singleLine = false,
                     )
                     if (state.address != "") {
-                        DetailRow("Balance", state.balancePlur?.let(::formatBzz) ?: "Checking…")
+                        DetailRow(stringResource(R.string.stamps_chequebook_balance), state.balancePlur?.let(::formatBzz) ?: stringResource(R.string.stamps_checking))
                     }
-                    DetailRow("Node's xBZZ", state.walletPlur?.let(::formatBzz) ?: "Checking…")
-                    SubLine("In the node's own account: what a deposit moves into the chequebook.")
+                    DetailRow(stringResource(R.string.stamps_node_xbzz), state.walletPlur?.let(::formatBzz) ?: stringResource(R.string.stamps_checking))
+                    SubLine(stringResource(R.string.stamps_chequebook_wallet_note))
                 }
             }
             item("deposit") {
-                SectionCard(title = "Deposit") {
+                SectionCard(title = stringResource(R.string.stamps_deposit)) {
                     DEPOSIT_PRESETS_PLUR.forEach { preset ->
                         ChoiceRow(selected = preset == amountPlur, label = formatBzzExact(preset)) {
                             amount = preset.toString()
@@ -130,8 +129,8 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
                     val running = !StampClient.canSpend(spend, discovery)
                     when {
                         spend is StampClient.Spend.Running ->
-                            MutedText("Another payment is running. Deposit once it has finished.")
-                        running -> MutedText("The node is searching for your stamps. Deposit once it has finished.")
+                            MutedText(stringResource(R.string.stamps_chequebook_other_payment))
+                        running -> MutedText(stringResource(R.string.stamps_chequebook_searching))
                         reason != null -> MutedText(reason)
                     }
                     Spacer(Modifier.height(8.dp))
@@ -141,16 +140,16 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
                             if (!address.isNullOrEmpty() && amountPlur != null) confirming = address to amountPlur
                         },
                         enabled = reason == null && !running,
-                    ) { Text("Deposit") }
+                    ) { Text(stringResource(R.string.stamps_deposit)) }
                 }
             }
         }
     }
     confirming?.let { (address, plur) ->
         SpendConfirmDialog(
-            title = "Deposit ${formatBzzExact(plur)}?",
+            title = stringResource(R.string.stamps_chequebook_deposit_title, formatBzzExact(plur)),
             body = depositConfirmText(plur, address),
-            confirmLabel = "Deposit",
+            confirmLabel = stringResource(R.string.stamps_deposit),
             onConfirm = {
                 confirming = null
                 if (StampClient.deposit(address, plur)) amount = null
