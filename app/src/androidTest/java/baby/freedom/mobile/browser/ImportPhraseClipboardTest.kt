@@ -14,6 +14,8 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextInputSelection
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -233,6 +235,72 @@ class ImportPhraseClipboardTest {
         // …and on Back once focus is back, read and still left alone.
         pressBack()
         assertEquals("https://example.com", clipText())
+    }
+
+    private fun selectAll() {
+        rule.onNode(field).performTextInputSelection(TextRange(0, twelve.length))
+        rule.waitForIdle()
+    }
+
+    /**
+     * The phrase already in the field, and forgotten (put in once, then a
+     * focus loss that looked at the clipboard and found something else),
+     * copied again and pasted over itself: the text doesn't change, the
+     * paste still counts.
+     */
+    private fun pasteOverItself() {
+        setClip("https://example.com")
+        rule.onNode(field).performTextInput(twelve)
+        rule.waitForIdle()
+        loseFocusToOwnWindow { assertEquals("https://example.com", clipText()) }
+        rule.waitUntil(5_000) { rule.runOnIdle { rule.activity.hasWindowFocus() } }
+        setClip(twelve)
+        selectAll()
+        paste()
+    }
+
+    @Test
+    fun aPhrasePastedOverItselfIsClearedOnBack() {
+        pasteOverItself()
+        pressBack()
+        assertFalse(shown)
+        assertEquals(null, clipText())
+    }
+
+    @Test
+    fun aPhrasePastedOverItselfIsClearedUnreadWhenFreedomGoesToTheBackground() {
+        pasteOverItself()
+        goHome { ownRead ->
+            assertEquals(null, ownRead)
+            assertEquals(null, clipText())
+        }
+    }
+
+    @Test
+    fun aPastedPhraseCutBackOutIsClearedUnreadWhenFreedomGoesToTheBackground() {
+        setClip(twelve)
+        paste()
+        selectAll()
+        rule.onNode(field).performSemanticsAction(SemanticsActions.CutText)
+        rule.waitForIdle()
+        // The Cut put it back on the clipboard.
+        assertEquals(twelve, clipText())
+        goHome { ownRead ->
+            assertEquals(null, ownRead)
+            assertEquals(null, clipText())
+        }
+    }
+
+    @Test
+    fun aPastedPhraseCutBackOutIsClearedOnBack() {
+        setClip(twelve)
+        paste()
+        selectAll()
+        rule.onNode(field).performSemanticsAction(SemanticsActions.CutText)
+        rule.waitForIdle()
+        assertEquals(twelve, clipText())
+        pressBack()
+        assertEquals(null, clipText())
     }
 
     @Test

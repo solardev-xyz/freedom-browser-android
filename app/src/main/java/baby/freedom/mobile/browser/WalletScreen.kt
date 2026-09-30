@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import android.content.ActivityNotFoundException
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.SystemClock
 import android.content.Intent
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
@@ -368,16 +369,37 @@ internal fun insertedLength(before: TextFieldValue, after: TextFieldValue): Int 
 internal fun insertedText(before: TextFieldValue, after: TextFieldValue): String {
     val old = before.text
     val new = after.text
-    if (old == new) return ""
     val sel = before.selection
     val head = old.substring(0, sel.min.coerceIn(0, old.length))
     val tail = old.substring(sel.max.coerceIn(0, old.length))
-    if (new.length > head.length + tail.length && new.startsWith(head) && new.endsWith(tail)) {
+    // A paste over a selection of the very same text changes nothing but
+    // the selection: it's told from the selection merely changing by
+    // where it leaves the cursor, collapsed at the end of what went in.
+    // (Tapping exactly at the end of the selection looks the same, and
+    // counts too: the clipboard is then only read, and cleared if it holds
+    // those words anyway.)
+    val sameTextPasted = old != new || (after.selection.collapsed && after.selection.start == sel.max)
+    if (sameTextPasted && new.length > head.length + tail.length && new.startsWith(head) && new.endsWith(tail)) {
         return new.substring(head.length, new.length - tail.length)
     }
+    if (old == new) return ""
     val prefix = old.commonPrefixWith(new).length
     val suffix = old.substring(prefix).commonSuffixWith(new.substring(prefix)).length
     return new.substring(prefix, new.length - suffix)
+}
+
+/**
+ * The text an edit from [before] to [after] took out of the field when it
+ * removed the selection and kept everything either side of it — what a Cut
+ * puts on the clipboard; empty for any other edit.
+ */
+internal fun removedSelection(before: TextFieldValue, after: TextFieldValue): String {
+    val old = before.text
+    val sel = before.selection
+    if (sel.collapsed) return ""
+    val head = old.substring(0, sel.min.coerceIn(0, old.length))
+    val tail = old.substring(sel.max.coerceIn(0, old.length))
+    return if (after.text == head + tail) old.substring(head.length, old.length - tail.length) else ""
 }
 
 /**
@@ -411,13 +433,51 @@ internal class PastedPhrases {
         if (pasted.size >= MIN_PHRASE_WORDS) clipIsPaste = true
     }
 
+    /**
+     * Notes [text], a selection one edit took out of the field
+     * ([removedSelection]) at [now] (uptime ms). With the clipboard heard
+     * changing within [CUT_WINDOW_MS] after it ([clipChanged]), that was a
+     * Cut — the text field puts the selection on the clipboard as it takes
+     * it out, and the change is heard just after — and [text] is on the
+     * clipboard now: noted as if it had been pasted from there ([add]), so
+     * a phrase cut back out of the field is taken off the clipboard on the
+     * way out, unread on focus loss too.
+     */
+    fun removed(text: String, now: Long) {
+        removedText = text.ifEmpty { null }
+        removedAt = now
+        removedWasCut = false
+    }
+
+    /**
+     * The clipboard changed at [now] (uptime ms): no paste is the last
+     * thing on it, unless this is a Cut ([removed]). Android may report
+     * one change more than once, so a Cut is seen again the same way.
+     */
+    fun clipChanged(now: Long) {
+        clipIsPaste = false
+        val text = removedText ?: return
+        if (now - removedAt !in 0..CUT_WINDOW_MS) return
+        if (!removedWasCut) add(text) else if (clipWords(text).size >= MIN_PHRASE_WORDS) clipIsPaste = true
+        removedWasCut = true
+    }
+
+    private var removedText: String? = null
+    private var removedAt = 0L
+    private var removedWasCut = false
+
     fun forget() {
         words.clear()
         clipIsPaste = false
+        removedText = null
+        removedWasCut = false
     }
 
     companion object {
         val MIN_PHRASE_WORDS = Mnemonic.IMPORT_WORD_COUNTS.min()
+
+        /** How close together a selection going and the clipboard changing must be to read as one Cut. */
+        const val CUT_WINDOW_MS = 1_000L
     }
 }
 
@@ -1602,7 +1662,9 @@ internal fun ImportPhrasePage(
     DisposableEffect(clipboard) {
         // Only heard while Freedom has window focus (API 29+) — which is
         // why clipIsPaste is dropped once focus goes.
-        val listener = ClipboardManager.OnPrimaryClipChangedListener { pastes.clipIsPaste = false }
+        // A Cut out of the field is a clipboard change too, one that puts
+        // what was cut on it ([PastedPhrases.removed]).
+        val listener = ClipboardManager.OnPrimaryClipChangedListener { pastes.clipChanged(SystemClock.uptimeMillis()) }
         clipboard?.addPrimaryClipChangedListener(listener)
         onDispose {
             clipboard?.removePrimaryClipChangedListener(listener)
@@ -1654,6 +1716,7 @@ internal fun ImportPhrasePage(
                             value = field,
                             onValueChange = {
                                 pastes.add(insertedText(field, it))
+                                pastes.removed(removedSelection(field, it), SystemClock.uptimeMillis())
                                 field = it
                             },
                             enabled = !busy,
