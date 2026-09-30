@@ -1,6 +1,7 @@
 package baby.freedom.mobile
 
 import android.app.Application
+import android.content.Context
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.l10n.TextLocale
 import baby.freedom.swarm.SwarmStrings
@@ -15,6 +16,16 @@ class FreedomApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         Strings.init(this)
-        SwarmStrings.init(this, TextLocale::resources)
+        initSwarmStrings(this)
+    }
+
+    companion object {
+        /**
+         * Points [SwarmStrings] at [context]'s resources, its counts resolved
+         * exactly as the app's own ([TextLocale.plural], #313 R3-M1).
+         */
+        fun initSwarmStrings(context: Context) {
+            SwarmStrings.init(context) { c, id, count, args -> TextLocale.plural(c, id, count, *args) }
+        }
     }
 }

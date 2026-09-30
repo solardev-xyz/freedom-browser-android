@@ -2,7 +2,6 @@ package baby.freedom.swarm
 
 import android.content.Context
 import android.content.res.Configuration
-import android.content.res.Resources
 import androidx.annotation.PluralsRes
 import androidx.annotation.StringRes
 import androidx.annotation.VisibleForTesting
@@ -29,14 +28,21 @@ object SwarmStrings {
 
     /**
      * Resolve from [context]'s application resources (their locale follows
-     * the app language). [pluralResources] gives the resources to choose a
-     * plural form with: set to the language the text is in, which the app
-     * knows and this module doesn't (the app's `TextLocale`, #313 R1-F1).
+     * the app language). [plural] resolves a plural: the form in the rules
+     * of the language the text is in, which the app knows and this module
+     * doesn't, and the arguments formatted in the context's locale like any
+     * other string's (the app's `TextLocale.plural`, #313 R1-F1, R2-M1,
+     * R3-M1). One function, so the app's and this module's counts agree.
      */
-    fun init(context: Context, pluralResources: (Context) -> Resources = { it.resources }) {
+    fun init(context: Context, plural: PluralResolver = PluralResolver(::devicePlural)) {
         val app = context.applicationContext ?: context
-        source = ResourcesSource(app, pluralResources)
+        source = ResourcesSource(app, plural)
     }
+
+    @Suppress("DevicePluralRules") // the fallback when no app says what language the text is in
+    private fun devicePlural(context: Context, id: Int, count: Int, args: Array<out Any?>): String =
+        if (args.isEmpty()) context.resources.getQuantityString(id, count)
+        else context.resources.getQuantityString(id, count, *args)
 
     /** The text of [id], with [args] filled in (`%1$s`, `%1$d`, …, locale-formatted). */
     fun get(@StringRes id: Int, vararg args: Any?): String = source().string(id, *args)
@@ -71,6 +77,11 @@ object SwarmStrings {
         }
 }
 
+/** Resolves plural [id] for [count] against [context], with [args] filled in. */
+fun interface PluralResolver {
+    fun plural(context: Context, @PluralsRes id: Int, count: Int, args: Array<out Any?>): String
+}
+
 /** Resolves this module's string and plural resources by id. */
 interface SwarmStringSource {
     fun string(@StringRes id: Int, vararg args: Any?): String
@@ -83,20 +94,18 @@ interface SwarmStringSource {
     fun englishPlural(@PluralsRes id: Int, count: Int, vararg args: Any?): String = plural(id, count, *args)
 }
 
-@Suppress("DevicePluralRules") // plural(): resources in the text's language; englishPlural(): en-US
+@Suppress("DevicePluralRules") // englishPlural(): en-US resources, en-US rules
 private class ResourcesSource(
     private val context: Context,
-    private val pluralResources: (Context) -> Resources,
+    private val pluralResolver: PluralResolver,
 ) : SwarmStringSource {
     // `context.resources` each time, not kept: the per-app language
     // (Android 13+) updates the application's resources in place.
     override fun string(id: Int, vararg args: Any?): String =
         if (args.isEmpty()) context.resources.getString(id) else context.resources.getString(id, *args)
 
-    override fun plural(id: Int, count: Int, vararg args: Any?): String {
-        val res = pluralResources(context)
-        return if (args.isEmpty()) res.getQuantityString(id, count) else res.getQuantityString(id, count, *args)
-    }
+    override fun plural(id: Int, count: Int, vararg args: Any?): String =
+        pluralResolver.plural(context, id, count, args)
 
     // `values/` is en-US (the app's res/resources.properties); formatted with en-US's digits too.
     // Built each time: cheap next to a seed line, and it follows a configuration change.

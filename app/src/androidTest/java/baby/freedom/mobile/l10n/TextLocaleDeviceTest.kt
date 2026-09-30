@@ -1,6 +1,7 @@
 package baby.freedom.mobile.l10n
 
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.res.Configuration
 import android.os.LocaleList
 import androidx.compose.material3.Text
@@ -11,7 +12,9 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import baby.freedom.mobile.FreedomApplication
 import baby.freedom.mobile.R
+import baby.freedom.swarm.SwarmStrings
 import java.util.Locale
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -58,6 +61,38 @@ class TextLocaleDeviceTest {
         val en = phoneIn("en-GB")
         assertEquals(true, TextLocale.resources(en) === en.resources)
         assertEquals("1 match", TextLocale.plural(en, R.plurals.browser_find_matches, 1, 1))
+    }
+
+    /**
+     * #313 R3-M1: `:swarmnode`'s counts go through the same resolver the
+     * app wires up in [FreedomApplication], so a Persian phone shows Persian
+     * digits there too, in English's form, and English on the way out.
+     */
+    @Test
+    fun swarmnodeCountsLikeTheApps() {
+        val fa = phoneIn("fa-IR")
+        // `init` takes the application context; stand in one set to Persian.
+        val faApp = object : ContextWrapper(fa) {
+            override fun getApplicationContext(): Context = this
+        }
+        val faDigits = String.format(Locale.forLanguageTag("fa-IR"), "%d", 17)
+        try {
+            // Exactly FreedomApplication.onCreate's wiring, on the Persian context.
+            FreedomApplication.initSwarmStrings(faApp)
+            val seeds = baby.freedom.swarm.R.plurals.swarmnode_radicle_candidate_seeds
+            assertEquals("$faDigits candidate seeds", SwarmStrings.plural(seeds, 17, 17))
+            assertEquals(TextLocale.plural(fa, seeds, 17, 17), SwarmStrings.plural(seeds, 17, 17))
+            // Russian's `one` would claim 21; English's form, in the phone's digits.
+            val ru = phoneIn("ru-RU")
+            FreedomApplication.initSwarmStrings(object : ContextWrapper(ru) {
+                override fun getApplicationContext(): Context = this
+            })
+            assertEquals("21 candidate seeds", SwarmStrings.plural(seeds, 21, 21))
+            // What leaves the app stays en-US, digits included.
+            assertEquals("17 candidate seeds", SwarmStrings.englishPlural(seeds, 17, 17))
+        } finally {
+            FreedomApplication.initSwarmStrings(app)
+        }
     }
 
     @Test
