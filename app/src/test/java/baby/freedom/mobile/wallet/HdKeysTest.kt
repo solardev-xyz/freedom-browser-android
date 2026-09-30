@@ -12,6 +12,11 @@ import org.junit.Test
  * the leading-zero bug these two vectors were added to BIP-32 for.
  * Every wallet account, the Swarm key and each publisher key goes
  * through this code.
+ *
+ * The fourth test checks, through the [HdKeys.scratchSeen] hook, that
+ * every HMAC output and every `I_L` copy made while deriving a
+ * secp256k1 and an ed25519 key is all-zero by the time the key is
+ * returned.
  */
 class HdKeysTest {
     private fun vectors(seed: String, expected: Map<String, String>) {
