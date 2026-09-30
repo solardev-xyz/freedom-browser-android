@@ -406,10 +406,15 @@ internal fun insertedText(before: TextFieldValue, after: TextFieldValue, committ
  * password-type field) — and that is no paste: counting it would read the
  * clipboard on the way out (Android's "pasted from your clipboard" notice)
  * for a phrase that was only typed. So a single word pasted on its own is
- * left on the clipboard; one word of a phrase is no phrase. A phrase pasted
- * from a keyboard's own clipboard history, not the clipboard, reads as a
- * paste too, so losing focus then clears whatever is on the clipboard —
- * the same trade-off [PhraseClipboard] makes at its deadline.
+ * left on the clipboard; one word of a phrase is no phrase. Any other
+ * phrase-sized text put in at once without passing through the clipboard
+ * reads as a paste too: a phrase from a keyboard's own clipboard history,
+ * an Autofill service filling a stored phrase (the field sets no content
+ * type, but may still be offered to one), or a keyboard's voice input that
+ * commits a whole utterance in one go. The field's edit alone can't tell
+ * these from a paste, so losing focus then clears whatever is on the
+ * clipboard unread, and Back reads it (Android's notice) to match the
+ * words — the same trade-off [PhraseClipboard] makes at its deadline.
  *
  * What the field itself puts on the clipboard — a Copy or a Cut, from its
  * menu, the keyboard or a hardware shortcut, all through
