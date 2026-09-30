@@ -104,6 +104,18 @@ android {
         // values are fine since the tests don't actually inspect log
         // output.
         unitTests.isReturnDefaultValues = true
+        // A failure on the CI runner prints its message and full stack
+        // trace in the log, not just "AssertionError at SendTest.kt:N"
+        // (#310); the HTML/XML reports are uploaded too (release.yml).
+        unitTests.all {
+            it.testLogging {
+                events("failed")
+                exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+                showExceptions = true
+                showStackTraces = true
+                showCauses = true
+            }
+        }
     }
 
     packaging {
