@@ -141,6 +141,16 @@ class OpenLvSession internal constructor(
 
         /** `eth_sendTransaction`, priced; [notice] says why it's shown again, if it is. */
         data class SendTransaction(val quote: SendQuote, val notice: String? = null) : Request
+
+        /**
+         * `eth_sendTransaction` from [account] that couldn't be priced
+         * ([reason], in the app language): shown before the peer is told,
+         * with only Close. The peer's answer names the account's balance
+         * or what the chain said of it, so it waits for a sheet the user
+         * sees, as every other answer about a wallet account does
+         * ([accountFor]).
+         */
+        data class CantSend(val account: WalletAccount, val chain: Chain, val reason: String) : Request
     }
 
     sealed interface Decision {
@@ -398,6 +408,9 @@ class OpenLvSession internal constructor(
             val quote = try {
                 sender.prepare(request)
             } catch (e: SendException) {
+                // Only after the user saw it: what went wrong says the account is this
+                // wallet's, and often its balance ([accountFor]). Closed, not approved.
+                ask(sid, Request.CantSend(account, chain, e.message ?: e.english))
                 // English, whatever the app language: the peer must not learn it (#280).
                 return OpenLvResponse.Error(INTERNAL, e.english)
             }
@@ -452,15 +465,17 @@ class OpenLvSession internal constructor(
         }
     }
 
-    /** The wallet's account at [address] (any case), or null. */
     /**
-     * The wallet account [address] names, or null. Each signing request looks
-     * it up only once everything else in it has checked out: an unknown
-     * address is refused at once (4100) and a known one brings up a sheet, so
-     * a request malformed in some other way must be refused alike for both —
-     * else a peer could learn, with no sheet ever showing, whether any
-     * address it likes is one of this wallet's (Ledger accounts too), none of
-     * which it was ever given.
+     * The wallet account [address] names (any case), or null. Each signing
+     * request looks it up only once everything else in it has checked out:
+     * an unknown address is refused at once (4100), and from there on a
+     * known one gets no answer until a sheet has shown — the request's own
+     * sheet, or, for a transaction that can't be priced (not enough funds,
+     * a call that would revert), [Request.CantSend]. So a request malformed
+     * in some other way is refused alike for both, and a peer can't learn,
+     * with no sheet ever showing, whether an address it likes is one of this
+     * wallet's (Ledger accounts too), none of which it was ever given — nor
+     * what it holds.
      */
     private fun accountFor(address: Any?): WalletAccount? {
         val a = (address as? String)?.trim() ?: return null

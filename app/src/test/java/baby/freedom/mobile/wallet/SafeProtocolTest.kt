@@ -179,6 +179,18 @@ class SafeProtocolTest {
     }
 
     @Test
+    fun `a pending message the phone proposed shows its hidden characters as the co-sign page does (R1-M1)`() {
+        val hidden = "Log in to app.example" + String(Character.toChars(0xE0061)) + "\u202Eevil\u200B"
+        val pending = SafePending(
+            id = "0x" + "11".repeat(32), safe = safe, kind = SafePending.Kind.MESSAGE, chainId = 100,
+            typedData = "{}", threshold = 2, signatures = emptyList(), createdAt = 0, text = hidden,
+        )
+        assertEquals("Log in to app.example\\u{E0061}\\u202Eevil\\u200B", pending.shownText)
+        assertEquals(Eip712.visible(hidden), pending.shownText)
+        assertNull(pending.copy(kind = SafePending.Kind.TX, text = null).shownText)
+    }
+
+    @Test
     fun `requests Freedom wouldn't build are refused`() {
         fun with(change: (JSONObject) -> Unit) = JSONObject(safeTxTypedData).also(change).toString()
         val refused = listOf(

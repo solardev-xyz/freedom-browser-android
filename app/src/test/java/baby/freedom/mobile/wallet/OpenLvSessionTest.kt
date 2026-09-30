@@ -501,6 +501,9 @@ class OpenLvSessionTest {
             // One that can't be priced: more than the account holds.
             keys.ledgerFails = null
             s.onRequest(1, 3, "eth_sendTransaction", JSONArray().put(JSONObject(tx.toString()).put("value", "0x" + "f".repeat(30))))
+            val cant = s.awaitSheet().request as OpenLvSession.Request.CantSend
+            assertTrue(cant.reason, cant.reason.contains(PseudoLanguage.MARK)) // the user's words are the app language's
+            s.approval.value!!.decide(OpenLvSession.Decision.Reject)
             val unpriced = engine.next().third as OpenLvResponse.Error
             assertFalse(unpriced.message, unpriced.message.contains(PseudoLanguage.MARK))
             assertTrue(unpriced.message, unpriced.message.startsWith("Not enough"))
@@ -543,6 +546,38 @@ class OpenLvSessionTest {
             s.onRequest(1, ++id, "personal_sign", JSONArray().put(tooLong).put(from))
             assertEquals(from, OpenLvSession.INVALID_PARAMS, error(engine.next()))
         }
+        assertNull(s.approval.value)
+    }
+
+    @Test
+    fun `a transaction that can't be priced is answered only after the user saw why, and a stranger's at once`() {
+        // What pricing says (the balance, a revert) names the account as this wallet's: it waits for a sheet (R1-F1).
+        val (s, engine) = session()
+        s.startOnScope()
+        s.onRequest(1, 1, "wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x64")))
+        engine.next()
+        fun overspend(from: String) = JSONArray().put(
+            JSONObject().put("from", from).put("to", "0x0000000000000000000000000000000000000002")
+                .put("value", "0xffffffffffffffffffffffff").put("chainId", "0x64"),
+        )
+        s.onRequest(1, 2, "eth_sendTransaction", overspend("0x0000000000000000000000000000000000000001"))
+        assertEquals(OpenLvSession.UNAUTHORIZED, error(engine.next()))
+        assertNull(s.approval.value)
+
+        s.onRequest(1, 3, "eth_sendTransaction", overspend(account1.address.lowercase()))
+        val sheet = s.awaitSheet()
+        val cant = sheet.request as OpenLvSession.Request.CantSend
+        assertEquals(account1, cant.account)
+        assertEquals(gnosis.id, cant.chain.id)
+        assertTrue(cant.reason, cant.reason.startsWith("Not enough"))
+        // No answer while the sheet is up: the peer learns nothing until the user closes it.
+        assertNull(engine.responses.poll(300, java.util.concurrent.TimeUnit.MILLISECONDS))
+        // Close is its only way out; even an "approve" can't turn it into a send.
+        sheet.decide(OpenLvSession.Decision.Approve())
+        val answer = engine.next().third as OpenLvResponse.Error
+        assertEquals(OpenLvSession.INTERNAL, answer.code)
+        assertTrue(answer.message, answer.message.startsWith("Not enough"))
+        assertTrue(synchronized(sent) { sent.isEmpty() })
         assertNull(s.approval.value)
     }
 

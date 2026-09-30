@@ -120,6 +120,8 @@
     <string name="signing_remote_title_sign_typed_data">Sign typed data</string>
     <string name="signing_remote_title_send_transaction">Send a transaction</string>
     <string name="signing_remote_action_confirm_send">Confirm and send</string>
+    <string name="signing_remote_title_cant_send">Can’t send this transaction</string>
+    <string name="signing_remote_cant_send_explained">Nothing was signed or sent. The code you scanned is told why once you close this.</string>
     <string name="signing_remote_asked_over_code">Asked for over the code you scanned. Only approve if that code came from Freedom on your own computer.</string>
     <string name="signing_remote_connect_explained">The code you scanned asks to add an account of this wallet. It learns the account’s address, nothing else; every signature or transaction it asks for later is shown here first.</string>
     <string name="signing_review_account">Account</string>
