@@ -81,6 +81,12 @@ class NodeService : Service() {
     @Volatile
     private var relayedMode: SwarmNode.Mode? = null
 
+    /** Numbers each [INodeService.setSwarmMode], so an older one can't land after a newer one. */
+    private val modeRelays = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** The newest [modeRelays] number applied to [relayedMode]. Guarded by [modeRelays]. */
+    private var appliedModeRelay = 0L
+
     /** The mode the launch now booting read, handed to [SwarmNode.Config.mode] right after its identity. */
     @Volatile
     private var launchMode: SwarmNode.Mode = SwarmNode.Mode.ULTRA_LIGHT
@@ -210,19 +216,34 @@ class NodeService : Service() {
         }
 
         override fun setSwarmMode(light: Boolean, gnosisRpc: String?, gnosisUserRpcs: List<String>?, gnosisRpcs: List<String>?) {
-            val mode = if (light) SwarmNode.Mode.light(gnosisRpc.orEmpty()) else SwarmNode.Mode.ULTRA_LIGHT
-            // Read by the next chain request at once: no restart needed.
-            relayedGnosis = gnosisChainFor(
-                listOf(
-                    BuiltInChains.GNOSIS.copy(
-                        rpcUrls = gnosisRpcs.orEmpty().take(Chain.MAX_RPC_URLS),
-                        userRpcUrls = gnosisUserRpcs.orEmpty().take(Chain.MAX_USER_RPC_URLS),
+            // No Gnosis relayed (the UI hasn't read its chain list yet,
+            // #300 R3-M1): keep the one this process has, and take the
+            // mode's RPC from it below.
+            if (gnosisRpc != null) {
+                // Read by the next chain request at once: no restart needed.
+                relayedGnosis = gnosisChainFor(
+                    listOf(
+                        BuiltInChains.GNOSIS.copy(
+                            rpcUrls = gnosisRpcs.orEmpty().take(Chain.MAX_RPC_URLS),
+                            userRpcUrls = gnosisUserRpcs.orEmpty().take(Chain.MAX_USER_RPC_URLS),
+                        ),
                     ),
-                ),
-            )
+                )
+            }
             if (doomed) return
+            val seq = modeRelays.incrementAndGet()
             scope.launch(Dispatchers.IO) {
-                relayedMode = mode
+                val mode = when {
+                    !light -> SwarmNode.Mode.ULTRA_LIGHT
+                    gnosisRpc != null -> SwarmNode.Mode.light(gnosisRpc)
+                    else -> SwarmNode.Mode.light(gnosisRpcFor(listOf(gnosisForReads())))
+                }
+                // A later relay that finished first stands.
+                synchronized(modeRelays) {
+                    if (seq < appliedModeRelay) return@launch
+                    appliedModeRelay = seq
+                    relayedMode = mode
+                }
                 restartSwarmIfStale("swarm mode is now $mode")
             }
         }

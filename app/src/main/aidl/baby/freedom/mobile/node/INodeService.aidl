@@ -87,7 +87,10 @@ interface INodeService {
      * through the chain-data router (#273), over `gnosisUserRpcs` (the
      * user's own, Chain.userRpcUrls) and `gnosisRpcs` (Chain.rpcUrls);
      * `gnosisRpc`, the first of them, is the one it sends confirmed
-     * transactions on. Any of these can carry an API key: never log them.
+     * transactions on. All three are null while the UI hasn't read its
+     * chain list yet (#300 R3-M1): the service then keeps the Gnosis it
+     * has and a light node's `gnosisRpc` is the first of those. Any of
+     * these can carry an API key: never log them.
      */
     void setSwarmMode(boolean light, String gnosisRpc, in List<String> gnosisUserRpcs, in List<String> gnosisRpcs);
 

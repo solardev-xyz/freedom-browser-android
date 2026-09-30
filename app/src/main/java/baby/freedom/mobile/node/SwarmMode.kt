@@ -6,7 +6,7 @@ import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.flow
 
 /**
  * The Swarm node's mode (#114) for the light-mode setting and the chains
@@ -45,21 +45,41 @@ internal fun gnosisChainFor(chains: List<Chain>): Chain {
 }
 
 /**
- * What the UI relays to `:node` ([INodeService.setSwarmMode]): the mode
- * and Gnosis as the node's reads see it, for the light-mode setting and
- * the chain list — [chainsOrUnreadable], not the built-ins-only list a
- * read error gives. A relayed Gnosis wins over what `:node` read from the
- * store itself, so relaying the shipped RPCs while the file can't be read
- * would drop the user's own RPC from the node's reads (and could restart
- * it on another `gnosisRpc`); nothing is relayed until it reads again, and
- * the last relay (or `:node`'s own read) stands meanwhile (#300 R2-M2).
+ * One relay to `:node` ([INodeService.setSwarmMode]): the light-mode
+ * setting, and Gnosis as the node's reads see it ([gnosisChainFor]) — or
+ * null while the UI has never read the chain list, when `:node` keeps the
+ * Gnosis it has and takes the mode's RPC from that.
+ */
+internal data class SwarmRelay(val light: Boolean, val gnosis: Chain?) {
+    /** The RPC ant is configured with ([gnosisRpcFor]); null with no [gnosis]. */
+    val gnosisRpc: String? get() = gnosis?.let { gnosisRpcFor(listOf(it)) }
+}
+
+/**
+ * What the UI relays to `:node` ([INodeService.setSwarmMode]), for the
+ * light-mode setting and the chain list — [chainsOrUnreadable], not the
+ * built-ins-only list a read error gives. A relayed Gnosis wins over what
+ * `:node` read from the store itself, so relaying the shipped RPCs while
+ * the file can't be read would drop the user's own RPC from the node's
+ * reads (and could restart it on another `gnosisRpc`) (#300 R2-M2). So
+ * while it can't be read the last readable list stands in — and before
+ * any, no Gnosis at all — but a Light-mode toggle is relayed either way,
+ * never held back until the store reads again (#300 R3-M1).
  */
 internal fun swarmRelays(
     light: Flow<Boolean>,
     chainsOrUnreadable: Flow<List<Chain>?>,
-): Flow<Pair<SwarmNode.Mode, Chain>> =
-    combine(light, chainsOrUnreadable.filterNotNull()) { l, chains -> swarmModeFor(l, chains) to gnosisChainFor(chains) }
+): Flow<SwarmRelay> {
+    val lastReadable = flow {
+        var last: List<Chain>? = null
+        chainsOrUnreadable.collect { chains ->
+            if (chains != null) last = chains
+            emit(last)
+        }
+    }
+    return combine(light, lastReadable) { l, chains -> SwarmRelay(l, chains?.let(::gnosisChainFor)) }
         .distinctUntilChanged()
+}
 
 /**
  * What [SwarmBootIdentity] tracks a launch as: the Swarm account it boots

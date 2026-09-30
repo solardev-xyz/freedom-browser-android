@@ -195,6 +195,31 @@ class SwarmNodeTest {
     }
 
     @Test
+    fun aFailedGatewayStartShutsTheNodeDownWithChainReadsRefused() {
+        // #300 R3-M2: the shutdown after a failed startGateway mustn't wait
+        // behind a chain read ant began, as [stop]'s doesn't.
+        AntChainTransport.install({ """{"result":"0x1"}""" })
+        try {
+            val ops = FakeOps().apply {
+                releaseSeed.countDown()
+                releaseInit.countDown()
+                gatewayStartsLeft = 0
+            }
+            val node = SwarmNode(config, ops)
+            node.start()
+            awaitStatus(node, NodeStatus.Error)
+            assertEquals(listOf("shutdown:1"), ops.calls.filter { it.startsWith("shutdown") })
+            assertEquals(1, ops.readsWhileStopping.size)
+            assertTrue(ops.readsWhileStopping.toString(), "the Swarm node is stopping" in ops.readsWhileStopping.single())
+            // Served again once the shutdown is over.
+            assertEquals("""{"result":"0x1"}""", String(AntChainTransport.serve("{}".toByteArray()), Charsets.UTF_8))
+            node.dispose()
+        } finally {
+            AntChainTransport.install({ """{"result":"0x0"}""" })
+        }
+    }
+
+    @Test
     fun stopDuringInitShutsTheNewNodeDownAndStaysStopped() {
         val ops = FakeOps().apply { releaseSeed.countDown() }
         val node = SwarmNode(config, ops)

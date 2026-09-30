@@ -284,7 +284,12 @@ class SwarmNode internal constructor(
                     gnosisRpc = mode.gnosisRpc,
                 )
             } catch (t: Throwable) {
-                runCatching { ops.shutdown(h) }
+                // As in [stop]: a chain read ant began before the gateway
+                // failed would otherwise hold this shutdown for the
+                // reader's whole deadline. Nothing else uses this handle
+                // yet (it isn't published), so no spend's read is failed
+                // (#300 R3-M2).
+                runCatching { AntChainTransport.whileStopping { ops.shutdown(h) } }
                 throw t
             }
             val agent = runCatching { ops.agentString(h) }.getOrNull().orEmpty()

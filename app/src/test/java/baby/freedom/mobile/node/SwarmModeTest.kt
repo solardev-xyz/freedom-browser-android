@@ -1,14 +1,22 @@
 package baby.freedom.mobile.node
 
 import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.chains.Chain
 import baby.freedom.swarm.SwarmNode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 
 class SwarmModeTest {
     @Test
@@ -73,7 +81,7 @@ class SwarmModeTest {
     }
 
     @Test
-    fun `a chain store read error relays nothing, so the user's Gnosis RPC isn't dropped`() = runBlocking {
+    fun `a chain store read error relays nothing new, so the user's Gnosis RPC isn't dropped`() = runBlocking {
         val mine = BuiltInChains.ALL.map {
             if (it.id == 100L) it.copy(userRpcUrls = listOf("https://my.gnosis.example/k")) else it
         }
@@ -81,9 +89,35 @@ class SwarmModeTest {
         // One relay: the unreadable moment in between neither relays the
         // shipped RPCs nor repeats the same mode.
         assertEquals(1, relayed.size)
-        assertEquals("https://my.gnosis.example/k", relayed.single().first.gnosisRpc)
-        assertEquals(listOf("https://my.gnosis.example/k"), relayed.single().second.userRpcUrls)
-        // Unreadable from the start: nothing until it reads (`:node` reads the store itself).
-        assertEquals(emptyList<Any>(), swarmRelays(flowOf(true), flowOf<List<baby.freedom.mobile.chains.Chain>?>(null)).toList())
+        assertEquals("https://my.gnosis.example/k", relayed.single().gnosisRpc)
+        assertEquals(listOf("https://my.gnosis.example/k"), relayed.single().gnosis?.userRpcUrls)
+        // Unreadable from the start: the mode alone, no Gnosis (`:node` keeps its own).
+        assertEquals(
+            listOf(SwarmRelay(true, null)),
+            swarmRelays(flowOf(true), flowOf<List<Chain>?>(null)).toList(),
+        )
+        assertNull(SwarmRelay(true, null).gnosisRpc)
+    }
+
+    @Test
+    fun `a light-mode toggle is relayed while the chain store can't be read`() = runBlocking {
+        // #300 R3-M1: the toggle isn't held back until the store reads again.
+        val mine = BuiltInChains.ALL.map {
+            if (it.id == 100L) it.copy(userRpcUrls = listOf("https://my.gnosis.example/k")) else it
+        }
+        // The store reads, then errors for good; the user toggles Light on and off meanwhile.
+        val chains = flow<List<Chain>?> { emit(mine); delay(20); emit(null); awaitCancellation() }
+        val light = flow { emit(false); delay(100); emit(true); delay(100); emit(false) }
+        val relayed = withTimeout(5_000) { swarmRelays(light, chains).take(3).toList() }
+        assertEquals(listOf(false, true, false), relayed.map { it.light })
+        // Still the user's RPC, the last readable list's, never the shipped one.
+        assertEquals("https://my.gnosis.example/k", relayed[1].gnosisRpc)
+        assertTrue(relayed.all { it.gnosis?.userRpcUrls == listOf("https://my.gnosis.example/k") })
+        // Unreadable from the start: toggles still go out, with no Gnosis.
+        val never = flow<List<Chain>?> { emit(null); awaitCancellation() }
+        assertEquals(
+            listOf(SwarmRelay(false, null), SwarmRelay(true, null)),
+            withTimeout(5_000) { swarmRelays(flow { emit(false); delay(50); emit(true) }, never).take(2).toList() },
+        )
     }
 }
