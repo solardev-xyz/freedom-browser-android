@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -21,6 +22,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -61,6 +63,7 @@ import baby.freedom.mobile.node.swarmModeFor
 import baby.freedom.mobile.node.ITorCallback
 import baby.freedom.mobile.node.ITorService
 import baby.freedom.mobile.node.TorService
+import baby.freedom.mobile.ui.Appearance
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.NodeIdentitySync
@@ -88,6 +91,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Hosts the browser UI and brokers the bind/unbind lifecycle of the
@@ -358,6 +362,19 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Settings → Appearance (#269), followed live: the choice becomes
+        // the app's night mode, which re-themes the chrome and every
+        // page's `prefers-color-scheme` without a restart (see
+        // [Appearance]). Android keeps that mode across launches too, so
+        // this only writes it again, which changes nothing. A read error
+        // doesn't end this: [NodeSettings.appearance] logs it and reads
+        // again, so a later choice is still applied.
+        lifecycleScope.launch {
+            settings.appearance
+                .distinctUntilChanged()
+                .collect { Appearance.apply(this@MainActivity, it) }
+        }
+
         // Honor the persisted preference on cold start. If the user had
         // the node enabled, start + bind right away; otherwise leave
         // the :node process dormant so we don't hold the state store
@@ -493,8 +510,30 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showBrowser() {
+        // Below Android 12 there's no app night mode for [Appearance.apply]
+        // to set, so the chrome follows the choice only through the
+        // Compose theme below — and composing with System as a placeholder
+        // until DataStore answers would draw the first frame in the
+        // system's theme and then flip. Wait (briefly) for the stored
+        // choice there instead; above, the configuration already agrees
+        // with it, so there is nothing to wait for.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            lifecycleScope.launch {
+                val stored = withTimeoutOrNull(APPEARANCE_WAIT_MS) { settings.appearance.first() }
+                composeBrowser(stored ?: Appearance.System)
+            }
+        } else {
+            composeBrowser(Appearance.System)
+        }
+    }
+
+    private fun composeBrowser(initialAppearance: Appearance) {
         setContent {
-            FreedomTheme {
+            // Below Android 12 this is what makes the chrome follow the
+            // choice (see [showBrowser]); above, the configuration already
+            // agrees with it.
+            val appearance by settings.appearance.collectAsState(initial = initialAppearance)
+            FreedomTheme(darkTheme = appearance.isDark(isSystemInDarkTheme())) {
                 SystemBarsForScheme()
                 Surface(
                     modifier = Modifier.fillMaxSize(),
@@ -920,3 +959,11 @@ class MainActivity : ComponentActivity() {
  * `.onion` is refused before letting `:tor` stop regardless.
  */
 private const val TOR_UNBIND_TIMEOUT_MS = 2_000L
+
+/**
+ * How long [MainActivity] waits, below Android 12, for the stored
+ * Settings → Appearance choice before composing (see `showBrowser`):
+ * long enough for a normal DataStore read, short enough that a stuck one
+ * only costs the placeholder theme, not the browser.
+ */
+private const val APPEARANCE_WAIT_MS = 1_000L

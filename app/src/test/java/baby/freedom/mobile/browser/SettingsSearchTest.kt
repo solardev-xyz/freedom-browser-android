@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ui.Appearance
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import org.junit.Assert.assertEquals
@@ -84,5 +85,17 @@ class SettingsSearchTest {
         for (q in listOf("desktop site", "Desktop")) {
             assertEquals(q, setOf("site-data"), visibleSettingsRows(q, "Browsing data", browsingDataRows(3, 2)))
         }
+    }
+
+    @Test
+    fun `theme row is found by every choice and by dark mode`() {
+        // #269: whichever choice is in use, each one it can switch to finds the row.
+        for (current in Appearance.entries) {
+            for (q in listOf("theme", "Light", "dark", "system default", "dark mode", "night")) {
+                assertEquals("$current/$q", setOf("theme"), visibleSettingsRows(q, "Appearance", appearanceSectionRows(current)))
+            }
+        }
+        assertEquals(setOf("theme"), visibleSettingsRows("appearance", "Appearance", appearanceSectionRows(Appearance.System)))
+        assertEquals(emptySet<Any>(), visibleSettingsRows("bookmarks", "Appearance", appearanceSectionRows(Appearance.Dark)))
     }
 }

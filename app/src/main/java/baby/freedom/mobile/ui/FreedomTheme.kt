@@ -12,7 +12,11 @@ import androidx.compose.ui.graphics.luminance
 
 /**
  * The app theme: Material 3 Expressive on one of two wordmark-keyed
- * schemes, following the OS light/dark setting.
+ * schemes, light or dark as the configuration says — which is the OS
+ * setting, or Settings → Appearance's choice once one is made
+ * ([Appearance], #269: the choice is set as the app's own night mode, so
+ * `isSystemInDarkTheme()` reports it; `MainActivity` also passes it in
+ * explicitly for Android 11, which has no app night mode).
  *
  * Both schemes take their accents from the wordmark (its teal and amber
  * dots) rather than from the wallpaper — dynamic colour is still

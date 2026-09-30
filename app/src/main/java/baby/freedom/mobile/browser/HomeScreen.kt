@@ -141,8 +141,8 @@ private const val RECENT_LIMIT = 8
 @Composable
 private fun HomeHero(modifier: Modifier = Modifier) {
     // Drive logo selection off the active Compose theme rather than
-    // `isSystemInDarkTheme()`. The two now agree by default (the theme
-    // follows the system setting), but the scheme is still the honest
+    // `isSystemInDarkTheme()`. The two agree (the theme follows the
+    // configuration's light/dark, #269), but the scheme is still the honest
     // source: it is the thing this wordmark is actually being drawn on,
     // and an explicit `FreedomTheme(darkTheme = …)` — a preview, a
     // screenshot test — must not make the logo disappear.
