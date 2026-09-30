@@ -492,17 +492,29 @@ class MainActivity : ComponentActivity() {
         // Settings → Tor → Tor client (#275) picks the embedded Arti or an
         // external SOCKS proxy (Orbot); switching it while Tor runs stops
         // the one and starts the other.
+        // Until the settings are applied (Tor on, its client, and the
+        // external check started if Tor starts at launch), an onion request
+        // waits for them, so a link that cold-starts the app isn't refused
+        // as "Tor is off" by the defaults and gets the first check's
+        // verdict instead (#305 R3-M2).
         TorRouting.init(this)
+        TorRouting.expectSettings()
         TorRouting.setOnExternalFailure(externalTorFailed)
         lifecycleScope.launch {
-            torProxy = externalTorProxyOf(settings.torExternalProxy.first())
-            TorRouting.setExternal(this@MainActivity, torProxy, confirmed = false)
+            try {
+                torProxy = externalTorProxyOf(settings.torExternalProxy.first())
+                TorRouting.setExternal(this@MainActivity, torProxy, confirmed = false)
+                val enabled = settings.torEnabled.first()
+                TorRouting.setEnabled(this@MainActivity, enabled)
+                if (enabled && settings.torStartOnLaunch.first()) startTor()
+            } finally {
+                TorRouting.settingsLoaded()
+            }
             launch {
                 settings.torExternalProxy.map(::externalTorProxyOf).collect { proxy ->
                     if (proxy != torProxy) switchTorClient(proxy)
                 }
             }
-            if (settings.torEnabled.first() && settings.torStartOnLaunch.first()) startTor()
             settings.torEnabled.distinctUntilChanged().collect { enabled ->
                 TorRouting.setEnabled(this@MainActivity, enabled)
                 if (!enabled) stopTor()
@@ -999,14 +1011,24 @@ class MainActivity : ComponentActivity() {
     private fun startExternalTor(proxy: SocksEndpoint) {
         externalTorJob?.cancel()
         torRunning = true
-        publishExternalTor(proxy, externalTorChecking(proxy), confirmed = false, pending = true)
+        // Idle until the loop below runs, if the Activity isn't started (R3-M1).
+        publishExternalTor(
+            proxy,
+            externalTorChecking(proxy),
+            confirmed = false,
+            pending = true,
+            idle = !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
+        )
         externalTorJob = lifecycleScope.launch {
             var watch = TorProxy.Watch()
             var lastCheckAt = 0L
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 // The first check since (re)starting: onion requests wait
-                // for its verdict instead of being refused (R1-F1).
+                // for its verdict instead of being refused (R1-F1), and a
+                // document refused meanwhile hears it's being checked,
+                // which it now is (R3-M1).
                 var pending = true
+                publishExternalTor(proxy, externalTorChecking(proxy), confirmed = false, pending = true)
                 try {
                     while (true) {
                         // Always the full check, a real onion included, even
@@ -1089,13 +1111,17 @@ class MainActivity : ComponentActivity() {
                     // once: a link from another app or a form posted on return
                     // from an authenticator arrives with the start, before any
                     // check can have passed (R1-F1). Nothing is sent to the
-                    // proxy before that check passes.
+                    // proxy before that check passes. A document refused
+                    // meanwhile (the hold ran out in the background) hears
+                    // that nothing checks until Freedom is back, and doesn't
+                    // ask again by itself in a loop (idle, R3-M1).
                     publishExternalTor(
                         proxy,
                         externalTorChecking(proxy),
                         confirmed = false,
                         unreached = false,
                         pending = true,
+                        idle = true,
                     )
                     watch = TorProxy.afterStop(watch)
                 }
@@ -1121,10 +1147,11 @@ class MainActivity : ComponentActivity() {
         confirmed: Boolean,
         unreached: Boolean = false,
         pending: Boolean = false,
+        idle: Boolean = false,
     ) {
         if (proxy != torProxy || !torRunning) return
         torInfoFlow.value = info
-        TorRouting.setExternal(this, proxy, confirmed, unreached, pending)
+        TorRouting.setExternal(this, proxy, confirmed, unreached, pending, idle)
     }
 
     private fun stopExternalTor() {

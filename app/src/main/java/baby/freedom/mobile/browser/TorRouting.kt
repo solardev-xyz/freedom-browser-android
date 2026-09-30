@@ -18,6 +18,8 @@ import java.net.Proxy
 import java.net.URL
 import java.net.URLConnection
 import java.text.Normalizer
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
@@ -89,6 +91,16 @@ object TorRouting {
      */
     const val CODE_PROXY_CHECKING = "tor_proxy_checking"
 
+    /**
+     * An onion document refused while the external proxy's verdict is
+     * pending but nothing checks: the Activity is stopped ([externalIdle]),
+     * and the check runs only once it's back. Not "still checking … loads
+     * by itself", and no refresh — a background tab's page would otherwise
+     * ask again every [HOLD_MS] + [CHECKING_REFRESH_S] for as long as
+     * Freedom stays in the background (#305 R3-M1).
+     */
+    const val CODE_PROXY_PAUSED = "tor_proxy_paused"
+
     /** How soon the [CODE_PROXY_CHECKING] page asks again (a meta refresh, no script). */
     const val CHECKING_REFRESH_S = 5
 
@@ -132,6 +144,29 @@ object TorRouting {
      */
     @Volatile
     private var externalPending = false
+
+    /**
+     * Whether [externalPending]'s check isn't running: the Activity is
+     * stopped, and nothing checks until it's back. Onion requests still
+     * wait ([awaitExternalVerdict]) — the start may be on its way — but a
+     * document refused meanwhile gets [CODE_PROXY_PAUSED], not
+     * [CODE_PROXY_CHECKING] (#305 R3-M1).
+     */
+    @Volatile
+    private var externalIdle = false
+
+    /**
+     * Open until [settingsLoaded]: Settings → Tor (on/off, the client) and
+     * whether Tor starts at launch haven't been read yet. [refusalFor]
+     * waits for it (bounded, [SETTINGS_WAIT_MS]), so an onion link that
+     * cold-starts the app isn't judged by the defaults — "Tor is off" —
+     * before the settings land and the external check starts (#305 R3-M2).
+     */
+    @Volatile
+    private var settingsKnown = CountDownLatch(0)
+
+    /** A bound on the [settingsKnown] wait: a DataStore read takes milliseconds. */
+    private const val SETTINGS_WAIT_MS = 5_000L
 
     /** Notified whenever routing state changes, for [awaitExternalVerdict]. */
     private val verdictLock = Object()
@@ -196,6 +231,30 @@ object TorRouting {
         apply(context)
     }
 
+    /**
+     * The Tor settings are being read (see [settingsKnown]); until
+     * [settingsLoaded], [refusalFor] waits for them. Main thread.
+     */
+    fun expectSettings() {
+        if (settingsKnown.count == 0L) settingsKnown = CountDownLatch(1)
+    }
+
+    /**
+     * The Tor settings are applied ([setEnabled], [setExternal], and Tor
+     * started if it starts at launch). Any thread.
+     */
+    fun settingsLoaded() = settingsKnown.countDown()
+
+    internal fun awaitSettings(timeoutMs: Long = SETTINGS_WAIT_MS) {
+        val known = settingsKnown
+        if (known.count == 0L) return
+        try {
+            known.await(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
     /** Settings → Tor switched. Main thread. */
     fun setEnabled(context: Context, on: Boolean) {
         enabled = on
@@ -216,7 +275,9 @@ object TorRouting {
      * a Tor client there (and while it still listens); [unreached] when
      * its last check found Tor there that couldn't reach onion sites
      * ([TorProxy.Watch.unreached]); [pending] while its verdict is
-     * awaited ([externalPending]): onion requests wait for it. Main thread.
+     * awaited ([externalPending]): onion requests wait for it; [idle] when
+     * that verdict waits for the Activity to start again ([externalIdle]).
+     * Main thread.
      */
     fun setExternal(
         context: Context,
@@ -224,11 +285,13 @@ object TorRouting {
         confirmed: Boolean,
         unreached: Boolean = false,
         pending: Boolean = false,
+        idle: Boolean = false,
     ) {
         external = proxy
         externalConfirmed = proxy != null && confirmed
         externalUnreached = proxy != null && unreached
         externalPending = proxy != null && !confirmed && pending
+        externalIdle = externalPending && idle
         apply(context)
         signalVerdict()
     }
@@ -287,6 +350,8 @@ object TorRouting {
         externalConfirmed = false
         externalUnreached = false
         externalPending = false
+        externalIdle = false
+        settingsKnown = CountDownLatch(0)
         held.set(0)
         routed = null
         target = null
@@ -416,6 +481,7 @@ object TorRouting {
     fun refusalFor(req: WebResourceRequest): WebResourceResponse? {
         val uri = req.url ?: return null
         if (!isOnionHost(uri.host)) return null
+        awaitSettings()
         if (awaitExternalVerdict()) return null
         val headers = mapOf("Cache-Control" to "no-store")
         if (!isDocumentRequest(req.isForMainFrame, req.requestHeaders)) {
@@ -439,10 +505,15 @@ object TorRouting {
      * The refusal page for an onion document refused now: while the
      * external proxy's check is still pending (the hold ran out, or
      * [MAX_HELD] were already held) [CODE_PROXY_CHECKING] — nothing has
-     * said no Tor client answers yet (#305 R2-F1) — else [refusalCode]'s.
+     * said no Tor client answers yet (#305 R2-F1) — or, while nothing
+     * checks because the Activity is stopped, [CODE_PROXY_PAUSED] (R3-M1);
+     * else [refusalCode]'s.
      */
-    internal fun documentRefusalCode(): String =
-        if (awaitingExternal()) CODE_PROXY_CHECKING else refusalCode(supported, enabled, external != null)
+    internal fun documentRefusalCode(): String = when {
+        !awaitingExternal() -> refusalCode(supported, enabled, external != null)
+        externalIdle -> CODE_PROXY_PAUSED
+        else -> CODE_PROXY_CHECKING
+    }
 
     /**
      * Open [url] for a native fetch: a `.onion` URL through the routed Tor
@@ -621,6 +692,11 @@ object TorRouting {
             "This is an onion site, reachable only over Tor. Freedom is still checking the Tor " +
             "proxy at <code>${proxy ?: "(not set)"}</code> (Settings &rarr; Tor); this page loads " +
             "by itself once it passes. Freedom never opens onion sites without Tor."
+        CODE_PROXY_PAUSED -> "Tor proxy not checked yet" to
+            "This is an onion site, reachable only over Tor. Freedom checks the Tor proxy at " +
+            "<code>${proxy ?: "(not set)"}</code> (Settings &rarr; Tor) only while Freedom is on " +
+            "screen, and hasn't since it went to the background. Try again once you're back in " +
+            "Freedom. Freedom never opens onion sites without Tor."
         CODE_PROXY_DOWN -> if (unreached) {
             "Tor can't reach onion sites" to
                 "This is an onion site, reachable only over Tor. The Tor client at " +

@@ -571,6 +571,73 @@ class TorRoutingTest {
     }
 
     @Test
+    fun `a document refused while the Activity is stopped doesn't promise a check or loop`() {
+        // R3-M1: nothing checks until the Activity is back, so not "still
+        // checking … loads by itself", and no refresh that would re-hold the
+        // request every HOLD_MS + 5 s in the background.
+        val context = android.content.ContextWrapper(null)
+        val real = TorRouting.setOverride
+        val pending = java.util.Collections.synchronizedList(mutableListOf<Runnable>())
+        TorRouting.setOverride = { _, _, done -> pending += done }
+        val orbot = SocksEndpoint("127.0.0.1", 9050)
+        try {
+            TorRouting.resetForTest(supported = true)
+            TorRouting.setEnabled(context, true)
+            pending.removeAt(0).run()
+            // Stopped: still held (the start may be on its way), but idle.
+            TorRouting.setExternal(context, orbot, confirmed = false, pending = true, idle = true)
+            assertFalse(TorRouting.awaitExternalVerdict(200))
+            assertEquals(TorRouting.CODE_PROXY_PAUSED, TorRouting.documentRefusalCode())
+            // Started again: the check runs.
+            TorRouting.setExternal(context, orbot, confirmed = false, pending = true)
+            assertEquals(TorRouting.CODE_PROXY_CHECKING, TorRouting.documentRefusalCode())
+            // Idle means nothing without a pending verdict.
+            TorRouting.setExternal(context, orbot, confirmed = false, idle = true)
+            assertEquals(TorRouting.CODE_PROXY_DOWN, TorRouting.documentRefusalCode())
+        } finally {
+            TorRouting.setOverride = real
+            TorRouting.resetForTest(supported = null)
+        }
+        val paused = TorRouting.refusalHtml(onion, TorRouting.CODE_PROXY_PAUSED, TorInfo(), orbot)
+        assertTrue(paused.contains("<h1>Tor proxy not checked yet</h1>"))
+        assertTrue(paused.contains("127.0.0.1:9050"))
+        assertTrue(paused.contains("background"))
+        assertFalse(paused.contains("still checking"))
+        assertFalse(paused.contains("by itself"))
+        assertFalse(paused.contains("no Tor client"))
+        assertFalse(paused.contains("http-equiv=\"refresh\""))
+        assertFalse(paused.contains("<script"))
+    }
+
+    @Test
+    fun `an onion request waits for the Tor settings on a cold start`() {
+        // R3-M2: a link that cold-starts the app arrives before Settings →
+        // Tor is read; judged by the defaults it got "Tor is off".
+        TorRouting.resetForTest(supported = true)
+        val pool = java.util.concurrent.Executors.newCachedThreadPool()
+        try {
+            // Nothing expected: no wait.
+            var t0 = System.nanoTime()
+            TorRouting.awaitSettings(5_000)
+            assertTrue(System.nanoTime() - t0 < 1_000_000_000L)
+            TorRouting.expectSettings()
+            val waiting = pool.submit { TorRouting.awaitSettings(10_000) }
+            Thread.sleep(200)
+            assertFalse(waiting.isDone)
+            TorRouting.settingsLoaded()
+            waiting.get(2, java.util.concurrent.TimeUnit.SECONDS)
+            // Bounded if they never land.
+            TorRouting.expectSettings()
+            t0 = System.nanoTime()
+            TorRouting.awaitSettings(300)
+            assertTrue(System.nanoTime() - t0 >= 250_000_000L)
+        } finally {
+            pool.shutdownNow()
+            TorRouting.resetForTest(supported = null)
+        }
+    }
+
+    @Test
     fun `nothing to wait for without an override`() {
         TorRouting.resetForTest(supported = false)
         var released = false
