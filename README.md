@@ -31,7 +31,7 @@ Building the embedded-node artifact (required — not checked in) additionally r
 | Component | Version | Notes |
 |---|---|---|
 | Rust | pinned by `rust-toolchain.toml` in freedom-mobile-ffi | Compiles `libfreedom_mobile_ffi.so` (ant + freedom-ipfs in one cdylib) — see [Building libfreedom_mobile_ffi.so](#building-libfreedom_mobile_ffiso). |
-| cargo-ndk | latest | `cargo install cargo-ndk` — used by freedom-mobile-ffi's `scripts/build-android.sh`. |
+| cargo-ndk | 4.1.2 | `cargo install cargo-ndk --version 4.1.2 --locked` — the `CARGO_NDK_VERSION` release.yml pins (and keys its native-library cache on); used by freedom-mobile-ffi's `scripts/build-android.sh`. |
 | Android NDK | r27+ | Installed via `sdkmanager "ndk;27.2.12479018"` or similar. Also builds the JNI shims in `swarmnode/src/main/cpp/`. |
 
 ### One-time environment setup (macOS with Homebrew)
@@ -62,18 +62,14 @@ source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 #    which is gitignored here and must exist before Gradle can build the app.
 #    Needs cargo-ndk and ANDROID_NDK_HOME; rustup picks the toolchain from
 #    the repo's rust-toolchain.toml.
-#    Use the FFI_REF pinned in release.yml, with ant's `chain` feature,
-#    the embedded Radicle node and the Tor client on, and fat LTO (see
-#    "Building libfreedom_mobile_ffi.so" below). Chained with && so a failed step
-#    (e.g. enable-ffi-chain.sh rejecting a reshaped cargo call) stops
-#    before a chain-less .so is built or copied.
+#    Use the FFI_REF pinned in release.yml; scripts/build-ffi.sh builds it
+#    the way release.yml does (ant's `chain` feature, the embedded Radicle
+#    node, the Tor client and fat LTO — see "Building
+#    libfreedom_mobile_ffi.so" below). Chained with && so a failed step
+#    stops before a stale or chain-less .so is copied.
 git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
   git -C /tmp/freedom-mobile-ffi checkout v0.12.4 &&
-  scripts/enable-ffi-chain.sh /tmp/freedom-mobile-ffi &&
-  scripts/enable-ffi-radicle.sh /tmp/freedom-mobile-ffi &&
-  scripts/enable-ffi-tor.sh /tmp/freedom-mobile-ffi &&
-  scripts/enable-ffi-fat-lto.sh /tmp/freedom-mobile-ffi &&
-  ( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh ) &&
+  scripts/build-ffi.sh /tmp/freedom-mobile-ffi &&
   mkdir -p swarmnode/src/main/jniLibs &&
   cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
 
@@ -253,7 +249,7 @@ $ANDROID_HOME/build-tools/36.0.0/aapt2 dump badging app/build/outputs/apk/debug/
 `libfreedom_mobile_ffi.so` is both embedded nodes in one Rust cdylib — the ant Swarm light-node plus the freedom-ipfs reader, compiled per ABI from [`solardev-xyz/freedom-mobile-ffi`](https://github.com/solardev-xyz/freedom-mobile-ffi). Combining them in a single compilation graph dedupes everything the two dependency trees share (std, tokio, hyper/axum, libp2p, ring, SQLite, …), which is ~7 MiB per ABI versus shipping two separate `.so`s. It's **not checked in**; every fresh clone builds it once:
 
 ```bash
-# 0. Run from the root of this repo; later steps cd away and come back.
+# 0. Run from the root of this repo.
 FREEDOM_ANDROID="$PWD"
 
 # 1. Clone freedom-mobile-ffi at the ref release.yml pins as FFI_REF,
@@ -263,27 +259,23 @@ git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mo
 
 # 2. Cross-compile both ABIs. Needs cargo-ndk + ANDROID_NDK_HOME; rustup
 #    installs the pinned toolchain + targets from rust-toolchain.toml.
-#    The script also verifies both C ABIs are exported and stages the
-#    matching headers under target/android/headers/. It builds with
-#    --no-default-features (no `chain`, no `radicle`);
-#    scripts/enable-ffi-chain.sh (run from this repo) puts ant's `chain`
-#    feature back — the same helper release.yml calls — and fails if the
-#    script's cargo call has changed shape.
-#    scripts/enable-ffi-radicle.sh then extends that to `chain,radicle`,
-#    the embedded Radicle node, and scripts/enable-ffi-tor.sh to
-#    `chain,radicle,tor`, the Arti client for .onion (see below).
-#    scripts/enable-ffi-fat-lto.sh switches the release-android profile
-#    from thin to fat LTO (see "Library size" below).
-#    Chained with && so a failed helper stops before a chain-less build.
-"$FREEDOM_ANDROID/scripts/enable-ffi-chain.sh" /tmp/freedom-mobile-ffi &&
-  "$FREEDOM_ANDROID/scripts/enable-ffi-radicle.sh" /tmp/freedom-mobile-ffi &&
-  "$FREEDOM_ANDROID/scripts/enable-ffi-tor.sh" /tmp/freedom-mobile-ffi &&
-  "$FREEDOM_ANDROID/scripts/enable-ffi-fat-lto.sh" /tmp/freedom-mobile-ffi &&
-  cd /tmp/freedom-mobile-ffi &&
-  ./scripts/build-android.sh
+#    scripts/build-ffi.sh is the one build recipe, shared with release.yml
+#    (which keys its cache of the built library on it): it runs
+#    scripts/enable-ffi-chain.sh, which puts ant's `chain` feature back
+#    into freedom-mobile-ffi's --no-default-features build and fails if
+#    that script's cargo call has changed shape; enable-ffi-radicle.sh,
+#    which extends it to `chain,radicle`, the embedded Radicle node;
+#    enable-ffi-tor.sh, to `chain,radicle,tor`, the Arti client for .onion
+#    (see below); and enable-ffi-fat-lto.sh, which switches the
+#    release-android profile from thin to fat LTO (see "Library size"
+#    below). Then it runs the checkout's own scripts/build-android.sh,
+#    which verifies both C ABIs are exported and stages the matching
+#    headers under target/android/headers/, and checks both ABIs came out.
+#    Pass an ABI (arm64-v8a or x86_64) as a second argument to build only
+#    that one, as release.yml's per-ABI jobs do.
+"$FREEDOM_ANDROID/scripts/build-ffi.sh" /tmp/freedom-mobile-ffi
 
 # 3. Copy the results into Freedom.
-cd "$FREEDOM_ANDROID"
 mkdir -p swarmnode/src/main/jniLibs
 cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
 ```

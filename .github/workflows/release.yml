@@ -204,7 +204,10 @@ jobs:
           name: ffi-${{ matrix.abi }}
           path: native-out/jniLibs/
           if-no-files-found: error
-          retention-days: 3
+          # Long enough to "Re-run failed jobs" of apk/publish a week or so
+          # later without rebuilding: a re-run downloads this artifact
+          # from the original run.
+          retention-days: 14
 
       - name: Upload native diagnostics on failure
         if: failure()
@@ -270,7 +273,10 @@ jobs:
           name: colibri
           path: colibri-out/
           if-no-files-found: error
-          retention-days: 3
+          # Long enough to "Re-run failed jobs" of apk/publish a week or so
+          # later without rebuilding: a re-run downloads this artifact
+          # from the original run.
+          retention-days: 14
 
   unit-tests:
     # Not on the cache-filling runs (push to main, schedule).
@@ -386,7 +392,9 @@ jobs:
           name: release
           path: dist/
           if-no-files-found: error
-          retention-days: 1
+          # As the libraries above: a failed publish can be re-run on its
+          # own for as long as this lasts.
+          retention-days: 14
 
   publish:
     needs: [apk, unit-tests]
