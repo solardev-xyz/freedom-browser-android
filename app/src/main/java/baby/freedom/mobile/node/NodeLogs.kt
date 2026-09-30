@@ -173,12 +173,14 @@ object LogScrub {
      * rather than another field, that text goes too: more is taken out,
      * never less. (A decoded file name that itself holds ` key=` still
      * reads as the next field there; nothing tells the two apart.)
+     * `(?s)` and `\z`: a decoded path can hold U+2028, U+2029 or U+0085,
+     * which a plain `.` stops at and `$` matches before (R2-M1).
      */
     private val FIELD_KEY_ENDS = listOf(
         "path", "paths", "cid", "cids", "name", "names", "target", "targets", "url", "uri", "href",
         "referer", "referrer", "host", "hostname", "domain", "dnslink", "etag", "reference",
     )
-    private val FIELD_VALUE = Regex(""""(?:[^"\\]|\\.)*"|\[[^\]]*]|.*?(?=\}+:|\}*$|\}*\s+[A-Za-z_][\w.]*=)""").toPattern()
+    private val FIELD_VALUE = Regex("""(?s)"(?:[^"\\]|\\.)*"|\[[^\]]*]|.*?(?=\}+:|\}*\z|\}*\s+[A-Za-z_][\w.]*=)""").toPattern()
 
     /**
      * A DNSLink / IPNS name inside free text — freedom-ipfs's resolver
@@ -273,11 +275,13 @@ object LogScrub {
             var next = i + 1
             if (k < i && FIELD_KEY_ENDS.any { it.length <= i - k && s.regionMatches(i - it.length, it, 0, it.length) }) {
                 val m = (value ?: FIELD_VALUE.matcher(s).also { value = it }).region(i + 1, s.length)
-                m.lookingAt()
+                // The pattern always matches; if it ever didn't, the rest of
+                // the line goes rather than m.end() throwing (R2-M1).
+                val end = if (m.lookingAt()) m.end() else s.length
                 val sb = out ?: StringBuilder(s.length).also { out = it }
                 sb.append(s, copied, i + 1).append(REDACTED)
-                copied = m.end()
-                next = maxOf(m.end(), i + 1)
+                copied = end
+                next = maxOf(end, i + 1)
             }
             i = if (next < s.length) s.indexOf('=', next) else -1
         }
@@ -410,7 +414,7 @@ internal class LogcatEntries(input: InputStream, private val zone: ZoneId = Zone
             if (hdrSize < MIN_HEADER || hdrSize > MAX_HEADER) throw IOException("logcat entry header size $hdrSize")
             input.readFully(header, 4, hdrSize - 4)
             input.readFully(payload, 0, len)
-            val lid = if (hdrSize >= 24) int32(20) else 0
+            val lid = int32(20)
             if (lid !in TEXT_BUFFERS || len < 1) continue
             val tagEnd = indexOfNul(1, len)
             if (tagEnd < 0) continue
@@ -433,8 +437,12 @@ internal class LogcatEntries(input: InputStream, private val zone: ZoneId = Zone
     }
 
     companion object {
-        /** `logger_entry` v1 (no `lid`) is 20 bytes; v4 is 28. */
-        private const val MIN_HEADER = 20
+        /**
+         * `logger_entry` v3 is 24 bytes (with `lid`), v4 28 (with `uid`);
+         * logd writes nothing older. A v1 entry has no `hdr_size` (its
+         * `__pad` is 0), so it reads as out of step (R2-M2).
+         */
+        private const val MIN_HEADER = 24
         private const val MAX_HEADER = 100
 
         /** The text buffers: main, radio, system, crash, kernel. Not events, stats or security. */

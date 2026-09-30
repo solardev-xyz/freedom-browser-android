@@ -478,10 +478,10 @@ class NodeLogsTest {
     }
 
     @Test
-    fun `a v1 header reads, and other buffers' entries are skipped`() {
+    fun `a v3 header reads, and other buffers' entries are skipped`() {
         val lines = read(
             entry("from events", lid = 2),
-            entry("v1", hdrSize = 20),
+            entry("v1", hdrSize = 24),
             entry("from security", lid = 6),
             entry("from system", tag = "t", lid = 3),
         )
@@ -492,6 +492,8 @@ class NodeLogsTest {
     fun `a stream out of step fails rather than guess`() {
         val bad = entry("x", hdrSize = 28).also { it[2] = 3 }
         assertTrue(runCatching { read(entry("ok"), bad) }.exceptionOrNull() is java.io.IOException)
+        // A v1 entry: its __pad (where hdr_size would be) is 0.
+        assertTrue(runCatching { read(entry("ok"), entry("v1", hdrSize = 20).also { it[2] = 0 }) }.exceptionOrNull() is java.io.IOException)
         // Cut off mid-entry.
         assertTrue(runCatching { read(entry("ok").copyOf(30)) }.exceptionOrNull() is java.io.EOFException)
     }
@@ -509,6 +511,25 @@ class NodeLogsTest {
             listOf("after", "2026-09-30T05:13:07Z", "2026-09-30X05:13:07Z m", "m", "bold$esc[ not an escape ok"),
             lines.map { it.message },
         )
+    }
+
+    @Test
+    fun `a line or paragraph separator inside a bare value is taken out with it`() {
+        for (sep in listOf("\u2028", "\u2029", "\u0085", "\u2028\u2029")) {
+            val out = LogScrub.scrub(
+                "gateway_request{path=/ipfs/x/r2probe${sep}zzsecret diary.html range=}: phase=\"a\" path=/ipfs/x/a${sep}secret b",
+            )
+            assertFalse(out, "secret" in out)
+            assertFalse(out, "diary" in out)
+            assertTrue(out, "range=" in out && "phase=" in out)
+        }
+        // Also as the whole message, run through the reader: no failure, no line lost.
+        val lines = read(
+            request("r2probe\u2028zzsecret diary.html", "start"),
+            entry("after"),
+        )
+        assertEquals(2, lines.size)
+        assertFalse(lines[0].message, "secret" in LogScrub.scrub(lines[0].message))
     }
 
     private val cid = "k2jmtxt6f4hf4f8e0j7xq5d7sxkqk1n2ajr8lkq0f2pcw6qg0tmckx0ae"
