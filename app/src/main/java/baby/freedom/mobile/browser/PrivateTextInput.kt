@@ -35,7 +35,8 @@ internal fun tabImeOptions(imeOptions: Int, private: Boolean): Int =
  *
  * [onCommitText], if given, hears the text the keyboard commits, just
  * before the field applies it (the Import page tells a paste over the very
- * same text from a mere selection change by it — [PastedPhrases]).
+ * same text from a mere selection change by it — [PastedPhrases]), and
+ * hears `null` if the connection then refused the commit ([reportingCommit]).
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -56,19 +57,16 @@ internal fun TabTextInput(
                             connection
                         } else {
                             object : InputConnectionWrapper(connection, false) {
-                                override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                                    commitText?.invoke(text)
-                                    return super.commitText(text, newCursorPosition)
-                                }
+                                override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean =
+                                    reportingCommit(text, commitText) { super.commitText(text, newCursorPosition) }
 
                                 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
                                 override fun commitText(
                                     text: CharSequence,
                                     newCursorPosition: Int,
                                     textAttribute: TextAttribute?,
-                                ): Boolean {
-                                    commitText?.invoke(text)
-                                    return super.commitText(text, newCursorPosition, textAttribute)
+                                ): Boolean = reportingCommit(text, commitText) {
+                                    super.commitText(text, newCursorPosition, textAttribute)
                                 }
                             }
                         }
@@ -78,4 +76,20 @@ internal fun TabTextInput(
         }
     }
     InterceptPlatformTextInput(interceptor = interceptor, content = content)
+}
+
+/**
+ * Runs [commit], a keyboard's commit of [text], telling [report] about it
+ * first: the field applies a commit inside [commit], so it must already
+ * know what's coming. If [commit] refused it (an inactive connection
+ * answers `false` and edits nothing), [report] hears `null` after, so the
+ * text isn't left waiting to be taken for the next, unrelated edit.
+ */
+internal inline fun reportingCommit(
+    text: CharSequence?,
+    noinline report: ((CharSequence?) -> Unit)?,
+    commit: () -> Boolean,
+): Boolean {
+    report?.invoke(text)
+    return commit().also { applied -> if (!applied) report?.invoke(null) }
 }

@@ -1736,8 +1736,9 @@ internal fun ImportPhrasePage(
                 SectionCard(title = "Recovery phrase") {
                     Text(
                         "Type or paste the words, separated by spaces. They’re encrypted on this " +
-                            "phone only and never sent anywhere. A pasted phrase is taken off the " +
-                            "clipboard when you tap Import wallet or leave this page.",
+                            "phone only and never sent anywhere. A phrase pasted in, or copied out of " +
+                            "this field, is taken off the clipboard when you tap Import wallet or " +
+                            "leave this page.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
