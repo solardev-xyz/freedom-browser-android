@@ -1,6 +1,8 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.l10n.Strings
 
 /**
  * The address a bookmark's edited URL field saves (#264), read the way
@@ -31,9 +33,9 @@ internal sealed interface BookmarkAddress {
 internal fun bookmarkAddress(input: String): BookmarkAddress {
     val trimmed = input.trim()
     val url = when (AddressInput.classify(trimmed)) {
-        null -> return BookmarkAddress.Invalid("Enter an address")
+        null -> return BookmarkAddress.Invalid(Strings.get(R.string.library_bookmark_enter_address))
         AddressInput.Kind.Search ->
-            return BookmarkAddress.Invalid("Not an address: the address bar would search the web for this")
+            return BookmarkAddress.Invalid(Strings.get(R.string.library_bookmark_not_an_address))
         AddressInput.Kind.Dweb -> trimmed
         // Not a search, so [UrlParser.toUrl] never reaches its search
         // template.
@@ -42,7 +44,7 @@ internal fun bookmarkAddress(input: String): BookmarkAddress {
     return if (BrowsingRepository.isRecordable(url)) {
         BookmarkAddress.Ok(BookmarkUrls.canonical(url))
     } else {
-        BookmarkAddress.Invalid("This address can't be bookmarked")
+        BookmarkAddress.Invalid(Strings.get(R.string.library_bookmark_cannot_bookmark))
     }
 }
 
@@ -63,11 +65,11 @@ internal fun bookmarkTitle(input: String): String =
 internal fun bookmarkMoves(ids: List<Long>, index: Int): List<Pair<String, Long?>> = buildList {
     if (index !in ids.indices) return@buildList
     if (index > 0) {
-        add("Move up" to ids.getOrNull(index - 2))
-        if (index > 1) add("Move to top" to null)
+        add(Strings.get(R.string.library_bookmark_move_up) to ids.getOrNull(index - 2))
+        if (index > 1) add(Strings.get(R.string.library_bookmark_move_to_top) to null)
     }
     if (index < ids.lastIndex) {
-        add("Move down" to ids[index + 1])
-        if (index < ids.lastIndex - 1) add("Move to bottom" to ids.last())
+        add(Strings.get(R.string.library_bookmark_move_down) to ids[index + 1])
+        if (index < ids.lastIndex - 1) add(Strings.get(R.string.library_bookmark_move_to_bottom) to ids.last())
     }
 }

@@ -41,11 +41,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.DownloadEntry
 import baby.freedom.mobile.data.DownloadStatus
+import baby.freedom.mobile.l10n.Strings
 import kotlinx.coroutines.delay
 import java.text.DateFormat
 import java.util.Date
@@ -73,14 +77,14 @@ fun DownloadsScreen(
     }
 
     FullScreenScaffold(
-        title = "Downloads",
+        title = stringResource(R.string.library_downloads_title),
         onDismiss = onDismiss,
     ) {
         if (entries.isEmpty()) {
             EmptyState(
                 icon = Icons.Outlined.Download,
-                title = "No downloads yet",
-                hint = "Files you download from web and dweb pages will show up here.",
+                title = stringResource(R.string.library_downloads_empty_title),
+                hint = stringResource(R.string.library_downloads_empty_hint),
             )
         } else {
             LazyColumn(
@@ -109,7 +113,11 @@ fun DownloadsScreen(
 
 /** "12.0 MB of 40.0 MB", or "12.0 MB downloaded" with no known total. */
 private fun downloadBytesLine(received: Long, total: Long?): String =
-    if (total != null) "${formatBytes(received)} of ${formatBytes(total)}" else "${formatBytes(received)} downloaded"
+    if (total != null) {
+        Strings.get(R.string.library_download_bytes_of_total, formatBytes(received), formatBytes(total))
+    } else {
+        Strings.get(R.string.library_download_bytes_downloaded, formatBytes(received))
+    }
 
 /** The status line under a download's name. */
 internal fun downloadStatusLine(entry: DownloadEntry, live: DownloadProgress?, timestamp: String): String =
@@ -118,24 +126,35 @@ internal fun downloadStatusLine(entry: DownloadEntry, live: DownloadProgress?, t
             val received = live?.received ?: 0
             val total = live?.total?.takeIf { it > 0 } ?: entry.totalBytes.takeIf { it > 0 }
             val line = when {
-                live == null -> "Starting…"
-                live.saving -> "Saving to Downloads…"
+                live == null -> Strings.get(R.string.library_download_status_starting)
+                live.saving -> Strings.get(R.string.library_download_status_saving)
                 else -> downloadBytesLine(received, total)
             }
             // "Restarted from the beginning: …" after a resume that
             // couldn't pick up where it left off.
-            entry.note?.let { "$line · $it" } ?: line
+            entry.note?.let { Strings.get(R.string.library_download_status_with_note, line, it) } ?: line
         }
         DownloadStatus.PAUSED -> {
-            val why = entry.note?.let { "Paused: ${it.replaceFirstChar(Char::lowercaseChar)}" } ?: "Paused"
+            val why = entry.note?.let {
+                Strings.get(R.string.library_download_status_paused_reason, it.replaceFirstChar(Char::lowercaseChar))
+            } ?: Strings.get(R.string.library_download_status_paused)
             val bytes = downloadBytesLine(entry.receivedBytes, entry.totalBytes.takeIf { it > 0 })
             // No validator to check a range against: Resume starts over.
             val whole = entry.totalBytes > 0 && entry.receivedBytes == entry.totalBytes
-            if (entry.validator == null && !whole) "$why · $bytes · resuming starts over" else "$why · $bytes"
+            if (entry.validator == null && !whole) {
+                Strings.get(R.string.library_download_status_paused_line_restarts, why, bytes)
+            } else {
+                Strings.get(R.string.library_download_status_paused_line, why, bytes)
+            }
         }
-        DownloadStatus.COMPLETED -> "${formatBytes(entry.receivedBytes)} · $timestamp"
-        DownloadStatus.CANCELLED -> "Cancelled · $timestamp"
-        else -> "Failed: ${entry.error ?: "unknown error"} · $timestamp"
+        DownloadStatus.COMPLETED ->
+            Strings.get(R.string.library_download_status_completed, formatBytes(entry.receivedBytes), timestamp)
+        DownloadStatus.CANCELLED -> Strings.get(R.string.library_download_status_cancelled, timestamp)
+        else -> Strings.get(
+            R.string.library_download_status_failed,
+            entry.error ?: Strings.get(R.string.library_download_unknown_error),
+            timestamp,
+        )
     }
 
 @Composable
@@ -221,18 +240,18 @@ private fun DownloadRow(
         }
         Spacer(Modifier.width(8.dp))
         if (canRetry) {
-            RowAction(Icons.Filled.Refresh, "Retry", onRetry)
+            RowAction(Icons.Filled.Refresh, stringResource(R.string.common_retry), onRetry)
         }
         if (running && canPause) {
-            RowAction(Icons.Filled.Pause, "Pause download", onPause)
+            RowAction(Icons.Filled.Pause, stringResource(R.string.library_download_pause), onPause)
         }
         if (paused) {
-            RowAction(Icons.Filled.PlayArrow, "Resume download", onResume)
+            RowAction(Icons.Filled.PlayArrow, stringResource(R.string.library_download_resume), onResume)
         }
         if (running || paused) {
-            RowAction(Icons.Filled.Close, "Cancel download", onCancel)
+            RowAction(Icons.Filled.Close, stringResource(R.string.library_download_cancel), onCancel)
         } else {
-            RowAction(Icons.Filled.Close, "Remove from list", onRemove)
+            RowAction(Icons.Filled.Close, stringResource(R.string.library_download_remove_from_list), onRemove)
         }
     }
 }
@@ -254,7 +273,7 @@ private fun RowAction(
 
 /** The line under an offered file's name: its size, or that it's unknown. */
 internal fun downloadOfferSizeLine(totalBytes: Long): String =
-    if (totalBytes > 0) formatBytes(totalBytes) else "Size unknown"
+    if (totalBytes > 0) formatBytes(totalBytes) else Strings.get(R.string.library_download_size_unknown)
 
 /**
  * How long each offer's Download button stays disabled after it
@@ -269,8 +288,7 @@ internal const val DOWNLOAD_OFFER_ARM_DELAY_MS = 1_000L
 
 /** The prompt's note that a tab asked for more than [MAX_PENDING_OFFERS] at once. */
 internal fun downloadOfferDroppedLine(dropped: Int): String =
-    (if (dropped == 1) "1 further download from this tab wasn't" else "$dropped further downloads from this tab weren't") +
-        " offered: $MAX_PENDING_OFFERS were already waiting."
+    Strings.plural(R.plurals.library_download_offer_dropped, dropped, dropped, MAX_PENDING_OFFERS)
 
 /**
  * "Download file?" for a download a page asked for (#79): its name,
@@ -301,31 +319,31 @@ internal fun DownloadOfferDialog(
     val secondary = MaterialTheme.colorScheme.onSurfaceVariant
     AlertDialog(
         onDismissRequest = onDecline,
-        title = { Text("Download file?") },
+        title = { Text(stringResource(R.string.library_download_offer_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(offer.fileName, fontWeight = FontWeight.SemiBold)
                 Text(downloadOfferSizeLine(offer.totalBytes))
                 Text(
-                    "From ${offer.source}",
+                    stringResource(R.string.library_download_offer_from, offer.source),
                     color = secondary,
                     style = MaterialTheme.typography.bodySmall,
                 )
                 offer.requestedBy?.let { page ->
                     Text(
-                        "Requested by $page",
+                        stringResource(R.string.library_download_offer_requested_by, page),
                         color = secondary,
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
-                        "Cancel also blocks further downloads from this tab until you reload it or enter an address.",
+                        stringResource(R.string.library_download_offer_cancel_blocks),
                         color = secondary,
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
                 if (othersWaiting > 0) {
                     Text(
-                        if (othersWaiting == 1) "1 more download waiting" else "$othersWaiting more downloads waiting",
+                        pluralStringResource(R.plurals.library_download_offer_more_waiting, othersWaiting, othersWaiting),
                         color = secondary,
                         style = MaterialTheme.typography.bodySmall,
                     )
@@ -340,14 +358,14 @@ internal fun DownloadOfferDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onAccept, enabled = armed) { Text("Download") }
+            TextButton(onClick = onAccept, enabled = armed) { Text(stringResource(R.string.library_download_offer_download)) }
         },
         dismissButton = {
             Row {
                 if (othersWaiting > 0) {
-                    TextButton(onClick = onDeclineAll) { Text("Cancel all") }
+                    TextButton(onClick = onDeclineAll) { Text(stringResource(R.string.library_download_offer_cancel_all)) }
                 }
-                TextButton(onClick = onDecline) { Text("Cancel") }
+                TextButton(onClick = onDecline) { Text(stringResource(R.string.common_cancel)) }
             }
         },
     )

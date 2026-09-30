@@ -1,6 +1,10 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
+import java.math.RoundingMode
 import java.net.URLDecoder
+import java.text.NumberFormat
 import java.util.Base64
 
 /**
@@ -264,17 +268,33 @@ private fun clampFileName(name: String): String {
 
 /** "1.4 MB" — the unit ladder the downloads list shows sizes in. */
 internal fun formatBytes(bytes: Long): String {
-    if (bytes < 1024) return "$bytes B"
-    val units = listOf("KB", "MB", "GB", "TB")
+    if (bytes < 1024) return Strings.get(R.string.library_size_bytes, sizeNumber(bytes.toDouble(), 0))
+    val units = listOf(
+        R.string.library_size_kb,
+        R.string.library_size_mb,
+        R.string.library_size_gb,
+        R.string.library_size_tb,
+    )
     var value = bytes / 1024.0
     var unit = 0
     while (value >= 1024 && unit < units.lastIndex) {
         value /= 1024
         unit++
     }
-    return if (value >= 100) "${value.toLong()} ${units[unit]}"
-    else String.format(java.util.Locale.US, "%.1f %s", value, units[unit])
+    return Strings.get(units[unit], if (value >= 100) sizeNumber(value, 0) else sizeNumber(value, 1))
 }
+
+/**
+ * [value] in the user's locale ("1.5", "1,5") with [digits] decimals,
+ * no grouping: whole numbers are cut off, one decimal is rounded half up.
+ */
+private fun sizeNumber(value: Double, digits: Int): String =
+    NumberFormat.getNumberInstance().apply {
+        minimumFractionDigits = digits
+        maximumFractionDigits = digits
+        isGroupingUsed = false
+        roundingMode = if (digits == 0) RoundingMode.DOWN else RoundingMode.HALF_UP
+    }.format(value)
 
 /**
  * The origin (`https://host[:port]/`) of the page a web download came
@@ -329,7 +349,7 @@ internal fun downloadRequester(pageUrl: String?, gatewayDisplay: (String) -> Str
     }
     webOrigin(pageUrl)?.let { return it }
     val scheme = pageUrl.substringBefore(':', "").lowercase()
-    return if (scheme.isNotEmpty() && scheme.all { it.isLetterOrDigit() || it in "+-." }) "$scheme:" else "a page"
+    return if (scheme.isNotEmpty() && scheme.all { it.isLetterOrDigit() || it in "+-." }) "$scheme:" else Strings.get(R.string.library_download_requester_unknown)
 }
 
 
@@ -347,14 +367,14 @@ internal sealed class DownloadRedirect {
  * somewhere deeper with a generic error.
  */
 internal fun downloadRedirect(current: String, location: String?): DownloadRedirect {
-    if (location.isNullOrBlank()) return DownloadRedirect.Refuse("Redirect without a location")
+    if (location.isNullOrBlank()) return DownloadRedirect.Refuse(Strings.get(R.string.library_download_redirect_no_location))
     val resolved = runCatching { java.net.URL(java.net.URL(current), location.trim()) }.getOrNull()
     val scheme = resolved?.protocol?.lowercase()
         ?: Regex("^([A-Za-z][A-Za-z0-9+.-]*):").find(location.trim())?.groupValues?.get(1)?.lowercase()
     return when {
         scheme != null && scheme != "http" && scheme != "https" ->
-            DownloadRedirect.Refuse("Redirected to an unsupported $scheme: link")
-        resolved == null || resolved.host.isNullOrEmpty() -> DownloadRedirect.Refuse("Malformed redirect")
+            DownloadRedirect.Refuse(Strings.get(R.string.library_download_redirect_unsupported, scheme))
+        resolved == null || resolved.host.isNullOrEmpty() -> DownloadRedirect.Refuse(Strings.get(R.string.library_download_redirect_malformed))
         else -> DownloadRedirect.Follow(resolved.toString())
     }
 }

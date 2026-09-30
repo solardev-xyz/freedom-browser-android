@@ -1,6 +1,9 @@
 package baby.freedom.mobile.browser
 
 import android.Manifest
+import androidx.annotation.StringRes
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -68,16 +71,26 @@ sealed interface SiteCapability {
 
 enum class SitePermission(
     override val key: String,
-    override val label: String,
-    override val phrase: String,
+    @StringRes private val labelRes: Int,
+    @StringRes private val phraseRes: Int,
     override val androidPermissions: List<String>,
 ) : SiteCapability {
-    CAMERA("camera", "Camera", "use your camera", listOf(Manifest.permission.CAMERA)),
-    MICROPHONE("microphone", "Microphone", "use your microphone", listOf(Manifest.permission.RECORD_AUDIO)),
+    CAMERA(
+        "camera",
+        R.string.library_permission_camera,
+        R.string.library_permission_camera_phrase,
+        listOf(Manifest.permission.CAMERA),
+    ),
+    MICROPHONE(
+        "microphone",
+        R.string.library_permission_microphone,
+        R.string.library_permission_microphone_phrase,
+        listOf(Manifest.permission.RECORD_AUDIO),
+    ),
     LOCATION(
         "geolocation",
-        "Location",
-        "know your location",
+        R.string.library_permission_location,
+        R.string.library_permission_location_phrase,
         listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
     ),
 
@@ -92,7 +105,7 @@ enum class SitePermission(
      * Keyed `midi` like the desktop browser (whose one decision covers
      * both). Android needs no runtime permission for it.
      */
-    MIDI("midi", "MIDI SysEx", "send system-exclusive messages to your MIDI devices", emptyList()),
+    MIDI("midi", R.string.library_permission_midi, R.string.library_permission_midi_phrase, emptyList()),
 
     /**
      * Pop-ups a page opens without the user's gesture (#261). Never
@@ -101,8 +114,12 @@ enum class SitePermission(
      * Read synchronously, from inside `onCreateWindow`
      * ([SitePermissionBroker.popupsAllowed]).
      */
-    POPUPS("popups", "Pop-ups", "open pop-up windows", emptyList()),
+    POPUPS("popups", R.string.library_permission_popups, R.string.library_permission_popups_phrase, emptyList()),
     ;
+
+    override val label: String get() = Strings.get(labelRes)
+
+    override val phrase: String get() = Strings.get(phraseRes)
 
     companion object {
         fun forKey(key: String): SitePermission? = entries.firstOrNull { it.key == key }
@@ -146,9 +163,8 @@ fun isProtectedMediaResource(resource: String): Boolean =
  * per run. Names no site: it shows over the page that asked, and in a
  * private tab it mustn't be a trace of where the user was.
  */
-const val PROTECTED_MEDIA_NOTICE =
-    "This page wanted to play protected (DRM) video. Freedom doesn't allow it, " +
-        "as it would identify your device to the video's provider — so the video won't play."
+val PROTECTED_MEDIA_NOTICE: String
+    get() = Strings.get(R.string.library_permission_protected_media_notice)
 
 enum class PermissionDecision(val stored: String) {
     ALLOW("allow"),
@@ -213,12 +229,27 @@ fun describePermissionRequest(permissions: Collection<SiteCapability>): String {
     val unique = permissions.distinct()
     val phrases = mutableListOf<String>()
     val av = SitePermission.CAMERA in unique && SitePermission.MICROPHONE in unique
-    if (av) phrases += "use your camera and microphone"
+    if (av) phrases += Strings.get(R.string.library_permission_camera_and_microphone_phrase)
     for (p in unique) {
         if (av && (p == SitePermission.CAMERA || p == SitePermission.MICROPHONE)) continue
         phrases += p.phrase
     }
-    return phrases.joinToString(" and ").ifEmpty { "use a device" }
+    return joinWithAnd(phrases) ?: Strings.get(R.string.library_permission_device_phrase)
+}
+
+/** "a and b and c" for a list inside a sentence; null for none. */
+internal fun joinWithAnd(items: List<String>): String? =
+    items.reduceOrNull { acc, item -> Strings.get(R.string.library_permission_list_and, acc, item) }
+
+/**
+ * [permission]'s name inside a sentence ("your camera"), for the ones
+ * Android has to allow the app.
+ */
+internal fun permissionNoun(permission: SitePermission): String = when (permission) {
+    SitePermission.CAMERA -> Strings.get(R.string.library_permission_camera_noun)
+    SitePermission.MICROPHONE -> Strings.get(R.string.library_permission_microphone_noun)
+    SitePermission.LOCATION -> Strings.get(R.string.library_permission_location_noun)
+    else -> permission.label.lowercase()
 }
 
 /** What the user did with a prompt. */
@@ -751,9 +782,9 @@ fun mediaInUseLabel(inUse: Set<SitePermission>): String? {
     val camera = SitePermission.CAMERA in inUse
     val mic = SitePermission.MICROPHONE in inUse
     return when {
-        camera && mic -> "Camera and microphone in use"
-        camera -> "Camera in use"
-        mic -> "Microphone in use"
+        camera && mic -> Strings.get(R.string.library_permission_camera_and_microphone_in_use)
+        camera -> Strings.get(R.string.library_permission_camera_in_use)
+        mic -> Strings.get(R.string.library_permission_microphone_in_use)
         else -> null
     }
 }
@@ -765,16 +796,23 @@ fun mediaInUseLabel(inUse: Set<SitePermission>): String? {
  * last until the private tabs are closed.
  */
 fun sitePermissionStateLabel(entry: SitePermissionEntry, private: Boolean = false): String {
-    val scope = when {
-        private -> " (private tabs)"
-        entry.remembered -> ""
-        else -> " (this session)"
-    }
+    val n = PermissionSession.DISMISS_EMBARGO_THRESHOLD
     return when {
-        entry.embargoed ->
-            "Blocked after ${PermissionSession.DISMISS_EMBARGO_THRESHOLD} dismissals$scope"
-        entry.decision == PermissionDecision.ALLOW -> "Allowed$scope"
-        else -> "Blocked$scope"
+        entry.embargoed -> when {
+            private -> Strings.plural(R.plurals.library_permission_embargoed_private, n, n)
+            entry.remembered -> Strings.plural(R.plurals.library_permission_embargoed, n, n)
+            else -> Strings.plural(R.plurals.library_permission_embargoed_session, n, n)
+        }
+        entry.decision == PermissionDecision.ALLOW -> when {
+            private -> Strings.get(R.string.library_permission_allowed_private)
+            entry.remembered -> Strings.get(R.string.library_permission_allowed)
+            else -> Strings.get(R.string.library_permission_allowed_session)
+        }
+        else -> when {
+            private -> Strings.get(R.string.library_permission_blocked_private)
+            entry.remembered -> Strings.get(R.string.library_permission_blocked)
+            else -> Strings.get(R.string.library_permission_blocked_session)
+        }
     }
 }
 
@@ -800,18 +838,19 @@ fun stillHeldAfterRemoval(removed: Set<SitePermission>, inUse: Set<SitePermissio
  */
 fun stillHeldNote(held: Set<SitePermission>): String? {
     val media = listOf(SitePermission.CAMERA, SitePermission.MICROPHONE).filter { it in held }
-    val mediaPart = media.joinToString(" and ") { it.label.lowercase() }
+    val mediaPart = joinWithAnd(media.map(::permissionNoun))
     // What the page can go on doing until it's reloaded.
-    val untilReload = listOfNotNull(
-        "get your location".takeIf { SitePermission.LOCATION in held },
-        SitePermission.MIDI.phrase.takeIf { SitePermission.MIDI in held },
-    ).joinToString(" and ")
+    val untilReload = joinWithAnd(
+        listOfNotNull(
+            Strings.get(R.string.library_permission_still_held_get_location).takeIf { SitePermission.LOCATION in held },
+            SitePermission.MIDI.phrase.takeIf { SitePermission.MIDI in held },
+        ),
+    )
     return when {
-        media.isNotEmpty() && untilReload.isNotEmpty() ->
-            "This page keeps your $mediaPart until it stops using it or is reloaded, " +
-                "and can still $untilReload until it's reloaded."
-        media.isNotEmpty() -> "This page keeps your $mediaPart until it stops using it or is reloaded."
-        untilReload.isNotEmpty() -> "This page can still $untilReload until it's reloaded."
+        mediaPart != null && untilReload != null ->
+            Strings.get(R.string.library_permission_still_held_media_and_more, mediaPart, untilReload)
+        mediaPart != null -> Strings.get(R.string.library_permission_still_held_media, mediaPart)
+        untilReload != null -> Strings.get(R.string.library_permission_still_held_more, untilReload)
         else -> null
     }
 }
@@ -829,4 +868,4 @@ fun sitePermissionsSummary(
     stillHeld: Set<SitePermission> = emptySet(),
 ): String? =
     entries.map { it.permission.label }.distinct().joinToString(" · ").ifEmpty { null }
-        ?: stillHeld.joinToString(" · ") { it.label }.ifEmpty { null }?.let { "$it kept until reload" }
+        ?: stillHeld.joinToString(" · ") { it.label }.ifEmpty { null }?.let { Strings.get(R.string.library_permission_kept_until_reload, it) }

@@ -33,12 +33,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 
 /** The glyph a site capability is listed with, here and in Settings. */
 internal fun sitePermissionIcon(capability: SiteCapability): ImageVector = when (capability) {
@@ -101,7 +103,7 @@ fun PageSitePermissionsSheet(
         onDismissRequest = onDismiss,
         title = {
             Column {
-                Text("Site permissions")
+                Text(stringResource(R.string.library_site_permissions_title))
                 if (pageOrigin != null) {
                     // In full, wrapping: a host's tail is what a spoof hides.
                     Text(
@@ -120,10 +122,10 @@ fun PageSitePermissionsSheet(
                 if (entries.isEmpty()) {
                     Text(
                         if (heldNote == null) {
-                            "This site has no permissions. It will ask again if it needs one."
+                            stringResource(R.string.library_site_permissions_none)
                         } else {
                             // Not "no permissions": the page still has what's below.
-                            "Nothing is saved for this site any more."
+                            stringResource(R.string.library_site_permissions_nothing_saved)
                         },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -150,9 +152,9 @@ fun PageSitePermissionsSheet(
                 }
                 Text(
                     if (private) {
-                        "Private tab: these last until you close your private tabs."
+                        stringResource(R.string.library_site_permissions_private)
                     } else {
-                        "Removing one lets the site ask again. Settings › Site permissions lists every site."
+                        stringResource(R.string.library_site_permissions_removing_hint)
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -161,14 +163,14 @@ fun PageSitePermissionsSheet(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Done") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_done)) }
         },
         dismissButton = if (heldNote != null) {
             {
                 TextButton(onClick = {
                     onDismiss()
                     onReload()
-                }) { Text("Reload page") }
+                }) { Text(stringResource(R.string.library_site_permissions_reload)) }
             }
         } else {
             null
@@ -200,14 +202,16 @@ private fun PageSitePermissionRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(entry.permission.label, fontWeight = FontWeight.Medium)
             Text(
-                sitePermissionStateLabel(entry, private) + if (inUse) " · in use now" else "",
+                sitePermissionStateLabel(entry, private).let {
+                    if (inUse) stringResource(R.string.library_site_permissions_in_use_now, it) else it
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             // A frame inside the page asked for this one, under its own site.
             if (entry.origin != pageOrigin) {
                 Text(
-                    "Embedded: $site",
+                    stringResource(R.string.library_site_permissions_embedded, site),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -216,7 +220,7 @@ private fun PageSitePermissionRow(
         IconButton(onClick = onRevoke) {
             Icon(
                 Icons.Filled.Close,
-                contentDescription = "Remove ${entry.permission.label} permission for $site",
+                contentDescription = stringResource(R.string.library_site_permissions_remove, entry.permission.label, site),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -246,7 +250,7 @@ fun MediaInUseIndicator(
     ) {
         Row(
             modifier = Modifier
-                .clickable(onClickLabel = "Site permissions", role = Role.Button, onClick = onClick)
+                .clickable(onClickLabel = stringResource(R.string.library_site_permissions_title), role = Role.Button, onClick = onClick)
                 .heightIn(min = 36.dp)
                 .padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,

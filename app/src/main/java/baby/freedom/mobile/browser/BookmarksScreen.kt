@@ -47,12 +47,14 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BookmarkEntry
 import baby.freedom.mobile.data.BrowsingRepository
 import kotlinx.coroutines.CancellationException
@@ -114,14 +116,14 @@ fun BookmarksScreen(
     val currentShown by rememberUpdatedState(shown)
 
     FullScreenScaffold(
-        title = "Bookmarks",
+        title = stringResource(R.string.library_bookmarks_title),
         onDismiss = onDismiss,
     ) {
         if (shown.isEmpty()) {
             EmptyState(
                 icon = Icons.Outlined.BookmarkBorder,
-                title = "No bookmarks yet",
-                hint = "Tap the star in the menu while on a page to save it.",
+                title = stringResource(R.string.library_bookmarks_empty_title),
+                hint = stringResource(R.string.library_bookmarks_empty_hint),
             )
         } else {
             val ids = shown.map { it.id }
@@ -191,6 +193,8 @@ private fun BookmarkRow(
     modifier: Modifier = Modifier,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    val editLabel = stringResource(R.string.common_edit)
+    val removeLabel = stringResource(R.string.common_remove)
     PageRow(
         title = entry.title.ifBlank { entry.url },
         subtitle = entry.url,
@@ -200,7 +204,7 @@ private fun BookmarkRow(
         // and Remove, so the whole menu is on the row itself (#279).
         modifier = modifier.semantics {
             customActions = listOf(
-                CustomAccessibilityAction("Edit") {
+                CustomAccessibilityAction(editLabel) {
                     onEdit()
                     true
                 },
@@ -209,7 +213,7 @@ private fun BookmarkRow(
                     onMove(afterId)
                     true
                 }
-            } + CustomAccessibilityAction("Remove") {
+            } + CustomAccessibilityAction(removeLabel) {
                 onRemove()
                 true
             }
@@ -226,13 +230,13 @@ private fun BookmarkRow(
                 ) {
                     Icon(
                         Icons.Filled.MoreVert,
-                        contentDescription = "Bookmark options",
+                        contentDescription = stringResource(R.string.library_bookmark_options),
                         modifier = Modifier.size(20.dp),
                     )
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     DropdownMenuItem(
-                        text = { Text("Edit") },
+                        text = { Text(editLabel) },
                         onClick = {
                             menuOpen = false
                             onEdit()
@@ -248,7 +252,7 @@ private fun BookmarkRow(
                         )
                     }
                     DropdownMenuItem(
-                        text = { Text("Remove") },
+                        text = { Text(removeLabel) },
                         onClick = {
                             menuOpen = false
                             onRemove()
