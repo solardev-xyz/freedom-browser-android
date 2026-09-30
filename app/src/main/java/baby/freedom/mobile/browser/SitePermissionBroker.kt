@@ -272,11 +272,13 @@ class SitePermissionBroker private constructor(
      * isn't the page's), and which of those the user has since removed
      * while the document still holds them ([revokedHeld], per origin
      * too) — from any tab's sheet or Settings, not only this tab's own
-     * sheet ([noteRemoved]). WebView can't take a grant back from a live
-     * document — a camera stream runs on, and a location grant keeps
-     * answering the document's watches and new requests without asking —
-     * so the sheet keeps saying so, and offering a reload, however often
-     * it's closed and reopened over this document.
+     * sheet ([noteRemoved]) — until the site is allowed them again, from
+     * any tab of the tier ([noteAllowedAgain]). WebView can't take a
+     * grant back from a live document — a camera stream runs on, and a
+     * location grant keeps answering the document's watches and new
+     * requests without asking — so the sheet keeps saying so, and
+     * offering a reload, however often it's closed and reopened over
+     * this document.
      * [doc] is the tab's document number ([documents]), so a sheet opened
      * over one document can tell when another has replaced it.
      */
@@ -293,13 +295,23 @@ class SitePermissionBroker private constructor(
         fun grantedTo(origin: String): Set<SitePermission> = grants[origin].orEmpty()
 
         /** After [origin] gets [more] (again) in this document: no longer revoked. */
-        fun granting(origin: String, more: Collection<SitePermission>): DocumentPermissions {
-            val left = revokedHeld[origin].orEmpty() - more.toSet()
-            return copy(
+        fun granting(origin: String, more: Collection<SitePermission>): DocumentPermissions =
+            allowedAgain(origin, more).copy(
                 origins = origins + origin,
                 grants = if (more.isEmpty()) grants else grants + (origin to grantedTo(origin) + more),
-                revokedHeld = if (left.isEmpty()) revokedHeld - origin else revokedHeld + (origin to left),
             )
+
+        /**
+         * After [origin] is allowed [again] — from this document or any
+         * other of its tier: what this document still holds of it is no
+         * longer "removed" but allowed, so there's nothing a reload would
+         * take away. Nothing is granted to this document by it.
+         */
+        fun allowedAgain(origin: String, again: Collection<SitePermission>): DocumentPermissions {
+            val held = revokedHeld[origin] ?: return this
+            val left = held - again.toSet()
+            if (left == held) return this
+            return copy(revokedHeld = if (left.isEmpty()) revokedHeld - origin else revokedHeld + (origin to left))
         }
 
         /**
@@ -424,6 +436,19 @@ class SitePermissionBroker private constructor(
             revokingInDocuments(all, entry) { tabId ->
                 (tabId in privateTabs) == private && all[tabId]?.doc == (documents[tabId] ?: 0)
             }
+        }
+    }
+
+    /**
+     * [origin] was allowed [permissions] again in the [private] tier: no
+     * open document of that tier still holds them "removed" — the
+     * counterpart of [noteRemoved], so a re-grant from one tab clears the
+     * "kept until reload" note in every other.
+     */
+    private fun noteAllowedAgain(origin: String, permissions: Collection<SitePermission>, private: Boolean) {
+        if (permissions.isEmpty()) return
+        documentActivity.update { all ->
+            allowingAgainInDocuments(all, origin, permissions) { tabId -> (tabId in privateTabs) == private }
         }
     }
 
@@ -582,13 +607,19 @@ class SitePermissionBroker private constructor(
         // re-create the closed tab's lock.
         if (!live()) return finish(false)
         val lock = tabLocks.getOrPut(tab.id) { Mutex() }
+        val tier = sessionFor(tab)
+        // Removals of what's asked for, as of the decision below: read
+        // before the store is, so one landing while that read (or the
+        // prompt, or Android's dialog after it) is in flight is caught.
+        var removals = 0
         val siteAllowed = lock.withLock {
             var allowed: Boolean? = null
             while (allowed == null) {
                 if (!live()) return@withLock false
+                removals = tier.removalCount(origin, permissions)
                 val stored = storedDecisionsFor(tab, origin)
                 if (!live()) return@withLock false
-                allowed = when (val plan = planFor(origin, permissions, stored, sessionFor(tab))) {
+                allowed = when (val plan = planFor(origin, permissions, stored, tier)) {
                     PermissionPlan.Deny -> false
                     PermissionPlan.Grant -> true
                     // null: settled by another tab's answer meanwhile — re-plan.
@@ -597,8 +628,14 @@ class SitePermissionBroker private constructor(
             }
             allowed
         }
-        if (!siteAllowed || !live()) return finish(false)
-        finish(ensureAndroidPermissions(entry, permissions, live))
+        // Still this document's request, and nothing it was allowed has
+        // been removed since (from Settings or any sheet): the decision
+        // above still stands. Checked again once Android's own dialog is
+        // done — a request waiting for its tab to come on screen can wait
+        // a long time, and a removal made meanwhile must win.
+        fun stillAllowed() = live() && tier.removalCount(origin, permissions) == removals
+        if (!siteAllowed || !stillAllowed()) return finish(false)
+        finish(ensureAndroidPermissions(entry, permissions, ::stillAllowed) && stillAllowed())
     }
 
     /** What's remembered for [origin], as [tab] sees it: nothing, in a private tab. */
@@ -651,6 +688,7 @@ class SitePermissionBroker private constructor(
         }
         return when (answer) {
             is PromptAnswer.Allow -> {
+                noteAllowedAgain(origin, undecided.filterIsInstance<SitePermission>(), tab.private)
                 record(tier, origin, undecided, PermissionDecision.ALLOW, answer.remember && !tab.private)
                 true
             }
@@ -816,6 +854,18 @@ class SitePermissionBroker private constructor(
             inScope: (Long) -> Boolean,
         ): Map<Long, DocumentPermissions> =
             all.mapValues { (tabId, d) -> if (inScope(tabId)) d.revoking(entry) else d }
+
+        /**
+         * [all] after [origin] is allowed [permissions] again, for every
+         * tab [inScope] ([DocumentPermissions.allowedAgain]).
+         */
+        internal fun allowingAgainInDocuments(
+            all: Map<Long, DocumentPermissions>,
+            origin: String,
+            permissions: Collection<SitePermission>,
+            inScope: (Long) -> Boolean,
+        ): Map<Long, DocumentPermissions> =
+            all.mapValues { (tabId, d) -> if (inScope(tabId)) d.allowedAgain(origin, permissions) else d }
 
         private const val TAG = "SitePermissions"
 

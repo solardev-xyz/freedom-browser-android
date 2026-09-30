@@ -257,6 +257,7 @@ class PermissionSession(private val embargoes: Boolean = true) {
     private val decisions = LinkedHashMap<Key, PermissionDecision>()
     private val embargoed = HashSet<Key>()
     private val dismissals = HashMap<Key, Int>()
+    private val removals = HashMap<Key, Int>()
 
     /** Bumped on every change; observe it to re-read [entries]. */
     val version = kotlinx.coroutines.flow.MutableStateFlow(0)
@@ -302,8 +303,20 @@ class PermissionSession(private val embargoes: Boolean = true) {
         decisions.remove(k)
         embargoed.remove(k)
         dismissals.remove(k)
+        removals[k] = (removals[k] ?: 0) + 1
         version.value++
     }
+
+    /**
+     * How many times any of [permissions] has been removed for [origin]
+     * ([revoke]) this run. A request that was found allowed and is still
+     * on its way to the page (waiting for Android's own dialog, say)
+     * compares this with what it read before deciding: a removal in
+     * between means the site isn't allowed any more.
+     */
+    @Synchronized
+    fun removalCount(origin: String, permissions: Collection<SiteCapability>): Int =
+        permissions.distinct().sumOf { removals[Key(origin, it)] ?: 0 }
 
     @Synchronized
     fun entries(): List<SitePermissionEntry> = decisions.map { (k, d) ->

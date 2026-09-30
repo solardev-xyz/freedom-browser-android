@@ -617,6 +617,57 @@ class SitePermissionsTest {
     }
 
     @Test
+    fun `allowed again from another tab clears the kept-until-reload note in every document of that tier`() {
+        val page = "https://page.example"
+        val removed = SitePermissionBroker.DocumentPermissions(doc = 1)
+            .granting(page, listOf(SitePermission.LOCATION, SitePermission.CAMERA))
+            .revoking(entry(page, SitePermission.LOCATION))
+            .revoking(entry(page, SitePermission.CAMERA))
+        val other = SitePermissionBroker.DocumentPermissions(doc = 2)
+            .granting("https://other.example", listOf(SitePermission.LOCATION))
+            .revoking(entry("https://other.example", SitePermission.LOCATION))
+        val all = mapOf(1L to removed, 2L to removed, 3L to other, 5L to removed)
+        // Tab A (1) re-allowed location; tab 5 is in the other tier.
+        val after = SitePermissionBroker.allowingAgainInDocuments(all, page, listOf(SitePermission.LOCATION)) { it != 5L }
+        // Tab B (2), not the one that asked, no longer offers a reload for location…
+        assertEquals(setOf(SitePermission.CAMERA), after.getValue(2L).revokedHeld.getValue(page))
+        assertEquals(emptySet<SitePermission>(), after.getValue(2L).stillHeld(emptySet()))
+        assertNull(stillHeldNote(after.getValue(2L).stillHeld(emptySet())))
+        // …but keeps a camera still in use and removed, and its own grants.
+        assertEquals(setOf(SitePermission.CAMERA), after.getValue(2L).stillHeld(setOf(SitePermission.CAMERA)))
+        assertEquals(removed.grants, after.getValue(2L).grants)
+        assertEquals(removed.origins, after.getValue(2L).origins)
+        // Another site and the other tier are left alone.
+        assertEquals(other, after.getValue(3L))
+        assertEquals(removed, after.getValue(5L))
+        // Both allowed again: nothing is kept "removed" for the site.
+        val both = after.getValue(1L).allowedAgain(page, listOf(SitePermission.CAMERA))
+        assertEquals(emptyMap<String, Set<SitePermission>>(), both.revokedHeld)
+    }
+
+    @Test
+    fun `a removal is counted per site and permission, so a waiting grant can tell it lost its allow`() {
+        val tier = PermissionSession()
+        val site = "https://a.example"
+        val asked = listOf(SitePermission.LOCATION)
+        tier.record(site, SitePermission.LOCATION, PermissionDecision.ALLOW, remembered = true)
+        val before = tier.removalCount(site, asked)
+        // Unrelated removals don't touch it.
+        tier.revoke(site, SitePermission.CAMERA)
+        tier.revoke("https://b.example", SitePermission.LOCATION)
+        assertEquals(before, tier.removalCount(site, asked))
+        // A remembered Allow (not in the session tier at all) removed from Settings does.
+        tier.revoke(site, SitePermission.LOCATION)
+        assertTrue(tier.removalCount(site, asked) != before)
+        // Allowed again afterwards: still a removal since the waiting request's decision.
+        val after = tier.removalCount(site, asked)
+        tier.record(site, SitePermission.LOCATION, PermissionDecision.ALLOW, remembered = false)
+        assertEquals(after, tier.removalCount(site, asked))
+        // The other tier's removals are its own.
+        assertEquals(0, PermissionSession(embargoes = false).removalCount(site, asked))
+    }
+
+    @Test
     fun `a frame's grant and the page's are kept apart`() {
         val page = "https://page.example"
         val frame = "https://frame.example"
