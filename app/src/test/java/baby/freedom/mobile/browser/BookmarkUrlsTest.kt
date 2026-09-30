@@ -56,8 +56,70 @@ class BookmarkUrlsTest {
         for (s in listOf(
             "http://localhost:8730", "Example.com", "ENS://X.eth/p", "ipfs://x.eth", "bzz://" + "CD".repeat(32),
             "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5?x", "ftp://Host/a", "mailto:A@b.c",
+            "http://h/x/../Straße/?q=ß#ß", "vitalik.eth/a b/../c", "http://h/a/%2e%2E/b",
         )) {
             assertEquals(s, BookmarkUrls.key(s), BookmarkUrls.key(BookmarkUrls.canonical(s)))
         }
+    }
+
+    /** Chromium 153's `new URL(x).href` for each, run in headless Chromium (#296 R3-F1). */
+    private val chromium = listOf(
+        "http://h/Straße/" to "http://h/Stra%C3%9Fe/",
+        "http://h/x/../Stra%C3%9Fe/" to "http://h/Stra%C3%9Fe/",
+        "http://h/a b\"<>`{}|^\\c" to "http://h/a%20b%22%3C%3E%60%7B%7D%7C%5E/c",
+        "http://h/%41%2e%7e%c3%9f/%2E%2e/x" to "http://h/x",
+        "http://h/a/./b/.%2E/c/%2e" to "http://h/a/c/",
+        "http://h/?q=a b\"'<>`{}|^ß#f a\"<>`{}|^ß" to
+            "http://h/?q=a%20b%22%27%3C%3E`{}|^%C3%9F#f%20a%22%3C%3E%60{}|^%C3%9F",
+        "http://h/a%2fb%zz%" to "http://h/a%2fb%zz%",
+        "http://h/a\tb\nc" to "http://h/abc",
+        "http://h/\u0001\u007f" to "http://h/%01%7F",
+        "http://h/.." to "http://h/",
+        "http://h/a/.." to "http://h/",
+        "http://h/a/." to "http://h/a/",
+        "http://h/p?%41%c3" to "http://h/p?%41%c3",
+        "http://h/p#%41" to "http://h/p#%41",
+        "http://h/[]@!$&()*+,;=:~" to "http://h/[]@!$&()*+,;=:~",
+        "http://h/p?[]@!$&()*+,;=:~/?#[]@!$&()*+,;=:~/?#" to "http://h/p?[]@!$&()*+,;=:~/?#[]@!$&()*+,;=:~/?#",
+        "http://h/😀" to "http://h/%F0%9F%98%80",
+        "http://h/p?\ud800" to "http://h/p?%EF%BF%BD",
+        "http://h//a//b" to "http://h//a//b",
+        "http://h/%2E" to "http://h/",
+        "http://h/a/%2e%2E/b" to "http://h/b",
+        "http://h/.%2e" to "http://h/",
+        "http://h/?" to "http://h/?",
+        "http://h/#" to "http://h/#",
+        "http://h/p%" to "http://h/p%",
+        "http://h/%5B%3a%40" to "http://h/%5B%3a%40",
+        "http://h/p%41%7e%2D" to "http://h/p%41%7e%2D",
+        "http://h/p?a\u007fb\\c" to "http://h/p?a%7Fb\\c",
+        "http://h/p#a\u007fb\\c" to "http://h/p#a%7Fb\\c",
+        "http://h/a%2eb/x/%2e%2e%2f" to "http://h/a%2eb/x/%2e%2e%2f",
+        "http://h/a/..%2f" to "http://h/a/..%2f",
+        "http://h\\a\\b" to "http://h/a/b",
+        "http://h/a/b/../../../c" to "http://h/c",
+        "http://h/a/ ./b" to "http://h/a/%20./b",
+        "http://h/a/.. /b" to "http://h/a/..%20/b",
+        "http://h/p?a#b#c" to "http://h/p?a#b#c",
+        "http://h/p#a?b" to "http://h/p#a?b",
+        "http://h/%zz/../x" to "http://h/x",
+    )
+
+    @Test
+    fun `paths, queries and fragments are saved the way Chromium serialises them`() {
+        for ((typed, page) in chromium) {
+            assertEquals(typed, page, BookmarkUrls.canonical(typed))
+            same(typed, page)
+        }
+    }
+
+    @Test
+    fun `an edited path matches the page it opens`() {
+        same("http://localhost:8731/Stra%C3%9Fe/", "localhost:8731/x/../Stra%C3%9Fe/".let { "http://$it" })
+        same("https://de.wikipedia.org/wiki/Stra%C3%9Fe", "https://de.wikipedia.org/wiki/Straße")
+        same("vitalik.eth/Stra%C3%9Fe", "vitalik.eth/a/../Straße")
+        same("ipfs://vitalik.eth/a%20b", "ens://vitalik.eth/a b")
+        same("vitalik.eth", "vitalik.eth/x/..")
+        differ("https://example.com/%41", "https://example.com/A")
     }
 }

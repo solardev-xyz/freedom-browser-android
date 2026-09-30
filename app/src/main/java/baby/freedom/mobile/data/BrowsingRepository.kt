@@ -105,7 +105,11 @@ class BrowsingRepository internal constructor(
      * fills the star on the page shown as `ipfs://x.eth/` (#296 R1-F1).
      */
     fun isBookmarked(url: String): Flow<Boolean> {
-        val key = BookmarkUrls.key(url)
+        // Worked out in the flow, on Dispatchers.Default: [BookmarkUrls.key]
+        // runs ENSIP-15 normalisation for a non-ASCII name, and this is
+        // called from composition each time the page's address changes
+        // (#296 R3-M2).
+        val key by lazy { BookmarkUrls.key(url) }
         return bookmarks
             .map { list -> list.any { BookmarkUrls.key(it.url) == key } }
             .distinctUntilChanged()

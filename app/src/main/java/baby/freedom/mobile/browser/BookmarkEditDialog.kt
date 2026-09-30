@@ -30,7 +30,9 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.data.BookmarkEditResult
 import baby.freedom.mobile.data.BookmarkEntry
 import baby.freedom.mobile.data.BrowsingRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Edit bookmark [id]'s name and address (#264): from the Bookmarks
@@ -79,13 +81,24 @@ private fun BookmarkEditor(
     var saveError by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val parsed = bookmarkAddress(address)
+    // Parsed off the main thread (#296 R3-M2): a dweb name goes through
+    // ENSIP-15 normalisation, on every keystroke. Until the typed text's
+    // own result is in, the last one is shown; Save parses what's typed
+    // itself, so it never saves an older result.
+    val parsed by produceState<BookmarkAddress?>(null, address) {
+        value = withContext(Dispatchers.Default) { bookmarkAddress(address) }
+    }
 
     val save: () -> Unit = save@{
-        val ok = parsed as? BookmarkAddress.Ok ?: return@save
-        if (saving) return@save
+        if (parsed !is BookmarkAddress.Ok || saving) return@save
+        val typed = address
         saving = true
         scope.launch {
+            val ok = withContext(Dispatchers.Default) { bookmarkAddress(typed) } as? BookmarkAddress.Ok
+            if (ok == null) {
+                saving = false
+                return@launch
+            }
             // The write runs in the repository's scope: leaving the
             // dialog while it runs doesn't undo it.
             val result = repo.editBookmark(entry.id, bookmarkTitle(title), ok.url).await()
@@ -140,10 +153,11 @@ private fun BookmarkEditor(
                             // what's typed — `https://` added, say — or
                             // why it can't be saved.
                             supportingText = {
-                                val note = saveError ?: when (parsed) {
-                                    is BookmarkAddress.Invalid -> parsed.reason
+                                val note = saveError ?: when (val p = parsed) {
+                                    null -> null
+                                    is BookmarkAddress.Invalid -> p.reason
                                     is BookmarkAddress.Ok ->
-                                        if (parsed.url != address.trim()) "Saves as ${parsed.url}" else null
+                                        if (p.url != address.trim()) "Saves as ${p.url}" else null
                                 }
                                 if (note != null) Text(note)
                             },

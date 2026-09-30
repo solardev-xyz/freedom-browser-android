@@ -51,18 +51,25 @@ internal object BookmarkUrls {
         return c
     }
 
-    /** A dweb address's path: none for the root, and a leading `/` before a bare `?`/`#`. */
-    private fun tail(t: String): String = when {
-        t.isEmpty() || t == "/" -> ""
-        t.startsWith("/") -> t
-        else -> "/$t"
+    /**
+     * A dweb address's path, query and fragment: none for the root, a
+     * leading `/` before a bare `?`/`#`, and otherwise the way Chromium
+     * serialises them ([pathQueryFragment]) — a dweb page is loaded as a
+     * virtual `https://` URL and the address bar shows that URL's own
+     * path and query back ([VirtualOrigin.displayUrlFor]).
+     */
+    private fun tail(t: String): String {
+        if (t.isEmpty()) return ""
+        val c = pathQueryFragment(if (t[0] == '/' || t[0] == '\\') t else "/$t")
+        return if (c == "/") "" else c
     }
 
     /**
      * An `http`/`https` URL the way Chromium serialises it: lowercase
      * scheme, the WHATWG host ([WhatwgHost.host]: lowercase, punycode,
-     * IPv4 and IPv6 in their canonical forms), no default port, and a `/`
-     * path at least. Null for anything else, or a host that doesn't parse.
+     * IPv4 and IPv6 in their canonical forms), no default port, and a
+     * path, query and fragment as [pathQueryFragment] has them. Null for
+     * anything else, or a host that doesn't parse.
      */
     private fun web(url: String): String? {
         val colon = url.indexOf("://")
@@ -72,7 +79,7 @@ internal object BookmarkUrls {
         val rest = url.substring(colon + 3)
         val end = rest.indexOfFirst { it == '/' || it == '?' || it == '#' || it == '\\' }
         val authority = if (end < 0) rest else rest.substring(0, end)
-        var path = if (end < 0) "" else rest.substring(end)
+        val path = if (end < 0) "" else rest.substring(end)
         val at = authority.lastIndexOf('@')
         val userInfo = if (at >= 0) authority.substring(0, at + 1) else ""
         val hostPort = authority.substring(at + 1)
@@ -94,7 +101,90 @@ internal object BookmarkUrls {
         }
         val default = if (scheme == "http") "80" else "443"
         val portPart = if (port.isEmpty() || port == default) "" else ":$port"
-        if (path.isEmpty() || path[0] == '?' || path[0] == '#') path = "/$path"
-        return "$scheme://$userInfo$host$portPart$path"
+        val tail = pathQueryFragment(if (path.isEmpty() || path[0] == '?' || path[0] == '#') "/$path" else path)
+        return "$scheme://$userInfo$host$portPart$tail"
     }
+
+    /**
+     * An `http(s)` URL's path (starting `/` or `\`), query and fragment
+     * the way Chromium's URL parser serialises them (WHATWG, special
+     * scheme; #296 R3-F1), so a typed `/x/../Straße/` is saved as the
+     * `/Stra%C3%9Fe/` the page reports:
+     *
+     *  - tabs and newlines are dropped, `\` in the path is `/`;
+     *  - `.` and `..` segments (also as `%2e`, any case) are resolved;
+     *  - each part is UTF-8 percent-encoded with its own set — C0
+     *    controls, DEL and non-ASCII always, plus space `"` `<` `>` and
+     *    `` ` `` `{` `}` `|` `^` in the path, space `"` `'` `<` `>` in
+     *    the query, and space `"` `<` `>` `` ` `` in the fragment. A lone
+     *    surrogate is U+FFFD. An escape already there is kept as typed
+     *    (Chromium neither decodes nor re-cases it).
+     *
+     * Checked against Chromium 153's `new URL()`, and on the WebView
+     * itself by `BookmarkUrlsWebViewTest`.
+     */
+    internal fun pathQueryFragment(tail: String): String {
+        val t = tail.filter { it != '\t' && it != '\n' && it != '\r' }
+        val hash = t.indexOf('#')
+        val beforeHash = if (hash < 0) t else t.substring(0, hash)
+        val q = beforeHash.indexOf('?')
+        val path = (if (q < 0) beforeHash else beforeHash.substring(0, q)).replace('\\', '/')
+        val out = StringBuilder(t.length + 8)
+        val segments = path.removePrefix("/").split('/')
+        val kept = ArrayList<String>(segments.size)
+        for ((i, seg) in segments.withIndex()) {
+            val last = i == segments.lastIndex
+            when (seg.lowercase()) {
+                "..", ".%2e", "%2e.", "%2e%2e" -> {
+                    kept.removeLastOrNull()
+                    if (last) kept.add("")
+                }
+                ".", "%2e" -> if (last) kept.add("")
+                else -> kept.add(seg)
+            }
+        }
+        out.append('/')
+        kept.forEachIndexed { i, seg ->
+            if (i > 0) out.append('/')
+            encode(seg, PATH_SET, out)
+        }
+        if (q >= 0) {
+            out.append('?')
+            encode(beforeHash.substring(q + 1), QUERY_SET, out)
+        }
+        if (hash >= 0) {
+            out.append('#')
+            encode(t.substring(hash + 1), FRAGMENT_SET, out)
+        }
+        return out.toString()
+    }
+
+    private const val PATH_SET = " \"<>`{}|^"
+    private const val QUERY_SET = " \"'<>"
+    private const val FRAGMENT_SET = " \"<>`"
+
+    private fun encode(s: String, set: String, out: StringBuilder) {
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            val cp: Int
+            if (Character.isHighSurrogate(c) && i + 1 < s.length && Character.isLowSurrogate(s[i + 1])) {
+                cp = Character.toCodePoint(c, s[i + 1])
+                i += 2
+            } else {
+                cp = if (Character.isSurrogate(c)) 0xFFFD else c.code
+                i += 1
+            }
+            if (cp in 0x21..0x7E && set.indexOf(cp.toChar()) < 0) {
+                out.append(cp.toChar())
+            } else {
+                for (b in String(Character.toChars(cp)).toByteArray(Charsets.UTF_8)) {
+                    val v = b.toInt() and 0xFF
+                    out.append('%').append(HEX[v shr 4]).append(HEX[v and 0xF])
+                }
+            }
+        }
+    }
+
+    private const val HEX = "0123456789ABCDEF"
 }
