@@ -1,6 +1,7 @@
 package baby.freedom.mobile.wallet
 
 import android.util.Log
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
@@ -13,6 +14,7 @@ import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.NameSystem
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.ledger.Ledger
 import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.math.BigInteger
@@ -103,7 +105,7 @@ object Recipients {
      */
     fun parse(input: String, token: Token, names: Boolean = false): Parsed {
         val t = input.trim()
-        if (t.isEmpty()) return Parsed.Invalid(if (names) "Enter an address or a name to send to" else "Enter the address to send to")
+        if (t.isEmpty()) return Parsed.Invalid(Strings.get(if (names) R.string.send_recipient_empty_names else R.string.send_recipient_empty))
         if (!EthTransaction.ADDRESS.matches(t)) {
             if (names && looksLikeName(t)) {
                 // The resolver's own normalization, so a name refused here is
@@ -112,21 +114,20 @@ object Recipients {
                     EnsNormalize.fastNormalize(t)
                 } catch (_: EnsNormalize.InvalidNameException) {
                     null
-                } ?: return Parsed.Invalid("Not a valid name: it breaks the ENS naming rules (ENSIP-15)")
+                } ?: return Parsed.Invalid(Strings.get(R.string.send_recipient_bad_name))
                 if (NameSystem.forName(name) == NameSystem.TEZOS) {
-                    return Parsed.Invalid("Tezos Domains names don’t name Ethereum accounts: enter an address or an ENS, .wei or .gwei name")
+                    return Parsed.Invalid(Strings.get(R.string.send_recipient_tezos))
                 }
                 return Parsed.Name(name)
             }
             return Parsed.Invalid(
-                if (names) "Not an address or a name: an address is 0x and 40 hex digits, a name is like alice.eth"
-                else "Not an address: it’s 0x and 40 hex digits (names aren’t supported here yet)",
+                Strings.get(if (names) R.string.send_recipient_not_address_or_name else R.string.send_recipient_not_address),
             )
         }
         val digits = t.substring(2)
         val checksummed = checksum(digits.lowercase())
         val mixed = digits.any { it in 'a'..'f' } && digits.any { it in 'A'..'F' }
-        if (mixed && checksummed != t) return Parsed.Invalid("This address has a typo: its capital letters don’t match its checksum")
+        if (mixed && checksummed != t) return Parsed.Invalid(Strings.get(R.string.send_recipient_checksum_typo))
         return accept(checksummed, token)
     }
 
@@ -136,14 +137,14 @@ object Recipients {
      * refusals as a typed one — a name can point at a token's contract too.
      */
     fun resolved(address: String, token: Token): Parsed {
-        if (!EthTransaction.ADDRESS.matches(address)) return Parsed.Invalid("The name’s record isn’t an Ethereum address")
+        if (!EthTransaction.ADDRESS.matches(address)) return Parsed.Invalid(Strings.get(R.string.send_recipient_record_not_address))
         return accept(checksum(address.substring(2).lowercase()), token)
     }
 
     private fun accept(checksummed: String, token: Token): Parsed {
-        if (checksummed.substring(2).all { it == '0' }) return Parsed.Invalid("That’s the zero address: anything sent there is lost")
+        if (checksummed.substring(2).all { it == '0' }) return Parsed.Invalid(Strings.get(R.string.send_recipient_zero))
         if (token.address != null && token.address.equals(checksummed, ignoreCase = true)) {
-            return Parsed.Invalid("That’s the ${token.symbol} contract itself, not an account: tokens sent there are lost")
+            return Parsed.Invalid(Strings.get(R.string.send_recipient_token_contract, token.symbol))
         }
         return Parsed.Ok(checksummed)
     }
@@ -166,21 +167,22 @@ object Recipients {
     fun lookupProblem(result: EnsAddressResult, chainName: String): String? = when (result) {
         is EnsAddressResult.Ok -> null
         is EnsAddressResult.NoAddress -> when (result.reason) {
-            "NO_RESOLVER" -> "${result.name} isn’t set up: it has no resolver, so no address to send to."
-            "NO_ADDRESS" -> "${result.name} has no address for $chainName. Only an address its owner set for this network is safe to send to."
-            "CHAIN_UNSUPPORTED" -> "${NameSystem.forName(result.name).label} names hold an Ethereum address only, not one for " +
-                "$chainName: funds sent there could be lost. Send an Ethereum asset to it, or enter an address."
-            "CHAIN_ID_UNSUPPORTED" -> "Names can’t hold an address for $chainName: its chain id is past the range ENS " +
-                "address records cover (ENSIP-11). Enter an address instead."
-            else -> "${result.name} doesn’t name an Ethereum account."
+            "NO_RESOLVER" -> Strings.get(R.string.send_name_no_resolver, result.name)
+            "NO_ADDRESS" -> Strings.get(R.string.send_name_no_address, result.name, chainName)
+            "CHAIN_UNSUPPORTED" -> Strings.get(R.string.send_name_chain_unsupported, NameSystem.forName(result.name).label, chainName)
+            "CHAIN_ID_UNSUPPORTED" -> Strings.get(R.string.send_name_chain_id_unsupported, chainName)
+            else -> Strings.get(R.string.send_name_not_account, result.name)
         }
         is EnsAddressResult.Conflict -> if (result.subject == EnsResult.Conflict.Subject.RECORD) {
-            "Servers disagree on ${result.name}’s address, so nothing can be sent to it: " +
-                result.groups.joinToString("; ") { g -> "${g.answer} (${g.hosts.joinToString(", ")})" } + "."
+            Strings.get(
+                R.string.send_name_conflict_record,
+                result.name,
+                result.groups.joinToString("; ") { g -> "${g.answer} (${g.hosts.joinToString(", ")})" },
+            )
         } else {
-            "Servers disagree on which block is the chain’s, so ${result.name} can’t be looked up safely right now. Try again shortly."
+            Strings.get(R.string.send_name_conflict_block, result.name)
         }
-        is EnsAddressResult.Error -> "Couldn’t look up ${result.name}: ${result.error}"
+        is EnsAddressResult.Error -> Strings.get(R.string.send_name_lookup_error, result.name, result.error)
     }
 
     /**
@@ -193,22 +195,20 @@ object Recipients {
     fun recheck(name: String, address: String, after: EnsAddressResult, unverifiedAccepted: Boolean): String? = when (after) {
         is EnsAddressResult.Ok -> when {
             !after.address.equals(address, ignoreCase = true) ->
-                "$name now resolves to a different address (${checksum(after.address.substring(2).lowercase())}), so nothing was sent. Look at the new one before sending."
-            !after.trust.verified && !unverifiedAccepted ->
-                "Checking $name again, only one server vouched for its address, so nothing was sent. Look at it again before sending."
+                Strings.get(R.string.send_recheck_moved, name, checksum(after.address.substring(2).lowercase()))
+            !after.trust.verified && !unverifiedAccepted -> Strings.get(R.string.send_recheck_unverified, name)
             else -> null
         }
-        is EnsAddressResult.NoAddress -> "$name no longer has an address for this network, so nothing was sent."
+        is EnsAddressResult.NoAddress -> Strings.get(R.string.send_recheck_no_address, name)
         is EnsAddressResult.Conflict -> if (after.subject == EnsResult.Conflict.Subject.RECORD) {
-            "Checking $name again, servers disagreed on its address, so nothing was sent."
+            Strings.get(R.string.send_recheck_conflict_record, name)
         } else {
-            "Checking $name again, servers disagreed on which block is the chain’s, so it couldn’t be looked up safely " +
-                "and nothing was sent. Try again shortly."
+            Strings.get(R.string.send_recheck_conflict_block, name)
         }
         is EnsAddressResult.Error -> if (after.retryable) {
-            "Couldn’t check $name again (${after.error}), so nothing was sent. Try again."
+            Strings.get(R.string.send_recheck_error_retry, name, after.error)
         } else {
-            "Couldn’t check $name again (${after.error}), so nothing was sent."
+            Strings.get(R.string.send_recheck_error, name, after.error)
         }
     }
 
@@ -513,7 +513,7 @@ class GasOracle(private val rpc: WalletRpc) {
 
         internal fun legacy(gasPrice: BigInteger): EthTransaction.Fees.Legacy {
             // A zero price would sit in the mempool forever and hold every later nonce behind it.
-            if (gasPrice.signum() <= 0) throw SendException("The network gave no usable gas price. Try again.")
+            if (gasPrice.signum() <= 0) throw SendException(Strings.get(R.string.send_no_gas_price))
             // Not refused when high (#233 R1-F1): a legacy price can't be clamped, and a chain
             // may just be priced that way (IoTeX 1000 gwei, Theta 4000). It's shown on a sheet
             // that says it's unusually high, and never sent without one ([quiet]).
@@ -1077,7 +1077,7 @@ class WalletSender internal constructor(
                 }
                 val failed = SendStatus(
                     quote,
-                    SendStatus.Stage.Failed("Couldn’t save the transaction before sending it, so nothing was sent.", false),
+                    SendStatus.Stage.Failed(Strings.get(R.string.send_save_failed), false),
                 )
                 failedStatus = failed
                 snapshot(failed, null)
@@ -1125,17 +1125,17 @@ class WalletSender internal constructor(
             val tokenBalance = async {
                 token.address?.let { contract ->
                     val r = rpc.call(chainId, JSONObject().put("to", contract).put("data", Erc20.balanceOfData(from)))
-                    Erc20.decodeUint256(r.value) ?: throw SendException("The ${token.symbol} contract gave no balance for this account")
+                    Erc20.decodeUint256(r.value) ?: throw SendException(Strings.get(R.string.send_token_no_balance, token.symbol))
                 }
             }
             val nonce = async { nonces.next(from, chainId) }
             val fees = async { gas.fees(chainId) }
             val held = tokenBalance.await() ?: native.await()
             // A site's call may carry no value: the fee check below says what's missing then.
-            if (held.signum() == 0 && request.dapp == null) throw SendException("This account has no ${token.symbol}")
+            if (held.signum() == 0 && request.dapp == null) throw SendException(Strings.get(R.string.send_no_token, token.symbol))
             if (!all && request.amount > held) {
                 throw SendException(
-                    "Not enough ${token.symbol}: this account has ${SendAmounts.exact(held, token.decimals)} ${token.symbol}",
+                    Strings.get(R.string.send_not_enough_token, token.symbol, SendAmounts.exact(held, token.decimals)),
                 )
             }
             // Max: all of a token; all of the native currency is priced first, then less the fee.
@@ -1161,17 +1161,17 @@ class WalletSender internal constructor(
             )
             val nativeBalance = native.await()
             val symbol = request.chain.symbol
-            val fee = "${SendAmounts.exact(tx.maxFee, request.chain.decimals)} $symbol"
-            val has = "this account has ${SendAmounts.exact(nativeBalance, request.chain.decimals)} $symbol"
+            val fee = SendAmounts.exact(tx.maxFee, request.chain.decimals)
+            val has = SendAmounts.exact(nativeBalance, request.chain.decimals)
             if (all && token.isNative) {
                 val rest = nativeBalance - tx.maxFee
-                if (rest.signum() <= 0) throw SendException("Not enough $symbol to pay the network fee (up to $fee): $has")
+                if (rest.signum() <= 0) throw SendException(Strings.get(R.string.send_not_enough_for_fee_all, symbol, fee, has))
                 sending = sending.copy(amount = rest)
                 tx = tx.copy(value = rest)
             }
             if (tx.maxFee + tx.value > nativeBalance) {
-                val what = if (token.isNative && tx.value.signum() > 0) "the amount and the network fee" else "the network fee"
-                throw SendException("Not enough $symbol for $what (up to $fee): $has")
+                val what = if (token.isNative && tx.value.signum() > 0) R.string.send_not_enough_for_amount_and_fee else R.string.send_not_enough_for_fee
+                throw SendException(Strings.get(what, symbol, fee, has))
             }
             SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash, sendsBefore)
         }
@@ -1317,18 +1317,18 @@ class WalletSender internal constructor(
     private suspend fun signingFailed(quote: SendQuote, e: Exception) {
         when (e) {
             is QuoteStaleException -> failStale(quote, droppedSigned = false)
-            is SigningHeldException -> fail(quote, e.message.orEmpty() + " Nothing was signed or sent.", false)
+            is SigningHeldException -> fail(quote, Strings.get(R.string.send_signing_held, e.message.orEmpty()), false)
             is VaultLockedException ->
-                fail(quote, "The wallet locked before the transaction was signed. Nothing was sent; confirm again to unlock it.", false)
+                fail(quote, Strings.get(R.string.send_signing_locked), false)
             is LedgerException -> {
                 // The Ledger's own words: rejected, locked, disconnected, timed out… (#142)
-                val nothing = if (e.message.orEmpty().contains("Nothing was")) "" else " Nothing was sent."
+                val said = e.message.orEmpty()
                 val rejected = e.kind == LedgerException.Kind.REJECTED || e.kind == LedgerException.Kind.CANCELLED
-                fail(quote, e.message + nothing, false, rejected)
+                fail(quote, if (said.contains("Nothing was")) said else Strings.get(R.string.send_ledger_failed, said), false, rejected)
             }
             else -> {
                 Log.w(TAG, "signing failed: ${e.javaClass.simpleName}")
-                fail(quote, "Couldn’t sign the transaction. Nothing was sent.", false)
+                fail(quote, Strings.get(R.string.send_signing_failed), false)
             }
         }
     }
@@ -1373,7 +1373,7 @@ class WalletSender internal constructor(
         val s = status.first { it?.quote !== quote || (it.stage != SendStatus.Stage.Signing && it.stage != SendStatus.Stage.Broadcasting) }
         if (s?.quote !== quote) {
             // Stopped on the phone (Stop tracking, or the wallet removed) while it was going out.
-            return Broadcast.Failed("The send was stopped on the phone while it was going out; it may still go through.", true)
+            return Broadcast.Failed(Strings.get(R.string.send_stopped_on_phone), true)
         }
         return when (val stage = s.stage) {
             is SendStatus.Stage.Failed -> when {
@@ -1381,7 +1381,7 @@ class WalletSender internal constructor(
                 stage.rejected -> Broadcast.Rejected
                 else -> Broadcast.Failed(stage.message, stage.mayHaveGone)
             }
-            else -> s.hash?.let { Broadcast.Sent(it) } ?: Broadcast.Failed("No transaction hash came back.", true)
+            else -> s.hash?.let { Broadcast.Sent(it) } ?: Broadcast.Failed(Strings.get(R.string.send_no_hash), true)
         }
     }
 
@@ -1619,16 +1619,13 @@ class WalletSender internal constructor(
         private const val TAG = "WalletSend"
 
         /** A send the last process died broadcasting, as the next one finds it. */
-        internal const val INTERRUPTED = "The app closed while this was going out, so it may or may not have gone out. " +
-            "Try again sends the very same transaction, so it can’t be paid twice."
+        internal val INTERRUPTED: String get() = Strings.get(R.string.send_interrupted)
 
         /** Why a send was dropped unsent: its quote aged past [SIGNED_TTL_MS] while it was signed. */
-        internal const val STALE_WHILE_SIGNING = "The network fee was worked out over three minutes ago, before this was signed, " +
-            "so it may no longer get the transaction in. Nothing was sent; review the new fee and confirm again."
+        internal val STALE_WHILE_SIGNING: String get() = Strings.get(R.string.send_stale_while_signing)
 
         /** Why a send was dropped unsigned: the Ledger found its quote over [QUOTE_TTL_MS] old before showing it. */
-        internal const val STALE_BEFORE_SIGNING = "The network fee was worked out over a minute ago, so it may no longer " +
-            "get the transaction in. Nothing was signed or sent; review the new fee and confirm again."
+        internal val STALE_BEFORE_SIGNING: String get() = Strings.get(R.string.send_stale_before_signing)
 
         /** A quote older than this is priced again before it's signed (or shown on a Ledger). */
         const val QUOTE_TTL_MS = 60_000L
@@ -1690,27 +1687,30 @@ class WalletSender internal constructor(
 
         /** A read (balance, nonce, fee, estimate) that failed, for the user. */
         internal fun readFailure(e: ChainRpcException): String = when (e) {
-            is ChainRpcException.UnknownChain -> "This chain isn’t set up in Settings → Chains."
-            is ChainRpcException.AllSourcesFailed -> "No RPC answered for this chain. Check the connection and try again."
-            is ChainRpcException.Rpc -> "The RPC answered with an error: ${clip(e.rpcMessage)}"
-            else -> "The RPC’s answer made no sense. Try again."
+            is ChainRpcException.UnknownChain -> Strings.get(R.string.send_read_unknown_chain)
+            is ChainRpcException.AllSourcesFailed -> Strings.get(R.string.send_read_no_rpc)
+            is ChainRpcException.Rpc -> Strings.get(R.string.send_read_rpc_error, clip(e.rpcMessage))
+            else -> Strings.get(R.string.send_read_nonsense)
         }
 
         /** The gas estimate failed: the chain would refuse the transaction as it stands. */
         internal fun estimateFailure(e: ChainRpcException.Rpc, request: SendRequest): SendException {
             val symbol = request.chain.symbol
             val message = when {
-                e.insufficientFunds -> "Not enough $symbol to pay for this transaction."
+                e.insufficientFunds -> Strings.get(R.string.send_estimate_insufficient, symbol)
                 e.data != null || e.code == ChainRpcException.EXECUTION_REVERTED || REVERTED.containsMatchIn(e.rpcMessage) -> {
                     val reason = e.data?.let(::revertReason) ?: REVERTED.find(e.rpcMessage)?.let { e.rpcMessage.substring(it.range.last + 1).trim(' ', ':') }
-                    val who = when {
-                        request.dapp != null -> "The contract would refuse this transaction"
-                        request.token.isNative -> "The recipient would refuse this transfer"
-                        else -> "The ${request.token.symbol} contract would refuse this transfer"
+                    val why = reason?.takeIf { it.isNotBlank() }?.let(::clip)
+                    when {
+                        request.dapp != null -> why?.let { Strings.get(R.string.send_estimate_contract_refuses_reason, it) }
+                            ?: Strings.get(R.string.send_estimate_contract_refuses)
+                        request.token.isNative -> why?.let { Strings.get(R.string.send_estimate_recipient_refuses_reason, it) }
+                            ?: Strings.get(R.string.send_estimate_recipient_refuses)
+                        else -> why?.let { Strings.get(R.string.send_estimate_token_refuses_reason, request.token.symbol, it) }
+                            ?: Strings.get(R.string.send_estimate_token_refuses, request.token.symbol)
                     }
-                    who + (reason?.takeIf { it.isNotBlank() }?.let { ": ${clip(it)}" } ?: ".")
                 }
-                else -> "The network couldn’t price this transaction: ${clip(e.rpcMessage)}"
+                else -> Strings.get(R.string.send_estimate_failed, clip(e.rpcMessage))
             }
             return SendException(message, e)
         }
@@ -1744,38 +1744,24 @@ class WalletSender internal constructor(
             val unanswered = (e as? ChainRpcException.AllSourcesFailed)?.unanswered == true
             val symbol = quote.request.chain.symbol
             val m = node?.rpcMessage?.lowercase().orEmpty()
-            val uncertain = "No RPC confirmed it took the transaction, so it may or may not have gone out. " +
-                "Try again sends the very same transaction, so it can’t be paid twice."
+            val nonce = quote.tx.nonce.toString()
             return when {
-                node == null -> uncertain to true
-                unanswered -> (
-                    "One RPC didn’t answer and may have taken it; another refused it (${clip(node.rpcMessage)}). " +
-                        "Try again sends the very same transaction, so it can’t be paid twice."
-                    ) to true
-                node.insufficientFunds -> "Not sent: not enough $symbol for the amount and the fee any more." to false
-                "nonce too high" in m ->
-                    "Not sent: nonce ${quote.tx.nonce} is ahead of what the network expects — an earlier transaction may not have reached it. Review it again." to false
+                node == null -> Strings.get(R.string.send_broadcast_uncertain) to true
+                unanswered -> Strings.get(R.string.send_broadcast_one_unanswered, clip(node.rpcMessage)) to true
+                node.insufficientFunds -> Strings.get(R.string.send_broadcast_insufficient, symbol) to false
+                "nonce too high" in m -> Strings.get(R.string.send_broadcast_nonce_too_high, nonce) to false
                 nonceUsed(e) && quote.replaces != null && heldBy != null ->
-                    "Not sent: nonce ${quote.tx.nonce} was already used — most likely by your send that took the place of the one " +
-                        "you stopped tracking, which went through ($heldBy). Check it on the explorer before sending again." to false
+                    Strings.get(R.string.send_broadcast_nonce_used_by_replacement, nonce, heldBy) to false
                 nonceUsed(e) && quote.replaces != null ->
-                    "Not sent: nonce ${quote.tx.nonce} was already used — most likely the send you stopped tracking went through " +
-                        "(${quote.replaces}). Check it on the explorer before sending again." to false
-                nonceUsed(e) ->
-                    "Not sent: nonce ${quote.tx.nonce} was already used — maybe by another wallet with this account. Review it again." to false
-                "invalid nonce" in m ->
-                    "Not sent: the network didn’t accept nonce ${quote.tx.nonce}. Review it again." to false
+                    Strings.get(R.string.send_broadcast_nonce_used_by_stopped, nonce, quote.replaces) to false
+                nonceUsed(e) -> Strings.get(R.string.send_broadcast_nonce_used, nonce) to false
+                "invalid nonce" in m -> Strings.get(R.string.send_broadcast_invalid_nonce, nonce) to false
                 "replacement" in m && "underpriced" in m && quote.replaces != null ->
-                    "Not sent: the send you stopped tracking still holds nonce ${quote.tx.nonce} and the network wouldn’t swap it. " +
-                        "Review it again for a fresh fee." to false
-                "replacement" in m && "underpriced" in m ->
-                    "Not sent: another transaction with nonce ${quote.tx.nonce} is still waiting to be mined. Review it again." to false
+                    Strings.get(R.string.send_broadcast_stopped_holds_nonce, nonce) to false
+                "replacement" in m && "underpriced" in m -> Strings.get(R.string.send_broadcast_nonce_waiting, nonce) to false
                 "underpriced" in m || "fee cap" in m || "base fee" in m || "too low" in m ->
-                    "Not sent: its fee is below what the network takes now. Review it again for a fresh fee." to false
-                else -> (
-                    "The RPC answered with an error (${clip(node.rpcMessage)}), so it may or may not have gone out. " +
-                        "Try again sends the very same transaction, so it can’t be paid twice."
-                    ) to true
+                    Strings.get(R.string.send_broadcast_underpriced) to false
+                else -> Strings.get(R.string.send_broadcast_rpc_error, clip(node.rpcMessage)) to true
             }
         }
 

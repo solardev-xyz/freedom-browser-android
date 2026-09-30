@@ -1,11 +1,13 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.ChainInput
 import baby.freedom.mobile.chains.RpcUrls
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.Eip712
 import baby.freedom.mobile.wallet.GasOracle
@@ -522,7 +524,7 @@ class EthereumProvider(
         chainFor(origin)
     } catch (e: ChainUnavailable) {
         if (pinnedChain(origin) != null || runCatching { chains() }.getOrNull() != null) throw e
-        Chain(id = e.id, name = "Custom network", symbol = "", rpcUrls = emptyList())
+        Chain(id = e.id, name = Strings.get(R.string.send_eth_custom_network), symbol = "", rpcUrls = emptyList())
     }
 
     private suspend fun switchChain(origin: String, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
