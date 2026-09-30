@@ -10,8 +10,9 @@
 # ABI, `colibri` builds libc4.so and `unit-tests` runs the JVM tests, all
 # in parallel; `apk` packages the two libraries as soon as they're there,
 # alongside the tests; `publish` needs both `apk` and `unit-tests`, so
-# nothing is released unless the tests passed. The two native libraries are cached with actions/cache,
-# keyed on everything that shapes them (see each job's "Cache key" step),
+# nothing is released unless the tests passed. The two native libraries
+# are cached with actions/cache, keyed on everything that shapes them (see
+# each job's "Cache key" step),
 # and a hit skips their build entirely; the checks after the build run on
 # a hit too (scripts/check-native-libs.sh, and the Radicle bindings
 # compared with the generated copy cached alongside the library), so a
