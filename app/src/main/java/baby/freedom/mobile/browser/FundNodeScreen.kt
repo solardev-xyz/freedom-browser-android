@@ -19,6 +19,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -27,7 +29,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -121,6 +122,28 @@ internal fun fundReviewHeld(blocked: String?, running: String?, reviewNode: Stri
     blocked ?: if (running?.equals(reviewNode, ignoreCase = true) != true) FUND_REVIEW_NODE_CHANGED else null
 
 /**
+ * [fundReviewHeld] for a send already under way, read from the live [node]
+ * and [pending] record (null [node]: the page is gone, so neither can be
+ * watched any more). The record this send itself starts — [SwarmFunding]
+ * notes it the moment the send shows Signing — is the send, not a reason to
+ * hold it, so a record for the review's own [batchId] is left out; any other
+ * still holds, as at the tap.
+ */
+internal fun fundSendHeld(node: NodeInfo?, pending: SwarmFunding.Pending?, batchId: String, reviewNode: String): String? {
+    node ?: return FUND_PAGE_CLOSED
+    val other = pending?.takeUnless { it.batchId.equals(batchId, ignoreCase = true) }
+    return fundReviewHeld(fundNodeBlockedReason(node, other), fundingAddress(node), reviewNode)
+}
+
+/**
+ * The node as the Fund node page last saw it, for a send's coroutines and
+ * the Ledger's ready check to read after the review that started them is
+ * gone (#291 R3-F1): kept at page level, not in the review's lazy item,
+ * and null once the page itself is.
+ */
+private class LiveNode(@Volatile var info: NodeInfo?)
+
+/**
  * The Ledger's [fresh][WalletSender.signerFor] check for a Fund node review:
  * asked once the device is connected and unlocked (up to ~90 s after the
  * tap), before it shows the transaction. The node can restart as another
@@ -131,6 +154,9 @@ internal fun fundLedgerFresh(held: () -> String?, stale: () -> Boolean): () -> B
     held()?.let { throw SigningHeldException(it) }
     !stale()
 }
+
+internal const val FUND_PAGE_CLOSED =
+    "The Fund page was closed before the Ledger was ready. Open it and review again."
 
 internal const val FUND_REVIEW_NODE_CHANGED =
     "The node is no longer running as the account this review pays. Cancel and review again."
@@ -195,6 +221,10 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
     val connectOwed = funding?.connectOwed?.collectAsState()?.value
     val spend by StampClient.spend.collectAsState()
     val node = fundingAddress(nodeInfo)
+    // Outlives the review item, which is gone as soon as a send starts.
+    val liveNode = remember { LiveNode(nodeInfo) }
+    SideEffect { liveNode.info = nodeInfo }
+    DisposableEffect(liveNode) { onDispose { liveNode.info = null } }
 
     var depth by rememberSaveable { mutableIntStateOf(STAMP_DEPTHS.first()) }
     var days by rememberSaveable { mutableLongStateOf(STAMP_BUY_DAYS.first()) }
@@ -328,8 +358,13 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                     val q = r.quote
                     // The node the review pays is no longer the one running, or funding it is blocked now.
                     val changed = fundReviewHeld(blocked, node, rows.node)
-                    // The live answer, for the tap's coroutine to read again after the unlock prompt.
-                    val changedNow by rememberUpdatedState(changed)
+                    // Read live after the unlock prompt and when the Ledger is ready: from the
+                    // page's own state and the record's flow, never this item's, which is
+                    // disposed the moment the send starts (#291 R3-F1).
+                    val f2 = funding
+                    val heldNow: () -> String? = {
+                        fundSendHeld(liveNode.info, f2?.pending?.value, r.plan.batchId, rows.node)
+                    }
                     FundReview(
                         quote = q,
                         summary = rows.summary,
@@ -357,8 +392,8 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                                 try {
                                     if (!q.request.from.isLedger && !vault.unlockedNow()) vault.unlock(auth)
                                     // The node may have restarted (or funding been blocked) while the prompt was up.
-                                    if (changedNow != null) return@launch
-                                    when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from, fundLedgerFresh({ changedNow }) { sender.isStale(q) }))) {
+                                    if (heldNow() != null) return@launch
+                                    when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from, fundLedgerFresh(heldNow) { sender.isStale(q) }))) {
                                         WalletSender.Submit.STARTED -> {
                                             reviewing = null
                                             notice = null

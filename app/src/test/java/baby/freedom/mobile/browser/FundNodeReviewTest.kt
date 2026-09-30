@@ -1,6 +1,8 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.swarm.NodeInfo
+import baby.freedom.swarm.NodeStatus
 import baby.freedom.mobile.wallet.ChainTrustsForTest
 import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.EthTransaction
@@ -105,6 +107,40 @@ class FundNodeReviewTest {
         held = null
         assertTrue(fresh())
     }
+
+    @Test
+    fun `a send under way is held by the live node and other records, never by its own`() {
+        val p = plan()
+        val running = NodeInfo(status = NodeStatus.Running, accountAddress = node, walletIdentity = true, lightMode = true)
+        // What SwarmFunding.noteSend records the moment this send shows Signing.
+        val own = SwarmFunding.Pending(node, p.batchId, p.depth, days, null, mined = false)
+        assertNull(fundSendHeld(running, null, p.batchId, node))
+        assertNull(fundSendHeld(running, own, p.batchId, node))
+        // Another stamp's record still holds it, as at the tap.
+        val other = own.copy(batchId = "0x" + "ab".repeat(32))
+        assertNotEquals(null, fundSendHeld(running, other, p.batchId, node))
+        // The node restarted as another account during the Ledger's wait.
+        assertEquals(FUND_REVIEW_NODE_CHANGED, fundSendHeld(running.copy(accountAddress = otherNode), own, p.batchId, node))
+        // The node stopped.
+        assertNotEquals(null, fundSendHeld(NodeInfo(), own, p.batchId, node))
+        // The page is gone: nothing watches the node any more.
+        assertEquals(FUND_PAGE_CLOSED, fundSendHeld(null, own, p.batchId, node))
+    }
+
+    @Test
+    fun `the Ledger's ready check reads the live hold, not the one at the tap`() {
+        val p = plan()
+        val live = LiveNodeForTest(NodeInfo(status = NodeStatus.Running, accountAddress = node, walletIdentity = true, lightMode = true))
+        var pending: SwarmFunding.Pending? = null
+        val fresh = fundLedgerFresh({ fundSendHeld(live.info, pending, p.batchId, node) }) { false }
+        // The send's own record appears once it shows Signing: still fine.
+        pending = SwarmFunding.Pending(node, p.batchId, p.depth, days, null, mined = false)
+        assertTrue(fresh())
+        live.info = live.info!!.copy(accountAddress = otherNode)
+        assertEquals(FUND_REVIEW_NODE_CHANGED, assertThrows(SigningHeldException::class.java) { fresh() }.message)
+    }
+
+    private class LiveNodeForTest(var info: NodeInfo?)
 
     @Test
     fun `a plan the quote wasn't built from describes nothing`() {
