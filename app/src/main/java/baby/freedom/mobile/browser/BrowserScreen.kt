@@ -277,6 +277,14 @@ internal fun addressBarTextAfterStop(committedUrl: String, pending: String): Str
     if (committedUrl.isNotBlank()) committedUrl else pending
 
 /**
+ * How long a keyboard that was already up for a page's field when Ctrl+L
+ * moved focus to the address bar has to stay up before it counts as the
+ * address bar's own. A focus change that hides the IME does so within a
+ * frame or two plus its exit animation; this is comfortably past that.
+ */
+internal const val PAGE_KEYBOARD_HANDOFF_SETTLE_MS = 750L
+
+/**
  * Whether a keyboard that has just gone away should take the address
  * bar's focus — and with it the capsule's editing morph — with it.
  *
@@ -504,7 +512,8 @@ fun BrowserScreen(
     var addressFocusRequested by remember { mutableStateOf(false) }
     // …and a keyboard already up for a page's own field when it did is
     // that page's, not one opened for the address bar: it doesn't count
-    // as seen until it has gone down once (see [imeDismissalEndsEditing]).
+    // as seen until it has gone down once, or stayed up past the handoff
+    // (see [imeDismissalEndsEditing], [PAGE_KEYBOARD_HANDOFF_SETTLE_MS]).
     var pageKeyboardHandoff by remember { mutableStateOf(false) }
     // Suggestions should only appear once the user has actively changed
     // the address-bar text. Tapping the pill (which select-alls the
@@ -1627,7 +1636,22 @@ fun BrowserScreen(
     // may we bounce the focus the user just asked for (see
     // [imeDismissalEndsEditing]).
     var keyboardSeenWhileEditing by remember { mutableStateOf(false) }
-    LaunchedEffect(addressFocused, keyboardVisible) {
+    // A page's keyboard handed over by Ctrl+L either goes down (the
+    // WebView hid it on blur, or a hardware keyboard means the field
+    // never asks for one back) — which ends the handoff below — or it
+    // simply stays up, now serving the address field: moving focus from
+    // one editor to another needn't hide the IME at all. In that second
+    // case the handoff must end too, or the keyboard is never counted as
+    // seen and dismissing it leaves the editor stuck open (#307 R1-F1).
+    // Anything still up once a focus change's own hide would long have
+    // landed is the address bar's.
+    LaunchedEffect(pageKeyboardHandoff, addressFocused, keyboardVisible) {
+        if (pageKeyboardHandoff && addressFocused && keyboardVisible) {
+            delay(PAGE_KEYBOARD_HANDOFF_SETTLE_MS)
+            pageKeyboardHandoff = false
+        }
+    }
+    LaunchedEffect(addressFocused, keyboardVisible, pageKeyboardHandoff) {
         if (imeDismissalEndsEditing(
                 addressFocused = addressFocused,
                 keyboardVisible = keyboardVisible,
