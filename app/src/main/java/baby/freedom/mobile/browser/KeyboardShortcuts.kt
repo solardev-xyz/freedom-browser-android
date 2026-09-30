@@ -139,11 +139,22 @@ fun shortcutFor(keyCode: Int, metaState: Int): Shortcut? {
 }
 
 /**
- * What the browser does with a shortcut. Returns false when shortcuts
- * don't apply right now (a full-screen panel is up), so the key goes
- * on to whatever has focus as if it were bound to nothing. [repeat] is
- * a held key's auto-repeat: a shortcut that doesn't [Shortcut.repeats]
- * should take it (return true) without acting again.
+ * What the browser does with a shortcut. Returns false when the key is
+ * not the browser's right now, so it goes on to whatever has focus as if
+ * it were bound to nothing. That is more than one case, so a caller must
+ * not read false as any one of them:
+ *
+ * - a full-screen panel (Settings, Wallet, History, …) is up;
+ * - a [Shortcut.caretKey] shortcut while the address bar has focus —
+ *   Alt+←/→ there move its caret;
+ * - [Shortcut.NewPrivateTab] where the WebView can't run private tabs:
+ *   there is no such command, so Ctrl+Shift+N is an unbound key.
+ *
+ * Returns true for a shortcut the browser takes, including one taken
+ * without effect because its button or menu row would do nothing right
+ * now (one tab to cycle, no forward history). [repeat] is a held key's
+ * auto-repeat: a shortcut that doesn't [Shortcut.repeats] should take it
+ * (return true) without acting again.
  */
 fun interface ShortcutTarget {
     fun onShortcut(shortcut: Shortcut, repeat: Boolean): Boolean

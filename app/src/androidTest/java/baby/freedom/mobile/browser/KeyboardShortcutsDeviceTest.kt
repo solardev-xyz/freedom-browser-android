@@ -8,6 +8,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -514,5 +516,47 @@ class KeyboardShortcutsDeviceTest {
         Thread.sleep(1_500)
         assertEquals(url("/two"), onActivity { tabs.active.url })
         assertTrue(onActivity { it.currentFocus !is WebView })
+    }
+
+    private fun keyboardUp(activity: MainActivity): Boolean =
+        ViewCompat.getRootWindowInsets(activity.window.decorView)
+            ?.isVisible(WindowInsetsCompat.Type.ime()) == true
+
+    private fun addressBarFocused(activity: MainActivity): Boolean =
+        activity.currentFocus.let { it !is WebView && it?.onCheckIsTextEditor() == true }
+
+    // #307 R4-F1: Ctrl+L from a page field whose on-screen keyboard is
+    // up hands that keyboard to the address bar. A Back that closes it a
+    // fifth of a second later is the user dismissing the editor, and
+    // must collapse it — not be written off as the focus change's own
+    // hide ([PAGE_KEYBOARD_HANDOFF_SETTLE_MS]).
+    @Test
+    fun backSoonAfterCtrlLFromAPageFieldClosesTheEditor() {
+        launch("/one")
+        focusField("one")
+        waitFor("the page field's keyboard") { onActivity(::keyboardUp) }
+        // Timed from the focus landing, not from [press] returning: that
+        // waits for the main thread to go idle, which the editor's own
+        // morph can hold off for longer than the handoff lasts.
+        val ctrlL = Thread {
+            shell("input keycombination ${KeyEvent.KEYCODE_CTRL_LEFT} ${KeyEvent.KEYCODE_L}")
+        }.apply { start() }
+        val deadline = SystemClock.uptimeMillis() + 10_000
+        while (!onActivity(::addressBarFocused)) {
+            if (SystemClock.uptimeMillis() > deadline) throw AssertionError("timed out waiting for address bar focus")
+            Thread.sleep(10)
+        }
+        val focusedAt = SystemClock.uptimeMillis()
+        // The handoff kept the keyboard up for the address bar.
+        assertTrue("keyboard still up for the address bar", onActivity(::keyboardUp))
+        Thread.sleep((focusedAt + 200 - SystemClock.uptimeMillis()).coerceAtLeast(0))
+        shell("input keyevent ${KeyEvent.KEYCODE_BACK}")
+        ctrlL.join()
+        waitFor("keyboard down") { !onActivity(::keyboardUp) }
+        waitFor("editor collapsed", timeoutMs = 5_000) { !onActivity(::addressBarFocused) }
+        // …and it stays collapsed, still on the page it was on.
+        Thread.sleep(1_000)
+        assertFalse(onActivity(::addressBarFocused))
+        assertEquals(url("/one"), onActivity { tabs.active.url })
     }
 }
