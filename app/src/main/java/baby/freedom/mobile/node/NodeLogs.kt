@@ -3,8 +3,12 @@ package baby.freedom.mobile.node
 import android.os.Process
 import android.os.SystemClock
 import android.util.Log
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import java.io.BufferedInputStream
+import java.io.DataInputStream
+import java.io.IOException
+import java.io.InputStream
+import java.time.Instant
+import java.time.ZoneId
 import java.util.Locale
 
 /**
@@ -296,101 +300,62 @@ object LogScrub {
 }
 
 /**
- * One line of `logcat -v threadtime`, as a node log line: time, level,
- * tag and message, with the terminal colours and tracing's own timestamp
+ * One entry of this process's log, as a node log line: time, level, tag
+ * and message, with the terminal colours and tracing's own timestamp
  * taken out of native lines.
  */
 internal data class LogcatLine(val time: String, val level: Char, val tag: String, val message: String) {
     fun format(): String = "$time $level $tag: $message"
 
-    /**
-     * The line's logcat header — time, pid, tid, level and tag. logcat
-     * prints each line of one multi-line log write under the same header
-     * ([LogcatJoiner]).
-     */
-    internal var header: String = ""
-        private set
-
-    /** Whether the message began with tracing's timestamp: the first line of a tracing event. */
-    internal var tracingEvent: Boolean = false
-        private set
-
-    internal fun copyHeaderOf(other: LogcatLine) {
-        header = other.header
-        tracingEvent = other.tracingEvent
-    }
-
     companion object {
-        // 09-30 07:13:07.730  3826  3860 I ant-ffi : message
-        //
-        // Read by hand, not by regex: this runs on every line a node logs,
-        // hundreds a second while a page loads, whether or not Logs is ever
-        // opened — and Android's regex engine took ~165 us a line here,
-        // most of the reader's CPU (R3-M1).
-        fun parse(raw: String): LogcatLine? {
-            if (raw.length < 20 || !raw.startsWith(DATE_SHAPE)) return null
-            val time = raw.substring(6, 18)
-            var i = 18
-            i = skipSpaces(raw, i, atLeast = 1) ?: return null
-            i = skipDigits(raw, i) ?: return null // pid
-            i = skipSpaces(raw, i, atLeast = 1) ?: return null
-            i = skipDigits(raw, i) ?: return null // tid
-            i = skipSpaces(raw, i, atLeast = 1) ?: return null
-            val level = raw.getOrNull(i) ?: return null
-            if (level !in "VDIWEFA" || raw.getOrNull(i + 1)?.isWhitespace() != true) return null
-            i = skipSpaces(raw, i + 1, atLeast = 1) ?: return null
-            val colon = raw.indexOf(':', i)
-            if (colon < 0) return null
-            val tag = raw.substring(i, colon).trim()
-            val from = if (raw.getOrNull(colon + 1) == ' ') colon + 2 else colon + 1
-            val cleaned = StringBuilder(raw.length - from)
-            val event = cleanNative(raw, from, cleaned)
-            return LogcatLine(time, level, tag, cleaned.toString()).also {
-                it.header = raw.substring(0, colon)
-                it.tracingEvent = event
-            }
-        }
-
-        /** `MM-DD HH:MM:SS.mmm`, `d` a digit. */
-        private const val DATE_SHAPE = "dd-dd dd:dd:dd.ddd"
-
-        private fun String.startsWith(shape: String): Boolean {
-            for (k in shape.indices) {
-                val c = this[k]
-                if (if (shape[k] == 'd') c !in '0'..'9' else c != shape[k]) return false
-            }
-            return true
-        }
-
-        private fun skipSpaces(s: String, from: Int, atLeast: Int): Int? {
-            var i = from
-            while (i < s.length && s[i] == ' ') i++
-            return if (i - from >= atLeast) i else null
-        }
-
-        private fun skipDigits(s: String, from: Int): Int? {
-            var i = from
-            while (i < s.length && s[i] in '0'..'9') i++
-            return if (i > from) i else null
-        }
+        /** Stands in for a line break inside one log write. */
+        const val JOIN = " ⏎ "
 
         /**
-         * The message from [from] on, into [sb], with the terminal colours
-         * (`ESC [ … letter`) and tracing's own leading timestamp
-         * (`2026-09-30T05:13:07.733503Z `) taken out. True if it had that
-         * timestamp.
+         * The line for one log write: [priority] is logcat's (4 = info),
+         * [raw] the whole message as written. A write that held line
+         * breaks stays one line — each break becomes [JOIN] — so it's
+         * scrubbed as a whole: freedom-ipfs logs a request's
+         * percent-decoded path unquoted, and a `%0A` or `%0D` in a
+         * visited address is a break there (R6-F1, R1-F1).
          */
-        private fun cleanNative(raw: String, from: Int, sb: StringBuilder): Boolean {
-            var i = from
-            while (i < raw.length) {
+        fun of(epochSec: Long, nanos: Int, priority: Int, tag: String, raw: String, zone: ZoneId): LogcatLine {
+            val t = Instant.ofEpochSecond(epochSec, nanos.toLong()).atZone(zone)
+            val time = String.format(
+                Locale.US, "%02d:%02d:%02d.%03d", t.hour, t.minute, t.second, t.nano / 1_000_000,
+            )
+            val sb = StringBuilder(raw.length)
+            cleanNative(raw, sb)
+            return LogcatLine(time, levelOf(priority), tag, sb.toString())
+        }
+
+        /** logcat's letter for an `android_LogPriority`. */
+        fun levelOf(priority: Int): Char = "??VDIWEFS".getOrElse(priority) { '?' }
+
+        /**
+         * [raw] into [sb], trailing line breaks trimmed, every other line
+         * break (`\r\n`, `\n` or a lone `\r`) as [JOIN], and the terminal
+         * colours (`ESC [ … letter`) and tracing's own leading timestamp
+         * (`2026-09-30T05:13:07.733503Z `) taken out.
+         */
+        private fun cleanNative(raw: String, sb: StringBuilder) {
+            var end = raw.length
+            while (end > 0 && (raw[end - 1] == '\n' || raw[end - 1] == '\r')) end--
+            var i = 0
+            while (i < end) {
                 val c = raw[i]
                 if (c == '\u001B' && raw.getOrNull(i + 1) == '[') {
                     var j = i + 2
-                    while (j < raw.length && (raw[j] in '0'..'9' || raw[j] == ';')) j++
-                    if (j < raw.length && (raw[j] in 'A'..'Z' || raw[j] in 'a'..'z')) {
+                    while (j < end && (raw[j] in '0'..'9' || raw[j] == ';')) j++
+                    if (j < end && (raw[j] in 'A'..'Z' || raw[j] in 'a'..'z')) {
                         i = j + 1
                         continue
                     }
+                }
+                if (c == '\r' || c == '\n') {
+                    sb.append(JOIN)
+                    i += if (c == '\r' && raw.getOrNull(i + 1) == '\n') 2 else 1
+                    continue
                 }
                 sb.append(c)
                 i++
@@ -406,67 +371,74 @@ internal data class LogcatLine(val time: String, val level: Char, val tag: Strin
                     var k = j + 1
                     while (k < m.length && m[k].isWhitespace()) k++
                     m.delete(0, k)
-                    return true
                 }
             }
-            return false
         }
     }
 }
 
 /**
- * Puts back together what logcat split (R6-F1). ant-ffi hands each
- * tracing event to one `__android_log_write`, and logcat prints every
- * line of it as a line of its own, under the same header. freedom-ipfs
- * logs a request's percent-decoded path unquoted, so a `%0A` in a
- * visited address is a newline there: the rest of the path would arrive
- * as a line of its own, with no `path=` in front for [LogScrub] to find.
- * So a line of [tracingTags] that doesn't begin with tracing's timestamp
- * — every event's first line does — is joined, with [JOIN], to the line
- * before it when their headers match, and the whole event is scrubbed as
- * one line. One whose start already went out (or was never seen) isn't
- * kept at all: only [CUT] shows where it was. [emit] gets each whole
- * line; [flush] hands over the one held back to see whether more of it
- * follows.
+ * Reads `logcat -B` (binary) output, one [LogcatLine] per log write.
+ *
+ * Why binary: in its text formats logcat prints every line of one write
+ * as a line of its own, and nothing but the text itself tells a follow-on
+ * line from a new write — text a visited address can forge (a `%0A` then
+ * a fake tracing timestamp, or a lone `%0D` then a fake logcat header).
+ * In binary each write is one length-prefixed entry, so where a write
+ * starts and ends isn't up to what it says (R1-F1). ant-ffi hands each
+ * tracing event to one `__android_log_write`, and liblog cuts a longer
+ * write at ~4 KB rather than splitting it, so an entry is a whole event.
+ *
+ * The entry (`struct logger_entry`, little-endian): `u16 len`,
+ * `u16 hdr_size`, `i32 pid`, `u32 tid`, `u32 sec`, `u32 nsec`, then more
+ * header up to `hdr_size` (`lid`, `uid`); then `len` bytes of payload:
+ * the priority byte, the tag and the message, each NUL-terminated.
  */
-internal class LogcatJoiner(
-    private val tracingTags: Set<String> = setOf("ant-ffi"),
-    private val emit: (LogcatLine) -> Unit,
-) {
-    private var pending: LogcatLine? = null
-    private var lastHeader: String? = null
+internal class LogcatEntries(input: InputStream, private val zone: ZoneId = ZoneId.systemDefault()) {
+    private val input = DataInputStream(BufferedInputStream(input, 16 * 1024))
+    private val header = ByteArray(MAX_HEADER)
+    private val payload = ByteArray(0xFFFF)
 
-    fun add(line: LogcatLine) {
-        if (!line.tracingEvent && line.tag in tracingTags) {
-            val p = pending
-            if (p != null && line.header == lastHeader) {
-                pending = LogcatLine(p.time, p.level, p.tag, p.message + JOIN + line.message).also {
-                    it.copyHeaderOf(p)
-                }
-            } else {
-                flush()
-                emit(LogcatLine(line.time, line.level, line.tag, CUT).also { it.copyHeaderOf(line) })
-                lastHeader = line.header
-            }
-            return
+    /** The next text entry, or null at the end of the stream. */
+    fun next(): LogcatLine? {
+        while (true) {
+            val first = input.read()
+            if (first < 0) return null
+            val len = first or (input.readUnsignedByte() shl 8)
+            val hdrSize = input.readUnsignedByte() or (input.readUnsignedByte() shl 8)
+            // Out of step with the stream: nothing after this can be trusted.
+            if (hdrSize < MIN_HEADER || hdrSize > MAX_HEADER) throw IOException("logcat entry header size $hdrSize")
+            input.readFully(header, 4, hdrSize - 4)
+            input.readFully(payload, 0, len)
+            val lid = if (hdrSize >= 24) int32(20) else 0
+            if (lid !in TEXT_BUFFERS || len < 1) continue
+            val tagEnd = indexOfNul(1, len)
+            if (tagEnd < 0) continue
+            val msgEnd = indexOfNul(tagEnd + 1, len).let { if (it < 0) len else it }
+            val tag = String(payload, 1, tagEnd - 1, Charsets.UTF_8).trim()
+            val message = String(payload, tagEnd + 1, msgEnd - tagEnd - 1, Charsets.UTF_8)
+            val sec = int32(12).toLong() and 0xFFFF_FFFFL
+            val nsec = int32(16)
+            return LogcatLine.of(sec, nsec.coerceIn(0, 999_999_999), payload[0].toInt(), tag, message, zone)
         }
-        flush()
-        pending = line
-        lastHeader = line.header
     }
 
-    fun flush() {
-        val p = pending ?: return
-        pending = null
-        emit(p)
+    private fun int32(at: Int): Int =
+        (header[at].toInt() and 0xFF) or ((header[at + 1].toInt() and 0xFF) shl 8) or
+            ((header[at + 2].toInt() and 0xFF) shl 16) or ((header[at + 3].toInt() and 0xFF) shl 24)
+
+    private fun indexOfNul(from: Int, until: Int): Int {
+        for (k in from until until) if (payload[k] == 0.toByte()) return k
+        return -1
     }
 
     companion object {
-        /** Where logcat had split one write. */
-        const val JOIN = " ⏎ "
+        /** `logger_entry` v1 (no `lid`) is 20 bytes; v4 is 28. */
+        private const val MIN_HEADER = 20
+        private const val MAX_HEADER = 100
 
-        /** What's kept of a line whose start went out without it. */
-        const val CUT = "⏎ <rest of a split line not kept>"
+        /** The text buffers: main, radio, system, crash, kernel. Not events, stats or security. */
+        private val TEXT_BUFFERS = setOf(0, 1, 3, 4, 7)
     }
 }
 
@@ -599,26 +571,19 @@ object NodeLogs {
             from = startFrom(from, clearedAt)
             var proc: java.lang.Process? = null
             try {
-                proc = ProcessBuilder("logcat", "-v", "threadtime", "--pid=$pid", "-T", from)
-                    .redirectErrorStream(true)
+                // Binary: one entry per log write, however many lines it holds (LogcatEntries).
+                proc = ProcessBuilder("logcat", "-B", "--pid=$pid", "-T", from)
+                    // logcat's own complaints (a bad -T, say) aren't entries.
+                    .redirectError(ProcessBuilder.Redirect.to(java.io.File("/dev/null")))
                     .start()
                 logcat = proc
                 if (stopped) proc.destroy()
-                var cleared = false
-                val joiner = LogcatJoiner { line ->
-                    if (cleared || line.tag in NOISE_TAGS || processName.endsWith(line.tag)) return@LogcatJoiner
-                    val source = route(line.tag, line.message) ?: return@LogcatJoiner
-                    if (!keep(gen, source, line.format(), LogRing.kindOf(line.tag, line.message))) cleared = true
-                }
-                BufferedReader(InputStreamReader(proc.inputStream, Charsets.UTF_8)).use { reader ->
-                    while (!cleared) {
-                        val raw = reader.readLine() ?: break
-                        LogcatLine.parse(raw)?.let(joiner::add)
-                        // logcat writes a whole entry at once: once nothing
-                        // more is waiting, the line held back is complete.
-                        if (!reader.ready()) joiner.flush()
-                    }
-                    joiner.flush()
+                val entries = LogcatEntries(proc.inputStream)
+                while (true) {
+                    val line = entries.next() ?: break
+                    if (line.tag in NOISE_TAGS || processName.endsWith(line.tag)) continue
+                    val source = route(line.tag, line.message) ?: continue
+                    if (!keep(gen, source, line.format(), LogRing.kindOf(line.tag, line.message))) break
                 }
             } catch (t: Throwable) {
                 // Not when stop() or clear() destroyed logcat under the reader.

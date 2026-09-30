@@ -2,7 +2,6 @@ package baby.freedom.mobile.node
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -412,7 +411,7 @@ class NodeLogsTest {
         NodeLogs.clear()
     }
 
-    // ---- LogcatLine ----
+    // ---- Restarting logcat ----
 
     @Test
     fun `logcat never restarts from before the latest clear`() {
@@ -425,93 +424,104 @@ class NodeLogsTest {
         assertEquals("1000.050", NodeLogs.formatSince(1_000_050L))
     }
 
-    @Test
-    fun `a threadtime line parses, colours and tracing's timestamp dropped`() {
-        val raw = "09-30 07:13:07.733  3826  3889 I ant-ffi : \u001B[2m2026-09-30T05:13:07.733503Z\u001B[0m " +
-            "\u001B[32m INFO\u001B[0m \u001B[2mant_gateway\u001B[0m\u001B[2m:\u001B[0m HTTP API listening on 127.0.0.1:1633"
-        val line = LogcatLine.parse(raw)
-        assertNotNull(line)
-        line!!
-        assertEquals("ant-ffi", line.tag)
-        assertEquals('I', line.level)
-        assertEquals("07:13:07.733 I ant-ffi: INFO ant_gateway: HTTP API listening on 127.0.0.1:1633", line.format())
-    }
-
-    @Test
-    fun `a kotlin line parses, and a message may hold colons`() {
-        val line = LogcatLine.parse("09-30 07:13:06.693  3826  3826 W NodeService: stamp call x failed: IOException: boom")
-        assertEquals("NodeService", line?.tag)
-        assertEquals("stamp call x failed: IOException: boom", line?.message)
-    }
-
-    @Test
-    fun `the hand parser reads lines as the threadtime regex did`() {
-        // The regex LogcatLine.parse replaced (R3-M1), verbatim.
-        val threadtime = Regex("""^\d\d-\d\d (\d\d:\d\d:\d\d\.\d{3})\s+\d+\s+\d+\s+([VDIWEFA])\s+(.*?)\s*: ?(.*)$""")
-        val ansi = Regex("""\u001B\[[0-9;]*[A-Za-z]""")
-        val tracingTime = Regex("""^\d{4}-\d\d-\d\dT[0-9:.]+Z\s+""")
-        fun reference(raw: String): LogcatLine? {
-            val m = threadtime.find(raw) ?: return null
-            val (time, level, tag, message) = m.destructured
-            return LogcatLine(time, level[0], tag.trim(), tracingTime.replace(ansi.replace(message, ""), ""))
-        }
-        val esc = "\u001B"
-        val lines = listOf(
-            "09-30 07:13:07.733  3826  3889 I ant-ffi : ${esc}[2m2026-09-30T05:13:07.733503Z${esc}[0m ${esc}[32m INFO${esc}[0m x",
-            "09-30 07:13:06.693  3826  3826 W NodeService: stamp call x failed: IOException: boom",
-            "09-30 07:13:06.693 13826 13826 E Tag with spaces : m",
-            "09-30 07:13:06.693  1  2 D :empty tag",
-            "09-30 07:13:06.693  1  2 D t:",
-            "09-30 07:13:06.693  1  2 D t:  two spaces",
-            "09-30 07:13:06.693  1  2 X t: bad level",
-            "09-30 07:13:06.693  1  2 II t: level run",
-            "09-30 07:13:06.693  x  2 I t: bad pid",
-            "09-30 07:13:06.693  1  2 I no colon",
-            "09-30 07:13:06.69  1  2 I t: short ms",
-            "--------- beginning of main",
-            "",
-            "09-30 07:13:06.693  1  2 I t: ${esc}[1mbold${esc}[ not an escape ${esc}[12;3mok",
-            "09-30 07:13:06.693  1  2 I t: 2026-09-30T05:13:07Z   after",
-            "09-30 07:13:06.693  1  2 I t: 2026-09-30T05:13:07Z",
-            "09-30 07:13:06.693  1  2 I t: 2026-09-30X05:13:07Z m",
-            "09-30 07:13:06.693  1  2 I t: ${esc}[2m2026-09-30T05:13:07.1Z${esc}[0m\tm",
-        )
-        for (l in lines) assertEquals(l, reference(l), LogcatLine.parse(l))
-    }
-
-    // ---- A write logcat split into lines (R6-F1) ----
-
-    /** Parse [raw], join, route and scrub it the way NodeLogs.follow does. */
-    private fun joined(raw: List<String>, flushEvery: Boolean = false): List<Pair<NodeLogSource, String>> {
-        val out = mutableListOf<Pair<NodeLogSource, String>>()
-        val joiner = LogcatJoiner { l -> out += nodeProcessSource(l.tag, l.message) to LogScrub.scrub(l.format()) }
-        for (r in raw) {
-            LogcatLine.parse(r)?.let(joiner::add)
-            if (flushEvery) joiner.flush()
-        }
-        joiner.flush()
-        return out
-    }
+    // ---- Binary logcat entries (R1-F1) ----
 
     private val esc = "\u001B"
+    private val utc = java.time.ZoneOffset.UTC
+
+    /** One `logger_entry` v4, as `logcat -B` writes it. */
+    private fun entry(
+        message: String,
+        tag: String = "ant-ffi",
+        priority: Int = 4,
+        sec: Long = 1_790_752_391L, // 2026-09-30T07:13:11Z
+        nsec: Int = 733_503_000,
+        lid: Int = 0,
+        hdrSize: Int = 28,
+    ): ByteArray {
+        val payload = byteArrayOf(priority.toByte()) + tag.toByteArray() + 0 + message.toByteArray() + 0
+        val b = java.nio.ByteBuffer.allocate(hdrSize + payload.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        b.putShort(payload.size.toShort()).putShort(hdrSize.toShort())
+        b.putInt(5104).putInt(5190).putInt(sec.toInt()).putInt(nsec)
+        if (hdrSize >= 24) b.putInt(lid)
+        while (b.position() < hdrSize) b.put(0)
+        b.put(payload)
+        return b.array()
+    }
+
+    private fun read(vararg entries: ByteArray): List<LogcatLine> {
+        val r = LogcatEntries(java.io.ByteArrayInputStream(entries.reduce { a, b -> a + b }), utc)
+        return generateSequence { r.next() }.toList()
+    }
+
+    /** Read, route and scrub [entries] the way NodeLogs.follow does. */
+    private fun kept(vararg entries: ByteArray): List<Pair<NodeLogSource, String>> =
+        read(*entries).map { nodeProcessSource(it.tag, it.message) to LogScrub.scrub(it.format()) }
+
+    @Test
+    fun `an entry reads, colours and tracing's timestamp dropped`() {
+        val lines = read(
+            entry(
+                "$esc[2m2026-09-30T07:13:11.733503Z$esc[0m $esc[32m INFO$esc[0m $esc[2mant_gateway$esc[0m$esc[2m:$esc[0m " +
+                    "HTTP API listening on 127.0.0.1:1633",
+            ),
+            entry("stamp call x failed: IOException: boom", tag = "NodeService", priority = 5, nsec = 5_000_000),
+        )
+        assertEquals(
+            listOf(
+                "07:13:11.733 I ant-ffi: INFO ant_gateway: HTTP API listening on 127.0.0.1:1633",
+                "07:13:11.005 W NodeService: stamp call x failed: IOException: boom",
+            ),
+            lines.map { it.format() },
+        )
+        assertEquals("stamp call x failed: IOException: boom", lines[1].message)
+    }
+
+    @Test
+    fun `a v1 header reads, and other buffers' entries are skipped`() {
+        val lines = read(
+            entry("from events", lid = 2),
+            entry("v1", hdrSize = 20),
+            entry("from security", lid = 6),
+            entry("from system", tag = "t", lid = 3),
+        )
+        assertEquals(listOf("07:13:11.733 I ant-ffi: v1", "07:13:11.733 I t: from system"), lines.map { it.format() })
+    }
+
+    @Test
+    fun `a stream out of step fails rather than guess`() {
+        val bad = entry("x", hdrSize = 28).also { it[2] = 3 }
+        assertTrue(runCatching { read(entry("ok"), bad) }.exceptionOrNull() is java.io.IOException)
+        // Cut off mid-entry.
+        assertTrue(runCatching { read(entry("ok").copyOf(30)) }.exceptionOrNull() is java.io.EOFException)
+    }
+
+    @Test
+    fun `tracing's timestamp only goes from the start, whitespace after it too`() {
+        val lines = read(
+            entry("2026-09-30T05:13:07Z   after"),
+            entry("2026-09-30T05:13:07Z"),
+            entry("2026-09-30X05:13:07Z m"),
+            entry("$esc[2m2026-09-30T05:13:07.1Z$esc[0m\tm"),
+            entry("$esc[1mbold$esc[ not an escape $esc[12;3mok"),
+        )
+        assertEquals(
+            listOf("after", "2026-09-30T05:13:07Z", "2026-09-30X05:13:07Z m", "m", "bold$esc[ not an escape ok"),
+            lines.map { it.message },
+        )
+    }
+
     private val cid = "k2jmtxt6f4hf4f8e0j7xq5d7sxkqk1n2ajr8lkq0f2pcw6qg0tmckx0ae"
 
-    /** The lines logcat printed for a visit to `ipfs://…/r6probe%0Anlsecretdiary.html` (R6-F1). */
-    private val splitRequest = listOf(
-        "09-30 09:20:11.402  5104  5190 I ant-ffi : ${esc}[2m2026-09-30T07:20:11.402113Z${esc}[0m ${esc}[32m INFO${esc}[0m " +
-            "gateway_request{request_id=11 path=/ipfs/$cid/r6probe",
-        "09-30 09:20:11.402  5104  5190 I ant-ffi : nlsecretdiary.html range=}: freedom_ipfs_gateway: " +
-            "phase=\"request_start\" request_id=11 path=/ipfs/$cid/r6probe",
-        "09-30 09:20:11.402  5104  5190 I ant-ffi : nlsecretdiary.html",
-        "09-30 09:20:11.403  5104  5190 I ant-ffi : ${esc}[2m2026-09-30T07:20:11.403001Z${esc}[0m ${esc}[32m INFO${esc}[0m " +
-            "gateway_request{request_id=11 path=/ipfs/$cid/r6probe",
-        "09-30 09:20:11.403  5104  5190 I ant-ffi : nlsecretdiary.html range=}: freedom_ipfs_gateway: " +
-            "phase=\"gateway_limiter\" request_id=11",
+    /** What freedom-ipfs writes for a visit to `ipfs://…/<name>`, [name] percent-decoded. */
+    private fun request(name: String, phase: String) = entry(
+        "$esc[2m2026-09-30T07:20:11.402113Z$esc[0m $esc[32m INFO$esc[0m gateway_request{request_id=11 " +
+            "path=/ipfs/$cid/$name range=}: freedom_ipfs_gateway: phase=\"$phase\" request_id=11 path=/ipfs/$cid/$name\n",
     )
 
     @Test
-    fun `a path logcat split at a decoded newline is joined and scrubbed whole`() {
-        val lines = joined(splitRequest)
+    fun `a path with a decoded newline stays one line, scrubbed whole`() {
+        val lines = kept(request("r6probe\nnlsecretdiary.html", "request_start"), request("r6probe\nnlsecretdiary.html", "gateway_limiter"))
         assertEquals(2, lines.size)
         for ((source, line) in lines) {
             assertEquals(line, NodeLogSource.Ipfs, source)
@@ -523,43 +533,36 @@ class NodeLogsTest {
     }
 
     @Test
-    fun `the rest of a split line whose start already went out isn't kept`() {
-        // The reader handed the first part over before the rest came in.
-        val lines = joined(splitRequest, flushEvery = true)
-        assertTrue(lines.none { "nlsecretdiary" in it.second })
-        assertEquals(5, lines.size)
-        assertTrue(lines[1].second, lines[1].second.endsWith(LogcatJoiner.CUT))
-        // A continuation with no event before it at all.
-        val orphan = joined(listOf("09-30 09:20:11.402  5104  5190 I ant-ffi : secret.html range=}: x"))
-        assertEquals(listOf(NodeLogSource.Swarm to "09:20:11.402 I ant-ffi: ${LogcatJoiner.CUT}"), orphan)
+    fun `a forged tracing timestamp or logcat header after a break starts no line`() {
+        // ipfs://…/r8probe%0A2026-01-01T00:00:00.0Z%20zzr8leak.html (R1-F1)
+        val forgedTracing = "r8probe\n2026-01-01T00:00:00.0Z zzr8leak.html"
+        // …%0D09-30%2009:20:11.402%20%205104%20%205190%20I%20ant-ffi%20:%20zzr9leak.html
+        val forgedHeader = "r9probe\r09-30 09:20:11.402  5104  5190 I ant-ffi : zzr9leak.html"
+        val crlf = "r10probe\r\n$esc[2m2026-01-01T00:00:00.0Z$esc[0m zzr10leak.html"
+        val lines = kept(
+            request(forgedTracing, "request_start"),
+            request(forgedHeader, "request_start"),
+            request(crlf, "request_start"),
+        )
+        assertEquals(3, lines.size)
+        for ((source, line) in lines) {
+            assertEquals(line, NodeLogSource.Ipfs, source)
+            assertFalse(line, "leak" in line)
+            assertFalse(line, "probe" in line)
+        }
     }
 
     @Test
-    fun `separate events, and other tags' lines, aren't joined`() {
-        val event = "09-30 09:20:11.402  5104  5190 I ant-ffi : ${esc}[2m2026-09-30T07:20:11.402113Z${esc}[0m  INFO ant_p2p: one"
-        val lines = joined(
-            listOf(
-                event,
-                event.replace("one", "two"),
-                "09-30 09:20:11.402  5104  5190 W NodeService: first",
-                "09-30 09:20:11.402  5104  5190 W NodeService: second",
-            ),
-        )
-        assertEquals(
-            listOf(
-                "09:20:11.402 I ant-ffi: INFO ant_p2p: one",
-                "09:20:11.402 I ant-ffi: INFO ant_p2p: two",
-                "09:20:11.402 W NodeService: first",
-                "09:20:11.402 W NodeService: second",
-            ),
-            lines.map { it.second },
-        )
+    fun `line breaks inside a write are joined, trailing ones dropped`() {
+        val lines = read(entry("one\ntwo\r\nthree\rfour\n\r\n"), entry("five"))
+        assertEquals(listOf("one ⏎ two ⏎ three ⏎ four", "five"), lines.map { it.message })
     }
 
     @Test
-    fun `logcat's own banners aren't lines`() {
-        assertNull(LogcatLine.parse("--------- beginning of main"))
-        assertNull(LogcatLine.parse(""))
+    fun `logcat's priority letters`() {
+        assertEquals("VDIWEFS", (2..8).map { LogcatLine.levelOf(it) }.joinToString(""))
+        assertEquals('?', LogcatLine.levelOf(0))
+        assertEquals('?', LogcatLine.levelOf(42))
     }
 
     // ---- Which :node node a line is ----
