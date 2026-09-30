@@ -7,6 +7,10 @@ import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
+import baby.freedom.mobile.ens.EnsAddressResult
+import baby.freedom.mobile.ens.EnsNormalize
+import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.NameSystem
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.wallet.ledger.Ledger
@@ -73,6 +77,14 @@ object Recipients {
         /** [address] EIP-55 checksummed. */
         data class Ok(val address: String) : Parsed
 
+        /**
+         * A name to look up (#277): [name] in its ENSIP-15 form. Not a
+         * recipient until [EnsResolver.resolveAddress] answers and
+         * [resolved] accepts the address it gives
+     * ([baby.freedom.mobile.ens.EnsResolver.resolveAddress]).
+         */
+        data class Name(val name: String) : Parsed
+
         data class Invalid(val reason: String) : Parsed
     }
 
@@ -83,22 +95,134 @@ object Recipients {
      * carries no checksum and is taken as typed. The zero address, and a
      * token's own contract for that token, are refused: what's sent there
      * is gone.
+     *
+     * With [names] (Send's own field, #277), anything else shaped like a
+     * dotted name — `alice.eth`, `alice.box`, `alice.wei`, `alice.gwei`,
+     * a DNS name imported into ENS like `gregskril.com` — is a [Parsed.Name]
+     * to look up; a `.tez` name isn't an Ethereum account and is refused.
      */
-    fun parse(input: String, token: Token): Parsed {
+    fun parse(input: String, token: Token, names: Boolean = false): Parsed {
         val t = input.trim()
-        if (t.isEmpty()) return Parsed.Invalid("Enter the address to send to")
+        if (t.isEmpty()) return Parsed.Invalid(if (names) "Enter an address or a name to send to" else "Enter the address to send to")
         if (!EthTransaction.ADDRESS.matches(t)) {
-            return Parsed.Invalid("Not an address: it’s 0x and 40 hex digits (names aren’t supported here yet)")
+            if (names && looksLikeName(t)) {
+                // The resolver's own normalization, so a name refused here is
+                // exactly one it would refuse (`a_b.eth`), said up front.
+                val name = try {
+                    EnsNormalize.fastNormalize(t)
+                } catch (_: EnsNormalize.InvalidNameException) {
+                    null
+                } ?: return Parsed.Invalid("Not a valid name: it breaks the ENS naming rules (ENSIP-15)")
+                if (NameSystem.forName(name) == NameSystem.TEZOS) {
+                    return Parsed.Invalid("Tezos Domains names don’t name Ethereum accounts: enter an address or an ENS, .wei or .gwei name")
+                }
+                return Parsed.Name(name)
+            }
+            return Parsed.Invalid(
+                if (names) "Not an address or a name: an address is 0x and 40 hex digits, a name is like alice.eth"
+                else "Not an address: it’s 0x and 40 hex digits (names aren’t supported here yet)",
+            )
         }
         val digits = t.substring(2)
         val checksummed = checksum(digits.lowercase())
         val mixed = digits.any { it in 'a'..'f' } && digits.any { it in 'A'..'F' }
         if (mixed && checksummed != t) return Parsed.Invalid("This address has a typo: its capital letters don’t match its checksum")
-        if (digits.all { it == '0' }) return Parsed.Invalid("That’s the zero address: anything sent there is lost")
+        return accept(checksummed, token)
+    }
+
+    /**
+     * The address a name resolved to (#277, lowercase from the resolver)
+     * as a recipient for [token]: checksummed, and held to the same
+     * refusals as a typed one — a name can point at a token's contract too.
+     */
+    fun resolved(address: String, token: Token): Parsed {
+        if (!EthTransaction.ADDRESS.matches(address)) return Parsed.Invalid("The name’s record isn’t an Ethereum address")
+        return accept(checksum(address.substring(2).lowercase()), token)
+    }
+
+    private fun accept(checksummed: String, token: Token): Parsed {
+        if (checksummed.substring(2).all { it == '0' }) return Parsed.Invalid("That’s the zero address: anything sent there is lost")
         if (token.address != null && token.address.equals(checksummed, ignoreCase = true)) {
             return Parsed.Invalid("That’s the ${token.symbol} contract itself, not an account: tokens sent there are lost")
         }
         return Parsed.Ok(checksummed)
+    }
+
+    /**
+     * Shaped like a name: dotted, every label non-empty, nothing a name
+     * can't hold (spaces, URL punctuation, control characters) —
+     * desktop's `isPotentialEnsName`.
+     */
+    internal fun looksLikeName(value: String): Boolean =
+        '.' in value &&
+            value.none { it.isWhitespace() || it in "/:@?#%\\" || it.code < 32 || it.code == 127 } &&
+            value.split('.').all { it.isNotEmpty() }
+
+    /**
+     * Why a name's answer (#277) gives nothing to send to on [chainName],
+     * for the field to say; `null` for an address (which [resolved] then
+     * judges).
+     */
+    fun lookupProblem(result: EnsAddressResult, chainName: String): String? = when (result) {
+        is EnsAddressResult.Ok -> null
+        is EnsAddressResult.NoAddress -> when (result.reason) {
+            "NO_RESOLVER" -> "${result.name} isn’t set up: it has no resolver, so no address to send to."
+            "NO_ADDRESS" -> "${result.name} has no address for $chainName. Only an address its owner set for this network is safe to send to."
+            "CHAIN_UNSUPPORTED" -> "${NameSystem.forName(result.name).label} names hold an Ethereum address only, not one for " +
+                "$chainName: funds sent there could be lost. Send an Ethereum asset to it, or enter an address."
+            "CHAIN_ID_UNSUPPORTED" -> "Names can’t hold an address for $chainName: its chain id is past the range ENS " +
+                "address records cover (ENSIP-11). Enter an address instead."
+            else -> "${result.name} doesn’t name an Ethereum account."
+        }
+        is EnsAddressResult.Conflict -> if (result.subject == EnsResult.Conflict.Subject.RECORD) {
+            "Servers disagree on ${result.name}’s address, so nothing can be sent to it: " +
+                result.groups.joinToString("; ") { g -> "${g.answer} (${g.hosts.joinToString(", ")})" } + "."
+        } else {
+            "Servers disagree on which block is the chain’s, so ${result.name} can’t be looked up safely right now. Try again shortly."
+        }
+        is EnsAddressResult.Error -> "Couldn’t look up ${result.name}: ${result.error}"
+    }
+
+    /**
+     * Whether the re-check just before signing (#277) still backs the
+     * send the user reviewed: [name] must still resolve to [address]
+     * (`null`: it does), and an answer only one server vouches for only
+     * if the user accepted exactly that one ([unverifiedAccepted]). Else
+     * why not, for the review to say.
+     */
+    fun recheck(name: String, address: String, after: EnsAddressResult, unverifiedAccepted: Boolean): String? = when (after) {
+        is EnsAddressResult.Ok -> when {
+            !after.address.equals(address, ignoreCase = true) ->
+                "$name now resolves to a different address (${checksum(after.address.substring(2).lowercase())}), so nothing was sent. Look at the new one before sending."
+            !after.trust.verified && !unverifiedAccepted ->
+                "Checking $name again, only one server vouched for its address, so nothing was sent. Look at it again before sending."
+            else -> null
+        }
+        is EnsAddressResult.NoAddress -> "$name no longer has an address for this network, so nothing was sent."
+        is EnsAddressResult.Conflict -> if (after.subject == EnsResult.Conflict.Subject.RECORD) {
+            "Checking $name again, servers disagreed on its address, so nothing was sent."
+        } else {
+            "Checking $name again, servers disagreed on which block is the chain’s, so it couldn’t be looked up safely " +
+                "and nothing was sent. Try again shortly."
+        }
+        is EnsAddressResult.Error -> if (after.retryable) {
+            "Couldn’t check $name again (${after.error}), so nothing was sent. Try again."
+        } else {
+            "Couldn’t check $name again (${after.error}), so nothing was sent."
+        }
+    }
+
+    /**
+     * Whether asking again could give a different answer for [result]:
+     * a transport failure marked retryable, or servers that disagreed.
+     * Not a malformed name, a record that isn't an address, or an answer
+     * that says there's nothing to send to — the same ask fails the same
+     * way, so no Try again is offered for it.
+     */
+    fun retryable(result: EnsAddressResult): Boolean = when (result) {
+        is EnsAddressResult.Error -> result.retryable
+        is EnsAddressResult.Conflict -> true
+        is EnsAddressResult.Ok, is EnsAddressResult.NoAddress -> false
     }
 
     private fun checksum(lowerHex: String): String =
@@ -167,6 +291,20 @@ data class SendRequest(
     val to: String,
     val amount: BigInteger,
     val dapp: DappCall? = null,
+    /**
+     * The name the user typed for [to] (#277), shown beside it on the
+     * review, the status and in history. A label only: [to] is what's
+     * signed and journalled.
+     */
+    val toName: String? = null,
+    /**
+     * The user said, for [toName], to send to [to] though only one
+     * server vouched for it (#277). Carried with the request — and
+     * journalled — so a Review again, even from a reopened page, re-checks
+     * against the acceptance actually given: an answer still that one
+     * server's, for this same [to], still counts as accepted.
+     */
+    val toNameAccepted: Boolean = false,
 ) {
     init {
         require(token.chainId == chain.id) { "the token is on another chain" }

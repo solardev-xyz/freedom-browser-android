@@ -15,6 +15,9 @@ import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.JsonRpc
 import baby.freedom.mobile.chains.rpc.RpcTransport
 import baby.freedom.mobile.chains.rpc.WalletRpc
+import baby.freedom.mobile.ens.EnsAddressResult
+import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsTrust
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.wallet.ledger.LedgerException
@@ -227,6 +230,135 @@ class SendTest {
         // The token's own contract, for that token — fine as a native recipient.
         assertTrue(Recipients.parse(xbzz.address!!, xbzz) is Recipients.Parsed.Invalid)
         assertTrue(Recipients.parse(xbzz.address!!, xdai) is Recipients.Parsed.Ok)
+    }
+
+    @Test
+    fun `recipients - names are looked up on Send's field, in their ENSIP-15 form (#277)`() {
+        assertEquals(Recipients.Parsed.Name("alice.eth"), Recipients.parse("Alice.ETH", xdai, names = true))
+        assertEquals(Recipients.Parsed.Name("alice.box"), Recipients.parse("alice.box", xdai, names = true))
+        assertEquals(Recipients.Parsed.Name("alice.wei"), Recipients.parse("alice.wei", xdai, names = true))
+        assertEquals(Recipients.Parsed.Name("alice.gwei"), Recipients.parse("alice.gwei", xdai, names = true))
+        // A DNS name imported into ENS.
+        assertEquals(Recipients.Parsed.Name("gregskril.com"), Recipients.parse(" gregskril.com ", xdai, names = true))
+        assertEquals(Recipients.Parsed.Ok(to), Recipients.parse(to, xdai, names = true))
+        assertEquals(Recipients.Parsed.Name("0x1234.eth"), Recipients.parse("0x1234.eth", xdai, names = true))
+        // The resolver's own normalization: pre-ENSIP-15 ASCII names it
+        // takes as-is are names here too; ASCII ENSIP-15 refuses is refused
+        // up front, not left to fail at lookup.
+        assertEquals(Recipients.Parsed.Name("xn--2i8h.eth"), Recipients.parse("xn--2i8h.eth", xdai, names = true))
+        assertEquals(Recipients.Parsed.Name("ab--c.eth"), Recipients.parse("AB--c.eth", xdai, names = true))
+        val underscore = Recipients.parse("a_b.eth", xdai, names = true)
+        assertTrue("$underscore", underscore is Recipients.Parsed.Invalid && underscore.reason.contains("ENSIP-15"))
+        for (bad in listOf("alice", "alice..eth", ".eth", "alice.eth/x", "https://alice.eth", "a b.eth", "alice.tez", "a_b.eth", "a!b.eth")) {
+            assertTrue(bad, Recipients.parse(bad, xdai, names = true) is Recipients.Parsed.Invalid)
+        }
+        // Elsewhere (a Safe's send) an address only, as before.
+        assertTrue(Recipients.parse("alice.eth", xdai) is Recipients.Parsed.Invalid)
+    }
+
+    @Test
+    fun `recipients - a name's address is checksummed and held to the same refusals (#277)`() {
+        assertEquals(Recipients.Parsed.Ok(to), Recipients.resolved(to.lowercase(), xdai))
+        assertTrue(Recipients.resolved(xbzz.address!!.lowercase(), xbzz) is Recipients.Parsed.Invalid)
+        assertTrue(Recipients.resolved("0x" + "0".repeat(40), xdai) is Recipients.Parsed.Invalid)
+    }
+
+    @Test
+    fun `recipients - the re-check before signing holds the name to the address reviewed (#277)`() {
+        val verified = EnsTrust(verified = true, agreed = listOf("a", "b"))
+        val single = EnsTrust(verified = false, agreed = listOf("a"))
+        val other = "0x" + "b0".repeat(20)
+        fun ok(address: String, trust: EnsTrust) = EnsAddressResult.Ok("alice.eth", address, trust)
+        assertNull(Recipients.recheck("alice.eth", to, ok(to.lowercase(), verified), unverifiedAccepted = false))
+        assertNull(Recipients.recheck("alice.eth", to, ok(to.lowercase(), single), unverifiedAccepted = true))
+        assertNotNull(Recipients.recheck("alice.eth", to, ok(to.lowercase(), single), unverifiedAccepted = false))
+        val moved = Recipients.recheck("alice.eth", to, ok(other, verified), unverifiedAccepted = true)!!
+        assertTrue(moved, moved.contains("different address (0x"))
+        assertNotNull(Recipients.recheck("alice.eth", to, EnsAddressResult.NoAddress("alice.eth", "NO_ADDRESS", verified), true))
+        assertNotNull(
+            Recipients.recheck(
+                "alice.eth", to,
+                EnsAddressResult.Conflict("alice.eth", EnsResult.Conflict.Subject.RECORD, emptyList(), 1L), true,
+            ),
+        )
+        assertNotNull(Recipients.recheck("alice.eth", to, EnsAddressResult.Error("alice.eth", "PROVIDER_ERROR", "down", true), true))
+    }
+
+    @Test
+    fun `recipients - a re-check's conflict says what the servers disagreed on (#277)`() {
+        fun conflict(subject: EnsResult.Conflict.Subject) = EnsAddressResult.Conflict("alice.eth", subject, emptyList(), 1L)
+        assertEquals(
+            "Checking alice.eth again, servers disagreed on its address, so nothing was sent.",
+            Recipients.recheck("alice.eth", to, conflict(EnsResult.Conflict.Subject.RECORD), true),
+        )
+        for (subject in listOf(EnsResult.Conflict.Subject.BLOCK, EnsResult.Conflict.Subject.HEAD)) {
+            val said = Recipients.recheck("alice.eth", to, conflict(subject), true)!!
+            assertTrue(said, said.contains("which block is the chain’s"))
+            assertFalse(said, said.contains("its address"))
+        }
+    }
+
+    @Test
+    fun `recipients - Try again only for an answer asking again could change (#277)`() {
+        assertTrue(Recipients.retryable(EnsAddressResult.Error("alice.eth", "PROVIDER_ERROR", "down", retryable = true)))
+        assertTrue(
+            Recipients.retryable(EnsAddressResult.Conflict("alice.eth", EnsResult.Conflict.Subject.BLOCK, emptyList(), 1L)),
+        )
+        val tooLong = EnsAddressResult.Error("x.eth", "NAME_TOO_LONG", "a label is longer than 255 bytes", retryable = false)
+        assertFalse(Recipients.retryable(tooLong))
+        assertFalse(Recipients.retryable(EnsAddressResult.Error("alice.eth", "RESOLUTION_ERROR", "not an address record", retryable = false)))
+        assertFalse(Recipients.retryable(EnsAddressResult.NoAddress("alice.eth", "NO_ADDRESS", EnsTrust.ASSUMED)))
+        assertFalse(Recipients.retryable(EnsAddressResult.Ok("alice.eth", to.lowercase(), EnsTrust.ASSUMED)))
+        // Nor does the review's refusal tell the user to try what can only fail the same way.
+        assertFalse(Recipients.recheck("x.eth", to, tooLong, true)!!.contains("Try again"))
+        assertTrue(
+            Recipients.recheck("alice.eth", to, EnsAddressResult.Error("alice.eth", "PROVIDER_ERROR", "down", true), true)!!
+                .contains("Try again"),
+        )
+    }
+
+    @Test
+    fun `recipients - a name with nothing to send to says why (#277)`() {
+        assertNull(Recipients.lookupProblem(EnsAddressResult.Ok("alice.eth", to.lowercase(), EnsTrust.ASSUMED), "Gnosis"))
+        assertEquals(
+            "alice.eth has no address for Gnosis. Only an address its owner set for this network is safe to send to.",
+            Recipients.lookupProblem(EnsAddressResult.NoAddress("alice.eth", "NO_ADDRESS", EnsTrust.ASSUMED), "Gnosis"),
+        )
+        assertTrue(
+            Recipients.lookupProblem(EnsAddressResult.NoAddress("alice.wei", "CHAIN_UNSUPPORTED", null), "Gnosis")!!
+                .startsWith("WNS names hold an Ethereum address only"),
+        )
+        // A chain id ENSIP-11 has no coin type for: nothing to retry.
+        assertTrue(
+            Recipients.lookupProblem(EnsAddressResult.NoAddress("alice.eth", "CHAIN_ID_UNSUPPORTED", null), "Big chain")!!
+                .startsWith("Names can’t hold an address for Big chain"),
+        )
+        val conflict = EnsAddressResult.Conflict(
+            "alice.eth", EnsResult.Conflict.Subject.RECORD,
+            listOf(EnsResult.Conflict.Group("0xa1", listOf("rpc1.test")), EnsResult.Conflict.Group("0xb0", listOf("rpc2.test"))),
+            1L,
+        )
+        assertEquals(
+            "Servers disagree on alice.eth’s address, so nothing can be sent to it: 0xa1 (rpc1.test); 0xb0 (rpc2.test).",
+            Recipients.lookupProblem(conflict, "Ethereum"),
+        )
+    }
+
+    @Test
+    fun `a send to a name keeps the name as a label across a restart, the address is what's signed (#277)`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain, journal = FileSendJournal(journalFile()))
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        val quote = s.prepare(request().copy(toName = "alice.eth", toNameAccepted = true))
+        assertEquals(to, quote.tx.to)
+        s.submit(quote, signer())
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertTrue(journalFile().readText().contains("\"toName\":\"alice.eth\""))
+        val restored = sender(chain, journal = FileSendJournal(journalFile())).status.value!!.quote.request
+        assertEquals("alice.eth", restored.toName)
+        // The acceptance of a one-server answer travels too, for a Review again from a reopened page.
+        assertTrue(restored.toNameAccepted)
+        assertEquals(to, restored.to)
     }
 
     // ---- fees and gas ----

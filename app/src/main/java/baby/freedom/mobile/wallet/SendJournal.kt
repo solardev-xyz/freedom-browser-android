@@ -184,6 +184,8 @@ internal object SendJournalCodec {
                 },
             )
             .put("to", r.to)
+            .put("toName", r.toName ?: JSONObject.NULL)
+            .put("toNameAccepted", r.toNameAccepted)
             .put("amount", r.amount.toString())
             .put(
                 "dapp",
@@ -253,7 +255,11 @@ internal object SendJournalCodec {
                 d.optJSONObject("swarm")?.let { l -> SwarmFundLabel(l.getString("node"), l.getString("batchId"), l.getInt("depth"), l.getLong("days")) },
             )
         }
-        val request = SendRequest(chain, token, from, o.getString("to"), BigInteger(o.getString("amount")), dapp)
+        val request = SendRequest(
+            chain, token, from, o.getString("to"), BigInteger(o.getString("amount")), dapp,
+            toName = o.optStringOrNull("toName"),
+            toNameAccepted = o.optBoolean("toNameAccepted", false),
+        )
         val x = o.getJSONObject("tx")
         val tx = EthTransaction(
             chainId = chain.id,
