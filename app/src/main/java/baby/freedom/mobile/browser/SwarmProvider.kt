@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.PublisherIdentity
 import baby.freedom.mobile.wallet.PublisherKeys
 import baby.freedom.mobile.wallet.SitePublisher
@@ -566,7 +568,7 @@ class SwarmProvider(
 
     /** Checks [method]'s parameters (before any sheet) and returns its work. */
     private fun checkSigning(origin: String, method: String, params: JSONObject): Signed = when (method) {
-        "swarm_getSigningIdentity" -> Signed(null, null, "Signing identity", writes = false) {
+        "swarm_getSigningIdentity" -> Signed(null, null, Strings.get(R.string.swarm_sign_detail_identity), writes = false) {
             withKey(origin, null) { r ->
                 Reply.Ok(
                     JSONObject().put("owner", PublisherKeys.address(r.key)).put("identityMode", r.identity.mode.wire),
@@ -578,7 +580,7 @@ class SwarmProvider(
             val identifier = hex32(params.opt("identifier"), "invalid_identifier", "identifier")
             val payload = chunkPayload(params.opt("data"))
             val span = span(params.opt("span"))
-            Signed(null, null, "Single Owner Chunk ${identifier.swarmHex()}", writes = true) {
+            Signed(null, null, Strings.get(R.string.swarm_sign_detail_soc, identifier.swarmHex()), writes = true) {
                 withKey(origin, null) { r -> writeSoc(r, identifier, payload, span) }
             }
         }
@@ -1604,4 +1606,4 @@ internal fun SwarmAsk.Manifest.outcomeOf(answer: SwarmProvider.Answer): SwarmMan
 
 /** Why the wallet page opens, for a site whose approved signing sheet needs a wallet. */
 internal fun swarmWalletReason(origin: String) =
-    "${permissionOriginDisplay(origin)} wants to sign Swarm content with a publisher identity"
+    Strings.get(R.string.swarm_wallet_reason, permissionOriginDisplay(origin))
