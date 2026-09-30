@@ -82,6 +82,15 @@ enum class SitePermission(
     ),
 
     /**
+     * Web MIDI with system-exclusive messages (#267): WebView asks for
+     * `RESOURCE_MIDI_SYSEX` only when a page calls
+     * `navigator.requestMIDIAccess({sysex: true})` — plain MIDI it
+     * allows by itself. Keyed `midi` like the desktop browser, whose one
+     * decision covers both. Android needs no runtime permission for it.
+     */
+    MIDI("midi", "MIDI devices", "use your MIDI devices", emptyList()),
+
+    /**
      * Pop-ups a page opens without the user's gesture (#261). Never
      * prompted for: a blocked pop-up raises a notice instead, whose
      * "Always allow" grants it ([SitePermissionBroker.allowPopups]).
@@ -95,6 +104,47 @@ enum class SitePermission(
         fun forKey(key: String): SitePermission? = entries.firstOrNull { it.key == key }
     }
 }
+
+/**
+ * Whether the app holds what Android requires for [permission] — any one
+ * of its [SitePermission.androidPermissions] ([granted]), or nothing at
+ * all for a capability backed by none (MIDI, pop-ups), which must never
+ * read as "Android refused it".
+ */
+fun androidPermissionsHeld(permission: SitePermission, granted: (String) -> Boolean): Boolean =
+    permission.androidPermissions.isEmpty() || permission.androidPermissions.any(granted)
+
+/**
+ * The site permission a WebView `PermissionRequest` resource asks for,
+ * or `null` for one that's denied without a prompt: protected media
+ * (`RESOURCE_PROTECTED_MEDIA_ID`, see [isProtectedMediaResource]) and
+ * anything a later WebView adds.
+ */
+fun mediaResourcePermission(resource: String): SitePermission? = when (resource) {
+    android.webkit.PermissionRequest.RESOURCE_VIDEO_CAPTURE -> SitePermission.CAMERA
+    android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE -> SitePermission.MICROPHONE
+    android.webkit.PermissionRequest.RESOURCE_MIDI_SYSEX -> SitePermission.MIDI
+    else -> null
+}
+
+/**
+ * Protected media (#267): a page setting up DRM playback (EME with
+ * Widevine) asks for `RESOURCE_PROTECTED_MEDIA_ID` — an identifier for
+ * this device that the content provider's licence server gets to see.
+ * Freedom keeps denying it, without a prompt, so the video won't play;
+ * the user gets a notice saying why ([SitePermissionBroker.onProtectedMediaRefused]).
+ */
+fun isProtectedMediaResource(resource: String): Boolean =
+    resource == android.webkit.PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID
+
+/**
+ * The notice for a refused protected-media request, shown once per site
+ * per run. Names no site: it shows over the page that asked, and in a
+ * private tab it mustn't be a trace of where the user was.
+ */
+const val PROTECTED_MEDIA_NOTICE =
+    "This page wanted to play protected (DRM) video. Freedom doesn't allow it, " +
+        "as it would identify your device to the video's provider — so the video won't play."
 
 enum class PermissionDecision(val stored: String) {
     ALLOW("allow"),
@@ -727,15 +777,18 @@ fun sitePermissionStateLabel(entry: SitePermissionEntry, private: Boolean = fals
 /**
  * Which of [removed] — grants the user took away on the Site permissions
  * sheet (#266) while the tab's document held them — the document still
- * has. WebView can't take either back from a live document: the camera
+ * has. WebView can't take any back from a live document: the camera
  * and microphone stay with it while it's using them ([inUse]); a
  * location grant stays for the document's whole life, answering its
- * running watches and any new request without asking. A reload ends both.
+ * running watches and any new request without asking; and a `MIDIAccess`
+ * the page was given keeps working (a new request is asked about again,
+ * but the page needn't make one). A reload ends them all.
  */
 fun stillHeldAfterRemoval(removed: Set<SitePermission>, inUse: Set<SitePermission>): Set<SitePermission> =
-    listOf(SitePermission.CAMERA, SitePermission.MICROPHONE, SitePermission.LOCATION).filterTo(LinkedHashSet()) {
-        it in removed && (it == SitePermission.LOCATION || it in inUse)
-    }
+    listOf(SitePermission.CAMERA, SitePermission.MICROPHONE, SitePermission.LOCATION, SitePermission.MIDI)
+        .filterTo(LinkedHashSet()) {
+            it in removed && (it == SitePermission.LOCATION || it == SitePermission.MIDI || it in inUse)
+        }
 
 /**
  * The sheet's note for what the page still has after its removal
@@ -743,14 +796,18 @@ fun stillHeldAfterRemoval(removed: Set<SitePermission>, inUse: Set<SitePermissio
  */
 fun stillHeldNote(held: Set<SitePermission>): String? {
     val media = listOf(SitePermission.CAMERA, SitePermission.MICROPHONE).filter { it in held }
-    val location = SitePermission.LOCATION in held
     val mediaPart = media.joinToString(" and ") { it.label.lowercase() }
+    // What the page can go on doing until it's reloaded.
+    val untilReload = listOfNotNull(
+        "get your location".takeIf { SitePermission.LOCATION in held },
+        "use your MIDI devices".takeIf { SitePermission.MIDI in held },
+    ).joinToString(" and ")
     return when {
-        media.isNotEmpty() && location ->
+        media.isNotEmpty() && untilReload.isNotEmpty() ->
             "This page keeps your $mediaPart until it stops using it or is reloaded, " +
-                "and can still get your location until it's reloaded."
+                "and can still $untilReload until it's reloaded."
         media.isNotEmpty() -> "This page keeps your $mediaPart until it stops using it or is reloaded."
-        location -> "This page can still get your location until it's reloaded."
+        untilReload.isNotEmpty() -> "This page can still $untilReload until it's reloaded."
         else -> null
     }
 }

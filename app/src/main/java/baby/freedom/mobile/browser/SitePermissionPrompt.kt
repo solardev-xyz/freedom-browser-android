@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
@@ -74,6 +75,7 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
         prompt.permissions.any { it is ExternalScheme } -> Icons.AutoMirrored.Filled.OpenInNew
         SitePermission.CAMERA in prompt.permissions -> Icons.Filled.Videocam
         SitePermission.MICROPHONE in prompt.permissions -> Icons.Filled.Mic
+        SitePermission.MIDI in prompt.permissions -> Icons.Filled.Piano
         else -> Icons.Filled.LocationOn
     }
     AlertDialog(
@@ -182,7 +184,7 @@ fun SitePermissionAndroidBridge(
         broker.onAndroidPermissionMissing = missing@{ refused ->
             val activity = context.findActivity() ?: return@missing
             val missing = refused.filter { p ->
-                p.androidPermissions.all { androidPermissionBlocked(activity, it) }
+                p.androidPermissions.isNotEmpty() && p.androidPermissions.all { androidPermissionBlocked(activity, it) }
             }
             if (missing.isEmpty()) return@missing
             val what = missing.joinToString(" and ") { it.label.lowercase() }
@@ -210,7 +212,13 @@ fun SitePermissionAndroidBridge(
                 snackbarHostState.showSnackbar("No app on this device can open ${scheme.label}.")
             }
         }
+        broker.onProtectedMediaRefused = {
+            scope.launch {
+                snackbarHostState.showSnackbar(PROTECTED_MEDIA_NOTICE, duration = SnackbarDuration.Long)
+            }
+        }
         onDispose {
+            broker.onProtectedMediaRefused = null
             broker.onNoAppForLink = null
             broker.requestAndroidPermissions = null
             broker.onAndroidPermissionMissing = null

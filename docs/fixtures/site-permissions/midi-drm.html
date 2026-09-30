@@ -1,0 +1,55 @@
+<!doctype html>
+<!--
+  Site permissions fixture (#267): Web MIDI and protected media (DRM).
+  Serve over http://localhost (a secure context), e.g.
+    python3 -m http.server 8730 -d docs/fixtures/site-permissions
+    adb reverse tcp:8730 tcp:8730
+  and open http://localhost:8730/midi-drm.html.
+
+  - "MIDI (SysEx)" asks for navigator.requestMIDIAccess({sysex: true}):
+    Freedom prompts for "MIDI devices" (Allow / Block, Remember).
+  - "MIDI" asks without SysEx, which WebView allows by itself.
+  - "Protected media" sets up Widevine EME the way a streaming site does:
+    Freedom refuses it and says why, once per site per run.
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MIDI and DRM</title>
+<style>
+  body { font: 16px system-ui, sans-serif; margin: 16px; }
+  button { font-size: 16px; padding: 10px 14px; margin: 4px 4px 4px 0; }
+  #log { white-space: pre-wrap; font-family: monospace; font-size: 14px; margin-top: 12px; }
+</style>
+<h1>MIDI and DRM</h1>
+<button id="sysex">MIDI (SysEx)</button>
+<button id="midi">MIDI</button>
+<button id="drm">Protected media</button>
+<div id="log"></div>
+<script>
+  const log = (m) => { document.getElementById('log').textContent += m + '\n'; };
+  async function midi(sysex) {
+    try {
+      const access = await navigator.requestMIDIAccess({ sysex });
+      log(`MIDI${sysex ? ' (SysEx)' : ''}: granted, sysexEnabled=${access.sysexEnabled}, ` +
+        `${access.inputs.size} in / ${access.outputs.size} out`);
+    } catch (e) {
+      log(`MIDI${sysex ? ' (SysEx)' : ''}: ${e.name}: ${e.message}`);
+    }
+  }
+  async function drm() {
+    const config = [{
+      initDataTypes: ['cenc'],
+      videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }],
+    }];
+    try {
+      const access = await navigator.requestMediaKeySystemAccess('com.widevine.alpha', config);
+      await access.createMediaKeys();
+      log('Protected media: MediaKeys created');
+    } catch (e) {
+      log(`Protected media: ${e.name}: ${e.message}`);
+    }
+  }
+  document.getElementById('sysex').onclick = () => midi(true);
+  document.getElementById('midi').onclick = () => midi(false);
+  document.getElementById('drm').onclick = drm;
+</script>

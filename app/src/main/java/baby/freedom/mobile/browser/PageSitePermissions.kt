@@ -18,6 +18,7 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WebAsset
 import androidx.compose.material3.AlertDialog
@@ -44,6 +45,7 @@ internal fun sitePermissionIcon(capability: SiteCapability): ImageVector = when 
     SitePermission.CAMERA -> Icons.Filled.Videocam
     SitePermission.MICROPHONE -> Icons.Filled.Mic
     SitePermission.LOCATION -> Icons.Filled.LocationOn
+    SitePermission.MIDI -> Icons.Filled.Piano
     SitePermission.POPUPS -> Icons.Filled.WebAsset
     is ExternalScheme -> Icons.AutoMirrored.Filled.OpenInNew
 }
@@ -57,7 +59,7 @@ private val InUseGreen = Color(0xFF34A853)
 /**
  * The page's own **Site permissions** (#266), opened from the page menu
  * or the in-use indicator: every decision the site on screen holds —
- * camera, microphone, location, pop-ups, links to other apps, a
+ * camera, microphone, location, MIDI, pop-ups, links to other apps, a
  * dismissal block — and those of any frame inside the page that asked,
  * each with a × that removes it so the site has to ask again.
  *
