@@ -87,63 +87,73 @@ class WalletScreenTest {
     fun `a phrase pasted over the same phrase selected is still a paste (#241)`() {
         fun at(text: String, cursor: Int = text.length) = TextFieldValue(text, TextRange(cursor))
         fun all(text: String) = TextFieldValue(text, TextRange(0, text.length))
-        // Select all, paste the identical phrase: only the selection changes.
-        assertEquals(twelve, insertedText(all(twelve), at(twelve)))
+        // Select all, paste the identical phrase: only the selection changes,
+        // and the Paste was seen putting that text in.
+        assertEquals(twelve, insertedText(all(twelve), at(twelve), committed = twelve))
         // Part of it selected and pasted over with the same words.
         val middle = TextFieldValue(twelve, TextRange(8, 24))
-        assertEquals(twelve.substring(8, 24), insertedText(middle, at(twelve, 24)))
+        assertEquals(twelve.substring(8, 24), insertedText(middle, at(twelve, 24), committed = twelve.substring(8, 24)))
         // Merely selecting, moving the cursor or narrowing a selection isn't one.
         assertEquals("", insertedText(at(twelve), all(twelve)))
         assertEquals("", insertedText(all(twelve), at(twelve, 0)))
         assertEquals("", insertedText(all(twelve), at(twelve, 30)))
         assertEquals("", insertedText(all(twelve), TextFieldValue(twelve, TextRange(0, 30))))
         assertEquals("", insertedText(at(twelve), at(twelve, 3)))
+        // R3-F1: deselecting at the end (a tap there, End) looks the same as
+        // that paste, but no paste was seen: nothing went in.
+        assertEquals("", insertedText(all(twelve), at(twelve)))
+        assertEquals("", insertedText(middle, at(twelve, 24)))
+        // Something else committed (a letter) is not that text.
+        assertEquals("", insertedText(all(twelve), at(twelve), committed = "a"))
+        // A typed phrase selected and deselected at its end: no paste noted.
+        val pastes = PastedPhrases()
+        pastes.edit(at(twelve), all(twelve))
+        pastes.edit(all(twelve), at(twelve))
+        assertTrue(pastes.words.isEmpty())
+        assertFalse(pastes.clipIsPaste)
+        // The same with a real Paste of it: noted.
+        pastes.edit(at(twelve), all(twelve))
+        pastes.committing(twelve)
+        pastes.edit(all(twelve), at(twelve))
+        assertEquals(1, pastes.words.size)
+        assertTrue(pastes.clipIsPaste)
+        // What a Paste read is for the edit right after it only.
+        pastes.forget()
+        pastes.committing(twelve)
+        pastes.edit(at(twelve), all(twelve))
+        pastes.edit(all(twelve), at(twelve))
+        assertTrue(pastes.words.isEmpty())
     }
 
     @Test
-    fun `a phrase cut out of the field is on the clipboard again (#241)`() {
-        fun at(text: String, cursor: Int = text.length) = TextFieldValue(text, TextRange(cursor))
-        fun all(text: String) = TextFieldValue(text, TextRange(0, text.length))
-        assertEquals(twelve, removedSelection(all(twelve), at("")))
-        assertEquals("", removedSelection(at(twelve), at(twelve.dropLast(1))))
-        assertEquals("", removedSelection(all(twelve), at("x")))
-        // Pasted, then cut: the edit first, the clipboard change heard after it.
+    fun `what the field copies or cuts to the clipboard counts as pasted (#241)`() {
         val pastes = PastedPhrases()
+        // Pasted, then copied (or cut) back out: the field's own clip, noted
+        // as pasted, and the change Android reports for it (twice, even)
+        // doesn't undo that.
         pastes.add(twelve)
-        pastes.removed(twelve, now = 1_000)
-        pastes.clipChanged(now = 1_050)
-        assertTrue(pastes.clipIsPaste)
-        // The change reported twice is still that Cut, noted once.
-        pastes.clipChanged(now = 1_090)
+        pastes.copied(twelve, timestamp = 1_000)
+        pastes.clipChanged(1_000)
+        pastes.clipChanged(1_000)
         assertTrue(pastes.clipIsPaste)
         assertEquals(2, pastes.words.size)
-        // A clipboard change just before a selection is deleted is no Cut:
-        // something copied, then the phrase deleted by hand.
+        // Something copied elsewhere since: no longer the last thing on it.
+        pastes.clipChanged(2_000)
+        assertFalse(pastes.clipIsPaste)
+        pastes.clipChanged(null)
+        assertFalse(pastes.clipIsPaste)
+        // A word copied out of the field is no phrase on the clipboard.
         pastes.forget()
         pastes.add(twelve)
-        pastes.clipChanged(now = 5_000)
-        pastes.removed(twelve, now = 5_020)
+        pastes.copied("abandon", timestamp = 3_000)
+        pastes.clipChanged(3_000)
         assertFalse(pastes.clipIsPaste)
         assertEquals(1, pastes.words.size)
-        // Typing after a deletion makes the next clipboard change no Cut.
+        // A copy whose stamp couldn't be read is still noted; any change heard is then taken as someone else's.
         pastes.forget()
-        pastes.removed(twelve, now = 7_000)
-        pastes.removed("", now = 7_010)
-        pastes.clipChanged(now = 7_020)
-        assertFalse(pastes.clipIsPaste)
-        // A selection deleted (no clipboard change), then something copied
-        // much later: no Cut, so the paste is no longer the last thing on it.
-        pastes.forget()
-        pastes.add(twelve)
-        pastes.removed(twelve, now = 10_000)
+        pastes.copied(twelve, timestamp = null)
         assertTrue(pastes.clipIsPaste)
-        pastes.clipChanged(now = 10_000 + PastedPhrases.CUT_WINDOW_MS + 1)
-        assertFalse(pastes.clipIsPaste)
-        // A word cut is no phrase-sized paste.
-        pastes.forget()
-        pastes.removed("abandon", now = 20_000)
-        pastes.clipChanged(now = 20_010)
-        assertTrue(pastes.words.isEmpty())
+        pastes.clipChanged(null)
         assertFalse(pastes.clipIsPaste)
     }
 

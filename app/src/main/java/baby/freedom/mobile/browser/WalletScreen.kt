@@ -3,7 +3,6 @@ package baby.freedom.mobile.browser
 import android.content.ActivityNotFoundException
 import android.content.ClipboardManager
 import android.content.Context
-import android.os.SystemClock
 import android.content.Intent
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
@@ -49,6 +48,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -62,6 +62,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.Clipboard
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -365,41 +368,30 @@ internal fun insertedLength(before: TextFieldValue, after: TextFieldValue): Int 
  * what went in at the cursor (or over the selection) when the edit kept
  * everything either side of it, so a pasted phrase is had whole even
  * where it starts or ends with words already in the field.
+ *
+ * [committed] is the text a Paste or the keyboard was just seen putting
+ * in ([PastedPhrases.committing]). A paste over a selection of the very
+ * same text changes nothing but the selection, and by the values alone
+ * looks exactly like deselecting by tapping at the end of the selection
+ * (or End): so a same-text edit only counts when [committed] is that
+ * text, never from where the cursor ends up.
  */
-internal fun insertedText(before: TextFieldValue, after: TextFieldValue): String {
+internal fun insertedText(before: TextFieldValue, after: TextFieldValue, committed: CharSequence? = null): String {
     val old = before.text
     val new = after.text
     val sel = before.selection
     val head = old.substring(0, sel.min.coerceIn(0, old.length))
     val tail = old.substring(sel.max.coerceIn(0, old.length))
-    // A paste over a selection of the very same text changes nothing but
-    // the selection: it's told from the selection merely changing by
-    // where it leaves the cursor, collapsed at the end of what went in.
-    // (Tapping exactly at the end of the selection looks the same, and
-    // counts too: the clipboard is then only read, and cleared if it holds
-    // those words anyway.)
-    val sameTextPasted = old != new || (after.selection.collapsed && after.selection.start == sel.max)
-    if (sameTextPasted && new.length > head.length + tail.length && new.startsWith(head) && new.endsWith(tail)) {
-        return new.substring(head.length, new.length - tail.length)
+    val replaced = new.length > head.length + tail.length && new.startsWith(head) && new.endsWith(tail)
+    if (old == new) {
+        if (!replaced || committed == null || sel.collapsed) return ""
+        val same = new.substring(head.length, new.length - tail.length)
+        return if (committed.toString() == same) same else ""
     }
-    if (old == new) return ""
+    if (replaced) return new.substring(head.length, new.length - tail.length)
     val prefix = old.commonPrefixWith(new).length
     val suffix = old.substring(prefix).commonSuffixWith(new.substring(prefix)).length
     return new.substring(prefix, new.length - suffix)
-}
-
-/**
- * The text an edit from [before] to [after] took out of the field when it
- * removed the selection and kept everything either side of it — what a Cut
- * puts on the clipboard; empty for any other edit.
- */
-internal fun removedSelection(before: TextFieldValue, after: TextFieldValue): String {
-    val old = before.text
-    val sel = before.selection
-    if (sel.collapsed) return ""
-    val head = old.substring(0, sel.min.coerceIn(0, old.length))
-    val tail = old.substring(sel.max.coerceIn(0, old.length))
-    return if (after.text == head + tail) old.substring(head.length, old.length - tail.length) else ""
 }
 
 /**
@@ -410,17 +402,39 @@ internal fun removedSelection(before: TextFieldValue, after: TextFieldValue): St
  *
  * A paste is text of more than one word inserted at once ([add]). The
  * keyboard also inserts a whole word at once — a swiped word, an accepted
- * suggestion — and that is no paste: counting it would read the clipboard
- * on the way out (Android's "pasted from your clipboard" notice) for a
- * phrase that was only typed. So a single word pasted on its own is left
- * on the clipboard; one word of a phrase is no phrase. A phrase pasted
+ * suggestion (other keyboards than Gboard, which offers neither on this
+ * password-type field) — and that is no paste: counting it would read the
+ * clipboard on the way out (Android's "pasted from your clipboard" notice)
+ * for a phrase that was only typed. So a single word pasted on its own is
+ * left on the clipboard; one word of a phrase is no phrase. A phrase pasted
  * from a keyboard's own clipboard history, not the clipboard, reads as a
  * paste too, so losing focus then clears whatever is on the clipboard —
  * the same trade-off [PhraseClipboard] makes at its deadline.
+ *
+ * What the field itself puts on the clipboard — a Copy or a Cut, from its
+ * menu, the keyboard or a hardware shortcut, all through
+ * [WatchedClipboard] — is noted as if it had been pasted ([copied]): it
+ * is the field's text on the clipboard, taken off it on the way out like
+ * a paste, unread on focus loss too.
  */
 internal class PastedPhrases {
     val words = mutableListOf<List<String>>()
     var clipIsPaste = false
+
+    /**
+     * The text a Paste read off the clipboard, or the keyboard committed,
+     * for the edit about to follow ([edit]); see [insertedText].
+     */
+    fun committing(text: CharSequence?) {
+        committed = text?.toString()
+    }
+
+    /** Notes the edit from [before] to [after], if it was a paste ([insertedText], [add]). */
+    fun edit(before: TextFieldValue, after: TextFieldValue) {
+        val text = committed
+        committed = null
+        add(insertedText(before, after, text))
+    }
 
     /** Notes [inserted], the text one edit put in the field ([insertedText]), if it was a paste. */
     fun add(inserted: String) {
@@ -434,51 +448,66 @@ internal class PastedPhrases {
     }
 
     /**
-     * Notes [text], a selection one edit took out of the field
-     * ([removedSelection]) at [now] (uptime ms). With the clipboard heard
-     * changing within [CUT_WINDOW_MS] after it ([clipChanged]), that was a
-     * Cut — the text field puts the selection on the clipboard as it takes
-     * it out, and the change is heard just after — and [text] is on the
-     * clipboard now: noted as if it had been pasted from there ([add]), so
-     * a phrase cut back out of the field is taken off the clipboard on the
-     * way out, unread on focus loss too.
+     * The field put [text] on the clipboard (a Copy or a Cut), as the clip
+     * whose description is stamped [timestamp] (`ClipDescription.getTimestamp`,
+     * null if it couldn't be looked at): it's the last thing on the
+     * clipboard now, noted as if pasted ([add]), and the change Android
+     * reports for it ([clipChanged]) is no change from it.
      */
-    fun removed(text: String, now: Long) {
-        removedText = text.ifEmpty { null }
-        removedAt = now
-        removedWasCut = false
+    fun copied(text: CharSequence?, timestamp: Long?) {
+        ownClipAt = timestamp
+        clipIsPaste = false
+        add(text?.toString().orEmpty())
     }
 
     /**
-     * The clipboard changed at [now] (uptime ms): no paste is the last
-     * thing on it, unless this is a Cut ([removed]). Android may report
-     * one change more than once, so a Cut is seen again the same way.
+     * The clipboard changed, to a clip stamped [timestamp] (null if it
+     * couldn't be looked at): no paste is the last thing on it, unless it's
+     * the field's own Copy or Cut ([copied]) — reported after it was
+     * noted, and perhaps more than once.
      */
-    fun clipChanged(now: Long) {
+    fun clipChanged(timestamp: Long?) {
+        if (timestamp != null && timestamp == ownClipAt) return
         clipIsPaste = false
-        val text = removedText ?: return
-        if (now - removedAt !in 0..CUT_WINDOW_MS) return
-        if (!removedWasCut) add(text) else if (clipWords(text).size >= MIN_PHRASE_WORDS) clipIsPaste = true
-        removedWasCut = true
     }
 
-    private var removedText: String? = null
-    private var removedAt = 0L
-    private var removedWasCut = false
+    private var committed: String? = null
+    private var ownClipAt: Long? = null
 
     fun forget() {
         words.clear()
         clipIsPaste = false
-        removedText = null
-        removedWasCut = false
+        committed = null
+        ownClipAt = null
     }
 
     companion object {
         val MIN_PHRASE_WORDS = Mnemonic.IMPORT_WORD_COUNTS.min()
-
-        /** How close together a selection going and the clipboard changing must be to read as one Cut. */
-        const val CUT_WINDOW_MS = 1_000L
     }
+}
+
+/**
+ * The Import field's clipboard ([LocalClipboard]): the field's own Paste
+ * (menu, keyboard, hardware shortcut) reads through [getClipEntry], and its
+ * Copy and Cut write through [setClipEntry], so [pastes] hears each where
+ * it happens instead of guessing it from the text ([PastedPhrases.committing],
+ * [PastedPhrases.copied]). Only the item's plain text is looked at, never
+ * coerced from a `content:` URI.
+ */
+internal class WatchedClipboard(private val inner: Clipboard, private val pastes: PastedPhrases) : Clipboard {
+    override val nativeClipboard: ClipboardManager get() = inner.nativeClipboard
+
+    override suspend fun getClipEntry(): ClipEntry? =
+        inner.getClipEntry().also { pastes.committing(it?.plainText()) }
+
+    override suspend fun setClipEntry(clipEntry: ClipEntry?) {
+        inner.setClipEntry(clipEntry)
+        val stamp = runCatching { nativeClipboard.primaryClipDescription?.timestamp }.getOrNull()
+        pastes.copied(clipEntry?.plainText(), stamp)
+    }
+
+    private fun ClipEntry.plainText(): CharSequence? =
+        clipData.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text
 }
 
 /**
@@ -1662,9 +1691,11 @@ internal fun ImportPhrasePage(
     DisposableEffect(clipboard) {
         // Only heard while Freedom has window focus (API 29+) — which is
         // why clipIsPaste is dropped once focus goes.
-        // A Cut out of the field is a clipboard change too, one that puts
-        // what was cut on it ([PastedPhrases.removed]).
-        val listener = ClipboardManager.OnPrimaryClipChangedListener { pastes.clipChanged(SystemClock.uptimeMillis()) }
+        // The field's own Copy or Cut is a clipboard change too, one that
+        // puts its text on it ([PastedPhrases.copied]).
+        val listener = ClipboardManager.OnPrimaryClipChangedListener {
+            pastes.clipChanged(runCatching { clipboard?.primaryClipDescription?.timestamp }.getOrNull())
+        }
         clipboard?.addPrimaryClipChangedListener(listener)
         onDispose {
             clipboard?.removePrimaryClipChangedListener(listener)
@@ -1711,26 +1742,29 @@ internal fun ImportPhrasePage(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(8.dp))
-                    TabTextInput(private = true) {
-                        OutlinedTextField(
-                            value = field,
-                            onValueChange = {
-                                pastes.add(insertedText(field, it))
-                                pastes.removed(removedSelection(field, it), SystemClock.uptimeMillis())
-                                field = it
-                            },
-                            enabled = !busy,
-                            minLines = 4,
-                            textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
-                            keyboardOptions = KeyboardOptions(
-                                capitalization = KeyboardCapitalization.None,
-                                autoCorrectEnabled = false,
-                                keyboardType = KeyboardType.Password,
-                                imeAction = ImeAction.Done,
-                            ),
-                            keyboardActions = KeyboardActions(onDone = { submit() }),
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp),
-                        )
+                    val appClipboard = LocalClipboard.current
+                    val watched = remember(appClipboard) { WatchedClipboard(appClipboard, pastes) }
+                    TabTextInput(private = true, onCommitText = pastes::committing) {
+                        CompositionLocalProvider(LocalClipboard provides watched) {
+                            OutlinedTextField(
+                                value = field,
+                                onValueChange = {
+                                    pastes.edit(field, it)
+                                    field = it
+                                },
+                                enabled = !busy,
+                                minLines = 4,
+                                textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+                                keyboardOptions = KeyboardOptions(
+                                    capitalization = KeyboardCapitalization.None,
+                                    autoCorrectEnabled = false,
+                                    keyboardType = KeyboardType.Password,
+                                    imeAction = ImeAction.Done,
+                                ),
+                                keyboardActions = KeyboardActions(onDone = { submit() }),
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp),
+                            )
+                        }
                     }
                     Spacer(Modifier.height(6.dp))
                     Text(

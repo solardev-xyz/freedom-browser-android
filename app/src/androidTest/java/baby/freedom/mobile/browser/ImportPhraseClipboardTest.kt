@@ -304,6 +304,67 @@ class ImportPhraseClipboardTest {
     }
 
     @Test
+    fun aPastedPhraseCopiedBackOutIsClearedUnreadWhenFreedomGoesToTheBackground() {
+        setClip(twelve)
+        paste()
+        selectAll()
+        rule.onNode(field).performSemanticsAction(SemanticsActions.CopyText)
+        rule.waitForIdle()
+        assertEquals(twelve, clipText())
+        goHome { ownRead ->
+            assertEquals(null, ownRead)
+            assertEquals(null, clipText())
+        }
+    }
+
+    @Test
+    fun aPastedPhraseCopiedBackOutIsClearedOnBack() {
+        setClip(twelve)
+        paste()
+        selectAll()
+        rule.onNode(field).performSemanticsAction(SemanticsActions.CopyText)
+        rule.waitForIdle()
+        pressBack()
+        assertEquals(null, clipText())
+    }
+
+    /**
+     * A phrase typed a word at a time, selected whole and deselected by
+     * placing the cursor at its end (a tap there, End): the text doesn't
+     * change and the cursor ends where a paste over it would leave it, but
+     * nothing was pasted.
+     */
+    private fun typeSelectAllAndDeselectAtTheEnd() {
+        setClip("hunter2-unrelated-secret")
+        for (word in twelve.split(" ")) {
+            rule.onNode(field).performTextInput(if (word == "about") word else "$word ")
+            rule.waitForIdle()
+        }
+        selectAll()
+        rule.onNode(field).performTextInputSelection(TextRange(twelve.length))
+        rule.waitForIdle()
+    }
+
+    @Test
+    fun aTypedPhraseDeselectedAtItsEndLeavesTheClipboardAloneWhenFreedomGoesToTheBackground() {
+        typeSelectAllAndDeselectAtTheEnd()
+        goHome { ownRead ->
+            assertEquals(null, ownRead)
+            assertEquals("hunter2-unrelated-secret", clipText())
+        }
+    }
+
+    @Test
+    fun aTypedPhraseDeselectedAtItsEndNeverReadsTheClipboard() {
+        typeSelectAllAndDeselectAtTheEnd()
+        val reads = lastClipboardRead()
+        pressBack()
+        assertFalse(shown)
+        assertEquals(reads, lastClipboardRead())
+        assertEquals("hunter2-unrelated-secret", clipText())
+    }
+
+    @Test
     fun wordsTypedAWordAtATimeLeaveTheClipboardAloneWhenFreedomLosesFocus() {
         // A swiped word goes in whole, but it's no phrase-sized paste.
         setClip(twelve)
