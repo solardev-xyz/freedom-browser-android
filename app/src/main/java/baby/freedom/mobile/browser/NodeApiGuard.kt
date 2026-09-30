@@ -47,9 +47,17 @@ import java.io.ByteArrayInputStream
  * in the node yet: ant's FFI gateway pins its CORS allow-list to `null`
  * (tracked upstream, see `docs/virtual-origins-hardening.md`).
  *
- * Matched by the gateway's port, not its host: any DNS name that resolves
- * to 127.0.0.1 reaches the node as well as `127.0.0.1` itself does, and
- * ant doesn't look at `Host`.
+ * Matched by the gateway's port, and by host only as far as a URL can
+ * prove it isn't the device: any DNS name that resolves to 127.0.0.1
+ * reaches the node as well as `127.0.0.1` itself does, and ant doesn't
+ * look at `Host`. The node binds 127.0.0.1 only, so an IP literal outside
+ * loopback and the unspecified address (`http://192.168.1.20:1633`) is
+ * some other machine's Bee node — the user's own on their LAN, say — and
+ * its reads pass; so does the host of the external Swarm node the user
+ * set in Settings ([Gateways.externalSwarmBase]), which they named
+ * themselves. Any other name on the port (`http://nas:1633`) is refused,
+ * with a refusal that says how to reach such a node. Chain writes stay
+ * refused on every host, as they were before the reads were covered.
  */
 internal object NodeApiGuard {
     /**
@@ -81,19 +89,74 @@ internal object NodeApiGuard {
         if (!refuses(method, url)) return null
         val segment = firstSegment(pathOf(url))
         val write = isWrite(method) && segment in CHAIN_PATHS
+        val text = when {
+            write -> SPEND_REFUSAL
+            isLoopbackLiteral(WhatwgHost.parse(url)?.hostname) -> READ_REFUSAL
+            else -> READ_REFUSAL + OTHER_NODE_HINT
+        }
         // The endpoint only: a query can carry anything.
         Log.w(TAG, "refused a page's request to the Swarm node's API: ${method.uppercase()} /${segment.orEmpty()}")
         return WebResourceResponse(
             "text/plain", "utf-8", 403, "Forbidden",
             mapOf("Access-Control-Allow-Origin" to "*", "Cache-Control" to "no-store"),
-            ByteArrayInputStream((if (write) SPEND_REFUSAL else READ_REFUSAL).toByteArray(Charsets.UTF_8)),
+            ByteArrayInputStream(text.toByteArray(Charsets.UTF_8)),
         )
     }
 
-    /** Is a [method] request to [url] one for the node's gateway, outside the dapp surface? */
-    internal fun refuses(method: String, url: String): Boolean {
+    /**
+     * Is a [method] request to [url] one for the node's gateway, outside the
+     * dapp surface? [externalSwarm] is the user's external Swarm node
+     * ([Gateways.externalSwarmBase]; `""` for none).
+     */
+    internal fun refuses(
+        method: String,
+        url: String,
+        externalSwarm: String = Gateways.externalSwarmBase,
+    ): Boolean {
         if (!onGatewayPort(url)) return false
-        return firstSegment(pathOf(url)) !in DAPP_PATHS
+        val segment = firstSegment(pathOf(url))
+        if (segment in DAPP_PATHS) return false
+        if (isWrite(method) && segment in CHAIN_PATHS) return true
+        return mayBeThisDevice(url, externalSwarm)
+    }
+
+    /**
+     * Could [url]'s host be the embedded node, bound to 127.0.0.1? Yes for
+     * a loopback or unspecified literal and for any name (it may resolve
+     * to loopback), except the external node's own host the user set; no
+     * for any other IP literal. Unparsable counts as yes.
+     */
+    private fun mayBeThisDevice(url: String, externalSwarm: String): Boolean {
+        val host = WhatwgHost.parse(url)?.hostname ?: return true
+        if (isLoopbackLiteral(host)) return true
+        if (host.startsWith("[")) return false
+        if (host.split('.').let { p -> p.size == 4 && p.all { o -> o.isNotEmpty() && o.all { it in '0'..'9' } } }) {
+            return false
+        }
+        if (externalSwarm.isEmpty() || !onGatewayPort(externalSwarm)) return true
+        return WhatwgHost.parse(externalSwarm)?.hostname?.trimEnd('.') != host.trimEnd('.')
+    }
+
+    /**
+     * Does [host] (WHATWG-serialised) name the device itself: `localhost`
+     * and `*.localhost`, IPv4 `127.0.0.0/8` or `0.0.0.0/8` (connecting to
+     * `0.0.0.0` reaches loopback on Linux), or an IPv6 address whose first
+     * 80 bits are zero (`::1`, `::`, `::ffff:127.0.0.1`, the deprecated
+     * `::127.0.0.1`)? `null` (unparsable) counts as yes.
+     */
+    private fun isLoopbackLiteral(host: String?): Boolean {
+        val h = host?.trimEnd('.') ?: return true
+        if (h == "localhost" || h.endsWith(".localhost")) return true
+        if (h.startsWith("[")) {
+            val v6 = h.removePrefix("[").removeSuffix("]")
+            // WHATWG compresses the longest zero run, so five or more leading
+            // zero pieces always serialise as a leading `::` followed by at
+            // most three pieces (`ffff:7f00:1`, `1`, none).
+            return v6.startsWith("::") && v6.removePrefix("::").split(':').filter { it.isNotEmpty() }.size <= 3
+        }
+        val octets = h.split('.')
+        if (octets.size != 4 || !octets.all { o -> o.isNotEmpty() && o.all { it in '0'..'9' } }) return false
+        return octets[0].toInt() == 127 || octets[0].toInt() == 0
     }
 
     private fun isWrite(method: String): Boolean = method.uppercase().let { it != "GET" && it != "HEAD" }
@@ -177,4 +240,12 @@ internal object NodeApiGuard {
         "Freedom doesn't let web pages use the Swarm node's own API. " +
             "Pages can upload and read content (/bzz, /bytes, /chunks, /soc, /feeds); " +
             "the node's wallet, stamps and addresses are shown in the app."
+
+    /**
+     * Added for a name, which may resolve to the device: how to reach a
+     * Bee node on another machine instead.
+     */
+    private const val OTHER_NODE_HINT =
+        " If this is a Bee node on another machine, use its IP address, " +
+            "or set it as the external Swarm node in Settings."
 }

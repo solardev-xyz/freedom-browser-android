@@ -81,7 +81,10 @@ Status:
   pinned `null` lets any opaque-origin context read the node's private
   API (`/wallet`, `/addresses`, `/stamps`, …) — and a CORS fetch carries
   `Origin: null` after any cross-origin redirect, so an ordinary page
-  can too, through a redirector. `NodeApiGuard` refuses every page
+  can too, through a redirector — from a public https site as well:
+  Private Network Access doesn't block it in WebView 133 (checked from
+  `https://example.com` through `httpbin.org/redirect-to`, see
+  `docs/dapp-compatibility.md`). `NodeApiGuard` refuses every page
   request to the gateway outside the dapp surface, but WebView never
   asks the interceptor about such a redirect hop, and other browsers
   and apps don't pass through it at all. The fix belongs in the node:

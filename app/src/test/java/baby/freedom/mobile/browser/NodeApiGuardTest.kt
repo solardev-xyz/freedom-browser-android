@@ -5,7 +5,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NodeApiGuardTest {
-    private fun refused(method: String, url: String) = NodeApiGuard.refuses(method, url)
+    private fun refused(method: String, url: String, externalSwarm: String = "") =
+        NodeApiGuard.refuses(method, url, externalSwarm)
 
     @Test
     fun `every on-chain write to the node is refused`() {
@@ -72,10 +73,12 @@ class NodeApiGuardTest {
     }
 
     @Test
-    fun `any host on the gateway port counts, since any name can resolve to loopback`() {
+    fun `any host on the gateway port that may be the device counts, since any name can resolve to loopback`() {
         for (host in listOf(
-            "localhost", "127.0.0.1", "[::1]", "[::ffff:7f00:1]", "0.0.0.0",
-            "127.0.0.1.nip.io", "anything.example", "user:pw@127.0.0.1",
+            "localhost", "127.0.0.1", "[::1]", "[::ffff:7f00:1]", "[::ffff:127.0.0.1]", "[::]",
+            "[::7f00:1]", "0.0.0.0", "0", "0.1.2.3", "127.1", "0x7f.1", "2130706433", "127.9.9.9",
+            "app.localhost", "127.0.0.1.nip.io", "anything.example", "nas", "user:pw@127.0.0.1",
+            "LOCALHOST.",
         )) {
             assertTrue(host, refused("POST", "http://$host:1633/stamps/1/17"))
             assertTrue(host, refused("GET", "http://$host:1633/wallet"))
@@ -83,6 +86,27 @@ class NodeApiGuardTest {
         }
         assertTrue(refused("POST", "https://127.0.0.1:1633/stamps/1/17"))
         assertTrue(refused("POST", "http://127.0.0.1:01633/stamps/1/17"))
+    }
+
+    @Test
+    fun `another machine's Bee node is reachable by IP literal, and by the external node's own name`() {
+        for (host in listOf("192.168.1.20", "10.0.2.2", "[fe80::1]", "[2001:db8::1]", "[::1:0:0:0]", "8.8.8.8", "0xc0.0xa8.1.20")) {
+            assertFalse(host, refused("GET", "http://$host:1633/wallet"))
+            assertFalse(host, refused("GET", "http://$host:1633/stamps"))
+            assertFalse(host, refused("POST", "http://$host:1633/pins/ab"))
+            // Spending stays refused on every host, as before #283.
+            assertTrue(host, refused("POST", "http://$host:1633/stamps/1/17"))
+        }
+        // The user named this node in Settings: it's theirs, not the device.
+        assertFalse(refused("GET", "http://nas:1633/wallet", externalSwarm = "http://nas:1633"))
+        assertFalse(refused("GET", "http://NAS.:1633/addresses", externalSwarm = "http://nas:1633"))
+        assertTrue(refused("POST", "http://nas:1633/stamps/1/17", externalSwarm = "http://nas:1633"))
+        // Only that name, and only on the gateway port.
+        assertTrue(refused("GET", "http://other:1633/wallet", externalSwarm = "http://nas:1633"))
+        assertTrue(refused("GET", "http://nas:1633/wallet", externalSwarm = "http://nas:8080"))
+        // A loopback name is still the device, even if it's the external node.
+        assertTrue(refused("GET", "http://localhost:1633/wallet", externalSwarm = "http://localhost:1633"))
+        assertTrue(refused("GET", "http://127.0.0.1:1633/wallet", externalSwarm = "http://127.0.0.1:1633"))
     }
 
     @Test
