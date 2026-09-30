@@ -186,7 +186,7 @@ internal fun AccountsSection(
                 Text(stringResource(R.string.common_copy_address))
             }
             if (active.hasLocalKey) {
-                TextButton(onClick = { onShowKey(active) }, modifier = Modifier.testTag("wallet-show-key")) {
+                TextButton(onClick = { onShowKey(active) }, enabled = !busy, modifier = Modifier.testTag("wallet-show-key")) {
                     Text(stringResource(R.string.wallet_key_show))
                 }
             }

@@ -98,13 +98,15 @@ internal object PhraseClipboard {
     private val _copiedLabel = MutableStateFlow<String?>(null)
 
     /**
-     * Whether a copied phrase is still owed its clear: true from [copy]
+     * Whether *some* copied secret — the phrase or a private key, see
+     * [copiedLabel] for which — is still owed its clear: true from [copy]
      * until the deadline's [clearIfDue] (or a stale deadline) takes it
      * off. A process started while a clear is still pending (the saved
      * deadline) learns it from its first [clearIfDue], which
      * `MainActivity.onWindowFocusChanged` runs as soon as Freedom has
-     * focus. What the page's Copy button shows as "Copied", so it goes
-     * back to "Copy" the moment the words are gone, not later.
+     * focus. No page reads this to show "Copied": each page's Copy button
+     * reads [copiedLabel] and matches its own label, so a pending private
+     * key never reads as a copied phrase (or the reverse).
      */
     val copied: StateFlow<Boolean> = _copied.asStateFlow()
 
