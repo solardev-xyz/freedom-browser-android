@@ -1466,7 +1466,7 @@ private fun ErrorText(message: String) {
  * so it doesn't learn the words.
  */
 @Composable
-private fun ImportPhrasePage(
+internal fun ImportPhrasePage(
     busy: Boolean,
     error: String?,
     deviceSecure: Boolean,
