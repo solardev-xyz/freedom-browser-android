@@ -284,7 +284,12 @@ class SwarmNode internal constructor(
                     gnosisRpc = mode.gnosisRpc,
                 )
             } catch (t: Throwable) {
-                runCatching { ops.shutdown(h) }
+                // As in [stop]: a chain read ant began before the gateway
+                // failed would otherwise hold this shutdown for the
+                // reader's whole deadline. Nothing else uses this handle
+                // yet (it isn't published), so no spend's read is failed
+                // (#300 R3-M2).
+                runCatching { AntChainTransport.whileStopping { ops.shutdown(h) } }
                 throw t
             }
             val agent = runCatching { ops.agentString(h) }.getOrNull().orEmpty()
@@ -310,8 +315,10 @@ class SwarmNode internal constructor(
             if (!published) {
                 Log.i(TAG, "stopped while starting; shutting the new node down")
                 runCatching {
-                    ops.stopGateway(h)
-                    ops.shutdown(h)
+                    AntChainTransport.whileStopping {
+                        ops.stopGateway(h)
+                        ops.shutdown(h)
+                    }
                 }.onFailure { Log.w(TAG, "shutdown threw", it) }
             }
         } catch (t: Throwable) {
@@ -356,8 +363,13 @@ class SwarmNode internal constructor(
                 runCatching {
                     // After any storage call still using it (#116).
                     handleUse.write {
-                        ops.stopGateway(h)
-                        ops.shutdown(h)
+                        // Its chain reads end now, not at their deadline,
+                        // and none starts meanwhile: both calls below wait
+                        // for them (#273, #300 R2-M1).
+                        AntChainTransport.whileStopping {
+                            ops.stopGateway(h)
+                            ops.shutdown(h)
+                        }
                     }
                 }.onFailure { Log.w(TAG, "shutdown threw", it) }
             }.also { pendingShutdown = it }
@@ -684,6 +696,12 @@ class SwarmNode internal constructor(
     private fun reloadGateway(h: Long, mode: Mode) {
         synchronized(lock) { if (handle != h) return }
         try {
+            // Not under [AntChainTransport.whileStopping], unlike [stop]:
+            // other storage calls may be running (a spend reading its
+            // receipt), and failing their reads could turn a sent
+            // transaction into a reported failure. So this stop can wait
+            // behind a gateway handler's read, up to the reader's deadline
+            // (#300 R2-M1).
             ops.stopGateway(h)
             ops.startGateway(handle = h, apiAddr = GATEWAY_ADDR, lightMode = mode.light, gnosisRpc = mode.gnosisRpc)
             Log.i(TAG, "reloaded the gateway so it reports the node's chequebook")

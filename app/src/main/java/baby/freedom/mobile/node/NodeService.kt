@@ -20,10 +20,15 @@ import android.system.OsConstants
 import android.system.StructPollfd
 import android.util.Log
 import baby.freedom.mobile.R
+import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.chains.rpc.PinnedHttpTransport
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.wallet.KeystoreVaultStore
 import baby.freedom.mobile.wallet.NodeIdentityStore
+import baby.freedom.swarm.AntChainTransport
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsNode
 import baby.freedom.swarm.NodeInfo
@@ -31,6 +36,7 @@ import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.RadicleInfo
 import baby.freedom.swarm.RadicleNode
 import baby.freedom.swarm.SwarmNode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -75,9 +81,36 @@ class NodeService : Service() {
     @Volatile
     private var relayedMode: SwarmNode.Mode? = null
 
+    /** Numbers each [INodeService.setSwarmMode], so an older one can't land after a newer one. */
+    private val modeRelays = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** The newest [modeRelays] number applied to [relayedMode]. Guarded by [modeRelays]. */
+    private var appliedModeRelay = 0L
+
     /** The mode the launch now booting read, handed to [SwarmNode.Config.mode] right after its identity. */
     @Volatile
     private var launchMode: SwarmNode.Mode = SwarmNode.Mode.ULTRA_LIGHT
+
+    /**
+     * The Gnosis chain the Swarm node reads through the chain-data router
+     * (#273), as the UI last relayed it with [INodeService.setSwarmMode] —
+     * its RPCs and the user's; null until it has, when [storedGnosis] (read
+     * here) stands in. Can carry API keys: never logged.
+     */
+    @Volatile
+    private var relayedGnosis: Chain? = null
+
+    @Volatile
+    private var storedGnosis: Chain? = null
+
+    /**
+     * Answers ant's Gnosis reads (#273) through a router of this process's
+     * own over [gnosisForReads], installed as [AntChainTransport]'s reader
+     * for the life of the process: it's never taken down, since a postage
+     * spend still running after [onDestroy] reads the chain (nonces,
+     * receipts) until it ends, and the process exits after either way.
+     */
+    private lateinit var chainBridge: AntChainBridge
     private var ipfsNode: IpfsNode? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -182,11 +215,35 @@ class NodeService : Service() {
             scope.launch(Dispatchers.IO) { restartSwarmIfStale("node identity changed") }
         }
 
-        override fun setSwarmMode(light: Boolean, gnosisRpc: String?) {
-            val mode = if (light) SwarmNode.Mode.light(gnosisRpc.orEmpty()) else SwarmNode.Mode.ULTRA_LIGHT
+        override fun setSwarmMode(light: Boolean, gnosisRpc: String?, gnosisUserRpcs: List<String>?, gnosisRpcs: List<String>?) {
+            // No Gnosis relayed (the UI hasn't read its chain list yet,
+            // #300 R3-M1): keep the one this process has, and take the
+            // mode's RPC from it below.
+            if (gnosisRpc != null) {
+                // Read by the next chain request at once: no restart needed.
+                relayedGnosis = gnosisChainFor(
+                    listOf(
+                        BuiltInChains.GNOSIS.copy(
+                            rpcUrls = gnosisRpcs.orEmpty().take(Chain.MAX_RPC_URLS),
+                            userRpcUrls = gnosisUserRpcs.orEmpty().take(Chain.MAX_USER_RPC_URLS),
+                        ),
+                    ),
+                )
+            }
             if (doomed) return
+            val seq = modeRelays.incrementAndGet()
             scope.launch(Dispatchers.IO) {
-                relayedMode = mode
+                val mode = when {
+                    !light -> SwarmNode.Mode.ULTRA_LIGHT
+                    gnosisRpc != null -> SwarmNode.Mode.light(gnosisRpc)
+                    else -> SwarmNode.Mode.light(gnosisRpcFor(listOf(gnosisForReads())))
+                }
+                // A later relay that finished first stands.
+                synchronized(modeRelays) {
+                    if (seq < appliedModeRelay) return@launch
+                    appliedModeRelay = seq
+                    relayedMode = mode
+                }
                 restartSwarmIfStale("swarm mode is now $mode")
             }
         }
@@ -445,15 +502,32 @@ class NodeService : Service() {
      */
     private fun swarmMode(): SwarmNode.Mode = relayedMode ?: try {
         runBlocking {
-            swarmModeFor(
-                NodeSettings.get(this@NodeService).swarmLightMode.first(),
-                ChainStore.get(this@NodeService).chains.first(),
-            )
+            // Null while the file can't be read: nothing is kept then, so
+            // a passing read error doesn't pin the Swarm node's reads to
+            // the shipped RPCs ([gnosisForReads] reads again).
+            val chains = ChainStore.get(this@NodeService).chainsOrUnreadable.first()
+            chains?.let { storedGnosis = gnosisChainFor(it) }
+            swarmModeFor(NodeSettings.get(this@NodeService).swarmLightMode.first(), chains ?: BuiltInChains.ALL)
         }
     } catch (e: Exception) {
         Log.w(TAG, "reading the swarm mode failed (${e.javaClass.simpleName}); ultra-light")
         SwarmNode.Mode.ULTRA_LIGHT
     }
+
+    /**
+     * The Gnosis chain for the Swarm node's reads (#273): the UI's latest
+     * relay, or — before this process has heard one — the chains store,
+     * read here as [swarmMode] does. While that can't be read, the shipped
+     * chain answers this read, and nothing is kept: the next read tries
+     * the store again, so a passing error doesn't leave the user's own
+     * Gnosis RPC out until the UI next relays.
+     */
+    private suspend fun gnosisForReads(): Chain = relayedGnosis ?: storedGnosis ?: try {
+        ChainStore.get(this).chainsOrUnreadable.first()?.let { chains -> gnosisChainFor(chains).also { storedGnosis = it } }
+    } catch (e: Exception) {
+        if (e is CancellationException) throw e
+        null
+    } ?: BuiltInChains.GNOSIS.also { Log.w(TAG, "reading the Gnosis RPCs failed; the shipped ones for now") }
 
     /**
      * Drop stale connections and redial on every node. Triggered by a
@@ -548,6 +622,12 @@ class NodeService : Service() {
 
         identityStore = NodeIdentityStore.get(this)
         vaultStore = KeystoreVaultStore(this)
+        // Before the node starts: ant's first chain reads come at its
+        // gateway's start.
+        chainBridge = AntChainBridge(
+            ChainDataRouter(chains = { listOf(gnosisForReads()) }, transport = PinnedHttpTransport()),
+        )
+        AntChainTransport.install(chainBridge::serve, chainBridge::cancelInFlight)
         swarmNode = SwarmNode(
             SwarmNode.Config(
                 dataDir = filesDir.absolutePath,

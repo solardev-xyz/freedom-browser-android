@@ -148,6 +148,28 @@ internal class QuorumRun(
     }
 
     /**
+     * How every leg that has ended without an answer failed, in arrival
+     * order — a node's own error or a transport failure — for a caller's
+     * `rankError` ([ChainDataRouter.request]). Legs [cancel] ended aren't
+     * failures of their endpoint and aren't listed.
+     */
+    fun failures(): List<ChainFailure> = synchronized(legs) {
+        legs.filterKeys { it !in cancelled }.values.mapNotNull { leg ->
+            when (leg) {
+                is Leg.NodeError -> ChainFailure.of(leg.error)
+                is Leg.Failed -> ChainFailure(null, leg.reason, null, leg.timeout)
+                is Leg.Answer -> null
+            }
+        }
+    }
+
+    /** Whether some endpoint has answered ([Leg.Answer]) — what [directCandidate] would reuse. */
+    fun hasAnswer(): Boolean = synchronized(legs) { legs.values.any { it is Leg.Answer } }
+
+    /** Legs still in flight. */
+    fun pending(): Int = urls.size - synchronized(legs) { legs.size }
+
+    /**
      * The endpoints this run really asked: every one but those [cancel]
      * ended before they answered. A later tier needn't ask these again.
      */
