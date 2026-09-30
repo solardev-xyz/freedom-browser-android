@@ -44,6 +44,19 @@ class BrowsingRepository private constructor(
     val bookmarks: Flow<List<BookmarkEntry>> = db.bookmarks().all()
 
     /**
+     * The History page's list (#263): the most recent visits when
+     * [query] is blank, otherwise those whose title or URL contains it
+     * (see [HistoryDao.matching]). Re-emits when history changes.
+     */
+    fun searchHistory(query: String): Flow<List<HistoryEntry>> {
+        val q = query.trim()
+        return if (q.isEmpty()) history else db.history().matching(likeContains(q))
+    }
+
+    /** Whether any history exists, independent of a search. */
+    val hasHistory: Flow<Boolean> = db.history().any()
+
+    /**
      * Most recently visited pages, deduplicated by URL so a site visited
      * 20 times in a row doesn't crowd out other entries. Backs the home
      * page's "Recent pages" list.

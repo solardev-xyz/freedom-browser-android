@@ -1179,6 +1179,7 @@ class WalletSender internal constructor(
     private suspend fun signingFailed(quote: SendQuote, e: Exception) {
         when (e) {
             is QuoteStaleException -> failStale(quote, droppedSigned = false)
+            is SigningHeldException -> fail(quote, e.message.orEmpty() + " Nothing was signed or sent.", false)
             is VaultLockedException ->
                 fail(quote, "The wallet locked before the transaction was signed. Nothing was sent; confirm again to unlock it.", false)
             is LedgerException -> {
@@ -1462,7 +1463,8 @@ class WalletSender internal constructor(
          * which the user confirms there; else [vaultSigner]. [fresh] is
          * asked once the Ledger is ready, before it shows the transaction:
          * false (the quote aged while it was unlocked) ends it with
-         * [QuoteStaleException], so nothing is reviewed that would be dropped.
+         * [QuoteStaleException], so nothing is reviewed that would be dropped;
+         * it may throw [SigningHeldException] to end it for a reason of its own.
          */
         fun signerFor(
             context: android.content.Context,
@@ -1711,3 +1713,11 @@ class WalletSender internal constructor(
 
 /** A signer found the quote it was signing too old to use ([WalletSender.QUOTE_TTL_MS]): nothing was signed. */
 class QuoteStaleException : Exception("quote went stale before signing")
+
+/**
+ * A signer's [fresh][WalletSender.signerFor] check found the page no longer
+ * wants this transaction signed, for the reason in [message] (e.g. Fund node:
+ * the node restarted as another account while the Ledger was connecting):
+ * nothing was signed, and the page's own reason is what the user sees.
+ */
+class SigningHeldException(message: String) : Exception(message)

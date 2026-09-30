@@ -15,6 +15,7 @@ import baby.freedom.mobile.browser.ExternalEndpoints
 import baby.freedom.mobile.browser.SearchEngines
 import baby.freedom.mobile.browser.normalizeAllowlistHost
 import baby.freedom.mobile.ens.EnsRpcConfig
+import baby.freedom.mobile.ui.Appearance
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -22,6 +23,8 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
@@ -52,6 +55,14 @@ import org.json.JSONObject
  * it has passed [baby.freedom.mobile.browser.SearchEngines.normalizeTemplate].
  * [searchTemplate] resolves the pair to the template the address bar
  * searches with.
+ *
+ * ## Appearance key
+ *
+ * `appearance` is an [Appearance.key] (`system`, `light`, `dark`),
+ * absent until the user first makes a choice (#269) — picking System
+ * default then stores `system`, so absent and `system` both mean follow
+ * the system. `MainActivity` applies it as the app's night mode
+ * ([Appearance.apply]).
  *
  * ## Name resolution keys (#102)
  *
@@ -266,6 +277,30 @@ class NodeSettings private constructor(
             it[Keys.SEARCH_ENGINE] = SearchEngines.CUSTOM_ID
         }
         return true
+    }
+
+    /**
+     * Settings → Appearance → Theme (#269); [Appearance.System] until chosen.
+     *
+     * A read error doesn't end the flow: DataStore's `data` stops at the
+     * first failure, and both readers (the app's night mode, the Compose
+     * chrome) live as long as the Activity, so a transient `IOException`
+     * would otherwise stop every later choice from being applied until
+     * the next launch. It is logged and read again after a short back-off
+     * (capped at [APPEARANCE_RETRY_MAX_MS]); readers keep the last value
+     * meanwhile.
+     */
+    val appearance: Flow<Appearance> = store.data
+        .map { prefs -> Appearance.fromKey(prefs[Keys.APPEARANCE]) }
+        .retryWhen { cause, attempt ->
+            if (cause is CancellationException) return@retryWhen false
+            Log.w(TAG, "reading the appearance setting failed (${cause.javaClass.simpleName}); retrying")
+            delay((APPEARANCE_RETRY_FIRST_MS shl attempt.coerceAtMost(5L).toInt()).coerceAtMost(APPEARANCE_RETRY_MAX_MS))
+            true
+        }
+
+    suspend fun setAppearance(appearance: Appearance) {
+        store.edit { it[Keys.APPEARANCE] = appearance.key }
     }
 
     private val chainStore: ChainStore by lazy(chains)
@@ -612,6 +647,7 @@ class NodeSettings private constructor(
         val IPFS_ROUTING_MODE = stringPreferencesKey("ipfs_routing_mode")
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val SEARCH_CUSTOM_TEMPLATE = stringPreferencesKey("search_custom_template")
+        val APPEARANCE = stringPreferencesKey("appearance")
         /** Moved onto Ethereum mainnet's own RPCs in [ChainStore]; see [migrateEnsRpc]. */
         val LEGACY_ENS_RPC_CUSTOM = stringPreferencesKey("ens_rpc_custom_endpoints")
         val ENS_RPC_DISABLED_PUBLIC = stringSetPreferencesKey("ens_rpc_disabled_public")
@@ -652,6 +688,8 @@ class NodeSettings private constructor(
         private var instance: NodeSettings? = null
 
         private const val TAG = "NodeSettings"
+        internal const val APPEARANCE_RETRY_FIRST_MS = 1_000L
+        internal const val APPEARANCE_RETRY_MAX_MS = 30_000L
         private const val MAINNET = 1L
         private const val MIGRATE_RETRY_MS = 30_000L
         private const val MIGRATE_RETRY_MAX_MS = 30 * 60_000L

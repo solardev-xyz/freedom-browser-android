@@ -340,6 +340,31 @@
           descriptionEl.innerHTML =
             "Couldn't get an answer from the chain's RPC servers. Check your connection " +
             'and try again.';
+        } else if (error && error.indexOf('cert_') === 0) {
+          // #259: an https site whose certificate failed. Always refused
+          // (no proceed-anyway); the host is the page's word, so it goes
+          // in as text, never as HTML.
+          const CERT_REASONS = {
+            cert_expired: 'has expired',
+            cert_not_yet_valid:
+              "isn't valid yet. If your device's date and time are wrong, correct them and try again",
+            cert_date_invalid: 'has invalid dates',
+            cert_wrong_host: 'was issued for a different site',
+            cert_untrusted: "wasn't issued by an authority this device trusts",
+          };
+          const host =
+            (url || '').replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split(/[\/?#]/)[0] || url || '';
+          titleEl.textContent = "Connection isn't secure";
+          descriptionEl.textContent = '';
+          descriptionEl.append(
+            "Freedom didn't load ",
+            Object.assign(document.createElement('b'), { textContent: host }),
+            ' because its security certificate ' + (CERT_REASONS[error] || 'is not valid') + '. ' +
+              'Someone could be impersonating the site or intercepting the connection, or ' +
+              'the site is misconfigured.'
+          );
+          document.title = "Connection isn't secure";
+          if (detail) parts.push('');
         } else if (error === 'swarm_content_not_found') {
           titleEl.textContent = 'Content not ready yet';
           descriptionEl.innerHTML =

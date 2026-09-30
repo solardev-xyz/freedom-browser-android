@@ -1815,6 +1815,18 @@ class SendTest {
     }
 
     @Test
+    fun `a signer held for the page's own reason ends the send with that reason, nothing signed`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain) { 1_000L }
+        assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request())) { throw SigningHeldException("The node changed.") })
+        val failed = s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed
+        assertEquals("The node changed. Nothing was signed or sent.", failed.message)
+        assertFalse(failed.mayHaveGone)
+        assertFalse(failed.stale)
+        assertTrue(chain.sent.isEmpty())
+    }
+
+    @Test
     fun `what the pages show`() {
         assertEquals("0.00002101 xDAI", feeText(BigInteger.valueOf(21_000) * (gwei + BigInteger.valueOf(28)), gnosis))
         assertEquals("0 xDAI", feeText(BigInteger.ZERO, gnosis))

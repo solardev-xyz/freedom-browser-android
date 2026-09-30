@@ -19,6 +19,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -45,6 +46,7 @@ import baby.freedom.mobile.wallet.SendAmounts
 import baby.freedom.mobile.wallet.SendException
 import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.SendRequest
+import baby.freedom.mobile.wallet.SigningHeldException
 import baby.freedom.mobile.wallet.SwarmFundLabel
 import baby.freedom.mobile.wallet.SwarmFunder
 import baby.freedom.mobile.wallet.TokenRegistry
@@ -57,6 +59,7 @@ import java.math.BigInteger
 import java.math.RoundingMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -87,6 +90,105 @@ internal fun fundNodeSummary(plan: SwarmFunder.Plan, days: Long): String =
         "swaps ${formatXdaiCeiling(plan.xdaiForSwap)} for about ${formatBzz(plan.expectedBzz)} " +
         "(at least ${formatBzz(plan.minBzz)}), buys the stamp for ${formatBzz(plan.stampCostPlur)}, and sends the node " +
         "${formatXdai(plan.xdaiForNode)} and the xBZZ the stamp doesn't use."
+
+/** What the fund-node review shows beside the quote's own rows: [fundNodeSummary] and the node paid. */
+internal data class FundReviewRows(val summary: String, val node: String)
+
+/**
+ * The review's summary and Node row for [quote], from the [plan] and [days]
+ * it was built from — or null when [quote] doesn't carry exactly that plan's
+ * value, call data and label, so a plan priced again during the review (or
+ * a node that restarted as another identity) can never describe the
+ * transaction being signed (#242, audit #229).
+ */
+internal fun fundReviewRows(quote: SendQuote, plan: SwarmFunder.Plan, days: Long): FundReviewRows? {
+    val request = quote.request
+    val data = plan.calldata()
+    val matches = request.to.equals(SwarmFunder.ADDRESS, ignoreCase = true) &&
+        quote.tx.to.equals(SwarmFunder.ADDRESS, ignoreCase = true) &&
+        request.amount == plan.value && quote.tx.value == plan.value &&
+        request.dapp?.data?.contentEquals(data) == true && quote.tx.data.contentEquals(data) &&
+        request.dapp.swarm == SwarmFundLabel(plan.node, plan.batchId, plan.depth, days)
+    return if (matches) FundReviewRows(fundNodeSummary(plan, days), plan.node) else null
+}
+
+/**
+ * Why an open review's Confirm is held, or null: funding is [blocked] now,
+ * or the running node's funding address ([running]) is no longer the node
+ * the review pays ([reviewNode]). Read at render, at the tap, and again once
+ * the wallet is unlocked, since the node can change while the prompt is up.
+ */
+internal fun fundReviewHeld(blocked: String?, running: String?, reviewNode: String): String? =
+    blocked ?: if (running?.equals(reviewNode, ignoreCase = true) != true) FUND_REVIEW_NODE_CHANGED else null
+
+/**
+ * [fundReviewHeld] for a send already under way, read from the live [node]
+ * and [pending] record (null [node]: the page is gone, so neither can be
+ * watched any more). The record this send itself starts — [SwarmFunding]
+ * notes it the moment the send shows Signing — is the send, not a reason to
+ * hold it, so a record for the review's own [batchId] is left out; any other
+ * still holds, as at the tap.
+ */
+internal fun fundSendHeld(node: NodeInfo?, pending: SwarmFunding.Pending?, batchId: String, reviewNode: String): String? {
+    node ?: return FUND_PAGE_CLOSED
+    val other = pending?.takeUnless { it.batchId.equals(batchId, ignoreCase = true) }
+    return fundReviewHeld(fundNodeBlockedReason(node, other), fundingAddress(node), reviewNode)
+}
+
+/**
+ * The node as `:node` last reported it, for a send's coroutines and the
+ * Ledger's ready check to read after the review that started them is gone
+ * (#291 R3-F1): kept at page level, not in the review's lazy item, and
+ * null once the page itself is [closed][close].
+ *
+ * Read straight from [source] ([StampClient.node], which `:node`'s
+ * callback moves while the Activity is stopped too), never from the
+ * page's `nodeInfo` parameter: that only moves on recomposition, which
+ * pauses in the background, so a payer who backgrounds the app while the
+ * Ledger connects would be checked against the node as it was when they
+ * left (#291 R4-M1).
+ */
+internal class FundPageNode(private val source: StateFlow<NodeInfo>) {
+    @Volatile
+    private var open = true
+
+    val info: NodeInfo? get() = if (open) source.value else null
+
+    fun close() {
+        open = false
+    }
+
+    /**
+     * The hold a send of [batchId] to [reviewNode] is under right now: the
+     * live node and [records]' live pending entry, read on every call —
+     * nothing here is the review item's state, which is disposed the moment
+     * the send starts.
+     */
+    fun heldNow(records: StateFlow<SwarmFunding.Pending?>?, batchId: String, reviewNode: String): () -> String? = {
+        fundSendHeld(info, records?.value, batchId, reviewNode)
+    }
+}
+
+/**
+ * The Ledger's [fresh][WalletSender.signerFor] check for a Fund node review:
+ * asked once the device is connected and unlocked (up to ~90 s after the
+ * tap), before it shows the transaction. The node can restart as another
+ * account, or funding be blocked, in that wait too, so a [held] reason ends
+ * it with [SigningHeldException] naming it; else the quote must not be [stale].
+ */
+internal fun fundLedgerFresh(held: () -> String?, stale: () -> Boolean): () -> Boolean = {
+    held()?.let { throw SigningHeldException(it) }
+    !stale()
+}
+
+internal const val FUND_PAGE_CLOSED =
+    "The Fund page was closed before the Ledger was ready. Open it and review again."
+
+internal const val FUND_REVIEW_NODE_CHANGED =
+    "The node is no longer running as the account this review pays. Cancel and review again."
+
+/** An open review: the [quote] and the [plan] and [days] it was built from, kept together (#242). */
+private class FundReviewing(val plan: SwarmFunder.Plan, val days: Long, val quote: SendQuote)
 
 /**
  * Whether a Gnosis Chain read with [trust] may be acted on where a wrong
@@ -145,11 +247,14 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
     val connectOwed = funding?.connectOwed?.collectAsState()?.value
     val spend by StampClient.spend.collectAsState()
     val node = fundingAddress(nodeInfo)
+    // Outlives the review item, which is gone as soon as a send starts.
+    val liveNode = remember { FundPageNode(StampClient.node) }
+    DisposableEffect(liveNode) { onDispose { liveNode.close() } }
 
     var depth by rememberSaveable { mutableIntStateOf(STAMP_DEPTHS.first()) }
     var days by rememberSaveable { mutableLongStateOf(STAMP_BUY_DAYS.first()) }
     var refresh by remember { mutableIntStateOf(0) }
-    var quote by remember { mutableStateOf<SendQuote?>(null) }
+    var reviewing by remember { mutableStateOf<FundReviewing?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -201,16 +306,19 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
 
     fun review(p: SwarmFunder.Plan) {
         val from = payer ?: return
+        // The duration as tapped: the review describes the quote built now, whatever the page does meanwhile.
+        val d = days
         busy = true
         error = null
         scope.launch {
             try {
-                quote = sender.prepare(
+                val q = sender.prepare(
                     SendRequest(
                         chain, TokenRegistry.native(chain), from, SwarmFunder.ADDRESS, p.value,
-                        DappCall(null, p.calldata(), null, swarm = SwarmFundLabel(p.node, p.batchId, p.depth, days)),
+                        DappCall(null, p.calldata(), null, swarm = SwarmFundLabel(p.node, p.batchId, p.depth, d)),
                     ),
                 )
+                reviewing = FundReviewing(p, d, q)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -222,8 +330,8 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
     }
 
     val back: () -> Unit = {
-        if (quote != null) {
-            quote = null
+        if (reviewing != null) {
+            reviewing = null
             notice = null
         } else {
             onDismiss()
@@ -237,7 +345,9 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
             modifier = Modifier.fillMaxSize(),
         ) {
             val status = sendStatus?.takeIf { it.quote.request.dapp?.swarm != null }
-            val q = quote
+            val r = reviewing
+            // From the plan the quote was built from, never the one priced live (#242).
+            val rows = r?.let { fundReviewRows(it.quote, it.plan, it.days) }
             item("intro") {
                 SectionCard(title = "One transaction") {
                     MutedText(
@@ -269,23 +379,32 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                         },
                     )
                 }
-                q != null && plan != null -> item("review") {
+                r != null && rows != null -> item("review") {
+                    val q = r.quote
+                    // The node the review pays is no longer the one running, or funding it is blocked now.
+                    val changed = fundReviewHeld(blocked, node, rows.node)
+                    // Read live after the unlock prompt and when the Ledger is ready: from the
+                    // page's own state and the record's flow, never this item's, which is
+                    // disposed the moment the send starts (#291 R3-F1).
+                    val heldNow = liveNode.heldNow(funding?.pending, r.plan.batchId, rows.node)
                     FundReview(
                         quote = q,
-                        summary = fundNodeSummary(plan, days),
-                        node = plan.node,
+                        summary = rows.summary,
+                        node = rows.node,
                         busy = busy,
                         notice = notice,
+                        held = changed,
                         error = error,
                         onCancel = {
-                            quote = null
+                            reviewing = null
                             notice = null
                             error = null
                         },
                         onConfirm = {
+                            if (changed != null) return@FundReview
                             if (sender.isStale(q)) {
                                 // Price the pool and the fee again: both can have moved.
-                                quote = null
+                                reviewing = null
                                 refresh++
                                 notice = "The quote was over a minute old, so it's been priced again. Check it and review again."
                                 return@FundReview
@@ -294,15 +413,17 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                             scope.launch {
                                 try {
                                     if (!q.request.from.isLedger && !vault.unlockedNow()) vault.unlock(auth)
-                                    when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from) { !sender.isStale(q) })) {
+                                    // The node may have restarted (or funding been blocked) while the prompt was up.
+                                    if (heldNow() != null) return@launch
+                                    when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from, fundLedgerFresh(heldNow) { sender.isStale(q) }))) {
                                         WalletSender.Submit.STARTED -> {
-                                            quote = null
+                                            reviewing = null
                                             notice = null
                                         }
                                         WalletSender.Submit.BUSY -> error = "Another send is still going out, or may have. " +
                                             "Settle it (or stop tracking it) on the wallet's Send page first."
                                         WalletSender.Submit.STALE -> {
-                                            quote = null
+                                            reviewing = null
                                             refresh++
                                             notice = "The quote was over a minute old, so it's been priced again. Check it and review again."
                                         }
@@ -411,13 +532,17 @@ private fun FundReview(
     node: String,
     busy: Boolean,
     notice: String?,
+    held: String?,
     error: String?,
     onCancel: () -> Unit,
     onConfirm: () -> Unit,
 ) {
     val request = quote.request
     val chain = request.chain
-    val tap = rememberArmedTapGuard(quote, PromptTapGuard.SPEND_PROTECTION_MS)
+    val confirmable = held == null
+    // Armed afresh whenever Confirm comes back from being held, not only for a new quote:
+    // the review stays up through a node change, so re-enabling must not land under a tapping finger.
+    val tap = rememberArmedTapGuard(quote to confirmable, PromptTapGuard.SPEND_PROTECTION_MS)
     val guard = tap.guard
     val armed = tap.armed
     Column {
@@ -440,11 +565,13 @@ private fun FundReview(
         }
         Spacer(Modifier.height(12.dp))
         notice?.let { MutedText(it) }
+        // Why Confirm is disabled first, then any earlier failure: neither hides the other.
+        held?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         ObscuredTapNotice(tap)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             OutlinedButton(onClick = onCancel, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Cancel") }
-            Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy, modifier = Modifier.weight(1f).protectedPress(tap)) {
+            Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy && confirmable, modifier = Modifier.weight(1f).protectedPress(tap)) {
                 if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Confirm and send")
             }
         }

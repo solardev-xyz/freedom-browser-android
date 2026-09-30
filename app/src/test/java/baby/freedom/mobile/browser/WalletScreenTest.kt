@@ -73,6 +73,174 @@ class WalletScreenTest {
     }
 
     @Test
+    fun `a paste is had whole, even where it shares words with the field`() {
+        fun at(text: String, cursor: Int = text.length) = TextFieldValue(text, TextRange(cursor))
+        // The first word typed, the whole phrase pasted after it by mistake:
+        // what went in at the cursor, not what a shared prefix leaves over.
+        assertEquals(twelve, insertedText(at("abandon "), at("abandon $twelve", "abandon $twelve".length)))
+        // Pasted at the start, in front of words it ends with.
+        assertEquals("$twelve ", insertedText(at("about", 0), at("$twelve about", twelve.length + 1)))
+        assertEquals("", insertedText(at("abandon"), at("abando")))
+    }
+
+    @Test
+    fun `a phrase pasted over the same phrase selected is still a paste (#241)`() {
+        fun at(text: String, cursor: Int = text.length) = TextFieldValue(text, TextRange(cursor))
+        fun all(text: String) = TextFieldValue(text, TextRange(0, text.length))
+        // Select all, paste the identical phrase: only the selection changes,
+        // and the Paste was seen putting that text in.
+        assertEquals(twelve, insertedText(all(twelve), at(twelve), committed = twelve))
+        // Part of it selected and pasted over with the same words.
+        val middle = TextFieldValue(twelve, TextRange(8, 24))
+        assertEquals(twelve.substring(8, 24), insertedText(middle, at(twelve, 24), committed = twelve.substring(8, 24)))
+        // Merely selecting, moving the cursor or narrowing a selection isn't one.
+        assertEquals("", insertedText(at(twelve), all(twelve)))
+        assertEquals("", insertedText(all(twelve), at(twelve, 0)))
+        assertEquals("", insertedText(all(twelve), at(twelve, 30)))
+        assertEquals("", insertedText(all(twelve), TextFieldValue(twelve, TextRange(0, 30))))
+        assertEquals("", insertedText(at(twelve), at(twelve, 3)))
+        // R3-F1: deselecting at the end (a tap there, End) looks the same as
+        // that paste, but no paste was seen: nothing went in.
+        assertEquals("", insertedText(all(twelve), at(twelve)))
+        assertEquals("", insertedText(middle, at(twelve, 24)))
+        // Something else committed (a letter) is not that text.
+        assertEquals("", insertedText(all(twelve), at(twelve), committed = "a"))
+        // A typed phrase selected and deselected at its end: no paste noted.
+        val pastes = PastedPhrases()
+        pastes.edit(at(twelve), all(twelve))
+        pastes.edit(all(twelve), at(twelve))
+        assertTrue(pastes.words.isEmpty())
+        assertFalse(pastes.clipIsPaste)
+        // The same with a real Paste of it: noted.
+        pastes.edit(at(twelve), all(twelve))
+        pastes.committing(twelve)
+        pastes.edit(all(twelve), at(twelve))
+        assertEquals(1, pastes.words.size)
+        assertTrue(pastes.clipIsPaste)
+        // What a Paste read is for the edit right after it only.
+        pastes.forget()
+        pastes.committing(twelve)
+        pastes.edit(at(twelve), all(twelve))
+        pastes.edit(all(twelve), at(twelve))
+        assertTrue(pastes.words.isEmpty())
+    }
+
+    @Test
+    fun `what the field copies or cuts to the clipboard counts as pasted (#241)`() {
+        val pastes = PastedPhrases()
+        // Pasted, then copied (or cut) back out: the field's own clip, noted
+        // as pasted, and the change Android reports for it (twice, even)
+        // doesn't undo that.
+        pastes.add(twelve)
+        pastes.copied(twelve, timestamp = 1_000)
+        pastes.clipChanged(1_000)
+        pastes.clipChanged(1_000)
+        assertTrue(pastes.clipIsPaste)
+        assertEquals(2, pastes.words.size)
+        // Something copied elsewhere since: no longer the last thing on it.
+        pastes.clipChanged(2_000)
+        assertFalse(pastes.clipIsPaste)
+        pastes.clipChanged(null)
+        assertFalse(pastes.clipIsPaste)
+        // A word copied out of the field is no phrase on the clipboard.
+        pastes.forget()
+        pastes.add(twelve)
+        pastes.copied("abandon", timestamp = 3_000)
+        pastes.clipChanged(3_000)
+        assertFalse(pastes.clipIsPaste)
+        assertEquals(1, pastes.words.size)
+        // A copy whose stamp couldn't be read is still noted; any change heard is then taken as someone else's.
+        pastes.forget()
+        pastes.copied(twelve, timestamp = null)
+        assertTrue(pastes.clipIsPaste)
+        pastes.clipChanged(null)
+        assertFalse(pastes.clipIsPaste)
+    }
+
+    @Test
+    fun `leaving the import page clears only what was pasted into it (#241)`() {
+        val words = twelve.split(" ")
+        val pasted = listOf(clipWords(twelve))
+        fun clear(
+            vararg texts: CharSequence?,
+            readable: Boolean = true,
+            hasText: Boolean = true,
+            pasted: List<List<String>> = listOf(clipWords(twelve)),
+            imported: List<String>? = null,
+        ): Boolean = shouldClearPasted(readable, hasText, { texts.toList() }, pasted, imported)
+        // The pasted phrase, still on the clipboard: cleared, whatever its spacing or case.
+        assertTrue(clear(twelve))
+        assertTrue(clear("  " + twelve.uppercase().replace(" ", "\n") + "\n"))
+        // Pasted from a note: the whole note went in, and is what's cleared.
+        val note = "My phrase: $twelve. Keep it safe!"
+        assertTrue(clear(note, pasted = listOf(clipWords(note))))
+        // Something copied since the paste: left alone.
+        assertFalse(clear("https://example.com"))
+        assertFalse(clear(twelve.replace("about", "abandon")))
+        assertFalse(clear(twelve.substringBeforeLast(" ")))
+        // Something containing the paste but not it: left alone before an import…
+        assertFalse(clear(note))
+        // …and cleared after one, when it holds the imported phrase (#75).
+        assertTrue(clear(note, imported = words))
+        assertFalse(clear("https://example.com", imported = words))
+        // Nothing pasted (typed), unreadable (no focus) or not text: the
+        // clipboard's items are never read at all.
+        var read = false
+        fun never(): List<CharSequence?> { read = true; return listOf(twelve) }
+        assertFalse(shouldClearPasted(true, true, ::never, emptyList(), words))
+        assertFalse(shouldClearPasted(false, true, ::never, pasted))
+        assertFalse(shouldClearPasted(true, false, ::never, pasted))
+        assertFalse(read)
+        // A non-text item (a `content:` URI) has no `text`, and isn't opened.
+        assertFalse(clear(null))
+        assertTrue(clear(null, twelve))
+        // Focus lost with the page up (Home): unreadable, so cleared unread
+        // only while a paste of a phrase, or a piece of one, is the last thing seen on it.
+        assertTrue(shouldClearPasted(false, false, ::never, pasted, clipIsPaste = true))
+        assertFalse(shouldClearPasted(false, false, ::never, emptyList(), clipIsPaste = true))
+        assertFalse(read)
+        // Readable, the read decides: something else there isn't cleared.
+        assertFalse(shouldClearPasted(true, true, { listOf("https://example.com") }, pasted, clipIsPaste = true))
+    }
+
+    @Test
+    fun `a word the keyboard puts in is no paste, and only a phrase or a piece of one may be cleared unread (#241)`() {
+        val pastes = PastedPhrases()
+        // Swipe typing and keyboard suggestions insert a word at a time:
+        // no paste at all, so leaving the page never reads the clipboard.
+        pastes.add("abandon")
+        pastes.add("ability ")
+        pastes.add(" about")
+        pastes.add("")
+        pastes.add("…")
+        assertTrue(pastes.words.isEmpty())
+        assertFalse(pastes.clipIsPaste)
+        // Two words at once are a paste, but, not BIP-39 words, no piece of a phrase.
+        pastes.add("meeting tomorrow")
+        assertEquals(1, pastes.words.size)
+        assertFalse(pastes.clipIsPaste)
+        // R3-M1: a phrase pasted in chunks (a line of six words at a time)
+        // leaves its last chunk on the clipboard: a piece of the phrase.
+        pastes.add("abandon ability able about above absent")
+        assertTrue(pastes.clipIsPaste)
+        pastes.forget()
+        pastes.add("abandon ability")
+        assertTrue(pastes.clipIsPaste)
+        // One word not in the list: no piece of a phrase, unless phrase-sized.
+        pastes.forget()
+        pastes.add("abandon ability zzz")
+        assertFalse(pastes.clipIsPaste)
+        pastes.add(twelve.replace(" ", ","))
+        assertTrue(pastes.clipIsPaste)
+        pastes.forget()
+        pastes.add(twelve)
+        assertTrue(pastes.clipIsPaste)
+        pastes.forget()
+        assertTrue(pastes.words.isEmpty())
+        assertFalse(pastes.clipIsPaste)
+    }
+
+    @Test
     fun `settings row states and the reminder that stays under it`() {
         val fresh = Vault.Info(VaultProtection.SCREEN_LOCK, strongBox = true, backedUp = false)
         assertEquals(BACKUP_REMINDER, walletAttentionLine(Vault.State.Locked(fresh)))

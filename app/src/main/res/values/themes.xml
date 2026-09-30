@@ -2,8 +2,10 @@
 <resources>
     <!--
       Light variant (the `-night` qualifier below carries the dark one).
-      The Compose side follows the same system setting via
-      `isSystemInDarkTheme()` in FreedomTheme, so the window background
+      The Compose side follows the same configuration via
+      `isSystemInDarkTheme()` in FreedomTheme — the system setting, or
+      Settings → Appearance's choice, which is applied as the app's night
+      mode (`ui/Appearance.kt`) — so the window background
       the platform paints before the first Compose frame — and the
       status / navigation bar icon tint, which Compose does not own —
       match the scheme that is about to be drawn over them.

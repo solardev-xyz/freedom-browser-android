@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import android.util.Log
 import baby.freedom.mobile.node.INodeService
+import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.SpendPermit
 import baby.freedom.swarm.SwarmNode
 import java.math.BigDecimal
@@ -225,11 +226,59 @@ internal fun withUnit(amount: String, unit: String): String =
  * chequebook deposit, #117, or connecting a stamp the wallet bought, #115)
  * in flight
  * — held here, not by a screen, so it outlives leaving the page, and so
- * there's only ever one. [MainActivity] keeps [service] current.
+ * there's only ever one. [MainActivity] keeps [service] and [node] current.
  */
 internal object StampClient {
     @Volatile
     var service: INodeService? = null
+
+    /**
+     * The Swarm node's last published state, as `:node`'s callback reports
+     * it — kept current while the Activity is stopped too (the callback
+     * stays registered until it's destroyed), unlike a composable's
+     * parameter, which only moves on recomposition (#291 R4-M1).
+     */
+    val node = MutableStateFlow(NodeInfo())
+
+    /** Guards [service] against [attach]/[publish]/[detach] racing each other. */
+    private val binding = Any()
+
+    /** [b] is this process's binder to `:node` now; [publish] and [detach] are keyed to it. */
+    fun attach(b: INodeService) {
+        synchronized(binding) { service = b }
+    }
+
+    /**
+     * `:node` reported [info] over the binding [from]. Dropped unless [from]
+     * is still the current binding: a report already in flight on a binder
+     * thread when its Activity unbound would otherwise land after [detach]
+     * and leave a stale state for the next Activity to start from
+     * (#291 R6-M2).
+     */
+    fun publish(from: INodeService?, info: NodeInfo) {
+        synchronized(binding) {
+            if (from != null && service === from) node.value = info
+        }
+    }
+
+    /**
+     * This process stopped hearing from `:node` over [from] (an unbind, the
+     * Activity's destroy, or `:node` dying): drop the binder and reset
+     * [node] to Stopped, as a fresh Activity's own flow used to start.
+     * [node] is process-wide, so without this a recreated Activity (the task
+     * swiped away while the process stays cached) would first show the
+     * previous binding's last state until its own bind reports (#291 R5-M1).
+     * Only if [from] is still the current binding: an older Activity's late
+     * `onDestroy` must not wipe a newer instance's binder and state
+     * (#291 R6-M1, the #207 compare-and-clear pattern).
+     */
+    fun detach(from: INodeService?) {
+        synchronized(binding) {
+            if (from == null || service !== from) return
+            service = null
+            node.value = NodeInfo()
+        }
+    }
 
     sealed interface Answer {
         data class Ok(val json: JSONObject) : Answer

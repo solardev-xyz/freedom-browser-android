@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -21,6 +22,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -61,6 +63,7 @@ import baby.freedom.mobile.node.swarmModeFor
 import baby.freedom.mobile.node.ITorCallback
 import baby.freedom.mobile.node.ITorService
 import baby.freedom.mobile.node.TorService
+import baby.freedom.mobile.ui.Appearance
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.NodeIdentitySync
@@ -88,6 +91,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Hosts the browser UI and brokers the bind/unbind lifecycle of the
@@ -103,7 +107,8 @@ import kotlinx.coroutines.withContext
  */
 class MainActivity : ComponentActivity() {
 
-    private val infoFlow = MutableStateFlow(NodeInfo())
+    // Shared with the Fund node page's Ledger ready check (#291 R4-M1).
+    private val infoFlow = StampClient.node
     private val ipfsInfoFlow = MutableStateFlow(IpfsInfo())
     // Shared with the `rad://` browser and `window.radicle` (#124).
     private val radicleInfoFlow = RadicleClient.state
@@ -154,7 +159,7 @@ class MainActivity : ComponentActivity() {
 
     private val callback = object : INodeCallback.Stub() {
         override fun onStateChanged(info: NodeInfo?) {
-            if (info != null) infoFlow.value = info
+            if (info != null) StampClient.publish(binder, info)
         }
 
         override fun onIpfsStateChanged(info: IpfsInfo?) {
@@ -263,9 +268,9 @@ class MainActivity : ComponentActivity() {
             val b = INodeService.Stub.asInterface(service) ?: return
             binder = b
             RadicleClient.service = b
-            StampClient.service = b
+            StampClient.attach(b)
             runCatching { b.registerCallback(callback) }
-            runCatching { b.state?.let { infoFlow.value = it } }
+            runCatching { b.state?.let { StampClient.publish(b, it) } }
             runCatching {
                 b.ipfsState?.let {
                     ipfsInfoFlow.value = it
@@ -293,10 +298,9 @@ class MainActivity : ComponentActivity() {
         override fun onServiceDisconnected(name: ComponentName?) {
             // `:node` died unexpectedly. A clean toggle-off goes through
             // [setRunNodeEnabled] instead, which sets Stopped explicitly.
+            StampClient.detach(binder)
             binder = null
             RadicleClient.service = null
-            StampClient.service = null
-            infoFlow.value = NodeInfo()
             ipfsInfoFlow.value = IpfsInfo()
             radicleInfoFlow.value = RadicleInfo()
             Gateways.setIpfsBase("")
@@ -356,6 +360,19 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 android.util.Log.w("MainActivity", "resuming the node's funding failed (${e.javaClass.simpleName})")
             }
+        }
+
+        // Settings → Appearance (#269), followed live: the choice becomes
+        // the app's night mode, which re-themes the chrome and every
+        // page's `prefers-color-scheme` without a restart (see
+        // [Appearance]). Android keeps that mode across launches too, so
+        // this only writes it again, which changes nothing. A read error
+        // doesn't end this: [NodeSettings.appearance] logs it and reads
+        // again, so a later choice is still applied.
+        lifecycleScope.launch {
+            settings.appearance
+                .distinctUntilChanged()
+                .collect { Appearance.apply(this@MainActivity, it) }
         }
 
         // Honor the persisted preference on cold start. If the user had
@@ -493,8 +510,30 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showBrowser() {
+        // Below Android 12 there's no app night mode for [Appearance.apply]
+        // to set, so the chrome follows the choice only through the
+        // Compose theme below — and composing with System as a placeholder
+        // until DataStore answers would draw the first frame in the
+        // system's theme and then flip. Wait (briefly) for the stored
+        // choice there instead; above, the configuration already agrees
+        // with it, so there is nothing to wait for.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            lifecycleScope.launch {
+                val stored = withTimeoutOrNull(APPEARANCE_WAIT_MS) { settings.appearance.first() }
+                composeBrowser(stored ?: Appearance.System)
+            }
+        } else {
+            composeBrowser(Appearance.System)
+        }
+    }
+
+    private fun composeBrowser(initialAppearance: Appearance) {
         setContent {
-            FreedomTheme {
+            // Below Android 12 this is what makes the chrome follow the
+            // choice (see [showBrowser]); above, the configuration already
+            // agrees with it.
+            val appearance by settings.appearance.collectAsState(initial = initialAppearance)
+            FreedomTheme(darkTheme = appearance.isDark(isSystemInDarkTheme())) {
                 SystemBarsForScheme()
                 Surface(
                     modifier = Modifier.fillMaxSize(),
@@ -898,7 +937,6 @@ class MainActivity : ComponentActivity() {
         } else {
             NodeService.stop(this)
         }
-        infoFlow.value = NodeInfo()
         ipfsInfoFlow.value = IpfsInfo()
         radicleInfoFlow.value = RadicleInfo()
         Gateways.setIpfsBase("")
@@ -908,9 +946,14 @@ class MainActivity : ComponentActivity() {
         if (!bound) return
         runCatching { binder?.unregisterCallback(callback) }
         runCatching { unbindService(connection) }
+        // Unbound, the callback no longer moves the process-wide node
+        // state, so it goes back to Stopped rather than stay at the last
+        // report for the next Activity to start from (#291 R5-M1) — keyed
+        // to this instance's own binder, and before [binder] is cleared so
+        // a late report from it is dropped too (#291 R6-M1, R6-M2).
+        StampClient.detach(binder)
         binder = null
         RadicleClient.service = null
-        StampClient.service = null
         bound = false
     }
 }
@@ -920,3 +963,11 @@ class MainActivity : ComponentActivity() {
  * `.onion` is refused before letting `:tor` stop regardless.
  */
 private const val TOR_UNBIND_TIMEOUT_MS = 2_000L
+
+/**
+ * How long [MainActivity] waits, below Android 12, for the stored
+ * Settings → Appearance choice before composing (see `showBrowser`):
+ * long enough for a normal DataStore read, short enough that a stuck one
+ * only costs the placeholder theme, not the browser.
+ */
+private const val APPEARANCE_WAIT_MS = 1_000L

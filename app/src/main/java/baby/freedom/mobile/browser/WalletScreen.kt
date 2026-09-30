@@ -47,6 +47,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -55,14 +56,19 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.Clipboard
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -303,9 +309,47 @@ internal fun clipHoldsPhrase(clip: CharSequence?, words: List<String>): Boolean 
     // Normalized the way Mnemonic.words normalizes, so a phrase pasted in
     // compatibility letters (fullwidth, say) or carrying a soft hyphen
     // inside a word still matches its words.
-    val tokens = Mnemonic.normalized(clip)
-        .split(Regex("[^\\p{L}\\p{M}]+")).filter { it.isNotEmpty() }
+    val tokens = clipWords(clip)
     return (0..tokens.size - words.size).any { start -> tokens.subList(start, start + words.size) == words }
+}
+
+/** [text]'s words, letters only and normalized the way [Mnemonic.words] normalizes. */
+internal fun clipWords(text: CharSequence): List<String> =
+    Mnemonic.normalized(text).split(Regex("[^\\p{L}\\p{M}]+")).filter { it.isNotEmpty() }
+
+/**
+ * Whether to clear the clipboard as the Import page lets go of what was
+ * pasted into it (#241): at Import (whatever the authentication then
+ * does), on Back, when the page goes away, or when Freedom loses focus.
+ * - Nothing [pasted]: left alone, and never read.
+ * - Not [readable] (no window focus, so it can't be looked at): cleared
+ *   unread only if [clipIsPaste] — a phrase or a piece of one
+ *   ([PastedPhrases.phrasePiece]) pasted is the last thing
+ *   seen happening to it — and otherwise left alone: the clip isn't ours,
+ *   so unlike [PhraseClipboard] nothing else is cleared blind.
+ * - Its description says no text ([hasText] false): left alone, and its
+ *   items never read.
+ * - Otherwise an item's plain `text` (never `coerceToText`, which opens a
+ *   `content:` URI on the main thread; [readTexts] is only called here)
+ *   is cleared if it's one of the [pasted] texts — the same words, so
+ *   something copied since is left alone — or, after a successful
+ *   import, holds the [imported] phrase ([clipHoldsPhrase]).
+ */
+internal fun shouldClearPasted(
+    readable: Boolean,
+    hasText: Boolean,
+    readTexts: () -> List<CharSequence?>,
+    pasted: List<List<String>>,
+    imported: List<String>? = null,
+    clipIsPaste: Boolean = false,
+): Boolean {
+    if (pasted.isEmpty()) return false
+    if (!readable) return clipIsPaste
+    if (!hasText) return false
+    return readTexts().any { text ->
+        text != null && (clipWords(text).let { it.isNotEmpty() && it in pasted } ||
+            (imported != null && clipHoldsPhrase(text, imported)))
+    }
 }
 
 /**
@@ -317,36 +361,209 @@ internal fun clipHoldsPhrase(clip: CharSequence?, words: List<String>): Boolean 
  * otherwise it's what's left of [after] once the text the two share at the
  * start and at the end is taken off.
  */
-internal fun insertedLength(before: TextFieldValue, after: TextFieldValue): Int {
+internal fun insertedLength(before: TextFieldValue, after: TextFieldValue): Int = insertedText(before, after).length
+
+/**
+ * The text an edit from [before] to [after] inserted ([insertedLength]):
+ * what went in at the cursor (or over the selection) when the edit kept
+ * everything either side of it, so a pasted phrase is had whole even
+ * where it starts or ends with words already in the field.
+ *
+ * [committed] is the text a Paste or the keyboard was just seen putting
+ * in ([PastedPhrases.committing]). A paste over a selection of the very
+ * same text changes nothing but the selection, and by the values alone
+ * looks exactly like deselecting by tapping at the end of the selection
+ * (or End): so a same-text edit only counts when [committed] is that
+ * text, never from where the cursor ends up.
+ */
+internal fun insertedText(before: TextFieldValue, after: TextFieldValue, committed: CharSequence? = null): String {
     val old = before.text
     val new = after.text
-    if (old == new) return 0
     val sel = before.selection
-    if (!sel.collapsed) {
-        val head = old.substring(0, sel.min)
-        val tail = old.substring(sel.max)
-        if (new.length >= head.length + tail.length && new.startsWith(head) && new.endsWith(tail)) {
-            return new.length - head.length - tail.length
-        }
+    val head = old.substring(0, sel.min.coerceIn(0, old.length))
+    val tail = old.substring(sel.max.coerceIn(0, old.length))
+    val replaced = new.length > head.length + tail.length && new.startsWith(head) && new.endsWith(tail)
+    if (old == new) {
+        if (!replaced || committed == null || sel.collapsed) return ""
+        val same = new.substring(head.length, new.length - tail.length)
+        return if (committed.toString() == same) same else ""
     }
+    if (replaced) return new.substring(head.length, new.length - tail.length)
     val prefix = old.commonPrefixWith(new).length
     val suffix = old.substring(prefix).commonSuffixWith(new.substring(prefix)).length
-    return new.length - prefix - suffix
+    return new.substring(prefix, new.length - suffix)
 }
 
 /**
- * Takes an imported recovery phrase off the clipboard if it's still there
- * (#75). Only called when the user pasted into the import field, so the
- * clipboard isn't read (and Android's "pasted from your clipboard" notice
- * doesn't show) for a phrase that was typed.
+ * What was pasted into the Import page's field and may still be on the
+ * clipboard (#241): the words of each paste, and whether a phrase — or a
+ * piece of one ([phrasePiece]) — is the last thing seen happening to the
+ * clipboard while Freedom had focus.
+ *
+ * A phrase-sized paste, or one of BIP-39 words only (a phrase pasted in
+ * chunks, a line at a time — [phrasePiece]), sets [clipIsPaste].
+ *
+ * A paste is text of more than one word inserted at once ([add]). The
+ * keyboard also inserts a whole word at once — a swiped word, an accepted
+ * suggestion (other keyboards than Gboard, which offers neither on this
+ * password-type field) — and that is no paste: counting it would read the
+ * clipboard on the way out (Android's "pasted from your clipboard" notice)
+ * for a phrase that was only typed. So a single word pasted on its own is
+ * left on the clipboard; one word of a phrase is no phrase. Any other
+ * phrase-sized text put in at once without passing through the clipboard
+ * reads as a paste too: a phrase from a keyboard's own clipboard history,
+ * an Autofill service filling a stored phrase (the field sets no content
+ * type, but may still be offered to one), or a keyboard's voice input that
+ * commits a whole utterance in one go. The field's edit alone can't tell
+ * these from a paste, so losing focus then clears whatever is on the
+ * clipboard unread, and Back reads it (Android's notice) to match the
+ * words — the same trade-off [PhraseClipboard] makes at its deadline.
+ *
+ * What the field itself puts on the clipboard — a Copy or a Cut, from its
+ * menu, the keyboard or a hardware shortcut, all through
+ * [WatchedClipboard] — is noted as if it had been pasted ([copied]): it
+ * is the field's text on the clipboard, taken off it on the way out like
+ * a paste, unread on focus loss too.
  */
-private fun clearPhraseFromClipboard(context: Context, words: List<String>) {
-    val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
-    runCatching {
-        val clip = clipboard.primaryClip ?: return
-        val holds = (0 until clip.itemCount).any { clipHoldsPhrase(clip.getItemAt(it).coerceToText(context), words) }
-        if (holds) clipboard.clearPrimaryClip()
+internal class PastedPhrases {
+    val words = mutableListOf<List<String>>()
+    var clipIsPaste = false
+
+    /**
+     * The text a Paste read off the clipboard, or the keyboard committed,
+     * for the edit about to follow ([edit]); see [insertedText].
+     */
+    fun committing(text: CharSequence?) {
+        committed = text?.toString()
     }
+
+    /** Notes the edit from [before] to [after], if it was a paste ([insertedText], [add]). */
+    fun edit(before: TextFieldValue, after: TextFieldValue) {
+        val text = committed
+        committed = null
+        add(insertedText(before, after, text))
+    }
+
+    /** Notes [inserted], the text one edit put in the field ([insertedText]), if it was a paste. */
+    fun add(inserted: String) {
+        // Letters-only words, as the clipboard is matched: a swiped word with
+        // the space the keyboard adds after it is one word, and a phrase
+        // pasted with commas and no spaces still counts as the paste it is.
+        val pasted = clipWords(inserted)
+        if (pasted.size < 2) return
+        words += pasted
+        if (phrasePiece(pasted)) clipIsPaste = true
+    }
+
+    /**
+     * The field put [text] on the clipboard (a Copy or a Cut), as the clip
+     * whose description is stamped [timestamp] (`ClipDescription.getTimestamp`,
+     * null if it couldn't be looked at): it's the last thing on the
+     * clipboard now, noted as if pasted ([add]), and the change Android
+     * reports for it ([clipChanged]) is no change from it.
+     */
+    fun copied(text: CharSequence?, timestamp: Long?) {
+        ownClipAt = timestamp
+        clipIsPaste = false
+        add(text?.toString().orEmpty())
+    }
+
+    /**
+     * The clipboard changed, to a clip stamped [timestamp] (null if it
+     * couldn't be looked at): no paste is the last thing on it, unless it's
+     * the field's own Copy or Cut ([copied]) — reported after it was
+     * noted, and perhaps more than once.
+     */
+    fun clipChanged(timestamp: Long?) {
+        if (timestamp != null && timestamp == ownClipAt) return
+        clipIsPaste = false
+    }
+
+    private var committed: String? = null
+    private var ownClipAt: Long? = null
+
+    fun forget() {
+        words.clear()
+        clipIsPaste = false
+        committed = null
+        ownClipAt = null
+    }
+
+    companion object {
+        val MIN_PHRASE_WORDS = Mnemonic.IMPORT_WORD_COUNTS.min()
+
+        /**
+         * Whether the [words] of one paste are a recovery phrase or a piece of
+         * one, cleared unread on focus loss ([clipIsPaste]): phrase-sized, or
+         * every word a BIP-39 word — a phrase pasted in chunks (two lines of
+         * six words from a note) leaves its last chunk on the clipboard, and
+         * that is part of the phrase just the same (R3-M1).
+         */
+        fun phrasePiece(words: List<String>): Boolean =
+            words.size >= MIN_PHRASE_WORDS || (words.size >= 2 && words.all { it in bip39Words })
+    }
+}
+
+/**
+ * The Import field's clipboard ([LocalClipboard]): the field's own Paste
+ * (menu, keyboard, hardware shortcut) reads through [getClipEntry], and its
+ * Copy and Cut write through [setClipEntry], so [pastes] hears each where
+ * it happens instead of guessing it from the text ([PastedPhrases.committing],
+ * [PastedPhrases.copied]). Only the item's plain text is looked at, never
+ * coerced from a `content:` URI. What the field copies or cuts is its
+ * text — a recovery phrase — so it goes on the clipboard flagged sensitive
+ * ([PhraseClipboard.markSensitive]), like the Backup page's Copy: no
+ * plain-text preview in the system's copy overlay, and no copy in a
+ * keyboard's clipboard history that clearing the clipboard can't reach.
+ */
+internal class WatchedClipboard(private val inner: Clipboard, private val pastes: PastedPhrases) : Clipboard {
+    override val nativeClipboard: ClipboardManager get() = inner.nativeClipboard
+
+    override suspend fun getClipEntry(): ClipEntry? =
+        inner.getClipEntry().also { pastes.committing(it?.plainText()) }
+
+    override suspend fun setClipEntry(clipEntry: ClipEntry?) {
+        clipEntry?.clipData?.let(PhraseClipboard::markSensitive)
+        inner.setClipEntry(clipEntry)
+        val stamp = runCatching { nativeClipboard.primaryClipDescription?.timestamp }.getOrNull()
+        pastes.copied(clipEntry?.plainText(), stamp)
+    }
+
+    private fun ClipEntry.plainText(): CharSequence? =
+        clipData.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text
+}
+
+/**
+ * Takes what was pasted into the import field off the clipboard if it's
+ * still there (#75, #241); see [shouldClearPasted]. Reads nothing when
+ * nothing was pasted, so the clipboard isn't read (and Android's "pasted
+ * from your clipboard" notice doesn't show) for a phrase that was typed.
+ * The description is looked at first, so a clip that isn't text never has
+ * its items read. Whether it's done with [pastes]: the clipboard could be
+ * looked at, or was cleared unread.
+ */
+private fun clearPastedFromClipboard(context: Context, pastes: PastedPhrases, imported: List<String>? = null): Boolean {
+    if (pastes.words.isEmpty()) return true
+    val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return false
+    return runCatching {
+        // Null both when the clipboard is empty and when it can't be read
+        // (no window focus): an empty one is then looked at again for nothing.
+        val description = runCatching { clipboard.primaryClipDescription }.getOrNull()
+        val clear = shouldClearPasted(
+            readable = description != null,
+            hasText = description?.hasMimeType("text/*") == true,
+            readTexts = {
+                val clip = runCatching { clipboard.primaryClip }.getOrNull()
+                // `text` only — never `coerceToText`, which opens a `content:` URI.
+                clip?.let { c -> (0 until c.itemCount).map { c.getItemAt(it).text } }.orEmpty()
+            },
+            pasted = pastes.words.toList(),
+            imported = imported,
+            clipIsPaste = pastes.clipIsPaste,
+        )
+        if (clear) clipboard.clearPrimaryClip()
+        description != null || clear
+    }.getOrDefault(false)
 }
 
 private val bip39Words: Set<String> by lazy { baby.freedom.mobile.wallet.Bip39English.words.toHashSet() }
@@ -1467,7 +1684,7 @@ private fun ErrorText(message: String) {
  * so it doesn't learn the words.
  */
 @Composable
-private fun ImportPhrasePage(
+internal fun ImportPhrasePage(
     busy: Boolean,
     error: String?,
     deviceSecure: Boolean,
@@ -1481,10 +1698,45 @@ private fun ImportPhrasePage(
     // A TextFieldValue so a paste over a selection can be told from typing.
     var field by remember { mutableStateOf(TextFieldValue("")) }
     val phrase = field.text
-    // Something was pasted in (more than one character inserted at once,
-    // also over a selection it replaced): the
-    // phrase may still be on the clipboard after the import.
-    var pasted by remember { mutableStateOf(false) }
+    // The words of each paste (more than one word inserted at once, also
+    // over a selection it replaced — [PastedPhrases.add]), in memory only: what may still be
+    // on the clipboard (#241). Taken off it at Import — the words are in
+    // the field now, whatever the authentication does — and, whatever else
+    // happens (Back, the page closed from outside), when the page goes;
+    // forgotten once the clipboard could be looked at, kept for the next
+    // try while it couldn't. Freedom losing window focus with the page up
+    // (Home, another app, the notification shade) is the one exit where it
+    // can't be looked at: then it's cleared unread if a paste of a phrase,
+    // or of a piece of one, is the last thing that happened to it
+    // ([PastedPhrases.clipIsPaste]).
+    val pastes = remember { PastedPhrases() }
+    val clipboard = remember(context) { context.getSystemService(ClipboardManager::class.java) }
+    val clearPasted = { imported: List<String>? ->
+        if (clearPastedFromClipboard(context, pastes, imported)) pastes.forget()
+    }
+    DisposableEffect(clipboard) {
+        // Only heard while Freedom has window focus (API 29+) — which is
+        // why clipIsPaste is dropped once focus goes.
+        // The field's own Copy or Cut is a clipboard change too, one that
+        // puts its text on it ([PastedPhrases.copied]).
+        val listener = ClipboardManager.OnPrimaryClipChangedListener {
+            pastes.clipChanged(runCatching { clipboard?.primaryClipDescription?.timestamp }.getOrNull())
+        }
+        clipboard?.addPrimaryClipChangedListener(listener)
+        onDispose {
+            clipboard?.removePrimaryClipChangedListener(listener)
+            clearPasted(null)
+        }
+    }
+    val windowInfo = LocalWindowInfo.current
+    LaunchedEffect(windowInfo) {
+        snapshotFlow { windowInfo.isWindowFocused }.collect { focused ->
+            if (!focused) {
+                clearPasted(null)
+                pastes.clipIsPaste = false
+            }
+        }
+    }
     val back = {
         field = TextFieldValue("")
         onBack()
@@ -1494,11 +1746,9 @@ private fun ImportPhrasePage(
     val submit = {
         if (!busy && hint is ImportHint.Valid) {
             runCatching { Mnemonic.parse(phrase) }.getOrNull()?.let { mnemonic ->
-                onImport(mnemonic) {
-                    if (pasted) clearPhraseFromClipboard(context, mnemonic.words)
-                    field = TextFieldValue("")
-                    pasted = false
-                }
+                // Before the authentication, which may be cancelled or fail.
+                clearPasted(mnemonic.words)
+                onImport(mnemonic) { field = TextFieldValue("") }
             }
         }
     }
@@ -1512,31 +1762,36 @@ private fun ImportPhrasePage(
                 SectionCard(title = "Recovery phrase") {
                     Text(
                         "Type or paste the words, separated by spaces. They’re encrypted on this " +
-                            "phone only and never sent anywhere. A pasted phrase is taken off the " +
-                            "clipboard once it’s imported.",
+                            "phone only and never sent anywhere. A phrase pasted in, or copied out of " +
+                            "this field, is taken off the clipboard when you tap Import wallet or " +
+                            "leave this page.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(8.dp))
-                    TabTextInput(private = true) {
-                        OutlinedTextField(
-                            value = field,
-                            onValueChange = {
-                                if (insertedLength(field, it) > 1) pasted = true
-                                field = it
-                            },
-                            enabled = !busy,
-                            minLines = 4,
-                            textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
-                            keyboardOptions = KeyboardOptions(
-                                capitalization = KeyboardCapitalization.None,
-                                autoCorrectEnabled = false,
-                                keyboardType = KeyboardType.Password,
-                                imeAction = ImeAction.Done,
-                            ),
-                            keyboardActions = KeyboardActions(onDone = { submit() }),
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp),
-                        )
+                    val appClipboard = LocalClipboard.current
+                    val watched = remember(appClipboard) { WatchedClipboard(appClipboard, pastes) }
+                    TabTextInput(private = true, onCommitText = pastes::committing) {
+                        CompositionLocalProvider(LocalClipboard provides watched) {
+                            OutlinedTextField(
+                                value = field,
+                                onValueChange = {
+                                    pastes.edit(field, it)
+                                    field = it
+                                },
+                                enabled = !busy,
+                                minLines = 4,
+                                textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+                                keyboardOptions = KeyboardOptions(
+                                    capitalization = KeyboardCapitalization.None,
+                                    autoCorrectEnabled = false,
+                                    keyboardType = KeyboardType.Password,
+                                    imeAction = ImeAction.Done,
+                                ),
+                                keyboardActions = KeyboardActions(onDone = { submit() }),
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp),
+                            )
+                        }
                     }
                     Spacer(Modifier.height(6.dp))
                     Text(

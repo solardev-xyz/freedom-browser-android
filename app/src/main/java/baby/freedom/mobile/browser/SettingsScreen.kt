@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WebAsset
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Cookie
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
@@ -89,6 +90,7 @@ import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.DappGrantStore
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsRpcConfig
+import baby.freedom.mobile.ui.Appearance
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.WalletAccount
@@ -109,6 +111,8 @@ import kotlinx.coroutines.launch
  *     [WalletScreen].
  *  0. **Search** — the address bar's search engine: the desktop set
  *     ([SearchEngines.BUILT_IN]) or a custom template (#87).
+ *  0. **Appearance** — the theme: System default, Light or Dark
+ *     ([baby.freedom.mobile.ui.Appearance], #269).
  *  0a. **Ad blocking** — the filter-list categories and the sites ad
  *     blocking is off for (#126, [Adblock]).
  *  0b. **Name resolution** and **RPC providers** — the resolution
@@ -172,6 +176,8 @@ fun SettingsScreen(
         .collectAsState(initial = SearchEngines.DEFAULT_ID)
     val customSearchTemplate by settings.customSearchTemplate.collectAsState(initial = "")
     var pickSearchEngine by remember { mutableStateOf(false) }
+    val appearance by settings.appearance.collectAsState(initial = Appearance.System)
+    var pickAppearance by remember { mutableStateOf(false) }
     val ensRpcConfig by settings.ensRpcConfig.collectAsState(initial = EnsRpcConfig())
     val externalSwarm by settings.externalSwarmEndpoint.collectAsState(initial = "")
     val externalIpfs by settings.externalIpfsGateway.collectAsState(initial = "")
@@ -224,6 +230,7 @@ fun SettingsScreen(
     val searchRows = visibleSettingsRows(
         query, SECTION_SEARCH, searchSectionRows(searchEngine, customSearchTemplate),
     )
+    val appearanceRows = visibleSettingsRows(query, SECTION_APPEARANCE, appearanceSectionRows(appearance))
     val defaultBrowser = rememberDefaultBrowserState()
     val defaultBrowserRows = visibleSettingsRows(
         query, DefaultBrowser.SECTION, defaultBrowserRows(defaultBrowser.isDefault),
@@ -254,7 +261,7 @@ fun SettingsScreen(
         visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
     } else emptySet()
     val nothingMatches = listOf(
-        walletRows, searchRows, defaultBrowserRows, adblockRows, ensRows, rpcRows, browsingRows, permissionRows, nodeRows,
+        walletRows, searchRows, appearanceRows, defaultBrowserRows, adblockRows, ensRows, rpcRows, browsingRows, permissionRows, nodeRows,
         torRows,
         chainRows, aboutRows, otherRows, ipfsRows,
     ).all { it.isEmpty() }
@@ -356,6 +363,9 @@ fun SettingsScreen(
                         customTemplate = customSearchTemplate,
                         onClick = { pickSearchEngine = true },
                     )
+                }
+                if (appearanceRows.isNotEmpty()) item("appearance") {
+                    AppearanceSection(appearance = appearance, onClick = { pickAppearance = true })
                 }
                 if (defaultBrowserRows.isNotEmpty()) item("default-browser") {
                     DefaultBrowserSection(defaultBrowser)
@@ -497,6 +507,16 @@ fun SettingsScreen(
             onDismiss = { pickSearchEngine = false },
         )
     }
+    if (pickAppearance) {
+        AppearanceDialog(
+            selected = appearance,
+            onSelect = { choice ->
+                scope.launch { settings.setAppearance(choice) }
+                pickAppearance = false
+            },
+            onDismiss = { pickAppearance = false },
+        )
+    }
     editEndpoint?.let { endpoint ->
         EndpointDialog(
             endpoint = endpoint,
@@ -588,6 +608,7 @@ fun SettingsScreen(
 
 private const val SECTION_WALLET = "Wallet"
 private const val SECTION_SEARCH = "Search"
+private const val SECTION_APPEARANCE = "Appearance"
 private const val SECTION_ADBLOCK = "Ad blocking"
 private const val SECTION_BROWSING = "Browsing data"
 private const val SECTION_PERMISSIONS = "Site permissions"
@@ -653,6 +674,79 @@ private fun customSearchTemplateLine(engineId: String, customTemplate: String): 
     customTemplate.takeIf {
         SearchEngines.effectiveId(engineId, customTemplate) == SearchEngines.CUSTOM_ID
     }
+
+private const val ROW_THEME = "Theme"
+
+/**
+ * The theme row (#269), findable by the choice in use and by every
+ * choice it can be switched to, plus the words people search for them
+ * with ("dark mode" → the Theme row).
+ */
+internal fun appearanceSectionRows(appearance: Appearance) = listOf(
+    settingsRow(
+        "theme",
+        ROW_THEME,
+        appearance.label,
+        APPEARANCE_DETAIL,
+        *Appearance.entries.map { it.label }.toTypedArray(),
+        "dark mode",
+        "light mode",
+        "night mode",
+    ),
+)
+
+/**
+ * What else the choice reaches: pages, through `prefers-color-scheme`,
+ * only where [Appearance.apply] can set the app's night mode. Nothing
+ * is claimed on Android 11, where only the chrome follows.
+ */
+private val APPEARANCE_DETAIL: String? =
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+        "Freedom's own pages, and web pages that offer a light and a dark look, follow it too"
+    } else null
+
+/** Settings → Appearance: the theme row, which opens [AppearanceDialog]. */
+@Composable
+private fun AppearanceSection(appearance: Appearance, onClick: () -> Unit) {
+    SectionCard(title = SECTION_APPEARANCE) {
+        PageRow(
+            title = ROW_THEME,
+            subtitle = appearance.label,
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Contrast,
+            thirdLine = APPEARANCE_DETAIL,
+            onClick = onClick,
+        )
+    }
+}
+
+/** Radio list of the [Appearance] choices; a tap applies one straight away. */
+@Composable
+private fun AppearanceDialog(
+    selected: Appearance,
+    onSelect: (Appearance) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(ROW_THEME) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Appearance.entries.forEach { choice ->
+                    EngineRadioRow(
+                        label = choice.label,
+                        selected = choice == selected,
+                        onClick = { onSelect(choice) },
+                    )
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
 
 /**
  * Settings → Wallet: one row with the wallet's state, and the backup
