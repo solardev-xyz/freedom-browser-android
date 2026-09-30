@@ -233,87 +233,6 @@
    ]
   },
   {
-   "name": "ant-chain",
-   "version": "0.5.49",
-   "licence": "MIT OR Apache-2.0",
-   "url": "",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "ant-control",
-   "version": "0.5.49",
-   "licence": "MIT OR Apache-2.0",
-   "url": "",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "ant-crypto",
-   "version": "0.5.49",
-   "licence": "MIT OR Apache-2.0",
-   "url": "",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "ant-ffi",
-   "version": "0.5.49",
-   "licence": "MIT OR Apache-2.0",
-   "url": "",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "ant-gateway",
-   "version": "0.5.49",
-   "licence": "MIT OR Apache-2.0",
-   "url": "",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "ant-node",
-   "version": "0.5.49",
-   "licence": "MIT OR Apache-2.0",
-   "url": "",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "ant-p2p",
-   "version": "0.5.49",
-   "licence": "MIT OR Apache-2.0",
-   "url": "",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "ant-postage",
-   "version": "0.5.49",
-   "licence": "MIT OR Apache-2.0",
-   "url": "",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "ant-retrieval",
-   "version": "0.5.49",
-   "licence": "MIT OR Apache-2.0",
-   "url": "",
-   "texts": [
-    40
-   ]
-  },
-  {
    "name": "anyhow",
    "version": "1.0.104",
    "licence": "MIT OR Apache-2.0",
@@ -788,7 +707,8 @@
    "url": "https://crates.io/crates/blst/0.3.17",
    "texts": [
     40
-   ]
+   ],
+   "native": true
   },
   {
    "name": "bs58",
@@ -1967,78 +1887,6 @@
    "url": "https://crates.io/crates/form_urlencoded/1.2.2",
    "texts": [
     31
-   ]
-  },
-  {
-   "name": "freedom-ipfs-core",
-   "version": "0.4.4",
-   "licence": "MIT OR Apache-2.0",
-   "url": "https://github.com/solardev-xyz/freedom-ipfs",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "freedom-ipfs-gateway",
-   "version": "0.4.4",
-   "licence": "MIT OR Apache-2.0",
-   "url": "https://github.com/solardev-xyz/freedom-ipfs",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "freedom-ipfs-mobile",
-   "version": "0.4.4",
-   "licence": "MIT OR Apache-2.0",
-   "url": "https://github.com/solardev-xyz/freedom-ipfs",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "freedom-ipfs-namesys",
-   "version": "0.4.4",
-   "licence": "MIT OR Apache-2.0",
-   "url": "https://github.com/solardev-xyz/freedom-ipfs",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "freedom-ipfs-retrieval",
-   "version": "0.4.4",
-   "licence": "MIT OR Apache-2.0",
-   "url": "https://github.com/solardev-xyz/freedom-ipfs",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "freedom-ipfs-routing",
-   "version": "0.4.4",
-   "licence": "MIT OR Apache-2.0",
-   "url": "https://github.com/solardev-xyz/freedom-ipfs",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "freedom-ipfs-store",
-   "version": "0.4.4",
-   "licence": "MIT OR Apache-2.0",
-   "url": "https://github.com/solardev-xyz/freedom-ipfs",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "freedom-ipfs-unixfs",
-   "version": "0.4.4",
-   "licence": "MIT OR Apache-2.0",
-   "url": "https://github.com/solardev-xyz/freedom-ipfs",
-   "texts": [
-    40
    ]
   },
   {
@@ -3245,7 +3093,8 @@
    "url": "https://crates.io/crates/libgit2-sys/0.18.7+1.9.6",
    "texts": [
     31
-   ]
+   ],
+   "native": true
   },
   {
    "name": "liblzma",
@@ -3263,7 +3112,8 @@
    "url": "https://crates.io/crates/liblzma-sys/0.4.9",
    "texts": [
     31
-   ]
+   ],
+   "native": true
   },
   {
    "name": "libm",
@@ -3464,31 +3314,14 @@
    ]
   },
   {
-   "name": "libradicle",
-   "version": "0.7.1",
-   "licence": "MIT OR Apache-2.0",
-   "url": "",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "libradicle-uniffi",
-   "version": "0.7.1",
-   "licence": "MIT OR Apache-2.0",
-   "url": "",
-   "texts": [
-    40
-   ]
-  },
-  {
    "name": "libsqlite3-sys",
    "version": "0.37.0",
    "licence": "MIT",
    "url": "https://crates.io/crates/libsqlite3-sys/0.37.0",
    "texts": [
     89
-   ]
+   ],
+   "native": true
   },
   {
    "name": "libz-sys",
@@ -3497,7 +3330,8 @@
    "url": "https://crates.io/crates/libz-sys/1.1.29",
    "texts": [
     31
-   ]
+   ],
+   "native": true
   },
   {
    "name": "linux-raw-sys",
@@ -3757,7 +3591,7 @@
    "name": "myotis-bls",
    "version": "0.1.12",
    "licence": "MIT OR Apache-2.0",
-   "url": "",
+   "url": "https://github.com/biafra23/myotis/tree/fb118a8b5f62d3d559783e035c4526f2d186df38",
    "texts": [
     40
    ]
@@ -3766,7 +3600,7 @@
    "name": "myotis-consensus",
    "version": "0.1.12",
    "licence": "MIT OR Apache-2.0",
-   "url": "",
+   "url": "https://github.com/biafra23/myotis/tree/fb118a8b5f62d3d559783e035c4526f2d186df38",
    "texts": [
     40
    ]
@@ -3775,7 +3609,7 @@
    "name": "myotis-core",
    "version": "0.1.12",
    "licence": "MIT OR Apache-2.0",
-   "url": "",
+   "url": "https://github.com/biafra23/myotis/tree/fb118a8b5f62d3d559783e035c4526f2d186df38",
    "texts": [
     40
    ]
@@ -3784,7 +3618,7 @@
    "name": "myotis-engine",
    "version": "0.1.12",
    "licence": "MIT OR Apache-2.0",
-   "url": "",
+   "url": "https://github.com/biafra23/myotis/tree/fb118a8b5f62d3d559783e035c4526f2d186df38",
    "texts": [
     40
    ]
@@ -3793,7 +3627,7 @@
    "name": "myotis-evm",
    "version": "0.1.12",
    "licence": "MIT OR Apache-2.0",
-   "url": "",
+   "url": "https://github.com/biafra23/myotis/tree/fb118a8b5f62d3d559783e035c4526f2d186df38",
    "texts": [
     40
    ]
@@ -3802,7 +3636,7 @@
    "name": "myotis-net",
    "version": "0.1.12",
    "licence": "MIT OR Apache-2.0",
-   "url": "",
+   "url": "https://github.com/biafra23/myotis/tree/fb118a8b5f62d3d559783e035c4526f2d186df38",
    "texts": [
     40
    ]
@@ -4504,7 +4338,7 @@
    "name": "radicle",
    "version": "0.25.1",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4513,7 +4347,7 @@
    "name": "radicle-cob",
    "version": "0.21.1",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4522,7 +4356,7 @@
    "name": "radicle-core",
    "version": "0.4.1",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4531,7 +4365,7 @@
    "name": "radicle-crypto",
    "version": "0.19.0",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4540,7 +4374,7 @@
    "name": "radicle-dag",
    "version": "0.10.0",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4549,7 +4383,7 @@
    "name": "radicle-fetch",
    "version": "0.21.1",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4558,7 +4392,7 @@
    "name": "radicle-git-metadata",
    "version": "0.2.1",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4567,7 +4401,7 @@
    "name": "radicle-git-ref-format",
    "version": "0.2.0",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4576,7 +4410,7 @@
    "name": "radicle-localtime",
    "version": "0.1.0",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4585,7 +4419,7 @@
    "name": "radicle-log",
    "version": "0.2.0",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4594,7 +4428,7 @@
    "name": "radicle-node",
    "version": "0.21.1",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4603,7 +4437,7 @@
    "name": "radicle-oid",
    "version": "0.2.2",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4612,7 +4446,7 @@
    "name": "radicle-protocol",
    "version": "0.9.1",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4621,7 +4455,7 @@
    "name": "radicle-signals",
    "version": "0.12.1",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4630,7 +4464,7 @@
    "name": "radicle-surf",
    "version": "0.29.0",
    "licence": "MIT OR Apache-2.0",
-   "url": "https://radicle.network/seeds/seed.radicle.dev/rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+   "url": "https://github.com/solardev-xyz/heartwood/tree/c208df3ac7626402db60752f1f38d31465731f01",
    "texts": [
     40
    ]
@@ -4778,7 +4612,8 @@
    "texts": [
     79,
     119
-   ]
+   ],
+   "native": true
   },
   {
    "name": "ref-cast",
@@ -5002,7 +4837,8 @@
     72,
     73,
     75
-   ]
+   ],
+   "native": true
   },
   {
    "name": "ripemd",
@@ -5686,15 +5522,6 @@
    "version": "0.37.0",
    "licence": "Apache-2.0 OR MIT",
    "url": "https://crates.io/crates/sqlite/0.37.0",
-   "texts": [
-    40
-   ]
-  },
-  {
-   "name": "sqlite3-src",
-   "version": "0.7.0",
-   "licence": "Apache-2.0 OR MIT",
-   "url": "",
    "texts": [
     40
    ]
@@ -7190,7 +7017,8 @@
     46,
     47,
     54
-   ]
+   ],
+   "native": true
   }
  ],
  "texts": [

@@ -88,4 +88,44 @@ Inc. and friends
             OpenSourceLicences.paragraphs(text),
         )
     }
+
+    @Test
+    fun `a wrapped line that begins like a list item stays in its sentence`() {
+        val text = """
+  This library is free software; you can redistribute it under the version
+  2. of the License, or any later version published by
+  a) the Free Software Foundation.
+  Redistribution is permitted provided that the following conditions are met:
+  1. Redistributions of source code must retain this notice
+  2. Redistributions in binary form must reproduce it
+  - in the documentation
+  - and in other materials
+        """.trimIndent()
+        assertEquals(
+            listOf(
+                "This library is free software; you can redistribute it under the version " +
+                    "2. of the License, or any later version published by a) the Free Software Foundation. " +
+                    "Redistribution is permitted provided that the following conditions are met:\n" +
+                    "1. Redistributions of source code must retain this notice\n" +
+                    "2. Redistributions in binary form must reproduce it\n" +
+                    "- in the documentation\n" +
+                    "- and in other materials",
+            ),
+            OpenSourceLicences.paragraphs(text),
+        )
+    }
+
+    @Test
+    fun `an item still starts after a heading or a clause ending in and-comma`() {
+        val text = """
+            TERMS AND CONDITIONS
+            1. Definitions.
+            c. to Distribute the Work in Collections; and,
+            d. to Distribute Derivative Works.
+        """.trimIndent()
+        assertEquals(
+            listOf("TERMS AND CONDITIONS\n1. Definitions.\nc. to Distribute the Work in Collections; and,\nd. to Distribute Derivative Works."),
+            OpenSourceLicences.paragraphs(text),
+        )
+    }
 }

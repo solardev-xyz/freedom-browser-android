@@ -1,3 +1,4 @@
+import com.android.build.api.artifact.SingleArtifact
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -318,8 +319,11 @@ dependencies {
 // The task fails the build when any of it is missing or stale: a
 // dependency with no licence, a licence with no text, a copyright-bearing
 // licence (MIT, BSD, …) without the library's own notice, native.json for
-// another FFI_REF, Colibri at another COLIBRI_REF, or a file in
-// src/main/assets nobody has said is Freedom's own or listed.
+// another FFI_REF, a crate that compiles C code nobody has checked at its
+// version, or Colibri at another COLIBRI_REF. checkLicencedFiles<Variant>
+// then fails it for a file the APK ships (any merged asset or .so, from
+// every source set, generated directory and library) that nobody has
+// said is Freedom's own or listed.
 aboutLibraries {
     offlineMode = true
     library { requireLicense = true }
@@ -333,10 +337,19 @@ androidComponents {
             dependsOn(scan)
             gradleLibraries.set(layout.buildDirectory.file("generated/aboutLibraries/${variant.name}/res/raw/aboutlibraries.json"))
             licencesDir.set(layout.projectDirectory.dir("licences"))
-            assetsDir.set(layout.projectDirectory.dir("src/main/assets"))
             releaseWorkflow.set(rootProject.layout.projectDirectory.file(".github/workflows/release.yml"))
         }
         variant.sources.assets?.addGeneratedSourceDirectory(generate, GenerateLicences::outputDir)
+        // What the APK actually ships, after merging: not just
+        // src/main/assets, but src/<buildType>/assets, generated asset
+        // directories, and every library's assets and .so files.
+        val shipped = tasks.register<CheckLicencedFiles>("checkLicencedFiles$name") {
+            bundled.set(layout.projectDirectory.file("licences/bundled.json"))
+            mergedAssets.set(variant.artifacts.get(SingleArtifact.ASSETS))
+            mergedNativeLibs.set(variant.artifacts.get(SingleArtifact.MERGED_NATIVE_LIBS))
+            outputFile.set(layout.buildDirectory.file("intermediates/licences/${variant.name}/checked"))
+        }
+        tasks.matching { it.name == "package$name" || it.name == "bundle$name" }.configureEach { dependsOn(shipped) }
     }
 }
 
@@ -346,9 +359,6 @@ abstract class GenerateLicences : DefaultTask() {
 
     @get:InputDirectory @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val licencesDir: DirectoryProperty
-
-    @get:InputDirectory @get:PathSensitive(PathSensitivity.RELATIVE)
-    abstract val assetsDir: DirectoryProperty
 
     @get:InputFile @get:PathSensitive(PathSensitivity.NONE)
     abstract val releaseWorkflow: RegularFileProperty
@@ -424,6 +434,7 @@ abstract class GenerateLicences : DefaultTask() {
                 lib["artifactVersion"] as? String ?: "", licence, url, null, ids)
         }
         val present = libraries.mapTo(HashSet()) { it["uniqueId"] as String }
+        val gradleVersions = libraries.associate { "${it["uniqueId"]} ${it["artifactVersion"]}" to it["uniqueId"] as String }
         for (stale in notices.keys - present) {
             problems += "app/licences/gradle.json lists a notice for $stale, which is no longer a dependency: remove it"
         }
@@ -441,16 +452,34 @@ abstract class GenerateLicences : DefaultTask() {
                 "run scripts/native-licences.sh on a freedom-mobile-ffi checkout at $ffiRef and commit it"
         }
         val nativeTexts = (native["texts"] as List<Map<String, String>>).map { text(it["name"]!!, it["text"]!!) }
+        val bundled = json(File(dir, "bundled.json"))
+        // A crate that compiles C code (native.json's "native") can carry
+        // code under other licences than its own: bundled.json's
+        // nativeCode says, for that crate at that version, what it builds,
+        // and the components with "inCrate" list it.
+        val nativeCode = bundled["nativeCode"] as Map<String, String>
+        val nativeCrates = HashSet<String>()
         for (crate in native["crates"] as List<Map<String, Any?>>) {
             val ids = (crate["texts"] as List<Number>).map { nativeTexts[it.toInt()] }
             if (ids.isEmpty()) problems += "native crate ${crate["name"]} has no licence text"
+            val key = "${crate["name"]} ${crate["version"]}"
+            if (crate["native"] == true) {
+                nativeCrates += key
+                if (key !in nativeCode) {
+                    problems += "native crate $key compiles C code: check what it vendors, list that in " +
+                        "app/licences/bundled.json's components (with \"inCrate\": \"$key\"), and say what you found under nativeCode"
+                }
+            }
             component("native", crate["name"] as String, crate["name"] as String, crate["version"] as String,
                 crate["licence"] as String, crate["url"] as String, null, ids)
         }
+        for (stale in nativeCode.keys - nativeCrates) {
+            problems += "app/licences/bundled.json's nativeCode has $stale, which native.json has no C-compiling crate for: " +
+                "recheck it at the new version (and the components that say they're in it)"
+        }
 
-        // Colibri, the OpenLV bundle and the filter lists.
-        val bundled = json(File(dir, "bundled.json"))
-        val claimed = HashSet(bundled["own"] as List<String>)
+        // Colibri, the C code in those crates and in JNA, the OpenLV
+        // bundle and the filter lists.
         for (c in bundled["components"] as List<Map<String, Any?>>) {
             val name = c["name"] as String
             val ids = (c["texts"] as List<String>).mapNotNull { path ->
@@ -464,18 +493,15 @@ abstract class GenerateLicences : DefaultTask() {
                 problems += "app/licences/bundled.json has Colibri ${c["version"]}, release.yml pins COLIBRI_REF $colibriRef: " +
                     "update it and what it links (scripts/check-colibri-licences.sh)"
             }
-            for (file in (c["files"] as List<String>?).orEmpty()) {
-                if (!File(assetsDir.get().asFile, file).isFile) problems += "app/licences/bundled.json: $name lists assets/$file, which doesn't exist"
-                claimed += file
+            (c["inCrate"] as String?)?.let {
+                if (it !in nativeCrates) problems += "app/licences/bundled.json: $name is in $it, which native.json has no C-compiling crate for: recheck it"
+            }
+            (c["inGradle"] as String?)?.let {
+                if (it !in gradleVersions) problems += "app/licences/bundled.json: $name is in $it, which isn't a dependency at that version: recheck it"
             }
             component(c["section"] as String, name, name, c["version"] as String, c["licence"] as String,
                 c["url"] as String, c["notice"] as String?, ids)
         }
-        val assets = assetsDir.get().asFile
-        assets.walkTopDown().filter { it.isFile }.map { it.relativeTo(assets).invariantSeparatorsPath }
-            .filter { it !in claimed }.sorted().forEach {
-                problems += "assets/$it is neither Freedom's own nor listed with its licence: add it to app/licences/bundled.json"
-            }
 
         if (problems.isNotEmpty()) {
             throw GradleException("Open-source licences (#325, app/licences/README.md):\n  - " + problems.joinToString("\n  - "))
@@ -486,5 +512,64 @@ abstract class GenerateLicences : DefaultTask() {
         out.resolve("licences.json").writeText(
             groovy.json.JsonOutput.toJson(mapOf("components" to components, "texts" to texts)),
         )
+    }
+}
+
+/**
+ * Fails the build for a file the APK ships that nobody has accounted for
+ * (#325): a merged asset that's neither in bundled.json's `own` nor in a
+ * component's `files`, or a merged `.so` that isn't in its
+ * `nativeLibraries` (saying whose code it is). Reads the merged outputs, so
+ * an asset from src/release/assets, a generated directory or a library is
+ * caught as well as one in src/main/assets.
+ */
+abstract class CheckLicencedFiles : DefaultTask() {
+    @get:InputFile @get:PathSensitive(PathSensitivity.NONE)
+    abstract val bundled: RegularFileProperty
+
+    @get:InputDirectory @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val mergedAssets: DirectoryProperty
+
+    @get:InputDirectory @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val mergedNativeLibs: DirectoryProperty
+
+    @get:OutputFile
+    abstract val outputFile: RegularFileProperty
+
+    @Suppress("UNCHECKED_CAST")
+    @TaskAction
+    fun check() {
+        val config = groovy.json.JsonSlurper().parse(bundled.get().asFile, "UTF-8") as Map<String, Any?>
+        val problems = mutableListOf<String>()
+        val claimed = HashSet(config["own"] as List<String>)
+        val listed = HashSet<String>()
+        for (c in config["components"] as List<Map<String, Any?>>) listed += (c["files"] as List<String>?).orEmpty()
+        claimed += listed
+        // generateLicences' own output.
+        claimed += "licences/licences.json"
+
+        val assets = mergedAssets.get().asFile
+        val shipped = assets.walkTopDown().filter { it.isFile }.map { it.relativeTo(assets).invariantSeparatorsPath }.toSortedSet()
+        for (file in shipped - claimed) {
+            problems += "assets/$file is neither Freedom's own nor listed with its licence: add it to app/licences/bundled.json"
+        }
+        for (file in (claimed - shipped).sorted()) {
+            problems += "app/licences/bundled.json lists assets/$file, which the APK doesn't ship"
+        }
+
+        val libs = config["nativeLibraries"] as Map<String, String>
+        val so = mergedNativeLibs.get().asFile.walkTopDown().filter { it.isFile && it.name.endsWith(".so") }.mapTo(sortedSetOf()) { it.name }
+        for (lib in so - libs.keys) {
+            problems += "$lib is a native library the APK ships that app/licences/bundled.json's nativeLibraries doesn't know: " +
+                "find what's linked into it, list any third-party code under components, and add it to nativeLibraries"
+        }
+        for (lib in (libs.keys - so).sorted()) {
+            problems += "app/licences/bundled.json's nativeLibraries has $lib, which the APK no longer ships: remove it"
+        }
+
+        if (problems.isNotEmpty()) {
+            throw GradleException("Open-source licences (#325, app/licences/README.md):\n  - " + problems.joinToString("\n  - "))
+        }
+        outputFile.get().asFile.writeText("ok\n")
     }
 }

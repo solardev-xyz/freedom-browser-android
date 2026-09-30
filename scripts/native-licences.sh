@@ -65,16 +65,40 @@ trap 'rm -rf "$tmp"' EXIT
     --no-default-features --features "${features//,/ }" \
     -o "$tmp/about.json" 2> "$tmp/about.log" ) || { cat "$tmp/about.log" >&2; exit 1; }
 
-python3 - "$tmp/about.json" "$tmp/native.json" "$ref" "$features" <<'PY'
-import json, sys
+python3 - "$tmp/about.json" "$tmp/native.json" "$ref" "$features" "$REPO/app/licences" <<'PY'
+import json, os, re, sys
 
-src, dst, ref, features = sys.argv[1:]
+src, dst, ref, features, licences = sys.argv[1:]
 about = json.load(open(src, encoding="utf-8"))
 
-# The root crate is freedom-mobile-ffi itself: the app's own code, not a
-# dependency. It's the only crate without a source.
-def is_root(pkg):
-    return pkg["name"] == "freedom-mobile-ffi" and pkg.get("source") is None
+# Crates that are Freedom's own code rather than third-party components:
+# freedom-mobile-ffi itself and anything else in its tree (a path
+# dependency has no source; vendor/sqlite3-src is a no-op stand-in), and
+# the Freedom projects it pulls from git. Not listed.
+OWN_GIT = ("github.com/freedom-hq/ant", "github.com/solardev-xyz/freedom-ipfs", "github.com/solardev-xyz/libradicle")
+
+def git_repo(source):
+    # "git+ssh://git@github.com/o/r.git?tag=v1#<sha>" -> ("github.com/o/r", "<sha>")
+    m = re.match(r"git\+(?:ssh://git@|https://)([^?#]+?)(?:\.git)?(?:\?[^#]*)?#([0-9a-f]+)$", source)
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+def is_own(pkg):
+    source = pkg.get("source")
+    if source is None:
+        return True
+    repo, _ = git_repo(source)
+    return repo in OWN_GIT
+
+# A crate that compiles C/C++/assembly (a build dependency on cc or
+# cmake) or links a native library (`links`) can carry code under another
+# licence than its own Cargo.toml says: libgit2-sys builds libgit2 with
+# LibXDiff and PCRE2, liblzma-sys builds XZ Utils. The build makes
+# bundled.json account for every one of these, at its version.
+NATIVE_BUILD = {"cc", "cmake", "autotools", "nasm-rs", "cxx-build"}
+
+def builds_native(pkg):
+    return bool(pkg.get("links")) or any(
+        d.get("kind") == "build" and d["name"] in NATIVE_BUILD for d in pkg.get("dependencies", []))
 
 texts = {}   # (id, name, text) -> set of crate ids
 for lic in about["licenses"]:
@@ -85,32 +109,70 @@ for lic in about["licenses"]:
 ordered = sorted(texts)
 index = {key: i for i, key in enumerate(ordered)}
 
-crates, missing = [], []
+crates, missing, dirs = [], [], {}
 for entry in about["crates"]:
     pkg = entry["package"]
-    if is_root(pkg):
+    if is_own(pkg):
         continue
     mine = sorted(index[k] for k, ids in texts.items() if pkg["id"] in ids)
     if not mine:
         missing.append(f'{pkg["name"]} {pkg["version"]} ({pkg.get("license") or "no licence field"})')
         continue
     source = pkg.get("source") or ""
+    repo, rev = git_repo(source)
     if source.startswith("registry+"):
         url = f'https://crates.io/crates/{pkg["name"]}/{pkg["version"]}'
+    elif repo:
+        # The exact commit Cargo.lock pins, not the default branch.
+        url = f"https://{repo}/tree/{rev}"
     else:
         url = pkg.get("repository") or pkg.get("homepage") or ""
-    crates.append({
+    if not url:
+        sys.exit(f'native-licences: no source URL for {pkg["name"]} {pkg["version"]} ({source or "no source"}); update this script')
+    crate = {
         "name": pkg["name"],
         "version": pkg["version"],
         "licence": pkg.get("license") or "",
         "url": url,
         "texts": mine,
-    })
+    }
+    if builds_native(pkg):
+        crate["native"] = True
+        dirs[(pkg["name"], pkg["version"])] = os.path.dirname(pkg["manifest_path"])
+    crates.append(crate)
+
+# The C code those crates compile in is listed in bundled.json, each
+# component naming the crate it's in; a text taken from the crate's own
+# sources ("crateFiles") must still be that file, byte for byte.
+bundled = json.load(open(os.path.join(licences, "bundled.json"), encoding="utf-8"))
+stale = []
+for c in bundled["components"]:
+    if "inCrate" not in c:
+        continue
+    name, _, version = c["inCrate"].partition(" ")
+    where = dirs.get((name, version))
+    if where is None:
+        stale.append(f'{c["name"]}: bundled.json says it\'s in {c["inCrate"]}, which isn\'t a native-building crate at FFI_REF {ref}')
+        continue
+    for text, path in c.get("crateFiles", {}).items():
+        mine = open(os.path.join(licences, text), encoding="utf-8").read().strip("\n")
+        theirs = open(os.path.join(where, path), encoding="utf-8").read().strip("\n")
+        if mine != theirs:
+            stale.append(f'app/licences/{text} ({c["name"]}) differs from {c["inCrate"]}\'s {path}: copy it over')
+if stale:
+    sys.exit("native-licences: bundled.json's C code in Rust crates is out of date:\n  " + "\n  ".join(stale))
 
 if missing:
     sys.exit("native-licences: no accepted licence text for:\n  " + "\n  ".join(sorted(missing))
              + "\n(add the licence to scripts/native-licences.toml's `accepted` once it's been checked,"
              + " or clarify the crate there)")
+
+# Only the texts a listed crate uses (Freedom's own crates are left out).
+used = sorted({i for c in crates for i in c["texts"]})
+remap = {old: new for new, old in enumerate(used)}
+for c in crates:
+    c["texts"] = [remap[i] for i in c["texts"]]
+ordered = [ordered[i] for i in used]
 
 crates.sort(key=lambda c: (c["name"], c["version"]))
 out = {
