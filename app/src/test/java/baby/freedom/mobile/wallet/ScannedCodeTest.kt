@@ -161,4 +161,61 @@ class ScannedCodeTest {
     fun `a pairing code never reaches a log line through toString`() {
         assertEquals("Pairing(…)", ScannedCode.Pairing("openlv://secret").toString())
     }
+
+    @Test
+    fun `a link is read exactly as a scanned code, for everything the scanner reads`() {
+        // #317: one parser for both, so a tapped link and a scanned code agree.
+        val links = listOf(
+            "ethereum:${checksummed.lowercase()}@100?value=2.014e18",
+            "ethereum:$checksummed",
+            "ethereum:pay-$checksummed@1?value=10",
+            "ethereum:$xbzz@100/transfer?address=$other&uint256=1.5e16",
+            "ethereum:$xbzz/transfer?address=${other.lowercase()}",
+            "ethereum:$xbzz/transfer?uint256=1",
+            "ethereum:$xbzz/approve?address=$other&uint256=1e30",
+            "ethereum:hello",
+            "ethereum:$checksummed@0",
+            "ethereum:$checksummed?value=1&value=2",
+            "ethereum:$checksummed?value=0.5",
+            "ethereum:${checksummed.replace("aAeb", "aaeb")}",
+        )
+        for (link in links) assertEquals(link, ScannedCode.parse(link), ScannedCode.parseLink(link))
+    }
+
+    @Test
+    fun `a link may name its payee, which a scanned code may not`() {
+        assertEquals(
+            ScannedCode.Payment("vitalik.eth", chainId = 1, token = null, amount = BigInteger.ONE),
+            ScannedCode.parseLink("ethereum:vitalik.eth@1?value=1"),
+        )
+        assertEquals(
+            ScannedCode.Payment("alice.eth", chainId = 100, token = xbzz, amount = BigInteger("10000000000000000")),
+            ScannedCode.parseLink("ethereum:$xbzz@100/transfer?address=alice.eth&uint256=1e16"),
+        )
+        // A browser hands a non-ASCII name over percent-encoded.
+        assertEquals(
+            ScannedCode.Payment("bücher.eth", chainId = null, token = null, amount = null),
+            ScannedCode.parseLink("ethereum:b%C3%BCcher.eth"),
+        )
+        // The scanner still refuses them.
+        assertTrue(unrecognized("ethereum:vitalik.eth@1?value=1").contains("vitalik.eth"))
+        assertTrue(unrecognized("ethereum:$xbzz/transfer?address=bob.eth").contains("valid address"))
+    }
+
+    @Test
+    fun `a link's token contract is never a name, and what isn't a name stays refused`() {
+        fun linkRefused(link: String): String {
+            val code = ScannedCode.parseLink(link)
+            assertTrue("$link → $code", code is ScannedCode.Unrecognized)
+            return (code as ScannedCode.Unrecognized).reason
+        }
+        assertTrue(linkRefused("ethereum:usdc.eth@1/transfer?address=$other&uint256=1").contains("usdc.eth"))
+        assertTrue(linkRefused("ethereum:vitalik.eth/approve?address=$other").contains("vitalik.eth"))
+        assertTrue(linkRefused("ethereum:hello").contains("no valid address"))
+        assertTrue(linkRefused("ethereum:a..eth").contains("a..eth"))
+        assertTrue(linkRefused("ethereum:$xbzz/transfer?address=bob").contains("valid address"))
+        // Not an ethereum: link at all.
+        linkRefused(checksummed)
+        linkRefused("https://example.com/")
+    }
 }

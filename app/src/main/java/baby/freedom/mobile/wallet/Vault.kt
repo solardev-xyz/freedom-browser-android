@@ -239,6 +239,37 @@ class Vault internal constructor(
         openMnemonic(storedRecord(), auth, VaultAuthPurpose.REVEAL)
     }
 
+    /**
+     * One account's private key, for "Show private key" (#323), as
+     * `0x` and 64 hex digits — what other wallets import. Like
+     * [revealMnemonic] it always asks the user again, locked or not, and
+     * keeps nothing: the phrase, seed and key bytes are zeroed before it
+     * returns. Refused for an account with no key here ([WalletAccount.hasLocalKey]:
+     * a Ledger's), and for one whose derived address isn't [account]'s —
+     * a list that doesn't belong to this wallet shows no key rather than
+     * another account's. Show it only on a `FLAG_SECURE` screen.
+     */
+    suspend fun revealPrivateKey(auth: VaultAuthenticator, account: WalletAccount): String = ops.withLock {
+        require(account.hasLocalKey) { "this account has no key on this phone" }
+        val mnemonic = openMnemonic(storedRecord(), auth, VaultAuthPurpose.EXPORT_KEY)
+        withContext(compute) {
+            val seed = mnemonic.seed()
+            val key = try {
+                EthAccounts.privateKey(seed, account.index)
+            } finally {
+                seed.fill(0)
+            }
+            try {
+                check(EthAccounts.addressOf(key).equals(account.address, ignoreCase = true)) {
+                    "the account's address isn't this wallet's"
+                }
+                "0x" + key.joinToString("") { "%02x".format(it) }
+            } finally {
+                key.fill(0)
+            }
+        }
+    }
+
     /** The user has seen the phrase (#78): the backup reminder goes. */
     suspend fun markBackedUp() = ops.withLock {
         val record = storedRecord()

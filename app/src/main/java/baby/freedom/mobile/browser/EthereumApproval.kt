@@ -85,6 +85,8 @@ internal fun ethApprovalCopy(ask: EthAsk): EthApprovalCopy {
         is EthAsk.AddChain ->
             Triple(R.string.send_eth_add_chain_title, R.string.send_eth_add_chain_request, R.string.send_eth_add_chain_action)
         is EthAsk.Payment -> Triple(R.string.send_eth_pay_title, R.string.send_eth_pay_request, R.string.send_eth_pay_action)
+        // Never a sheet: BrowserScreen opens the Send page for it instead.
+        is EthAsk.SendLink -> Triple(R.string.send_title, R.string.send_eth_pay_request, R.string.send_eth_pay_action)
     }
     return EthApprovalCopy(Strings.get(title), Strings.get(request), Strings.get(approve))
 }
@@ -246,6 +248,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                         locked = vaultState is Vault.State.Locked,
                         onSetUp = request.setUpWallet,
                     )
+                    is EthAsk.SendLink -> Unit
                 }
             }
             ledger?.let {
@@ -296,7 +299,7 @@ internal fun ledgerOf(ask: EthAsk): baby.freedom.mobile.wallet.ledger.LedgerKey?
 private fun iconFor(ask: EthAsk) = when (ask) {
     is EthAsk.Connect -> Icons.Filled.AccountBalanceWallet
     is EthAsk.SignMessage, is EthAsk.SignTypedData -> Icons.Filled.Draw
-    is EthAsk.SendTransaction -> Icons.AutoMirrored.Filled.Send
+    is EthAsk.SendTransaction, is EthAsk.SendLink -> Icons.AutoMirrored.Filled.Send
     is EthAsk.SwitchChain -> Icons.Filled.Link
     is EthAsk.AddChain -> Icons.Filled.Hub
     is EthAsk.Payment -> Icons.Filled.Payments
@@ -440,9 +443,9 @@ private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, tap: ArmedTap
     }
     Row0(
         stringResource(R.string.send_label_network_fee),
-        stringResource(R.string.send_up_to, feeText(quote.tx.maxFee, chain)),
+        stringResource(R.string.send_up_to, feeText(quote.maxFee, chain)),
         mono = true,
-        detail = feeDetail(quote.tx),
+        detail = feeDetail(quote),
     )
     quote.nativeTotal?.takeIf { request.amount.signum() > 0 }?.let {
         Row0(stringResource(R.string.send_label_total), stringResource(R.string.send_up_to, feeText(it, chain)), mono = true)

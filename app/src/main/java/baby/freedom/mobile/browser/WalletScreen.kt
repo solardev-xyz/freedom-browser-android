@@ -40,6 +40,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -72,6 +73,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
@@ -90,6 +92,7 @@ import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
+import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.DuplicateAccountException
 import baby.freedom.mobile.wallet.BackupMissingException
@@ -632,6 +635,14 @@ private fun lostWalletAdvice(
  * lives in plain `remember` state on either page, never
  * `rememberSaveable`, so it can't end up in the saved-instance-state
  * bundle.
+ *
+ * Opened for a payment link ([sendLink], #317) it starts on the Send
+ * page, filled in from the link, and leaving that page closes the wallet
+ * again, back to the page the link was on. [onSendStarted]: a send from
+ * that page has started; [onSendShown]: the Send page itself came on
+ * screen. Until the wallet's networks and accounts are read, a link's
+ * page shows only a spinner, never the wallet home; while a feature's
+ * [request] is up the home page shows for it, and Send comes back after.
  */
 @Composable
 fun WalletScreen(
@@ -639,6 +650,9 @@ fun WalletScreen(
     currentSite: String?,
     onOpenUrl: (String) -> Unit,
     onDismiss: () -> Unit,
+    sendLink: SendPrefill? = null,
+    onSendStarted: () -> Unit = {},
+    onSendShown: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val vault = remember(context) { Vault.get(context) }
@@ -647,7 +661,7 @@ fun WalletScreen(
     val scope = rememberCoroutineScope()
     var importing by remember { mutableStateOf(false) }
     var publishing by remember { mutableStateOf(false) }
-    var sending by remember { mutableStateOf(false) }
+    var sending by remember { mutableStateOf(sendLink != null) }
     val sender = remember(context) { WalletSender.get(context) }
     val sendStatus by sender.status.collectAsState()
     // The transaction history (#109) and its two pages: all sends, one send (by hash, so it follows the record).
@@ -675,6 +689,8 @@ fun WalletScreen(
     // No other app's overlay over the wallet (#240): Android 12+ hides them while it's open.
     HideOverlayWindows()
     var showingPhrase by remember { mutableStateOf(false) }
+    // Show private key (#323): the account it was opened for, fixed then, by address.
+    var showingKeyOf by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
@@ -863,7 +879,26 @@ fun WalletScreen(
         return
     }
     val sendFrom = accountList?.active
-    if (sending && sendFrom != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
+    // A link's Send page stays the page for as long as the link is open,
+    // except while a feature's request needs the home page: `sending`,
+    // which that request clears, would otherwise never bring it back (R1-M2).
+    val linkSending = sendLink != null && request == null
+    // …and what the user had changed on it comes back with it: the page
+    // leaves composition while the request has the home page (R2-M1).
+    val linkDraft = remember(sendLink) { SendDraft() }
+    // A link's page waits for the account and the networks (its asset is
+    // looked up among them) on a spinner of its own, not the wallet home,
+    // whose ✕ would read as turning the link down (R1-M3).
+    if (linkSending && (state is Vault.State.Locked || state is Vault.State.Unlocked) &&
+        (sendFrom == null || walletChains == null)
+    ) {
+        LinkSendLoading(onBack = onDismiss)
+        return
+    }
+    if ((sending || linkSending) && sendFrom != null && (state is Vault.State.Locked || state is Vault.State.Unlocked) &&
+        (sendLink == null || walletChains != null)
+    ) {
+        if (sendLink != null) LaunchedEffect(sendLink) { onSendShown() }
         SendPage(
             account = sendFrom,
             chains = walletChains.orEmpty(),
@@ -872,7 +907,11 @@ fun WalletScreen(
             auth = auth,
             phraseBackedUp = phraseBackedUp,
             onOpenUrl = onOpenUrl,
-            onBack = { sending = false },
+            // A link's Send page goes back to the page the link was on.
+            onBack = { if (sendLink != null) onDismiss() else sending = false },
+            prefill = sendLink,
+            onStarted = if (sendLink != null) onSendStarted else ({}),
+            draft = if (sendLink != null) linkDraft else null,
         )
         return
     }
@@ -982,6 +1021,26 @@ fun WalletScreen(
     }
     // The wallet went away (removed, or unreadable) with the page up: nothing to show.
     LaunchedEffect(stored == null) { if (stored == null) showingPhrase = false }
+
+    // Looked up by the address it was opened for, never the active account: a switch
+    // meanwhile must not change whose key the page shows. Gone from the list (or no key
+    // here) closes it.
+    val keyAccount = showingKeyOf?.let { address ->
+        accountList?.accounts?.firstOrNull { it.hasLocalKey && it.address.equals(address, ignoreCase = true) }
+    }
+    if (keyAccount != null && stored != null) {
+        PrivateKeyPage(
+            account = keyAccount,
+            protection = stored.protection,
+            reveal = { vault.revealPrivateKey(auth, keyAccount) },
+            errorMessage = { e -> walletErrorMessage(e, Strings.get(R.string.wallet_action_show_key), phraseBackedUp) },
+            onBack = { showingKeyOf = null },
+        )
+        return
+    }
+    LaunchedEffect(showingKeyOf != null && (keyAccount == null || stored == null)) {
+        if (keyAccount == null || stored == null) showingKeyOf = null
+    }
 
     if (x402HistoryOpen) {
         X402HistoryPage(x402Payments, allChains.orEmpty(), onBack = { x402HistoryOpen = false })
@@ -1142,6 +1201,10 @@ fun WalletScreen(
                             onConnectLedger = {
                                 error = null
                                 connectingLedger = true
+                            },
+                            onShowKey = { account ->
+                                error = null
+                                showingKeyOf = account.address
                             },
                             onRemoveLedger = { account ->
                                 run(Strings.get(R.string.wallet_action_remove_ledger_account)) {
@@ -1927,8 +1990,10 @@ private fun RecoveryPhrasePage(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     // Follows the clipboard itself, so the button says "Copy" again as
-    // soon as the minute is up and the words have been taken off.
-    val copied by PhraseClipboard.copied.collectAsState()
+    // soon as the minute is up and the words have been taken off — and
+    // only for these words, not a removed wallet's (#334 R3-M2).
+    val copiedLabel by PhraseClipboard.copiedLabel.collectAsState()
+    val copiedHash by PhraseClipboard.copiedHash.collectAsState()
     val hide = {
         words = null
     }
@@ -2017,7 +2082,7 @@ private fun RecoveryPhrasePage(
                             ) {
                                 Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                CopyLabel(copied)
+                                CopyLabel(PhraseClipboard.holdsPhrase(copiedLabel, copiedHash, shown))
                             }
                             OutlinedButton(onClick = hide) {
                                 Icon(Icons.Filled.VisibilityOff, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -2028,6 +2093,167 @@ private fun RecoveryPhrasePage(
                         Spacer(Modifier.height(8.dp))
                         Text(
                             COPY_NOTE,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            error?.let { message -> item("error") { ErrorText(message) } }
+        }
+    }
+}
+
+/** What "Copy" on the private-key page leaves on the clipboard, and for how long; see [COPY_NOTE]. */
+internal val KEY_COPY_NOTE: String get() = (PhraseClipboard.TTL_MS / 1000 / 60).toInt().let { minutes ->
+    Strings.plural(R.plurals.wallet_key_copy_note, minutes, minutes)
+}
+
+/**
+ * Show private key (#323): one account's key, for importing just that
+ * account into another wallet, as desktop's wallet settings do — rather
+ * than the whole phrase, which gives every account and identity away.
+ * Only for an account whose key is derived here ([WalletAccount.hasLocalKey]);
+ * a Ledger's never leaves the device, and Safes aren't wallet accounts.
+ *
+ * Held to the recovery phrase page's protections ([RecoveryPhrasePage]):
+ * `FLAG_SECURE` ([SecureWindow]); hidden until Show, which asks for the
+ * fingerprint, face or screen lock every time ([Vault.revealPrivateKey]
+ * keeps nothing); the key in plain `remember` state only, never
+ * `rememberSaveable`, dropped on Hide, Back and as soon as the app goes
+ * to the background; not selectable (a selection's own Copy would skip
+ * the timed, sensitive clip); Copy through [PhraseClipboard.copyKey].
+ *
+ * The warning says the key "on its own" opens this account only. Other
+ * accounts sit under their own hardened `{index}'`, but Account 1's
+ * `m/44'/60'/0'/0/0` shares a non-hardened parent with the Swarm node
+ * key ([baby.freedom.mobile.wallet.NodeIdentity.SWARM_PATH]): the claim
+ * holds only while that parent's xpub is never given out.
+ */
+@Composable
+private fun PrivateKeyPage(
+    account: WalletAccount,
+    protection: VaultProtection,
+    reveal: suspend () -> String,
+    errorMessage: (Throwable) -> String?,
+    onBack: () -> Unit,
+) {
+    SecureWindow()
+    ReleaseCoveredFocus()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var key by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val copiedLabel by PhraseClipboard.copiedLabel.collectAsState()
+    val copiedHash by PhraseClipboard.copiedHash.collectAsState()
+    val hide = {
+        key = null
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) hide()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val back = {
+        hide()
+        onBack()
+    }
+    BackHandler(onBack = back)
+
+    fun show() {
+        if (busy) return
+        busy = true
+        error = null
+        scope.launch {
+            try {
+                key = reveal()
+            } catch (e: Throwable) {
+                error = errorMessage(e)
+                if (e is CancellationException) throw e
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    FullScreenScaffold(title = stringResource(R.string.wallet_key_title), onDismiss = back) {
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            item("warning") {
+                SectionCard(title = stringResource(R.string.wallet_key_keep_secret_title)) {
+                    NoScreenLockWarning(text = stringResource(R.string.wallet_key_keep_secret, accountLabel(account)))
+                }
+            }
+            item("account") {
+                SectionCard(title = stringResource(R.string.wallet_key_account)) {
+                    Text(accountLabel(account), fontWeight = FontWeight.Medium)
+                    AddressText(
+                        account.address,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        accountPathLine(account),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            item("key") {
+                val shown = key
+                SectionCard(
+                    title = stringResource(if (shown != null) R.string.wallet_key_shown else R.string.wallet_key_hidden),
+                ) {
+                    if (shown == null) {
+                        Text(
+                            stringResource(
+                                if (protection == VaultProtection.SCREEN_LOCK) {
+                                    R.string.wallet_key_reveal_asks
+                                } else {
+                                    R.string.wallet_key_reveal_no_screen_lock
+                                },
+                            ),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Button(
+                            onClick = { show() },
+                            enabled = !busy,
+                            modifier = Modifier.fillMaxWidth().testTag("wallet-key-reveal"),
+                        ) {
+                            Text(if (busy) stringResource(R.string.wallet_waiting) else stringResource(R.string.wallet_key_show))
+                        }
+                    } else {
+                        Text(
+                            shown,
+                            style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+                            modifier = Modifier.testTag("wallet-key-text"),
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        SheetButtonRow {
+                            OutlinedButton(onClick = { PhraseClipboard.copyKey(context, shown) }) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                CopyLabel(PhraseClipboard.holdsKey(copiedLabel, copiedHash, shown))
+                            }
+                            OutlinedButton(onClick = hide) {
+                                Icon(Icons.Filled.VisibilityOff, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(stringResource(R.string.wallet_hide))
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            KEY_COPY_NOTE,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -2122,5 +2348,16 @@ private fun PhraseWord(
         )
         Spacer(Modifier.width(PHRASE_NUMBER_GAP))
         Text(word, style = wordStyle)
+    }
+}
+
+/** A payment link's Send page (#317) while the wallet reads its account and networks. */
+@Composable
+private fun LinkSendLoading(onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    FullScreenScaffold(title = stringResource(R.string.send_title), onDismiss = onBack) {
+        Box(Modifier.fillMaxSize().testTag("send-link-loading"), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
     }
 }

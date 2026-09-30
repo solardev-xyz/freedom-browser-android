@@ -10,6 +10,8 @@
     <string name="send_title">Send</string>
     <string name="send_fee_detail_eip1559">Gas limit %1$s · up to %2$s per gas, tip %3$s</string>
     <string name="send_fee_detail_legacy">Gas limit %1$s · %2$s per gas</string>
+    <!-- %1$s: the gas detail above; %2$s: the most the L1 data fee can be, e.g. 0.0000004 ETH (an OP Stack rollup such as Base). -->
+    <string name="send_fee_detail_l1">%1$s · plus up to %2$s to post it to L1</string>
     <string name="send_fee_footnote_eip1559">The “up to” leaves room for unused gas and for the base fee to rise; what isn\'t used stays in the account. The tip is paid on the gas used, less only if the base fee rises into that room.</string>
     <string name="send_fee_footnote_legacy">The “up to” leaves room for unused gas, which stays in the account; the gas used is paid at the price above in full.</string>
     <string name="send_fee_footnote_high">This network fee is unusually high per gas; check it before you confirm. %1$s</string>
@@ -61,6 +63,8 @@
         <item quantity="one">Enter a positive amount with at most %1$s decimal</item>
         <item quantity="other">Enter a positive amount with at most %1$s decimals</item>
     </plurals>
+    <!-- %1$s: what the user typed, e.g. 1,234; %2$s: it with a decimal point (1.234); %3$s: without the comma (1234). -->
+    <string name="send_amount_ambiguous">%1$s could be %2$s or %3$s: write it with a point, or without the comma</string>
     <string name="send_all_note">All of it, less the network fee: the review shows the exact amount</string>
     <!-- %1$s: the balance, fixed format; %2$s: the token's symbol. -->
     <string name="send_balance_note">Balance %1$s %2$s</string>
@@ -332,4 +336,24 @@
     <string name="send_swarm_manifest_allowed">Allowed by the app\'s permission manifest: %1$s</string>
     <string name="send_connected_to_swarm">Connected to Swarm</string>
     <string name="send_ask_each_time">Ask each time</string>
+
+    <!-- Payment links (EIP-681 ethereum: links, #317): a page's link or the address bar opening Send. -->
+    <string name="send_link_private">Payment links open in the wallet, which private tabs don’t use. Open this link in a normal tab to pay it.</string>
+    <string name="send_link_no_wallet">This is a payment link. To pay it, set up a wallet first in Settings → Wallet.</string>
+    <!-- %1$s: why, a sentence (e.g. “This payment request has no valid address in it.”). -->
+    <string name="send_link_refused">Can’t open this payment link. %1$s</string>
+    <string name="send_link_token_no_network">This token payment request doesn’t say which network the token is on.</string>
+    <!-- %1$s: a network's name, e.g. Base. -->
+    <string name="send_link_chain_unsupported_named">It asks for a payment on %1$s, and Send pays on Ethereum and Gnosis Chain only.</string>
+    <!-- %1$s: a chain ID, as the link wrote it. -->
+    <string name="send_link_chain_unsupported">It asks for a payment on the network with chain ID %1$s, and Send pays on Ethereum and Gnosis Chain only.</string>
+    <!-- %1$s: a token contract address; %2$s: a network's name. -->
+    <string name="send_link_token_unknown">It asks for the token %1$s on %2$s, which isn’t one Send knows.</string>
+    <string name="send_link_tab_left">The address you entered led to a payment link, but you’d left that tab by then, so Send didn’t open. Enter the address in that tab again to pay it.</string>
+    <string name="send_link_paused">Payment links on this page are paused, since you turned down one of its wallet requests. Reload the page or open another to use them again.</string>
+    <!-- %1$s: the site whose link it was. -->
+    <string name="send_link_filled_from_site">Filled in from a payment link on %1$s. Check every field before you review.</string>
+    <string name="send_link_filled">Filled in from a payment link. Check every field before you review.</string>
+    <string name="send_link_chain_assumed">The link doesn’t name a network, so Ethereum is filled in. Pick another asset if the payment is meant for another network.</string>
+    <string name="send_link_chain_from_token">The link doesn’t name a network. %1$s is filled in: it’s the only network Send knows this token on. Check the payment is meant for it.</string>
 </resources>
