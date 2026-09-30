@@ -13,6 +13,7 @@ import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -68,5 +69,14 @@ class FundNodeReviewTest {
         // Only the deposit changed (the node set up its chequebook meanwhile).
         val noDeposit = plan(dep = BigInteger.ZERO)
         assertNotEquals(fundNodeSummary(noDeposit, days), fundReviewRows(q, noDeposit, days)?.summary)
+    }
+
+    @Test
+    fun `a plan the quote wasn't built from describes nothing`() {
+        val q = quoteFor(plan())
+        assertNull(fundReviewRows(q, plan(perChunk = amount.add(BigInteger.ONE)), days))
+        assertNull(fundReviewRows(q, plan(n = otherNode), days))
+        assertNull(fundReviewRows(q, plan(), days + 1))
+        assertNull(fundReviewRows(q, SwarmFunder.Plan(node, 17, amount, ByteArray(32) { 8 }, deposit, sqrt), days))
     }
 }

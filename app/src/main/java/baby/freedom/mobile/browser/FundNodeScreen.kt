@@ -88,11 +88,29 @@ internal fun fundNodeSummary(plan: SwarmFunder.Plan, days: Long): String =
         "(at least ${formatBzz(plan.minBzz)}), buys the stamp for ${formatBzz(plan.stampCostPlur)}, and sends the node " +
         "${formatXdai(plan.xdaiForNode)} and the xBZZ the stamp doesn't use."
 
-/** What the fund-node review shows beside the quote's own rows. */
+/** What the fund-node review shows beside the quote's own rows: [fundNodeSummary] and the node paid. */
 internal data class FundReviewRows(val summary: String, val node: String)
 
-internal fun fundReviewRows(quote: SendQuote, plan: SwarmFunder.Plan, days: Long): FundReviewRows? =
-    FundReviewRows(fundNodeSummary(plan, days), plan.node)
+/**
+ * The review's summary and Node row for [quote], from the [plan] and [days]
+ * it was built from — or null when [quote] doesn't carry exactly that plan's
+ * value, call data and label, so a plan priced again during the review (or
+ * a node that restarted as another identity) can never describe the
+ * transaction being signed (#242, audit #229).
+ */
+internal fun fundReviewRows(quote: SendQuote, plan: SwarmFunder.Plan, days: Long): FundReviewRows? {
+    val request = quote.request
+    val data = plan.calldata()
+    val matches = request.to.equals(SwarmFunder.ADDRESS, ignoreCase = true) &&
+        quote.tx.to.equals(SwarmFunder.ADDRESS, ignoreCase = true) &&
+        request.amount == plan.value && quote.tx.value == plan.value &&
+        request.dapp?.data?.contentEquals(data) == true && quote.tx.data.contentEquals(data) &&
+        request.dapp.swarm == SwarmFundLabel(plan.node, plan.batchId, plan.depth, days)
+    return if (matches) FundReviewRows(fundNodeSummary(plan, days), plan.node) else null
+}
+
+/** An open review: the [quote] and the [plan] and [days] it was built from, kept together (#242). */
+private class FundReviewing(val plan: SwarmFunder.Plan, val days: Long, val quote: SendQuote)
 
 /**
  * Whether a Gnosis Chain read with [trust] may be acted on where a wrong
@@ -155,7 +173,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
     var depth by rememberSaveable { mutableIntStateOf(STAMP_DEPTHS.first()) }
     var days by rememberSaveable { mutableLongStateOf(STAMP_BUY_DAYS.first()) }
     var refresh by remember { mutableIntStateOf(0) }
-    var quote by remember { mutableStateOf<SendQuote?>(null) }
+    var reviewing by remember { mutableStateOf<FundReviewing?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -207,16 +225,19 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
 
     fun review(p: SwarmFunder.Plan) {
         val from = payer ?: return
+        // The duration as tapped: the review describes the quote built now, whatever the page does meanwhile.
+        val d = days
         busy = true
         error = null
         scope.launch {
             try {
-                quote = sender.prepare(
+                val q = sender.prepare(
                     SendRequest(
                         chain, TokenRegistry.native(chain), from, SwarmFunder.ADDRESS, p.value,
-                        DappCall(null, p.calldata(), null, swarm = SwarmFundLabel(p.node, p.batchId, p.depth, days)),
+                        DappCall(null, p.calldata(), null, swarm = SwarmFundLabel(p.node, p.batchId, p.depth, d)),
                     ),
                 )
+                reviewing = FundReviewing(p, d, q)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -228,8 +249,8 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
     }
 
     val back: () -> Unit = {
-        if (quote != null) {
-            quote = null
+        if (reviewing != null) {
+            reviewing = null
             notice = null
         } else {
             onDismiss()
@@ -243,7 +264,9 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
             modifier = Modifier.fillMaxSize(),
         ) {
             val status = sendStatus?.takeIf { it.quote.request.dapp?.swarm != null }
-            val q = quote
+            val r = reviewing
+            // From the plan the quote was built from, never the one priced live (#242).
+            val rows = r?.let { fundReviewRows(it.quote, it.plan, it.days) }
             item("intro") {
                 SectionCard(title = "One transaction") {
                     MutedText(
@@ -275,24 +298,32 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                         },
                     )
                 }
-                q != null && plan != null -> item("review") {
-                    val rows = fundReviewRows(q, plan, days)!!
+                r != null && rows != null -> item("review") {
+                    val q = r.quote
+                    // The node the review pays is no longer the one running, or funding it is blocked now.
+                    val changed = blocked ?: if (node?.equals(rows.node, ignoreCase = true) != true) {
+                        "The node is no longer running as the account this review pays. Cancel and review again."
+                    } else {
+                        null
+                    }
                     FundReview(
                         quote = q,
                         summary = rows.summary,
                         node = rows.node,
                         busy = busy,
                         notice = notice,
-                        error = error,
+                        error = error ?: changed,
+                        confirmable = changed == null,
                         onCancel = {
-                            quote = null
+                            reviewing = null
                             notice = null
                             error = null
                         },
                         onConfirm = {
+                            if (changed != null) return@FundReview
                             if (sender.isStale(q)) {
                                 // Price the pool and the fee again: both can have moved.
-                                quote = null
+                                reviewing = null
                                 refresh++
                                 notice = "The quote was over a minute old, so it's been priced again. Check it and review again."
                                 return@FundReview
@@ -303,13 +334,13 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                                     if (!q.request.from.isLedger && !vault.unlockedNow()) vault.unlock(auth)
                                     when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from) { !sender.isStale(q) })) {
                                         WalletSender.Submit.STARTED -> {
-                                            quote = null
+                                            reviewing = null
                                             notice = null
                                         }
                                         WalletSender.Submit.BUSY -> error = "Another send is still going out, or may have. " +
                                             "Settle it (or stop tracking it) on the wallet's Send page first."
                                         WalletSender.Submit.STALE -> {
-                                            quote = null
+                                            reviewing = null
                                             refresh++
                                             notice = "The quote was over a minute old, so it's been priced again. Check it and review again."
                                         }
@@ -419,6 +450,7 @@ private fun FundReview(
     busy: Boolean,
     notice: String?,
     error: String?,
+    confirmable: Boolean,
     onCancel: () -> Unit,
     onConfirm: () -> Unit,
 ) {
@@ -451,7 +483,7 @@ private fun FundReview(
         ObscuredTapNotice(tap)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             OutlinedButton(onClick = onCancel, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Cancel") }
-            Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy, modifier = Modifier.weight(1f).protectedPress(tap)) {
+            Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy && confirmable, modifier = Modifier.weight(1f).protectedPress(tap)) {
                 if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Confirm and send")
             }
         }
