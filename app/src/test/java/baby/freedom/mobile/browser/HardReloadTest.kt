@@ -14,7 +14,82 @@ class HardReloadTest {
 
     private class Settings(var mode: Int = WebSettings.LOAD_DEFAULT) {
         val writes = mutableListOf<Int>()
-        val bypass = CacheBypass(readCacheMode = { mode }, writeCacheMode = { mode = it; writes += it })
+
+        /** The UI thread's queue behind the callbacks delivered so far. */
+        val posted = ArrayDeque<Runnable>()
+        val bypass = CacheBypass(
+            readCacheMode = { mode },
+            writeCacheMode = { mode = it; writes += it },
+            post = { posted.addLast(it) },
+        )
+
+        fun runPosted() {
+            while (posted.isNotEmpty()) posted.removeFirst().run()
+        }
+    }
+
+    private companion object {
+        const val PAGE = "http://host/page#sec"
+    }
+
+    @Test
+    fun `a fragment navigation of the page on screen stays in its document`() {
+        // loadUrl of these would only scroll (R3-F1): the Hard reload reloads.
+        assertTrue(CacheBypass.staysInDocument("http://host/page#sec", "http://host/page#sec"))
+        assertTrue(CacheBypass.staysInDocument("http://host/page", "http://host/page#sec"))
+        assertTrue(CacheBypass.staysInDocument("http://host/page#a", "http://host/page#b"))
+        assertTrue(CacheBypass.staysInDocument("http://host/page?q=1", "http://host/page?q=1#"))
+        // These load a document.
+        assertFalse(CacheBypass.staysInDocument("http://host/page", "http://host/page"))
+        assertFalse(CacheBypass.staysInDocument("http://host/page#sec", "http://host/page"))
+        assertFalse(CacheBypass.staysInDocument("http://host/page#sec", "http://host/other#sec"))
+        assertFalse(CacheBypass.staysInDocument("http://host/page?q=1", "http://host/page?q=2#x"))
+        assertFalse(CacheBypass.staysInDocument(null, "http://host/page#sec"))
+    }
+
+    @Test
+    fun `a fragment navigation while the page loads doesn't end the bypass`() {
+        // R3-M1: the page sets location.hash before its load event.
+        val s = Settings()
+        s.bypass.loadStarting(bypass = true)
+        s.bypass.pageStarted()
+        s.bypass.historyUpdated("http://host/page") // the commit's own
+        s.runPosted()
+        // The fragment navigation: its history update, and its finish
+        // posted right behind it.
+        s.bypass.historyUpdated(PAGE)
+        s.bypass.pageFinished(PAGE)
+        s.runPosted()
+        assertEquals(WebSettings.LOAD_NO_CACHE, s.mode)
+        // The document's own finish, at the new address.
+        s.bypass.pageFinished(PAGE)
+        assertEquals(WebSettings.LOAD_DEFAULT, s.mode)
+    }
+
+    @Test
+    fun `a pushState while the page loads doesn't swallow its finish`() {
+        // No finish follows a pushState: the window closes behind it.
+        val s = Settings()
+        s.bypass.loadStarting(bypass = true)
+        s.bypass.pageStarted()
+        s.bypass.historyUpdated("http://host/page")
+        s.runPosted()
+        s.bypass.historyUpdated("http://host/route")
+        s.runPosted()
+        s.bypass.pageFinished("http://host/route")
+        assertEquals(WebSettings.LOAD_DEFAULT, s.mode)
+    }
+
+    @Test
+    fun `the reload of a fragment URL ends its bypass at its own finish`() {
+        // R3-F1's path: a reload commits (onPageStarted, then its history
+        // update with no fragment navigation), and finishes.
+        val s = Settings()
+        s.bypass.loadStarting(bypass = true)
+        s.bypass.pageStarted()
+        s.bypass.historyUpdated(PAGE)
+        s.bypass.pageFinished(PAGE)
+        assertEquals(WebSettings.LOAD_DEFAULT, s.mode)
     }
 
     @Test
@@ -26,7 +101,7 @@ class HardReloadTest {
         s.bypass.pageStarted()
         // Its subresources load before the finish: still bypassing.
         assertEquals(WebSettings.LOAD_NO_CACHE, s.mode)
-        s.bypass.pageFinished()
+        s.bypass.pageFinished(PAGE)
         assertEquals(WebSettings.LOAD_DEFAULT, s.mode)
         assertFalse(s.bypass.active)
     }
@@ -36,10 +111,10 @@ class HardReloadTest {
         val s = Settings()
         s.bypass.loadStarting(bypass = true)
         // The page on screen was still loading: its stop finishes late.
-        s.bypass.pageFinished()
+        s.bypass.pageFinished(PAGE)
         assertEquals(WebSettings.LOAD_NO_CACHE, s.mode)
         s.bypass.pageStarted()
-        s.bypass.pageFinished()
+        s.bypass.pageFinished(PAGE)
         assertEquals(WebSettings.LOAD_DEFAULT, s.mode)
     }
 
@@ -60,7 +135,7 @@ class HardReloadTest {
         val s = Settings()
         s.bypass.loadStarting(bypass = false)
         s.bypass.pageStarted()
-        s.bypass.pageFinished()
+        s.bypass.pageFinished(PAGE)
         s.bypass.stopped()
         assertTrue(s.writes.isEmpty())
     }
@@ -72,7 +147,7 @@ class HardReloadTest {
         // A second Hard reload before the first finished keeps the original.
         s.bypass.loadStarting(bypass = true)
         s.bypass.pageStarted()
-        s.bypass.pageFinished()
+        s.bypass.pageFinished(PAGE)
         assertEquals(WebSettings.LOAD_CACHE_ELSE_NETWORK, s.mode)
     }
 
@@ -84,13 +159,13 @@ class HardReloadTest {
         // The first hop answers with a redirect to the other user agent's
         // site: it is cancelled (a finish before any commit) ...
         val carried = s.bypass.active
-        s.bypass.pageFinished()
+        s.bypass.pageFinished(PAGE)
         // ... and the corrected load goes out, still past the cache.
         s.bypass.loadStarting(bypass = carried && s.bypass.active)
         assertEquals(WebSettings.LOAD_NO_CACHE, s.mode)
         s.bypass.pageStarted()
         assertEquals(WebSettings.LOAD_NO_CACHE, s.mode)
-        s.bypass.pageFinished()
+        s.bypass.pageFinished(PAGE)
         assertEquals(WebSettings.LOAD_CACHE_ELSE_NETWORK, s.mode)
 
         // Stop between the redirect and the corrected load ends it for good.

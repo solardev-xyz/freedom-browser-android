@@ -56,6 +56,22 @@ class HardReloadDeviceTest {
                             .setHeader("Content-Type", "text/javascript")
                             .setHeader("Cache-Control", "max-age=3600")
                             .setBody("document.title = 'v$version';")
+                        // Moves to a fragment while loading (R3-M1), then
+                        // asks for a script before its `load` event, which
+                        // a slow image holds back.
+                        "/hashing" -> MockResponse()
+                            .setHeader("Content-Type", "text/html")
+                            .setHeader("Cache-Control", "max-age=3600")
+                            .setBody(
+                                "<!doctype html><title>page</title><script>location.hash = 'moved';" +
+                                    "setTimeout(function () { var s = document.createElement('script');" +
+                                    "s.src = '/app.js'; document.head.appendChild(s); }, 500);</script>" +
+                                    "<img src=\"/slow.png\">",
+                            )
+                        "/slow.png" -> MockResponse()
+                            .setHeadersDelay(2, TimeUnit.SECONDS)
+                            .setHeader("Content-Type", "image/png")
+                            .setHeader("Cache-Control", "no-store")
                         else -> MockResponse().setResponseCode(404)
                     }
                 }
@@ -82,8 +98,12 @@ class HardReloadDeviceTest {
                 }
 
                 override fun onPageFinished(v: WebView?, url: String?) {
-                    view.cacheBypass.pageFinished()
+                    view.cacheBypass.pageFinished(url)
                     finished.countDown()
+                }
+
+                override fun doUpdateVisitedHistory(v: WebView?, url: String?, isReload: Boolean) {
+                    view.cacheBypass.historyUpdated(url)
                 }
             }
         }
@@ -121,6 +141,108 @@ class HardReloadDeviceTest {
             site.version = 3
             assertEquals("v2", load(bypass = false))
             assertEquals(2, site.hitsOf("/app.js"))
+        } finally {
+            instrumentation.runOnMainSync {
+                view.stopLoading()
+                view.destroy()
+            }
+            site.server.shutdown()
+        }
+    }
+
+    /** A PageWebView with what the tab's client reports to its bypass; `finishes` counts its finishes. */
+    private fun bypassingView(finishes: java.util.concurrent.LinkedBlockingQueue<String>): PageWebView {
+        lateinit var view: PageWebView
+        instrumentation.runOnMainSync {
+            view = PageWebView(instrumentation.targetContext)
+            view.settings.javaScriptEnabled = true
+            view.webViewClient = object : WebViewClient() {
+                override fun onPageStarted(v: WebView?, url: String?, favicon: Bitmap?) {
+                    view.cacheBypass.pageStarted()
+                }
+
+                override fun onPageFinished(v: WebView?, url: String?) {
+                    view.cacheBypass.pageFinished(url)
+                    finishes.add(url.orEmpty())
+                }
+
+                override fun doUpdateVisitedHistory(v: WebView?, url: String?, isReload: Boolean) {
+                    view.cacheBypass.historyUpdated(url)
+                }
+            }
+        }
+        return view
+    }
+
+    private fun titleOf(view: PageWebView): String {
+        var title = ""
+        instrumentation.runOnMainSync { title = view.title.orEmpty() }
+        return title
+    }
+
+    private fun cacheModeOf(view: PageWebView): Int {
+        var mode = -1
+        instrumentation.runOnMainSync { mode = view.settings.cacheMode }
+        return mode
+    }
+
+    @Test
+    fun a_hard_reload_of_an_address_with_a_fragment_loads_the_page_again() {
+        // R3-F1: loadUrl of the page's own address with a #fragment only
+        // scrolls; the Hard reload reloads it past the cache instead.
+        val site = Site()
+        val page = "http://127.0.0.1:${site.server.port}/page#sec"
+        val finishes = java.util.concurrent.LinkedBlockingQueue<String>()
+        val view = bypassingView(finishes)
+        try {
+            instrumentation.runOnMainSync { view.loadUrl(page) }
+            assertEquals(page, finishes.poll(20, TimeUnit.SECONDS))
+            assertEquals("v1", titleOf(view))
+            site.version = 2
+            val pageHits = site.hitsOf("/page")
+            finishes.clear()
+            instrumentation.runOnMainSync { view.hardReload(page, namedByUser = true) }
+            assertEquals(page, finishes.poll(20, TimeUnit.SECONDS))
+            assertEquals("v2", titleOf(view))
+            assertEquals(pageHits + 1, site.hitsOf("/page"))
+            assertEquals(2, site.hitsOf("/app.js"))
+            assertEquals("the bypass ends at the reload's finish", WebSettings.LOAD_DEFAULT, cacheModeOf(view))
+        } finally {
+            instrumentation.runOnMainSync {
+                view.stopLoading()
+                view.destroy()
+            }
+            site.server.shutdown()
+        }
+    }
+
+    @Test
+    fun a_fragment_navigation_while_the_page_loads_keeps_the_bypass_until_its_load() {
+        // R3-M1: the page sets location.hash before its load event; the
+        // fragment navigation's own finish doesn't restore the cache mode,
+        // so the script it asks for afterwards still goes past the cache.
+        val site = Site()
+        val page = "http://127.0.0.1:${site.server.port}/hashing"
+        val finishes = java.util.concurrent.LinkedBlockingQueue<String>()
+        val view = bypassingView(finishes)
+        fun loadAndSettle(hard: Boolean) {
+            finishes.clear()
+            instrumentation.runOnMainSync {
+                if (hard) view.hardReload(page, namedByUser = false) else view.loadUrl(page)
+            }
+            // The fragment navigation's finish, then the document's.
+            assertEquals("$page#moved", finishes.poll(20, TimeUnit.SECONDS))
+            assertEquals("$page#moved", finishes.poll(20, TimeUnit.SECONDS))
+        }
+        try {
+            loadAndSettle(hard = false)
+            assertEquals("v1", titleOf(view))
+            assertEquals(1, site.hitsOf("/app.js"))
+            site.version = 2
+            loadAndSettle(hard = true)
+            assertEquals(2, site.hitsOf("/app.js"))
+            assertEquals("v2", titleOf(view))
+            assertEquals(WebSettings.LOAD_DEFAULT, cacheModeOf(view))
         } finally {
             instrumentation.runOnMainSync {
                 view.stopLoading()

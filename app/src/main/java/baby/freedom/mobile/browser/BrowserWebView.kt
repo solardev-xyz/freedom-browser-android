@@ -1206,18 +1206,13 @@ fun BrowserWebViewHost(
                                 // From here the WebView is on this load, not
                                 // the one it was showing (#94).
                                 tab.handLoadToWebView()
-                                val start = {
-                                    if (namedByUser) {
-                                        (wv as PageWebView).loadUrlNamedByUser(pending)
-                                    } else {
-                                        wv.loadUrl(pending)
-                                    }
-                                }
                                 if (bypassCache) {
                                     tab.bypassCacheForHandedLoad()
-                                    (wv as PageWebView).loadBypassingCache(start)
+                                    (wv as PageWebView).hardReload(pending, namedByUser)
+                                } else if (namedByUser) {
+                                    (wv as PageWebView).loadUrlNamedByUser(pending)
                                 } else {
-                                    start()
+                                    wv.loadUrl(pending)
                                 }
                             }
                             // One that needs the other user agent (#180)
@@ -3052,7 +3047,7 @@ private fun buildRefreshableWebView(
             override fun onPageFinished(view: WebView?, url: String?) {
                 // A Hard reload's page has loaded: the cache is used
                 // again from here (#262, [CacheBypass]).
-                (view as? PageWebView)?.cacheBypass?.pageFinished()
+                (view as? PageWebView)?.cacheBypass?.pageFinished(url)
                 showFailedLoadPage(view, url)
                 // A certificate error's cancelled navigation ends here,
                 // committing nothing: without a page of our own the
@@ -3283,6 +3278,9 @@ private fun buildRefreshableWebView(
             // and this doesn't install it (see [requestBottomUiProbe]).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 committedPageUrl = url
+                // A fragment navigation's finish, right behind this, isn't a
+                // Hard-reloaded document's end (#262 R3-M1).
+                (view as? PageWebView)?.cacheBypass?.historyUpdated(url)
                 // Posted after `onPageStarted` for a new document, alone
                 // for a same-document step: either way the user's
                 // navigation is over, and a same-document one (the
@@ -4585,10 +4583,32 @@ internal class PageWebView(context: Context) : WebView(context) {
     val cacheBypass = CacheBypass(
         readCacheMode = { settings.cacheMode },
         writeCacheMode = { settings.cacheMode = it },
+        // Not `View.post`: a background tab's WebView may be detached,
+        // and that would hold the task until it's attached again.
+        post = { mainHandler.post(it) },
     )
 
     /**
-     * Runs [load] — the app's `loadUrl` of a Hard reload's URL — with the
+     * The Hard reload of [url] (#262), past the caches
+     * ([loadBypassingCache]): its `loadUrl`, as the address the user named
+     * if [namedByUser] — or, where that would only move to a `#fragment`
+     * of the page on screen, a reload of that page.
+     */
+    fun hardReload(url: String, namedByUser: Boolean) = loadBypassingCache {
+        when {
+            // The address on screen with a `#fragment`: `loadUrl` would
+            // only scroll to it, fetching and committing nothing — the
+            // page stale and the bypass left on with no finish to end it
+            // (R3-F1). A reload loads the document again, fragment and
+            // all, as the user's own when they named it.
+            CacheBypass.staysInDocument(this.url, url) -> if (namedByUser) reloadByUser() else reload()
+            namedByUser -> loadUrlNamedByUser(url)
+            else -> loadUrl(url)
+        }
+    }
+
+    /**
+     * Runs [load] — the app's load of a Hard reload's URL ([hardReload]) — with the
      * HTTP cache bypassed for it and its document's subresources
      * ([cacheBypass]).
      *
@@ -4635,7 +4655,9 @@ internal class PageWebView(context: Context) : WebView(context) {
             url != HISTORY_BACK_JS && url != HISTORY_FORWARD_JS
         @Suppress("SENSELESS_COMPARISON")
         if (cacheBypass != null && !loadsNothing) {
-            cacheBypass.loadStarting(bypass = url != null && loadingBypassingCache)
+            // Its reload too, where the address is the page's own with a
+            // `#fragment` ([hardReload]).
+            cacheBypass.loadStarting(bypass = loadingBypassingCache)
         }
         val usersStep = if (url == null) reloadingByUser else url == HISTORY_BACK_JS || url == HISTORY_FORWARD_JS
         onBrowserInitiatedLoad(url, url != null && loadingNamedByUser, usersStep, url != null && loadingRedirectCorrection)
