@@ -43,6 +43,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.SoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -50,6 +51,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.UrlSuggestion
 
@@ -170,7 +172,7 @@ internal fun SuggestionsList(
     ) {
         if (actions.isEmpty() && suggestions.isEmpty()) {
             Text(
-                text = "No matches for \"$query\"",
+                text = stringResource(R.string.browser_suggestions_no_matches_for, query),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier
@@ -220,15 +222,15 @@ private fun ActionRow(action: AddressAction, onClick: () -> Unit) {
     when (action) {
         is AddressAction.Search -> RowLayout(
             icon = Icons.Filled.Search,
-            iconDescription = "Search",
+            iconDescription = stringResource(R.string.browser_suggestions_search),
             iconTint = MaterialTheme.colorScheme.primary,
             title = AnnotatedString(action.query),
-            subtitle = AnnotatedString("Search with ${action.engine}"),
+            subtitle = AnnotatedString(stringResource(R.string.browser_suggestions_search_with, action.engine)),
             onClick = onClick,
         )
         is AddressAction.Go -> RowLayout(
             icon = Icons.Filled.Public,
-            iconDescription = "Address",
+            iconDescription = stringResource(R.string.browser_suggestions_address),
             iconTint = MaterialTheme.colorScheme.primary,
             title = AnnotatedString(action.input),
             subtitle = AnnotatedString(action.subtitle),
@@ -250,8 +252,8 @@ private fun SuggestionRow(
             UrlSuggestion.Source.HISTORY -> Icons.Filled.History
         },
         iconDescription = when (suggestion.source) {
-            UrlSuggestion.Source.BOOKMARK -> "Bookmark"
-            UrlSuggestion.Source.HISTORY -> "History"
+            UrlSuggestion.Source.BOOKMARK -> stringResource(R.string.browser_suggestions_bookmark)
+            UrlSuggestion.Source.HISTORY -> stringResource(R.string.browser_suggestions_history)
         },
         iconTint = when (suggestion.source) {
             UrlSuggestion.Source.BOOKMARK -> MaterialTheme.colorScheme.primary

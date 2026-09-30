@@ -14,6 +14,8 @@ import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.widget.EditText
 import android.widget.FrameLayout
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import java.net.URI
 
 /** The JavaScript dialogs a page can open: `alert`, `confirm`, `prompt`, `beforeunload`. */
@@ -25,7 +27,7 @@ internal enum class JsDialogKind { ALERT, CONFIRM, PROMPT, BEFORE_UNLOAD }
  * neutral title for one without (`data:`, `about:blank`, a malformed URL).
  */
 internal fun jsDialogTitle(kind: JsDialogKind, url: String?): String {
-    if (kind == JsDialogKind.BEFORE_UNLOAD) return "Leave this page?"
+    if (kind == JsDialogKind.BEFORE_UNLOAD) return Strings.get(R.string.browser_js_leave_page_title)
     val origin = runCatching { URI(url.orEmpty()) }.getOrNull()?.let { uri ->
         val scheme = uri.scheme?.lowercase()
         val host = uri.host
@@ -34,7 +36,7 @@ internal fun jsDialogTitle(kind: JsDialogKind, url: String?): String {
             "$scheme://$host$port"
         } else null
     }
-    return if (origin != null) "The page at \"$origin\" says:" else "This page says:"
+    return if (origin != null) Strings.get(R.string.browser_js_page_at_says, origin) else Strings.get(R.string.browser_js_page_says)
 }
 
 /**
@@ -167,7 +169,7 @@ internal fun showJsDialog(context: Context, request: JsDialogRequest): AlertDial
         // the dialog loses its turn doesn't answer the page.
         .setOnCancelListener { request.cancel() }
     if (kind == JsDialogKind.BEFORE_UNLOAD) {
-        builder.setMessage("Changes you made may not be saved.")
+        builder.setMessage(activity.getString(R.string.browser_js_leave_page_message))
     } else if (!request.message.isNullOrEmpty()) {
         builder.setMessage(request.message)
     }
@@ -179,9 +181,9 @@ internal fun showJsDialog(context: Context, request: JsDialogRequest): AlertDial
         })
     }
     val guard = PromptTapGuard(SystemClock::uptimeMillis)
-    builder.setPositiveButton(if (kind == JsDialogKind.BEFORE_UNLOAD) "Leave" else "OK", null)
+    builder.setPositiveButton(if (kind == JsDialogKind.BEFORE_UNLOAD) R.string.browser_js_leave else R.string.common_ok, null)
     if (kind != JsDialogKind.ALERT) {
-        builder.setNegativeButton(if (kind == JsDialogKind.BEFORE_UNLOAD) "Stay" else "Cancel", null)
+        builder.setNegativeButton(if (kind == JsDialogKind.BEFORE_UNLOAD) R.string.browser_js_stay else R.string.common_cancel, null)
     }
     val dialog = builder.create()
     dialog.window?.apply {

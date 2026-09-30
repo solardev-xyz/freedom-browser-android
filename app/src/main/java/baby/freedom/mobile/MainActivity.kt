@@ -1020,7 +1020,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
             runCatching { unbindService(myotisConnection) }
             myotisInfoFlow.value = MyotisInfo(
                 status = MyotisStatus.Error,
-                errorMessage = "Couldn't start the light client service",
+                errorMessage = getString(R.string.browser_light_client_start_failed),
             )
         }
     }
@@ -1151,7 +1151,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                                     TorInfo(
                                         status = TorStatus.Starting,
                                         socksPort = proxy.port,
-                                        summary = "Reaching a .onion site through $proxy…",
+                                        summary = getString(R.string.browser_tor_reaching_onion, proxy.toString()),
                                     ),
                                     confirmed = false,
                                     unreached = watch.unreached,
@@ -1175,7 +1175,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                                     status = TorStatus.Running,
                                     progress = 100,
                                     socksPort = proxy.port,
-                                    summary = "Didn't reach a .onion site just now; checking again…",
+                                    summary = getString(R.string.browser_tor_onion_unreached_checking),
                                 )
                                 else -> externalTorError(proxy, result, watch.unreached)
                             },
@@ -1237,14 +1237,15 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     }
 
     private fun externalTorChecking(proxy: SocksEndpoint) =
-        TorInfo(status = TorStatus.Starting, socksPort = proxy.port, summary = "Checking $proxy…")
+        TorInfo(status = TorStatus.Starting, socksPort = proxy.port, summary = getString(R.string.browser_tor_checking_proxy, proxy.toString()))
 
     private fun externalTorError(proxy: SocksEndpoint, result: TorProxy.Probe, unreached: Boolean = false) =
         TorInfo(
             status = TorStatus.Error,
             socksPort = proxy.port,
-            errorMessage = TorProxy.describe(result, proxy) +
-                if (unreached) " Checking again shortly." else "",
+            errorMessage = TorProxy.describe(result, proxy).let { described ->
+                if (unreached) getString(R.string.browser_tor_error_checking_again, described) else described
+            },
         )
 
     /** Main thread; a state for a proxy no longer in use, or after Tor stopped, is dropped. */
@@ -1307,7 +1308,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
             publishTor(TorInfo(status = TorStatus.Starting))
         } else {
             runCatching { applicationContext.unbindService(torConnection) }
-            publishTor(TorInfo(status = TorStatus.Error, errorMessage = "Couldn't start the Tor service"))
+            publishTor(TorInfo(status = TorStatus.Error, errorMessage = getString(R.string.browser_tor_start_failed)))
         }
     }
 

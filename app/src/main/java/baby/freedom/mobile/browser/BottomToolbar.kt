@@ -117,6 +117,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -148,6 +150,8 @@ import androidx.compose.ui.util.lerp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.NodeInfo
 import kotlin.math.ceil
@@ -1989,7 +1993,7 @@ private fun NavPillButton(
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back",
+                    contentDescription = stringResource(R.string.common_back),
                     tint = navGlyphTint(contentColor, backEnabled),
                 )
             }
@@ -2006,7 +2010,7 @@ private fun NavPillButton(
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                            contentDescription = "Forward",
+                            contentDescription = stringResource(R.string.browser_forward),
                             tint = navGlyphTint(contentColor, forwardEnabled),
                         )
                     }
@@ -2764,10 +2768,10 @@ private fun AddressField(
                         // square corner in the whole capsule.
                         indication = null,
                         onClickLabel = when (capsuleTapAction(collapse, addressFocused)) {
-                            CapsuleTapAction.Expand -> "Expand address bar"
-                            CapsuleTapAction.Edit -> "Edit address"
+                            CapsuleTapAction.Expand -> stringResource(R.string.browser_capsule_expand)
+                            CapsuleTapAction.Edit -> stringResource(R.string.browser_capsule_edit_address)
                         },
-                        onLongClickLabel = "URL actions",
+                        onLongClickLabel = stringResource(R.string.browser_capsule_url_actions),
                         onLongClick = {
                             urlActionsCanPaste = context.clipboardHasText()
                             // Nothing to copy and nothing to paste is an
@@ -2871,7 +2875,7 @@ private fun AddressField(
                     CapsuleTrailingControl.None -> Unit
                     CapsuleTrailingControl.Clear -> CapsuleTrailingButton(
                         icon = Icons.Filled.Clear,
-                        contentDescription = "Clear",
+                        contentDescription = stringResource(R.string.browser_clear),
                         onClick = {
                             fieldValue = TextFieldValue("")
                             onAddressQueryChanged("")
@@ -2883,13 +2887,13 @@ private fun AddressField(
                     )
                     CapsuleTrailingControl.Stop -> CapsuleTrailingButton(
                         icon = Icons.Filled.Close,
-                        contentDescription = "Stop loading",
+                        contentDescription = stringResource(R.string.browser_stop_loading),
                         tint = colors.primary,
                         onClick = onStop,
                     )
                     CapsuleTrailingControl.Reload -> CapsuleTrailingButton(
                         icon = Icons.Filled.Refresh,
-                        contentDescription = "Reload",
+                        contentDescription = stringResource(R.string.browser_reload),
                         onClick = onReload,
                     )
                 }
@@ -3032,7 +3036,7 @@ private fun OverflowMenuButton(
             // domain read as a pair.
             Icon(
                 imageVector = Icons.Filled.Menu,
-                contentDescription = "Menu",
+                contentDescription = stringResource(R.string.browser_menu),
                 tint = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.size(CapsuleFieldIconSize),
             )
@@ -3095,7 +3099,7 @@ private fun OverflowMenuButton(
                         DropdownMenuItem(
                             text = {
                                 MenuItemLabel(
-                                    if (isBookmarked) "Remove bookmark" else "Add bookmark",
+                                    if (isBookmarked) stringResource(R.string.browser_menu_remove_bookmark) else stringResource(R.string.browser_menu_add_bookmark),
                                 )
                             },
                             leadingIcon = {
@@ -3116,7 +3120,7 @@ private fun OverflowMenuButton(
                         // Home lives here now that Back owns the
                         // capsule's left control slot.
                         DropdownMenuItem(
-                            text = { MenuItemLabel("Home") },
+                            text = { MenuItemLabel(stringResource(R.string.browser_menu_home)) },
                             leadingIcon = { Icon(Icons.Filled.Home, contentDescription = null) },
                             onClick = {
                                 menuExpanded = false
@@ -3124,7 +3128,7 @@ private fun OverflowMenuButton(
                             },
                         )
                         DropdownMenuItem(
-                            text = { MenuItemLabel("New tab") },
+                            text = { MenuItemLabel(stringResource(R.string.browser_menu_new_tab)) },
                             leadingIcon = { Icon(Icons.Filled.Add, contentDescription = null) },
                             onClick = {
                                 menuExpanded = false
@@ -3133,7 +3137,7 @@ private fun OverflowMenuButton(
                         )
                         if (onNewPrivateTab != null) {
                             DropdownMenuItem(
-                                text = { MenuItemLabel("New private tab") },
+                                text = { MenuItemLabel(stringResource(R.string.browser_menu_new_private_tab)) },
                                 leadingIcon = { Icon(PrivateTabIcon, contentDescription = null) },
                                 onClick = {
                                     menuExpanded = false
@@ -3142,7 +3146,7 @@ private fun OverflowMenuButton(
                             )
                         }
                         DropdownMenuItem(
-                            text = { MenuItemLabel("Reload") },
+                            text = { MenuItemLabel(stringResource(R.string.browser_reload)) },
                             leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null) },
                             onClick = {
                                 menuExpanded = false
@@ -3155,7 +3159,7 @@ private fun OverflowMenuButton(
                         // home surface, nor in a tab whose renderer went
                         // away (#260) — its Reload rebuilds the page.
                         DropdownMenuItem(
-                            text = { MenuItemLabel("Hard reload") },
+                            text = { MenuItemLabel(stringResource(R.string.browser_menu_hard_reload)) },
                             leadingIcon = { Icon(Icons.Filled.Cached, contentDescription = null) },
                             enabled = state.hasPageToActOn,
                             onClick = {
@@ -3164,7 +3168,7 @@ private fun OverflowMenuButton(
                             },
                         )
                         DropdownMenuItem(
-                            text = { MenuItemLabel("Find in page") },
+                            text = { MenuItemLabel(stringResource(R.string.browser_find_in_page)) },
                             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                             // Nothing to search on the home surface, nor
                             // on a tab whose renderer went away (#260).
@@ -3183,7 +3187,7 @@ private fun OverflowMenuButton(
                         // ask as a desktop one (home, an error page, a
                         // dweb page). The page reloads, so the menu closes.
                         DropdownMenuItem(
-                            text = { MenuItemLabel("Desktop site") },
+                            text = { MenuItemLabel(stringResource(R.string.browser_menu_desktop_site)) },
                             leadingIcon = { Icon(Icons.Filled.Computer, contentDescription = null) },
                             trailingIcon = {
                                 Checkbox(
@@ -3207,7 +3211,7 @@ private fun OverflowMenuButton(
                         // page, so there is no document behind it to print
                         // (nor is there on a tab whose renderer went away).
                         DropdownMenuItem(
-                            text = { MenuItemLabel("Print") },
+                            text = { MenuItemLabel(stringResource(R.string.browser_menu_print)) },
                             leadingIcon = { Icon(Icons.Filled.Print, contentDescription = null) },
                             enabled = state.hasPageToActOn,
                             onClick = {
@@ -3226,7 +3230,7 @@ private fun OverflowMenuButton(
                             DropdownMenuItem(
                                 text = {
                                     Column(modifier = Modifier.padding(end = 32.dp)) {
-                                        Text("Block ads on this site")
+                                        Text(stringResource(R.string.browser_menu_block_ads))
                                         adblockState.note?.let { note ->
                                             Text(
                                                 text = note,
@@ -3264,7 +3268,7 @@ private fun OverflowMenuButton(
                             DropdownMenuItem(
                                 text = {
                                     Column(modifier = Modifier.padding(end = 32.dp)) {
-                                        Text("Site permissions")
+                                        Text(stringResource(R.string.browser_menu_site_permissions))
                                         Text(
                                             text = sitePermissionsSummary,
                                             style = MaterialTheme.typography.bodySmall,
@@ -3280,7 +3284,7 @@ private fun OverflowMenuButton(
                             )
                         }
                         DropdownMenuItem(
-                            text = { MenuItemLabel("History") },
+                            text = { MenuItemLabel(stringResource(R.string.browser_menu_history)) },
                             leadingIcon = { Icon(Icons.Filled.History, contentDescription = null) },
                             onClick = {
                                 menuExpanded = false
@@ -3288,7 +3292,7 @@ private fun OverflowMenuButton(
                             },
                         )
                         DropdownMenuItem(
-                            text = { MenuItemLabel("Bookmarks") },
+                            text = { MenuItemLabel(stringResource(R.string.browser_menu_bookmarks)) },
                             leadingIcon = { Icon(Icons.Filled.Bookmark, contentDescription = null) },
                             onClick = {
                                 menuExpanded = false
@@ -3296,7 +3300,7 @@ private fun OverflowMenuButton(
                             },
                         )
                         DropdownMenuItem(
-                            text = { MenuItemLabel("Downloads") },
+                            text = { MenuItemLabel(stringResource(R.string.browser_menu_downloads)) },
                             leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null) },
                             onClick = {
                                 menuExpanded = false
@@ -3304,14 +3308,14 @@ private fun OverflowMenuButton(
                             },
                         )
                         DropdownMenuItem(
-                            text = { MenuItemLabel("Settings") },
+                            text = { MenuItemLabel(stringResource(R.string.browser_menu_settings)) },
                             leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) },
                             onClick = {
                                 menuExpanded = false
                                 onOpenSettings()
                             },
                         )
-                        val peersLabel = if (peerCount == 1L) "1 peer" else "$peerCount peers"
+                        val peersLabel = pluralStringResource(R.plurals.browser_menu_peers, peerCount.toInt(), peerCount)
                         NodesMenuItem(peersLabel) {
                             menuExpanded = false
                             onOpenNode()
@@ -3360,7 +3364,7 @@ private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
         val labelStyle = MaterialTheme.typography.labelLarge
         val labelFloor = with(LocalDensity.current) { 10.dp.toSp() }
         Text(
-            text = "Zoom",
+            text = stringResource(R.string.browser_menu_zoom),
             style = labelStyle,
             color = MaterialTheme.colorScheme.onSurface
                 .let { if (enabled) it else it.copy(alpha = disabledAlpha) },
@@ -3380,7 +3384,12 @@ private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
             enabled = enabled && shown > PageZoomLevels.MIN,
             modifier = Modifier.size(48.dp),
         ) {
-            Icon(Icons.Filled.Remove, contentDescription = "Zoom out")
+            Icon(Icons.Filled.Remove, contentDescription = stringResource(R.string.browser_zoom_out))
+        }
+        val zoomDescription = if (enabled && shown != PageZoomLevels.DEFAULT) {
+            stringResource(R.string.browser_zoom_level_resettable, shown)
+        } else {
+            stringResource(R.string.browser_zoom_level, shown)
         }
         TextButton(
             onClick = { onZoom(ZoomAction.Reset) },
@@ -3399,8 +3408,7 @@ private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
             modifier = Modifier
                 .widthIn(min = 64.dp)
                 .semantics {
-                    contentDescription = "Zoom $shown%" +
-                        if (enabled && shown != PageZoomLevels.DEFAULT) ", tap to reset to 100%" else ""
+                    contentDescription = zoomDescription
                 },
         ) {
             Box(contentAlignment = Alignment.Center) {
@@ -3428,7 +3436,7 @@ private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
             enabled = enabled && shown < PageZoomLevels.MAX,
             modifier = Modifier.size(48.dp),
         ) {
-            Icon(Icons.Filled.Add, contentDescription = "Zoom in")
+            Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.browser_zoom_in))
         }
     }
 }
@@ -3514,7 +3522,8 @@ internal fun popupMaxHeightAbove(anchorTop: Int, gapPx: Int, topInsetPx: Int): I
     (anchorTop - gapPx - topInsetPx).coerceAtLeast(0)
 
 /** TalkBack's name for the overflow menu's Nodes row (#279): where it goes, then the count it shows. */
-internal fun nodesMenuDescription(peersLabel: String): String = "Nodes, $peersLabel"
+internal fun nodesMenuDescription(peersLabel: String): String =
+    Strings.get(R.string.browser_menu_nodes_description, peersLabel)
 
 /**
  * What TalkBack says of a load on the address bar (#279): the phase the
@@ -3522,18 +3531,27 @@ internal fun nodesMenuDescription(peersLabel: String): String = "Nodes, $peersLa
  * tens.
  */
 internal fun capsuleLoadStateDescription(resolving: Boolean, tenths: Int): String =
-    if (resolving) "Resolving name" else "Loading, ${tenths * 10}%"
+    if (resolving) Strings.get(R.string.browser_capsule_resolving_name)
+    else Strings.get(R.string.browser_capsule_loading_percent, tenths * 10)
 
 /** TalkBack's name for the address bar's tap surface (#279). */
 internal fun addressBarDescription(private: Boolean, empty: Boolean): String =
-    listOfNotNull(
-        "Address bar",
-        "private tab".takeIf { private },
-        "search or type URL".takeIf { empty },
-    ).joinToString(", ")
+    Strings.get(
+        when {
+            private && empty -> R.string.browser_address_bar_private_empty
+            private -> R.string.browser_address_bar_private
+            empty -> R.string.browser_address_bar_empty
+            else -> R.string.browser_address_bar
+        },
+    )
 
 /** The address bar's placeholder, longest first: [AddressPlaceholder] shows the longest that fits. */
-internal val AddressPlaceholders = listOf("Search or type URL", "Search or URL", "Search")
+internal val AddressPlaceholders: List<String>
+    get() = listOf(
+        Strings.get(R.string.browser_address_placeholder_long),
+        Strings.get(R.string.browser_address_placeholder_medium),
+        Strings.get(R.string.browser_address_placeholder_short),
+    )
 
 /**
  * The smallest the placeholder's type goes before a shorter wording

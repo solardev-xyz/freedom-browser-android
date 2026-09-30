@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The browser chrome (#280): the address bar and toolbar, tabs and the tab
+  switcher, the home screen, find in page, the page context menu, pop-up
+  notices, private tabs and the main activity.
+-->
+<resources>
+    <!-- FindInPage.kt -->
+    <string name="browser_find_in_page">Find in page</string>
+    <string name="browser_find_no_matches">No matches</string>
+    <plurals name="browser_find_matches">
+        <item quantity="one">%d match</item>
+        <item quantity="other">%d matches</item>
+    </plurals>
+    <string name="browser_find_match_of">Match %1$d of %2$d</string>
+    <string name="browser_find_previous_match">Previous match</string>
+    <string name="browser_find_next_match">Next match</string>
+    <string name="browser_find_close">Close find</string>
+
+    <!-- AddressInput.kt: the address-bar action row's second line -->
+    <string name="browser_address_go_to">Go to address</string>
+    <string name="browser_address_open_ens">Open ENS name</string>
+    <string name="browser_address_open_swarm">Open on Swarm</string>
+    <string name="browser_address_open_ipfs">Open on IPFS</string>
+    <string name="browser_address_open_radicle">Open on Radicle</string>
+
+    <!-- AddressSuggestions.kt -->
+    <string name="browser_suggestions_no_matches_for">No matches for \"%1$s\"</string>
+    <string name="browser_suggestions_search">Search</string>
+    <string name="browser_suggestions_search_with">Search with %1$s</string>
+    <string name="browser_suggestions_address">Address</string>
+    <string name="browser_suggestions_bookmark">Bookmark</string>
+    <string name="browser_suggestions_history">History</string>
+
+    <!-- PageContextMenu.kt: the long-press sheet -->
+    <string name="browser_menu_image">Image</string>
+    <string name="browser_menu_open_in_new_tab">Open in new tab</string>
+    <string name="browser_menu_copy_link_address">Copy link address</string>
+    <string name="browser_menu_share_link">Share link</string>
+    <string name="browser_menu_open_image_in_new_tab">Open image in new tab</string>
+    <string name="browser_menu_copy_image">Copy image</string>
+    <string name="browser_menu_save_image">Save image</string>
+    <string name="browser_menu_share_image">Share image</string>
+
+    <!-- UrlActions.kt: the capsule's long-press menu -->
+    <string name="browser_url_copied">URL copied</string>
+    <string name="browser_url_copy">Copy URL</string>
+    <string name="browser_url_paste_and_go">Paste and go</string>
+
+    <!-- BlockedPopupNotice.kt -->
+    <string name="browser_popup_close_notice">Close the pop-up notice</string>
+    <string name="browser_popup_and_more">and %1$d more</string>
+    <string name="browser_popup_allowed">Pop-ups from this site will open from now on. Settings → Site permissions can undo it.</string>
+    <string name="browser_popup_allowed_private">Pop-ups from this site will open from now on, until you close your private tabs.</string>
+    <string name="browser_popup_always_allow">Always allow pop-ups on this site</string>
+    <string name="browser_popup_scroll_through">Scroll through the whole of a long address to use its button.</string>
+    <string name="browser_popup_form_sent_to">A form sent to %1$s</string>
+    <string name="browser_popup_form_not_resent">Its data can\'t be sent again from here.</string>
+    <string name="browser_popup_blocked_single">Pop-up blocked</string>
+    <plurals name="browser_popups_blocked">
+        <item quantity="one">%d pop-up blocked</item>
+        <item quantity="other">%d pop-ups blocked</item>
+    </plurals>
+
+    <!-- PopupBlocker.kt -->
+    <string name="browser_popup_reading_address">Reading its address…</string>
+    <string name="browser_popup_form_sent_to_long">A form sent to %1$s (its data can\'t be sent again from here)</string>
+    <string name="browser_popup_address_unread">Its address wasn\'t read (too many pop-ups at once)</string>
+    <string name="browser_popup_blank_window">A blank window (no address to open)</string>
+
+    <!-- PrivateJsDialogs.kt: a private tab's alert/confirm/prompt/beforeunload -->
+    <string name="browser_js_leave_page_title">Leave this page?</string>
+    <string name="browser_js_page_at_says">The page at \"%1$s\" says:</string>
+    <string name="browser_js_page_says">This page says:</string>
+    <string name="browser_js_leave_page_message">Changes you made may not be saved.</string>
+    <string name="browser_js_leave">Leave</string>
+    <string name="browser_js_stay">Stay</string>
+
+    <!-- TapProtection.kt -->
+    <string name="browser_obscured_tap">Another app is drawing over the screen, so that tap was ignored. Close it (a chat bubble or a screen filter) and try again.</string>
+
+    <!-- MainActivity.kt: light client and Tor status lines on the node page -->
+    <string name="browser_light_client_start_failed">Couldn\'t start the light client service</string>
+    <string name="browser_tor_reaching_onion">Reaching a .onion site through %1$s…</string>
+    <string name="browser_tor_onion_unreached_checking">Didn\'t reach a .onion site just now; checking again…</string>
+    <string name="browser_tor_checking_proxy">Checking %1$s…</string>
+    <string name="browser_tor_error_checking_again">%1$s Checking again shortly.</string>
+    <string name="browser_tor_start_failed">Couldn\'t start the Tor service</string>
+
+    <!-- BrowserScreen.kt -->
+    <string name="browser_badge_via_swarm">via Swarm</string>
+    <string name="browser_badge_via_ipfs">via IPFS</string>
+    <string name="browser_download_started">Downloading %1$s</string>
+    <string name="browser_download_completed">Downloaded %1$s</string>
+    <string name="browser_download_failed">Download failed: %1$s</string>
+    <string name="browser_download_details">Details</string>
+    <string name="browser_download_background_dropped">A background tab is asking for more downloads than can wait; extras are dropped</string>
+    <string name="browser_download_show">Show</string>
+    <string name="browser_web3_invalid_detail">Expected web3://&lt;contract address&gt;[:&lt;chain ID&gt;]/</string>
+    <string name="browser_ens_wrong_protocol_detail">%1$s resolves to %2$s:// content, not %3$s://</string>
+    <string name="browser_ens_codec_detail">codec %1$s</string>
+    <string name="browser_opened_in_new_tab">Opened in new tab</string>
+    <string name="browser_opened_in_new_private_tab">Opened in new private tab</string>
+    <string name="browser_opened_switch">Switch</string>
+    <string name="browser_bookmark_added">Bookmark added</string>
+    <string name="browser_bookmark_already">Already bookmarked</string>
+    <string name="browser_image_loading">Loading image…</string>
+    <string name="browser_image_copy_failed">Couldn\'t copy image</string>
+    <string name="browser_image_saved">Image saved</string>
+    <string name="browser_image_save_failed">Couldn\'t save image</string>
+    <string name="browser_image_share_failed">Couldn\'t share image</string>
+
+    <!-- ImageActions.kt -->
+    <string name="browser_image_copied">Image copied</string>
+
+    <!-- BottomToolbar.kt: the capsule and its overflow menu -->
+    <string name="browser_forward">Forward</string>
+    <string name="browser_capsule_expand">Expand address bar</string>
+    <string name="browser_capsule_edit_address">Edit address</string>
+    <string name="browser_capsule_url_actions">URL actions</string>
+    <string name="browser_clear">Clear</string>
+    <string name="browser_stop_loading">Stop loading</string>
+    <string name="browser_reload">Reload</string>
+    <string name="browser_menu">Menu</string>
+    <string name="browser_menu_remove_bookmark">Remove bookmark</string>
+    <string name="browser_menu_add_bookmark">Add bookmark</string>
+    <string name="browser_menu_home">Home</string>
+    <string name="browser_menu_new_tab">New tab</string>
+    <string name="browser_menu_new_private_tab">New private tab</string>
+    <string name="browser_menu_hard_reload">Hard reload</string>
+    <string name="browser_menu_desktop_site">Desktop site</string>
+    <string name="browser_menu_print">Print</string>
+    <string name="browser_menu_block_ads">Block ads on this site</string>
+    <string name="browser_menu_site_permissions">Site permissions</string>
+    <string name="browser_menu_history">History</string>
+    <string name="browser_menu_bookmarks">Bookmarks</string>
+    <string name="browser_menu_downloads">Downloads</string>
+    <string name="browser_menu_settings">Settings</string>
+    <plurals name="browser_menu_peers">
+        <item quantity="one">%d peer</item>
+        <item quantity="other">%d peers</item>
+    </plurals>
+    <!-- TalkBack's name for the menu's Nodes row: %1$s is the peer count, e.g. "12 peers". -->
+    <string name="browser_menu_nodes_description">Nodes, %1$s</string>
+    <string name="browser_menu_zoom">Zoom</string>
+    <string name="browser_zoom_out">Zoom out</string>
+    <string name="browser_zoom_in">Zoom in</string>
+    <string name="browser_zoom_level">Zoom %1$d%%</string>
+    <string name="browser_zoom_level_resettable">Zoom %1$d%%, tap to reset to 100%%</string>
+    <string name="browser_capsule_resolving_name">Resolving name</string>
+    <string name="browser_capsule_loading_percent">Loading, %1$d%%</string>
+    <!-- TalkBack's name for the address bar, by whether the tab is private and the bar empty. -->
+    <string name="browser_address_bar">Address bar</string>
+    <string name="browser_address_bar_empty">Address bar, search or type URL</string>
+    <string name="browser_address_bar_private">Address bar, private tab</string>
+    <string name="browser_address_bar_private_empty">Address bar, private tab, search or type URL</string>
+    <!-- The empty address bar's placeholder, longest first: the longest that fits is shown. -->
+    <string name="browser_address_placeholder_long">Search or type URL</string>
+    <string name="browser_address_placeholder_medium">Search or URL</string>
+    <string name="browser_address_placeholder_short">Search</string>
+
+    <!-- HomeScreen.kt -->
+    <string name="browser_home_bookmarks">Bookmarks</string>
+    <string name="browser_home_recent">Recent</string>
+    <string name="browser_home_explore">Explore</string>
+    <string name="browser_explore_swarmit_subtitle">Decentralized social feed on Swarm</string>
+    <string name="browser_intro_title">Welcome to Freedom</string>
+    <string name="browser_intro_body_web">Freedom opens the web you know and the decentralized web: sites stored on Swarm (bzz://) and IPFS (ipfs://), and ENS names such as app.swarmit.eth.</string>
+    <string name="browser_intro_body_nodes">It reaches them through its own nodes, running on this phone and talking straight to peers. The nodes use data and battery while they run; the peers row in the menu shows them and can switch them off.</string>
+    <string name="browser_intro_body_wallet">You don\'t need a wallet to browse. If you want one later, it\'s in Settings.</string>
+    <string name="browser_intro_got_it">Got it</string>
+    <!-- %1$s is the name of a curated site, e.g. "Swarmit". -->
+    <string name="browser_intro_try">Try %1$s</string>
+    <string name="browser_warmup_starting">Starting your Swarm node…</string>
+    <string name="browser_warmup_starting_detail">Swarm sites open once it has found peers.</string>
+    <string name="browser_warmup_connecting">Your Swarm node is looking for peers…</string>
+    <string name="browser_warmup_connecting_detail">Swarm sites open once it has found some.</string>
+    <string name="browser_warmup_failed">Your Swarm node ran into a problem</string>
+    <string name="browser_warmup_failed_detail">Tap for details and to try again.</string>
+    <string name="browser_warmup_open_node_details">Open node details</string>
+    <!-- %1$s is a version number, e.g. "0.6.11". -->
+    <string name="browser_update_available">Freedom %1$s is available</string>
+    <string name="browser_update_body">A newer version of this browser is out. Its release page has the APK and what changed.</string>
+    <string name="browser_update_view_release">View release</string>
+    <string name="browser_update_close">Close the notice for Freedom %1$s</string>
+    <string name="browser_home_hero">The decentralized web is here. Powered by built-in nodes, this browser connects you directly to peers, keeping the network strong and user-controlled.</string>
+    <string name="browser_private_home_title">Private tab</string>
+    <string name="browser_private_home_body">Pages you open in private tabs aren\'t kept in your history, and their cookies, site data and cache are deleted when you close your last private tab. Site permissions and zoom levels you set here last only until then too.</string>
+    <string name="browser_private_home_still_saved">Downloaded files and bookmarks you add are still saved. So is Swarm and IPFS content you open: your Swarm and IPFS nodes keep what they fetch in their own storage on this device, for private tabs too.</string>
+    <string name="browser_private_home_limits_header">What private tabs don\'t do</string>
+    <string name="browser_private_home_limits">This is privacy on this device, not anonymity. Sites you sign in to still know it\'s you, your network operator can still see your traffic, Swarm and IPFS peers still see your nodes\' requests, and your IP address stays visible to sites and peers.</string>
+
+    <!-- TabSwitcher.kt -->
+    <string name="browser_tabs_new_tab">New tab</string>
+    <!-- The switcher's button that opens a new private tab. -->
+    <string name="browser_tabs_new_private">Private</string>
+    <string name="browser_tabs_reopen">Reopen</string>
+    <string name="browser_tabs_close_switcher">Close tab switcher</string>
+    <string name="browser_tabs_move_earlier">Move tab earlier</string>
+    <string name="browser_tabs_move_to_start">Move tab to start</string>
+    <string name="browser_tabs_move_later">Move tab later</string>
+    <string name="browser_tabs_move_to_end">Move tab to end</string>
+    <string name="browser_tabs_switch_to_tab">Switch to tab</string>
+    <string name="browser_tabs_current_tab">Current tab</string>
+    <string name="browser_tabs_close_tab">Close tab</string>
+    <string name="browser_tabs_mute_tab">Mute tab</string>
+    <string name="browser_tabs_unmute_tab">Unmute tab</string>
+    <string name="browser_tabs_private_tab">Private tab</string>
+    <!-- A private tab card's icon. -->
+    <string name="browser_tabs_private">Private</string>
+    <string name="browser_tabs_muted">Tab muted</string>
+    <string name="browser_tabs_playing_audio">Tab playing audio</string>
+    <!-- TalkBack's name for the toolbar's tab-count button. -->
+    <plurals name="browser_tabs_count_description">
+        <item quantity="one">Tabs, %d open</item>
+        <item quantity="other">Tabs, %d open</item>
+    </plurals>
+</resources>

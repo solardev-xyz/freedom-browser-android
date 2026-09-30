@@ -82,7 +82,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.node.NodeLogSource
@@ -359,8 +361,10 @@ private val CONTENT_SCHEMES_FOR_SUBMIT = listOf("bzz://", "ipfs://", "ipns://")
  */
 internal data class ProtocolBadge(
     @androidx.annotation.DrawableRes val drawableRes: Int,
-    val contentDescription: String,
-)
+    @androidx.annotation.StringRes val contentDescriptionRes: Int,
+) {
+    val contentDescription: String get() = Strings.get(contentDescriptionRes)
+}
 
 internal fun protocolBadgeFor(state: BrowserState): ProtocolBadge? {
     val url = state.url
@@ -381,12 +385,12 @@ internal fun protocolBadgeFor(state: BrowserState): ProtocolBadge? {
 
 private val SWARM_BADGE = ProtocolBadge(
     drawableRes = baby.freedom.mobile.R.drawable.ic_swarm,
-    contentDescription = "via Swarm",
+    contentDescriptionRes = R.string.browser_badge_via_swarm,
 )
 
 private val IPFS_BADGE = ProtocolBadge(
     drawableRes = baby.freedom.mobile.R.drawable.ic_ipfs,
-    contentDescription = "via IPFS",
+    contentDescriptionRes = R.string.browser_badge_via_ipfs,
 )
 
 /**
@@ -586,7 +590,7 @@ fun BrowserScreen(
             when (event) {
                 is DownloadEvent.Started -> downloadNotices.show(this, event.id, start = true) {
                     snackbarHostState.showSnackbar(
-                        "Downloading ${event.fileName}",
+                        Strings.get(R.string.browser_download_started, event.fileName),
                         duration = SnackbarDuration.Short,
                     )
                 }
@@ -594,8 +598,8 @@ fun BrowserScreen(
                     downloadNotices.supersedeStart(event.id)
                     downloadNotices.show(this, event.id) {
                         val result = snackbarHostState.showSnackbar(
-                            "Downloaded ${event.fileName}",
-                            actionLabel = "Open",
+                            Strings.get(R.string.browser_download_completed, event.fileName),
+                            actionLabel = Strings.get(R.string.common_open),
                             duration = SnackbarDuration.Long,
                         )
                         if (result == SnackbarResult.ActionPerformed) {
@@ -609,8 +613,8 @@ fun BrowserScreen(
                     downloadNotices.supersedeStart(event.id)
                     downloadNotices.show(this, event.id) {
                         val result = snackbarHostState.showSnackbar(
-                            "Download failed: ${event.reason}",
-                            actionLabel = "Details",
+                            Strings.get(R.string.browser_download_failed, event.reason),
+                            actionLabel = Strings.get(R.string.browser_download_details),
                             duration = SnackbarDuration.Long,
                         )
                         if (result == SnackbarResult.ActionPerformed) showDownloads = true
@@ -947,7 +951,7 @@ fun BrowserScreen(
                     errorCode = "web3_invalid",
                     displayUrl = input.trim(),
                     protocol = "web3",
-                    detail = "Expected web3://<contract address>[:<chain ID>]/",
+                    detail = Strings.get(R.string.browser_web3_invalid_detail),
                 ),
             )
             return
@@ -1179,8 +1183,12 @@ fun BrowserScreen(
                             ensError(
                                 errorCode = "ens_wrong_protocol",
                                 detail = EnsGate.withTrustNote(
-                                    "$name resolves to ${result.protocol}:// content, " +
-                                        "not $requiredProtocol://",
+                                    Strings.get(
+                                        R.string.browser_ens_wrong_protocol_detail,
+                                        name,
+                                        result.protocol,
+                                        requiredProtocol,
+                                    ),
                                     result.trust,
                                 ),
                                 // A `.tez` website record has no name-
@@ -1270,7 +1278,7 @@ fun BrowserScreen(
                                 // A `.tez` record's "codec" is the reason
                                 // its website URI was refused.
                                 detail = EnsGate.withTrustNote(
-                                    if (name.endsWith(".tez")) result.codec else "codec ${result.codec}",
+                                    if (name.endsWith(".tez")) result.codec else Strings.get(R.string.browser_ens_codec_detail, result.codec),
                                     result.trust,
                                 ),
                             )
@@ -1558,8 +1566,12 @@ fun BrowserScreen(
             if (background) {
                 scope.launch {
                     val result = snackbarHostState.showSnackbar(
-                        message = if (private) "Opened in new private tab" else "Opened in new tab",
-                        actionLabel = "Switch",
+                        message = if (private) {
+                            Strings.get(R.string.browser_opened_in_new_private_tab)
+                        } else {
+                            Strings.get(R.string.browser_opened_in_new_tab)
+                        },
+                        actionLabel = Strings.get(R.string.browser_opened_switch),
                         duration = SnackbarDuration.Short,
                     )
                     if (result == SnackbarResult.ActionPerformed) {
@@ -2189,8 +2201,12 @@ fun BrowserScreen(
                                 // state for a moment; a page that turns out
                                 // to be bookmarked already isn't "added".
                                 val result = snackbarHostState.showSnackbar(
-                                    if (saved.added) "Bookmark added" else "Already bookmarked",
-                                    actionLabel = "Edit",
+                                    if (saved.added) {
+                                        Strings.get(R.string.browser_bookmark_added)
+                                    } else {
+                                        Strings.get(R.string.browser_bookmark_already)
+                                    },
+                                    actionLabel = Strings.get(R.string.common_edit),
                                     duration = SnackbarDuration.Short,
                                 )
                                 if (result == SnackbarResult.ActionPerformed) {
@@ -2639,7 +2655,7 @@ fun BrowserScreen(
                 if (tabs.pageContextMenu === request) tabs.pageContextMenu = null
             }
         } else if (owner != null && promptTurn == PromptTurn.ContextMenu) {
-            fun withImage(url: String, action: suspend (FetchedImage) -> Boolean, failure: String) {
+            fun withImage(url: String, action: suspend (FetchedImage) -> Boolean, @androidx.annotation.StringRes failure: Int) {
                 scope.launch {
                     // The sheet is already gone: a refetch that isn't back
                     // almost at once says so, rather than leaving the user
@@ -2647,7 +2663,7 @@ fun BrowserScreen(
                     // The fetch itself is bounded by IMAGE_FETCH_DEADLINE_MS.
                     val progress = launch {
                         delay(IMAGE_FETCH_PROGRESS_DELAY_MS)
-                        Toast.makeText(context, "Loading image\u2026", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, context.getString(R.string.browser_image_loading), Toast.LENGTH_SHORT).show()
                     }
                     val image = try {
                         fetchImage(url, request.pageUrl, WebSettings.getDefaultUserAgent(context), owner.private)
@@ -2655,7 +2671,7 @@ fun BrowserScreen(
                         progress.cancel()
                     }
                     val ok = image != null && action(image)
-                    if (!ok) Toast.makeText(context, failure, Toast.LENGTH_SHORT).show()
+                    if (!ok) Toast.makeText(context, context.getString(failure), Toast.LENGTH_SHORT).show()
                 }
             }
             key(request) {
@@ -2667,19 +2683,19 @@ fun BrowserScreen(
                     onShareLink = { url, title -> shareUrl(context, url, title) },
                     onOpenImage = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true, owner.private) },
                     onCopyImage = { url ->
-                        withImage(url, { copyImageToClipboard(context, it, url) }, "Couldn't copy image")
+                        withImage(url, { copyImageToClipboard(context, it, url) }, R.string.browser_image_copy_failed)
                     },
                     onSaveImage = { url ->
                         withImage(url, { image ->
                             saveImage(context, image, url).also { saved ->
                                 if (saved) {
-                                    Toast.makeText(context, "Image saved", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, context.getString(R.string.browser_image_saved), Toast.LENGTH_SHORT).show()
                                 }
                             }
-                        }, "Couldn't save image")
+                        }, R.string.browser_image_save_failed)
                     },
                     onShareImage = { url ->
-                        withImage(url, { shareImage(context, it, url) }, "Couldn't share image")
+                        withImage(url, { shareImage(context, it, url) }, R.string.browser_image_share_failed)
                     },
                     onDismiss = {
                         if (tabs.pageContextMenu === request) tabs.pageContextMenu = null
@@ -2731,8 +2747,8 @@ fun BrowserScreen(
         if (showDownloads) return@LaunchedEffect
         downloadNotices.announceDrops(scope, droppedOffers.keys, tabs.active.id) { tabId ->
             val result = snackbarHostState.showSnackbar(
-                "A background tab is asking for more downloads than can wait; extras are dropped",
-                actionLabel = "Show",
+                Strings.get(R.string.browser_download_background_dropped),
+                actionLabel = Strings.get(R.string.browser_download_show),
                 duration = SnackbarDuration.Long,
             )
             if (result == SnackbarResult.ActionPerformed) {

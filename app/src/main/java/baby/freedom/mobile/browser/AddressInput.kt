@@ -1,6 +1,8 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.ens.EnsInput
+import baby.freedom.mobile.l10n.Strings
 
 /**
  * What the address bar's text is, as far as pressing Enter is concerned
@@ -66,14 +68,14 @@ internal sealed interface AddressAction {
          */
         val subtitle: String
             get() = when {
-                kind == AddressInput.Kind.Url -> "Go to address"
+                kind == AddressInput.Kind.Url -> Strings.get(R.string.browser_address_go_to)
                 EnsInput.parse(input) != null || EnsInput.parseConstrained(input) != null ->
-                    "Open ENS name"
-                input.startsWith("bzz://", ignoreCase = true) -> "Open on Swarm"
+                    Strings.get(R.string.browser_address_open_ens)
+                input.startsWith("bzz://", ignoreCase = true) -> Strings.get(R.string.browser_address_open_swarm)
                 input.startsWith("ipfs://", ignoreCase = true) ||
-                    input.startsWith("ipns://", ignoreCase = true) -> "Open on IPFS"
-                RadUrl.parse(input) != null -> "Open on Radicle"
-                else -> "Go to address"
+                    input.startsWith("ipns://", ignoreCase = true) -> Strings.get(R.string.browser_address_open_ipfs)
+                RadUrl.parse(input) != null -> Strings.get(R.string.browser_address_open_radicle)
+                else -> Strings.get(R.string.browser_address_go_to)
             }
     }
 
