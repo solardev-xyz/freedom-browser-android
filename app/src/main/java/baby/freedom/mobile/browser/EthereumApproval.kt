@@ -49,10 +49,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.GasOracle
 import baby.freedom.mobile.wallet.SendAmounts
@@ -61,20 +65,28 @@ import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.ledger.LedgerTypedDataHashes
 import java.net.URI
+import java.text.NumberFormat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /** What an approval sheet says: its title, what the site wants, and the approve button's label. */
 internal data class EthApprovalCopy(val title: String, val request: String, val approve: String)
 
-internal fun ethApprovalCopy(ask: EthAsk): EthApprovalCopy = when (ask) {
-    is EthAsk.Connect -> EthApprovalCopy("Connect wallet", "wants to connect to your wallet", "Connect")
-    is EthAsk.SignMessage -> EthApprovalCopy("Sign message", "wants you to sign a message", "Sign")
-    is EthAsk.SignTypedData -> EthApprovalCopy("Sign data", "wants you to sign typed data", "Sign")
-    is EthAsk.SendTransaction -> EthApprovalCopy("Send transaction", "wants to send a transaction", "Confirm and send")
-    is EthAsk.SwitchChain -> EthApprovalCopy("Switch network", "wants to switch networks", "Switch")
-    is EthAsk.AddChain -> EthApprovalCopy("Add network", "wants to add a network and switch to it", "Add and switch")
-    is EthAsk.Payment -> EthApprovalCopy("Pay for this page", "asks to be paid to show this page", "Pay")
+internal fun ethApprovalCopy(ask: EthAsk): EthApprovalCopy {
+    val (title, request, approve) = when (ask) {
+        is EthAsk.Connect -> Triple(R.string.send_eth_connect_title, R.string.send_eth_connect_request, R.string.send_eth_connect_action)
+        is EthAsk.SignMessage ->
+            Triple(R.string.send_eth_sign_message_title, R.string.send_eth_sign_message_request, R.string.send_eth_sign_action)
+        is EthAsk.SignTypedData ->
+            Triple(R.string.send_eth_sign_data_title, R.string.send_eth_sign_data_request, R.string.send_eth_sign_action)
+        is EthAsk.SendTransaction ->
+            Triple(R.string.send_eth_send_title, R.string.send_eth_send_request, R.string.send_confirm_and_send)
+        is EthAsk.SwitchChain -> Triple(R.string.send_eth_switch_title, R.string.send_eth_switch_request, R.string.send_eth_switch_action)
+        is EthAsk.AddChain ->
+            Triple(R.string.send_eth_add_chain_title, R.string.send_eth_add_chain_request, R.string.send_eth_add_chain_action)
+        is EthAsk.Payment -> Triple(R.string.send_eth_pay_title, R.string.send_eth_pay_request, R.string.send_eth_pay_action)
+    }
+    return EthApprovalCopy(Strings.get(title), Strings.get(request), Strings.get(approve))
 }
 
 /**
@@ -255,7 +267,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                     onClick = { if (guard.accepts() && !busy) request.respond(EthAnswer.Rejected) },
                     enabled = armed && !busy,
                     modifier = Modifier.testTag("ethereum-reject"),
-                ) { Text("Reject") }
+                ) { Text(stringResource(R.string.common_reject)) }
                 Button(
                     onClick = ::approve,
                     enabled = armed && !busy && canApprove,
@@ -309,7 +321,7 @@ private fun OriginStrip(origin: String, request: String) {
             Text(request, style = MaterialTheme.typography.bodyMedium)
             if (origin.startsWith("http://")) {
                 Text(
-                    "Not encrypted: a loopback page on this device",
+                    stringResource(R.string.send_eth_loopback),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -336,14 +348,14 @@ internal fun ConnectBody(
     onSetUp: () -> Unit,
 ) {
     if (noWallet || accounts == null) {
-        Text("There's no wallet on this device yet. Set one up to connect — or reject, and keep browsing without one.")
+        Text(stringResource(R.string.send_eth_no_wallet))
         Spacer(Modifier.height(12.dp))
-        OutlinedButton(onClick = onSetUp, modifier = Modifier.fillMaxWidth().testTag("ethereum-setup")) { Text("Set up a wallet") }
+        OutlinedButton(onClick = onSetUp, modifier = Modifier.fillMaxWidth().testTag("ethereum-setup")) { Text(stringResource(R.string.send_eth_set_up_wallet)) }
         return
     }
-    Row0("Network", ask.chain.name)
+    Row0(stringResource(R.string.send_label_network), ask.chain.name)
     Text(
-        if (accounts.size > 1) "Account to share" else "Account",
+        stringResource(if (accounts.size > 1) R.string.send_eth_account_to_share else R.string.send_label_account),
         style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
@@ -365,37 +377,38 @@ internal fun ConnectBody(
         }
     }
     Spacer(Modifier.height(8.dp))
-    Note(
-        "The site will see this account's address and can read its balances. It can ask you to sign " +
-            "messages and send transactions, and each one asks you here first (unless you later turn on auto-approve for a call). Disconnect it any time on the wallet page or in Settings → Site permissions.",
-    )
+    Note(stringResource(R.string.send_eth_connect_note))
 }
 
 @Composable
 private fun SignMessageBody(ask: EthAsk.SignMessage) {
     AccountRow(ask.account)
-    Label("Message")
-    Block(ask.text ?: ask.hex, mono = ask.text == null, whole = "The signature covers the whole message.")
-    if (ask.text == null) Note("This message isn't readable text; it's shown as hex bytes.")
+    Label(stringResource(R.string.send_eth_message))
+    Block(ask.text ?: ask.hex, mono = ask.text == null, whole = stringResource(R.string.send_eth_message_whole))
+    if (ask.text == null) Note(stringResource(R.string.send_eth_message_hex))
     Spacer(Modifier.height(8.dp))
-    Note("A signature can authorise actions off-chain, such as a login or an order. Only sign if you trust the site.")
+    Note(stringResource(R.string.send_eth_message_note))
 }
 
 @Composable
 private fun SignTypedDataBody(ask: EthAsk.SignTypedData) {
-    Row0("Network", if (ask.chainBound) "${ask.chain.name} (chain ${ask.chain.id})" else "Any — the signature names no chain")
+    Row0(
+        stringResource(R.string.send_label_network),
+        if (ask.chainBound) {
+            stringResource(R.string.send_eth_chain_with_id, ask.chain.name, ask.chain.id.toString())
+        } else {
+            stringResource(R.string.send_eth_any_chain)
+        },
+    )
     AccountRow(ask.account)
-    ask.domainName?.let { Row0("Application", it) }
-    ask.verifyingContract?.let { AddressRow("Contract", it) }
-    Row0("Type", ask.primaryType, mono = true)
-    Label("Data")
-    Block(ask.messageJson, mono = true, whole = "The signature covers all of the data.")
+    ask.domainName?.let { Row0(stringResource(R.string.send_eth_application), it) }
+    ask.verifyingContract?.let { AddressRow(stringResource(R.string.send_label_contract), it) }
+    Row0(stringResource(R.string.send_eth_type), ask.primaryType, mono = true)
+    Label(stringResource(R.string.send_label_data))
+    Block(ask.messageJson, mono = true, whole = stringResource(R.string.send_eth_data_whole))
     ask.ledgerHashes?.let { LedgerHashesOnly(it) }
     Spacer(Modifier.height(8.dp))
-    Note(
-        "Typed data can authorise a transfer or a trade (a permit, an order) without a transaction. " +
-            "Only sign if you trust the site and expect it.",
-    )
+    Note(stringResource(R.string.send_eth_typed_note))
 }
 
 @Composable
@@ -405,34 +418,36 @@ private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, tap: ArmedTap
     val chain = request.chain
     val data = quote.tx.data
     if (ask.repriced) {
-        Note("It took more than a minute, so the network fee was priced again. Check it before you confirm.", warn = true)
+        Note(stringResource(R.string.send_eth_repriced), warn = true)
         Spacer(Modifier.height(4.dp))
     }
     quote.replaces?.let {
         // A site's transaction can take the nonce of a send the user stopped tracking that's
         // still waiting in a pool — say so here as the Send page does, or confirming silently
         // drops that earlier send (#215 R6-F1).
-        Note(
-            "This transaction takes the place of the send you stopped tracking ($it): only one of the two can " +
-                "go through, and this one pays the higher fee. If that send still matters, reject this and " +
-                "settle it on the wallet page first.",
-            warn = true,
-        )
+        Note(stringResource(R.string.send_eth_replaces, it), warn = true)
         Spacer(Modifier.height(4.dp))
     }
-    Row0("Network", chain.name)
-    AccountRow(request.from, "From")
-    AddressRow(if (data.isEmpty()) "To" else "Contract", request.to)
-    Row0("Amount", "${SendAmounts.exact(request.amount, chain.decimals)} ${chain.symbol}", mono = true)
+    Row0(stringResource(R.string.send_label_network), chain.name)
+    AccountRow(request.from, stringResource(R.string.send_label_from))
+    AddressRow(stringResource(if (data.isEmpty()) R.string.send_label_to else R.string.send_label_contract), request.to)
+    Row0(stringResource(R.string.send_label_amount), "${SendAmounts.exact(request.amount, chain.decimals)} ${chain.symbol}", mono = true)
     if (data.isNotEmpty()) {
-        Label("Data (${data.size} bytes)")
+        Label(pluralStringResource(R.plurals.send_eth_data_bytes, data.size, data.size))
         // Only the bytes the sheet shows are turned into hex, not megabytes of them.
         val head = remember(data) { "0x" + hexOf(data, SHEET_MAX_CHARS / 2) }
-        Block(head, mono = true, maxHeight = 120, omitted = maxOf(0, data.size - SHEET_MAX_CHARS / 2) * 2, whole = "The transaction sends all of it.")
+        Block(head, mono = true, maxHeight = 120, omitted = maxOf(0, data.size - SHEET_MAX_CHARS / 2) * 2, whole = stringResource(R.string.send_eth_tx_whole))
     }
-    Row0("Network fee", "up to ${feeText(quote.tx.maxFee, chain)}", mono = true, detail = feeDetail(quote.tx))
-    quote.nativeTotal?.takeIf { request.amount.signum() > 0 }?.let { Row0("Total", "up to ${feeText(it, chain)}", mono = true) }
-    Row0("Nonce", quote.tx.nonce.toString(), detail = nonceDetail(quote))
+    Row0(
+        stringResource(R.string.send_label_network_fee),
+        stringResource(R.string.send_up_to, feeText(quote.tx.maxFee, chain)),
+        mono = true,
+        detail = feeDetail(quote.tx),
+    )
+    quote.nativeTotal?.takeIf { request.amount.signum() > 0 }?.let {
+        Row0(stringResource(R.string.send_label_total), stringResource(R.string.send_up_to, feeText(it, chain)), mono = true)
+    }
+    Row0(stringResource(R.string.send_label_nonce), quote.tx.nonce.toString(), detail = nonceDetail(quote))
     ask.autoApprove?.let { rule ->
         Spacer(Modifier.height(8.dp))
         if (ask.ruled) {
@@ -442,10 +457,7 @@ private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, tap: ArmedTap
         }
     }
     Spacer(Modifier.height(8.dp))
-    Note(
-        feeFootnote(quote.tx) + " A transaction can't be undone once it's sent: " +
-            "only confirm if you trust the site and expect it.",
-    )
+    Note(stringResource(R.string.send_eth_send_footnote, feeFootnote(quote.tx)))
 }
 
 /**
@@ -507,38 +519,37 @@ internal fun AutoApproveSwitch(
  * none is ever claimed by default (R2-M2).
  */
 internal fun autoApproveRuledNote(replaces: Boolean, highFee: Boolean, locked: Boolean): String =
-    "An auto-approve rule you turned on covers this call. " + when {
-        replaces -> "It's asked here because it takes the place of a send you stopped tracking."
-        highFee && locked -> "It's asked here because its network fee is higher than a rule sends without asking, " +
-            "and because the wallet is locked; it goes out once you confirm."
-        highFee -> "It's asked here because its network fee is higher than a rule sends without asking."
-        locked -> "It's asked here because the wallet is locked; it goes out once you confirm."
-        else -> "It's asked here for you to check before it goes out."
-    }
+    Strings.get(
+        when {
+            replaces -> R.string.send_eth_ruled_replaces
+            highFee && locked -> R.string.send_eth_ruled_high_fee_locked
+            highFee -> R.string.send_eth_ruled_high_fee
+            locked -> R.string.send_eth_ruled_locked
+            else -> R.string.send_eth_ruled_check
+        },
+    )
 
 @Composable
 private fun SwitchBody(ask: EthAsk.SwitchChain) {
-    Row0("From", "${ask.from.name} (chain ${ask.from.id})")
-    Row0("To", "${ask.to.name} (chain ${ask.to.id})")
+    Row0(stringResource(R.string.send_label_from), stringResource(R.string.send_eth_chain_with_id, ask.from.name, ask.from.id.toString()))
+    Row0(stringResource(R.string.send_label_to), stringResource(R.string.send_eth_chain_with_id, ask.to.name, ask.to.id.toString()))
     Spacer(Modifier.height(8.dp))
-    Note("Only this site switches; other sites stay on their own network.")
+    Note(stringResource(R.string.send_eth_switch_note))
 }
 
 @Composable
 private fun AddChainBody(ask: EthAsk.AddChain) {
     val chain = ask.chain
-    Row0("Network", chain.name)
-    Row0("Chain ID", chain.id.toString(), mono = true)
-    Row0("Currency", "${chain.currencyName} (${chain.symbol}, ${chain.decimals} decimals)")
-    Row0("RPC", chain.rpcUrls.joinToString("\n") { hostOf(it) }, mono = true)
-    chain.explorerUrl?.let { Row0("Explorer", hostOf(it), mono = true) }
-    Spacer(Modifier.height(8.dp))
-    Note(
-        "The site chose these RPCs. They'll see your addresses and what you read and send on this network, " +
-            "and their answers aren't checked against other RPCs. You can change or remove the network in " +
-            "Settings → Chains.",
-        warn = true,
+    Row0(stringResource(R.string.send_label_network), chain.name)
+    Row0(stringResource(R.string.send_eth_chain_id), chain.id.toString(), mono = true)
+    Row0(
+        stringResource(R.string.send_eth_currency_label),
+        pluralStringResource(R.plurals.send_eth_currency, chain.decimals, chain.currencyName, chain.symbol, chain.decimals),
     )
+    Row0(stringResource(R.string.send_eth_rpc), chain.rpcUrls.joinToString("\n") { hostOf(it) }, mono = true)
+    chain.explorerUrl?.let { Row0(stringResource(R.string.send_eth_explorer), hostOf(it), mono = true) }
+    Spacer(Modifier.height(8.dp))
+    Note(stringResource(R.string.send_eth_add_chain_note), warn = true)
 }
 
 /** `host[:port]` of [url] (an accepted RPC has no user info). */
@@ -546,11 +557,7 @@ private fun hostOf(url: String): String = runCatching { URI(url).rawAuthority }.
 
 /** The line under a sheet whose signature a Ledger ([deviceName]) makes; [hashesOnly]: it shows [LedgerHashesOnly]'s hashes. */
 internal fun ledgerNote(deviceName: String, hashesOnly: Boolean): String =
-    if (hashesOnly) {
-        "You’ll confirm this on your Ledger ($deviceName) next, where it shows only the two hashes above."
-    } else {
-        "You’ll check and confirm this on your Ledger ($deviceName) next."
-    }
+    Strings.get(if (hashesOnly) R.string.send_eth_ledger_note_hashes else R.string.send_eth_ledger_note, deviceName)
 
 /**
  * Typed data a Ledger can't show field by field (an array over 255, a
@@ -562,14 +569,9 @@ internal fun ledgerNote(deviceName: String, hashesOnly: Boolean): String =
 internal fun LedgerHashesOnly(hashes: LedgerTypedDataHashes) {
     Spacer(Modifier.height(8.dp))
     Column(Modifier.testTag("ledger-hashes-only")) {
-        Note(
-            "Your Ledger can’t show this data field by field. It will show only these two hashes of it, and signs them " +
-                "only with Blind signing on — so its screen can’t confirm the data above. Check the data here, " +
-                "and that the Ledger shows these same hashes.",
-            warn = true,
-        )
-        Row0("Domain hash", hashes.domainHex, mono = true)
-        Row0("Message hash", hashes.messageHex, mono = true)
+        Note(stringResource(R.string.send_eth_ledger_hashes_only), warn = true)
+        Row0(stringResource(R.string.send_eth_domain_hash), hashes.domainHex, mono = true)
+        Row0(stringResource(R.string.send_eth_message_hash), hashes.messageHex, mono = true)
     }
 }
 
@@ -596,7 +598,7 @@ internal fun Row0(label: String, value: String, mono: Boolean = false, detail: S
 }
 
 @Composable
-internal fun AccountRow(account: WalletAccount, label: String = "Account") {
+internal fun AccountRow(account: WalletAccount, label: String = stringResource(R.string.send_label_account)) {
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(accountLabel(account))
@@ -647,7 +649,7 @@ private fun Block(text: String, mono: Boolean, maxHeight: Int = 240, omitted: In
     if (more > 0) {
         Spacer(Modifier.height(4.dp))
         Note(
-            "Too long to show whole: ${"%,d".format(more)} more characters aren't shown. " + (whole ?: ""),
+            pluralStringResource(R.plurals.send_eth_too_long, more, NumberFormat.getIntegerInstance().format(more), whole ?: ""),
             warn = true,
         )
     }

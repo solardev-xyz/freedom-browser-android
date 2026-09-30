@@ -28,12 +28,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.data.AutoApproveStore
 import baby.freedom.mobile.data.DappGrantStore
 import baby.freedom.mobile.data.SwarmGrantStore
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.WalletAccount
 import java.util.Date
 import kotlinx.coroutines.flow.map
@@ -48,7 +51,7 @@ import kotlinx.coroutines.launch
  */
 
 /** What a connected site's line says under its name, when it hasn't the account: the wallet page's wording (#215). */
-internal const val GONE_ACCOUNT = "An account this wallet no longer has"
+internal val GONE_ACCOUNT: String get() = Strings.get(R.string.send_gone_account)
 
 /** The wallet account [grant] shares, if the wallet still has it. */
 internal fun grantAccount(grant: DappGrantStore.Grant, accounts: List<WalletAccount>): WalletAccount? =
@@ -56,7 +59,7 @@ internal fun grantAccount(grant: DappGrantStore.Grant, accounts: List<WalletAcco
 
 /** The network [grant]'s site is on, by name; "chain 1234" for one the chain list doesn't have. */
 internal fun grantNetwork(grant: DappGrantStore.Grant, chains: List<Chain>): String =
-    chains.firstOrNull { it.id == grant.chainId }?.name ?: "chain ${grant.chainId}"
+    chains.firstOrNull { it.id == grant.chainId }?.name ?: Strings.get(R.string.send_chain_fallback, grant.chainId.toString())
 
 /** "Account 1 · 0x9858…da94 · Gnosis Chain": which account a connected site sees, and on which network. */
 internal fun connectedSiteSummary(
@@ -83,7 +86,7 @@ internal fun DappSitesSection(
     onRevoke: (String) -> Unit,
     disconnectFailed: String? = null,
 ) {
-    SectionCard(title = "Connected sites") {
+    SectionCard(title = stringResource(R.string.send_connected_sites)) {
         grants.forEach { grant ->
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(
@@ -100,13 +103,13 @@ internal fun DappSitesSection(
                     )
                     if (disconnectFailed == grant.origin) {
                         Text(
-                            DISCONNECT_FAILED,
+                            stringResource(R.string.send_disconnect_failed),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                         )
                     }
                 }
-                TextButton(onClick = { onRevoke(grant.origin) }) { Text("Disconnect") }
+                TextButton(onClick = { onRevoke(grant.origin) }) { Text(stringResource(R.string.common_disconnect)) }
             }
         }
     }
@@ -140,7 +143,7 @@ internal fun ConnectedSitePage(
     val allRules = read?.rules
     val rules = allRules.orEmpty().filter { it.origin == grant.origin }
     var removeFailed by remember { mutableStateOf<AutoApproveRule?>(null) }
-    FullScreenScaffold(title = "Connected site", onDismiss = onBack) {
+    FullScreenScaffold(title = stringResource(R.string.send_connected_site), onDismiss = onBack) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -149,14 +152,19 @@ internal fun ConnectedSitePage(
             item("site") {
                 SectionCard(title = permissionOriginDisplay(grant.origin)) {
                     Text(
-                        CONNECTED_SITE_EXPLAINER,
+                        stringResource(R.string.send_connected_site_explainer),
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(bottom = 8.dp),
                     )
-                    TxField("Site", grant.origin)
-                    TxField(if (account != null) "Account · ${account.name}" else "Account · $GONE_ACCOUNT", null, address = grant.account)
-                    TxField("Network", grantNetwork(grant, chains))
-                    grant.connectedAt?.let { TxField("Connected", txDateFormat().format(Date(it))) }
+                    TxField(stringResource(R.string.send_site), grant.origin)
+                    TxField(
+                        stringResource(R.string.send_account_named, account?.name ?: stringResource(R.string.send_gone_account)),
+                        null,
+                        address = grant.account,
+                    )
+                    TxField(stringResource(R.string.send_label_network), grantNetwork(grant, chains))
+                    val connected = stringResource(R.string.send_connected)
+                    grant.connectedAt?.let { TxField(connected, txDateFormat().format(Date(it))) }
                 }
             }
             item("rules") {
@@ -191,11 +199,11 @@ internal fun ConnectedSitePage(
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text("Disconnect")
+                        Text(stringResource(R.string.common_disconnect))
                     }
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        if (failed) DISCONNECT_FAILED else DISCONNECT_EXPLAINER,
+                        stringResource(if (failed) R.string.send_disconnect_failed else R.string.send_disconnect_explainer),
                         style = MaterialTheme.typography.bodySmall,
                         color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -205,14 +213,10 @@ internal fun ConnectedSitePage(
     }
 }
 
-internal const val CONNECTED_SITE_EXPLAINER =
-    "This site can see the account below and ask you to sign messages or send transactions from it. " +
-        "Each signature and transaction still needs your approval, unless an auto-approve rule below covers it."
-internal const val DISCONNECT_EXPLAINER =
-    "The site's open pages lose the account at once, and its auto-approve rules are removed. It can ask to connect " +
-        "again; nothing is shared until you approve."
-internal const val DISCONNECT_FAILED = "Couldn't disconnect: the change couldn't be saved. Try again."
-internal const val ASK_EACH_TIME_FAILED = "Couldn't switch to asking each time: the change couldn't be saved. Try again."
+internal val CONNECTED_SITE_EXPLAINER: String get() = Strings.get(R.string.send_connected_site_explainer)
+internal val DISCONNECT_EXPLAINER: String get() = Strings.get(R.string.send_disconnect_explainer)
+internal val DISCONNECT_FAILED: String get() = Strings.get(R.string.send_disconnect_failed)
+internal val ASK_EACH_TIME_FAILED: String get() = Strings.get(R.string.send_ask_each_time_failed)
 
 /** One read of the auto-approve rules; [rules] null when the store couldn't be read. */
 private class RulesRead(val rules: List<AutoApproveRule>?)
@@ -220,23 +224,23 @@ private class RulesRead(val rules: List<AutoApproveRule>?)
 /** What a Swarm-connected site's line says: what it may do without asking (#120), and whether it may message (#121). */
 internal fun swarmSiteSummary(grant: SwarmGrantStore.Grant): String {
     val always = listOfNotNull(
-        "publishes".takeIf { "publish" in grant.autoApprove },
-        "manages feeds".takeIf { "feeds" in grant.autoApprove },
-        "signs".takeIf { "signing" in grant.autoApprove },
-        "sends messages".takeIf { grant.messaging && "messaging" in grant.autoApprove },
-    )
+        R.string.send_swarm_publishes.takeIf { "publish" in grant.autoApprove },
+        R.string.send_swarm_manages_feeds.takeIf { "feeds" in grant.autoApprove },
+        R.string.send_swarm_signs.takeIf { "signing" in grant.autoApprove },
+        R.string.send_swarm_sends_messages.takeIf { grant.messaging && "messaging" in grant.autoApprove },
+    ).map { Strings.get(it) }
     val summary = if (always.isEmpty()) {
-        "Asks before each upload and signature"
+        Strings.get(R.string.send_swarm_asks_each)
     } else {
-        always.joinToString(", ").replaceFirstChar { it.uppercase() } + " without asking"
+        Strings.get(R.string.send_swarm_without_asking, always.joinToString(", ").replaceFirstChar { it.uppercase() })
     }
-    return if (grant.messaging) "$summary · Can send and receive messages" else summary
+    return if (grant.messaging) Strings.get(R.string.send_swarm_can_message, summary) else summary
 }
 
 /** What a site's line says about its permission manifest (#122): the rows it allowed through it, or null. */
 internal fun swarmManifestSummary(rows: List<ManifestCapability>?): String? =
     rows?.takeIf { it.isNotEmpty() }?.let { r ->
-        "Allowed by the app's permission manifest: " + r.joinToString(", ") { manifestRowLabel(it).first.lowercase() }
+        Strings.get(R.string.send_swarm_manifest_allowed, r.joinToString(", ") { manifestRowLabel(it).first.lowercase() })
     }
 
 /**
@@ -258,7 +262,7 @@ internal fun SwarmSitesSection(
     onAskEachTime: (String) -> Unit = {},
     askEachTimeFailed: String? = null,
 ) {
-    SectionCard(title = "Connected to Swarm") {
+    SectionCard(title = stringResource(R.string.send_connected_to_swarm)) {
         grants.forEach { grant ->
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f).padding(vertical = 4.dp)) {
@@ -278,24 +282,24 @@ internal fun SwarmSitesSection(
                         TextButton(
                             onClick = { onAskEachTime(grant.origin) },
                             modifier = Modifier.testTag("swarm-ask-each-time"),
-                        ) { Text("Ask each time") }
+                        ) { Text(stringResource(R.string.send_ask_each_time)) }
                     }
                     if (askEachTimeFailed == grant.origin) {
                         Text(
-                            ASK_EACH_TIME_FAILED,
+                            stringResource(R.string.send_ask_each_time_failed),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                         )
                     }
                     if (disconnectFailed == grant.origin) {
                         Text(
-                            DISCONNECT_FAILED,
+                            stringResource(R.string.send_disconnect_failed),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                         )
                     }
                 }
-                TextButton(onClick = { onRevoke(grant.origin) }) { Text("Disconnect") }
+                TextButton(onClick = { onRevoke(grant.origin) }) { Text(stringResource(R.string.common_disconnect)) }
             }
         }
     }

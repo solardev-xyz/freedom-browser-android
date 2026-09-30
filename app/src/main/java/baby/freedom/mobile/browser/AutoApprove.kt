@@ -11,10 +11,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.ens.Keccak256
+import baby.freedom.mobile.l10n.Strings
 import java.math.BigInteger
 import java.util.Date
 
@@ -162,7 +165,7 @@ internal fun selectorOf(signature: String): String = "0x" + hexOf(Keccak256.dige
 
 /** What a well-known [selector] does ("token transfers"); null for any other, which is still allowed. */
 internal fun selectorLabel(selector: String): String? = when (selector.lowercase()) {
-    "0xa9059cbb", "0x23b872dd" -> "token transfers"
+    "0xa9059cbb", "0x23b872dd" -> Strings.get(R.string.send_auto_approve_token_transfers)
     else -> null
 }
 
@@ -172,10 +175,7 @@ internal fun selectorLabel(selector: String): String? = when (selector.lowercase
  * ([autoApproveRuleWarning]) so the two surfaces can't describe it
  * differently (#253 R3-M1); each adds only its own closing advice.
  */
-private const val UNKNOWN_FUNCTION_RISK =
-    "The wallet can't tell what this function does. If it can move tokens you've approved this contract " +
-        "to use, run calls it's handed (as a swap router can), or let someone else spend, borrow or " +
-        "withdraw for you, this rule lets the site do that with no sheet, to anyone."
+private val UNKNOWN_FUNCTION_RISK: String get() = Strings.get(R.string.send_auto_approve_unknown_risk)
 
 /**
  * Under the switch, in red, for a function the wallet can't name (#234):
@@ -186,7 +186,7 @@ internal fun autoApproveWarning(rule: AutoApproveRule): String? =
     if (selectorLabel(rule.selector) != null) {
         null
     } else {
-        "$UNKNOWN_FUNCTION_RISK Only turn it on for a function you know."
+        Strings.get(R.string.send_auto_approve_warning_switch, UNKNOWN_FUNCTION_RISK)
     }
 
 /**
@@ -199,40 +199,35 @@ internal fun autoApproveRuleWarning(rule: AutoApproveRule): String? =
     if (selectorLabel(rule.selector) != null) {
         null
     } else {
-        "$UNKNOWN_FUNCTION_RISK Remove it unless you know the function."
+        Strings.get(R.string.send_auto_approve_warning_rule, UNKNOWN_FUNCTION_RISK)
     }
 
 /** The sheet's switch: "Always approve token transfers on this contract". */
 internal fun autoApproveSwitchLabel(rule: AutoApproveRule): String =
-    "Always approve ${selectorLabel(rule.selector) ?: "this function"} on this contract"
+    selectorLabel(rule.selector)?.let { Strings.get(R.string.send_auto_approve_switch_label, it) }
+        ?: Strings.get(R.string.send_auto_approve_switch_label_unknown)
 
 /** Under the switch: exactly what the rule covers, in full. */
 internal fun autoApproveScope(rule: AutoApproveRule, chain: String): String =
-    "Function ${rule.selector} on ${checksumOf(rule.contract)}, on $chain, from this site only. " +
-        "Every such call is covered, whatever its recipient, spender or amount. " +
-        "Calls that also send funds still ask."
+    Strings.get(R.string.send_auto_approve_scope, rule.selector, checksumOf(rule.contract), chain)
 
 /** A rule's line on its site's page: "Token transfers" or "Function 0x12345678". */
 internal fun autoApproveRuleTitle(rule: AutoApproveRule): String =
-    selectorLabel(rule.selector)?.replaceFirstChar { it.uppercase() } ?: "Function ${rule.selector}"
+    selectorLabel(rule.selector)?.replaceFirstChar { it.uppercase() } ?: Strings.get(R.string.send_auto_approve_function, rule.selector)
 
 /** A rule's details on its site's page: the function, the network, since when. */
 internal fun autoApproveRuleDetail(rule: AutoApproveRule, chains: List<Chain>): String {
-    val network = chains.firstOrNull { it.id == rule.chainId }?.name ?: "chain ${rule.chainId}"
-    val since = rule.grantedAt?.let { " · since ${txDateFormat().format(Date(it))}" }.orEmpty()
-    return "Function ${rule.selector} · $network$since"
+    val network = chains.firstOrNull { it.id == rule.chainId }?.name ?: Strings.get(R.string.send_chain_fallback, rule.chainId.toString())
+    return rule.grantedAt?.let {
+        Strings.get(R.string.send_auto_approve_rule_detail_since, rule.selector, network, txDateFormat().format(Date(it)))
+    } ?: Strings.get(R.string.send_auto_approve_rule_detail, rule.selector, network)
 }
 
 /** [address] (lower-case, valid) in EIP-55 form, as the sheets show addresses. */
 private fun checksumOf(address: String): String = EthereumProvider.checksummed(address) ?: address
 
-internal const val AUTO_APPROVE_EXPLAINER =
-    "Transactions from this site that match a rule go out without asking while the wallet is unlocked. " +
-        "Each rule covers one function on one contract on one network — with any recipient, spender or amount — " +
-        "and only calls that send no funds. " +
-        "The best-known approval, permit, multicall and execute functions can't have a rule. " +
-        "Disconnecting the site removes its rules."
-internal const val AUTO_APPROVE_REMOVE_FAILED = "Couldn't remove the rule: the change couldn't be saved. Try again."
+internal val AUTO_APPROVE_EXPLAINER: String get() = Strings.get(R.string.send_auto_approve_explainer)
+internal val AUTO_APPROVE_REMOVE_FAILED: String get() = Strings.get(R.string.send_auto_approve_remove_failed)
 
 /**
  * A connected site's auto-approve rules, each with Remove (#112). The
@@ -249,9 +244,9 @@ internal fun AutoApproveRulesSection(
     /** The rules haven't been read yet: say nothing about them rather than "None". */
     loading: Boolean = false,
 ) {
-    SectionCard(title = "Auto-approve rules") {
+    SectionCard(title = stringResource(R.string.send_auto_approve_rules)) {
         Text(
-            AUTO_APPROVE_EXPLAINER,
+            stringResource(R.string.send_auto_approve_explainer),
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.padding(bottom = 8.dp),
         )
@@ -259,13 +254,13 @@ internal fun AutoApproveRulesSection(
             // Nothing yet: a "None" here would be wrong for a moment on a site with rules.
         } else if (unreadable) {
             Text(
-                "Couldn't read the rules right now. None of them apply until they can be read.",
+                stringResource(R.string.send_auto_approve_unreadable),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
         } else if (rules.isEmpty()) {
             Text(
-                "None. Turn one on from a transaction's approval sheet.",
+                stringResource(R.string.send_auto_approve_none),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -294,13 +289,13 @@ internal fun AutoApproveRulesSection(
                     }
                     if (failed?.sameScope(rule) == true) {
                         Text(
-                            AUTO_APPROVE_REMOVE_FAILED,
+                            stringResource(R.string.send_auto_approve_remove_failed),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                         )
                     }
                 }
-                TextButton(onClick = { onRemove(rule) }, modifier = Modifier.testTag("auto-approve-remove")) { Text("Remove") }
+                TextButton(onClick = { onRemove(rule) }, modifier = Modifier.testTag("auto-approve-remove")) { Text(stringResource(R.string.common_remove)) }
             }
         }
     }
