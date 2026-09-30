@@ -86,6 +86,13 @@ app's files.
   (`SwarmStrings.english`) or the native library's own words, and pages
   get that; its `detailKey`/`detailArg` let the node page show `shown`,
   resolved in the app language when drawn.
+- **Bodies the interceptor serves that another page can read** (the
+  Swarm-gateway guard's 403, which carries `Access-Control-Allow-Origin:
+  *`; an onchain app's 403/404/405 text): `Strings.english(…)`, so no site
+  learns the app language from them (#313 R3-F1). A table in the app
+  language, like the Radicle viewer's `/_/strings.js`, is served only to
+  its own page (`fromViewer`) with `Cross-Origin-Resource-Policy:
+  same-origin`.
 - **Text held in state or a cache** (a last-check failure, a store name, a
   cached trust answer): keep a `Text.res(R.string.x, …)` or a stable key,
   and resolve it when shown. A string resolved once stays in the old

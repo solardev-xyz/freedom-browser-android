@@ -591,14 +591,14 @@ internal fun interceptOnchainAppRequest(
     if (virtual == null && !OnchainAppRef.isWeb3Scheme(url)) {
         // Under the suffix but not an app's own origin (another label, a
         // port, a trailing dot, plain http): no such site, and no DNS.
-        return onchainTextResponse(404, "Not Found", Strings.get(R.string.radicle_onchain_no_app_here))
+        return onchainTextResponse(404, "Not Found", Strings.english(R.string.radicle_onchain_no_app_here))
     }
     if (virtual == null || !req.isForMainFrame) {
-        return onchainTextResponse(403, "Forbidden", Strings.get(R.string.radicle_onchain_top_level_only))
+        return onchainTextResponse(403, "Forbidden", Strings.english(R.string.radicle_onchain_top_level_only))
     }
     val method = req.method?.uppercase() ?: "GET"
     if (method != "GET" && method != "HEAD") {
-        return onchainTextResponse(405, "Method Not Allowed", Strings.get(R.string.radicle_onchain_get_head_only))
+        return onchainTextResponse(405, "Method Not Allowed", Strings.english(R.string.radicle_onchain_get_head_only))
     }
     val (app, tail) = virtual
     val handedOff = tab?.takeHandoff(app)

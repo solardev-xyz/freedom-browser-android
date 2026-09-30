@@ -94,16 +94,9 @@ internal object NodeApiGuard {
     fun refusalFor(request: WebResourceRequest): WebResourceResponse? {
         val url = request.url?.toString() ?: return null
         val method = request.method.orEmpty()
-        if (!refuses(method, url)) return null
-        val segment = firstSegment(pathOf(url))
-        val write = isWrite(method) && segment in CHAIN_PATHS
-        val text = when {
-            write -> Strings.get(R.string.node_api_spend_refusal)
-            isLoopbackLiteral(WhatwgHost.parse(url)?.hostname) -> READ_REFUSAL
-            else -> Strings.get(R.string.node_api_read_refusal_other_node, dappPathList())
-        }
+        val text = refusalText(method, url) ?: return null
         // The endpoint only: a query can carry anything.
-        Log.w(TAG, "refused a page's request to the Swarm node's API: ${method.uppercase()} /${segment.orEmpty()}")
+        Log.w(TAG, "refused a page's request to the Swarm node's API: ${method.uppercase()} /${firstSegment(pathOf(url)).orEmpty()}")
         return WebResourceResponse(
             "text/plain", "utf-8", 403, "Forbidden",
             mapOf(
@@ -113,6 +106,22 @@ internal object NodeApiGuard {
             ),
             ByteArrayInputStream(text.toByteArray(Charsets.UTF_8)),
         )
+    }
+
+    /**
+     * [refusalFor]'s body, or null if [url] isn't refused. Always English,
+     * whatever the app language: it goes out with
+     * `Access-Control-Allow-Origin: *`, so any page can read it, and it
+     * mustn't tell a site which language the user picked (#313 R3-F1).
+     */
+    internal fun refusalText(method: String, url: String): String? {
+        if (!refuses(method, url)) return null
+        val write = isWrite(method) && firstSegment(pathOf(url)) in CHAIN_PATHS
+        return when {
+            write -> Strings.english(R.string.node_api_spend_refusal)
+            isLoopbackLiteral(WhatwgHost.parse(url)?.hostname) -> READ_REFUSAL
+            else -> Strings.english(R.string.node_api_read_refusal_other_node, dappPathList())
+        }
     }
 
     /**
@@ -272,7 +281,7 @@ internal object NodeApiGuard {
 
     /** Lists every path in [DAPP_PATHS], so the text can't drift from what's allowed. */
     internal val READ_REFUSAL: String
-        get() = Strings.get(R.string.node_api_read_refusal, dappPathList())
+        get() = Strings.english(R.string.node_api_read_refusal, dappPathList())
 
     /** [DAPP_PATHS] as the refusal lists them: `/bzz, /bytes, …`. */
     private fun dappPathList(): String = DAPP_PATHS.joinToString(", ") { "/$it" }

@@ -4,6 +4,7 @@ import java.io.File
 import java.util.Locale
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -40,7 +41,7 @@ class RadViewerStringsTest {
         )
         assertEquals(200, reply.status)
         assertTrue(reply.mime.startsWith("text/javascript"))
-        assertEquals(RadApi.PAGE_HEADERS, reply.headers)
+        assertEquals(RadApi.PAGE_HEADERS + ("Cross-Origin-Resource-Policy" to "same-origin"), reply.headers)
         val text = String(reply.body)
         val prefix = "window.RAD_STRINGS = "
         assertTrue(text.startsWith(prefix))
@@ -55,6 +56,18 @@ class RadViewerStringsTest {
         }
         assertEquals("%1\$d comment", plurals.getJSONObject("comments").getString("one"))
         assertEquals("%1\$d comments", plurals.getJSONObject("comments").getString("other"))
+    }
+
+    @Test
+    fun `another site can't include the table, which names the app language`() {
+        val reply = RadApi.serve(
+            "GET",
+            "https://rad.freedom.baby/_/strings.js",
+            { _, _ -> error("the API isn't asked") },
+            fromViewer = false,
+        )
+        assertEquals(403, reply.status)
+        assertFalse(String(reply.body).contains("RAD_STRINGS"))
     }
 
     @Test

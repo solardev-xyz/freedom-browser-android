@@ -168,17 +168,22 @@ object RadApi {
         val head = m == "HEAD"
         val reply = when {
             isApi -> serveApi(path.removePrefix(RadUrl.API_PREFIX), backend)
-            path.startsWith(RadUrl.INTERNAL_PREFIX) -> serveFile(path.substringBefore('?').substringBefore('#'))
+            path.startsWith(RadUrl.INTERNAL_PREFIX) -> serveFile(path.substringBefore('?').substringBefore('#'), fromViewer)
             else -> viewer()
         }
         return if (head) reply.copy(body = ByteArray(0)) else reply
     }
 
-    private fun serveFile(path: String): Reply {
+    private fun serveFile(path: String, fromViewer: Boolean): Reply {
         if (path == RadUrl.INVALID_PATH) return viewer()
         if (path == VIEWER_STRINGS_JS) {
+            // The viewer's text in the app language, plus its locale tag:
+            // only the viewer reads it. Another site's `<script src>` (a
+            // classic script needs no CORS) gets the API's 403, and CORP
+            // backs that up in the browser (#313 R3-F1).
+            if (!fromViewer) return json(403, error("not available to other sites"))
             val script = "window.RAD_STRINGS = ${viewerStrings()};\n"
-            return Reply(200, mimeFor(path), script.toByteArray(), PAGE_HEADERS)
+            return Reply(200, mimeFor(path), script.toByteArray(), STRINGS_HEADERS)
         }
         val file = VIEWER_FILES.firstOrNull { it.first == path && it.first != VIEWER_HTML }
             ?: return json(404, error("not found"))
@@ -650,7 +655,10 @@ object RadApi {
         "X-Content-Type-Options" to "nosniff",
     )
 
-    private const val VIEWER_HTML = "${RadUrl.INTERNAL_PREFIX}viewer.html"
+    /** `/_/strings.js`: [PAGE_HEADERS], readable by the viewer's own origin only. */
+    private val STRINGS_HEADERS = PAGE_HEADERS + ("Cross-Origin-Resource-Policy" to "same-origin")
+
+    private const val VIEWER_HTML ="${RadUrl.INTERNAL_PREFIX}viewer.html"
 
     private const val VIEWER_STRINGS_JS = "${RadUrl.INTERNAL_PREFIX}strings.js"
 
