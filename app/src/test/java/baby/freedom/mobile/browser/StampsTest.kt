@@ -258,4 +258,17 @@ class StampsTest {
         const val ACCOUNT_A = "0x1111111111111111111111111111111111111aAa"
         const val ACCOUNT_B = "0x2222222222222222222222222222222222222bBb"
     }
+
+    @Test
+    fun `detach resets the process-wide node state to Stopped`() {
+        val before = StampClient.node.value
+        try {
+            StampClient.node.value = NodeInfo(status = NodeStatus.Running)
+            StampClient.detach()
+            assertEquals(NodeInfo(), StampClient.node.value)
+            assertNull(StampClient.service)
+        } finally {
+            StampClient.node.value = before
+        }
+    }
 }

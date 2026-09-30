@@ -300,8 +300,7 @@ class MainActivity : ComponentActivity() {
             // [setRunNodeEnabled] instead, which sets Stopped explicitly.
             binder = null
             RadicleClient.service = null
-            StampClient.service = null
-            infoFlow.value = NodeInfo()
+            StampClient.detach()
             ipfsInfoFlow.value = IpfsInfo()
             radicleInfoFlow.value = RadicleInfo()
             Gateways.setIpfsBase("")
@@ -906,7 +905,6 @@ class MainActivity : ComponentActivity() {
         } else {
             NodeService.stop(this)
         }
-        infoFlow.value = NodeInfo()
         ipfsInfoFlow.value = IpfsInfo()
         radicleInfoFlow.value = RadicleInfo()
         Gateways.setIpfsBase("")
@@ -918,7 +916,10 @@ class MainActivity : ComponentActivity() {
         runCatching { unbindService(connection) }
         binder = null
         RadicleClient.service = null
-        StampClient.service = null
+        // Unbound, the callback no longer moves the process-wide node
+        // state, so it goes back to Stopped rather than stay at the last
+        // report for the next Activity to start from (#291 R5-M1).
+        StampClient.detach()
         bound = false
     }
 }

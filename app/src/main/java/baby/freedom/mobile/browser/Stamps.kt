@@ -240,6 +240,19 @@ internal object StampClient {
      */
     val node = MutableStateFlow(NodeInfo())
 
+    /**
+     * This process stopped hearing from `:node` (an unbind, the Activity's
+     * destroy, or `:node` dying): drop the binder and reset [node] to
+     * Stopped, as a fresh Activity's own flow used to start. [node] is
+     * process-wide, so without this a recreated Activity (the task swiped
+     * away while the process stays cached) would first show the previous
+     * binding's last state until its own bind reports (#291 R5-M1).
+     */
+    fun detach() {
+        service = null
+        node.value = NodeInfo()
+    }
+
     sealed interface Answer {
         data class Ok(val json: JSONObject) : Answer
         /**
