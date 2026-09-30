@@ -199,9 +199,17 @@ interface VerifiedChainSource {
      * the state it proves from them. Throw [ChainRpcException.Rpc] with
      * `deterministic` set for an answer that is itself an error (a
      * revert); anything else thrown means "couldn't answer", and the walk
-     * moves on.
+     * moves on. [context] says whose read it is: a page's
+     * ([RoutingContext.interactive]) is one the page chose, and mustn't
+     * cost the wallet's own reads anything shared (a back-off, slots).
      */
-    suspend fun request(chainId: Long, method: String, params: org.json.JSONArray, rpcs: List<String>): ChainDataResult
+    suspend fun request(
+        chainId: Long,
+        method: String,
+        params: org.json.JSONArray,
+        rpcs: List<String>,
+        context: RoutingContext = RoutingContext.WALLET,
+    ): ChainDataResult
 
     /**
      * Whether [broadcast] is implemented. The router asks a source that

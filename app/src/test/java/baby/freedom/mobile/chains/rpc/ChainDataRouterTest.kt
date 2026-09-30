@@ -416,9 +416,17 @@ class ChainDataRouterTest {
         var calls = 0
         override fun isAvailable(chainId: Long) = available
         val rpcsSeen = CopyOnWriteArrayList<List<String>>()
-        override suspend fun request(chainId: Long, method: String, params: JSONArray, rpcs: List<String>): ChainDataResult {
+        val contextsSeen = CopyOnWriteArrayList<RoutingContext>()
+        override suspend fun request(
+            chainId: Long,
+            method: String,
+            params: JSONArray,
+            rpcs: List<String>,
+            context: RoutingContext,
+        ): ChainDataResult {
             calls++
             rpcsSeen += rpcs
+            contextsSeen += context
             return answer()
         }
     }
@@ -566,6 +574,9 @@ class ChainDataRouterTest {
             .request(1, "eth_blockNumber", context = RoutingContext.forPage("web3://app.eth"))
         assertEquals(ChainSource.QUORUM, r.trust.source)
         assertEquals(ChainDataRouter.INTERACTIVE_DEADLINE_MS, currentTime)
+        // The source is told it's a page's read, so it can keep the miss
+        // off what the wallet's reads share (Colibri's back-off, Myotis's slots).
+        assertEquals(listOf(RoutingContext.forPage("web3://app.eth")), slow.contextsSeen.toList())
     }
 
     @Test
@@ -728,7 +739,7 @@ class ChainDataRouterTest {
         BuiltInChains.ETHEREUM.rpcUrls.forEach { url -> net.handlers[url] = { ok(txHash) } }
         val myotis = object : VerifiedChainSource {
             override fun isAvailable(chainId: Long) = true
-            override suspend fun request(chainId: Long, method: String, params: JSONArray, rpcs: List<String>): ChainDataResult =
+            override suspend fun request(chainId: Long, method: String, params: JSONArray, rpcs: List<String>, context: RoutingContext): ChainDataResult =
                 throw IOException()
             override val canBroadcast = true
             override suspend fun broadcast(chainId: Long, rawTransaction: String): String =

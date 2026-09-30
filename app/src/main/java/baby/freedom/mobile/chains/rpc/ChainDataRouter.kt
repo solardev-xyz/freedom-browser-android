@@ -168,7 +168,7 @@ class ChainDataRouter internal constructor(
                 val t0 = clock()
                 val outcome: Any? = when (source) {
                     ChainSource.MYOTIS, ChainSource.COLIBRI ->
-                        verified(source, chain, pool, method, normalized, waitMs, keeper)
+                        verified(source, chain, pool, method, normalized, waitMs, keeper, context)
                             .let { o -> if (agreeOn != null && o is ChainDataResult) o.copy(result = agreeOn(o.result)) else o }
                     ChainSource.QUORUM -> {
                         val members = quorumMembers(pool, policy.quorumK)
@@ -351,12 +351,13 @@ class ChainDataRouter internal constructor(
         params: JSONArray,
         waitMs: Long,
         keeper: ErrorKeeper,
+        context: RoutingContext,
     ): Any? {
         fun failed(reason: String, timeout: Boolean = false): String =
             reason.also { keeper.note(ChainFailure(null, it, null, timeout)) }
         val s = verifiedSources[source]?.takeIf { it.isAvailable(chain.id) } ?: return failed("not available")
         return try {
-            withTimeoutOrNull(waitMs) { s.request(chain.id, method, params, pool) }
+            withTimeoutOrNull(waitMs) { s.request(chain.id, method, params, pool, context) }
                 ?: failed("no answer within ${waitMs}ms", timeout = true)
         } catch (e: CancellationException) {
             // The source's own cancellation, not ours: no answer.

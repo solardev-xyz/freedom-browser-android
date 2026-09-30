@@ -21,17 +21,24 @@ import org.json.JSONTokener
  * hasn't seen (a transaction mined before it synced reads the same as
  * one that doesn't exist, so that `null` is never passed on as a
  * verified "no"). Those move on to the next tier. Never broadcasts.
+ *
+ * A page's read ([RoutingContext.interactive]) is sent as one: the
+ * router stops waiting for it after 2 s, but the engine can't cancel a
+ * started read, so the service keeps it to a share of its slots
+ * ([IMyotisService.read]'s `page`) and a site looping slow calls can't
+ * take the wallet's or name resolution's.
  */
 internal class MyotisChainSource(private val link: Link = Link.Default) : VerifiedChainSource {
     /** The light client as this source sees it; a seam for tests. */
     interface Link {
         fun isReady(chainId: Long): Boolean
-        suspend fun read(chainId: Long, method: String, paramsJson: String): String
+        /** [page]: a site's read ([RoutingContext.interactive]), which the service gives fewer slots. */
+        suspend fun read(chainId: Long, method: String, paramsJson: String, page: Boolean): String
 
         object Default : Link {
             override fun isReady(chainId: Long) = MyotisLink.isReady(chainId)
-            override suspend fun read(chainId: Long, method: String, paramsJson: String) =
-                MyotisLink.read(chainId, method, paramsJson)
+            override suspend fun read(chainId: Long, method: String, paramsJson: String, page: Boolean) =
+                MyotisLink.read(chainId, method, paramsJson, page)
         }
     }
 
@@ -43,10 +50,16 @@ internal class MyotisChainSource(private val link: Link = Link.Default) : Verifi
         else -> null
     }
 
-    override suspend fun request(chainId: Long, method: String, params: JSONArray, rpcs: List<String>): ChainDataResult {
+    override suspend fun request(
+        chainId: Long,
+        method: String,
+        params: JSONArray,
+        rpcs: List<String>,
+        context: RoutingContext,
+    ): ChainDataResult {
         if (method !in MyotisReads.METHODS) throw Unanswered("the light client doesn't serve $method")
         val reply = try {
-            JSONTokener(link.read(chainId, method, params.toString())).nextValue() as? JSONObject
+            JSONTokener(link.read(chainId, method, params.toString(), context.interactive)).nextValue() as? JSONObject
         } catch (_: Exception) {
             null
         } ?: throw Unanswered("unexpected answer from the light client")

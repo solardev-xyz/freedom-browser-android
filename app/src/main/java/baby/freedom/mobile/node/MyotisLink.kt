@@ -63,7 +63,7 @@ object MyotisLink : EnsLightClient {
      * no binding or `:myotis` dies before answering. Cancellable at once:
      * the service still answers a read it started, into nothing.
      */
-    suspend fun read(chainId: Long, method: String, paramsJson: String): String {
+    suspend fun read(chainId: Long, method: String, paramsJson: String, page: Boolean = false): String {
         val service = bindings.service ?: return UNAVAILABLE_JSON
         val binder = service.asBinder()
         return suspendCancellableCoroutine { cont ->
@@ -78,7 +78,7 @@ object MyotisLink : EnsLightClient {
             cont.invokeOnCancellation { runCatching { binder.unlinkToDeath(death, 0) } }
             try {
                 binder.linkToDeath(death, 0)
-                service.read(chainId, method, paramsJson, object : IMyotisCallResult.Stub() {
+                service.read(chainId, method, paramsJson, page, object : IMyotisCallResult.Stub() {
                     override fun onResult(json: String?) = finish(json ?: UNAVAILABLE_JSON)
                 })
             } catch (e: Exception) {

@@ -49,6 +49,17 @@ import org.json.JSONObject
  * the next read then needn't repeat — and any proof that comes in ends
  * the back-off. One call counts at most once, and a proof of this one
  * read not checking out doesn't count: it says nothing about the others.
+ *
+ * Only the wallet's and the Swarm node's own reads count directly. A
+ * page's read ([RoutingContext.interactive]: `window.ethereum`,
+ * `web3://`) is one the page chose — a call that takes the prover long
+ * to prove, or never proves, under a 2 s wait — so its miss or failure
+ * proves nothing about the prover, and on its own would let any site
+ * take the tier away from the wallet. It only asks for a **canary**: a
+ * proven `latest` block, which no page shapes, run in the background
+ * (up to [backgroundMs], outside [maxInFlight], one per chain at a time
+ * and at most one per [CANARY_INTERVAL_MS]). The canary failing the way
+ * a wallet read would count is what backs the chain off.
  */
 internal class ColibriChainSource(
     private val colibri: EnsColibri,
@@ -65,6 +76,7 @@ internal class ColibriChainSource(
 ) : VerifiedChainSource {
     private val inFlight = AtomicInteger()
     private val backoffs = ConcurrentHashMap<Long, Backoff>()
+    private val canaries = ConcurrentHashMap<Long, Canary>()
 
     override fun isAvailable(chainId: Long): Boolean = gap(chainId) == null
 
@@ -80,7 +92,13 @@ internal class ColibriChainSource(
     /** How much longer chain [chainId]'s reads skip the prover; `null` when it may be asked. */
     internal fun backoffRemainingMs(chainId: Long): Long? = backoffs[chainId]?.remainingMs()
 
-    override suspend fun request(chainId: Long, method: String, params: JSONArray, rpcs: List<String>): ChainDataResult {
+    override suspend fun request(
+        chainId: Long,
+        method: String,
+        params: JSONArray,
+        rpcs: List<String>,
+        context: RoutingContext,
+    ): ChainDataResult {
         if (!enabled()) throw Unanswered("Colibri proofs are off")
         backoffRemainingMs(chainId)?.let { throw Unanswered("backing off for ${it}ms: the prover couldn't be reached") }
         if (method !in METHODS) throw Unanswered("Colibri doesn't prove $method")
@@ -97,7 +115,9 @@ internal class ColibriChainSource(
         // here, or the background call's own end) sees it first.
         val counted = AtomicBoolean(false)
         fun failed() {
-            if (counted.compareAndSet(false, true)) backoff.failed()
+            if (!counted.compareAndSet(false, true)) return
+            // A page's read only asks the canary (see the class kdoc).
+            if (context.interactive) canary(chainId, rpcs) else backoff.failed()
         }
         val blockNumber = method == "eth_blockNumber"
         val call = scope.async {
@@ -164,6 +184,53 @@ internal class ColibriChainSource(
         )
     }
 
+    /**
+     * Check chain [chainId]'s prover with a read no page shapes — a
+     * proven `latest` block — after a page's read missed or failed, and
+     * back the chain off only if that fails too (see the class kdoc).
+     */
+    private fun canary(chainId: Long, rpcs: List<String>) {
+        val c = canaries.getOrPut(chainId) { Canary() }
+        if (!c.start(clock())) return
+        val backoff = backoffs.getOrPut(chainId) { Backoff() }
+        scope.async {
+            try {
+                val proven = withTimeoutOrNull(backgroundMs) {
+                    colibri.request(chainId, "eth_getBlockByNumber", JSONArray().put("latest").put(false), rpcs)
+                }
+                if (proven != null) backoff.succeeded() else backoff.failed()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: EnsColibri.Failure) {
+                if (e.unreachable) backoff.failed()
+            } catch (_: Throwable) {
+                backoff.failed()
+            } finally {
+                c.done()
+            }
+        }
+    }
+
+    /** Whether a page's miss may start one more canary for a chain (see the class kdoc). */
+    private class Canary {
+        private var running = false
+        private var startedAt: Long? = null
+
+        @Synchronized
+        fun start(now: Long): Boolean {
+            val last = startedAt
+            if (running || (last != null && now - last in 0 until CANARY_INTERVAL_MS)) return false
+            running = true
+            startedAt = now
+            return true
+        }
+
+        @Synchronized
+        fun done() {
+            running = false
+        }
+    }
+
     /** No proven answer; the router moves on. */
     class Unanswered(message: String) : Exception(message)
 
@@ -200,6 +267,9 @@ internal class ColibriChainSource(
 
         /** How long a call the router stopped waiting for may go on: a first sync-committee bootstrap. */
         const val BACKGROUND_MS = 60_000L
+
+        /** The least time between two canaries for one chain: a page looping misses mustn't loop them. */
+        const val CANARY_INTERVAL_MS = 10_000L
 
         /** What the core proves (colibri.h, `c4_get_method_support` PROOFABLE), and the router asks. */
         val METHODS = setOf(

@@ -27,8 +27,10 @@ class ProofSourcesTest {
 
     private class Link(var ready: Set<Long> = setOf(1L, 100L), val reply: (String) -> String) : MyotisChainSource.Link {
         val asked = mutableListOf<String>()
+        val pages = mutableListOf<Boolean>()
         override fun isReady(chainId: Long) = chainId in ready
-        override suspend fun read(chainId: Long, method: String, paramsJson: String): String {
+        override suspend fun read(chainId: Long, method: String, paramsJson: String, page: Boolean): String {
+            pages += page
             asked += "$chainId $method $paramsJson"
             return reply(method)
         }
@@ -339,5 +341,134 @@ class ProofSourcesTest {
         val deadline = System.nanoTime() + 5_000_000_000L
         while (!source.isAvailable(100) && System.nanoTime() < deadline) Thread.sleep(20)
         assertTrue(source.isAvailable(100))
+    }
+
+    // ---- Colibri: a page's read doesn't back the wallet's off (R2-F1) ----
+
+    /**
+     * A verifier whose `eth_call`s ask for one prover request (which
+     * [http] may stall or fail) and whose `latest`-block canaries answer
+     * [canary] at once, or ask for a request too when [canary] is null.
+     */
+    private class PageAndCanary(private val canary: JSONObject?) : EnsColibri.Engine {
+        override val available = true
+        val methods = java.util.concurrent.CopyOnWriteArrayList<String>()
+        private val byCtx = java.util.concurrent.ConcurrentHashMap<Long, String>()
+        private val rounds = java.util.concurrent.ConcurrentHashMap<Long, Int>()
+        private val next = AtomicLong(10)
+        override fun create(method: String, params: String, chainId: Long, proverFlags: Int, verifyFlags: Int, proverMode: Int): Long {
+            methods += method
+            return next.incrementAndGet().also { byCtx[it] = method }
+        }
+        override fun setMinLatestBlockTs(ctx: Long, unixSeconds: Long) = Unit
+        override fun execute(ctx: Long): String {
+            val round = rounds.merge(ctx, 1, Int::plus)!!
+            if (byCtx[ctx] == "eth_getBlockByNumber" && canary != null) return canary.toString()
+            return if (round == 1) {
+                JSONObject().put("status", "pending")
+                    .put("requests", JSONArray().put(JSONObject().put("type", "prover").put("req_ptr", "5")))
+                    .toString()
+            } else {
+                JSONObject().put("status", "error").put("error", "all provers failed").toString()
+            }
+        }
+        override fun setResponse(req: Long, data: ByteArray, nodeIndex: Int) = Unit
+        override fun setError(req: Long, error: String, nodeIndex: Int) = Unit
+        override fun free(ctx: Long) = Unit
+    }
+
+    private val page = RoutingContext.forPage("https://dapp.example")
+    private val call = JSONArray().put(JSONObject().put("to", "0x" + "11".repeat(20)).put("data", "0x")).put("latest")
+    private val latestBlock = JSONObject().put("status", "success")
+        .put("result", JSONObject().put("number", "0x10"))
+
+    @Test
+    fun `a page's call that misses its wait doesn't back off a healthy prover`() = runBlocking {
+        val gate = CountDownLatch(1)
+        val v = PageAndCanary(latestBlock)
+        val source = ColibriChainSource(
+            EnsColibri(v, http = { _, _, _, _, _ ->
+                gate.await(10, TimeUnit.SECONDS)
+                throw IOException("still stalled")
+            }),
+            present = { true },
+        )
+        // The router's 2 s page wait runs out on a call the prover is slow to prove.
+        assertNull(withTimeoutOrNull(200) { source.request(100, "eth_call", call, emptyList(), page) })
+        // A canary no page shapes checks the prover; it proves at once.
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while ("eth_getBlockByNumber" !in v.methods && System.nanoTime() < deadline) Thread.sleep(20)
+        Thread.sleep(100)
+        assertTrue("eth_getBlockByNumber" in v.methods)
+        assertNull(source.backoffRemainingMs(100))
+        assertTrue(source.isAvailable(100))
+        // Even when the page's call finally fails in the background, as unreachable.
+        gate.countDown()
+        Thread.sleep(200)
+        assertNull(source.backoffRemainingMs(100))
+        assertTrue(source.isAvailable(100))
+    }
+
+    @Test
+    fun `a page's miss backs off only when the canary can't reach the prover either`() = runBlocking {
+        val v = PageAndCanary(canary = null)
+        val source = ColibriChainSource(
+            EnsColibri(v, http = { _, _, _, _, _ -> throw IOException("connect timed out") }),
+            present = { true },
+        )
+        try {
+            source.request(100, "eth_call", call, emptyList(), page)
+            fail()
+        } catch (e: EnsColibri.Failure) {
+            assertTrue(e.unreachable)
+        }
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (source.isAvailable(100) && System.nanoTime() < deadline) Thread.sleep(20)
+        assertEquals(ProofTierGap.UNREACHABLE, source.gap(100))
+        assertEquals(listOf("eth_call", "eth_getBlockByNumber"), v.methods.toList())
+    }
+
+    @Test
+    fun `a page looping misses runs one canary per interval`() = runBlocking {
+        val now = AtomicLong(1_000_000)
+        val v = PageAndCanary(latestBlock)
+        val source = ColibriChainSource(
+            EnsColibri(v, http = { _, _, _, _, _ -> throw IOException("the prover can't prove this call in time") }),
+            present = { true },
+            clock = now::get,
+        )
+        repeat(5) { runCatching { source.request(100, "eth_call", call, emptyList(), page) } }
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while ("eth_getBlockByNumber" !in v.methods && System.nanoTime() < deadline) Thread.sleep(20)
+        Thread.sleep(100)
+        assertEquals(1, v.methods.count { it == "eth_getBlockByNumber" })
+        assertTrue(source.isAvailable(100))
+        // Past the interval, the next page miss may check again.
+        now.addAndGet(ColibriChainSource.CANARY_INTERVAL_MS)
+        runCatching { source.request(100, "eth_call", call, emptyList(), page) }
+        val d2 = System.nanoTime() + 5_000_000_000L
+        while (v.methods.count { it == "eth_getBlockByNumber" } < 2 && System.nanoTime() < d2) Thread.sleep(20)
+        assertEquals(2, v.methods.count { it == "eth_getBlockByNumber" })
+        assertTrue(source.isAvailable(100))
+    }
+
+    @Test
+    fun `the same miss from the wallet still backs off`() = runBlocking {
+        val v = PageAndCanary(latestBlock)
+        val source = ColibriChainSource(
+            EnsColibri(v, http = { _, _, _, _, _ -> throw IOException("connect timed out") }),
+            present = { true },
+        )
+        runCatching { source.request(100, "eth_call", call, emptyList()) }
+        assertEquals(ProofTierGap.UNREACHABLE, source.gap(100))
+        assertEquals(listOf("eth_call"), v.methods.toList())
+    }
+
+    @Test
+    fun `a page's read reaches the light client marked as a page's`() = runTest {
+        val link = Link { """{"result":"0x1","blockNumber":5}""" }
+        MyotisChainSource(link).request(100, "eth_getBalance", JSONArray().put(address).put("latest"), emptyList(), page)
+        MyotisChainSource(link).request(100, "eth_getBalance", JSONArray().put(address).put("latest"), emptyList())
+        assertEquals(listOf(true, false), link.pages.toList())
     }
 }
