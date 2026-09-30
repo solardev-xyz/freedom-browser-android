@@ -49,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -56,6 +57,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.DuplicateAccountException
 import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.WalletAccounts
@@ -67,8 +70,6 @@ import baby.freedom.mobile.wallet.ledger.LedgerScheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-
-internal const val CONNECT_LEDGER_TITLE = "Connect a Ledger"
 
 /** How many accounts the picker reads from the Ledger at a time. */
 private const val ACCOUNTS_PER_PAGE = 5
@@ -97,7 +98,7 @@ internal fun LedgerConnectPage(accounts: List<WalletAccount>, onAdded: () -> Uni
         if (device != null) device = null else onBack()
     }
     BackHandler(onBack = back)
-    FullScreenScaffold(title = CONNECT_LEDGER_TITLE, onDismiss = onBack) {
+    FullScreenScaffold(title = stringResource(R.string.signing_ledger_connect_title), onDismiss = onBack) {
         val d = device
         if (d == null) {
             LedgerDevicesStep(ledger, onPick = { device = it })
@@ -153,15 +154,14 @@ private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
         modifier = Modifier.fillMaxSize(),
     ) {
         item("how") {
-            SectionCard(title = "Before you start") {
+            SectionCard(title = stringResource(R.string.signing_ledger_before_you_start)) {
                 Text(
-                    "Unlock your Ledger (Nano X, Stax or Flex), open its Ethereum app and keep it close. " +
-                        "The first time, Android asks to pair: check that the same code is on the Ledger and the phone, and confirm it on both.",
+                    stringResource(R.string.signing_ledger_before_you_start_body),
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Your Ledger’s keys never leave it: every transaction and signature is shown and confirmed on the Ledger.",
+                    stringResource(R.string.signing_ledger_keys_never_leave),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -169,37 +169,35 @@ private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
         }
         when {
             !ledger.hasBle() -> item("no-ble") {
-                SectionCard(title = "Bluetooth") {
-                    Text(LedgerException.Kind.BLUETOOTH_UNAVAILABLE.message, style = MaterialTheme.typography.bodyMedium)
+                SectionCard(title = stringResource(R.string.signing_ledger_bluetooth)) {
+                    Text(stringResource(R.string.signing_ledger_error_bluetooth_unavailable), style = MaterialTheme.typography.bodyMedium)
                 }
             }
             !granted -> item("permission") {
-                SectionCard(title = "Nearby devices") {
+                SectionCard(title = stringResource(R.string.signing_ledger_nearby_devices)) {
                     Text(
                         if (blocked) {
-                            "Android won’t ask again for the permission to find and connect to your Ledger. " +
-                                "Turn on Nearby devices for Freedom in Android settings."
+                            stringResource(R.string.signing_ledger_permission_blocked)
                         } else {
-                            "Freedom needs Android’s permission to find and connect to your Ledger over Bluetooth. " +
-                                "It’s used for nothing else."
+                            stringResource(R.string.signing_ledger_permission_rationale)
                         },
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                         if (blocked) {
-                            TextButton(onClick = { openAppSettings(context) }) { Text("Open Android settings") }
+                            TextButton(onClick = { openAppSettings(context) }) { Text(stringResource(R.string.common_open_android_settings)) }
                         } else {
                             TextButton(
                                 onClick = { permissions.launch(ledger.permissions()) },
                                 modifier = Modifier.testTag("ledger-permission"),
-                            ) { Text("Allow") }
+                            ) { Text(stringResource(R.string.common_allow)) }
                         }
                     }
                 }
             }
             !bluetoothOn -> item("bluetooth-off") {
-                SectionCard(title = "Bluetooth") {
-                    Text(LedgerException.Kind.BLUETOOTH_OFF.message, style = MaterialTheme.typography.bodyMedium)
+                SectionCard(title = stringResource(R.string.signing_ledger_bluetooth)) {
+                    Text(stringResource(R.string.signing_ledger_error_bluetooth_off), style = MaterialTheme.typography.bodyMedium)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                         TextButton(onClick = {
                             try {
@@ -207,16 +205,16 @@ private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
                             } catch (_: ActivityNotFoundException) {
                             } catch (_: SecurityException) {
                             }
-                        }) { Text("Turn on Bluetooth") }
+                        }) { Text(stringResource(R.string.signing_ledger_turn_on_bluetooth)) }
                     }
                 }
             }
         }
         if ((granted && bluetoothOn) || devLinks || devices.isNotEmpty()) item("devices") {
-            SectionCard(title = "Ledgers") {
+            SectionCard(title = stringResource(R.string.signing_ledger_ledgers)) {
                 if (devices.isEmpty()) {
                     Text(
-                        if (scanning) "Looking for Ledgers…" else "No Ledger found. Check that it’s unlocked with Bluetooth on, then look again.",
+                        if (scanning) stringResource(R.string.signing_ledger_looking) else stringResource(R.string.signing_ledger_none_found),
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
@@ -224,9 +222,9 @@ private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
                     PageRow(
                         title = d.name,
                         subtitle = when {
-                            d.id.startsWith("dev:") -> "Emulator (debug build)"
-                            d.paired -> "Paired with this phone"
-                            else -> "Nearby · not paired yet"
+                            d.id.startsWith("dev:") -> stringResource(R.string.signing_ledger_device_emulator)
+                            d.paired -> stringResource(R.string.signing_ledger_device_paired)
+                            else -> stringResource(R.string.signing_ledger_device_nearby)
                         },
                         style = PageRowStyle.Inset,
                         leadingIcon = if (d.id.startsWith("dev:")) Icons.Filled.Usb else Icons.Filled.Bluetooth,
@@ -238,7 +236,7 @@ private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
                     if (scanning) {
                         CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                     } else {
-                        TextButton(onClick = { scanTick++ }) { Text("Look again") }
+                        TextButton(onClick = { scanTick++ }) { Text(stringResource(R.string.signing_ledger_look_again)) }
                     }
                 }
             }
@@ -255,6 +253,8 @@ private fun LedgerAccountsStep(
     add: suspend (path: String, address: String, name: String) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val alreadyInWallet = stringResource(R.string.signing_ledger_account_already_in_wallet)
+    val addFailed = stringResource(R.string.signing_ledger_add_failed)
     var scheme by remember { mutableStateOf(LedgerScheme.LIVE) }
     var found by remember(scheme) { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
@@ -290,7 +290,7 @@ private fun LedgerAccountsStep(
     ) {
         item("device") {
             SectionCard(title = device.name) {
-                Text("Layout", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(R.string.signing_ledger_layout), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     LedgerScheme.entries.forEach { s ->
                         FilterChip(
@@ -302,14 +302,14 @@ private fun LedgerAccountsStep(
                     }
                 }
                 Text(
-                    "Ledger Live makes accounts at m/44'/60'/n'/0/0; wallets like MyEtherWallet used m/44'/60'/0'/n.",
+                    stringResource(R.string.signing_ledger_layout_explained),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
         item("accounts") {
-            SectionCard(title = "Accounts on this Ledger") {
+            SectionCard(title = stringResource(R.string.signing_ledger_accounts_on_ledger)) {
                 found.forEachIndexed { i, (path, address) ->
                     val added = address.lowercase() in inWallet
                     if (i > 0) HorizontalDivider()
@@ -331,7 +331,7 @@ private fun LedgerAccountsStep(
                         Column(Modifier.weight(1f)) {
                             AddressText(address, MaterialTheme.typography.bodyMedium, MaterialTheme.colorScheme.onSurface)
                             Text(
-                                if (added) "m/$path · already in this wallet" else "m/$path",
+                                if (added) stringResource(R.string.signing_ledger_path_already_added, path) else "m/$path",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -342,7 +342,7 @@ private fun LedgerAccountsStep(
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 8.dp)) {
                         CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("Reading accounts from the Ledger…", style = MaterialTheme.typography.bodyMedium)
+                        Text(stringResource(R.string.signing_ledger_reading_accounts), style = MaterialTheme.typography.bodyMedium)
                     }
                 }
                 error?.let {
@@ -350,21 +350,21 @@ private fun LedgerAccountsStep(
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     if (error != null) {
-                        TextButton(onClick = { loadTick++ }, enabled = !loading) { Text("Try again") }
+                        TextButton(onClick = { loadTick++ }, enabled = !loading) { Text(stringResource(R.string.common_try_again)) }
                     } else if (found.isNotEmpty()) {
-                        TextButton(onClick = { wanted = found.size + ACCOUNTS_PER_PAGE }, enabled = !loading && !adding) { Text("Show more") }
+                        TextButton(onClick = { wanted = found.size + ACCOUNTS_PER_PAGE }, enabled = !loading && !adding) { Text(stringResource(R.string.signing_ledger_show_more)) }
                     }
                 }
             }
         }
         if (picked != null) item("add") {
-            SectionCard(title = "Add to the wallet") {
+            SectionCard(title = stringResource(R.string.signing_ledger_add_to_wallet)) {
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it.take(64) },
                     enabled = !adding,
                     singleLine = true,
-                    label = { Text("Name (optional)") },
+                    label = { Text(stringResource(R.string.signing_ledger_name_optional)) },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(8.dp))
@@ -379,9 +379,9 @@ private fun LedgerAccountsStep(
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: DuplicateAccountException) {
-                                error = "That account is already in this wallet."
+                                error = alreadyInWallet
                             } catch (e: Exception) {
-                                error = "Couldn’t add the account. The phone may be out of storage."
+                                error = addFailed
                             } finally {
                                 adding = false
                             }
@@ -389,7 +389,7 @@ private fun LedgerAccountsStep(
                     },
                     enabled = !adding,
                     modifier = Modifier.fillMaxWidth().testTag("ledger-add"),
-                ) { Text(if (adding) "Adding…" else "Add account") }
+                ) { Text(if (adding) stringResource(R.string.signing_ledger_adding) else stringResource(R.string.signing_ledger_add_account)) }
             }
         }
     }
@@ -432,7 +432,7 @@ fun LedgerActivityDialog() {
                 )
                 Spacer(Modifier.height(16.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    OutlinedButton(onClick = { a.cancel() }, modifier = Modifier.testTag("ledger-cancel")) { Text("Cancel") }
+                    OutlinedButton(onClick = { a.cancel() }, modifier = Modifier.testTag("ledger-cancel")) { Text(stringResource(R.string.common_cancel)) }
                 }
             }
         }
@@ -441,13 +441,12 @@ fun LedgerActivityDialog() {
 
 /** The dialog's heading and line for [a]'s stage. */
 internal fun ledgerActivityText(a: Ledger.Activity): Pair<String, String> = when (a.stage) {
-    Ledger.Stage.CONNECTING -> "Connecting to your Ledger…" to "Keep it unlocked and close to the phone."
-    Ledger.Stage.PAIRING -> "Pair with your Ledger" to
-        "Check that the same code is on the Ledger and on the phone, then confirm it on both."
-    Ledger.Stage.UNLOCK -> "Unlock your Ledger" to "Enter your PIN on the Ledger. This waits for it."
-    Ledger.Stage.OPEN_APP -> "Open the Ethereum app" to "On the Ledger, open the Ethereum app. This waits for it."
-    Ledger.Stage.READING -> "Reading accounts…" to "Addresses only: nothing is signed."
-    Ledger.Stage.CONFIRM -> a.purpose to "Check the details on the Ledger’s screen, then approve or reject them there."
+    Ledger.Stage.CONNECTING -> Strings.get(R.string.signing_ledger_stage_connecting) to Strings.get(R.string.signing_ledger_stage_connecting_detail)
+    Ledger.Stage.PAIRING -> Strings.get(R.string.signing_ledger_stage_pairing) to Strings.get(R.string.signing_ledger_stage_pairing_detail)
+    Ledger.Stage.UNLOCK -> Strings.get(R.string.signing_ledger_stage_unlock) to Strings.get(R.string.signing_ledger_stage_unlock_detail)
+    Ledger.Stage.OPEN_APP -> Strings.get(R.string.signing_ledger_stage_open_app) to Strings.get(R.string.signing_ledger_stage_open_app_detail)
+    Ledger.Stage.READING -> Strings.get(R.string.signing_ledger_stage_reading) to Strings.get(R.string.signing_ledger_stage_reading_detail)
+    Ledger.Stage.CONFIRM -> a.purpose to Strings.get(R.string.signing_ledger_stage_confirm_detail)
 }
 
 private tailrec fun android.content.Context.hostActivity(): android.app.Activity? = when (this) {
