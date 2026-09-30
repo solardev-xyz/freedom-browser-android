@@ -516,6 +516,10 @@ fun BrowserScreen(
     // opens the wallet page over whatever is up; see [Vault.requireUnlocked].
     val vault = remember(context) { Vault.get(context) }
     val walletRequest by vault.setupRequest.collectAsState()
+    // A payment link's Send page (#317), over the page the link was on.
+    // Plain `remember`: an ask left waiting by a relaunch is withdrawn
+    // with the tab's WebView anyway.
+    var linkSend by remember { mutableStateOf<LinkSend?>(null) }
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
@@ -558,8 +562,34 @@ fun BrowserScreen(
 
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
+    // Why a payment link didn't open Send (#317) — a private tab, no
+    // wallet, a link Send can't pay — instead of an error page.
+    DisposableEffect(snackbarHostState) {
+        val notice: (String) -> Unit = { text ->
+            scope.launch { snackbarHostState.showSnackbar(text, duration = SnackbarDuration.Long) }
+        }
+        EthereumLinks.onNotice = notice
+        // A link the user's own address redirected to (R1-M1): Send with
+        // no page's ask behind it, as for one typed in — for the tab on
+        // screen only; one the user has since left is dropped, and says
+        // so, since the address bar has already gone back (R2-M2).
+        val open: (BrowserState, SendPrefill) -> Unit = { tab, prefill ->
+            if (tabs.active.id == tab.id) {
+                linkSend?.closed()
+                linkSend = LinkSend(prefill, prompt = null)
+            } else {
+                notice(Strings.get(R.string.send_link_tab_left))
+            }
+        }
+        EthereumLinks.onOpenSend = open
+        onDispose {
+            if (EthereumLinks.onNotice === notice) EthereumLinks.onNotice = null
+            if (EthereumLinks.onOpenSend === open) EthereumLinks.onOpenSend = null
+        }
+    }
     // Any full-screen panel over the browser (they're all opaque).
     val overlayShown = showSettings || showNode || showRadicle || showLogs != null || showWallet || walletRequest != null ||
+        linkSend != null ||
         showTabSwitcher ||
         showHistory || showBookmarks || showDownloads
     val downloads = remember(context) { DownloadManager.get(context) }
@@ -1076,6 +1106,23 @@ fun BrowserScreen(
             // button) and fire it as a synthetic click.
             focusManager.clearFocus()
             addressBarEdited = false
+        }
+
+        // A payment link typed or pasted in (#317) isn't an address to
+        // load: it opens Send, filled in, over the page, which stays. Only
+        // the user's own: a page's goes through the WebView's link gate.
+        addressBarEthereumLink(raw, source, target.private, EthereumLinks.walletReady(context))?.let { route ->
+            when (route) {
+                is EthereumLinkRoute.Refuse -> scope.launch {
+                    snackbarHostState.showSnackbar(route.reason, duration = SnackbarDuration.Long)
+                }
+                is EthereumLinkRoute.OpenSend -> {
+                    linkSend?.closed()
+                    linkSend = LinkSend(route.prefill, prompt = null)
+                }
+                EthereumLinkRoute.Drop -> Unit
+            }
+            return
         }
 
         // The user navigating the tab themselves (an address, a reload)
@@ -2829,22 +2876,36 @@ fun BrowserScreen(
     // tab switcher, History, Bookmarks, Downloads) so a request arriving
     // while one of them is up opens on top of it rather than hidden
     // underneath, leaving its caller waiting on a page nobody can see.
-    if (showWallet || walletRequest != null) {
-        WalletScreen(
-            request = walletRequest,
-            // The site the user came from, for Publisher identities (#119);
-            // never a private tab's, which leaves nothing behind.
-            currentSite = tabs.active.takeUnless { it.private }?.providerOrigin,
-            // A transaction's explorer page (#105): a new tab in front, never a
-            // private one — with the pages the wallet was opened over closed too.
-            onOpenUrl = { url ->
-                showWallet = false
-                showSettings = false
-                showNode = false
-                tabs.requestOpenInNewTab?.invoke(url, false, false)
-            },
-            onDismiss = { showWallet = false },
-        )
+    if (showWallet || walletRequest != null || linkSend != null) {
+        // A new link's Send page starts from its own values.
+        androidx.compose.runtime.key(linkSend) {
+            WalletScreen(
+                request = walletRequest,
+                // The site the user came from, for Publisher identities (#119);
+                // never a private tab's, which leaves nothing behind.
+                currentSite = tabs.active.takeUnless { it.private }?.providerOrigin,
+                // A transaction's explorer page (#105): a new tab in front, never a
+                // private one — with the pages the wallet was opened over closed too.
+                onOpenUrl = { url ->
+                    linkSend?.closed()
+                    linkSend = null
+                    showWallet = false
+                    showSettings = false
+                    showNode = false
+                    tabs.requestOpenInNewTab?.invoke(url, false, false)
+                },
+                onDismiss = {
+                    // Answered before the page is uncovered: the ask is
+                    // done with by the time it could have its turn again.
+                    linkSend?.closed()
+                    linkSend = null
+                    showWallet = false
+                },
+                sendLink = linkSend?.prefill,
+                onSendStarted = { linkSend?.started = true },
+                onSendShown = { linkSend?.shown = true },
+            )
+        }
     }
 
     // Desktop Freedom's signing requests (#113): a dialog over whatever is up,
@@ -2902,7 +2963,16 @@ fun BrowserScreen(
         androidx.compose.runtime.key(prompt) { RadiclePromptDialog(prompt) }
     }
     state.ethereumPrompt?.takeIf { promptTurn == PromptTurn.Ethereum }?.let { prompt ->
-        androidx.compose.runtime.key(prompt) { EthereumApprovalSheet(prompt) }
+        val ask = prompt.ask
+        if (ask is EthAsk.SendLink) {
+            // A payment link (#317) isn't a sheet: its turn opens the Send
+            // page, filled in, which answers the ask when it's left.
+            LaunchedEffect(prompt) {
+                if (!prompt.answer.isCompleted && linkSend?.prompt !== prompt) linkSend = LinkSend(ask.prefill, prompt)
+            }
+        } else {
+            androidx.compose.runtime.key(prompt) { EthereumApprovalSheet(prompt) }
+        }
     }
     state.swarmPrompt?.takeIf { promptTurn == PromptTurn.Swarm }?.let { prompt ->
         androidx.compose.runtime.key(prompt) { SwarmPromptSheet(prompt) }

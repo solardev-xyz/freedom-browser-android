@@ -21,7 +21,8 @@ sealed class ScannedCode {
     data class Address(val address: String) : ScannedCode()
 
     /**
-     * An EIP-681 `ethereum:` request to pay [recipient]. [token] is the
+     * An EIP-681 `ethereum:` request to pay [recipient] — an address, or
+     * from a link ([parseLink]) possibly a name to look up. [token] is the
      * ERC-20 contract for a `…/transfer` request, null for the chain's
      * native currency. [amount] is in the asset's base units (wei for
      * the native currency), null when the request names none. [chainId]
@@ -74,6 +75,20 @@ sealed class ScannedCode {
         }
 
         /**
+         * An EIP-681 link a page opened or the user typed into the address
+         * bar (#317): read exactly as a scanned `ethereum:` code ([parse]),
+         * except that the payee may be a name (`ethereum:alice.eth@1?value=…`,
+         * or a `transfer`'s `address=alice.eth`) — the Send page looks it up
+         * the way it does a name typed there (#277). [Unrecognized] when
+         * [url] isn't an `ethereum:` link at all.
+         */
+        fun parseLink(url: String): ScannedCode {
+            val text = url.trim()
+            if (!text.startsWith("ethereum:", ignoreCase = true)) return Unrecognized(NOT_A_WALLET_CODE)
+            return parseEip681(text.substring("ethereum:".length), names = true)
+        }
+
+        /**
          * [address] (`0x` + 40 hex digits) EIP-55 checksummed, or null
          * when it's mixed case and the case doesn't match its checksum.
          * All-lower and all-upper hex carry no checksum and are taken as is.
@@ -109,9 +124,10 @@ sealed class ScannedCode {
          * being everything after `ethereum:`. Only what a wallet can pay
          * is taken: the native currency to an address, or an ERC-20
          * `transfer(address,uint256)`. Any other contract call, a name
-         * in place of an address, or an ambiguous amount is refused.
+         * in place of an address (unless [names]: a payee's, never a
+         * token contract's), or an ambiguous amount is refused.
          */
-        private fun parseEip681(rest: String): ScannedCode {
+        private fun parseEip681(rest: String, names: Boolean = false): ScannedCode {
             val body = if (rest.startsWith("pay-", ignoreCase = true)) rest.substring(4) else rest
             val query = body.substringAfter('?', "")
             val path = body.substringBefore('?')
@@ -120,7 +136,8 @@ sealed class ScannedCode {
             val target = targetAndChain.substringBefore('@')
             val chainText = targetAndChain.substringAfter('@', "").takeIf { '@' in targetAndChain }
 
-            if (!HEX_ADDRESS.matches(target)) {
+            val targetName = if (names && function == null) payeeName(target) else null
+            if (targetName == null && !HEX_ADDRESS.matches(target)) {
                 return Unrecognized(
                     if (target.contains('.')) {
                         Strings.get(R.string.wallet_scan_name_not_address, shortened(target))
@@ -129,7 +146,7 @@ sealed class ScannedCode {
                     },
                 )
             }
-            val targetAddress = checkedAddress(target) ?: return badChecksum()
+            val targetAddress = targetName ?: checkedAddress(target) ?: return badChecksum()
 
             val chainId = if (chainText == null) {
                 null
@@ -168,15 +185,32 @@ sealed class ScannedCode {
                     }
                     val to = params["address"]
                         ?: return Unrecognized(Strings.get(R.string.wallet_scan_token_no_recipient))
-                    if (!HEX_ADDRESS.matches(to)) {
+                    val toName = if (names) payeeName(to) else null
+                    if (toName == null && !HEX_ADDRESS.matches(to)) {
                         return Unrecognized(Strings.get(R.string.wallet_scan_token_bad_recipient))
                     }
-                    val recipient = checkedAddress(to) ?: return badChecksum()
+                    val recipient = toName ?: checkedAddress(to) ?: return badChecksum()
                     val amount = params["uint256"]?.let { eip681Number(it) ?: return badAmount() }
                     Payment(recipient, chainId, token = targetAddress, amount = amount)
                 }
                 else -> Unrecognized(Strings.get(R.string.wallet_scan_contract_call, shortened(function)))
             }
+        }
+
+        /**
+         * [text] as a payee name — percent-decoded once (a browser hands a
+         * link's non-ASCII name over encoded) and shaped like a name
+         * ([Recipients.looksLikeName]) — or null. Whether it is one that
+         * resolves is the Send page's lookup's to say.
+         */
+        private fun payeeName(text: String): String? {
+            if (HEX_ADDRESS.matches(text)) return null
+            val decoded = if ('%' in text) {
+                runCatching { URLDecoder.decode(text.replace("+", "%2B"), "UTF-8") }.getOrNull() ?: return null
+            } else {
+                text
+            }
+            return decoded.takeIf { Recipients.looksLikeName(it) }
         }
 
         /**

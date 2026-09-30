@@ -2683,7 +2683,19 @@ private fun buildRefreshableWebView(
         // remembered answer) for the page that asked, then the app is
         // started. An `intent:` no app can take goes to its http(s)
         // fallback instead, as a page navigation would.
-        fun offerExternalLink(view: WebView, pageUrl: String?, tab: BrowserState, url: String) {
+        fun offerExternalLink(view: WebView, pageUrl: String?, tab: BrowserState, url: String, doc: Int, userNamed: Boolean = false) {
+            // A payment link (#317): the wallet's Send page, not an app.
+            // One the user's own address answered with (a redirect) is
+            // theirs, as if typed: no ask filed against the page on
+            // screen, which never asked and mustn't be paused for it.
+            if (isEthereumLink(url)) {
+                if (userNamed) {
+                    EthereumLinks.fromUserNamed(view.context, tab, pageUrl, url)
+                } else {
+                    EthereumLinks.fromPage(view.context, tab, pageUrl, doc, url)
+                }
+                return
+            }
             val origin = permissionOriginKey(pageUrl)
             val launch = externalAppLaunch(url, view.context.packageName)
             if (origin == null || launch == null) {
@@ -3491,7 +3503,10 @@ private fun buildRefreshableWebView(
                     // the one on screen now, whatever commits meanwhile.
                     val pageUrl = askingView?.url
                     val offerTab = opener?.first ?: state
-                    val offer = askingView?.let { page -> { offerExternalLink(page, pageUrl, offerTab, target) } }
+                    // …and its document now: a payment link's Send page is
+                    // dropped if that page is gone by the time it's shown.
+                    val offerDoc = EthereumProviders.currentDocument(offerTab.id)
+                    val offer = askingView?.let { page -> { offerExternalLink(page, pageUrl, offerTab, target, offerDoc) } }
                     val waiting = verdict == ExternalLinkVerdict.Ask && input != null && latch != null &&
                         offer != null && latch.whenInTopDocument(input, offer)
                     if (verdict == ExternalLinkVerdict.AskUserNamed && askingView != null) {
@@ -3509,7 +3524,7 @@ private fun buildRefreshableWebView(
                         // link — not the page on screen, which didn't ask,
                         // nor the address typed, which may have been an
                         // open redirect to it (#173, R1-F2).
-                        offerExternalLink(askingView, userNamedAsker, state, target)
+                        offerExternalLink(askingView, userNamedAsker, state, target, EthereumProviders.currentDocument(state.id), userNamed = true)
                     } else if (waiting) {
                         askingView.postDelayed({
                             if (latch.giveUp(input, offer)) {

@@ -285,6 +285,11 @@ internal fun sameRequestUrl(a: String, b: String): Boolean {
  * called — and so the tap only used up — once everything else passes.
  * [userNamedRedirect]: a main-frame redirect hop of a load the user
  * named themselves, whose chain hasn't ended in an app link yet.
+ *
+ * An EIP-681 `ethereum:` payment link (#317) is never handed to another
+ * app, nor loaded (WebView has only an error page for it), but it gets
+ * this same gate: a main-frame navigation, one tap each. Its offer opens
+ * the wallet's Send page instead of an app ([EthereumLinks]).
  */
 internal fun externalLinkVerdict(
     url: String?,
@@ -293,8 +298,10 @@ internal fun externalLinkVerdict(
     userNamedRedirect: Boolean = false,
     consumeGesture: () -> Boolean,
 ): ExternalLinkVerdict {
-    val scheme = externalLinkScheme(url) ?: return ExternalLinkVerdict.NotExternal
-    if (!isExternalSchemeAllowed(scheme)) return ExternalLinkVerdict.Refuse
+    val scheme = externalLinkScheme(url)
+        ?: ETHEREUM_LINK_SCHEME.takeIf { isEthereumLink(url) }
+        ?: return ExternalLinkVerdict.NotExternal
+    if (scheme != ETHEREUM_LINK_SCHEME && !isExternalSchemeAllowed(scheme)) return ExternalLinkVerdict.Refuse
     if (isForMainFrame && userNamedRedirect) return ExternalLinkVerdict.AskUserNamed
     if (!isForMainFrame || !hasGesture) return ExternalLinkVerdict.Refuse
     return if (consumeGesture()) ExternalLinkVerdict.Ask else ExternalLinkVerdict.Refuse

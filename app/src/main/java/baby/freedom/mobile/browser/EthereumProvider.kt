@@ -91,6 +91,14 @@ sealed interface EthAsk {
 
     /** A page answered `402 Payment Required` with x402 terms (#140): pay it ([X402Payments]). */
     data class Payment(override val origin: String, val payment: X402Ask) : EthAsk
+
+    /**
+     * A tapped `ethereum:` payment link (#317, [EthereumLinks]): not a
+     * sheet but the Send page itself, filled in with [prefill]. Approved
+     * once a send from it has started, rejected when the user leaves it
+     * without one.
+     */
+    data class SendLink(override val origin: String, val prefill: SendPrefill) : EthAsk
 }
 
 /** The user's answer to an [EthAsk]. */
@@ -102,6 +110,13 @@ sealed interface EthAnswer {
      * and its pages may not ask again until the user navigates it.
      */
     data object Paused : EthAnswer
+
+    /**
+     * Left before it was ever shown (#317): a payment link's Send page
+     * closed while it was still loading. Refused like [Rejected], but the
+     * user turned nothing down, so the tab isn't paused.
+     */
+    data object Unseen : EthAnswer
 
     /**
      * [account]: the one the user picked to share, for [EthAsk.Connect];
