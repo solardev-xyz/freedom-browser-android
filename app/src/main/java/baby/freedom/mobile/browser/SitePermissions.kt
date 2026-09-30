@@ -594,3 +594,73 @@ class PromptTapGuard(private val protectionMs: Long, private val clock: () -> Lo
  */
 fun androidPermissionBlockedInSettings(rationale: Boolean, deniedBefore: Boolean): Boolean =
     !rationale && deniedBefore
+
+/**
+ * What the page's **Site permissions** sheet (#266) lists: every decision
+ * in [all] that belongs to the page on screen — its own origin
+ * ([pageOrigin]) or an origin that asked for something from inside this
+ * document ([documentOrigins]: an embedded frame's camera request is keyed
+ * by the frame's origin, not the page's). The page's own come first, in
+ * [all]'s order.
+ */
+fun pageSitePermissionEntries(
+    pageOrigin: String?,
+    documentOrigins: Set<String>,
+    all: List<SitePermissionEntry>,
+): List<SitePermissionEntry> {
+    val origins = documentOrigins + listOfNotNull(pageOrigin)
+    return all.filter { it.origin in origins }.sortedBy { if (it.origin == pageOrigin) 0 else 1 }
+}
+
+/**
+ * Which of [granted] (the camera/microphone this tab's document was
+ * given) is in use now: those the app itself is using at this moment
+ * ([activeInApp], Android's own app-op "active" state — what drives the
+ * system's privacy indicator). The app is one Android user of the
+ * camera, so a second tab whose document was granted it too shows it
+ * in use as well.
+ */
+fun mediaInUse(granted: Set<SitePermission>, activeInApp: Set<SitePermission>): Set<SitePermission> =
+    granted.intersect(activeInApp).filterTo(LinkedHashSet()) {
+        it == SitePermission.CAMERA || it == SitePermission.MICROPHONE
+    }
+
+/** "Camera in use", "Microphone in use", "Camera and microphone in use"; null for none. */
+fun mediaInUseLabel(inUse: Set<SitePermission>): String? {
+    val camera = SitePermission.CAMERA in inUse
+    val mic = SitePermission.MICROPHONE in inUse
+    return when {
+        camera && mic -> "Camera and microphone in use"
+        camera -> "Camera in use"
+        mic -> "Microphone in use"
+        else -> null
+    }
+}
+
+/**
+ * The decision part of a Site permissions row: "Allowed", "Blocked (this
+ * session)", "Blocked after 3 dismissals (this session)" — and, in a
+ * private tab ([private]), "Allowed (private tabs)", since its decisions
+ * last until the private tabs are closed.
+ */
+fun sitePermissionStateLabel(entry: SitePermissionEntry, private: Boolean = false): String {
+    val scope = when {
+        private -> " (private tabs)"
+        entry.remembered -> ""
+        else -> " (this session)"
+    }
+    return when {
+        entry.embargoed ->
+            "Blocked after ${PermissionSession.DISMISS_EMBARGO_THRESHOLD} dismissals$scope"
+        entry.decision == PermissionDecision.ALLOW -> "Allowed$scope"
+        else -> "Blocked$scope"
+    }
+}
+
+/**
+ * The page menu's Site permissions sub-line (#266): the capabilities
+ * [entries] name, once each, in order ("Camera · Location"); null when
+ * there are none and the menu leaves the row out.
+ */
+fun sitePermissionsSummary(entries: List<SitePermissionEntry>): String? =
+    entries.map { it.permission.label }.distinct().joinToString(" · ").ifEmpty { null }

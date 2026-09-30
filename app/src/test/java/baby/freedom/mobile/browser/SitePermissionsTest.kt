@@ -518,4 +518,94 @@ class SitePermissionsTest {
             ),
         )
     }
+
+    // --- The page's own Site permissions (#266) ---
+
+    private fun entry(origin: String, p: SiteCapability, d: PermissionDecision = PermissionDecision.ALLOW, remembered: Boolean = true) =
+        SitePermissionEntry(origin, p, d, remembered)
+
+    @Test
+    fun `page sheet lists the page's own decisions first, then a frame's that asked from it`() {
+        val all = listOf(
+            entry("https://a.example", SitePermission.LOCATION),
+            entry("https://frame.example", SitePermission.CAMERA),
+            entry("https://other.example", SitePermission.MICROPHONE),
+            entry("https://page.example", SitePermission.CAMERA),
+            entry("https://page.example", SitePermission.POPUPS, PermissionDecision.ALLOW),
+        )
+        val listed = pageSitePermissionEntries("https://page.example", setOf("https://frame.example"), all)
+        assertEquals(
+            listOf(
+                "https://page.example" to SitePermission.CAMERA,
+                "https://page.example" to SitePermission.POPUPS,
+                "https://frame.example" to SitePermission.CAMERA,
+            ),
+            listed.map { it.origin to it.permission },
+        )
+    }
+
+    @Test
+    fun `page sheet lists nothing for a page with no site`() {
+        val all = listOf(entry("https://a.example", SitePermission.LOCATION))
+        assertEquals(emptyList<SitePermissionEntry>(), pageSitePermissionEntries(null, emptySet(), all))
+    }
+
+    @Test
+    fun `media is in use only while granted to the document and active in the app`() {
+        val granted = setOf(SitePermission.CAMERA, SitePermission.MICROPHONE, SitePermission.LOCATION)
+        assertEquals(setOf(SitePermission.CAMERA), mediaInUse(granted, setOf(SitePermission.CAMERA)))
+        assertEquals(emptySet<SitePermission>(), mediaInUse(setOf(SitePermission.MICROPHONE), setOf(SitePermission.CAMERA)))
+        assertEquals(emptySet<SitePermission>(), mediaInUse(granted, emptySet()))
+        // Location has no app-op "in use" here: never shown as such.
+        assertEquals(emptySet<SitePermission>(), mediaInUse(granted, setOf(SitePermission.LOCATION)))
+    }
+
+    @Test
+    fun `in-use label names what is in use`() {
+        assertNull(mediaInUseLabel(emptySet()))
+        assertEquals("Camera in use", mediaInUseLabel(setOf(SitePermission.CAMERA)))
+        assertEquals("Microphone in use", mediaInUseLabel(setOf(SitePermission.MICROPHONE)))
+        assertEquals(
+            "Camera and microphone in use",
+            mediaInUseLabel(setOf(SitePermission.MICROPHONE, SitePermission.CAMERA)),
+        )
+    }
+
+    @Test
+    fun `a private tab's decisions read as lasting until private tabs close`() {
+        val allowed = entry("https://a.example", SitePermission.CAMERA, remembered = false)
+        assertEquals("Allowed (private tabs)", sitePermissionStateLabel(allowed, private = true))
+        assertEquals("Allowed (this session)", sitePermissionStateLabel(allowed))
+        assertEquals("Allowed", sitePermissionStateLabel(allowed.copy(remembered = true)))
+        assertEquals(
+            "Blocked (private tabs)",
+            sitePermissionStateLabel(allowed.copy(decision = PermissionDecision.DENY), private = true),
+        )
+    }
+
+    @Test
+    fun `menu sub-line names each capability once`() {
+        assertNull(sitePermissionsSummary(emptyList()))
+        assertEquals(
+            "Camera · Location",
+            sitePermissionsSummary(
+                listOf(
+                    entry("https://a.example", SitePermission.CAMERA),
+                    entry("https://a.example", SitePermission.LOCATION, PermissionDecision.DENY),
+                    entry("https://frame.example", SitePermission.CAMERA),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `revoking in one session tier leaves the other alone`() {
+        val normal = PermissionSession()
+        val private = PermissionSession(embargoes = false)
+        normal.record("https://a.example", SitePermission.CAMERA, PermissionDecision.ALLOW, remembered = false)
+        private.record("https://a.example", SitePermission.CAMERA, PermissionDecision.ALLOW, remembered = false)
+        private.revoke("https://a.example", SitePermission.CAMERA)
+        assertNull(private.decisionFor("https://a.example", SitePermission.CAMERA))
+        assertEquals(PermissionDecision.ALLOW, normal.decisionFor("https://a.example", SitePermission.CAMERA))
+    }
 }

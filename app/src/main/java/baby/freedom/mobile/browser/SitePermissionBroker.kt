@@ -1,7 +1,9 @@
 package baby.freedom.mobile.browser
 
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Process
 import android.util.Log
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
@@ -9,11 +11,17 @@ import androidx.core.content.ContextCompat
 import baby.freedom.mobile.data.SitePermissionStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -82,9 +90,12 @@ class SitePermissionBroker private constructor(
      * to private tabs only, is never written to the store, and isn't
      * listed in Settings. Replaced when the private session ends
      * ([onPrivateSessionEnded]). Since Settings can't show it, it never
-     * embargoes: a dismissed prompt is a deny-once, nothing more.
+     * embargoes: a dismissed prompt is a deny-once, nothing more. A
+     * private tab's own Site permissions sheet (#266) lists it, and
+     * revokes from it alone ([revokeOnTab]).
      */
-    private var privateSession = PermissionSession(embargoes = false)
+    private val privateSessionState = MutableStateFlow(PermissionSession(embargoes = false))
+    private val privateSession: PermissionSession get() = privateSessionState.value
 
     private fun sessionFor(tab: BrowserState): PermissionSession =
         if (tab.private) privateSession else session
@@ -226,8 +237,11 @@ class SitePermissionBroker private constructor(
 
     /** The tab started a new document: nothing asked by the old one may land. */
     fun onDocumentStarted(tab: BrowserState) {
-        documents[tab.id] = (documents[tab.id] ?: 0) + 1
+        val doc = (documents[tab.id] ?: 0) + 1
+        documents[tab.id] = doc
         withdraw(tab.id) { true }
+        // The new document has asked for nothing and been given nothing.
+        documentActivity.update { it + (tab.id to DocumentPermissions(doc)) }
     }
 
     /**
@@ -239,6 +253,104 @@ class SitePermissionBroker private constructor(
         withdraw(tabId) { true }
         documents.remove(tabId)
         tabLocks.remove(tabId)
+        documentActivity.update { it - tabId }
+    }
+
+    // ---------------------------------------------------------------
+    // The page's own view (#266)
+    // ---------------------------------------------------------------
+
+    /**
+     * What a tab's current document has to do with site permissions:
+     * [origins] that asked for something from it (its own, or an
+     * embedded frame's), and the camera/microphone it was [granted].
+     * [doc] is the tab's document number ([documents]), so a sheet opened
+     * over one document can tell when another has replaced it.
+     */
+    data class DocumentPermissions(
+        val doc: Int,
+        val origins: Set<String> = emptySet(),
+        val granted: Set<SitePermission> = emptySet(),
+    )
+
+    private val documentActivity = MutableStateFlow<Map<Long, DocumentPermissions>>(emptyMap())
+
+    /** Tab [tabId]'s current document's [DocumentPermissions]. */
+    fun documentPermissions(tabId: Long): Flow<DocumentPermissions> =
+        documentActivity.map { it[tabId] ?: DocumentPermissions(documents[tabId] ?: 0) }
+
+    private fun noteDocument(tabId: Long, doc: Int, origin: String, granted: Collection<SitePermission> = emptyList()) {
+        if ((documents[tabId] ?: 0) != doc) return
+        documentActivity.update { all ->
+            val cur = all[tabId]?.takeIf { it.doc == doc } ?: DocumentPermissions(doc)
+            all + (tabId to cur.copy(origins = cur.origins + origin, granted = cur.granted + granted))
+        }
+    }
+
+    /**
+     * The camera and microphone the app is using right now — Android's
+     * app-op "active" state for this app's uid, the same signal behind
+     * the system's own privacy indicator. Counted per op, since more than
+     * one attribution can hold one at a time.
+     */
+    private val activeMediaCounts = HashMap<SitePermission, Int>()
+    private val _activeMedia = MutableStateFlow<Set<SitePermission>>(emptySet())
+    val activeMedia: StateFlow<Set<SitePermission>> = _activeMedia.asStateFlow()
+
+    init {
+        // Our own uid needs no permission to watch; a device where it
+        // can't be watched simply never shows the indicator.
+        runCatching {
+            appContext.getSystemService(AppOpsManager::class.java)?.startWatchingActive(
+                arrayOf(AppOpsManager.OPSTR_CAMERA, AppOpsManager.OPSTR_RECORD_AUDIO),
+                ContextCompat.getMainExecutor(appContext),
+            ) { op, uid, _, active ->
+                if (uid != Process.myUid()) return@startWatchingActive
+                val p = when (op) {
+                    AppOpsManager.OPSTR_CAMERA -> SitePermission.CAMERA
+                    AppOpsManager.OPSTR_RECORD_AUDIO -> SitePermission.MICROPHONE
+                    else -> return@startWatchingActive
+                }
+                val n = ((activeMediaCounts[p] ?: 0) + if (active) 1 else -1).coerceAtLeast(0)
+                activeMediaCounts[p] = n
+                _activeMedia.update { if (n > 0) it + p else it - p }
+            }
+        }.onFailure { Log.w(TAG, "can't watch camera/microphone use", it) }
+    }
+
+    /**
+     * The camera/microphone tab [tabId]'s document was given and the app
+     * is using now ([mediaInUse]): the page's "in use" indicator.
+     */
+    fun mediaInUse(tabId: Long): Flow<Set<SitePermission>> =
+        combine(documentPermissions(tabId), activeMedia) { d, active -> mediaInUse(d.granted, active) }
+
+    /**
+     * The decisions the Site permissions sheet lists for [tab]'s page
+     * ([pageSitePermissionEntries]) — [pageOrigin] plus whatever else
+     * asked from inside its current document — as that tab sees them: a
+     * normal tab's remembered and this-run decisions, or a private tab's
+     * private-session ones only.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun pageEntries(tab: BrowserState, pageOrigin: String?): Flow<List<SitePermissionEntry>> {
+        val decisions: Flow<List<SitePermissionEntry>> = if (tab.private) {
+            privateSessionState.flatMapLatest { s -> s.version.map { s.entries() } }
+        } else {
+            entries
+        }
+        return combine(decisions, documentPermissions(tab.id)) { all, doc ->
+            pageSitePermissionEntries(pageOrigin, doc.origins, all)
+        }
+    }
+
+    /**
+     * Remove [entry] from [tab]'s Site permissions sheet: from a normal
+     * tab, everywhere ([revoke]); from a private tab, from the private
+     * session only — the only tier a private tab's decisions are in.
+     */
+    fun revokeOnTab(tab: BrowserState, entry: SitePermissionEntry) {
+        if (tab.private) privateSession.revoke(entry.origin, entry.permission) else revoke(entry)
     }
 
     // ---------------------------------------------------------------
@@ -306,7 +418,7 @@ class SitePermissionBroker private constructor(
 
     /** The last private tab has closed (#86): forget its answers. */
     fun onPrivateSessionEnded() {
-        privateSession = PermissionSession(embargoes = false)
+        privateSessionState.value = PermissionSession(embargoes = false)
     }
 
     // ---------------------------------------------------------------
@@ -353,14 +465,19 @@ class SitePermissionBroker private constructor(
         val doc = documents[tab.id] ?: 0
         val entry = Pending(tab.id, token)
         pending += entry
+        // Listed on the page's Site permissions sheet (#266) from now on,
+        // whatever the answer: a frame that asks is part of the page.
+        noteDocument(tab.id, doc, origin)
         fun live() = !entry.withdrawn.value && (documents[tab.id] ?: 0) == doc
         var finished = false
         fun finish(allowed: Boolean) {
             if (finished) return
             finished = true
             pending.remove(entry)
-            runCatching { if (allowed && live()) grant() else deny() }
+            val granting = allowed && live()
+            runCatching { if (granting) grant() else deny() }
                 .onFailure { Log.w(TAG, "answering permission request failed", it) }
+            if (granting) noteDocument(tab.id, doc, origin, permissions.filterIsInstance<SitePermission>())
         }
         scope.launch {
             // Whatever goes wrong below, the page gets an answer (a deny)

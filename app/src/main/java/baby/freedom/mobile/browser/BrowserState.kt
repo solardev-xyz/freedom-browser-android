@@ -748,6 +748,16 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
+     * The document on screen's site-permission origin key
+     * ([permissionOriginKey]): the site the page menu's **Site
+     * permissions** sheet is about (#266). Null for home and anything
+     * that can't hold a permission. Set by the tab's WebView at
+     * navigation commit, with [zoomSite].
+     */
+    var permissionOrigin: String? by mutableStateOf<String?>(null)
+        internal set
+
+    /**
      * Whether the page area stops above the bottom chrome for the
      * document on screen (#66). Set by the tab's WebView from its page's
      * bottom-nav detector (see [BottomChromeSlot]); back to overlay on
