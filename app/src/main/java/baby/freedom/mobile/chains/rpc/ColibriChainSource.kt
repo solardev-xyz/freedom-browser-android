@@ -60,6 +60,14 @@ import org.json.JSONObject
  * (up to [backgroundMs], outside [maxInFlight], one per chain at a time
  * and at most one per [CANARY_INTERVAL_MS]). The canary failing the way
  * a wallet read would count is what backs the chain off.
+ *
+ * Nor may pages take the tier's slots: a page's read the router stopped
+ * waiting for keeps its slot in the background (up to [backgroundMs]),
+ * so a site looping slow calls would otherwise hold all [maxInFlight]
+ * and every wallet read would find Colibri busy. Sites together get at
+ * most [maxPageInFlight] of them (as [baby.freedom.mobile.node.RouterReadSlots]
+ * does for Myotis); a page read past that share moves straight on to the
+ * next tier, and the rest stay the wallet's and the Swarm node's.
  */
 internal class ColibriChainSource(
     private val colibri: EnsColibri,
@@ -68,6 +76,8 @@ internal class ColibriChainSource(
     /** The *Colibri proofs* switch ([ColibriReads]); read on every call. */
     private val enabled: () -> Boolean = { true },
     private val maxInFlight: Int = MAX_IN_FLIGHT,
+    /** Of [maxInFlight], how many pages' reads may hold together (see the class kdoc). */
+    private val maxPageInFlight: Int = MAX_PAGE_IN_FLIGHT,
     private val backgroundMs: Long = BACKGROUND_MS,
     /** Monotonic milliseconds: a wall-clock step mustn't end or stretch a back-off. */
     private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
@@ -75,6 +85,7 @@ internal class ColibriChainSource(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) : VerifiedChainSource {
     private val inFlight = AtomicInteger()
+    private val pagesInFlight = AtomicInteger()
     private val backoffs = ConcurrentHashMap<Long, Backoff>()
     private val canaries = ConcurrentHashMap<Long, Canary>()
 
@@ -106,8 +117,17 @@ internal class ColibriChainSource(
             val tag = params.opt(i)
             if (tag == "pending") throw Unanswered("$method at \"pending\" can't be proven")
         }
+        // A page's read gets only a share of the slots (see the class
+        // kdoc), taken before the shared one so a page at its share never
+        // holds a shared slot even for a moment.
+        val page = context.interactive
+        if (page && pagesInFlight.incrementAndGet() > maxPageInFlight) {
+            pagesInFlight.decrementAndGet()
+            throw Unanswered("Colibri is busy with sites' reads")
+        }
         if (inFlight.incrementAndGet() > maxInFlight) {
             inFlight.decrementAndGet()
+            if (page) pagesInFlight.decrementAndGet()
             throw Unanswered("Colibri is busy")
         }
         val backoff = backoffs.getOrPut(chainId) { Backoff() }
@@ -141,6 +161,7 @@ internal class ColibriChainSource(
                 throw e
             } finally {
                 inFlight.decrementAndGet()
+                if (page) pagesInFlight.decrementAndGet()
             }
         }
         val (status, provers) = try {
@@ -260,6 +281,9 @@ internal class ColibriChainSource(
 
     companion object {
         const val MAX_IN_FLIGHT = 4
+
+        /** Sites' share of [MAX_IN_FLIGHT]: the wallet's and the Swarm node's reads always keep two. */
+        const val MAX_PAGE_IN_FLIGHT = 2
 
         /** Name resolution's figures ([baby.freedom.mobile.ens.EnsResolver.COLIBRI_BACKOFF_MS]). */
         const val BACKOFF_MS = 30_000L

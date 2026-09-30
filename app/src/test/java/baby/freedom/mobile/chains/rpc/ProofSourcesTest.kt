@@ -6,6 +6,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
@@ -381,6 +382,78 @@ class ProofSourcesTest {
     private val call = JSONArray().put(JSONObject().put("to", "0x" + "11".repeat(20)).put("data", "0x")).put("latest")
     private val latestBlock = JSONObject().put("status", "success")
         .put("result", JSONObject().put("number", "0x10"))
+
+    /** `eth_call`s ask for a prover request ([http] may stall it); everything else proves at once. */
+    private class SlowCalls : EnsColibri.Engine {
+        override val available = true
+        val methods = java.util.concurrent.CopyOnWriteArrayList<String>()
+        private val byCtx = java.util.concurrent.ConcurrentHashMap<Long, String>()
+        private val rounds = java.util.concurrent.ConcurrentHashMap<Long, Int>()
+        private val next = AtomicLong(10)
+        override fun create(method: String, params: String, chainId: Long, proverFlags: Int, verifyFlags: Int, proverMode: Int): Long {
+            methods += method
+            return next.incrementAndGet().also { byCtx[it] = method }
+        }
+        override fun setMinLatestBlockTs(ctx: Long, unixSeconds: Long) = Unit
+        override fun execute(ctx: Long): String {
+            val round = rounds.merge(ctx, 1, Int::plus)!!
+            if (byCtx[ctx] != "eth_call") return JSONObject().put("status", "success").put("result", "0x64").toString()
+            return if (round == 1) {
+                JSONObject().put("status", "pending")
+                    .put("requests", JSONArray().put(JSONObject().put("type", "prover").put("req_ptr", "5")))
+                    .toString()
+            } else {
+                JSONObject().put("status", "success").put("result", "0x").toString()
+            }
+        }
+        override fun setResponse(req: Long, data: ByteArray, nodeIndex: Int) = Unit
+        override fun setError(req: Long, error: String, nodeIndex: Int) = Unit
+        override fun free(ctx: Long) = Unit
+    }
+
+    @Test
+    fun `a site's slow calls can't take every slot from the wallet's reads`() = runBlocking {
+        val gate = CountDownLatch(1)
+        val v = SlowCalls()
+        val source = ColibriChainSource(
+            EnsColibri(v, http = { _, _, _, _, _ ->
+                gate.await(10, TimeUnit.SECONDS)
+                EnsColibri.Http.Reply(200, ByteArray(0))
+            }),
+            present = { true },
+        )
+        try {
+            // A site keeps slow calls going: each misses the router's wait
+            // and carries on in the background, holding its slot.
+            repeat(ColibriChainSource.MAX_IN_FLIGHT) {
+                runCatching { withTimeoutOrNull(200) { source.request(100, "eth_call", call, emptyList(), page) } }
+            }
+            // Only the sites' share of them reached the verifier.
+            assertEquals(ColibriChainSource.MAX_PAGE_IN_FLIGHT, v.methods.count { it == "eth_call" })
+            // The wallet's reads are still proven, one after another and side by side.
+            repeat(3) {
+                assertEquals("0x64", source.request(100, "eth_getBalance", balance, emptyList()).result)
+            }
+            val both = listOf(
+                async { source.request(100, "eth_getBalance", balance, emptyList()) },
+                async { source.request(100, "eth_getBalance", balance, emptyList()) },
+            )
+            both.forEach { assertEquals(ChainSource.COLIBRI, it.await().trust.source) }
+            assertTrue(source.isAvailable(100))
+        } finally {
+            gate.countDown()
+        }
+        // Once the sites' calls end, their slots come back.
+        val deadline = System.nanoTime() + 5_000_000_000L
+        var admitted = false
+        while (!admitted && System.nanoTime() < deadline) {
+            val before = v.methods.count { it == "eth_call" }
+            runCatching { withTimeoutOrNull(500) { source.request(100, "eth_call", call, emptyList(), page) } }
+            admitted = v.methods.count { it == "eth_call" } > before
+            if (!admitted) Thread.sleep(20)
+        }
+        assertTrue(admitted)
+    }
 
     @Test
     fun `a page's call that misses its wait doesn't back off a healthy prover`() = runBlocking {
