@@ -85,7 +85,10 @@ Status:
   Private Network Access doesn't block it in WebView 133 (checked from
   `https://example.com` through `httpbin.org/redirect-to`, see
   `docs/dapp-compatibility.md`). `NodeApiGuard` refuses every page
-  request to the gateway outside the dapp surface, but WebView never
+  request outside the dapp surface to the gateway port on a host that
+  may be this device (a loopback or unspecified literal, `localhost`,
+  or any name other than the external Swarm node set in Settings;
+  chain writes on every host), but WebView never
   asks the interceptor about such a redirect hop, and other browsers
   and apps don't pass through it at all. The fix belongs in the node:
   let the FFI host choose the gateway's CORS origins

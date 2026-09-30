@@ -28,11 +28,12 @@ import java.io.ByteArrayInputStream
  * so any page could read those answers from a sandboxed iframe, a
  * `data:` worker or anything else with an opaque origin.
  *
- * So every page request to the gateway — from a tab, a private tab, a
- * worker or a service worker, all of which pass [interceptVirtualRequest]
- * — whose endpoint isn't on the dapp surface ([DAPP_PATHS]) is answered
- * here with a 403 before it reaches the network, whatever its method and
- * origin. An allowlist, not a list of private endpoints: an endpoint a
+ * So every page request to the gateway port on a host that may be this
+ * device (see below) — from a tab, a private tab, a worker or a service
+ * worker, all of which pass [interceptVirtualRequest] — whose endpoint
+ * isn't on the dapp surface ([DAPP_PATHS]) is answered here with a 403
+ * before it reaches the network, whatever its method and origin; a chain
+ * write is refused on any host. An allowlist, not a list of private endpoints: an endpoint a
  * later ant adds stays closed until it's added here. Spending and the
  * node's details go through the app's own screens, which talk to the
  * node natively.
