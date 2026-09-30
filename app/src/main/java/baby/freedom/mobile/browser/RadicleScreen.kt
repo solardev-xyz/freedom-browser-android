@@ -35,11 +35,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.RadicleInfo
 import baby.freedom.swarm.RadicleNode
 import baby.freedom.swarm.RadicleSeed
@@ -64,43 +68,42 @@ data class RadicleControls(
 )
 
 internal const val RADICLE_ROW_KEY = "radicle"
-internal const val RADICLE_ROW_TITLE = "Radicle node"
+internal val RADICLE_ROW_TITLE: String get() = Strings.get(R.string.radicle_row_title)
 
 /** The Nodes section's Radicle row, for settings search. */
 internal fun radicleSettingsRow(radicle: RadicleControls) = settingsRow(
     RADICLE_ROW_KEY,
     RADICLE_ROW_TITLE,
     radicleSummary(radicle.info, radicle.enabled),
-    "Seed repositories",
+    Strings.get(R.string.radicle_row_search_hint),
 )
 
 /** One line on where the Radicle node stands, for its Settings row. */
 internal fun radicleSummary(info: RadicleInfo, enabled: Boolean): String = when {
-    !enabled -> "Off"
-    info.status == RadicleStatus.Running -> "Running · ${peersLabel(info.connectedPeers)}"
-    info.status == RadicleStatus.Starting -> "Starting…"
-    info.status == RadicleStatus.Stopping -> "Stopping…"
-    info.status == RadicleStatus.Error -> "Error"
+    !enabled -> Strings.get(R.string.radicle_status_off)
+    info.status == RadicleStatus.Running ->
+        Strings.plural(R.plurals.radicle_summary_running, info.connectedPeers, info.connectedPeers)
+    info.status == RadicleStatus.Starting -> Strings.get(R.string.radicle_status_starting)
+    info.status == RadicleStatus.Stopping -> Strings.get(R.string.radicle_status_stopping)
+    info.status == RadicleStatus.Error -> Strings.get(R.string.radicle_status_error)
     // On, but `:node` isn't up (the node service is off) or hasn't
     // started it yet.
-    else -> "Waiting for the node service"
+    else -> Strings.get(R.string.radicle_status_waiting_service)
 }
-
-private fun peersLabel(n: Int) = if (n == 1) "1 peer" else "$n peers"
 
 /** The seed line under the RID field: the phase and its detail. */
 internal fun seedLine(seed: RadicleSeed): String {
     val phase = when (seed.phase) {
-        "resolving" -> "Looking for seeds"
-        "connecting" -> "Connecting"
-        "fetching" -> "Fetching"
-        "peer-failed" -> "A seed failed, trying the next"
-        RadicleNode.PHASE_DONE -> "Seeded"
-        RadicleNode.PHASE_CANCELLED -> "Cancelled"
-        RadicleNode.PHASE_FAILED -> "Failed"
+        "resolving" -> Strings.get(R.string.radicle_seed_phase_resolving)
+        "connecting" -> Strings.get(R.string.radicle_seed_phase_connecting)
+        "fetching" -> Strings.get(R.string.radicle_seed_phase_fetching)
+        "peer-failed" -> Strings.get(R.string.radicle_seed_phase_peer_failed)
+        RadicleNode.PHASE_DONE -> Strings.get(R.string.radicle_seed_phase_done)
+        RadicleNode.PHASE_CANCELLED -> Strings.get(R.string.radicle_seed_phase_cancelled)
+        RadicleNode.PHASE_FAILED -> Strings.get(R.string.radicle_seed_phase_failed)
         else -> seed.phase
     }
-    return if (seed.detail.isEmpty()) phase else "$phase: ${seed.detail}"
+    return if (seed.detail.isEmpty()) phase else Strings.get(R.string.radicle_seed_line_detail, phase, seed.detail)
 }
 
 /**
@@ -125,7 +128,7 @@ fun RadicleScreen(
     BackHandler(onBack = onDismiss)
     val info = radicle.info
     FullScreenScaffold(
-        title = RADICLE_ROW_TITLE,
+        title = stringResource(R.string.radicle_row_title),
         onDismiss = onDismiss,
     ) {
         LazyColumn(
@@ -163,19 +166,20 @@ private fun RadicleStatusSection(
     onToggle: (Boolean) -> Unit,
     onOpenLogs: () -> Unit,
 ) {
-    val (color, icon, label) = when {
-        !enabled -> Triple(Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, "Off")
-        info.status == RadicleStatus.Running -> Triple(Color(0xFF22C55E), Icons.Filled.CheckCircle, "Running")
-        info.status == RadicleStatus.Error -> Triple(Color(0xFFEF4444), Icons.Filled.ErrorOutline, "Error")
-        info.status == RadicleStatus.Stopping -> Triple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Stopping…")
-        info.status == RadicleStatus.Starting -> Triple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Starting…")
-        else -> Triple(Color(0xFF94A3B8), Icons.Filled.HourglassTop, "Waiting")
+    val (color, icon, labelRes) = when {
+        !enabled -> Triple(Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, R.string.radicle_status_off)
+        info.status == RadicleStatus.Running -> Triple(Color(0xFF22C55E), Icons.Filled.CheckCircle, R.string.radicle_status_running)
+        info.status == RadicleStatus.Error -> Triple(Color(0xFFEF4444), Icons.Filled.ErrorOutline, R.string.radicle_status_error)
+        info.status == RadicleStatus.Stopping -> Triple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, R.string.radicle_status_stopping)
+        info.status == RadicleStatus.Starting -> Triple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, R.string.radicle_status_starting)
+        else -> Triple(Color(0xFF94A3B8), Icons.Filled.HourglassTop, R.string.radicle_status_waiting)
     }
-    SectionCard(title = "Status") {
+    val label = stringResource(labelRes)
+    SectionCard(title = stringResource(R.string.radicle_section_status)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .switchRow(checked = enabled, onCheckedChange = onToggle, label = "Radicle node")
+                .switchRow(checked = enabled, onCheckedChange = onToggle, label = stringResource(R.string.radicle_row_title))
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -185,14 +189,14 @@ private fun RadicleStatusSection(
                 Text(label, fontWeight = FontWeight.Medium)
                 Text(
                     when {
-                        !enabled -> "Collaborate on Radicle repositories peer-to-peer"
-                        !runNodeEnabled -> "Starts once the Swarm node is on"
+                        !enabled -> stringResource(R.string.radicle_status_off_detail)
+                        !runNodeEnabled -> stringResource(R.string.radicle_status_needs_swarm)
                         info.status == RadicleStatus.Running ->
-                            "Connected to ${peersLabel(info.connectedPeers)}"
-                        info.status == RadicleStatus.Starting -> "Loading the identity and dialling seeds"
-                        info.status == RadicleStatus.Stopping -> "Shutting the node down"
-                        info.status == RadicleStatus.Error -> "The node couldn’t start. Retry, or turn it off and on."
-                        else -> "Waiting for the node service"
+                            pluralStringResource(R.plurals.radicle_status_connected, info.connectedPeers, info.connectedPeers)
+                        info.status == RadicleStatus.Starting -> stringResource(R.string.radicle_status_starting_detail)
+                        info.status == RadicleStatus.Stopping -> stringResource(R.string.radicle_status_stopping_detail)
+                        info.status == RadicleStatus.Error -> stringResource(R.string.radicle_status_error_detail)
+                        else -> stringResource(R.string.radicle_status_waiting_service)
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -202,14 +206,14 @@ private fun RadicleStatusSection(
         }
         val err = info.errorMessage
         if (enabled && !err.isNullOrBlank()) {
-            DetailRow("Error", err, singleLine = false)
+            DetailRow(stringResource(R.string.radicle_detail_error), err, singleLine = false)
         }
         // A failed start isn't retried behind the user's back; this asks
         // `:node` to boot again (as the next bind would).
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             LogsButton(onOpenLogs)
             if (enabled && runNodeEnabled && info.status == RadicleStatus.Error) {
-                TextButton(onClick = { onToggle(true) }) { Text("Retry") }
+                TextButton(onClick = { onToggle(true) }) { Text(stringResource(R.string.common_retry)) }
             }
         }
     }
@@ -217,11 +221,11 @@ private fun RadicleStatusSection(
 
 @Composable
 private fun RadicleIdentitySection(info: RadicleInfo) {
-    SectionCard(title = "Identity") {
-        DetailRow("Alias", info.alias)
-        DetailRow("Peers", info.connectedPeers.toString())
-        StackedValue("DID", info.did)
-        StackedValue("Node ID", info.nid)
+    SectionCard(title = stringResource(R.string.radicle_section_identity)) {
+        DetailRow(stringResource(R.string.radicle_identity_alias), info.alias)
+        DetailRow(stringResource(R.string.radicle_identity_peers), info.connectedPeers.toString())
+        StackedValue(stringResource(R.string.radicle_identity_did), info.did)
+        StackedValue(stringResource(R.string.radicle_identity_node_id), info.nid)
     }
 }
 
@@ -256,10 +260,10 @@ private fun RadicleReposSection(
             onSeed(input)
         }
     }
-    SectionCard(title = "Seeded repositories") {
+    SectionCard(title = stringResource(R.string.radicle_section_seeded)) {
         if (info.seededRepos.isEmpty()) {
             Text(
-                "Nothing seeded yet.",
+                stringResource(R.string.radicle_nothing_seeded),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -271,7 +275,7 @@ private fun RadicleReposSection(
                             Text(repo.name, fontWeight = FontWeight.Medium)
                         } else {
                             Text(
-                                "Awaiting first fetch",
+                                stringResource(R.string.radicle_awaiting_first_fetch),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -287,10 +291,10 @@ private fun RadicleReposSection(
                     }
                     // Only once it has fetched: there's nothing to browse before.
                     if (onOpen != null && repo.name.isNotEmpty()) {
-                        TextButton(onClick = { onOpen(repo.rid) }) { Text("Open") }
+                        TextButton(onClick = { onOpen(repo.rid) }) { Text(stringResource(R.string.common_open)) }
                     }
                     // Also the way out for a RID that never fetched.
-                    TextButton(onClick = { onUnseed(repo.rid) }) { Text("Stop seeding") }
+                    TextButton(onClick = { onUnseed(repo.rid) }) { Text(stringResource(R.string.radicle_stop_seeding_button)) }
                 }
             }
         }
@@ -299,8 +303,8 @@ private fun RadicleReposSection(
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
-                label = { Text("Repository ID") },
-                placeholder = { Text("rad:z…") },
+                label = { Text(stringResource(R.string.radicle_rid_label)) },
+                placeholder = { Text(stringResource(R.string.radicle_rid_placeholder)) },
                 singleLine = true,
                 textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                 keyboardOptions = urlKeyboardOptions(ImeAction.Go),
@@ -313,7 +317,7 @@ private fun RadicleReposSection(
             Button(
                 onClick = submit,
                 enabled = input.isNotBlank() && !busy,
-            ) { Text(if (busy) "Seeding…" else "Seed") }
+            ) { Text(stringResource(if (busy) R.string.radicle_seeding_button else R.string.radicle_seed_button)) }
         }
         if (seed != null) {
             Text(
@@ -345,18 +349,18 @@ private fun RadicleReposSection(
  */
 @Composable
 private fun RadicleSitesSection(grants: List<RadicleGrantStore.Grant>, onRevoke: (String) -> Unit) {
-    SectionCard(title = "Connected sites") {
+    SectionCard(title = stringResource(R.string.radicle_section_sites)) {
         grants.forEach { grant ->
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f).padding(vertical = 4.dp)) {
                     Text(permissionOriginDisplay(grant.origin), fontWeight = FontWeight.Medium)
                     Text(
-                        if (grant.signing) "Can see your identity and write as you" else "Can see your node and ask to seed",
+                        stringResource(if (grant.signing) R.string.radicle_site_can_sign else R.string.radicle_site_can_connect),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                TextButton(onClick = { onRevoke(grant.origin) }) { Text("Disconnect") }
+                TextButton(onClick = { onRevoke(grant.origin) }) { Text(stringResource(R.string.common_disconnect)) }
             }
         }
     }

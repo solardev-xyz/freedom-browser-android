@@ -4,8 +4,11 @@ import android.content.Context
 import android.util.Log
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import java.io.ByteArrayInputStream
 import java.net.URLDecoder
+import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -51,7 +54,8 @@ import org.json.JSONObject
  *    not open to other origins.
  *
  *  - `/_/viewer.js`, `/_/viewer.css` — the browser page's own script and
- *    style, from the app's assets.
+ *    style, from the app's assets; `/_/strings.js` — the page's text in the
+ *    app's language (#280), built from string resources ([viewerStrings]).
  *
  *  - anything else — the browser page (`assets/rad/viewer.html`), which
  *    reads the address it was loaded at and fetches what it shows from
@@ -76,8 +80,13 @@ object RadApi {
     @Volatile
     private var assets: Map<String, ByteArray> = emptyMap()
 
+    /** For the language the viewer's text is in ([viewerLocale]); null off-device. */
+    @Volatile
+    private var appContext: Context? = null
+
     /** Load the viewer's files from the app's assets, once. */
     fun init(context: Context) {
+        appContext = context.applicationContext ?: context
         if (assets.isNotEmpty()) return
         assets = VIEWER_FILES.associate { (path, file) ->
             path to runCatching { context.assets.open("rad/$file").use { it.readBytes() } }
@@ -167,13 +176,23 @@ object RadApi {
 
     private fun serveFile(path: String): Reply {
         if (path == RadUrl.INVALID_PATH) return viewer()
+        if (path == VIEWER_STRINGS_JS) {
+            val script = "window.RAD_STRINGS = ${viewerStrings()};\n"
+            return Reply(200, mimeFor(path), script.toByteArray(), PAGE_HEADERS)
+        }
         val file = VIEWER_FILES.firstOrNull { it.first == path && it.first != VIEWER_HTML }
             ?: return json(404, error("not found"))
         return Reply(200, mimeFor(file.second), assets[path] ?: ByteArray(0), PAGE_HEADERS)
     }
 
-    private fun viewer(): Reply =
-        Reply(200, "text/html; charset=utf-8", assets[VIEWER_HTML] ?: FALLBACK_HTML, PAGE_HEADERS)
+    private fun viewer(): Reply {
+        val page = assets[VIEWER_HTML]?.toString(Charsets.UTF_8)
+            ?.replace(LOADING_MARK, htmlText(Strings.get(R.string.radicle_viewer_loading)))
+            ?: fallbackHtml()
+        return Reply(200, "text/html; charset=utf-8", page.toByteArray(), PAGE_HEADERS)
+    }
+
+    private fun htmlText(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     private fun mimeFor(file: String): String = when {
         file.endsWith(".js") -> "text/javascript; charset=utf-8"
@@ -413,6 +432,145 @@ object RadApi {
     }
 
     // ---------------------------------------------------------------
+    // The viewer's text (#280)
+    // ---------------------------------------------------------------
+
+    /**
+     * What `viewer.js` calls `S.<key>`: its sentences, raw (`%1$s` /
+     * `%1$d` left for the page to fill, `%%` for a literal `%`).
+     */
+    internal val VIEWER_STRINGS: Map<String, Int> = linkedMapOf(
+        "loading" to R.string.radicle_viewer_loading,
+        "just_now" to R.string.radicle_viewer_just_now,
+        "unknown_author" to R.string.radicle_viewer_unknown_author,
+        "image" to R.string.radicle_viewer_image,
+        "unreadable_response" to R.string.radicle_viewer_unreadable_response,
+        "off_title" to R.string.radicle_viewer_off_title,
+        "off_body" to R.string.radicle_viewer_off_body,
+        "starting_title" to R.string.radicle_viewer_starting_title,
+        "starting_body" to R.string.radicle_viewer_starting_body,
+        "stopped_title" to R.string.radicle_viewer_stopped_title,
+        "stopped_body" to R.string.radicle_viewer_stopped_body,
+        "repo_not_found_title" to R.string.radicle_viewer_repo_not_found_title,
+        "repo_not_found_body" to R.string.radicle_viewer_repo_not_found_body,
+        "repo_not_found_hint" to R.string.radicle_viewer_repo_not_found_hint,
+        "not_available_title" to R.string.radicle_viewer_not_available_title,
+        "not_public" to R.string.radicle_viewer_not_public,
+        "not_found_title" to R.string.radicle_viewer_not_found_title,
+        "nothing_here" to R.string.radicle_viewer_nothing_here,
+        "load_failed_title" to R.string.radicle_viewer_load_failed_title,
+        "repository" to R.string.radicle_viewer_repository,
+        "page_title" to R.string.radicle_viewer_page_title,
+        "tab_code" to R.string.radicle_viewer_tab_code,
+        "tab_issues" to R.string.radicle_viewer_tab_issues,
+        "tab_patches" to R.string.radicle_viewer_tab_patches,
+        "tab_commits" to R.string.radicle_viewer_tab_commits,
+        "fact_branch" to R.string.radicle_viewer_fact_branch,
+        "fact_head" to R.string.radicle_viewer_fact_head,
+        "root" to R.string.radicle_viewer_root,
+        "empty" to R.string.radicle_viewer_empty,
+        "binary" to R.string.radicle_viewer_binary,
+        "binary_not_shown" to R.string.radicle_viewer_binary_not_shown,
+        "nothing_yet_title" to R.string.radicle_viewer_nothing_yet_title,
+        "no_head_body" to R.string.radicle_viewer_no_head_body,
+        "state_open" to R.string.radicle_viewer_state_open,
+        "state_closed" to R.string.radicle_viewer_state_closed,
+        "state_solved" to R.string.radicle_viewer_state_solved,
+        "state_draft" to R.string.radicle_viewer_state_draft,
+        "state_merged" to R.string.radicle_viewer_state_merged,
+        "state_archived" to R.string.radicle_viewer_state_archived,
+        "no_open_issues" to R.string.radicle_viewer_no_open_issues,
+        "no_closed_issues" to R.string.radicle_viewer_no_closed_issues,
+        "no_issues_in_state" to R.string.radicle_viewer_no_issues_in_state,
+        "no_open_patches" to R.string.radicle_viewer_no_open_patches,
+        "no_draft_patches" to R.string.radicle_viewer_no_draft_patches,
+        "no_merged_patches" to R.string.radicle_viewer_no_merged_patches,
+        "no_archived_patches" to R.string.radicle_viewer_no_archived_patches,
+        "no_patches_in_state" to R.string.radicle_viewer_no_patches_in_state,
+        "untitled" to R.string.radicle_viewer_untitled,
+        "more" to R.string.radicle_viewer_more,
+        "issue_id" to R.string.radicle_viewer_issue_id,
+        "patch_id" to R.string.radicle_viewer_patch_id,
+        "revision" to R.string.radicle_viewer_revision,
+        "revision_head" to R.string.radicle_viewer_revision_head,
+        "browse_revision" to R.string.radicle_viewer_browse_revision,
+        "no_history_title" to R.string.radicle_viewer_no_history_title,
+        "no_head_commit" to R.string.radicle_viewer_no_head_commit,
+        "no_message" to R.string.radicle_viewer_no_message,
+        "older" to R.string.radicle_viewer_older,
+        "rid_placeholder" to R.string.radicle_rid_placeholder,
+        "open" to R.string.common_open,
+        "not_a_rid" to R.string.radicle_viewer_not_a_rid,
+        "invalid_title" to R.string.radicle_viewer_invalid_title,
+        "invalid_body" to R.string.radicle_viewer_invalid_body,
+        "invalid_hint" to R.string.radicle_viewer_invalid_hint,
+        "open_title" to R.string.radicle_viewer_open_title,
+        "open_body" to R.string.radicle_viewer_open_body,
+        "no_page" to R.string.radicle_viewer_no_page,
+    )
+
+    /** What `viewer.js` calls `P.<key>`: counted phrases, one form per plural category. */
+    internal val VIEWER_PLURALS: Map<String, Int> = linkedMapOf(
+        "seconds_ago" to R.plurals.radicle_viewer_seconds_ago,
+        "minutes_ago" to R.plurals.radicle_viewer_minutes_ago,
+        "hours_ago" to R.plurals.radicle_viewer_hours_ago,
+        "days_ago" to R.plurals.radicle_viewer_days_ago,
+        "months_ago" to R.plurals.radicle_viewer_months_ago,
+        "years_ago" to R.plurals.radicle_viewer_years_ago,
+        "delegates" to R.plurals.radicle_viewer_delegates,
+        "seeds" to R.plurals.radicle_viewer_seeds,
+        "comments" to R.plurals.radicle_viewer_comments,
+    )
+
+    /**
+     * The viewer's text table, `/_/strings.js`'s `window.RAD_STRINGS`:
+     * `lang` (a BCP 47 tag the page hands `Intl.PluralRules` and
+     * `Intl.NumberFormat`), `strings` ([VIEWER_STRINGS]) and `plurals`
+     * ([VIEWER_PLURALS], each `{category: form}` for the categories
+     * [pluralSamples] names). The page picks a plural form with the same
+     * CLDR rules Android's resources use, and inserts all of it as text.
+     */
+    internal fun viewerStrings(
+        locale: Locale = viewerLocale(),
+        samples: Map<String, Int> = pluralSamples(locale),
+    ): JSONObject {
+        val strings = JSONObject()
+        for ((key, id) in VIEWER_STRINGS) strings.put(key, Strings.get(id))
+        val plurals = JSONObject()
+        for ((key, id) in VIEWER_PLURALS) {
+            val forms = JSONObject()
+            // No args: the form's pattern as it is, for the page to fill.
+            for ((category, n) in samples) forms.put(category, Strings.plural(id, n))
+            plurals.put(key, forms)
+        }
+        return JSONObject()
+            .put("lang", locale.toLanguageTag())
+            .put("strings", strings)
+            .put("plurals", plurals)
+    }
+
+    private fun viewerLocale(): Locale =
+        appContext?.resources?.configuration?.locales?.takeIf { !it.isEmpty }?.get(0) ?: Locale.getDefault()
+
+    /**
+     * A whole number in each plural category [locale] has (`one` → 1,
+     * `other` → 0 in English), so [Strings.plural] yields that category's
+     * form. English's when ICU isn't there (JVM tests).
+     */
+    internal fun pluralSamples(locale: Locale): Map<String, Int> {
+        val out = linkedMapOf<String, Int>()
+        runCatching {
+            val rules = android.icu.text.PluralRules.forLocale(locale) ?: return@runCatching
+            for (keyword in rules.keywords.orEmpty()) {
+                val n = rules.getSamples(keyword)?.firstOrNull { it >= 0 && it % 1.0 == 0.0 && it <= Int.MAX_VALUE }
+                if (n != null) out[keyword] = n.toInt()
+            }
+        }
+        if (out["other"] == null) return linkedMapOf("one" to 1, "other" to 0)
+        return out
+    }
+
+    // ---------------------------------------------------------------
     // Replies
     // ---------------------------------------------------------------
 
@@ -494,13 +652,19 @@ object RadApi {
 
     private const val VIEWER_HTML = "${RadUrl.INTERNAL_PREFIX}viewer.html"
 
+    private const val VIEWER_STRINGS_JS = "${RadUrl.INTERNAL_PREFIX}strings.js"
+
+    /** Where viewer.html's first "Loading…" goes (the page's own script says the rest). */
+    private const val LOADING_MARK = "{{loading}}"
+
     private val VIEWER_FILES = listOf(
         VIEWER_HTML to "viewer.html",
         "${RadUrl.INTERNAL_PREFIX}viewer.js" to "viewer.js",
         "${RadUrl.INTERNAL_PREFIX}viewer.css" to "viewer.css",
     )
 
-    private val FALLBACK_HTML = "<!doctype html><title>Radicle</title><p>The repository browser is missing.".toByteArray()
+    private fun fallbackHtml() =
+        "<!doctype html><title>Radicle</title><p>${htmlText(Strings.get(R.string.radicle_viewer_missing))}"
 
     private const val TAG = "RadApi"
 }

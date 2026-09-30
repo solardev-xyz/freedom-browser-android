@@ -5,6 +5,7 @@ import android.util.Log
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import java.io.ByteArrayInputStream
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataResult
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
@@ -14,6 +15,7 @@ import baby.freedom.mobile.chains.rpc.RoutingContext
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.l10n.Strings
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
@@ -217,17 +219,17 @@ class OnchainDocument(
 
     /** The warning's details: what the user is being asked to run, whole. */
     fun unverifiedDetail(): String = listOf(
-        "Network: $network (chain ${app.chainId})",
-        "Contract: ${app.checksumAddress}",
-        "HTML keccak256: $hash",
-        "From: $source (not cross-checked)",
+        Strings.get(R.string.radicle_onchain_detail_network, network, app.chainId.toString()),
+        Strings.get(R.string.radicle_onchain_detail_contract, app.checksumAddress),
+        Strings.get(R.string.radicle_onchain_detail_html_hash, hash),
+        Strings.get(R.string.radicle_onchain_detail_from, source),
     ).joinToString("\n")
 
     fun conflictDetail(): String = listOf(
-        "Network: $network (chain ${app.chainId})",
-        "Contract: ${app.checksumAddress}",
-        "Answered: ${trust.agreed.joinToString(", ").ifEmpty { "?" }}",
-        "Disagreed: ${trust.dissented.joinToString(", ")}",
+        Strings.get(R.string.radicle_onchain_detail_network, network, app.chainId.toString()),
+        Strings.get(R.string.radicle_onchain_detail_contract, app.checksumAddress),
+        Strings.get(R.string.radicle_onchain_detail_answered, trust.agreed.joinToString(", ").ifEmpty { "?" }),
+        Strings.get(R.string.radicle_onchain_detail_disagreed, trust.dissented.joinToString(", ")),
     ).joinToString("\n")
 }
 
@@ -255,7 +257,7 @@ class OnchainAppLoader(
         val chain = runCatching { chains() }.getOrNull()?.firstOrNull { it.id == app.chainId }
             ?: return OnchainLoad.Failed(
                 "web3_unknown_chain",
-                "Chain ${app.chainId} isn't in your chain list. Add it in Settings → Chains.",
+                Strings.get(R.string.radicle_onchain_failed_unknown_chain_add, app.chainId.toString()),
             )
         val params = JSONArray()
             .put(JSONObject().put("to", app.address).put("data", HTML_SELECTOR))
@@ -263,27 +265,27 @@ class OnchainAppLoader(
         val result = try {
             withTimeoutOrNull(timeoutMs) {
                 request(app.chainId, "eth_call", params, RoutingContext.forPage(app.permissionKey))
-            } ?: return OnchainLoad.Failed("web3_lookup_failed", "No answer within ${timeoutMs / 1000} s")
+            } ?: return OnchainLoad.Failed("web3_lookup_failed", Strings.get(R.string.radicle_onchain_failed_timeout, timeoutMs / 1000))
         } catch (e: CancellationException) {
             throw e
         } catch (e: ChainRpcException.UnknownChain) {
-            return OnchainLoad.Failed("web3_unknown_chain", "Chain ${app.chainId} isn't in your chain list.")
+            return OnchainLoad.Failed("web3_unknown_chain", Strings.get(R.string.radicle_onchain_failed_unknown_chain, app.chainId.toString()))
         } catch (e: ChainRpcException.Rpc) {
             // A revert is the contract's own answer: it has no html().
-            return OnchainLoad.Failed("web3_not_an_app", "html() failed: ${e.rpcMessage}")
+            return OnchainLoad.Failed("web3_not_an_app", Strings.get(R.string.radicle_onchain_failed_html_call, e.rpcMessage))
         } catch (e: ChainRpcException) {
             Log.i(TAG, "[onchain] html() chain=${app.chainId} failed: ${e.message}")
-            return OnchainLoad.Failed("web3_lookup_failed", e.message ?: "No RPC answered")
+            return OnchainLoad.Failed("web3_lookup_failed", e.message ?: Strings.get(R.string.radicle_onchain_failed_no_rpc))
         }
         val html = when (val decoded = decodeHtml(result.result as? String)) {
             is Decoded.Html -> decoded.html
             Decoded.TooLarge -> return OnchainLoad.Failed(
                 "web3_too_large",
-                "The document is larger than ${MAX_HTML_BYTES / (1024 * 1024)} MiB.",
+                Strings.get(R.string.radicle_onchain_failed_too_large, MAX_HTML_BYTES / (1024 * 1024)),
             )
             Decoded.Malformed -> return OnchainLoad.Failed(
                 "web3_not_an_app",
-                "html() returned no ERC-8244 document (is this an onchain app, on this chain?)",
+                Strings.get(R.string.radicle_onchain_failed_malformed),
             )
         }
         val doc = OnchainDocument(app, html, htmlHash(html), result.trust, chain.name)
@@ -589,14 +591,14 @@ internal fun interceptOnchainAppRequest(
     if (virtual == null && !OnchainAppRef.isWeb3Scheme(url)) {
         // Under the suffix but not an app's own origin (another label, a
         // port, a trailing dot, plain http): no such site, and no DNS.
-        return onchainTextResponse(404, "Not Found", "No onchain application lives at this address.")
+        return onchainTextResponse(404, "Not Found", Strings.get(R.string.radicle_onchain_no_app_here))
     }
     if (virtual == null || !req.isForMainFrame) {
-        return onchainTextResponse(403, "Forbidden", "Onchain applications load as top-level documents only.")
+        return onchainTextResponse(403, "Forbidden", Strings.get(R.string.radicle_onchain_top_level_only))
     }
     val method = req.method?.uppercase() ?: "GET"
     if (method != "GET" && method != "HEAD") {
-        return onchainTextResponse(405, "Method Not Allowed", "Onchain applications only support GET and HEAD.")
+        return onchainTextResponse(405, "Method Not Allowed", Strings.get(R.string.radicle_onchain_get_head_only))
     }
     val (app, tail) = virtual
     val handedOff = tab?.takeHandoff(app)
@@ -612,7 +614,7 @@ internal fun interceptOnchainAppRequest(
                     if (fallback != null) OnchainApps.FALLBACK_DEADLINE_MS else OnchainAppLoader.REQUEST_TIMEOUT_MS,
                 )
             }
-        } ?: OnchainLoad.Failed("web3_lookup_failed", "Chain access isn't ready yet.")
+        } ?: OnchainLoad.Failed("web3_lookup_failed", Strings.get(R.string.radicle_onchain_failed_not_ready))
         decideOnchainDocument(load, approvals, fallback).also {
             if (it is OnchainDecision.Serve) {
                 // Loaded trusted: the same bytes are fine again later.
@@ -657,19 +659,16 @@ private fun onchainTextResponse(status: Int, reason: String, text: String) = Web
 internal fun onchainRefusal(displayUrl: String, linkUrl: String, code: String, detail: String): WebResourceResponse {
     val (title, description, action) = when (code) {
         "web3_unverified" -> Triple(
-            "Not cross-checked",
-            "Only one RPC server returned this app's code, so Freedom couldn't check it " +
-                "against another server, and it isn't code you already let through in this session. " +
-                "Nothing was run.",
-            "Review",
+            Strings.get(R.string.radicle_onchain_unverified_title),
+            Strings.get(R.string.radicle_onchain_unverified_description),
+            Strings.get(R.string.radicle_onchain_unverified_action),
         )
         "web3_conflict" -> Triple(
-            "RPC servers disagreed",
-            "The RPC servers Freedom asked returned different code for this app. At least one of " +
-                "them is wrong, so nothing was run.",
-            "Try again",
+            Strings.get(R.string.radicle_onchain_conflict_title),
+            Strings.get(R.string.radicle_onchain_conflict_description),
+            Strings.get(R.string.common_try_again),
         )
-        else -> Triple(onchainErrorTitle(code), onchainErrorDescription(code), "Try again")
+        else -> Triple(onchainErrorTitle(code), onchainErrorDescription(code), Strings.get(R.string.common_try_again))
     }
     fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
     val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -705,19 +704,17 @@ ${esc(detail)}</div><a href="${esc(linkUrl)}">$action</a></div></body></html>"""
 }
 
 internal fun onchainErrorTitle(code: String): String = when (code) {
-    "web3_unknown_chain" -> "Unknown chain"
-    "web3_not_an_app" -> "Not an onchain app"
-    "web3_too_large" -> "App too large"
-    "web3_invalid" -> "Not a web3:// app address"
-    else -> "Couldn't read the app"
+    "web3_unknown_chain" -> Strings.get(R.string.radicle_onchain_error_unknown_chain_title)
+    "web3_not_an_app" -> Strings.get(R.string.radicle_onchain_error_not_an_app_title)
+    "web3_too_large" -> Strings.get(R.string.radicle_onchain_error_too_large_title)
+    "web3_invalid" -> Strings.get(R.string.radicle_onchain_error_invalid_title)
+    else -> Strings.get(R.string.radicle_onchain_error_lookup_failed_title)
 }
 
 internal fun onchainErrorDescription(code: String): String = when (code) {
-    "web3_unknown_chain" -> "This app lives on a chain that isn't in your chain list, so Freedom " +
-        "doesn't know which RPC servers to ask. Add the chain in Settings, then try again."
-    "web3_not_an_app" -> "The contract didn't return an ERC-8244 html() document on this chain. " +
-        "Check the address and the chain ID."
-    "web3_too_large" -> "The app's document is larger than Freedom loads."
-    "web3_invalid" -> "Freedom loads web3:// apps by contract address: web3://0x…[:chainId]/."
-    else -> "Couldn't get an answer from the chain's RPC servers. Check your connection and try again."
+    "web3_unknown_chain" -> Strings.get(R.string.radicle_onchain_error_unknown_chain_description)
+    "web3_not_an_app" -> Strings.get(R.string.radicle_onchain_error_not_an_app_description)
+    "web3_too_large" -> Strings.get(R.string.radicle_onchain_error_too_large_description)
+    "web3_invalid" -> Strings.get(R.string.radicle_onchain_error_invalid_description)
+    else -> Strings.get(R.string.radicle_onchain_error_lookup_failed_description)
 }
