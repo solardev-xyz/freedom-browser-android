@@ -2033,6 +2033,9 @@ fun BrowserScreen(
         val blockedPopups = state.blockedPopups
         val popupNoticeShown = blockedPopups.entries.isNotEmpty() && !addressFocused && !overlayShown
         var popupNoticeHeightPx by remember { mutableIntStateOf(0) }
+        val popupNoticeTopInsets = WindowInsets.systemBars
+            .union(WindowInsets.displayCutout)
+            .only(WindowInsetsSides.Top)
         if (popupNoticeShown) {
             BlockedPopupNotice(
                 popups = blockedPopups,
@@ -2050,9 +2053,13 @@ fun BrowserScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .windowInsetsPadding(chromeInsets)
+                    // Its height is capped to what's left under the status
+                    // bar; past that its rows scroll (#292 R5-F1).
+                    .windowInsetsPadding(popupNoticeTopInsets)
                     .padding(
                         start = CapsuleSideMargin,
                         end = CapsuleSideMargin,
+                        top = CapsuleBottomMargin,
                         bottom = capsuleSlot + CapsuleBottomMargin + IpfsStatusGap + ipfsLift,
                     )
                     .widthIn(max = CHROME_MAX_WIDTH)

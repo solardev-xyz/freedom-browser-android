@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -16,8 +18,13 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -43,6 +50,11 @@ import androidx.compose.ui.unit.dp
  * ([PopupAddress.site]), on its own; only the path and query after it —
  * a page chooses them, and could make them a screenful — are cut after a
  * few lines.
+ *
+ * It takes no more height than it's given (#292 R5-F1): the site and the
+ * rows scroll between the title and "Always allow", and each button
+ * acts only while what it names — its row, or the site — is wholly in
+ * view, so a row cut off mid-host by the card's edge can't be opened.
  */
 @Composable
 fun BlockedPopupNotice(
@@ -63,6 +75,11 @@ fun BlockedPopupNotice(
     val tap = rememberArmedTapGuard(popups.layoutKey)
     val origin = popups.origin
     val site = origin?.let(::permissionOriginDisplay)
+    // The card never outgrows the space it's given (#292 R5-F1): the
+    // site and rows scroll between the fixed title and "Always allow",
+    // and a button acts only while what it names is wholly in view.
+    val scroll = rememberScrollState()
+    val inView = remember { FullyInView() }
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -75,60 +92,73 @@ fun BlockedPopupNotice(
         Column(modifier = Modifier.padding(start = 16.dp, top = 4.dp, end = 4.dp, bottom = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.WebAsset, contentDescription = null, modifier = Modifier.padding(end = 12.dp))
-                Column(modifier = Modifier.weight(1f).padding(vertical = 8.dp)) {
-                    Text(
-                        blockedPopupsTitle(popups.count),
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    if (site != null) {
-                        Text(
-                            site,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
+                Text(
+                    blockedPopupsTitle(popups.count),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f).padding(vertical = 8.dp),
+                )
                 // Closing only takes the notice down: no need to guard it.
                 IconButton(onClick = onClose) {
                     Icon(Icons.Filled.Close, contentDescription = "Close the pop-up notice")
                 }
             }
-            for (entry in entries) {
-                val url = entry.url?.takeUnless { it == ABOUT_BLANK }
-                val shown = url?.let(displayUrl)
-                // A form's address opened as a plain GET would be a
-                // different request than the page made: named only.
-                val openable = shown != null && !entry.posted && isOpenableInTab(shown)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (shown != null) {
-                        PopupAddressLabel(shown, posted = entry.posted, modifier = Modifier.weight(1f))
-                    } else {
-                        Text(
-                            blockedPopupLabel(entry, null),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    if (openable) {
-                        TextButton(
-                            enabled = tap.armed,
-                            onClick = { if (tap.guard.accepts()) onOpen(entry, shown!!) },
-                            modifier = Modifier.protectedPress(tap),
-                        ) { Text("Open") }
+            Column(
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .onGloballyPositioned(inView::viewport)
+                    .verticalScroll(scroll),
+            ) {
+                if (site != null) {
+                    Text(
+                        site,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .padding(start = 36.dp, end = 12.dp, bottom = 4.dp)
+                            .onGloballyPositioned { inView.item(SITE_KEY, it) },
+                    )
+                }
+                entries.forEachIndexed { index, entry ->
+                    val url = entry.url?.takeUnless { it == ABOUT_BLANK }
+                    val shown = url?.let(displayUrl)
+                    // A form's address opened as a plain GET would be a
+                    // different request than the page made: named only.
+                    val openable = shown != null && !entry.posted && isOpenableInTab(shown)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.onGloballyPositioned { inView.item(index, it) },
+                    ) {
+                        if (shown != null) {
+                            PopupAddressLabel(shown, posted = entry.posted, modifier = Modifier.weight(1f))
+                        } else {
+                            Text(
+                                blockedPopupLabel(entry, null),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        if (openable) {
+                            val whole = inView[index]
+                            TextButton(
+                                enabled = tap.armed && whole,
+                                onClick = { if (inView[index] && tap.guard.accepts()) onOpen(entry, shown!!) },
+                                modifier = Modifier.protectedPress(tap),
+                            ) { Text("Open") }
+                        }
                     }
                 }
-            }
-            val more = popups.unlisted
-            if (more > 0) {
-                Text(
-                    "and $more more",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(vertical = 4.dp),
-                )
+                val more = popups.unlisted
+                if (more > 0) {
+                    Text(
+                        "and $more more",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 4.dp),
+                    )
+                }
             }
             if (origin != null) {
                 if (popups.allowed) {
@@ -140,15 +170,60 @@ fun BlockedPopupNotice(
                         modifier = Modifier.padding(top = 8.dp, bottom = 4.dp, end = 12.dp),
                     )
                 } else {
+                    // Allows the site named above: only while it's in view.
+                    val named = site == null || inView[SITE_KEY]
                     TextButton(
-                        enabled = tap.armed,
-                        onClick = { if (tap.guard.accepts()) onAlwaysAllow(origin) },
+                        enabled = tap.armed && named,
+                        onClick = { if ((site == null || inView[SITE_KEY]) && tap.guard.accepts()) onAlwaysAllow(origin) },
                         modifier = Modifier.protectedPress(tap),
                     ) { Text("Always allow pop-ups on this site") }
                 }
             }
             ObscuredTapNotice(tap, modifier = Modifier.padding(end = 12.dp))
         }
+    }
+}
+
+private const val SITE_KEY = "site"
+
+/**
+ * Which items of a scrolling area are wholly inside its visible part
+ * ([viewport]), by key — so a button can refuse to act for a row whose
+ * name is scrolled half out of sight (#292 R5-F1). Written from
+ * layout callbacks, read in composition; a flip only changes a button's
+ * enabled colour, never the layout, so it can't feed back into itself.
+ */
+internal class FullyInView {
+    private var viewport: LayoutCoordinates? = null
+    private val items = HashMap<Any, LayoutCoordinates>()
+    private val whole = mutableStateMapOf<Any, Boolean>()
+
+    operator fun get(key: Any): Boolean = whole[key] == true
+
+    fun viewport(coordinates: LayoutCoordinates) {
+        viewport = coordinates
+        items.keys.toList().forEach(::update)
+    }
+
+    fun item(key: Any, coordinates: LayoutCoordinates) {
+        items[key] = coordinates
+        update(key)
+    }
+
+    private fun update(key: Any) {
+        val port = viewport
+        val item = items[key]
+        val value = if (port == null || item == null || !port.isAttached || !item.isAttached) {
+            false
+        } else {
+            wholly(port.size.height.toFloat(), port.localBoundingBoxOf(item, clipBounds = false))
+        }
+        if (whole[key] != value) whole[key] = value
+    }
+
+    companion object {
+        /** [box] (in the viewport's own coordinates) lies within a viewport [height] tall. */
+        fun wholly(height: Float, box: Rect): Boolean = box.top >= -0.5f && box.bottom <= height + 0.5f
     }
 }
 

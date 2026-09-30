@@ -200,9 +200,35 @@ class PopupBlockerTest {
         assertEquals(PopupAddress("pay.example", "/checkout"), PopupAddress.of("pay.example/checkout"))
         assertEquals(PopupAddress("https://b.example:8443", "?q=1#x"), PopupAddress.of("https://b.example:8443?q=1#x"))
         assertEquals(PopupAddress("bzz://abc", ""), PopupAddress.of("bzz://abc"))
-        // Userinfo padding is capped from the front: the host stays.
-        val padded = PopupAddress.of("https://" + "u".repeat(1000) + "@evil.example/")
-        assertEquals(PopupAddress.MAX_SITE + 1, padded.site.length)
-        assertTrue(padded.site.startsWith("…") && padded.site.endsWith("@evil.example"))
+        // A site past the cap loses its front: the registrable domain stays.
+        val huge = PopupAddress.of("https://" + "a.".repeat(400) + "evil.example/")
+        assertEquals(PopupAddress.MAX_SITE + 1, huge.site.length)
+        assertTrue(huge.site.startsWith("…") && huge.site.endsWith(".evil.example"))
+    }
+
+    @Test
+    fun `an address's userinfo is not shown, so it can't pose as the host`() {
+        // #292 R5-M1: Chromium drops userinfo from display too.
+        assertEquals(
+            PopupAddress("https://evil.example", "/x"),
+            PopupAddress.of("https://accounts.google.com@evil.example/x"),
+        )
+        assertEquals(PopupAddress("https://evil.example:8443", "?q"), PopupAddress.of("https://u:p@evil.example:8443?q"))
+        // The last '@' before the path ends the userinfo; one in the path is path.
+        assertEquals(PopupAddress("https://evil.example", "/@me"), PopupAddress.of("https://a@b@evil.example/@me"))
+        assertEquals(PopupAddress("https://good.example", "/u@x"), PopupAddress.of("https://good.example/u@x"))
+        // Padding in userinfo goes with it.
+        assertEquals("https://evil.example", PopupAddress.of("https://" + "u".repeat(1000) + "@evil.example/").site)
+        // No "scheme://": nothing is taken for userinfo.
+        assertEquals(PopupAddress("mailto:a@b.example", ""), PopupAddress.of("mailto:a@b.example"))
+    }
+
+    @Test
+    fun `a row counts as in view only while wholly inside the scrolled area`() {
+        // #292 R5-F1: a row cut off at the card's edge can't be opened.
+        assertTrue(FullyInView.wholly(300f, androidx.compose.ui.geometry.Rect(0f, 0f, 100f, 300f)))
+        assertTrue(FullyInView.wholly(300f, androidx.compose.ui.geometry.Rect(0f, 120f, 100f, 200f)))
+        assertFalse(FullyInView.wholly(300f, androidx.compose.ui.geometry.Rect(0f, 250f, 100f, 340f)))
+        assertFalse(FullyInView.wholly(300f, androidx.compose.ui.geometry.Rect(0f, -20f, 100f, 60f)))
     }
 }

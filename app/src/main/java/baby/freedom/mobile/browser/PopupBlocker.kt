@@ -86,17 +86,17 @@ internal fun blockedPopupLabel(entry: BlockedPopup, shown: String?): String = wh
 }
 
 /**
- * [shown] split for the notice (#292 R4-F1): [site] — the scheme and
- * everything up to the path (userinfo, host, port) — which the notice
+ * [shown] split for the notice (#292 R4-F1): [site] — the scheme, host
+ * and port, with any userinfo dropped (R5-M1) — which the notice
  * never cuts, since a host's tail is where its registrable domain is and
  * a spoof pads the front (`accounts.google.com.….evil.example`); and
  * [rest], the path, query and fragment, which a page can make a
  * screenful and the notice may shorten.
  *
  * [site] is capped at [MAX_SITE] characters by dropping its *start*
- * (behind a leading "…"): a real host is at most 253, but userinfo
- * (`https://<padding>@evil.example`) is not, and the end is the part
- * that says where it goes.
+ * (behind a leading "…"): a real host is at most 253, but a display
+ * form of one needn't be, and the end is the part that says where it
+ * goes.
  */
 internal data class PopupAddress(val site: String, val rest: String) {
     companion object {
@@ -106,7 +106,11 @@ internal data class PopupAddress(val site: String, val rest: String) {
             val sep = shown.indexOf("://")
             val start = if (sep > 0 && shown.substring(0, sep).all { it.isLetterOrDigit() || it in "+.-" }) sep + 3 else 0
             val end = shown.indexOfAny(charArrayOf('/', '?', '#'), start).let { if (it < 0) shown.length else it }
-            val site = shown.substring(0, end)
+            // Userinfo is dropped, as Chromium's own address display
+            // does (#292 R5-M1): `https://accounts.google.com@evil.example`
+            // goes to evil.example, and reads as Google if shown whole.
+            val at = if (start > 0) shown.lastIndexOf('@', end - 1) else -1
+            val site = if (at >= start) shown.substring(0, start) + shown.substring(at + 1, end) else shown.substring(0, end)
             val capped = if (site.length <= MAX_SITE) site else "…" + site.takeLast(MAX_SITE)
             return PopupAddress(capped, shown.substring(end))
         }
