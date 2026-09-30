@@ -89,19 +89,30 @@ private fun BookmarkEditor(
         value = withContext(Dispatchers.Default) { bookmarkAddress(address) }
     }
 
+    // The address as it was opened: saved exactly as it's stored, not
+    // re-spelled, and with no "Saves as" note — a rename touches only
+    // the name (#296 R6-M1).
+    val unchanged = address.trim() == entry.url
+    val canSave = (unchanged || parsed is BookmarkAddress.Ok) && !saving
+
     val save: () -> Unit = save@{
-        if (parsed !is BookmarkAddress.Ok || saving) return@save
+        if (!canSave) return@save
         val typed = address
         saving = true
         scope.launch {
-            val ok = withContext(Dispatchers.Default) { bookmarkAddress(typed) } as? BookmarkAddress.Ok
-            if (ok == null) {
-                saving = false
-                return@launch
+            val url = if (typed.trim() == entry.url) {
+                entry.url
+            } else {
+                val ok = withContext(Dispatchers.Default) { bookmarkAddress(typed) } as? BookmarkAddress.Ok
+                if (ok == null) {
+                    saving = false
+                    return@launch
+                }
+                ok.url
             }
             // The write runs in the repository's scope: leaving the
             // dialog while it runs doesn't undo it.
-            val result = repo.editBookmark(entry.id, bookmarkTitle(title), ok.url).await()
+            val result = repo.editBookmark(entry.id, bookmarkTitle(title), url).await()
             saving = false
             when (result) {
                 BookmarkEditResult.Saved -> onDismiss()
@@ -148,12 +159,12 @@ private fun BookmarkEditor(
                             },
                             label = { Text("Address") },
                             singleLine = true,
-                            isError = saveError != null || parsed is BookmarkAddress.Invalid,
+                            isError = saveError != null || (!unchanged && parsed is BookmarkAddress.Invalid),
                             // The address it saves as, when that's not
                             // what's typed — `https://` added, say — or
                             // why it can't be saved.
                             supportingText = {
-                                val note = saveError ?: when (val p = parsed) {
+                                val note = saveError ?: if (unchanged) null else when (val p = parsed) {
                                     null -> null
                                     is BookmarkAddress.Invalid -> p.reason
                                     is BookmarkAddress.Ok ->
@@ -174,7 +185,7 @@ private fun BookmarkEditor(
         confirmButton = {
             TextButton(
                 onClick = save,
-                enabled = parsed is BookmarkAddress.Ok && !saving,
+                enabled = canSave,
             ) { Text("Save") }
         },
         dismissButton = {

@@ -32,3 +32,9 @@ sealed interface BookmarkEditResult {
     /** The database refused the write (e.g. the disk is full). */
     data object Failed : BookmarkEditResult
 }
+
+/**
+ * The bookmark a star tap came to: [id], and whether it [added] a new
+ * one or found the page already bookmarked under some spelling of it.
+ */
+data class Bookmarked(val id: Long, val added: Boolean)

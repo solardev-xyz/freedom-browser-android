@@ -116,13 +116,13 @@ class BookmarksDatabaseTest {
             db.bookmarks().all().first { list -> list.map { it.url } == expected }
         }
         try {
-            val a = repo.bookmark("https://a.example/", "A").await()!!
-            val b = repo.bookmark("https://b.example/", "B").await()!!
-            val c = repo.bookmark("https://c.example/", "C").await()!!
+            val a = repo.bookmark("https://a.example/", "A").await()!!.id
+            val b = repo.bookmark("https://b.example/", "B").await()!!.id
+            val c = repo.bookmark("https://c.example/", "C").await()!!.id
             // New ones go on top.
             assertEquals(listOf("https://c.example/", "https://b.example/", "https://a.example/"), order())
             // Bookmarking an address again keeps the one there is.
-            assertEquals(b, repo.bookmark("https://b.example/", "B again").await())
+            assertEquals(Bookmarked(b, added = false), repo.bookmark("https://b.example/", "B again").await())
             assertEquals("B", db.bookmarks().byId(b)!!.title)
             // Not a page bookmarks keep.
             assertNull(repo.bookmark("javascript:alert(1)", "x").await())
@@ -177,7 +177,7 @@ class BookmarksDatabaseTest {
         suspend fun starred(url: String) = withTimeout(5_000) { repo.isBookmarked(url).first() }
         try {
             val page = "http://localhost:8730/"
-            val a = repo.bookmark(page, "Local").await()!!
+            val a = repo.bookmark(page, "Local").await()!!.id
             val typed = (bookmarkAddress("localhost:8730") as BookmarkAddress.Ok).url
             assertEquals(BookmarkEditResult.Saved, repo.editBookmark(a, "Local", typed).await())
             assertEquals(page, db.bookmarks().byId(a)!!.url)
@@ -185,10 +185,10 @@ class BookmarksDatabaseTest {
             // Even a row saved in another spelling before this fix.
             db.bookmarks().update(a, "http://LOCALHOST:8730", "Local")
             assertTrue(starred(page))
-            assertEquals(a, repo.bookmark(page, "Again").await())
+            assertEquals(Bookmarked(a, added = false), repo.bookmark(page, "Again").await())
             assertEquals(1, db.bookmarks().all().first().size)
 
-            val n = repo.bookmark("ipfs://x.eth/", "X").await()!!
+            val n = repo.bookmark("ipfs://x.eth/", "X").await()!!.id
             assertTrue(starred("x.eth"))
             assertTrue(starred("bzz://x.eth"))
             val dup = repo.editBookmark(a, "Local", (bookmarkAddress("ens://x.eth") as BookmarkAddress.Ok).url).await()
@@ -219,12 +219,29 @@ class BookmarksDatabaseTest {
             val second = db.bookmarks().upsert(
                 BookmarkEntry(url = "ipfs://vitalik.eth/", title = "Vitalik – blog", createdAt = 2),
             )
+            // Either row can still be renamed, its address untouched
+            // (#296 R6-F1) — the other one is on the same page already.
+            assertEquals(BookmarkEditResult.Saved, repo.editBookmark(first, "Vitalik Home", "vitalik.eth").await())
+            assertEquals("Vitalik Home", db.bookmarks().byId(first)!!.title)
+            assertEquals(
+                BookmarkEditResult.Saved,
+                repo.editBookmark(second, "Vitalik blog", "ipfs://vitalik.eth/").await(),
+            )
+            assertEquals("ipfs://vitalik.eth/", db.bookmarks().byId(second)!!.url)
+            // Or re-spelled onto that same page.
+            assertEquals(BookmarkEditResult.Saved, repo.editBookmark(first, "Vitalik Home", (bookmarkAddress("ens://vitalik.eth") as BookmarkAddress.Ok).url).await())
+            repo.editBookmark(first, "Vitalik Home", "vitalik.eth").await()
+            // Moving onto a different bookmarked page is still refused.
+            val other = db.bookmarks().upsert(BookmarkEntry(url = "https://a.example/", title = "A", createdAt = 4))
+            assertTrue(repo.editBookmark(other, "A", "vitalik.eth").await() is BookmarkEditResult.Duplicate)
+            db.bookmarks().delete(other)
+
             repo.deleteBookmark(first)
             val left = withTimeout(5_000) {
-                db.bookmarks().all().first { list -> list.none { it.id == first } }
+                db.bookmarks().all().first { list -> list.none { it.id == first } && list.size == 1 }
             }
             assertEquals(listOf(second), left.map { it.id })
-            assertEquals("Vitalik – blog", left.single().title)
+            assertEquals("Vitalik blog", left.single().title)
 
             db.bookmarks().upsert(BookmarkEntry(url = "vitalik.eth", title = "Vitalik", createdAt = 3))
             repo.unbookmark("vitalik.eth")

@@ -1946,9 +1946,13 @@ fun BrowserScreen(
                             val added = repo.bookmark(url, state.title)
                             val private = state.private
                             scope.launch {
-                                val id = added.await() ?: return@launch
+                                val saved = added.await() ?: return@launch
+                                val id = saved.id
+                                // The star can still show the last page's
+                                // state for a moment; a page that turns out
+                                // to be bookmarked already isn't "added".
                                 val result = snackbarHostState.showSnackbar(
-                                    "Bookmark added",
+                                    if (saved.added) "Bookmark added" else "Already bookmarked",
                                     actionLabel = "Edit",
                                     duration = SnackbarDuration.Short,
                                 )

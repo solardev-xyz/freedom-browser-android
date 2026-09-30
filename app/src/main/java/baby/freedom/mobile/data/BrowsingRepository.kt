@@ -157,24 +157,28 @@ class BrowsingRepository internal constructor(
 
     /**
      * Bookmark [url] under [title], above every other bookmark. Completes
-     * with the bookmark's id — an existing bookmark for [url] is kept as
-     * it is (its name and place) and its id given — or null for an
-     * address that isn't bookmarked ([isRecordable]). The write runs in
-     * the repository's scope, so a caller that stops waiting (the screen
-     * that asked went away) doesn't stop it.
+     * with the bookmark — an existing bookmark for [url] is kept as it is
+     * (its name and place) and given with [Bookmarked.added] false — or
+     * null for an address that isn't bookmarked ([isRecordable]). The
+     * write runs in the repository's scope, so a caller that stops
+     * waiting (the screen that asked went away) doesn't stop it.
      */
-    fun bookmark(url: String, title: String): Deferred<Long?> = scope.async {
+    fun bookmark(url: String, title: String): Deferred<Bookmarked?> = scope.async {
         if (!isRecordable(url)) return@async null
         try {
             db.withTransaction {
-                bookmarkFor(url)?.id ?: db.bookmarks().upsert(
-                    BookmarkEntry(
-                        url = url,
-                        title = title,
-                        createdAt = System.currentTimeMillis(),
-                        position = db.bookmarks().minPosition() - 1,
-                    ),
-                )
+                bookmarkFor(url)?.let { Bookmarked(it.id, added = false) }
+                    ?: Bookmarked(
+                        db.bookmarks().upsert(
+                            BookmarkEntry(
+                                url = url,
+                                title = title,
+                                createdAt = System.currentTimeMillis(),
+                                position = db.bookmarks().minPosition() - 1,
+                            ),
+                        ),
+                        added = true,
+                    )
             }
         } catch (e: SQLiteException) {
             Log.w(TAG, "bookmark: ${e.message}")
@@ -188,15 +192,21 @@ class BrowsingRepository internal constructor(
     /**
      * Rename bookmark [id] and/or change its address (#264). [url] must
      * already be what the address bar would load for the typed text
-     * (`bookmarkAddress` in the browser package) and [isRecordable]; an
-     * address another bookmark has is refused rather than merged. In the
-     * repository's scope like [bookmark], so closing the dialog mid-save
-     * can't lose it.
+     * (`bookmarkAddress` in the browser package) and [isRecordable], or
+     * the bookmark's own address unchanged. Moving it onto a page another
+     * bookmark has is refused rather than merged; an edit that keeps it
+     * on its own page ([BookmarkUrls.key] unchanged) isn't, even when an
+     * older row already shares that page — rows saved under two spellings
+     * before #264 stay separate bookmarks, each can still be renamed
+     * (#296 R6-F1). In the repository's scope like [bookmark], so closing
+     * the dialog mid-save can't lose it.
      */
     fun editBookmark(id: Long, title: String, url: String): Deferred<BookmarkEditResult> = scope.async {
         try {
             db.withTransaction {
-                val other = bookmarkFor(url, except = id)
+                val current = db.bookmarks().byId(id) ?: return@withTransaction BookmarkEditResult.Gone
+                val samePage = current.url == url || BookmarkUrls.key(current.url) == BookmarkUrls.key(url)
+                val other = if (samePage) null else bookmarkFor(url, except = id)
                 when {
                     other != null ->
                         BookmarkEditResult.Duplicate(other.title, other.url)
