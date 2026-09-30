@@ -1,6 +1,8 @@
 package baby.freedom.mobile.browser
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
@@ -126,5 +128,67 @@ class ClientCertificatesTest {
         // What the host's real destroy does for every tab.
         for (id in listOf(41L, 42L)) ClientCertificates.onTabClosed(id)
         assertFalse(ClientCertificates.privateTabOpen)
+    }
+
+    @Test
+    fun `a chooser that never answers doesn't hold the lock once its tab closes`() = runBlocking {
+        val c = ClientCertChoices()
+        val lock = Mutex()
+        val withdrawn = MutableStateFlow(false)
+        val first = async {
+            chooseInTurn(
+                c, lock, "mtls.example", 443, 2L,
+                MutableStateFlow(2L), MutableStateFlow(false), withdrawn,
+            ) { awaitCancellation() }
+        }
+        yield()
+        assertTrue(lock.isLocked)
+        withdrawn.value = true
+        assertEquals(ClientCertPlan.SendNone, withTimeout(2_000) { first.await() })
+        assertFalse(lock.isLocked)
+        // Another tab's request gets its own chooser.
+        val next = withTimeout(2_000) {
+            chooseInTurn(
+                c, lock, "other.example", 443, 3L,
+                MutableStateFlow(3L), MutableStateFlow(false), MutableStateFlow(false),
+            ) { "bob" }
+        }
+        assertEquals(ClientCertPlan.Send("bob"), next)
+    }
+
+    @Test
+    fun `a chooser gone without a callback gives up once the browser is back in front`() = runBlocking {
+        val resumes = MutableStateFlow(0)
+        val picked = CompletableDeferred<String?>()
+        val lock = Mutex()
+        val c = ClientCertChoices()
+        val plan = async {
+            chooseInTurn(
+                c, lock, "mtls.example", 443, 2L,
+                MutableStateFlow(2L), MutableStateFlow(false), MutableStateFlow(false),
+            ) { awaitChooserAnswer(picked, resumes, launchedAt = 0, graceMs = 50) }
+        }
+        yield()
+        // Still covered by the chooser: keeps waiting.
+        kotlinx.coroutines.delay(200)
+        assertFalse(plan.isCompleted)
+        // KeyChainActivity killed; our screen resumes and no callback comes.
+        resumes.value = 1
+        assertEquals(ClientCertPlan.SendNone, withTimeout(2_000) { plan.await() })
+        assertFalse(lock.isLocked)
+        // Nothing remembered: the next request asks again.
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443))
+    }
+
+    @Test
+    fun `an answer arriving just after the browser resumes still counts`() = runBlocking {
+        val resumes = MutableStateFlow(0)
+        val picked = CompletableDeferred<String?>()
+        val answer = async { awaitChooserAnswer(picked, resumes, launchedAt = 0, graceMs = 1_000) }
+        yield()
+        resumes.value = 1
+        yield()
+        picked.complete("alice")
+        assertEquals("alice", withTimeout(2_000) { answer.await() })
     }
 }

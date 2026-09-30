@@ -13,14 +13,23 @@ import android.webkit.WebView
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -109,6 +118,9 @@ internal class ClientCertChoices {
  *   its tab is on screen ([SitePermissionBroker.onScreenTab]). A tab
  *   closed meanwhile — or while its chooser is up — sends none, and a
  *   pick made in that chooser isn't remembered ([chooseInTurn]).
+ * - A chooser that closes without answering (its process killed, say)
+ *   sends none once the browser is back in front ([awaitChooserAnswer]),
+ *   so it can't hold up every later request.
  *
  * Main thread only, like the WebView callbacks that drive it.
  */
@@ -290,6 +302,9 @@ object ClientCertificates {
  * [withdrawn] is checked again once [open] returns: the tab may have been
  * closed while its chooser was up (from the tab switcher, say), and then
  * the pick is neither remembered nor sent to a request whose page is gone.
+ * Withdrawing also stops waiting for [open] at once, so a chooser that
+ * never answers can't keep [lock] from every later request; [open]
+ * itself gives up once the chooser is gone ([awaitChooserAnswer]).
  */
 internal suspend fun chooseInTurn(
     choices: ClientCertChoices,
@@ -311,7 +326,14 @@ internal suspend fun chooseInTurn(
     if (open == null) return@turn ClientCertPlan.SendNone
     val asOf = choices.generation
     val alias = try {
-        open()
+        coroutineScope {
+            val gone = async { withdrawn.first { it } }
+            val opening = async { open() }
+            select<String?> {
+                opening.onAwait { gone.cancel(); it }
+                gone.onAwait { opening.cancel(); null }
+            }
+        }
     } catch (e: Exception) {
         Log.w("ClientCertificates", "client certificate chooser failed", e)
         return@turn ClientCertPlan.SendNone
@@ -345,15 +367,67 @@ internal fun clientCertServerUri(host: String, port: Int): Uri {
     return Uri.Builder().scheme("https").encodedAuthority("$h:$port").build()
 }
 
+/** The chooser closed without answering (its process killed, the task swiped away). */
+internal class ChooserGone : Exception("the certificate chooser closed without an answer")
+
+/**
+ * How long, after our screen is back in front, a chooser's answer may
+ * still take to arrive: KeyChain grants the alias and calls back from
+ * its own process, which can land just after the chooser has closed.
+ */
+internal const val CHOOSER_ANSWER_GRACE_MS = 5_000L
+
+/**
+ * Waits for the KeyChain chooser's answer [picked]. KeyChain only calls
+ * back when the user picks or dismisses; if `KeyChainActivity` is
+ * destroyed any other way (its process killed, say) no callback ever
+ * comes. So once our screen resumes again ([resumes] moves past
+ * [launchedAt], the value read before the chooser opened) the answer
+ * gets [graceMs] to arrive, and then this throws [ChooserGone]: the
+ * request sends none, nothing is remembered, and the chooser lock is
+ * free for the next request.
+ */
+internal suspend fun awaitChooserAnswer(
+    picked: Deferred<String?>,
+    resumes: StateFlow<Int>,
+    launchedAt: Int,
+    graceMs: Long = CHOOSER_ANSWER_GRACE_MS,
+): String? = coroutineScope {
+    val gone = async {
+        resumes.first { it != launchedAt }
+        delay(graceMs)
+    }
+    select {
+        picked.onAwait { gone.cancel(); it }
+        gone.onAwait { throw ChooserGone() }
+    }
+}
+
+/**
+ * Counts every time a browser screen resumes; a chooser covering it
+ * keeps it paused ([awaitChooserAnswer]). One count for the process, so
+ * a screen rebuilt behind the chooser (a rotation) still counts.
+ */
+private val browserResumes = MutableStateFlow(0)
+
 /** Lets [ClientCertificates] open the system chooser from this screen's Activity. */
 @Composable
 fun ClientCertificateBridge() {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) browserResumes.value++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     DisposableEffect(context) {
         val activity: Activity? = context.findActivity()
         val open: suspend (ClientCertRequest) -> String? = { request ->
             val picked = CompletableDeferred<String?>()
             val a = activity ?: throw IllegalStateException("no activity")
+            val launchedAt = browserResumes.value
             KeyChain.choosePrivateKeyAlias(
                 a,
                 { alias -> picked.complete(alias) },
@@ -362,7 +436,7 @@ fun ClientCertificateBridge() {
                 clientCertServerUri(request.host, request.port),
                 null,
             )
-            picked.await()
+            awaitChooserAnswer(picked, browserResumes, launchedAt)
         }
         ClientCertificates.choose = open
         onDispose {
