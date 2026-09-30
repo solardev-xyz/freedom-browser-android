@@ -58,6 +58,15 @@ android {
         }
     }
 
+    // Per-app language (#280): the locale config Android 13+ offers in
+    // Settings → Apps → Freedom → Language is generated from the
+    // `res/values-<lang>/` folders, so adding a language is a
+    // translation-only change. `res/resources.properties` names the
+    // language of the unqualified `res/values/` (English).
+    androidResources {
+        generateLocaleConfig = true
+    }
+
     buildFeatures {
         compose = true
         aidl = true

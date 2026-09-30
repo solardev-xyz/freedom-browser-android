@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Actions and words many screens share (#280). Use these instead of a
+  per-screen copy only where the meaning is exactly the same; a button
+  whose word should be free to differ in another language gets its own
+  string next to its screen's others.
+-->
+<resources>
+    <string name="common_cancel">Cancel</string>
+    <string name="common_ok">OK</string>
+    <string name="common_save">Save</string>
+    <string name="common_remove">Remove</string>
+    <string name="common_add">Add</string>
+    <string name="common_done">Done</string>
+    <string name="common_close">Close</string>
+    <string name="common_back">Back</string>
+    <string name="common_retry">Retry</string>
+    <string name="common_try_again">Try again</string>
+    <string name="common_open">Open</string>
+    <string name="common_edit">Edit</string>
+    <string name="common_share">Share</string>
+    <string name="common_allow">Allow</string>
+    <string name="common_reject">Reject</string>
+    <string name="common_not_now">Not now</string>
+    <string name="common_disconnect">Disconnect</string>
+    <string name="common_copy_address">Copy address</string>
+    <string name="common_open_android_settings">Open Android settings</string>
+</resources>
