@@ -301,15 +301,16 @@ class SitePermissionBroker private constructor(
      * What a tab's current document has to do with site permissions:
      * [origins] that asked for something from it (its own, or an
      * embedded frame's), what each of them was granted ([grants]:
-     * camera, microphone, location — per origin, since a frame's grant
+     * camera, microphone, location, MIDI SysEx — per origin, since a frame's grant
      * isn't the page's), and which of those the user has since removed
      * while the document still holds them ([revokedHeld], per origin
      * too) — from any tab's sheet or Settings, not only this tab's own
      * sheet ([noteRemoved]) — until the site is allowed them again, from
      * any tab of the tier ([noteAllowedAgain]). WebView can't take a
-     * grant back from a live document — a camera stream runs on, and a
+     * grant back from a live document — a camera stream runs on, a
      * location grant keeps answering the document's watches and new
-     * requests without asking — so the sheet keeps saying so, and
+     * requests without asking, and a `MIDIAccess` the page was given
+     * keeps working ([stillHeldAfterRemoval]) — so the sheet keeps saying so, and
      * offering a reload, however often it's closed and reopened over
      * this document.
      * [doc] is the tab's document number ([documents]), so a sheet opened

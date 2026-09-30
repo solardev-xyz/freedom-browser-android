@@ -73,8 +73,9 @@ private val InUseGreen = Color(0xFF34A853)
  * lists too.
  *
  * Removing the camera or microphone from a page that is using it, or
- * location from a page that was given it, doesn't take away what the
- * document already holds — WebView has no way to — so the sheet says so
+ * location or MIDI SysEx from a page that was given it (its `MIDIAccess`
+ * keeps working), doesn't take away what the document already holds —
+ * WebView has no way to ([stillHeldAfterRemoval]) — so the sheet says so
  * and offers a reload, which ends it — for as long as that document
  * holds it ([document], kept by the broker per document and per origin,
  * so reopening the sheet still says it).
@@ -91,7 +92,7 @@ fun PageSitePermissionsSheet(
     onDismiss: () -> Unit,
 ) {
     // Camera/microphone removed while the page kept using them, or a
-    // location it was given — kept with the tab's document, not this
+    // location or MIDI SysEx it was given — kept with the tab's document, not this
     // dialog, so it's still said after the sheet is closed and opened
     // again.
     val stillHeld = document?.stillHeld(inUse).orEmpty()
