@@ -6,6 +6,9 @@ import android.content.ContextWrapper
 import android.os.Build
 import android.os.SystemClock
 import android.view.MotionEvent
+import android.view.View
+import android.view.ViewTreeObserver
+import android.view.Window
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -23,8 +26,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogWindowProvider
 import java.util.WeakHashMap
 import kotlinx.coroutines.delay
 
@@ -153,6 +158,70 @@ internal fun Modifier.restartsTapGuard(guard: PromptTapGuard): Modifier = pointe
             if (event.changes.any { it.pressed && !it.previousPressed }) guard.noteInput()
         }
     }
+}
+
+/**
+ * For a surface shown in its own window (a `ModalBottomSheet`, a
+ * `Dialog`): every touch *anywhere* in that window restarts [guard]'s
+ * protection period until it arms — the scrim above a sheet, the space
+ * around a dialog, a tap outside it — not only a touch on its content
+ * ([restartsTapGuard]). A sheet's scrim tap never reaches its
+ * `onDismissRequest` while the sheet refuses to hide (its
+ * `confirmValueChange`), so without this a page's tap game played over
+ * the scrim would leave the period running and arm Sign mid-stream.
+ * Observes only, at the window's own dispatch, so every touch still
+ * goes where it was going. The period also starts over when the window
+ * first draws, since the guard's own start is the host's first frame
+ * and a sheet's window can come up after it. Call it inside the sheet's
+ * or dialog's content.
+ */
+@Composable
+internal fun RestartsTapGuardInWindow(guard: PromptTapGuard) {
+    val view = LocalView.current
+    DisposableEffect(view, guard) {
+        val window = view.dialogWindow()
+        val original = window?.callback
+        val watcher = original?.let { TouchWatcher(it, guard) }
+        if (watcher != null) window.callback = watcher
+        // The guard starts on the host's first frame, and this window can come up
+        // later than that: until it has drawn, what's on screen isn't the sheet.
+        val root = view.rootView
+        val firstDraw = object : ViewTreeObserver.OnDrawListener {
+            override fun onDraw() {
+                guard.noteInput()
+                root.post { root.viewTreeObserver.removeOnDrawListener(this) }
+            }
+        }
+        root.viewTreeObserver.addOnDrawListener(firstDraw)
+        onDispose {
+            root.viewTreeObserver.removeOnDrawListener(firstDraw)
+            if (watcher != null && window.callback === watcher) window.callback = original
+        }
+    }
+}
+
+/** Passes everything on to [original]; notes every new finger down on [guard] first. */
+internal class TouchWatcher(
+    private val original: Window.Callback,
+    private val guard: PromptTapGuard,
+) : Window.Callback by original {
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (startsPress(event.actionMasked)) guard.noteInput()
+        return original.dispatchTouchEvent(event)
+    }
+}
+
+/** Whether a touch event with this masked action puts a new finger down. */
+internal fun startsPress(actionMasked: Int): Boolean =
+    actionMasked == MotionEvent.ACTION_DOWN || actionMasked == MotionEvent.ACTION_POINTER_DOWN
+
+private fun View.dialogWindow(): Window? {
+    var v: Any? = this
+    while (v is View) {
+        if (v is DialogWindowProvider) return v.window
+        v = v.parent
+    }
+    return null
 }
 
 /** A [PromptTapGuard] and whether its surface's buttons are enabled yet. */

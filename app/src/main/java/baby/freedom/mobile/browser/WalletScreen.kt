@@ -1574,7 +1574,7 @@ private fun ImportPhrasePage(
  * consequence spelled out, and Remove stays disabled until the user
  * ticks that they have the phrase or accept losing the wallet.
  *
- * Against tapjacking (#240): the tick and Remove ignore taps for the
+ * Against tapjacking (#240): both ticks and Remove ignore taps for the
  * dialog's first [PromptTapGuard.PROTECTION_MS] and drop a press another
  * app's window covered ([protectedPress]); other apps' overlays are
  * hidden while it's up (Android 12+).
@@ -1643,10 +1643,12 @@ private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boo
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .fillMaxWidth()
+                            .protectedPress(tap)
                             .toggleable(
                                 value = deleteBackup,
                                 role = Role.Checkbox,
-                                onValueChange = { deleteBackup = it },
+                                enabled = tap.armed,
+                                onValueChange = { if (guard.accepts()) deleteBackup = it },
                             ),
                     ) {
                         Checkbox(checked = deleteBackup, onCheckedChange = null)

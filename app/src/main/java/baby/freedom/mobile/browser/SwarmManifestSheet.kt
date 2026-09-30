@@ -61,14 +61,17 @@ internal fun manifestNotes(consent: SwarmManifests.Consent): List<String> = list
  * the browser's label and meaning and the app's reason, what happens to
  * its publisher identity, and three answers: Allow all, Use individual
  * approvals, Don't allow. Like the other approval sheets, the buttons, a
- * swipe down, a tap outside and Back ignore input for the first
- * [PromptTapGuard.PROTECTION_MS] it is on screen; dismissing it is Don't allow.
+ * swipe down, a tap outside and Back ignore input until it has been on
+ * screen, untouched, for [PromptTapGuard.SPEND_PROTECTION_MS] — every
+ * touch anywhere in its window restarts that until it arms (#240);
+ * dismissing it is Don't allow.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SwarmManifestSheet(request: SwarmPromptRequest, ask: SwarmAsk.Manifest) {
     val consent = ask.consent
-    val tap = rememberArmedTapGuard(request)
+    // Allow all hands the site standing grants at once: it arms as late as Sign (#240).
+    val tap = rememberArmedTapGuard(request, PromptTapGuard.SPEND_PROTECTION_MS)
     val guard = tap.guard
     val armed = tap.armed
     val sheetState = rememberModalBottomSheetState(
@@ -85,8 +88,10 @@ fun SwarmManifestSheet(request: SwarmPromptRequest, ask: SwarmAsk.Manifest) {
         sheetState = sheetState,
         modifier = Modifier.testTag("swarm-manifest"),
     ) {
+        RestartsTapGuardInWindow(guard)
         Column(
             modifier = Modifier
+                .restartsTapGuard(guard)
                 .fillMaxWidth()
                 .navigationBarsPadding()
                 .padding(horizontal = 24.dp)

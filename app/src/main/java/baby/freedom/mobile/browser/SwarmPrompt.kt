@@ -190,9 +190,11 @@ internal fun swarmSignIdentity(ask: SwarmAsk.Sign): String =
  * Signing needs the wallet open: the action asks for the screen lock
  * first when it isn't, and with no wallet on the device at all it opens
  * wallet setup once approved. Like the other approval sheets, the buttons, a
- * swipe down, a tap outside and Back all ignore input for the first
- * [PromptTapGuard.PROTECTION_MS] it is on screen, counted from its first
- * drawn frame. Everything but the action rejects.
+ * swipe down, a tap outside and Back all ignore input until it has been
+ * on screen, untouched, for [PromptTapGuard.PROTECTION_MS] — a signature
+ * [PromptTapGuard.SPEND_PROTECTION_MS] — counted from its first drawn
+ * frame and restarted by every touch anywhere in its window until then
+ * (#240). Everything but the action rejects.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -206,7 +208,11 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
     val context = LocalContext.current
     val vault = remember(context) { Vault.get(context) }
     val vaultState by vault.state.collectAsState()
-    val tap = rememberArmedTapGuard(request)
+    // A signature can't be taken back: it arms later, like the wallet's Sign (#240).
+    val tap = rememberArmedTapGuard(
+        request,
+        if (ask is SwarmAsk.Sign) PromptTapGuard.SPEND_PROTECTION_MS else PromptTapGuard.PROTECTION_MS,
+    )
     val guard = tap.guard
     val armed = tap.armed
     var busy by remember(request) { mutableStateOf(false) }
@@ -253,8 +259,10 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
         sheetState = sheetState,
         modifier = Modifier.testTag("swarm-approval"),
     ) {
+        RestartsTapGuardInWindow(guard)
         Column(
             modifier = Modifier
+                .restartsTapGuard(guard)
                 .fillMaxWidth()
                 .navigationBarsPadding()
                 .padding(horizontal = 24.dp)

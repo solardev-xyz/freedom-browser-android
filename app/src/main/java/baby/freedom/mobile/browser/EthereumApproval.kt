@@ -182,6 +182,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
         sheetState = sheetState,
         modifier = Modifier.testTag("ethereum-approval"),
     ) {
+        RestartsTapGuardInWindow(guard)
         Column(
             modifier = Modifier
                 .restartsTapGuard(guard)

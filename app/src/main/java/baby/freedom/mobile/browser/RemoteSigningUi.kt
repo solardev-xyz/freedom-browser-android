@@ -254,6 +254,7 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
         onDismissRequest = reject,
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
     ) {
+        RestartsTapGuardInWindow(guard)
         val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.9f).dp
         Surface(
             shape = RoundedCornerShape(24.dp),

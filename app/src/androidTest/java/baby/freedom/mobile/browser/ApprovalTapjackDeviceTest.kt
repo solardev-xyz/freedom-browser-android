@@ -37,7 +37,8 @@ import org.junit.runner.RunWith
  * - Sign and Send arm only after the sheet has been on screen *and*
  *   left alone for [PromptTapGuard.SPEND_PROTECTION_MS]: a tap just
  *   past the old half second doesn't sign, and a stream of taps (the
- *   game) never does — only a tap after the user stops.
+ *   game) never does — only a tap after the user stops. That holds for
+ *   taps on the scrim above the sheet too, the page's part of the screen.
  *
  * The signing account is a Ledger's, so Approve answers the sheet
  * straight away (the Ledger confirms afterwards) with no screen lock in
@@ -132,9 +133,12 @@ class ApprovalTapjackDeviceTest {
     }
 
     /** A tap on the action button's centre through the input pipeline, carrying [flags]. */
-    private fun tapApprove(flags: Int = 0) {
-        val x = approve.exactCenterX()
-        val y = approve.exactCenterY()
+    private fun tapApprove(flags: Int = 0) = tapAt(approve.exactCenterX(), approve.exactCenterY(), flags)
+
+    /** A tap on the scrim above the sheet: the page's part of the screen. */
+    private fun tapScrim() = tapAt(approve.exactCenterX(), 150f)
+
+    private fun tapAt(x: Float, y: Float, flags: Int = 0) {
         val down = SystemClock.uptimeMillis()
         inject(down, down, MotionEvent.ACTION_DOWN, x, y, flags)
         inject(down, down + 40, MotionEvent.ACTION_UP, x, y, flags)
@@ -199,6 +203,32 @@ class ApprovalTapjackDeviceTest {
         assertEquals(null, answered(request, withinMs = 300))
         // The user stops, reads, and taps.
         SystemClock.sleep(PromptTapGuard.PROTECTION_MS * 3)
+        tapApprove()
+        assertTrue(answered(request, withinMs = 2_000) is EthAnswer.Approved)
+    }
+
+    @Test
+    fun aStreamOfTapsOnTheScrimAlsoHoldsSignBack() = showing(signAsk()) { request ->
+        // The game plays in the page's half of the screen, over the sheet's scrim, which
+        // refuses to dismiss the sheet before it arms (#287 R1-F1). It runs from when the
+        // sheet is up for longer than Sign's protection period, so a period the scrim
+        // taps didn't restart would have armed mid-stream.
+        assertTrue(onScreen(ethApprovalCopy(signAsk()).approve))
+        val until = SystemClock.uptimeMillis() + PromptTapGuard.SPEND_PROTECTION_MS * 3 / 2
+        var last = 0L
+        while (SystemClock.uptimeMillis() < until) {
+            tapScrim()
+            last = SystemClock.uptimeMillis()
+            assertFalse("a scrim tap answered the sheet", request.answer.isCompleted)
+            SystemClock.sleep(250)
+        }
+        // Then its target moves onto Sign, in the stream's rhythm: short of a second after
+        // the last scrim tap.
+        SystemClock.sleep((last + 600 - SystemClock.uptimeMillis()).coerceAtLeast(0))
+        tapApprove()
+        assertEquals(null, answered(request, withinMs = 300))
+        // The user stops, reads, and taps.
+        SystemClock.sleep(PromptTapGuard.SPEND_PROTECTION_MS * 2)
         tapApprove()
         assertTrue(answered(request, withinMs = 2_000) is EthAnswer.Approved)
     }

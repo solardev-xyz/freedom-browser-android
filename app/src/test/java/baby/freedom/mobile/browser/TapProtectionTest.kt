@@ -32,4 +32,13 @@ class TapProtectionTest {
         // Unrelated flags don't count.
         assertFalse(touchObscured(MotionEvent.FLAG_CANCELED, android11))
     }
+
+    @Test
+    fun `every finger put down anywhere in a sheet's window restarts the guard`() {
+        assertTrue(startsPress(MotionEvent.ACTION_DOWN))
+        assertTrue(startsPress(MotionEvent.ACTION_POINTER_DOWN))
+        assertFalse(startsPress(MotionEvent.ACTION_MOVE))
+        assertFalse(startsPress(MotionEvent.ACTION_UP))
+        assertFalse(startsPress(MotionEvent.ACTION_CANCEL))
+    }
 }
