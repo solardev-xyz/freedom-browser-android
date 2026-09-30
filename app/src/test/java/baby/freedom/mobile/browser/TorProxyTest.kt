@@ -125,22 +125,76 @@ class TorProxyTest {
         return SocksEndpoint("127.0.0.1", port)
     }
 
+    /** A Tor-like SOCKS5 server: [CANARY_ONION] refused (1, as Tor does), others answered by [reply]. */
+    private fun tor(asked: MutableList<String>, reply: (String) -> Int? = { 0 }): SocksEndpoint =
+        socks5(asked) { name -> if (name == TorProxy.CANARY_ONION) 1 else reply(name) }
+
+    private val canary = "${TorProxy.CANARY_ONION}:80"
+
     @Test
-    fun `a proxy that connects to a onion service is Tor`() = runBlocking {
+    fun `a proxy that refuses the impossible onion and connects a real one is Tor`() = runBlocking {
         val asked = Collections.synchronizedList(mutableListOf<String>())
-        val tor = socks5(asked) { 0 }
+        val tor = tor(asked)
         assertEquals(TorProxy.Probe.Tor, TorProxy.probe(tor))
-        // The hostname goes to the proxy (ATYP domain), port 80, first onion only.
-        assertEquals(listOf("${TorProxy.PROBE_ONIONS[0]}:80"), asked.toList())
+        // The hostname goes to the proxy (ATYP domain), port 80: the canary,
+        // then the first onion only.
+        assertEquals(listOf(canary, "${TorProxy.PROBE_ONIONS[0]}:80"), asked.toList())
         assertTrue(TorProxy.listening(tor))
+        assertEquals(TorProxy.Probe.Tor, TorProxy.recheck(tor))
+    }
+
+    @Test
+    fun `a proxy that answers success before dialing isn't Tor, and gets no real onion name`() = runBlocking {
+        // shadowsocks' ss-local, v2ray/xray and clash socks inbounds reply 0
+        // to any CONNECT before dialing (R1-F1).
+        val asked = Collections.synchronizedList(mutableListOf<String>())
+        val early = socks5(asked) { 0 }
+        assertEquals(TorProxy.Probe.NotTor, TorProxy.probe(early))
+        assertEquals(listOf(canary), asked.toList())
+        // And a confirmed proxy's port taken over by one is caught on recheck.
+        assertEquals(TorProxy.Probe.NotTor, TorProxy.recheck(early))
+        assertTrue(TorProxy.describe(TorProxy.Probe.NotTor, early).contains("isn't Tor"))
+    }
+
+    @Test
+    fun `the canary is a well-formed v3 onion name no service can have`() {
+        fun decode(label: String): ByteArray {
+            val alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+            var bits = 0L
+            var n = 0
+            val out = java.io.ByteArrayOutputStream()
+            for (c in label) {
+                bits = (bits shl 5) or alphabet.indexOf(c).also { assertTrue(it >= 0) }.toLong()
+                n += 5
+                if (n >= 8) {
+                    n -= 8
+                    out.write(((bits shr n) and 0xff).toInt())
+                }
+            }
+            return out.toByteArray()
+        }
+        fun valid(onion: String): Boolean {
+            val label = onion.removeSuffix(".onion")
+            assertEquals(56, label.length)
+            val b = decode(label)
+            assertEquals(35, b.size)
+            val sha3 = java.security.MessageDigest.getInstance("SHA3-256")
+            sha3.update(".onion checksum".toByteArray())
+            sha3.update(b, 0, 32)
+            sha3.update(b[34])
+            val sum = sha3.digest()
+            return b[34].toInt() == 3 && sum[0] == b[32] && sum[1] == b[33]
+        }
+        TorProxy.PROBE_ONIONS.forEach { assertTrue(it, valid(it)) }
+        assertFalse(valid(TorProxy.CANARY_ONION))
     }
 
     @Test
     fun `one probe onion down is enough if the other answers`() = runBlocking {
         val asked = Collections.synchronizedList(mutableListOf<String>())
-        val tor = socks5(asked) { name -> if (name == TorProxy.PROBE_ONIONS[0]) 1 else 0 }
+        val tor = tor(asked) { name -> if (name == TorProxy.PROBE_ONIONS[0]) 1 else 0 }
         assertEquals(TorProxy.Probe.Tor, TorProxy.probe(tor))
-        assertEquals(TorProxy.PROBE_ONIONS.map { "$it:80" }, asked.toList())
+        assertEquals(listOf(canary) + TorProxy.PROBE_ONIONS.map { "$it:80" }, asked.toList())
     }
 
     @Test
@@ -148,15 +202,38 @@ class TorProxyTest {
         val asked = Collections.synchronizedList(mutableListOf<String>())
         val plain = socks5(asked) { 4 } // host unreachable: it tried DNS
         assertEquals(TorProxy.Probe.NoOnion(4), TorProxy.probe(plain))
-        assertEquals(2, asked.size)
+        assertEquals(3, asked.size)
         // It does listen, though.
         assertTrue(TorProxy.listening(plain))
+    }
+
+    @Test
+    fun `a canary with no answer in time is inconclusive, not proof of either`() = runBlocking {
+        val asked = Collections.synchronizedList(mutableListOf<String>())
+        val slow = socks5(asked) { name -> if (name == TorProxy.CANARY_ONION) null else 0 }
+        assertEquals(TorProxy.Probe.Tor, TorProxy.probe(slow, canaryTimeoutMs = 300))
+        assertEquals(TorProxy.Probe.Tor, TorProxy.recheck(slow, canaryTimeoutMs = 300))
+    }
+
+    @Test
+    fun `re-checks back off for a proxy that isn't Tor, not for one that's absent`() {
+        assertEquals(TorProxy.RECHECK_MS, TorProxy.nextCheckMs(TorProxy.Probe.Tor, TorProxy.RETRY_MS))
+        assertEquals(TorProxy.RETRY_MS, TorProxy.nextCheckMs(TorProxy.Probe.NotListening, 80_000))
+        assertFalse(TorProxy.backsOff(TorProxy.Probe.NotListening))
+        assertFalse(TorProxy.backsOff(TorProxy.Probe.Tor))
+        var wait = TorProxy.RETRY_MS
+        val waits = List(8) { wait = TorProxy.nextCheckMs(TorProxy.Probe.NoOnion(4), wait); wait }
+        assertEquals(listOf(10_000L, 20_000L, 40_000L, 80_000L, 160_000L, 300_000L, 300_000L, 300_000L), waits)
+        listOf(TorProxy.Probe.NotSocks, TorProxy.Probe.NotTor, TorProxy.Probe.NoOnion(-1)).forEach {
+            assertTrue(TorProxy.backsOff(it))
+        }
     }
 
     @Test
     fun `nothing listening`() = runBlocking {
         val closed = closedPort()
         assertEquals(TorProxy.Probe.NotListening, TorProxy.probe(closed))
+        assertEquals(TorProxy.Probe.NotListening, TorProxy.recheck(closed))
         assertFalse(TorProxy.listening(closed))
     }
 
@@ -167,6 +244,7 @@ class TorProxyTest {
             s.getOutputStream().write("HTTP/1.0 400 Bad Request\r\n\r\n".toByteArray())
         }
         assertEquals(TorProxy.Probe.NotSocks, TorProxy.probe(http))
+        assertEquals(TorProxy.Probe.NotSocks, TorProxy.recheck(http))
         assertFalse(TorProxy.listening(http))
         val authOnly = serve { s ->
             s.getInputStream().read(ByteArray(3))
@@ -187,9 +265,12 @@ class TorProxyTest {
         val asked = Collections.synchronizedList(mutableListOf<String>())
         val stuck = socks5(asked) { null }
         val t0 = System.nanoTime()
-        assertEquals(TorProxy.Probe.NoOnion(-1), TorProxy.probe(stuck, onionTimeoutMs = 300))
+        assertEquals(
+            TorProxy.Probe.NoOnion(-1),
+            TorProxy.probe(stuck, onionTimeoutMs = 300, canaryTimeoutMs = 300),
+        )
         assertTrue(System.nanoTime() - t0 < 3_000_000_000L)
-        assertEquals(2, asked.size)
+        assertEquals(3, asked.size)
     }
 
     @Test
@@ -208,9 +289,15 @@ class TorProxyTest {
         val t0 = System.nanoTime()
         assertEquals(
             TorProxy.Probe.NoOnion(-1),
-            TorProxy.probe(trickle, onions = listOf(TorProxy.PROBE_ONIONS[0]), onionTimeoutMs = 600),
+            TorProxy.probe(
+                trickle,
+                onions = listOf(TorProxy.PROBE_ONIONS[0]),
+                onionTimeoutMs = 600,
+                canaryTimeoutMs = 600,
+            ),
         )
-        assertTrue(System.nanoTime() - t0 < 2_000_000_000L)
+        // Canary and onion, each ended at its own 600 ms.
+        assertTrue(System.nanoTime() - t0 < 3_000_000_000L)
     }
 
     @Test

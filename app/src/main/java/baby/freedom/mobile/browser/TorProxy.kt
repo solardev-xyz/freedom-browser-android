@@ -129,7 +129,16 @@ object TorProxy {
          */
         data class NoOnion(val code: Int) : Probe()
 
-        /** A SOCKS5 proxy that connected to a `.onion` service: Tor. */
+        /**
+         * A SOCKS5 proxy that said "connected" to [CANARY_ONION], a
+         * `.onion` name that can't exist: it answers before dialing the
+         * target (shadowsocks, v2ray/xray, clash inbounds do), so a
+         * "connected" from it proves nothing — and it would carry every
+         * onion hostname to wherever it forwards (R1-F1).
+         */
+        data object NotTor : Probe()
+
+        /** A SOCKS5 proxy that connected to a `.onion` service, and refused one that can't exist: Tor. */
         data object Tor : Probe()
     }
 
@@ -144,6 +153,21 @@ object TorProxy {
         "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion",
     )
 
+    /**
+     * A well-formed v3 onion name whose checksum is wrong (an all-zero key,
+     * checksum 0): no service can have it. Tor rejects it locally, at
+     * once and even before it has bootstrapped, with a SOCKS error (0xF6
+     * "invalid onion address" with ExtendedErrors, else a plain error). A
+     * proxy that answers success before dialing says "connected" to it
+     * like to anything else — which is how [probe] tells it from Tor. It
+     * carries no hostname of the user's, so asking costs nothing even
+     * where the answer is "not Tor".
+     */
+    internal const val CANARY_ONION = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaad.onion"
+
+    /** Tor answers [CANARY_ONION] without the network; more than this is inconclusive, not proof. */
+    const val CANARY_TIMEOUT_MS = 10_000L
+
     /** Connect + SOCKS5 greeting; a loopback listener answers at once. */
     const val HANDSHAKE_TIMEOUT_MS = 3_000L
 
@@ -155,11 +179,16 @@ object TorProxy {
     const val ONION_TIMEOUT_MS = 45_000L
 
     /**
-     * Whether [endpoint] is a Tor SOCKS proxy: a SOCKS5 greeting with no
-     * authentication, then a CONNECT to each of [onions] in turn until
-     * one succeeds. Each step is bounded by its own deadline, enforced
-     * from outside the blocking read (the socket is closed from this
-     * coroutine), so a listener that accepts and never answers — or
+     * Whether [endpoint] is a Tor SOCKS proxy: [recheck] first (a SOCKS5
+     * greeting with no authentication, and a CONNECT to [CANARY_ONION]
+     * that must *not* succeed), then a CONNECT to each of [onions] in turn
+     * until one succeeds. Only a proxy that refuses the impossible onion
+     * and connects a real one is Tor: a plain SOCKS proxy can't connect a
+     * `.onion` name, and one that says "connected" before dialing (so
+     * would say it to anything) fails the canary — before any real onion
+     * name is sent to it. Each step is bounded by its own deadline,
+     * enforced from outside the blocking read (the socket is closed from
+     * this coroutine), so a listener that accepts and never answers — or
      * trickles — can't hold it longer.
      */
     suspend fun probe(
@@ -167,22 +196,14 @@ object TorProxy {
         onions: List<String> = PROBE_ONIONS,
         handshakeTimeoutMs: Long = HANDSHAKE_TIMEOUT_MS,
         onionTimeoutMs: Long = ONION_TIMEOUT_MS,
+        canaryTimeoutMs: Long = CANARY_TIMEOUT_MS,
     ): Probe {
+        val canary = recheck(endpoint, handshakeTimeoutMs, canaryTimeoutMs)
+        if (canary != Probe.Tor) return canary
         var last: Probe = Probe.NoOnion(-1)
         for (onion in onions) {
-            val result = attempt(endpoint, handshakeTimeoutMs, onionTimeoutMs) { input, output ->
-                val name = onion.toByteArray(Charsets.US_ASCII)
-                output.write(
-                    byteArrayOf(5, 1, 0, 3, name.size.toByte()) + name + byteArrayOf(0, 80),
-                )
-                output.flush()
-                val reply = readFully(input, 2) ?: return@attempt Probe.NoOnion(-1)
-                if (reply[0].toInt() != 5) Probe.NotSocks
-                else if (reply[1].toInt() == 0) Probe.Tor
-                else Probe.NoOnion(reply[1].toInt() and 0xff)
-            }
-            when (result) {
-                Probe.Tor, Probe.NotListening, Probe.NotSocks -> return result
+            when (val result = connectOnion(endpoint, onion, handshakeTimeoutMs, onionTimeoutMs)) {
+                Probe.Tor, Probe.NotListening, Probe.NotSocks, Probe.NotTor -> return result
                 is Probe.NoOnion -> last = result
             }
         }
@@ -190,9 +211,45 @@ object TorProxy {
     }
 
     /**
+     * Whether a proxy [probe] found to be Tor still looks like it, without
+     * a circuit: the greeting, and a CONNECT to [CANARY_ONION] answered
+     * with an error (or not within [canaryTimeoutMs] — inconclusive, not a
+     * sign of a proxy that answers before dialing, which answers at once).
+     * [Probe.Tor] if so, else what's there now: [Probe.NotListening],
+     * [Probe.NotSocks], or [Probe.NotTor] for a proxy that "connected" the
+     * impossible onion — something else took the port.
+     */
+    suspend fun recheck(
+        endpoint: SocksEndpoint,
+        handshakeTimeoutMs: Long = HANDSHAKE_TIMEOUT_MS,
+        canaryTimeoutMs: Long = CANARY_TIMEOUT_MS,
+    ): Probe = when (val r = connectOnion(endpoint, CANARY_ONION, handshakeTimeoutMs, canaryTimeoutMs)) {
+        Probe.Tor -> Probe.NotTor
+        is Probe.NoOnion -> Probe.Tor
+        else -> r
+    }
+
+    /** A CONNECT to [onion]:80: [Probe.Tor] for reply 0, else what went wrong. */
+    private suspend fun connectOnion(
+        endpoint: SocksEndpoint,
+        onion: String,
+        handshakeTimeoutMs: Long,
+        timeoutMs: Long,
+    ): Probe = attempt(endpoint, handshakeTimeoutMs, timeoutMs) { input, output ->
+        val name = onion.toByteArray(Charsets.US_ASCII)
+        output.write(
+            byteArrayOf(5, 1, 0, 3, name.size.toByte()) + name + byteArrayOf(0, 80),
+        )
+        output.flush()
+        val reply = readFully(input, 2) ?: return@attempt Probe.NoOnion(-1)
+        if (reply[0].toInt() != 5) Probe.NotSocks
+        else if (reply[1].toInt() == 0) Probe.Tor
+        else Probe.NoOnion(reply[1].toInt() and 0xff)
+    }
+
+    /**
      * Whether a SOCKS5 proxy (still) listens at [endpoint]: the greeting
-     * only, no request. For re-checking a proxy [probe] already found to
-     * be Tor, without a circuit each time.
+     * only, no request.
      */
     suspend fun listening(endpoint: SocksEndpoint, timeoutMs: Long = HANDSHAKE_TIMEOUT_MS): Boolean =
         attempt(endpoint, timeoutMs, timeoutMs) { _, _ -> Probe.Tor } == Probe.Tor
@@ -266,6 +323,32 @@ object TorProxy {
         return out
     }
 
+    // --- Re-checking (MainActivity's loop) --------------------------------
+
+    /** A proxy confirmed as Tor: how often it's [recheck]ed. */
+    const val RECHECK_MS = 20_000L
+
+    /** Nothing listening: how soon to look again (starting Orbot is picked up quickly). */
+    const val RETRY_MS = 5_000L
+
+    /** The longest wait between probes of a proxy that listens but isn't (or can't reach) Tor. */
+    const val RETRY_MAX_MS = 5 * 60_000L
+
+    /**
+     * Whether a wait after [result] backs off: a proxy that listens but
+     * isn't Tor, or can't reach an onion. Every full [probe] of it has it
+     * look up the probe onion names, so it isn't asked every [RETRY_MS]
+     * forever (R1-M2).
+     */
+    fun backsOff(result: Probe): Boolean = result != Probe.Tor && result != Probe.NotListening
+
+    /** How long to wait before checking again after [result]; [backoffMs] is the last backing-off wait. */
+    fun nextCheckMs(result: Probe, backoffMs: Long): Long = when {
+        result == Probe.Tor -> RECHECK_MS
+        !backsOff(result) -> RETRY_MS
+        else -> (backoffMs * 2).coerceIn(RETRY_MS, RETRY_MAX_MS)
+    }
+
     // --- Orbot -----------------------------------------------------------
 
     const val ORBOT_PACKAGE = "org.torproject.android"
@@ -305,6 +388,8 @@ object TorProxy {
         Probe.Tor -> "Tor reached a .onion site through $endpoint"
         Probe.NotListening -> "Nothing is listening on $endpoint. Start Orbot (or your Tor app) and check its SOCKS port."
         Probe.NotSocks -> "$endpoint isn't a SOCKS5 proxy without a password"
+        Probe.NotTor -> "The proxy on $endpoint isn't Tor: it claims to connect even to a .onion address " +
+            "that can't exist, as shadowsocks, v2ray or clash proxies do. Freedom sends onion sites only to Tor."
         is Probe.NoOnion -> if (result.code < 0) {
             "The proxy on $endpoint didn't reach a .onion site in time. Is it Tor, and connected?"
         } else {

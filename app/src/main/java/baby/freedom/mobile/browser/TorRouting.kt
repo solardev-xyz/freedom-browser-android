@@ -18,6 +18,7 @@ import java.net.Proxy
 import java.net.URL
 import java.net.URLConnection
 import java.text.Normalizer
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * `.onion` routing (#143): only onion hosts go through Tor's SOCKS5
@@ -197,6 +198,32 @@ object TorRouting {
 
     /** Whether onion requests are routed to Tor right now. */
     val isRouted: Boolean get() = routed != null
+
+    /** Whether onion requests are routed to an external proxy (#275) right now. */
+    val isRoutedExternal: Boolean get() = routed != null && external != null
+
+    /** Told when a routed external proxy may have gone; see [externalFailed]. */
+    private val onExternalFailure = AtomicReference<(() -> Unit)?>(null)
+
+    /** Listen for [externalFailed] (MainActivity, in `onCreate`), replacing any earlier listener. */
+    fun setOnExternalFailure(listener: () -> Unit) = onExternalFailure.set(listener)
+
+    /** Stop listening — only if [listener] is still the one set, so a newer Activity's isn't dropped. */
+    fun clearOnExternalFailure(listener: () -> Unit) {
+        onExternalFailure.compareAndSet(listener, null)
+    }
+
+    /**
+     * An onion page failed to load while routed to the external proxy
+     * (R1-M1): it may have stopped between re-checks. The listener checks
+     * it at once rather than at the next scheduled re-check, so the next
+     * try gets the *Tor proxy isn't reachable* page if it's gone.
+     */
+    fun externalFailed() {
+        if (!isRoutedExternal) return
+        Log.i(TAG, "onion load failed through socks5://$routed → re-checking it")
+        onExternalFailure.get()?.invoke()
+    }
 
     private fun apply(context: Context) {
         if (supported != true) return

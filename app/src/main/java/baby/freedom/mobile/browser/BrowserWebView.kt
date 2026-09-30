@@ -3751,6 +3751,11 @@ private fun buildRefreshableWebView(
                 // Tor port is routed. A form POST's reload would only
                 // ask to resend (answered "don't"), so that one is
                 // loaded again as a GET (R2-F2).
+                // Routed to an external proxy (Orbot, #275) and failed: it
+                // may have stopped between re-checks, so have it checked
+                // now (R1-M1); if it's gone, onion is refused and a retry
+                // gets the "Tor proxy isn't reachable" page.
+                if (isOnionHost(req.url?.host)) TorRouting.externalFailed()
                 if (isOnionHost(req.url?.host) && !TorRouting.isRouted && view != null) {
                     Log.i(LOG_TAG, "main-frame ${error?.errorCode} for $failed with Tor down → refusal page")
                     if (onionRefusalByReload(req.method)) {

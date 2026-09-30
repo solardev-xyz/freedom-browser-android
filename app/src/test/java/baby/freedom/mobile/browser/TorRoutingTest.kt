@@ -392,6 +392,45 @@ class TorRoutingTest {
     }
 
     @Test
+    fun `a failed onion load re-checks the external proxy only while routed to it`() {
+        val context = android.content.ContextWrapper(null)
+        val real = TorRouting.setOverride
+        TorRouting.setOverride = { _, _, done -> done.run() }
+        val orbot = SocksEndpoint("127.0.0.1", 9050)
+        var checks = 0
+        val listener: () -> Unit = { checks++ }
+        try {
+            TorRouting.resetForTest(supported = true)
+            TorRouting.setOnExternalFailure(listener)
+            TorRouting.setEnabled(context, true)
+            // Embedded Arti routed: not the external proxy's business.
+            TorRouting.onState(context, TorInfo(status = TorStatus.Running, socksPort = 40123))
+            assertTrue(TorRouting.isRouted)
+            TorRouting.externalFailed()
+            assertEquals(0, checks)
+            // External, not yet confirmed (already refused): nothing to check.
+            TorRouting.setExternal(context, orbot, confirmed = false)
+            TorRouting.externalFailed()
+            assertEquals(0, checks)
+            TorRouting.setExternal(context, orbot, confirmed = true)
+            assertTrue(TorRouting.isRoutedExternal)
+            TorRouting.externalFailed()
+            assertEquals(1, checks)
+            // An older Activity's clear doesn't drop a newer one's listener.
+            TorRouting.clearOnExternalFailure {}
+            TorRouting.externalFailed()
+            assertEquals(2, checks)
+            TorRouting.clearOnExternalFailure(listener)
+            TorRouting.externalFailed()
+            assertEquals(2, checks)
+        } finally {
+            TorRouting.clearOnExternalFailure(listener)
+            TorRouting.setOverride = real
+            TorRouting.resetForTest(supported = null)
+        }
+    }
+
+    @Test
     fun `nothing to wait for without an override`() {
         TorRouting.resetForTest(supported = false)
         var released = false
