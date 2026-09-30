@@ -10,6 +10,7 @@ import android.view.View
 import android.view.ViewTreeObserver
 import android.view.Window
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -28,6 +29,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogWindowProvider
 import java.util.WeakHashMap
@@ -223,6 +225,28 @@ private fun View.dialogWindow(): Window? {
     }
     return null
 }
+
+/**
+ * For a switch or tick on a guarded surface whose state the confirm acts
+ * on (an "always approve" switch, a delete-the-backup tick): the same
+ * [protectedPress] as a confirm button, so a press that began before the
+ * guard armed or that passed through another app's window can't flip it
+ * (#287 R3-M1), plus a guard check on the change itself for activations
+ * that come with no press (TalkBack, a keyboard). Enabled only once
+ * [tap] is armed and [enabled].
+ */
+internal fun Modifier.protectedToggle(
+    tap: ArmedTapGuard,
+    value: Boolean,
+    role: Role,
+    enabled: Boolean = true,
+    onValueChange: (Boolean) -> Unit,
+): Modifier = protectedPress(tap).toggleable(
+    value = value,
+    enabled = tap.armed && enabled,
+    role = role,
+    onValueChange = { if (tap.guard.accepts()) onValueChange(it) },
+)
 
 /** A [PromptTapGuard] and whether its surface's buttons are enabled yet. */
 @Stable

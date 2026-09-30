@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -1626,13 +1625,7 @@ private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boo
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .protectedPress(tap)
-                        .toggleable(
-                            value = acknowledged,
-                            role = Role.Checkbox,
-                            enabled = tap.armed,
-                            onValueChange = { if (guard.accepts()) acknowledged = it },
-                        ),
+                        .protectedToggle(tap, value = acknowledged, role = Role.Checkbox) { acknowledged = it },
                 ) {
                     Checkbox(checked = acknowledged, onCheckedChange = null)
                     Spacer(Modifier.width(8.dp))
@@ -1643,13 +1636,7 @@ private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boo
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .protectedPress(tap)
-                            .toggleable(
-                                value = deleteBackup,
-                                role = Role.Checkbox,
-                                enabled = tap.armed,
-                                onValueChange = { if (guard.accepts()) deleteBackup = it },
-                            ),
+                            .protectedToggle(tap, value = deleteBackup, role = Role.Checkbox) { deleteBackup = it },
                     ) {
                         Checkbox(checked = deleteBackup, onCheckedChange = null)
                         Spacer(Modifier.width(8.dp))

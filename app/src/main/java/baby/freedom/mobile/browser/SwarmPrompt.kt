@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -355,7 +354,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 8.dp)
-                            .toggleable(value = always, enabled = armed && !busy, role = Role.Switch, onValueChange = { always = it })
+                            .protectedToggle(tap, value = always, role = Role.Switch, enabled = !busy) { always = it }
                             .testTag("swarm-always-approve"),
                     ) {
                         Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))

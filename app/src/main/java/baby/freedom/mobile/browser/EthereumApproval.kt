@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -218,7 +217,8 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                     is EthAsk.SendTransaction -> SendBody(
                         ask,
                         always,
-                        enabled = armed && !busy,
+                        tap,
+                        enabled = !busy,
                         locked = vaultState is Vault.State.Locked,
                         onAlways = { always = it },
                     )
@@ -387,7 +387,7 @@ private fun SignTypedDataBody(ask: EthAsk.SignTypedData) {
 }
 
 @Composable
-private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, enabled: Boolean, locked: Boolean, onAlways: (Boolean) -> Unit) {
+private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, tap: ArmedTapGuard, enabled: Boolean, locked: Boolean, onAlways: (Boolean) -> Unit) {
     val quote = ask.quote
     val request = quote.request
     val chain = request.chain
@@ -426,7 +426,7 @@ private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, enabled: Bool
         if (ask.ruled) {
             Note(autoApproveRuledNote(quote.replaces != null, highFee = !GasOracle.quiet(quote.tx.fees, chain.id), locked = locked))
         } else {
-            AutoApproveSwitch(rule, chain.name, always, enabled, onAlways)
+            AutoApproveSwitch(rule, chain.name, always, tap, enabled, onAlways)
         }
     }
     Spacer(Modifier.height(8.dp))
@@ -439,10 +439,19 @@ private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, enabled: Bool
 /**
  * "Always approve … on this contract" (#112), with exactly what it covers
  * written out in full under it. Off until the user turns it on; it only
- * takes effect with the sheet's own Confirm.
+ * takes effect with the sheet's own Confirm. Guarded like the Confirm
+ * itself ([protectedToggle]): a press before the sheet armed, or one
+ * through another app's window, doesn't turn it on (#287 R3-M1).
  */
 @Composable
-private fun AutoApproveSwitch(rule: AutoApproveRule, chain: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+internal fun AutoApproveSwitch(
+    rule: AutoApproveRule,
+    chain: String,
+    checked: Boolean,
+    tap: ArmedTapGuard,
+    enabled: Boolean,
+    onChange: (Boolean) -> Unit,
+) {
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -453,12 +462,12 @@ private fun AutoApproveSwitch(rule: AutoApproveRule, chain: String, checked: Boo
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onChange)
+                    .protectedToggle(tap, value = checked, role = Role.Switch, enabled = enabled, onValueChange = onChange)
                     .testTag("ethereum-always-approve"),
             ) {
                 Text(autoApproveSwitchLabel(rule), style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
                 Spacer(Modifier.width(8.dp))
-                Switch(checked = checked, onCheckedChange = null, enabled = enabled)
+                Switch(checked = checked, onCheckedChange = null, enabled = tap.armed && enabled)
             }
             Spacer(Modifier.height(4.dp))
             Text(
