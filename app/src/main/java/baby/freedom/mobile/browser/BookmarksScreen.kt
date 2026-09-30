@@ -70,15 +70,18 @@ import kotlinx.coroutines.launch
  * Tapping a row calls [onOpen] with the bookmark's URL; the host closes
  * the screen and submits the URL into the active tab.
  *
- * Each row's ⋮ menu edits it ([BookmarkEditDialog]), moves it, or
- * removes it. To reorder by hand, drag a row by its handle (at once), or
- * long-press anywhere on it and drag, as in the tab switcher; TalkBack
- * gets the same moves as actions on the row. The order is saved
+ * Each row's ⋮ menu opens it in a new or a private tab behind this one
+ * ([onOpenInNewTab], #321), edits it ([BookmarkEditDialog]), moves it,
+ * or removes it; a long-press on the row that isn't followed by a drag
+ * opens the same menu. To reorder by hand, drag a row by its handle (at
+ * once), or long-press anywhere on it and drag, as in the tab switcher;
+ * TalkBack gets the whole menu as actions on the row. The order is saved
  * ([BrowsingRepository.moveBookmark]) and is the Home page tiles' order
  * too.
  *
  * [private] is whether it was opened from a private tab: the edit
- * dialog's fields then don't let the keyboard learn what's typed.
+ * dialog's fields then don't let the keyboard learn what's typed, and
+ * a new tab opened from here is a private one ([entryOpenTargets]).
  */
 @Composable
 fun BookmarksScreen(
@@ -86,11 +89,14 @@ fun BookmarksScreen(
     private: Boolean,
     onDismiss: () -> Unit,
     onOpen: (String) -> Unit,
+    onOpenInNewTab: (url: String, private: Boolean) -> Unit,
 ) {
     BackHandler(onBack = onDismiss)
 
     val entries by remember { repo.bookmarks }.collectAsState(initial = emptyList())
     var editingId by rememberSaveable { mutableStateOf<Long?>(null) }
+    // The row whose menu is open, from its ⋮ or a long-press.
+    var menuFor by remember { mutableStateOf<Long?>(null) }
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -142,6 +148,7 @@ fun BookmarksScreen(
                             entries = { currentShown },
                             onStart = { haptics.performHapticFeedback(HapticFeedbackType.LongPress) },
                             onDrag = { dy -> reorder.drag(dy, scope, edgePx, size.height.toFloat()) },
+                            onHeld = { id -> menuFor = id },
                         )
                     },
             ) {
@@ -163,6 +170,9 @@ fun BookmarksScreen(
                             Modifier.animateItem()
                         },
                         onClick = { onOpen(entry.url) },
+                        menuOpen = menuFor == entry.id,
+                        onMenuOpenChange = { open -> menuFor = if (open) entry.id else null },
+                        openActions = entryOpenActions(private) { inPrivate -> onOpenInNewTab(entry.url, inPrivate) },
                         onEdit = { editingId = entry.id },
                         onMove = { afterId -> repo.moveBookmark(entry.id, afterId) },
                         onRemove = { repo.deleteBookmark(entry.id) },
@@ -187,12 +197,14 @@ private fun BookmarkRow(
     entry: BookmarkEntry,
     moves: List<Pair<String, Long?>>,
     onClick: () -> Unit,
+    menuOpen: Boolean,
+    onMenuOpenChange: (Boolean) -> Unit,
+    openActions: List<Pair<String, () -> Unit>>,
     onEdit: () -> Unit,
     onMove: (afterId: Long?) -> Unit,
     onRemove: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var menuOpen by remember { mutableStateOf(false) }
     val editLabel = stringResource(R.string.common_edit)
     val removeLabel = stringResource(R.string.common_remove)
     PageRow(
@@ -200,10 +212,11 @@ private fun BookmarkRow(
         subtitle = entry.url,
         onClick = onClick,
         // The drag has no TalkBack equivalent, so its moves are offered
-        // as accessibility actions (the ⋮ menu has them too) — with Edit
-        // and Remove, so the whole menu is on the row itself (#279).
+        // as accessibility actions (the ⋮ menu has them too) — with the
+        // opens (#321), Edit and Remove, so the whole menu is on the row
+        // itself (#279).
         modifier = modifier.semantics {
-            customActions = listOf(
+            customActions = openActions.asAccessibilityActions() + listOf(
                 CustomAccessibilityAction(editLabel) {
                     onEdit()
                     true
@@ -225,7 +238,7 @@ private fun BookmarkRow(
             Box {
                 // Material's own size: a full 48 dp target (#279).
                 IconButton(
-                    onClick = { menuOpen = true },
+                    onClick = { onMenuOpenChange(true) },
                     shapes = IconButtonDefaults.shapes(),
                 ) {
                     Icon(
@@ -234,11 +247,12 @@ private fun BookmarkRow(
                         modifier = Modifier.size(20.dp),
                     )
                 }
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { onMenuOpenChange(false) }) {
+                    EntryOpenMenuItems(openActions, onClose = { onMenuOpenChange(false) })
                     DropdownMenuItem(
                         text = { Text(editLabel) },
                         onClick = {
-                            menuOpen = false
+                            onMenuOpenChange(false)
                             onEdit()
                         },
                     )
@@ -246,7 +260,7 @@ private fun BookmarkRow(
                         DropdownMenuItem(
                             text = { Text(label) },
                             onClick = {
-                                menuOpen = false
+                                onMenuOpenChange(false)
                                 onMove(afterId)
                             },
                         )
@@ -254,7 +268,7 @@ private fun BookmarkRow(
                     DropdownMenuItem(
                         text = { Text(removeLabel) },
                         onClick = {
-                            menuOpen = false
+                            onMenuOpenChange(false)
                             onRemove()
                         },
                     )
@@ -433,6 +447,11 @@ private class BookmarkReorder(
  * the same way, before the list's own scroll sees it. Before that
  * nothing is consumed: a tap still opens, a swipe elsewhere still
  * scrolls.
+ *
+ * A long press that ends without the finger having moved past touch
+ * slop was no drag: it calls [onHeld] with the row's id, which opens
+ * that row's menu (#321). Only a long press does — a press on the
+ * handle is a drag from its first move.
  */
 private suspend fun PointerInputScope.bookmarkDragGestures(
     reorder: BookmarkReorder,
@@ -440,10 +459,12 @@ private suspend fun PointerInputScope.bookmarkDragGestures(
     entries: () -> List<BookmarkEntry>,
     onStart: () -> Unit,
     onDrag: (Float) -> Unit,
+    onHeld: (id: Long) -> Unit,
 ) = awaitEachGesture {
     val down = awaitFirstDown(requireUnconsumed = false)
     var pending = 0f
-    val pointer = if (onHandle(down.position)) {
+    val longPress = !onHandle(down.position)
+    val pointer = if (!longPress) {
         var moved = Offset.Zero
         while (true) {
             val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -463,7 +484,12 @@ private suspend fun PointerInputScope.bookmarkDragGestures(
         if (!reorder.start(press.position, entries())) return@awaitEachGesture
         press.id
     }
+    val held = reorder.draggedId
     onStart()
+    var travelled = Offset.Zero
+    // Once past slop it was a drag, even if the row ends up back where it started.
+    var dragged = false
+    var lifted = false
     try {
         if (pending != 0f) onDrag(pending)
         while (true) {
@@ -471,10 +497,18 @@ private suspend fun PointerInputScope.bookmarkDragGestures(
             val change = event.changes.firstOrNull { it.id == pointer } ?: break
             val delta = change.positionChange()
             change.consume()
-            if (!change.pressed) break
+            if (!change.pressed) {
+                lifted = true
+                break
+            }
+            travelled += delta
+            if (travelled.getDistance() > viewConfiguration.touchSlop) dragged = true
             if (delta.y != 0f) onDrag(delta.y)
         }
     } finally {
         reorder.end()
+    }
+    if (longPress && lifted && !dragged && held != null) {
+        onHeld(held)
     }
 }

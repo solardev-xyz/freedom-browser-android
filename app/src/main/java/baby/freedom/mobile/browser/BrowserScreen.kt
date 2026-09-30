@@ -526,6 +526,9 @@ fun BrowserScreen(
     // that moment, so its Edit dialog keeps the keyboard from learning
     // what's typed there (#296 R1-M1).
     var bookmarksPrivate by rememberSaveable { mutableStateOf(false) }
+    // …and the same for History, where it decides that a new tab opened
+    // from the list is a private one (#321).
+    var historyPrivate by rememberSaveable { mutableStateOf(false) }
     var showDownloads by rememberSaveable { mutableStateOf(false) }
     var addressFocused by remember { mutableStateOf(false) }
     // Ctrl+L (#270): the address field takes focus once it's composed.
@@ -1506,6 +1509,7 @@ fun BrowserScreen(
             Shortcut.History -> {
                 {
                     focusManager.clearFocus()
+                    historyPrivate = state.private
                     showHistory = true
                 }
             }
@@ -1541,6 +1545,36 @@ fun BrowserScreen(
         }
     }
 
+    // A new tab for [url], submitted as the user's own choice. A
+    // background tab says so in a snackbar whose Switch brings it
+    // forward — otherwise nothing on screen would change — and then
+    // runs [onSwitch] (a panel it was opened from closes, so the tab
+    // is what's on screen, #321).
+    fun openInNewTab(url: String, background: Boolean, private: Boolean, onSwitch: () -> Unit = {}) {
+        val fresh = tabs.newTab(activate = !background, private = private)
+        submit(fresh, url)
+        if (background) {
+            scope.launch {
+                val result = snackbarHostState.showSnackbar(
+                    message = if (private) {
+                        Strings.get(R.string.browser_opened_in_new_private_tab)
+                    } else {
+                        Strings.get(R.string.browser_opened_in_new_tab)
+                    },
+                    actionLabel = Strings.get(R.string.browser_opened_switch),
+                    duration = SnackbarDuration.Short,
+                )
+                if (result == SnackbarResult.ActionPerformed) {
+                    val index = tabs.tabs.indexOf(fresh)
+                    if (index >= 0) {
+                        tabs.switchTo(index)
+                        onSwitch()
+                    }
+                }
+            }
+        }
+    }
+
     // Wire the WebView layer's "route this URL through submit" hook up
     // to this screen's [submit] function. The callback lives on
     // [TabsState] so BrowserWebView (which is composed under us) can
@@ -1557,30 +1591,8 @@ fun BrowserScreen(
         tabs.requestNodeRecovery = onRecoverNodes
         // The page context menu's "Open in new tab" and the selection
         // toolbar's "Search" (#84). Both are the user's own choice, so
-        // they submit as [SubmitSource.User]. A background tab says so
-        // in a snackbar that can bring it forward — otherwise nothing
-        // on screen would change.
-        tabs.requestOpenInNewTab = { url, background, private ->
-            val fresh = tabs.newTab(activate = !background, private = private)
-            submit(fresh, url)
-            if (background) {
-                scope.launch {
-                    val result = snackbarHostState.showSnackbar(
-                        message = if (private) {
-                            Strings.get(R.string.browser_opened_in_new_private_tab)
-                        } else {
-                            Strings.get(R.string.browser_opened_in_new_tab)
-                        },
-                        actionLabel = Strings.get(R.string.browser_opened_switch),
-                        duration = SnackbarDuration.Short,
-                    )
-                    if (result == SnackbarResult.ActionPerformed) {
-                        val index = tabs.tabs.indexOf(fresh)
-                        if (index >= 0) tabs.switchTo(index)
-                    }
-                }
-            }
-        }
+        // they submit as [SubmitSource.User] ([openInNewTab]).
+        tabs.requestOpenInNewTab = { url, background, private -> openInNewTab(url, background, private) }
         // Read [searchTemplate] when the search runs, so a change of
         // engine in Settings applies to the next one.
         tabs.requestSearchInNewTab = { query, private ->
@@ -2032,6 +2044,7 @@ fun BrowserScreen(
                 HomeScreen(
                     repo = repo,
                     onOpen = { submit(state, it) },
+                    onOpenInNewTab = { url, private -> openInNewTab(url, background = true, private = private) },
                     nodeInfo = nodeInfo,
                     runNodeEnabled = runNodeEnabled,
                     onOpenNode = { showNode = true },
@@ -2229,7 +2242,10 @@ fun BrowserScreen(
                     onOpenSettings = { showSettings = true },
                     onOpenNode = { showNode = true },
                     onOpenTabs = { showTabSwitcher = true },
-                    onOpenHistory = { showHistory = true },
+                    onOpenHistory = {
+                        historyPrivate = state.private
+                        showHistory = true
+                    },
                     onOpenBookmarks = {
                         bookmarksPrivate = state.private
                         showBookmarks = true
@@ -2529,10 +2545,16 @@ fun BrowserScreen(
     if (showHistory) {
         HistoryScreen(
             repo = repo,
+            private = historyPrivate,
             onDismiss = { showHistory = false },
             onOpen = { url ->
                 showHistory = false
                 submit(state, url)
+            },
+            // Behind the list, which stays up for the next one; the
+            // snackbar's Switch closes it (#321).
+            onOpenInNewTab = { url, private ->
+                openInNewTab(url, background = true, private = private, onSwitch = { showHistory = false })
             },
         )
     }
@@ -2555,6 +2577,9 @@ fun BrowserScreen(
             onOpen = { url ->
                 showBookmarks = false
                 submit(state, url)
+            },
+            onOpenInNewTab = { url, private ->
+                openInNewTab(url, background = true, private = private, onSwitch = { showBookmarks = false })
             },
         )
     }

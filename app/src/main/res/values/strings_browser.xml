@@ -35,6 +35,8 @@
     <!-- PageContextMenu.kt: the long-press sheet -->
     <string name="browser_menu_image">Image</string>
     <string name="browser_menu_open_in_new_tab">Open in new tab</string>
+    <!-- A bookmark's or history entry's menu (#321) -->
+    <string name="browser_menu_open_in_private_tab">Open in private tab</string>
     <string name="browser_menu_copy_link_address">Copy link address</string>
     <string name="browser_menu_share_link">Share link</string>
     <string name="browser_menu_open_image_in_new_tab">Open image in new tab</string>

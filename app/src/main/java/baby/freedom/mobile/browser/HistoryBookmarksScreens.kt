@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material.icons.outlined.History
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -50,6 +51,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -80,12 +82,19 @@ import java.util.Date
  * display URL (`bzz://…`, `name.eth/…`, `https://…`). Tapping a row
  * calls [onOpen] with the canonical URL; the host closes the screen and
  * submits the URL into the active tab.
+ *
+ * A long-press on a row (or its TalkBack actions) opens it in a new or
+ * a private tab behind this one instead (#321): [onOpenInNewTab], with
+ * whether the new tab is private — always, when [private] (the page was
+ * opened from a private tab; see [entryOpenTargets]).
  */
 @Composable
 fun HistoryScreen(
     repo: BrowsingRepository,
+    private: Boolean,
     onDismiss: () -> Unit,
     onOpen: (String) -> Unit,
+    onOpenInNewTab: (url: String, private: Boolean) -> Unit,
 ) {
     BackHandler(onBack = onDismiss)
     // Registered after the dismiss handler so it wins while there's a
@@ -133,7 +142,9 @@ fun HistoryScreen(
                     HistoryList(
                         days = days,
                         timeFormat = timeFormat,
+                        fromPrivate = private,
                         onOpen = onOpen,
+                        onOpenInNewTab = onOpenInNewTab,
                         onRemove = { repo.deleteHistory(it) },
                     )
                 }
@@ -203,7 +214,9 @@ private fun rememberCalendarDay(): CalendarDay {
 internal fun HistoryList(
     days: List<HistoryDay>,
     timeFormat: DateFormat,
+    fromPrivate: Boolean,
     onOpen: (String) -> Unit,
+    onOpenInNewTab: (url: String, private: Boolean) -> Unit,
     onRemove: (Long) -> Unit,
 ) {
     LazyColumn(
@@ -231,6 +244,7 @@ internal fun HistoryList(
                     subtitle = entry.url,
                     timestamp = timeFormat.format(Date(entry.visitedAt)),
                     onClick = { onOpen(entry.url) },
+                    openActions = entryOpenActions(fromPrivate) { private -> onOpenInNewTab(entry.url, private) },
                     onRemove = { onRemove(entry.id) },
                 )
             }
@@ -282,14 +296,28 @@ private fun EntryRow(
     subtitle: String,
     timestamp: String?,
     onClick: () -> Unit,
+    openActions: List<Pair<String, () -> Unit>>,
     onRemove: () -> Unit,
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val removeLabel = stringResource(R.string.common_remove)
     PageRow(
         title = title,
         subtitle = subtitle,
         thirdLine = timestamp,
         onClick = onClick,
+        // Long-press for the open-in-new-tab menu (#321); TalkBack gets
+        // its items as actions on the row itself.
+        onLongClick = { menuOpen = true },
+        onLongClickLabel = stringResource(R.string.library_entry_options),
+        modifier = Modifier.semantics { customActions = openActions.asAccessibilityActions() },
         trailing = {
+            // The long-press menu, dropped from the row's end.
+            Box {
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    EntryOpenMenuItems(openActions, onClose = { menuOpen = false })
+                }
+            }
             // Material's own size: a full 48 dp target (#279).
             IconButton(
                 onClick = onRemove,
@@ -297,7 +325,7 @@ private fun EntryRow(
             ) {
                 Icon(
                     Icons.Filled.Close,
-                    contentDescription = stringResource(R.string.common_remove),
+                    contentDescription = removeLabel,
                     modifier = Modifier.size(18.dp),
                 )
             }

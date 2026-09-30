@@ -125,6 +125,8 @@
     <string name="library_bookmarks_empty_title">No bookmarks yet</string>
     <string name="library_bookmarks_empty_hint">Tap the star in the menu while on a page to save it.</string>
     <string name="library_bookmark_options">Bookmark options</string>
+    <!-- The long-press on a history entry or a Home tile (#321), as TalkBack names it -->
+    <string name="library_entry_options">Open options</string>
 
     <!-- BookmarkEditDialog.kt -->
     <string name="library_bookmark_already_bookmarked">Already bookmarked</string>
