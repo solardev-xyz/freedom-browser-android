@@ -347,6 +347,60 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         (userNamedPendingUrl == url).also { userNamedPendingUrl = null }
 
     /**
+     * The WebView URL of a Hard reload's own load (#262), scheduled as
+     * [pendingUrl] by its submit's [loadUrl] (`bypassCache`), until the
+     * WebView takes it ([takeBypassCacheLoad]).
+     */
+    private var bypassCachePendingUrl: String? = null
+
+    /**
+     * Whether the load of [url] the tab's WebView is starting from
+     * [pendingUrl] is a Hard reload's (#262): it goes out with the HTTP
+     * cache bypassed ([CacheBypass]). One load's worth: taken here, so
+     * no later load — an error page, a Back step — inherits it.
+     */
+    internal fun takeBypassCacheLoad(url: String): Boolean =
+        (bypassCachePendingUrl == url).also { bypassCachePendingUrl = null }
+
+    /**
+     * The document a Hard reload loaded (#262), by the [loadGeneration]
+     * of its navigation, and the gateway URLs the interceptor already
+     * fetched afresh for it. Null until the tab's first Hard reload;
+     * a later navigation has another generation, so it no longer
+     * matches. Read on the interceptor's threads.
+     */
+    @Volatile
+    private var freshDocument: FreshDocument? = null
+
+    private class FreshDocument(val generation: Int) {
+        val fetched: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    }
+
+    /**
+     * The navigation the WebView was just handed ([webViewGeneration])
+     * is a Hard reload's: its document's gateway fetches skip the
+     * interceptor's own caches ([takeFreshFetch]).
+     */
+    internal fun bypassCacheForHandedLoad() {
+        freshDocument = FreshDocument(webViewGeneration)
+    }
+
+    /**
+     * Should the interceptor fetch [target] (a gateway URL) for a request
+     * of load [generation] past its own response caches (#262)? True
+     * the first time the Hard-reloaded document asks for it: its media
+     * body is fetched again rather than served from the Range buffer,
+     * and the gateway is asked not to answer from a cache. Later
+     * requests for the same URL (a video's seeks) use what that fetch
+     * buffered. False for every other document, in this tab or any
+     * other.
+     */
+    internal fun takeFreshFetch(generation: Int, target: String): Boolean {
+        val doc = freshDocument ?: return false
+        return doc.generation == generation && doc.fetched.add(target)
+    }
+
+    /**
      * The site-permission prompt this tab is waiting on (#81), or null.
      * Owned by [SitePermissionBroker]; [BrowserScreen] shows it while
      * this tab is the active one, so a background tab can never put a
@@ -921,8 +975,16 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * [namedByUser]: this is the load a user's own submit scheduled
      * (#173, [takeUserNamedLoad]). Only [BrowserScreen]'s submit passes
      * it, at the load that submit makes.
+     *
+     * [bypassCache]: this is the load of the user's Hard reload (#262,
+     * [takeBypassCacheLoad]), passed the same way.
      */
-    fun loadUrl(url: String, displayPrefix: String? = null, namedByUser: Boolean = false) {
+    fun loadUrl(
+        url: String,
+        displayPrefix: String? = null,
+        namedByUser: Boolean = false,
+        bypassCache: Boolean = false,
+    ) {
         cancelPendingProbe()
         // A new load supersedes whatever the last Stop aborted, so the
         // progress latch opens again.
@@ -939,6 +1001,8 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         // (#173): never an error page, a restore, or a Back step that
         // happens to come after it (R2-F2).
         userNamedPendingUrl = loadable.takeIf { namedByUser }
+        // Likewise a Hard reload's bypassing of the cache (#262).
+        bypassCachePendingUrl = loadable.takeIf { bypassCache }
         if (displayPrefix != null) {
             // The override base is the virtual origin the content is
             // served from — in-manifest navigation stays under it, so
