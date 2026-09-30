@@ -33,12 +33,15 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.node.NodeLogSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -90,11 +93,11 @@ fun NodeLogsScreen(
     val lines = if (external) emptyList() else logs?.lines.orEmpty()
 
     FullScreenScaffold(
-        title = "Node logs",
+        title = stringResource(R.string.node_logs_title),
         onDismiss = onDismiss,
         trailing = {
             IconButton(onClick = { confirmShare = true }, enabled = lines.isNotEmpty()) {
-                Icon(Icons.Filled.Share, contentDescription = "Share ${source.title} logs")
+                Icon(Icons.Filled.Share, contentDescription = stringResource(R.string.node_logs_share, source.title))
             }
         },
     ) {
@@ -113,10 +116,10 @@ fun NodeLogsScreen(
             }
             val current = logs
             when {
-                external -> LogNote(EXTERNAL_TOR_NOTE)
-                current == null -> LogNote("Reading…")
+                external -> LogNote(stringResource(R.string.node_logs_external_tor))
+                current == null -> LogNote(stringResource(R.string.node_logs_reading))
                 current.lines == null -> LogNote(notRunningNote(source))
-                current.lines.isEmpty() -> LogNote("No log lines yet.")
+                current.lines.isEmpty() -> LogNote(stringResource(R.string.node_logs_empty))
                 else -> LogLines(source, current.lines)
             }
         }
@@ -125,16 +128,16 @@ fun NodeLogsScreen(
     if (confirmShare) {
         AlertDialog(
             onDismissRequest = { confirmShare = false },
-            title = { Text("Share ${source.title} logs?") },
-            text = { Text(SHARE_WARNING) },
+            title = { Text(stringResource(R.string.node_logs_share_title, source.title)) },
+            text = { Text(stringResource(R.string.node_logs_share_warning)) },
             confirmButton = {
                 TextButton(onClick = {
                     confirmShare = false
                     shareNodeLogs(context, source, lines)
-                }) { Text("Share") }
+                }) { Text(stringResource(R.string.common_share)) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmShare = false }) { Text("Cancel") }
+                TextButton(onClick = { confirmShare = false }) { Text(stringResource(R.string.common_cancel)) }
             },
         )
     }
@@ -187,7 +190,7 @@ private fun LogLines(source: NodeLogSource, lines: List<String>) {
 /** A node card's way into its logs. */
 @Composable
 internal fun LogsButton(onClick: () -> Unit) {
-    TextButton(onClick = onClick) { Text("Logs") }
+    TextButton(onClick = onClick) { Text(stringResource(R.string.node_logs_button)) }
 }
 
 /** The lines of a node's log text, oldest first. */
@@ -195,16 +198,7 @@ internal fun nodeLogLines(text: String): List<String> =
     if (text.isEmpty()) emptyList() else text.split('\n')
 
 internal fun notRunningNote(source: NodeLogSource): String =
-    "${source.title} isn't running, so there are no logs to show. They're shown only while it runs, " +
-        "and kept in memory only, never written to storage."
-
-internal const val EXTERNAL_TOR_NOTE =
-    "Tor runs in an external app (Orbot, say), set in Settings → Tor. Its logs are in that app."
-
-internal const val SHARE_WARNING =
-    "Logs can contain this device's node addresses and peer IDs, the addresses of the peers and " +
-        "servers the node talked to, and the IDs of Radicle repositories. The addresses and names of " +
-        "the pages you visited are taken out before a line is kept. Share them only with someone you trust."
+    Strings.get(R.string.node_logs_not_running, source.title)
 
 /** The shared text: which app, node and time, then the lines. */
 internal fun nodeLogShareText(version: String, source: NodeLogSource, at: Date, lines: List<String>): String {
@@ -218,7 +212,7 @@ private fun shareNodeLogs(context: Context, source: NodeLogSource, lines: List<S
     }.getOrNull() ?: "unknown"
     val send = Intent(Intent.ACTION_SEND).apply {
         type = "text/plain"
-        putExtra(Intent.EXTRA_SUBJECT, "Freedom ${source.title} logs")
+        putExtra(Intent.EXTRA_SUBJECT, Strings.get(R.string.node_logs_share_subject, source.title))
         putExtra(Intent.EXTRA_TEXT, nodeLogShareText(version, source, Date(), lines))
     }
     // No share target at all would throw; losing the share beats a crash.
