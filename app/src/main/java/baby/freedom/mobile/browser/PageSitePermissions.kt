@@ -70,27 +70,30 @@ private val InUseGreen = Color(0xFF34A853)
  * a normal tab's are the remembered and this-run decisions Settings
  * lists too.
  *
- * Removing the camera or microphone from a page that is using it
- * doesn't take away what it already holds — WebView has no way to — so
- * the sheet says so and offers a reload, which ends the page's use —
- * for as long as that document holds it ([revokedHeld], kept by the
- * broker per document, so reopening the sheet still says it).
+ * Removing the camera or microphone from a page that is using it, or
+ * location from a page that was given it, doesn't take away what the
+ * document already holds — WebView has no way to — so the sheet says so
+ * and offers a reload, which ends it — for as long as that document
+ * holds it ([document], kept by the broker per document and per origin,
+ * so reopening the sheet still says it).
  */
 @Composable
 fun PageSitePermissionsSheet(
     pageOrigin: String?,
     entries: List<SitePermissionEntry>,
     inUse: Set<SitePermission>,
-    revokedHeld: Set<SitePermission>,
+    document: SitePermissionBroker.DocumentPermissions?,
     private: Boolean,
     onRevoke: (SitePermissionEntry) -> Unit,
     onReload: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    // Camera/microphone removed while the page kept using them — kept
-    // with the tab's document, not this dialog, so it's still said after
-    // the sheet is closed and opened again.
-    val stillHeld = revokedHeld.intersect(inUse)
+    // Camera/microphone removed while the page kept using them, or a
+    // location it was given — kept with the tab's document, not this
+    // dialog, so it's still said after the sheet is closed and opened
+    // again.
+    val stillHeld = document?.stillHeld(inUse).orEmpty()
+    val heldNote = stillHeldNote(stillHeld)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -113,7 +116,12 @@ fun PageSitePermissionsSheet(
             ) {
                 if (entries.isEmpty()) {
                     Text(
-                        "This site has no permissions. It will ask again if it needs one.",
+                        if (heldNote == null) {
+                            "This site has no permissions. It will ask again if it needs one."
+                        } else {
+                            // Not "no permissions": the page still has what's below.
+                            "Nothing is saved for this site any more."
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -122,15 +130,14 @@ fun PageSitePermissionsSheet(
                     PageSitePermissionRow(
                         entry = entry,
                         pageOrigin = pageOrigin,
-                        inUse = entry.permission in inUse && entry.decision == PermissionDecision.ALLOW,
+                        inUse = document?.inUse(entry, inUse) == true,
                         private = private,
                         onRevoke = { onRevoke(entry) },
                     )
                 }
-                if (stillHeld.isNotEmpty()) {
+                if (heldNote != null) {
                     Text(
-                        "This page keeps your ${stillHeld.joinToString(" and ") { it.label.lowercase() }} " +
-                            "until it stops using it or is reloaded.",
+                        heldNote,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier
@@ -153,7 +160,7 @@ fun PageSitePermissionsSheet(
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("Done") }
         },
-        dismissButton = if (stillHeld.isNotEmpty()) {
+        dismissButton = if (heldNote != null) {
             {
                 TextButton(onClick = {
                     onDismiss()

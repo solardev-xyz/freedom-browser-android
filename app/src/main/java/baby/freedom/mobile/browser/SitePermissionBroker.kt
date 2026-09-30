@@ -263,36 +263,64 @@ class SitePermissionBroker private constructor(
     /**
      * What a tab's current document has to do with site permissions:
      * [origins] that asked for something from it (its own, or an
-     * embedded frame's), the camera/microphone it was [granted], and
-     * which of those the user has since removed from the sheet while the
-     * document still holds them ([revokedHeld]: WebView can't take a grant
-     * back, so the sheet keeps saying so, and offering a reload, however
-     * often it's closed and reopened over this document).
+     * embedded frame's), what each of them was granted ([grants]:
+     * camera, microphone, location — per origin, since a frame's grant
+     * isn't the page's), and which of those the user has since removed
+     * from the sheet while the document still holds them ([revokedHeld],
+     * per origin too). WebView can't take a grant back from a live
+     * document — a camera stream runs on, and a location grant keeps
+     * answering the document's watches and new requests without asking —
+     * so the sheet keeps saying so, and offering a reload, however often
+     * it's closed and reopened over this document.
      * [doc] is the tab's document number ([documents]), so a sheet opened
      * over one document can tell when another has replaced it.
      */
     data class DocumentPermissions(
         val doc: Int,
         val origins: Set<String> = emptySet(),
-        val granted: Set<SitePermission> = emptySet(),
-        val revokedHeld: Set<SitePermission> = emptySet(),
+        val grants: Map<String, Set<SitePermission>> = emptyMap(),
+        val revokedHeld: Map<String, Set<SitePermission>> = emptyMap(),
     ) {
-        /** After this document gets [more] (again): no longer revoked. */
-        fun granting(origin: String, more: Collection<SitePermission>) =
-            copy(origins = origins + origin, granted = granted + more, revokedHeld = revokedHeld - more.toSet())
+        /** Everything granted to this document, whichever of its origins got it. */
+        val granted: Set<SitePermission> get() = grants.values.flatten().toSet()
+
+        /** What [origin] was granted in this document. */
+        fun grantedTo(origin: String): Set<SitePermission> = grants[origin].orEmpty()
+
+        /** After [origin] gets [more] (again) in this document: no longer revoked. */
+        fun granting(origin: String, more: Collection<SitePermission>): DocumentPermissions {
+            val left = revokedHeld[origin].orEmpty() - more.toSet()
+            return copy(
+                origins = origins + origin,
+                grants = if (more.isEmpty()) grants else grants + (origin to grantedTo(origin) + more),
+                revokedHeld = if (left.isEmpty()) revokedHeld - origin else revokedHeld + (origin to left),
+            )
+        }
 
         /**
-         * After [entry] is removed from the sheet over this document: its
-         * camera/microphone, if this document was given it, is still held.
+         * After [entry] is removed from the sheet over this document: what
+         * its origin was given here is still held.
          */
         fun revoking(entry: SitePermissionEntry): DocumentPermissions {
             val p = entry.permission
-            return if (p is SitePermission && p in granted && entry.origin in origins) {
-                copy(revokedHeld = revokedHeld + p)
+            return if (p is SitePermission && p in grantedTo(entry.origin)) {
+                copy(revokedHeld = revokedHeld + (entry.origin to revokedHeld[entry.origin].orEmpty() + p))
             } else {
                 this
             }
         }
+
+        /**
+         * What was removed but this document still has, given the
+         * camera/microphone in use now ([inUse]): see [stillHeldAfterRemoval].
+         */
+        fun stillHeld(inUse: Set<SitePermission>): Set<SitePermission> =
+            stillHeldAfterRemoval(revokedHeld.values.flatten().toSet(), inUse)
+
+        /** Whether [entry]'s own origin was given it here and it's in use now. */
+        fun inUse(entry: SitePermissionEntry, inUse: Set<SitePermission>): Boolean =
+            entry.decision == PermissionDecision.ALLOW &&
+                entry.permission in inUse && entry.permission in grantedTo(entry.origin)
     }
 
     private val documentActivity = MutableStateFlow<Map<Long, DocumentPermissions>>(emptyMap())

@@ -568,14 +568,72 @@ class SitePermissionsTest {
         val revoked = doc.revoking(entry(page, SitePermission.CAMERA))
         // Kept on the document, not the sheet: reading it again (a
         // reopened sheet) still says the camera is held.
-        assertEquals(setOf(SitePermission.CAMERA), revoked.revokedHeld)
-        // Location was never a held grant; another site's camera isn't this document's.
+        assertEquals(mapOf(page to setOf(SitePermission.CAMERA)), revoked.revokedHeld)
+        assertEquals(setOf(SitePermission.CAMERA), revoked.stillHeld(setOf(SitePermission.CAMERA)))
+        // Once the page stops using it, it doesn't have it any more.
+        assertEquals(emptySet<SitePermission>(), revoked.stillHeld(emptySet()))
+        // Location this document was never given; another site's camera isn't this document's.
         assertEquals(revoked, revoked.revoking(entry(page, SitePermission.LOCATION)))
         assertEquals(revoked, revoked.revoking(entry("https://other.example", SitePermission.CAMERA)))
         // A microphone the document was never given isn't held either.
         assertEquals(revoked, revoked.revoking(entry(page, SitePermission.MICROPHONE)))
         // Asked and allowed again: no longer removed.
-        assertEquals(emptySet<SitePermission>(), revoked.granting(page, listOf(SitePermission.CAMERA)).revokedHeld)
+        assertEquals(emptyMap<String, Set<SitePermission>>(), revoked.granting(page, listOf(SitePermission.CAMERA)).revokedHeld)
+    }
+
+    @Test
+    fun `a location removed from a document that was given it stays held until reload, used or not`() {
+        val page = "https://page.example"
+        val doc = SitePermissionBroker.DocumentPermissions(doc = 1)
+            .granting(page, listOf(SitePermission.LOCATION))
+        val revoked = doc.revoking(entry(page, SitePermission.LOCATION))
+        // WebView keeps answering this document's watch and new requests:
+        // no camera/microphone "in use" signal needed for it to count.
+        assertEquals(setOf(SitePermission.LOCATION), revoked.stillHeld(emptySet()))
+        assertEquals("This page can still get your location until it's reloaded.", stillHeldNote(revoked.stillHeld(emptySet())))
+        // With nothing listed any more, the menu row stays so the sheet's Reload can be reached.
+        assertEquals("Location kept until reload", sitePermissionsSummary(emptyList(), revoked.stillHeld(emptySet())))
+        // A new document starts with nothing held.
+        assertEquals(emptySet<SitePermission>(), SitePermissionBroker.DocumentPermissions(doc = 2).stillHeld(emptySet()))
+    }
+
+    @Test
+    fun `a frame's grant and the page's are kept apart`() {
+        val page = "https://page.example"
+        val frame = "https://frame.example"
+        // The page was given the camera; the frame only asked for location.
+        val doc = SitePermissionBroker.DocumentPermissions(doc = 1)
+            .granting(page, listOf(SitePermission.CAMERA))
+            .granting(frame, listOf(SitePermission.LOCATION))
+        val camera = setOf(SitePermission.CAMERA)
+        // The frame's remembered camera Allow isn't what's in use.
+        assertTrue(doc.inUse(entry(page, SitePermission.CAMERA), camera))
+        assertFalse(doc.inUse(entry(frame, SitePermission.CAMERA), camera))
+        // Removing the frame's camera leaves nothing held by that removal.
+        val afterFrame = doc.revoking(entry(frame, SitePermission.CAMERA))
+        assertEquals(doc, afterFrame)
+        assertEquals(emptySet<SitePermission>(), afterFrame.stillHeld(camera))
+        // Nor does a re-grant to the frame clear the page's own removal.
+        val afterPage = doc.revoking(entry(page, SitePermission.CAMERA))
+        assertEquals(camera, afterPage.granting(frame, listOf(SitePermission.CAMERA)).stillHeld(camera))
+        // The indicator still sees everything the document was given.
+        assertEquals(setOf(SitePermission.CAMERA, SitePermission.LOCATION), doc.granted)
+    }
+
+    @Test
+    fun `held note names what the page still has`() {
+        assertNull(stillHeldNote(emptySet()))
+        assertEquals(
+            "This page keeps your camera and microphone until it stops using it or is reloaded.",
+            stillHeldNote(setOf(SitePermission.MICROPHONE, SitePermission.CAMERA)),
+        )
+        assertEquals(
+            "This page keeps your camera until it stops using it or is reloaded, " +
+                "and can still get your location until it's reloaded.",
+            stillHeldNote(setOf(SitePermission.LOCATION, SitePermission.CAMERA)),
+        )
+        // Pop-ups and the like are never "held": nothing to reload for.
+        assertEquals(emptySet<SitePermission>(), stillHeldAfterRemoval(setOf(SitePermission.POPUPS), setOf(SitePermission.CAMERA)))
     }
 
     @Test

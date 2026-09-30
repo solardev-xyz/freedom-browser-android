@@ -1997,7 +1997,10 @@ fun BrowserScreen(
                         }
                     },
                     onPrint = { tabs.printPage?.invoke(state) },
-                    sitePermissionsSummary = sitePermissionsSummary(pagePermissions),
+                    sitePermissionsSummary = sitePermissionsSummary(
+                        pagePermissions,
+                        pageDocument?.stillHeld(mediaInUse).orEmpty(),
+                    ),
                     onOpenSitePermissions = openSitePermissions,
                     adblockState = adblockState,
                     onToggleAdblock = {
@@ -2505,7 +2508,7 @@ fun BrowserScreen(
             pageOrigin = target.origin,
             entries = pagePermissions,
             inUse = mediaInUse,
-            revokedHeld = pageDocument?.revokedHeld.orEmpty(),
+            document = pageDocument,
             private = state.private,
             onRevoke = { entry -> sitePermissions.revokeOnTab(state, entry) },
             onReload = reloadPage,

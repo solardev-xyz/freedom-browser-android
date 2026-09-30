@@ -658,9 +658,47 @@ fun sitePermissionStateLabel(entry: SitePermissionEntry, private: Boolean = fals
 }
 
 /**
- * The page menu's Site permissions sub-line (#266): the capabilities
- * [entries] name, once each, in order ("Camera · Location"); null when
- * there are none and the menu leaves the row out.
+ * Which of [removed] — grants the user took away on the Site permissions
+ * sheet (#266) while the tab's document held them — the document still
+ * has. WebView can't take either back from a live document: the camera
+ * and microphone stay with it while it's using them ([inUse]); a
+ * location grant stays for the document's whole life, answering its
+ * running watches and any new request without asking. A reload ends both.
  */
-fun sitePermissionsSummary(entries: List<SitePermissionEntry>): String? =
+fun stillHeldAfterRemoval(removed: Set<SitePermission>, inUse: Set<SitePermission>): Set<SitePermission> =
+    listOf(SitePermission.CAMERA, SitePermission.MICROPHONE, SitePermission.LOCATION).filterTo(LinkedHashSet()) {
+        it in removed && (it == SitePermission.LOCATION || it in inUse)
+    }
+
+/**
+ * The sheet's note for what the page still has after its removal
+ * ([stillHeldAfterRemoval]); null for nothing.
+ */
+fun stillHeldNote(held: Set<SitePermission>): String? {
+    val media = listOf(SitePermission.CAMERA, SitePermission.MICROPHONE).filter { it in held }
+    val location = SitePermission.LOCATION in held
+    val mediaPart = media.joinToString(" and ") { it.label.lowercase() }
+    return when {
+        media.isNotEmpty() && location ->
+            "This page keeps your $mediaPart until it stops using it or is reloaded, " +
+                "and can still get your location until it's reloaded."
+        media.isNotEmpty() -> "This page keeps your $mediaPart until it stops using it or is reloaded."
+        location -> "This page can still get your location until it's reloaded."
+        else -> null
+    }
+}
+
+/**
+ * The page menu's Site permissions sub-line (#266): the capabilities
+ * [entries] name, once each, in order ("Camera · Location"); or, when
+ * none are left but the page still has something removed from it
+ * ([stillHeld]), that ("Location kept until reload"), so the sheet —
+ * and its Reload — can still be reached. Null when there's neither and
+ * the menu leaves the row out.
+ */
+fun sitePermissionsSummary(
+    entries: List<SitePermissionEntry>,
+    stillHeld: Set<SitePermission> = emptySet(),
+): String? =
     entries.map { it.permission.label }.distinct().joinToString(" · ").ifEmpty { null }
+        ?: stillHeld.joinToString(" · ") { it.label }.ifEmpty { null }?.let { "$it kept until reload" }
