@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Freedom's own error pages and the browser's page-level messages (#280):
+  the dweb error page (assets/error/error.html, which gets these through
+  ErrorPage.stringsJson), the refusal and failed-load pages built in
+  Kotlin (BrowserWebView.kt, WebLoadError.kt) and the renderer-gone
+  screen.
+
+  Strings marked "HTML" go into a page as markup: keep their tags
+  (&lt;code>, &lt;b>) and entities (&amp;mdash;, &amp;rarr;,
+  &amp;hellip;) intact in a translation. Every other string is inserted
+  as text. %1$s-style arguments are filled in by the app or by the
+  page's fmt() helper; brand and network names (ENS, Swarm, Tezos, …)
+  arrive as arguments where the page picks them.
+-->
+<resources>
+    <!-- ===== Shared by error.html and the Kotlin-built pages ===== -->
+
+    <!-- Title; %1$s is the name system (ENS, WNS, GNS, Tezos Domains). -->
+    <string name="errorpage_ens_not_found_title">No content for this %1$s name</string>
+    <string name="errorpage_ens_wrong_protocol_title">Name lives on a different network</string>
+    <string name="errorpage_unsupported_format_title">Unsupported content format</string>
+    <!-- Title; %1$s is the name system (ENS, WNS, GNS, Tezos Domains). -->
+    <string name="errorpage_ens_invalid_name_title">Not a valid %1$s name</string>
+    <!-- HTML. %1$s is the name system (ENS, WNS, GNS, Tezos Domains). -->
+    <string name="errorpage_ens_invalid_name_description">This name breaks the ENSIP-15 naming rules (a disallowed character, mixed scripts, a lookalike, &amp;hellip;), so Freedom Browser won\'t look it up &amp;mdash; other %1$s apps refuse it too, and it could be mistaken for a different name. Check the spelling.</string>
+    <!-- Title; %1$s is the name system (ENS, WNS, GNS, Tezos Domains). -->
+    <string name="errorpage_ens_name_too_long_title">%1$s name too long</string>
+    <!-- HTML. %1$s is the name system (ENS, WNS, GNS, Tezos Domains). -->
+    <string name="errorpage_ens_name_too_long_description">A label of this name is longer than the 255 bytes an %1$s lookup can carry, so Freedom Browser can\'t ask a resolver about it. Check the address.</string>
+    <string name="errorpage_not_cross_checked_title">Not cross-checked</string>
+    <string name="errorpage_rpc_disagreed_title">RPC servers disagreed</string>
+    <!-- Title; %1$s is the name system (ENS, WNS, GNS, Tezos Domains). -->
+    <string name="errorpage_lookup_failed_title">%1$s lookup failed</string>
+    <!-- HTML. -->
+    <string name="errorpage_ccip_disabled_description">This name is resolved through an off-chain gateway (CCIP-Read), which is turned off in Settings &amp;rarr; Name resolution.</string>
+    <!-- HTML. -->
+    <string name="errorpage_tezos_rpc_unreachable_description">Couldn\'t reach a Tezos RPC endpoint to resolve this name. Check your connection and try again.</string>
+    <!-- HTML. -->
+    <string name="errorpage_ethereum_rpc_unreachable_description">Couldn\'t reach an Ethereum RPC endpoint to resolve this name. Check your connection, or the endpoints in Settings &amp;rarr; RPC providers, and try again.</string>
+
+    <!-- A certificate error (#259). -->
+    <string name="errorpage_cert_title">Connection isn\'t secure</string>
+    <!-- %1$s is the site's host (shown bold). -->
+    <string name="errorpage_cert_description_expired">Freedom didn\'t load %1$s because its security certificate has expired.</string>
+    <!-- %1$s is the site's host (shown bold). -->
+    <string name="errorpage_cert_description_not_yet_valid">Freedom didn\'t load %1$s because its security certificate isn\'t valid yet. If your device\'s date and time are wrong, correct them and try again.</string>
+    <!-- %1$s is the site's host (shown bold). -->
+    <string name="errorpage_cert_description_date_invalid">Freedom didn\'t load %1$s because its security certificate has invalid dates.</string>
+    <!-- %1$s is the site's host (shown bold). -->
+    <string name="errorpage_cert_description_wrong_host">Freedom didn\'t load %1$s because its security certificate was issued for a different site.</string>
+    <!-- %1$s is the site's host (shown bold). -->
+    <string name="errorpage_cert_description_untrusted">Freedom didn\'t load %1$s because its security certificate wasn\'t issued by an authority this device trusts.</string>
+    <!-- %1$s is the site's host (shown bold). -->
+    <string name="errorpage_cert_description_invalid">Freedom didn\'t load %1$s because its security certificate is not valid.</string>
+    <!-- Follows the cert_description sentence. -->
+    <string name="errorpage_cert_description_risk">Someone could be impersonating the site or intercepting the connection, or the site is misconfigured.</string>
+
+    <!-- ===== error.html (the dweb error page) ===== -->
+
+    <string name="errorpage_page_default_title">Content Unavailable</string>
+    <string name="errorpage_page_default_description">This content could not be retrieved from the decentralized network. The address may be invalid, the content may no longer exist, or no peers are serving it.</string>
+    <string name="errorpage_page_continue_once">Continue once</string>
+    <string name="errorpage_page_try_again">Try Again</string>
+    <!-- HTML. -->
+    <string name="errorpage_page_ens_not_found_tezos">This Tezos Domains name doesn\'t point at a website. The owner may not have set a &lt;code>web:content_url&lt;/code> record, the name isn\'t registered, or it has expired.</string>
+    <!-- HTML. %1$s is ENS. -->
+    <string name="errorpage_page_ens_not_found_no_resolver">This %1$s name doesn\'t point at any content yet. The owner may not have set a &lt;code>contenthash&lt;/code> record, or the name has no resolver.</string>
+    <!-- HTML. %1$s is the name system (WNS, GNS). -->
+    <string name="errorpage_page_ens_not_found_unregistered">This %1$s name doesn\'t point at any content yet. The owner may not have set a &lt;code>contenthash&lt;/code> record, or the name isn\'t registered.</string>
+    <!-- %1$s the name system, %2$s the network it resolves to, %3$s the network typed, %4$s the typed scheme (bzz, ipfs, ipns). -->
+    <string name="errorpage_page_wrong_protocol_networks">This %1$s name resolves to %2$s content, not %3$s. The %4$s:// you typed asks for %3$s only, so Freedom did not switch networks for you.</string>
+    <!-- Button; %1$s is a network (Swarm, IPFS, IPNS). -->
+    <string name="errorpage_page_open_on_network">Open on %1$s</string>
+    <!-- HTML. %1$s is the name system. -->
+    <string name="errorpage_page_wrong_protocol_contenthash">This %1$s name resolves to content on a different network than the scheme you typed asks for. Try the name on its own &amp;mdash; the browser will follow wherever its &lt;code>contenthash&lt;/code> points.</string>
+    <!-- HTML. %1$s is Tezos Domains. -->
+    <string name="errorpage_page_wrong_protocol_website_record">This %1$s name resolves to content on a different network than the scheme you typed asks for. Try the name on its own &amp;mdash; the browser will follow wherever its website record points.</string>
+    <!-- HTML. %1$s is the name system. -->
+    <string name="errorpage_page_unsupported_codec">This %1$s name resolves to a content format Freedom Browser cannot load yet on mobile.</string>
+    <!-- HTML. %1$s the chain (Ethereum, Tezos), %2$s the name system. -->
+    <string name="errorpage_page_ens_unverified">Only one %1$s RPC server answered for this %2$s name, so Freedom couldn\'t check its answer against another server. The address below may be right, but a single misbehaving server could have picked it.</string>
+    <!-- HTML. %1$s the chain (Ethereum, Tezos), %2$s the name system. -->
+    <string name="errorpage_page_ens_conflict">The %1$s RPC servers Freedom asked gave different answers for this %2$s name. At least one of them is wrong &amp;mdash; or lying &amp;mdash; so nothing was loaded. Try again in a moment.</string>
+    <!-- HTML. -->
+    <string name="errorpage_page_web3_unverified">Only one RPC server returned this onchain app\'s code, so Freedom couldn\'t check it against another server. It may be the real app, but a single misbehaving server could have changed it. Continue only if you trust that server with this app.</string>
+    <!-- HTML. -->
+    <string name="errorpage_page_web3_conflict">The RPC servers Freedom asked returned different code for this onchain app. At least one of them is wrong &amp;mdash; or lying &amp;mdash; so nothing was run. Try again in a moment.</string>
+    <string name="errorpage_page_web3_unknown_chain_title">Unknown chain</string>
+    <!-- HTML. -->
+    <string name="errorpage_page_web3_unknown_chain">This app lives on a chain that isn\'t in your chain list, so Freedom doesn\'t know which RPC servers to ask. Add the chain in Settings, then try again.</string>
+    <string name="errorpage_page_web3_not_an_app_title">Not an onchain app</string>
+    <!-- HTML. -->
+    <string name="errorpage_page_web3_not_an_app">The contract didn\'t return an ERC-8244 &lt;code>html()&lt;/code> document on this chain. Check the address and the chain ID.</string>
+    <string name="errorpage_page_web3_too_large_title">App too large</string>
+    <!-- HTML. -->
+    <string name="errorpage_page_web3_too_large">The app\'s document is larger than Freedom loads.</string>
+    <string name="errorpage_page_web3_invalid_title">Not a web3:// app address</string>
+    <!-- HTML. Keep the <code> address pattern as it is. -->
+    <string name="errorpage_page_web3_invalid">Freedom loads web3:// apps by contract address: &lt;code>web3://0x&amp;hellip;[:chainId]/&lt;/code>. Names are not supported yet.</string>
+    <string name="errorpage_page_web3_lookup_failed_title">Couldn\'t read the app</string>
+    <!-- HTML. -->
+    <string name="errorpage_page_web3_lookup_failed">Couldn\'t get an answer from the chain\'s RPC servers. Check your connection and try again.</string>
+    <string name="errorpage_page_swarm_not_ready_title">Content not ready yet</string>
+    <!-- HTML. -->
+    <string name="errorpage_page_swarm_not_ready">Couldn\'t find this content on the Swarm network yet. The node is still connecting to peers &amp;mdash; try again in a moment.</string>
+    <!-- A line of the details box. -->
+    <string name="errorpage_page_swarm_not_found_detail">Swarm content not found (timeout)</string>
+    <!-- HTML. %1$s is the Nodes panel's icon. -->
+    <string name="errorpage_page_swarm_node_stopped">The Swarm node is not running. Open the Nodes panel %1$s from the menu to start it.</string>
+    <!-- HTML. -->
+    <string name="errorpage_page_swarm_gateway_unreachable">Couldn\'t reach the Swarm gateway. Check that the node is running and try again.</string>
+    <!-- The details box when there is nothing else to show. -->
+    <string name="errorpage_page_unknown_error">Unknown error</string>
+
+    <!-- ===== BrowserWebView.kt: an ENS document refused in place (#99) ===== -->
+
+    <!-- HTML. %1$s the name system, %2$s the network (Swarm, IPFS, IPNS), %3$s the typed scheme (bzz, ipfs, ipns). -->
+    <string name="errorpage_refusal_wrong_protocol">This %1$s name no longer resolves to %2$s content, which the &lt;code>%3$s://&lt;/code> address asks for, so nothing was loaded: Freedom doesn\'t switch networks behind the address bar. Enter the name on its own to follow wherever it points now.</string>
+    <!-- HTML. %1$s the name system, %2$s the typed scheme. -->
+    <string name="errorpage_refusal_wrong_protocol_other_network">This %1$s name no longer resolves to the network content, which the &lt;code>%2$s://&lt;/code> address asks for, so nothing was loaded: Freedom doesn\'t switch networks behind the address bar. Enter the name on its own to follow wherever it points now.</string>
+    <!-- HTML. %1$s is the name system. -->
+    <string name="errorpage_refusal_wrong_protocol_no_scheme">This %1$s name no longer resolves to the network content, which the scheme address asks for, so nothing was loaded: Freedom doesn\'t switch networks behind the address bar. Enter the name on its own to follow wherever it points now.</string>
+    <!-- HTML. %1$s is Tezos Domains. -->
+    <string name="errorpage_refusal_not_found_tezos">This %1$s name doesn\'t point at a website any more. The owner may have removed its &lt;code>web:content_url&lt;/code> record, or the name has expired.</string>
+    <!-- HTML. %1$s is the name system. -->
+    <string name="errorpage_refusal_not_found">This %1$s name doesn\'t point at any content any more. The owner may have removed its &lt;code>contenthash&lt;/code> record, or the name has no resolver.</string>
+    <!-- HTML. %1$s is the name system. -->
+    <string name="errorpage_refusal_unsupported_codec">This %1$s name now resolves to a content format Freedom Browser cannot load yet on mobile.</string>
+    <!-- HTML. %1$s is the chain (Ethereum, Tezos). -->
+    <string name="errorpage_refusal_unverified">Only one %1$s RPC server answered for this name, so Freedom couldn\'t check its answer against another server. An answer only one server gave is loaded here only if it matches one already loaded in this session, so nothing was loaded. Try again, or enter the name in the address bar to see what that server answered.</string>
+    <!-- HTML. %1$s is the chain (Ethereum, Tezos). -->
+    <string name="errorpage_refusal_conflict">The %1$s RPC servers Freedom asked gave different answers for this name. At least one of them is wrong, so nothing was loaded.</string>
+
+    <!-- BrowserWebView.kt: the text-selection menu's web search. -->
+    <string name="errorpage_selection_search">Search</string>
+
+    <!-- ===== WebLoadError.kt: a failed ordinary web load (#259) ===== -->
+
+    <string name="errorpage_net_offline_title">You\'re offline</string>
+    <!-- HTML. -->
+    <string name="errorpage_net_offline">Your device isn\'t connected to the internet. Check Wi-Fi or mobile data, or turn off airplane mode, then try again.</string>
+    <string name="errorpage_net_not_found_title">Site can\'t be found</string>
+    <!-- HTML. %1$s is the site's host (bold). -->
+    <string name="errorpage_net_not_found">Couldn\'t find the server at %1$s. Check the address for typos. If it\'s right, the site may be gone, or your network\'s DNS may not be answering.</string>
+    <string name="errorpage_net_refused_title">Site refused the connection</string>
+    <!-- HTML. %1$s is the site's host (bold). -->
+    <string name="errorpage_net_refused">%1$s is reachable, but nothing there accepted the connection. The site may be down, or not serving on this address.</string>
+    <string name="errorpage_net_reset_title">Connection was interrupted</string>
+    <!-- HTML. %1$s is the site's host (bold). -->
+    <string name="errorpage_net_reset">The connection to %1$s was cut off before the page arrived. This is often temporary; try again.</string>
+    <string name="errorpage_net_timed_out_title">Site took too long to respond</string>
+    <!-- HTML. %1$s is the site's host (bold). -->
+    <string name="errorpage_net_timed_out">%1$s didn\'t answer in time. The site may be overloaded, or your connection slow.</string>
+    <!-- HTML. %1$s is the site's host (bold). -->
+    <string name="errorpage_net_insecure">Freedom couldn\'t set up a secure connection to %1$s, so nothing was loaded. The site may be misconfigured, or someone may be interfering with the connection.</string>
+    <string name="errorpage_net_other_title">Couldn\'t load this page</string>
+    <!-- HTML. %1$s is the site's host (bold). -->
+    <string name="errorpage_net_other">Something went wrong loading %1$s.</string>
+
+    <!-- Lines of a certificate page's details box. %1$s is the site's host. -->
+    <string name="errorpage_cert_detail_wrong_host">Not issued for %1$s</string>
+    <string name="errorpage_cert_detail_untrusted">Issuer not trusted by this device</string>
+    <!-- %1$s is a date. -->
+    <string name="errorpage_cert_detail_expired_on">Expired on %1$s</string>
+    <!-- %1$s is a date. -->
+    <string name="errorpage_cert_detail_not_valid_until">Not valid until %1$s</string>
+    <string name="errorpage_cert_detail_dates_invalid">Dates not valid</string>
+    <string name="errorpage_cert_detail_invalid">Certificate not valid</string>
+    <!-- %1$s is the certificate's subject name. -->
+    <string name="errorpage_cert_detail_issued_to">Issued to: %1$s</string>
+    <!-- %1$s is the certificate issuer's name. -->
+    <string name="errorpage_cert_detail_issued_by">Issued by: %1$s</string>
+
+    <!-- ===== RendererGone.kt (#260) ===== -->
+
+    <string name="errorpage_renderer_gone_crashed_title">This page closed after a crash</string>
+    <string name="errorpage_renderer_gone_memory_title">This page was closed to free memory</string>
+    <string name="errorpage_renderer_gone_crashed_body">The process that shows web pages crashed, maybe because of a page in another tab. Other tabs that closed with it reload when you switch to them. Reload to open this page again.</string>
+    <string name="errorpage_renderer_gone_memory_body">Android needed the memory the browser\'s pages were using. Other tabs that closed with it reload when you switch to them. Reload to open this page again.</string>
+    <string name="errorpage_renderer_gone_reload">Reload</string>
+
+    <!-- ===== ExternalApps.kt: the site permission to open another app (#81) ===== -->
+
+    <!-- %1$s is a URL scheme (mailto, magnet, …). -->
+    <string name="errorpage_external_scheme_label">%1$s: links</string>
+    <!-- Completes "… wants to …"; %1$s is a URL scheme. -->
+    <string name="errorpage_external_scheme_phrase">open %1$s: links in another app</string>
+</resources>
