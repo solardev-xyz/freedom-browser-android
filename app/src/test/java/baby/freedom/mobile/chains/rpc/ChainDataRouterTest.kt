@@ -489,6 +489,46 @@ class ChainDataRouterTest {
     }
 
     @Test
+    fun anUnreachableColibriProverCostsOneReadItsWaitNotEveryRead() = runTest {
+        // gnosis.colibri-proof.tech dropped: the first read waits out
+        // Colibri's tier timeout, then the quorum answers; the reads after
+        // it skip Colibri at once ("not available"), not wait again.
+        val net = Net()
+        BuiltInChains.GNOSIS.rpcUrls.forEach { url -> net.handlers[url] = { ok("0x5") } }
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val created = AtomicInteger()
+        val engine = object : baby.freedom.mobile.ens.EnsColibri.Engine {
+            override val available = true
+            override fun create(method: String, params: String, chainId: Long, proverFlags: Int, verifyFlags: Int, proverMode: Int): Long =
+                created.incrementAndGet().toLong()
+            override fun setMinLatestBlockTs(ctx: Long, unixSeconds: Long) = Unit
+            override fun execute(ctx: Long) = JSONObject().put("status", "pending")
+                .put("requests", JSONArray().put(JSONObject().put("type", "prover").put("req_ptr", "5"))).toString()
+            override fun setResponse(req: Long, data: ByteArray, nodeIndex: Int) = Unit
+            override fun setError(req: Long, error: String, nodeIndex: Int) = Unit
+            override fun free(ctx: Long) = Unit
+        }
+        val colibri = ColibriChainSource(
+            baby.freedom.mobile.ens.EnsColibri(engine, http = { _, _, _, _, _ ->
+                gate.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                throw IOException("dropped")
+            }),
+            present = { true },
+        )
+        val r = router(net, listOf(BuiltInChains.GNOSIS), sources = mapOf(ChainSource.COLIBRI to colibri))
+        try {
+            repeat(3) {
+                assertEquals(ChainSource.QUORUM, r.request(100, "eth_getBalance").trust.source)
+            }
+            assertEquals(1, created.get())
+            assertFalse(r.isWired(ChainSource.COLIBRI, 100))
+            assertEquals(ProofTierGap.UNREACHABLE, r.gap(ChainSource.COLIBRI, 100))
+        } finally {
+            gate.countDown()
+        }
+    }
+
+    @Test
     fun aProofSourceIsGivenTheChainsPoolUsersRpcsFirst() = runTest {
         val net = Net()
         val colibri = FakeSource { ChainDataResult("0x1", proof.copy(source = ChainSource.COLIBRI)) }

@@ -94,6 +94,17 @@ class ChainDataRouter internal constructor(
     }
 
     /**
+     * Why proof tier [source] isn't answering [chainId]'s reads right now
+     * ([VerifiedChainSource.gap]); `null` when it is, or for a tier that
+     * isn't a proof source. Not in this build when no source is registered.
+     */
+    fun gap(source: ChainSource, chainId: Long): ProofTierGap? = when (source) {
+        ChainSource.MYOTIS, ChainSource.COLIBRI ->
+            verifiedSources[source]?.gap(chainId) ?: ProofTierGap.NOT_IN_BUILD.takeIf { verifiedSources[source] == null }
+        ChainSource.QUORUM, ChainSource.DIRECT -> null
+    }
+
+    /**
      * Read [method] ([READ_METHODS]) on chain [chainId]. Throws
      * [ChainRpcException] (or `CancellationException`), never anything else.
      *
@@ -659,6 +670,7 @@ class ChainDataRouter internal constructor(
                 ChainSource.COLIBRI to ColibriChainSource(
                     EnsColibri(EnsColibri.NativeEngine { statesDir }),
                     present = { ColibriNative.available || !ColibriNative.initFailed },
+                    enabled = { ColibriReads.enabled },
                 ),
             )
         }

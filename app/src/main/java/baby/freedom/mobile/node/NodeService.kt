@@ -26,6 +26,7 @@ import baby.freedom.mobile.l10n.TextLocale
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.chains.rpc.ColibriReads
 import baby.freedom.mobile.chains.rpc.PinnedHttpTransport
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
@@ -176,6 +177,8 @@ class NodeService : Service() {
             NodeLogSource.of(source)?.let { NodeLogs.text(it) }.orEmpty()
 
         override fun clearLogs() = NodeLogs.clear()
+
+        override fun setColibriReads(on: Boolean) = ColibriReads.set(on)
 
         override fun registerCallback(cb: INodeCallback?) {
             cb ?: return
@@ -643,6 +646,13 @@ class NodeService : Service() {
         // Its light-client tier reads through this process's own
         // binding to `:myotis`, which never starts the light client.
         myotisReads.bind()
+        // The Colibri proofs switch (#329): the UI relays it on bind; till
+        // then the stored value, read here (off until either lands).
+        scope.launch(Dispatchers.IO) {
+            runCatching { NodeSettings.get(this@NodeService).ensColibri.first() }
+                .onSuccess(ColibriReads::seed)
+                .onFailure { Log.w(TAG, "reading the Colibri proofs setting failed (${it.javaClass.simpleName})") }
+        }
         chainBridge = AntChainBridge(
             ChainDataRouter(
                 chains = { listOf(gnosisForReads()) },

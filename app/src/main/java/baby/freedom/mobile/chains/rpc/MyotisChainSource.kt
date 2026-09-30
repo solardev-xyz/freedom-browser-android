@@ -35,8 +35,13 @@ internal class MyotisChainSource(private val link: Link = Link.Default) : Verifi
         }
     }
 
-    override fun isAvailable(chainId: Long): Boolean =
-        ChainAccessPolicy.supports(ChainSource.MYOTIS, chainId) && link.isReady(chainId)
+    override fun isAvailable(chainId: Long): Boolean = gap(chainId) == null
+
+    override fun gap(chainId: Long): ProofTierGap? = when {
+        !ChainAccessPolicy.supports(ChainSource.MYOTIS, chainId) -> ProofTierGap.NOT_SERVED
+        !link.isReady(chainId) -> ProofTierGap.NOT_READY
+        else -> null
+    }
 
     override suspend fun request(chainId: Long, method: String, params: JSONArray, rpcs: List<String>): ChainDataResult {
         if (method !in MyotisReads.METHODS) throw Unanswered("the light client doesn't serve $method")

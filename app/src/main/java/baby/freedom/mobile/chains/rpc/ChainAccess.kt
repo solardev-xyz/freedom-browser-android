@@ -187,6 +187,13 @@ interface VerifiedChainSource {
     fun isAvailable(chainId: Long): Boolean
 
     /**
+     * Why the source can't answer for [chainId] right now, when it can't
+     * ([isAvailable] false) — for the chain page's note. Cheap, like
+     * [isAvailable]; `null` when it can answer.
+     */
+    fun gap(chainId: Long): ProofTierGap? = if (isAvailable(chainId)) null else ProofTierGap.NOT_READY
+
+    /**
      * Answer [method] with the trust the source mints. [rpcs] is the
      * chain's RPC pool in the router's order, for a source that fetches
      * the state it proves from them. Throw [ChainRpcException.Rpc] with
@@ -210,4 +217,22 @@ interface VerifiedChainSource {
      */
     suspend fun broadcast(chainId: Long, rawTransaction: String): String =
         throw UnsupportedOperationException("cannot broadcast")
+}
+
+/** Why a proof tier isn't answering a chain's reads ([VerifiedChainSource.gap]). */
+enum class ProofTierGap {
+    /** The source doesn't cover this chain. */
+    NOT_SERVED,
+
+    /** Not in this build, or its native library didn't load. */
+    NOT_IN_BUILD,
+
+    /** Switched off by the user (Colibri: *Colibri proofs*). */
+    OFF,
+
+    /** Backing off after its servers couldn't be reached. */
+    UNREACHABLE,
+
+    /** Not ready for this chain (the light client: off, syncing, parked on a stale anchor). */
+    NOT_READY,
 }

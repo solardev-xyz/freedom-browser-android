@@ -1,7 +1,15 @@
 package baby.freedom.mobile.chains.rpc
 
 import baby.freedom.mobile.ens.EnsColibri
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -24,19 +32,57 @@ import org.json.JSONObject
  * at once: past that the router moves straight on rather than queueing
  * behind the verifier's one lock (which name resolution shares). Never
  * broadcasts.
+ *
+ * Only while [enabled]: the *Colibri proofs* switch (Settings → Name
+ * resolution), which covers these reads too — off, nothing goes to the
+ * prover and reads start at the quorum.
+ *
+ * **Back-off**, per chain, as name resolution's ([baby.freedom.mobile.ens.EnsResolver]
+ * `ColibriBackoff`): a call that can't reach the chain's provers or
+ * servers ([EnsColibri.Failure.unreachable], or an unexpected error),
+ * or that outlasts the router's wait, makes the tier unavailable for
+ * [BACKOFF_MS], doubling with each further one up to [BACKOFF_MAX_MS] —
+ * so a prover that's down costs one read the tier's wait, not every
+ * read. A call the router stops waiting for carries on in the
+ * background (up to [backgroundMs], holding its slot) rather than being
+ * cut off — on a first read that is the sync-committee bootstrap, which
+ * the next read then needn't repeat — and any proof that comes in ends
+ * the back-off. One call counts at most once, and a proof of this one
+ * read not checking out doesn't count: it says nothing about the others.
  */
 internal class ColibriChainSource(
     private val colibri: EnsColibri,
     /** Whether the verifier may be usable here without loading it: [isAvailable] runs on the UI thread. */
     private val present: () -> Boolean,
+    /** The *Colibri proofs* switch ([ColibriReads]); read on every call. */
+    private val enabled: () -> Boolean = { true },
     private val maxInFlight: Int = MAX_IN_FLIGHT,
+    private val backgroundMs: Long = BACKGROUND_MS,
+    /** Monotonic milliseconds: a wall-clock step mustn't end or stretch a back-off. */
+    private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
+    /** Where calls run, so one the router stopped waiting for can finish. */
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) : VerifiedChainSource {
     private val inFlight = AtomicInteger()
+    private val backoffs = ConcurrentHashMap<Long, Backoff>()
 
-    override fun isAvailable(chainId: Long): Boolean =
-        chainId in EnsColibri.CHAINS && ChainAccessPolicy.supports(ChainSource.COLIBRI, chainId) && present()
+    override fun isAvailable(chainId: Long): Boolean = gap(chainId) == null
+
+    override fun gap(chainId: Long): ProofTierGap? = when {
+        chainId !in EnsColibri.CHAINS || !ChainAccessPolicy.supports(ChainSource.COLIBRI, chainId) ->
+            ProofTierGap.NOT_SERVED
+        !present() -> ProofTierGap.NOT_IN_BUILD
+        !enabled() -> ProofTierGap.OFF
+        backoffRemainingMs(chainId) != null -> ProofTierGap.UNREACHABLE
+        else -> null
+    }
+
+    /** How much longer chain [chainId]'s reads skip the prover; `null` when it may be asked. */
+    internal fun backoffRemainingMs(chainId: Long): Long? = backoffs[chainId]?.remainingMs()
 
     override suspend fun request(chainId: Long, method: String, params: JSONArray, rpcs: List<String>): ChainDataResult {
+        if (!enabled()) throw Unanswered("Colibri proofs are off")
+        backoffRemainingMs(chainId)?.let { throw Unanswered("backing off for ${it}ms: the prover couldn't be reached") }
         if (method !in METHODS) throw Unanswered("Colibri doesn't prove $method")
         TAG_PARAM[method]?.let { i ->
             val tag = params.opt(i)
@@ -46,54 +92,114 @@ internal class ColibriChainSource(
             inFlight.decrementAndGet()
             throw Unanswered("Colibri is busy")
         }
-        try {
-            val blockNumber = method == "eth_blockNumber"
-            val (status, provers) = if (blockNumber) {
-                colibri.request(chainId, "eth_getBlockByNumber", JSONArray().put("latest").put(false), rpcs)
-            } else {
-                colibri.request(chainId, method, params, rpcs)
-            }
-            if (status.optString("status") == "revert") {
-                if (method != "eth_call") throw Unanswered("the verifier reported a revert for $method")
-                throw ChainRpcException.Rpc(
-                    ChainRpcException.EXECUTION_REVERTED,
-                    "execution reverted",
-                    status.optString("data", "0x").ifEmpty { "0x" },
-                )
-            }
-            val raw = status.opt("result")
-            if (raw == null || raw == JSONObject.NULL) throw Unanswered("no proven answer for $method")
-            val result: Any = if (blockNumber) {
-                (raw as? JSONObject)?.opt("number") as? String ?: throw Unanswered("a block without a number")
-            } else {
-                raw
-            }
-            val hosts = provers.ifEmpty {
-                listOfNotNull(EnsColibri.CHAINS[chainId]?.provers?.firstOrNull()?.let(EnsColibri::hostOf))
-            }
-            return ChainDataResult(
-                result,
-                ChainTrust(
-                    level = ChainTrust.Level.VERIFIED,
-                    source = ChainSource.COLIBRI,
-                    agreed = hosts,
-                    dissented = emptyList(),
-                    queried = hosts,
-                    k = 1,
-                    m = 1,
-                    block = blockOf(raw),
-                ),
-            )
-        } finally {
-            inFlight.decrementAndGet()
+        val backoff = backoffs.getOrPut(chainId) { Backoff() }
+        // One call is one failure at most, whichever side (a missed wait
+        // here, or the background call's own end) sees it first.
+        val counted = AtomicBoolean(false)
+        fun failed() {
+            if (counted.compareAndSet(false, true)) backoff.failed()
         }
+        val blockNumber = method == "eth_blockNumber"
+        val call = scope.async {
+            try {
+                withTimeoutOrNull(backgroundMs) {
+                    if (blockNumber) {
+                        colibri.request(chainId, "eth_getBlockByNumber", JSONArray().put("latest").put(false), rpcs)
+                    } else {
+                        colibri.request(chainId, method, params, rpcs)
+                    }
+                }.also { if (it != null) backoff.succeeded() else failed() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: EnsColibri.Failure) {
+                // This read's own proof failing isn't the provers
+                // being unreachable: other reads may still prove.
+                if (e.unreachable) failed()
+                throw e
+            } catch (e: Throwable) {
+                failed()
+                throw e
+            } finally {
+                inFlight.decrementAndGet()
+            }
+        }
+        val (status, provers) = try {
+            call.await() ?: throw Unanswered("no proof within ${backgroundMs}ms")
+        } catch (e: CancellationException) {
+            // The router's wait ran out (or its reader went away) with
+            // the call still running: a missed wait. It carries on.
+            if (call.isActive) failed()
+            throw e
+        }
+        if (status.optString("status") == "revert") {
+            if (method != "eth_call") throw Unanswered("the verifier reported a revert for $method")
+            throw ChainRpcException.Rpc(
+                ChainRpcException.EXECUTION_REVERTED,
+                "execution reverted",
+                status.optString("data", "0x").ifEmpty { "0x" },
+            )
+        }
+        val raw = status.opt("result")
+        if (raw == null || raw == JSONObject.NULL) throw Unanswered("no proven answer for $method")
+        val result: Any = if (blockNumber) {
+            (raw as? JSONObject)?.opt("number") as? String ?: throw Unanswered("a block without a number")
+        } else {
+            raw
+        }
+        val hosts = provers.ifEmpty {
+            listOfNotNull(EnsColibri.CHAINS[chainId]?.provers?.firstOrNull()?.let(EnsColibri::hostOf))
+        }
+        return ChainDataResult(
+            result,
+            ChainTrust(
+                level = ChainTrust.Level.VERIFIED,
+                source = ChainSource.COLIBRI,
+                agreed = hosts,
+                dissented = emptyList(),
+                queried = hosts,
+                k = 1,
+                m = 1,
+                block = blockOf(raw),
+            ),
+        )
     }
 
     /** No proven answer; the router moves on. */
     class Unanswered(message: String) : Exception(message)
 
+    /** One chain's back-off (see the class kdoc). */
+    private inner class Backoff {
+        private var failures = 0
+        private var until = 0L
+
+        @Synchronized
+        fun remainingMs(): Long? {
+            val left = until - clock()
+            return left.takeIf { it > 0 && it <= BACKOFF_MAX_MS }
+        }
+
+        @Synchronized
+        fun failed() {
+            failures = (failures + 1).coerceAtMost(16)
+            until = clock() + (BACKOFF_MS shl (failures - 1)).coerceAtMost(BACKOFF_MAX_MS)
+        }
+
+        @Synchronized
+        fun succeeded() {
+            failures = 0
+            until = 0
+        }
+    }
+
     companion object {
         const val MAX_IN_FLIGHT = 4
+
+        /** Name resolution's figures ([baby.freedom.mobile.ens.EnsResolver.COLIBRI_BACKOFF_MS]). */
+        const val BACKOFF_MS = 30_000L
+        const val BACKOFF_MAX_MS = 5 * 60_000L
+
+        /** How long a call the router stopped waiting for may go on: a first sync-committee bootstrap. */
+        const val BACKGROUND_MS = 60_000L
 
         /** What the core proves (colibri.h, `c4_get_method_support` PROOFABLE), and the router asks. */
         val METHODS = setOf(

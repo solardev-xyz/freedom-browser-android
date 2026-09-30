@@ -114,6 +114,14 @@
     <string name="names_how_reads_are_checked">How reads are checked</string>
     <!-- %1$s: chain name -->
     <string name="names_proof_tiers_missing">The P2P light client isn\'t verifying %1$s reads right now: it\'s off for this chain, still syncing, or waiting on a fresh checkpoint. Turn it on and follow its sync on the node page.</string>
+    <!-- %1$s: chain name -->
+    <string name="names_light_client_tier_not_in_build">The P2P light client, which verifies %1$s reads with a proof, isn\'t available in this build.</string>
+    <!-- %1$s: chain name -->
+    <string name="names_colibri_tier_off">The Colibri prover isn\'t checking %1$s reads: Colibri proofs are off under Settings → Name resolution.</string>
+    <!-- %1$s: chain name -->
+    <string name="names_colibri_tier_unreachable">The Colibri prover isn\'t checking %1$s reads right now: it couldn\'t be reached, so reads skip it for a while and try it again after.</string>
+    <!-- %1$s: chain name -->
+    <string name="names_colibri_tier_not_in_build">The Colibri prover, which verifies %1$s reads with a proof, isn\'t available in this build.</string>
     <string name="names_check_no_answer">No answer</string>
     <string name="names_check_latest_block">Check latest block</string>
     <!-- %1$s: block number, already formatted -->
@@ -168,7 +176,7 @@
     <string name="names_section_rpc">RPC providers</string>
     <string name="names_ens_about">How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. With Colibri proofs on, an answer is proven first: checked on this device against Ethereum\'s own consensus. An answer that can\'t be proven is cross-checked: it\'s only trusted when at least two RPC endpoints return exactly the same one. An answer only one endpoint gave is shown to you before anything loads.</string>
     <string name="names_colibri_title">Colibri proofs</string>
-    <string name="names_colibri_help">Each name\'s record is proven by corpus.core\'s Colibri prover (colibri-proof.tech) and the proof checked on this device against Ethereum\'s sync committee, so no server can make up the answer. The prover learns which contract storage a lookup reads; the reads themselves go to the endpoints in the resolution order. If no proof comes back within a few seconds, the endpoints are cross-checked instead. Off: every name is cross-checked.</string>
+    <string name="names_colibri_help">Each name\'s record is proven by corpus.core\'s Colibri prover (colibri-proof.tech) and the proof checked on this device against Ethereum\'s sync committee, so no server can make up the answer. The prover learns which contract storage a lookup reads; the reads themselves go to the endpoints in the resolution order. If no proof comes back within a few seconds, the endpoints are cross-checked instead. The wallet\'s and the Swarm node\'s Ethereum and Gnosis reads (balances, token balances, nonces, receipts) are proven the same way when the P2P light client isn\'t answering them, so the prover also learns the addresses and contracts they read. Off: nothing goes to the prover; every name and read is cross-checked on the RPCs.</string>
     <string name="names_order_title">Resolution order</string>
     <string name="names_order_help">The first three providers in this order that are reachable read each name, so the order decides who answers; the rest are asked, in order, when those can\'t agree or don\'t answer. Two endpoints of one provider count once: the first that answers. Change it under RPC providers.</string>
     <string name="names_ccip_title">Off-chain lookups (CCIP-Read)</string>

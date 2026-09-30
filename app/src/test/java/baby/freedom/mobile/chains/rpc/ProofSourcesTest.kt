@@ -2,7 +2,13 @@ package baby.freedom.mobile.chains.rpc
 
 import baby.freedom.mobile.ens.EnsColibri
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -211,5 +217,127 @@ class ProofSourcesTest {
         assertFalse(ColibriChainSource(EnsColibri(Verifier(JSONObject())), present = { false }).isAvailable(1))
         assertFalse(source.canBroadcast)
         assertNull(EnsColibri.CHAINS[137])
+    }
+
+    // ---- Colibri: the switch and the back-off ----
+
+    /**
+     * A verifier whose first round asks for one prover request and whose
+     * next reports [final]; [http] decides what that request gets.
+     */
+    private class Roundtrip(private val final: JSONObject) : EnsColibri.Engine {
+        override val available = true
+        val created = AtomicInteger()
+        private val rounds = java.util.concurrent.ConcurrentHashMap<Long, Int>()
+        private val next = AtomicLong(10)
+        override fun create(method: String, params: String, chainId: Long, proverFlags: Int, verifyFlags: Int, proverMode: Int): Long {
+            created.incrementAndGet()
+            return next.incrementAndGet()
+        }
+        override fun setMinLatestBlockTs(ctx: Long, unixSeconds: Long) = Unit
+        override fun execute(ctx: Long): String {
+            val round = rounds.merge(ctx, 1, Int::plus)!!
+            return if (round == 1) {
+                JSONObject().put("status", "pending")
+                    .put("requests", JSONArray().put(JSONObject().put("type", "prover").put("req_ptr", "5")))
+                    .toString()
+            } else {
+                final.toString()
+            }
+        }
+        override fun setResponse(req: Long, data: ByteArray, nodeIndex: Int) = Unit
+        override fun setError(req: Long, error: String, nodeIndex: Int) = Unit
+        override fun free(ctx: Long) = Unit
+    }
+
+    private val proven = JSONObject().put("status", "success").put("result", "0x64")
+    private val balance = JSONArray().put(address).put("latest")
+
+    @Test
+    fun `with Colibri proofs off nothing goes to the prover`() = runTest {
+        val v = Verifier(proven)
+        var on = false
+        val source = ColibriChainSource(EnsColibri(v), present = { true }, enabled = { on })
+        assertFalse(source.isAvailable(100))
+        assertEquals(ProofTierGap.OFF, source.gap(100))
+        try {
+            source.request(100, "eth_getBalance", balance, emptyList())
+            fail()
+        } catch (_: ColibriChainSource.Unanswered) {
+        }
+        assertTrue(v.created.isEmpty())
+        on = true
+        assertTrue(source.isAvailable(100))
+        assertEquals("0x64", source.request(100, "eth_getBalance", balance, emptyList()).result)
+    }
+
+    @Test
+    fun `an unreachable prover is skipped for a while, then asked again`() = runTest {
+        val now = AtomicLong(1_000_000)
+        val v = Roundtrip(JSONObject().put("status", "error").put("error", "all provers failed"))
+        val source = ColibriChainSource(
+            EnsColibri(v, http = { _, _, _, _, _ -> throw IOException("connect timed out") }),
+            present = { true },
+            clock = now::get,
+        )
+        try {
+            source.request(100, "eth_getBalance", balance, emptyList())
+            fail()
+        } catch (e: EnsColibri.Failure) {
+            assertTrue(e.unreachable)
+        }
+        // Gnosis backs off; mainnet's provers are other hosts, still asked.
+        assertEquals(ProofTierGap.UNREACHABLE, source.gap(100))
+        assertFalse(source.isAvailable(100))
+        assertTrue(source.isAvailable(1))
+        try {
+            source.request(100, "eth_getBalance", balance, emptyList())
+            fail()
+        } catch (_: ColibriChainSource.Unanswered) {
+        }
+        assertEquals(1, v.created.get())
+
+        // After the back-off: asked again; a second failure doubles it.
+        now.addAndGet(ColibriChainSource.BACKOFF_MS + 1)
+        assertTrue(source.isAvailable(100))
+        runCatching { source.request(100, "eth_getBalance", balance, emptyList()) }
+        assertEquals(2, v.created.get())
+        now.addAndGet(ColibriChainSource.BACKOFF_MS + 1)
+        assertFalse(source.isAvailable(100))
+        now.addAndGet(ColibriChainSource.BACKOFF_MS)
+        assertTrue(source.isAvailable(100))
+    }
+
+    @Test
+    fun `a proof that fails its own check doesn't back the prover off`() = runTest {
+        val v = Verifier(JSONObject().put("status", "error").put("error", "invalid proof: state root mismatch"))
+        val source = colibri(v)
+        runCatching { source.request(100, "eth_getBalance", balance, emptyList()) }
+        assertTrue(source.isAvailable(100))
+        assertNull(source.backoffRemainingMs(100))
+    }
+
+    @Test
+    fun `a missed wait backs off at once, and the call finishing in the background ends it`() = runBlocking {
+        val gate = CountDownLatch(1)
+        val v = Roundtrip(proven)
+        val source = ColibriChainSource(
+            EnsColibri(v, http = { _, _, _, _, _ ->
+                gate.await(10, TimeUnit.SECONDS)
+                EnsColibri.Http.Reply(200, ByteArray(0))
+            }),
+            present = { true },
+        )
+        // The router's wait (its tier timeout) runs out on a stalled prover.
+        assertNull(withTimeoutOrNull(200) { source.request(100, "eth_getBalance", balance, emptyList()) })
+        assertEquals(ProofTierGap.UNREACHABLE, source.gap(100))
+        // The next read doesn't wait again: it isn't even asked.
+        assertFalse(source.isAvailable(100))
+        assertEquals(1, v.created.get())
+        // The stalled call carries on and proves: the back-off ends.
+        gate.countDown()
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (!source.isAvailable(100) && System.nanoTime() < deadline) Thread.sleep(20)
+        assertTrue(source.isAvailable(100))
     }
 }
