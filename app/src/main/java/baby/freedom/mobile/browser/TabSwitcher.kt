@@ -33,9 +33,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -95,8 +98,12 @@ import kotlinx.coroutines.launch
  * snapshot has been captured yet).
  *
  * Long-press a card and drag it to move the tab ([TabsState.moveTab]);
- * the header's "Reopen" brings back the most recently closed tab
- * ([TabsState.reopenClosedTab]) while there is one.
+ * long-press and let go opens the tab's menu (Close other tabs, Close
+ * tab; #320), whose items are also the card's accessibility actions.
+ * The header's "Reopen" brings back the most recently closed tab
+ * ([TabsState.reopenClosedTab]) while there is one, and its ⋮ menu has
+ * Close all tabs (and Close private tabs, when there are normal ones
+ * too). A bulk close is handed to [onTabsClosed], which offers its Undo.
  *
  * "Private" opens a private tab (#86) — offered only where the WebView
  * can run them ([onNewPrivateTab] non-null) — and private tabs' cards
@@ -108,6 +115,7 @@ fun TabSwitcherScreen(
     onDismiss: () -> Unit,
     onNewTab: () -> Unit,
     onNewPrivateTab: (() -> Unit)? = null,
+    onTabsClosed: (TabsState.BulkClose) -> Unit = {},
 ) {
     // Snapshot the currently-active tab right before we render so the
     // user sees an up-to-date preview of whatever they were last reading.
@@ -167,6 +175,31 @@ fun TabSwitcherScreen(
                     }
                 }
             }
+            Box {
+                var menuOpen by remember { mutableStateOf(false) }
+                IconButton(onClick = { menuOpen = true }, shapes = IconButtonDefaults.shapes()) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.browser_tabs_menu))
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.browser_tabs_close_all)) },
+                        onClick = {
+                            menuOpen = false
+                            onTabsClosed(tabs.closeAllTabs())
+                        },
+                    )
+                    // Only when it's not the same as Close all tabs.
+                    if (tabs.hasPrivateTabs && tabs.tabs.any { !it.private }) {
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.browser_tabs_close_private)) },
+                            onClick = {
+                                menuOpen = false
+                                onTabsClosed(tabs.closePrivateTabs())
+                            },
+                        )
+                    }
+                }
+            }
             IconButton(onClick = onDismiss, shapes = IconButtonDefaults.shapes()) {
                 Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.browser_tabs_close_switcher))
             }
@@ -180,6 +213,8 @@ fun TabSwitcherScreen(
         val reorder = remember(tabs, gridState, gridStartPx) {
             TabReorder(tabs, gridState, gridStartPx)
         }
+        // The tab whose menu is open: long-pressed and let go in place.
+        var menuTabId by remember { mutableStateOf<Long?>(null) }
 
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
@@ -193,6 +228,7 @@ fun TabSwitcherScreen(
                         onDrag = { amount ->
                             reorder.drag(amount, scope, edgePx, size.height.toFloat())
                         },
+                        onHold = { id -> menuTabId = id },
                     )
                 },
             contentPadding = PaddingValues(
@@ -227,6 +263,13 @@ fun TabSwitcherScreen(
                         onDismiss()
                     },
                     onClose = { tabs.closeTab(index) },
+                    onCloseOthers = if (tabs.tabs.size > 1) {
+                        { onTabsClosed(tabs.closeOtherTabs(tab)) }
+                    } else {
+                        null
+                    },
+                    menuOpen = menuTabId == tab.id,
+                    onMenuDismiss = { menuTabId = null },
                     onToggleMute = tabs.setAudioMuted?.let { set -> { set(tab, !tab.audioMuted) } },
                     // The drag has no TalkBack equivalent, so the same
                     // moves are offered as accessibility actions.
@@ -419,16 +462,22 @@ private class TabReorder(
  * doesn't scroll under the drag and lifting the finger doesn't also
  * count as a tap that opens the tab. Before the long press nothing is
  * consumed: a quick tap still opens a tab, a quick swipe still scrolls.
+ * A long press let go without moving is a hold: [onHold] opens that
+ * tab's menu.
  */
 private suspend fun PointerInputScope.reorderGestures(
     reorder: TabReorder,
     onStart: () -> Unit,
     onDrag: (Offset) -> Unit,
+    onHold: (tabId: Long) -> Unit,
 ) = awaitEachGesture {
     val down = awaitFirstDown(requireUnconsumed = false)
     val press = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
     if (!reorder.start(press.position)) return@awaitEachGesture
+    val held = reorder.draggedId ?: return@awaitEachGesture
     onStart()
+    val hold = HoldCheck(viewConfiguration.touchSlop)
+    var lifted = false
     try {
         val pointer = press.id
         while (true) {
@@ -436,11 +485,35 @@ private suspend fun PointerInputScope.reorderGestures(
             val change = event.changes.firstOrNull { it.id == pointer } ?: break
             val delta = change.positionChange()
             change.consume()
-            if (!change.pressed) break
+            if (!change.pressed) {
+                lifted = true
+                break
+            }
+            hold.move(delta)
             if (delta != Offset.Zero) onDrag(delta)
         }
     } finally {
         reorder.end()
+    }
+    if (lifted && hold.isHold) onHold(held)
+}
+
+/**
+ * Whether a long press let go was a hold (open the tab's menu) or a drag
+ * (#320): a hold if the finger never left the touch [slop] around where
+ * the press landed. Farthest reach, not net travel — dragging a card out
+ * and back (swapping it, then swapping it back) and lifting near the
+ * start is still a drag.
+ */
+internal class HoldCheck(private val slop: Float) {
+    private var travel = Offset.Zero
+
+    var isHold = true
+        private set
+
+    fun move(delta: Offset) {
+        travel += delta
+        if (travel.getDistance() >= slop) isHold = false
     }
 }
 
@@ -452,6 +525,9 @@ private fun TabCard(
     onClose: () -> Unit,
     onToggleMute: (() -> Unit)?,
     modifier: Modifier = Modifier,
+    onCloseOthers: (() -> Unit)? = null,
+    menuOpen: Boolean = false,
+    onMenuDismiss: () -> Unit = {},
     moveActions: List<CustomAccessibilityAction> = emptyList(),
 ) = PrivateTheme(tab.private) {
     val borderColor = if (isActive) {
@@ -462,6 +538,7 @@ private fun TabCard(
     val borderWidth = if (isActive) 2.dp else 1.dp
     val currentTabState = stringResource(R.string.browser_tabs_current_tab)
     val closeTabLabel = stringResource(R.string.browser_tabs_close_tab)
+    val closeOthersLabel = stringResource(R.string.browser_tabs_close_others)
     val muteLabel = stringResource(if (tab.audioMuted) R.string.browser_tabs_unmute_tab else R.string.browser_tabs_mute_tab)
 
     Column(
@@ -485,6 +562,9 @@ private fun TabCard(
                 if (isActive) stateDescription = currentTabState
                 customActions = listOfNotNull(
                     CustomAccessibilityAction(closeTabLabel) { onClose(); true },
+                    onCloseOthers?.let { closeOthers ->
+                        CustomAccessibilityAction(closeOthersLabel) { closeOthers(); true }
+                    },
                     onToggleMute?.takeIf { tab.playingAudio || tab.audioMuted }?.let { toggle ->
                         CustomAccessibilityAction(muteLabel) {
                             toggle(); true
@@ -562,6 +642,26 @@ private fun TabCard(
             } else {
                 ThumbnailPlaceholder(tab)
             }
+        }
+        // The tab's own menu (#320), from a long press let go in place;
+        // anchored to the card.
+        DropdownMenu(expanded = menuOpen, onDismissRequest = onMenuDismiss) {
+            if (onCloseOthers != null) {
+                DropdownMenuItem(
+                    text = { Text(closeOthersLabel) },
+                    onClick = {
+                        onMenuDismiss()
+                        onCloseOthers()
+                    },
+                )
+            }
+            DropdownMenuItem(
+                text = { Text(closeTabLabel) },
+                onClick = {
+                    onMenuDismiss()
+                    onClose()
+                },
+            )
         }
     }
 }

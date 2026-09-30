@@ -101,6 +101,7 @@ import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
@@ -552,6 +553,8 @@ fun BrowserScreen(
     // text lives here until it is submitted.
     var addressQuery by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
+    // The Undo notice of the switcher's last bulk close (#320).
+    var tabsClosedNotice by remember { mutableStateOf<Job?>(null) }
 
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
@@ -2539,6 +2542,29 @@ fun BrowserScreen(
             onDismiss = { showTabSwitcher = false },
             onNewTab = openNewTab,
             onNewPrivateTab = newPrivateTab,
+            onTabsClosed = { closed ->
+                // Close all / Close other tabs (#320): say how many went,
+                // with an Undo that brings back the ones that are kept
+                // (none of a private tab's). A newer bulk close replaces
+                // the notice of the last one.
+                tabsClosedNotice?.cancel()
+                if (closed.count > 0) {
+                    tabsClosedNotice = scope.launch {
+                        val undo = closed.undo
+                        try {
+                            val result = snackbarHostState.showSnackbar(
+                                message = Strings.plural(R.plurals.browser_tabs_closed, closed.count, closed.count),
+                                actionLabel = undo?.let { Strings.get(R.string.browser_tabs_undo) },
+                                duration = SnackbarDuration.Long,
+                            )
+                            if (result == SnackbarResult.ActionPerformed && undo != null) tabs.reopenClosed(undo)
+                        } finally {
+                            // Held on the reopen stack only while its Undo is up.
+                            undo?.let(tabs::undoWithdrawn)
+                        }
+                    }
+                }
+            },
         )
     }
 

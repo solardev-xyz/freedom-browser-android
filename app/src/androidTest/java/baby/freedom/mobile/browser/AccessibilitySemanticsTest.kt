@@ -31,7 +31,9 @@ import androidx.compose.ui.test.isSelected
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -125,6 +127,45 @@ class AccessibilitySemanticsTest {
         val close = beta.fetchSemanticsNode().config[SemanticsActions.CustomActions]
             .single { it.label == "Close tab" }
         rule.runOnUiThread { assertTrue(close.action()) }
+        rule.waitForIdle()
+        assertEquals(listOf("Alpha"), tabs.tabs.map { it.title })
+    }
+
+    @Test
+    fun aTabCardOffersCloseOtherTabsAndReportsTheBulkClose() {
+        val tabs = TabsState(homepage = "https://home.example/")
+        tabs.tabs[0].apply { url = "https://a.example/"; title = "Alpha" }
+        tabs.newTab().apply { url = "https://b.example/"; title = "Beta" }
+        tabs.newTab().apply { url = "https://c.example/"; title = "Gamma" }
+        var closed: TabsState.BulkClose? = null
+        rule.setContent {
+            MaterialTheme {
+                TabSwitcherScreen(tabs = tabs, onDismiss = {}, onNewTab = {}, onTabsClosed = { closed = it })
+            }
+        }
+        val others = rule.onNode(hasText("Beta") and hasClickAction()).fetchSemanticsNode()
+            .config[SemanticsActions.CustomActions].single { it.label == "Close other tabs" }
+        rule.runOnUiThread { assertTrue(others.action()) }
+        rule.waitForIdle()
+        assertEquals(listOf("Beta"), tabs.tabs.map { it.title })
+        assertEquals(2, closed?.count)
+        // The one tab left has no others to close.
+        val left = rule.onNode(hasText("Beta") and hasClickAction()).fetchSemanticsNode()
+            .config[SemanticsActions.CustomActions].map { it.label }
+        assertTrue("Close other tabs" !in left)
+        rule.runOnUiThread { assertTrue(tabs.reopenClosed(closed!!.undo!!)) }
+        rule.waitForIdle()
+        assertEquals(listOf("Alpha", "Beta", "Gamma"), tabs.tabs.map { it.title })
+    }
+
+    @Test
+    fun aLongPressLetGoInPlaceOpensTheTabMenu() {
+        val tabs = TabsState(homepage = "https://home.example/")
+        tabs.tabs[0].apply { url = "https://a.example/"; title = "Alpha" }
+        tabs.newTab().apply { url = "https://b.example/"; title = "Beta" }
+        rule.setContent { MaterialTheme { TabSwitcherScreen(tabs = tabs, onDismiss = {}, onNewTab = {}) } }
+        rule.onNode(hasText("Alpha") and hasClickAction()).performTouchInput { longClick() }
+        rule.onNodeWithText("Close other tabs").performClick()
         rule.waitForIdle()
         assertEquals(listOf("Alpha"), tabs.tabs.map { it.title })
     }
