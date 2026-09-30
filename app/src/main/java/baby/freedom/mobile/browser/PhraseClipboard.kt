@@ -120,10 +120,11 @@ internal object PhraseClipboard {
     /**
      * The SHA-256 ([phraseHash]) of the secret owed a clear, while this
      * process knows it; null otherwise, including in a process started
-     * after the copy. A page whose label can stand for more than one
-     * secret — the private-key page, one per account — matches it with
-     * [holdsKey], so Account 1's page never reads "Copied" while Account
-     * 2's key is on the clipboard.
+     * after the copy. Each page matches it against its own secret —
+     * [holdsKey], [holdsPhrase] — so Account 1's key page never reads
+     * "Copied" while Account 2's key is on the clipboard, and a phrase
+     * page never does for a phrase copied before the wallet was removed
+     * and another imported.
      */
     val copiedHash: StateFlow<ByteArray?> = _copiedHash.asStateFlow()
 
@@ -134,7 +135,19 @@ internal object PhraseClipboard {
      * can't be told to be this key's isn't shown.
      */
     internal fun holdsKey(label: String?, hash: ByteArray?, key: String): Boolean =
-        label == KEY_CLIP_LABEL && hash != null && MessageDigest.isEqual(hash, phraseHash(listOf(key)))
+        holds(KEY_CLIP_LABEL, label, hash, listOf(key))
+
+    /**
+     * Whether [words] are the recovery phrase owed a clear — [holdsKey]
+     * for the phrase page (#334 R3-M2): a phrase copied, the wallet
+     * removed and another imported within the minute, the new wallet's
+     * page reads Copy while the old phrase is still on the clipboard.
+     */
+    internal fun holdsPhrase(label: String?, hash: ByteArray?, words: List<String>): Boolean =
+        holds(CLIP_LABEL, label, hash, words)
+
+    private fun holds(expected: String, label: String?, hash: ByteArray?, secret: List<String>): Boolean =
+        label == expected && hash != null && MessageDigest.isEqual(hash, phraseHash(secret))
 
     private fun setCopied(label: String?) {
         _copied.value = label != null
@@ -202,9 +215,11 @@ internal object PhraseClipboard {
             Deadline.STALE -> return forget(app)
             Deadline.PENDING -> {
                 // Still owed, possibly to a new process (swiped from
-                // Recents and reopened within the minute): the button reads
-                // "Copied" again, and this process's own Handler brings it
-                // back to "Copy" on time rather than the inexact alarm.
+                // Recents and reopened within the minute): [copied] is set
+                // again, and this process's own Handler clears on time
+                // rather than the inexact alarm. A page's button still reads
+                // "Copy" here: without the hash it can't tell the clip is
+                // its own secret ([holdsPhrase], [holdsKey]).
                 setCopied(prefs.getString(KEY_LABEL, null)?.takeIf { it in LABELS } ?: CLIP_LABEL)
                 main.removeCallbacksAndMessages(null)
                 main.postDelayed({ clearIfDue(app) }, dueAt - now)

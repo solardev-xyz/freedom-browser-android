@@ -352,6 +352,21 @@ class WalletScreenTest {
     }
 
     @Test
+    fun `a phrase page reads Copied only for its own words (#334 R3-M2)`() {
+        val a = twelve.split(" ")
+        val b = "legal winner thank year wave sausage worth useful legal winner thank yellow".split(" ")
+        val label = PhraseClipboard.CLIP_LABEL
+        val copiedA = PhraseClipboard.phraseHash(a)
+        // Phrase A copied, the wallet removed and B imported: B's page reads Copy.
+        assertTrue(PhraseClipboard.holdsPhrase(label, copiedA, a))
+        assertFalse(PhraseClipboard.holdsPhrase(label, copiedA, b))
+        // A key pending, or nothing, or a hash lost with the process: no Copied.
+        assertFalse(PhraseClipboard.holdsPhrase(PhraseClipboard.KEY_CLIP_LABEL, copiedA, a))
+        assertFalse(PhraseClipboard.holdsPhrase(null, null, a))
+        assertFalse(PhraseClipboard.holdsPhrase(label, null, a))
+    }
+
+    @Test
     fun `another app's clip is left alone without being read`() {
         val hash = PhraseClipboard.phraseHash(twelve.split(" "))
         // Reading it would show Android 12+'s paste toast and could open a

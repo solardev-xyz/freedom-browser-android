@@ -45,6 +45,10 @@ class PhraseClipboardDeviceTest {
         PhraseClipboard.copy(a, words, now)
         assertTrue(clipboard(a).hasPrimaryClip())
         assertTrue(PhraseClipboard.copied.value)
+        // Only these words' page reads "Copied", not another wallet's (#334 R3-M2).
+        val other = "legal winner thank year wave sausage worth useful legal winner thank yellow".split(" ")
+        assertTrue(PhraseClipboard.holdsPhrase(PhraseClipboard.copiedLabel.value, PhraseClipboard.copiedHash.value, words))
+        assertFalse(PhraseClipboard.holdsPhrase(PhraseClipboard.copiedLabel.value, PhraseClipboard.copiedHash.value, other))
         // Not yet due: still on the clipboard, button still "Copied".
         PhraseClipboard.clearIfDue(a, now + PhraseClipboard.TTL_MS - 1)
         assertTrue(clipboard(a).hasPrimaryClip())
@@ -68,9 +72,12 @@ class PhraseClipboardDeviceTest {
         (PhraseClipboard::class.java.getDeclaredField("_copied").apply { isAccessible = true }
             .get(PhraseClipboard) as kotlinx.coroutines.flow.MutableStateFlow<Boolean>).value = false
         assertFalse(PhraseClipboard.copied.value)
-        // Focus regained before the deadline: the button reads "Copied" again (R4-F1).
+        // Focus regained before the deadline: the clear is still owed (R4-F1)…
         PhraseClipboard.clearIfDue(a, now + PhraseClipboard.TTL_MS - 1)
         assertTrue(PhraseClipboard.copied.value)
+        // …but without the hash no page can tell it's its own words, so the
+        // phrase page reads "Copy", like the key page (#334 R3-M2).
+        assertFalse(PhraseClipboard.holdsPhrase(PhraseClipboard.copiedLabel.value, PhraseClipboard.copiedHash.value, words))
         assertTrue(clipboard(a).hasPrimaryClip())
         PhraseClipboard.clearIfDue(a, now + PhraseClipboard.TTL_MS)
         assertFalse(clipboard(a).hasPrimaryClip())

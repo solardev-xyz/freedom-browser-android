@@ -1955,8 +1955,10 @@ private fun RecoveryPhrasePage(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     // Follows the clipboard itself, so the button says "Copy" again as
-    // soon as the minute is up and the words have been taken off.
-    val copied = PhraseClipboard.copiedLabel.collectAsState().value == PhraseClipboard.CLIP_LABEL
+    // soon as the minute is up and the words have been taken off — and
+    // only for these words, not a removed wallet's (#334 R3-M2).
+    val copiedLabel by PhraseClipboard.copiedLabel.collectAsState()
+    val copiedHash by PhraseClipboard.copiedHash.collectAsState()
     val hide = {
         words = null
     }
@@ -2045,7 +2047,7 @@ private fun RecoveryPhrasePage(
                             ) {
                                 Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                CopyLabel(copied)
+                                CopyLabel(PhraseClipboard.holdsPhrase(copiedLabel, copiedHash, shown))
                             }
                             OutlinedButton(onClick = hide) {
                                 Icon(Icons.Filled.VisibilityOff, contentDescription = null, modifier = Modifier.size(18.dp))
