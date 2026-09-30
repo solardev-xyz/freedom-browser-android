@@ -280,7 +280,7 @@ class TorProxyTest {
         assertEquals(TorProxy.Watch(confirmed = true, confirmedAtMs = 26_000), back.watch)
         // A second miss in a row: refused, and checked every RECHECK_MS
         // (no back-off) while Tor still answers, within the window.
-        next = TorProxy.afterCheck(next.watch, tor, TorProxy.Probe.NoOnion(1), nowMs = 26_000)
+        next = TorProxy.afterCheck(next.watch, tor, TorProxy.Probe.NoOnion(0xF2), nowMs = 26_000)
         assertFalse(next.watch.confirmed)
         assertTrue(next.watch.unreached)
         assertEquals(TorProxy.RECHECK_MS, next.waitMs)
@@ -320,6 +320,51 @@ class TorProxyTest {
         val never = TorProxy.afterCheck(TorProxy.Watch(), TorProxy.Probe.Tor, TorProxy.Probe.NoOnion(4), 0)
         assertFalse(never.watch.confirmed)
         assertEquals(10_000L, never.waitMs)
+    }
+
+    @Test
+    fun `a plain SOCKS5 error to the probe onions is no Tor that can't get through`() {
+        // R4-M1: a plain SOCKS5 proxy that took the port refuses the canary
+        // and the probe onions at once with a plain error (it can't look the
+        // names up) — refused on the first check, no grace, no "Tor answers"
+        // copy, no fast re-checks: backs off like any proxy that isn't Tor.
+        val tor = TorProxy.Probe.Tor
+        val confirmed = TorProxy.afterCheck(TorProxy.Watch(), tor, tor, nowMs = 0).watch
+        (1..8).forEach { code ->
+            val plain = TorProxy.Probe.NoOnion(code)
+            assertFalse(TorProxy.unreachedByTor(plain))
+            val next = TorProxy.afterCheck(confirmed, tor, plain, nowMs = 20_000)
+            assertFalse("$code", next.watch.confirmed)
+            assertFalse("$code", next.watch.unreached)
+            assertEquals(10_000L, next.waitMs)
+            assertEquals(20_000L, TorProxy.afterCheck(next.watch, tor, plain, nowMs = 30_000).waitMs)
+        }
+        // A timeout, or Tor's own onion-service errors (ExtendedErrors), are.
+        assertTrue(TorProxy.unreachedByTor(TorProxy.Probe.NoOnion(-1)))
+        (0xF0..0xF7).forEach { assertTrue(TorProxy.unreachedByTor(TorProxy.Probe.NoOnion(it))) }
+        assertTrue(TorProxy.afterCheck(confirmed, tor, TorProxy.Probe.NoOnion(0xF0), 20_000).watch.confirmed)
+    }
+
+    @Test
+    fun `a page's nudge doesn't cut a back-off short, the user's does`() {
+        // R4-M2: a page adding onion iframes (or reloading the refusal page)
+        // in a loop must not have a proxy that isn't Tor probed every
+        // RETRY_MS.
+        val plain = TorProxy.Probe.NoOnion(4)
+        var watch = TorProxy.afterCheck(TorProxy.Watch(), TorProxy.Probe.Tor, plain, 0).watch
+        assertTrue(watch.backoffMs > TorProxy.RETRY_MS)
+        assertNull(TorProxy.afterNudge(watch, byUser = false))
+        assertEquals(TorProxy.RETRY_MS, TorProxy.afterNudge(watch, byUser = true)!!.backoffMs)
+        // Not backing off (nothing listening; Tor that can't get through in
+        // the window): a page's nudge checks sooner, and changes nothing.
+        watch = TorProxy.afterCheck(TorProxy.Watch(), TorProxy.Probe.NotListening, TorProxy.Probe.NotListening, 0).watch
+        assertEquals(watch, TorProxy.afterNudge(watch, byUser = false))
+        val tor = TorProxy.Probe.Tor
+        watch = TorProxy.afterCheck(TorProxy.Watch(), tor, tor, 0).watch
+        watch = TorProxy.afterCheck(watch, tor, TorProxy.Probe.NoOnion(-1), 20_000).watch
+        watch = TorProxy.afterCheck(watch, tor, TorProxy.Probe.NoOnion(-1), 25_000).watch
+        assertFalse(watch.confirmed)
+        assertEquals(watch, TorProxy.afterNudge(watch, byUser = false))
     }
 
     @Test

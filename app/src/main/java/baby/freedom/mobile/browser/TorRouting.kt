@@ -214,7 +214,12 @@ object TorRouting {
     /** Whether onion requests are routed to an external proxy (#275) right now. */
     val isRoutedExternal: Boolean get() = routed != null && external != null
 
-    /** Told when a routed external proxy may have gone; see [externalFailed]. */
+    /**
+     * Told when a routed external proxy may have gone ([externalFailed]) or
+     * an onion page got the *Tor proxy* refusal ([refusedDocument]) — both
+     * page-driven, so the listener doesn't let them cut a back-off short
+     * ([TorProxy.afterNudge]).
+     */
     private val onExternalFailure = AtomicReference<(() -> Unit)?>(null)
 
     /** Listen for [externalFailed] (MainActivity, in `onCreate`), replacing any earlier listener. */
@@ -238,16 +243,18 @@ object TorRouting {
     }
 
     /**
-     * An onion page got refusal page [code]; for the *Tor proxy* one
-     * ([CODE_PROXY_DOWN], R3-F1): check the
-     * external proxy now rather than at the next scheduled check (which
-     * may be minutes off, backing off), so trying again soon can find it
-     * routed. The listener spaces checks at least [TorProxy.RETRY_MS]
-     * apart, so a page reloading in a loop doesn't make it probe back to
-     * back. Any thread (the interceptor's).
+     * An onion document got refusal page [code]; for the *Tor proxy* one
+     * ([CODE_PROXY_DOWN], R3-F1) in a top-level document ([mainFrame]):
+     * check the external proxy sooner than the next scheduled check, so
+     * trying again soon can find it routed. Only the main frame — an
+     * `<iframe>` any page can add in a loop is no sign the user is
+     * waiting for Tor (R4-M2) — and the listener honours it only while
+     * it isn't backing off, no sooner than [TorProxy.RETRY_MS] after the
+     * last check, and without starting the back-off over
+     * ([TorProxy.afterNudge]). Any thread (the interceptor's).
      */
-    internal fun refusedDocument(code: String) {
-        if (code == CODE_PROXY_DOWN) onExternalFailure.get()?.invoke()
+    internal fun refusedDocument(code: String, mainFrame: Boolean) {
+        if (code == CODE_PROXY_DOWN && mainFrame) onExternalFailure.get()?.invoke()
     }
 
     private fun apply(context: Context) {
@@ -309,7 +316,7 @@ object TorRouting {
         }
         val proxy = external
         val code = refusalCode(supported, enabled, proxy != null)
-        refusedDocument(code)
+        refusedDocument(code, req.isForMainFrame)
         return WebResourceResponse(
             "text/html", "utf-8", 503, "Tor Not Running",
             headers + (NAME_RESOLUTION_ERROR_HEADER to code),

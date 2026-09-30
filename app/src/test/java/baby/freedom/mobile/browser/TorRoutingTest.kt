@@ -439,10 +439,13 @@ class TorRoutingTest {
         val orbot = SocksEndpoint("127.0.0.1", 9050)
         try {
             TorRouting.setOnExternalFailure(listener)
-            TorRouting.refusedDocument(TorRouting.CODE_OFF)
-            TorRouting.refusedDocument(TorRouting.CODE_NOT_RUNNING)
+            TorRouting.refusedDocument(TorRouting.CODE_OFF, mainFrame = true)
+            TorRouting.refusedDocument(TorRouting.CODE_NOT_RUNNING, mainFrame = true)
             assertEquals(0, checks)
-            TorRouting.refusedDocument(TorRouting.CODE_PROXY_DOWN)
+            // Not for an iframe, which any page can add in a loop (R4-M2).
+            TorRouting.refusedDocument(TorRouting.CODE_PROXY_DOWN, mainFrame = false)
+            assertEquals(0, checks)
+            TorRouting.refusedDocument(TorRouting.CODE_PROXY_DOWN, mainFrame = true)
             assertEquals(1, checks)
 
             val gone = TorRouting.refusalHtml(onion, TorRouting.CODE_PROXY_DOWN, TorInfo(), orbot, unreached = false)

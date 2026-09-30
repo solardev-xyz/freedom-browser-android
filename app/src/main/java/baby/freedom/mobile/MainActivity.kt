@@ -152,7 +152,18 @@ class MainActivity : ComponentActivity() {
     /** Wakes that loop early (after Start Orbot, or a failed onion load). */
     private val externalTorNudge = Channel<Unit>(Channel.CONFLATED)
 
-    /** [TorRouting.externalFailed] / the refusal page shown: re-check the proxy now (R1-M1, R3-F1). */
+    /**
+     * Whether a pending [externalTorNudge] came from the user (Start
+     * Orbot) rather than a page, so a page's nudge conflated after it
+     * doesn't downgrade it ([TorProxy.afterNudge]).
+     */
+    private val externalTorNudgeByUser = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * [TorRouting.externalFailed] / the refusal page shown: re-check the
+     * proxy sooner (R1-M1, R3-F1) — page-driven, so not while backing off
+     * (R4-M2). Any thread.
+     */
     private val externalTorFailed: () -> Unit = { externalTorNudge.trySend(Unit) }
     private lateinit var settings: NodeSettings
 
@@ -952,14 +963,20 @@ class MainActivity : ComponentActivity() {
      *    isn't (or can't reach) Tor otherwise, backing off to
      *    [TorProxy.RETRY_MAX_MS] ([TorProxy.nextCheckMs]), as each full
      *    probe has that proxy look up the probe onions (R1-M2). The
-     *    refusal page being shown checks sooner too (no sooner than
-     *    [TorProxy.RETRY_MS] after the last check), so trying an onion
-     *    site again soon finds it routed once it passes (R3-F1).
+     *    refusal page being shown in a top-level document checks sooner
+     *    too while not backing off (no sooner than [TorProxy.RETRY_MS]
+     *    after the last check), so trying an onion site again soon finds
+     *    it routed once it passes (R3-F1); a page can't cut a back-off
+     *    short (R4-M2, [TorProxy.afterNudge]). "Can't reach an onion" is
+     *    only a timeout or one of Tor's own onion errors
+     *    ([TorProxy.unreachedByTor]): a plain SOCKS5 error at once is a
+     *    plain proxy that took the port (R4-M1).
      *
      * While the Activity is stopped nothing checks, so `.onion` isn't
      * routed to the proxy meanwhile (fail closed: a proxy that dies in
      * the background, or another app taking its port, gets no onion
-     * requests from background tabs), and on return it's routed again
+     * requests from background tabs), the refusal page doesn't promise a
+     * check that isn't coming (R4-M3), and on return it's routed again
      * only once a full probe passes (R1-M1, R2-F1). Status goes through
      * [torInfoFlow] like the embedded client's.
      */
@@ -1016,15 +1033,24 @@ class MainActivity : ComponentActivity() {
                             watch.confirmed,
                             watch.unreached,
                         )
-                        // A nudge (Start Orbot, a failed onion load, the
-                        // refusal page shown) checks sooner, and starts the
-                        // back-off over — but never within RETRY_MS of the
-                        // last check, so a page retrying in a loop can't make
-                        // it probe back to back.
-                        if (withTimeoutOrNull(next.waitMs) { externalTorNudge.receive() } != null) {
-                            watch = watch.copy(backoffMs = TorProxy.RETRY_MS)
+                        // A nudge checks sooner: Start Orbot always, and
+                        // starts the back-off over; a page's (a failed onion
+                        // load, the refusal page in a top-level document)
+                        // only while not backing off, so onion frames added
+                        // in a loop can't skip the back-off (R4-M2,
+                        // TorProxy.afterNudge). Never within RETRY_MS of the
+                        // last check, so nothing can make it probe back to
+                        // back.
+                        val due = lastCheckAt + next.waitMs
+                        while (true) {
+                            val left = due - SystemClock.elapsedRealtime()
+                            if (left <= 0) break
+                            withTimeoutOrNull(left) { externalTorNudge.receive() } ?: break
+                            val byUser = externalTorNudgeByUser.getAndSet(false)
+                            watch = TorProxy.afterNudge(watch, byUser) ?: continue
                             val gap = lastCheckAt + TorProxy.RETRY_MS - SystemClock.elapsedRealtime()
                             if (gap > 0) delay(gap)
+                            break
                         }
                     }
                 } finally {
@@ -1032,9 +1058,13 @@ class MainActivity : ComponentActivity() {
                     // out in publishExternalTor): nothing checks until the
                     // Activity is back, so stop routing onion here meanwhile,
                     // and on return it's routed only once a check passes
-                    // (no grace carried over).
-                    if (watch.confirmed) publishExternalTor(proxy, externalTorChecking(proxy), confirmed = false)
-                    watch = watch.copy(confirmed = false, graceUsed = false)
+                    // (no grace carried over). Nor "Tor answers but can't
+                    // get through" on the refusal page, whose "Freedom is
+                    // checking again" nothing would keep meanwhile (R4-M3).
+                    if (watch.confirmed || watch.unreached) {
+                        publishExternalTor(proxy, externalTorChecking(proxy), confirmed = false, unreached = false)
+                    }
+                    watch = watch.copy(confirmed = false, graceUsed = false, unreached = false)
                 }
             }
         }
@@ -1078,6 +1108,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             // Orbot needs a moment to open its SOCKS port.
             delay(ORBOT_START_GRACE_MS)
+            externalTorNudgeByUser.set(true)
             externalTorNudge.trySend(Unit)
         }
     }

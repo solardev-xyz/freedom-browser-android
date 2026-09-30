@@ -391,7 +391,7 @@ object TorProxy {
      *   as Tor does but reached neither probe onion, and it was kept routed
      *   for one quick check more (R3-F1).
      * @property unreached the last check found the canary refused as Tor
-     *   does, but no onion site reached — "Tor that can't get through
+     *   does, but no onion site reached ([unreachedByTor]) — "Tor that can't get through
      *   right now", not "no Tor client there" (the refusal page says so).
      * @property backoffMs the last backing-off wait ([nextCheckMs]).
      * @property confirmedAtMs when (`elapsedRealtime`) it last passed, or `null`.
@@ -413,7 +413,8 @@ object TorProxy {
      * itself, or [reachOnion]'s after a refusal).
      *
      *  - Tor: confirmed, checked again in [RECHECK_MS].
-     *  - The canary refused as Tor does but no probe onion reached, for a
+     *  - The canary refused as Tor does but no probe onion reached — timed
+     *    out, or a Tor onion-service error ([unreachedByTor]) — for a
      *    confirmed proxy: once, it stays routed and is checked again in
      *    [RETRY_MS] — one slow circuit on a flaky link isn't "gone" (R3-F1).
      *    A second such check in a row, and it's refused. Anything else — no
@@ -431,7 +432,7 @@ object TorProxy {
         if (result == Probe.Tor) {
             return Next(Watch(confirmed = true, confirmedAtMs = nowMs), RECHECK_MS)
         }
-        val unreached = canary == Probe.Tor && result is Probe.NoOnion
+        val unreached = canary == Probe.Tor && unreachedByTor(result)
         if (unreached && watch.confirmed && !watch.graceUsed) {
             return Next(watch.copy(graceUsed = true, unreached = true), RETRY_MS)
         }
@@ -452,6 +453,39 @@ object TorProxy {
             ),
             wait,
         )
+    }
+
+    /**
+     * Whether [result], from [reachOnion] after the canary was refused,
+     * reads as Tor that couldn't get through rather than as a proxy that
+     * can't do onion at all: no reply within the deadline (a circuit that
+     * didn't build in time), or one of Tor's own onion-service errors
+     * (`0xF0`–`0xF7` with ExtendedErrors), which no other SOCKS5 proxy
+     * sends. A plain SOCKS5 error (1–8) at once is what a plain proxy
+     * that took the port answers — it can't look the name up — so that is
+     * no grace, no "Tor answers" copy and no fast re-checks (R4-M1). A Tor
+     * without ExtendedErrors that fails an onion quickly with a plain code
+     * is treated the same way: refused at once and backed off, until a
+     * check passes.
+     */
+    internal fun unreachedByTor(result: Probe): Boolean =
+        result is Probe.NoOnion && (result.code < 0 || result.code in 0xF0..0xFF)
+
+    /**
+     * A nudge to check sooner arrived at the loop in state [watch]: the
+     * state to carry on with, or `null` to ignore it and keep waiting.
+     * [byUser] (the Nodes page's Start Orbot) always checks sooner and
+     * starts the back-off over. One from a page (a refusal page shown, a
+     * routed onion load that failed) checks sooner only while the loop
+     * isn't backing off, and leaves the back-off alone — else a page
+     * loading onion frames in a loop would have a proxy that isn't Tor
+     * probed every [RETRY_MS] (R4-M2). Either way the check runs no
+     * sooner than [RETRY_MS] after the last one.
+     */
+    fun afterNudge(watch: Watch, byUser: Boolean): Watch? = when {
+        byUser -> watch.copy(backoffMs = RETRY_MS)
+        watch.backoffMs > RETRY_MS -> null
+        else -> watch
     }
 
     // --- Orbot -----------------------------------------------------------
