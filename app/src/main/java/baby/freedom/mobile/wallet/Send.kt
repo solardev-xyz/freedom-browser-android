@@ -392,9 +392,19 @@ data class SendQuote(
      * than the account holds).
      */
     val all: Boolean = false,
+    /**
+     * On an OP Stack rollup (Base), what posting the transaction to L1
+     * may cost on top of its gas ([WalletSender.l1Fee]), with headroom;
+     * zero elsewhere. The chain takes it from the sender's balance too,
+     * and refuses a send the balance can't cover it for.
+     */
+    val l1Fee: BigInteger = BigInteger.ZERO,
 ) {
+    /** The most the send can cost in fees: its gas at the fee cap, plus [l1Fee]. */
+    val maxFee: BigInteger get() = tx.maxFee + l1Fee
+
     /** For a native send, the amount plus the most the fee can be; null for a token (two currencies). */
-    val nativeTotal: BigInteger? get() = if (request.token.isNative) request.amount + tx.maxFee else null
+    val nativeTotal: BigInteger? get() = if (request.token.isNative) request.amount + maxFee else null
 }
 
 /**
@@ -1206,20 +1216,23 @@ class WalletSender internal constructor(
                 fees = replacing?.let { GasOracle.replacing(fees.await(), it.fees) } ?: fees.await(),
             )
             val nativeBalance = native.await()
+            // Priced on the bytes as they stand — for Max, with the whole balance, which is never shorter than the rest.
+            val l1Fee = l1Fee(tx)
+            val maxFee = tx.maxFee + l1Fee
             val symbol = request.chain.symbol
-            val fee = SendAmounts.exact(tx.maxFee, request.chain.decimals)
+            val fee = SendAmounts.exact(maxFee, request.chain.decimals)
             val has = SendAmounts.exact(nativeBalance, request.chain.decimals)
             if (all && token.isNative) {
-                val rest = nativeBalance - tx.maxFee
+                val rest = nativeBalance - maxFee
                 if (rest.signum() <= 0) throw SendException(Strings.said(R.string.send_not_enough_for_fee_all, symbol, fee, has))
                 sending = sending.copy(amount = rest)
                 tx = tx.copy(value = rest)
             }
-            if (tx.maxFee + tx.value > nativeBalance) {
+            if (maxFee + tx.value > nativeBalance) {
                 val what = if (token.isNative && tx.value.signum() > 0) R.string.send_not_enough_for_amount_and_fee else R.string.send_not_enough_for_fee
                 throw SendException(Strings.said(what, symbol, fee, has))
             }
-            SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash, sendsBefore, all)
+            SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash, sendsBefore, all, l1Fee)
         }
     } catch (e: CancellationException) {
         throw e
@@ -1227,6 +1240,24 @@ class WalletSender internal constructor(
         throw e
     } catch (e: ChainRpcException) {
         throw SendException(readFailureSaid(e), e)
+    }
+
+    /**
+     * What [tx] may cost to post to L1 on an OP Stack rollup
+     * ([OP_STACK_CHAINS]; zero on any other chain): the chain's own
+     * `GasPriceOracle.getL1Fee` of the unsigned transaction — which adds
+     * the signature's bytes itself, as viem's `estimateL1Fee` relies on —
+     * doubled, headroom for L1's fee to rise before the send is mined,
+     * like the gas fee cap's. op-geth refuses a send whose balance
+     * can't cover this on top of value and gas ("insufficient funds for
+     * gas * price + value"), so Max and the balance check must count it.
+     */
+    private suspend fun l1Fee(tx: EthTransaction): BigInteger {
+        if (tx.chainId !in OP_STACK_CHAINS) return BigInteger.ZERO
+        val call = JSONObject().put("to", GAS_PRICE_ORACLE).put("data", getL1FeeData(tx.signingPayload()))
+        val fee = Erc20.decodeUint256(rpc.call(tx.chainId, call).value)
+            ?: throw SendException(Strings.said(R.string.send_read_nonsense))
+        return fee.shiftLeft(1)
     }
 
     /** [quote] priced afresh, as it was asked for: Max stays Max. */
@@ -1728,6 +1759,29 @@ class WalletSender internal constructor(
          */
         internal fun gasLimit(estimate: BigInteger, hasData: Boolean, site: BigInteger?): BigInteger =
             site?.takeIf { it >= estimate }?.min(estimate * SITE_GAS_CEILING) ?: gasLimit(estimate, hasData)
+
+        /**
+         * OP Stack rollups, whose sends also pay an L1 data fee ([l1Fee]):
+         * OP Mainnet, Base, their Sepolia testnets, and other Superchain
+         * members (Zora, Mode, Unichain, World Chain, Ink, Soneium, Lisk,
+         * Fraxtal, BOB).
+         */
+        internal val OP_STACK_CHAINS = setOf(
+            10L, 8453L, 11155420L, 84532L, 7777777L, 34443L, 130L, 480L, 57073L, 1868L, 1135L, 252L, 60808L,
+        )
+
+        /** The OP Stack's `GasPriceOracle` predeploy. */
+        internal const val GAS_PRICE_ORACLE = "0x420000000000000000000000000000000000000F"
+
+        /** `getL1Fee(bytes)`'s selector. */
+        internal const val GET_L1_FEE = "0x49948e0e"
+
+        /** `getL1Fee(unsignedTx)` call data: the selector, the offset of the bytes, their length, the bytes padded to a word. */
+        internal fun getL1FeeData(unsignedTx: ByteArray): String {
+            val padded = (unsignedTx.size + 31) / 32 * 32
+            return GET_L1_FEE + "20".padStart(64, '0') + unsignedTx.size.toString(16).padStart(64, '0') +
+                unsignedTx.toHex() + "00".repeat(padded - unsignedTx.size)
+        }
 
         /** How many times the estimate a site's own `gas` may be ([gasLimit]). */
         private val SITE_GAS_CEILING = BigInteger.valueOf(3)

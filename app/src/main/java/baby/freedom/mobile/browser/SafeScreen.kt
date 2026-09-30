@@ -792,9 +792,9 @@ private fun SafeCallReview(
         ReviewRow(stringResource(R.string.safe_review_contract), null, address = request.to)
         ReviewRow(
             stringResource(R.string.safe_review_network_fee),
-            stringResource(R.string.safe_review_fee_up_to, feeText(quote.tx.maxFee, chain)),
+            stringResource(R.string.safe_review_fee_up_to, feeText(quote.maxFee, chain)),
             mono = true,
-            detail = feeDetail(quote.tx),
+            detail = feeDetail(quote),
         )
         ReviewRow(stringResource(R.string.safe_review_nonce), quote.tx.nonce.toString(), detail = nonceDetail(quote))
         Spacer(Modifier.height(4.dp))
@@ -989,7 +989,11 @@ private fun SafeProposePage(
                             modifier = Modifier.fillMaxWidth(),
                         )
                         if (amount.isNotEmpty() && parsedAmount == null) {
-                            FieldText(stringResource(R.string.safe_amount_invalid, token?.symbol.toString(), token?.decimals ?: 0), error = true)
+                            FieldText(
+                                ambiguousAmountNote(amount)
+                                    ?: stringResource(R.string.safe_amount_invalid, token?.symbol.toString(), token?.decimals ?: 0),
+                                error = true,
+                            )
                         }
                     }
                 }

@@ -555,9 +555,9 @@ private fun FundReview(
             ReviewRow(stringResource(R.string.stamps_fund_amount), "${SendAmounts.exact(request.amount, request.token.decimals)} ${request.token.symbol}", mono = true)
             ReviewRow(
                 stringResource(R.string.stamps_fund_network_fee),
-                stringResource(R.string.stamps_fund_fee_up_to, feeText(quote.tx.maxFee, chain)),
+                stringResource(R.string.stamps_fund_fee_up_to, feeText(quote.maxFee, chain)),
                 mono = true,
-                detail = feeDetail(quote.tx),
+                detail = feeDetail(quote),
             )
             ReviewRow(stringResource(R.string.stamps_fund_nonce), quote.tx.nonce.toString(), detail = nonceDetail(quote))
             Spacer(Modifier.height(4.dp))

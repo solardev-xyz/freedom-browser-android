@@ -1,5 +1,6 @@
 package baby.freedom.mobile.wallet
 
+import baby.freedom.mobile.browser.ambiguousAmountNote
 import baby.freedom.mobile.browser.explorerTxUrl
 import baby.freedom.mobile.browser.feeDetail
 import baby.freedom.mobile.browser.feeFootnote
@@ -58,6 +59,7 @@ class SendTest {
     private val from = WalletAccount(0, "Account 1", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
     private val to = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
     private val gnosis = BuiltInChains.GNOSIS.copy(rpcUrls = listOf("https://a.example", "https://b.example", "https://c.example"))
+    private val base = BuiltInChains.BASE.copy(rpcUrls = listOf("https://a.example", "https://b.example", "https://c.example"))
     private val xdai = TokenRegistry.native(gnosis)
     private val xbzz = TokenRegistry.builtins.first { it.symbol == "xBZZ" }
     private val gwei = BigInteger.valueOf(1_000_000_000L)
@@ -139,7 +141,7 @@ class SendTest {
 
         fun rpc() = WalletRpc(
             ChainDataRouter(
-                chains = { listOf<Chain>(gnosis) },
+                chains = { listOf<Chain>(gnosis, base) },
                 transport = RpcTransport { url, body, _ ->
                     if (down) throw IOException("down")
                     withReceiptHash(JSONObject(body), """{"jsonrpc":"2.0","id":1,${answer(JSONObject(body), url)}}""")
@@ -256,6 +258,9 @@ class SendTest {
         assertEquals(BigInteger("1234000000"), SendAmounts.parse("1234", 6))
         assertEquals(BigInteger("1234000"), SendAmounts.parse("1.234", 6))
         assertFalse(SendAmounts.ambiguous("1.234"))
+        // Every amount field's note quotes it as judged: trimmed, no stray spaces.
+        assertEquals("999,000 could be 999.000 or 999000: write it with a point, or without the comma", ambiguousAmountNote(" 999,000 "))
+        assertNull(ambiguousAmountNote("1,23"))
         assertEquals("1.5", SendAmounts.exact(BigInteger("1500000000000000000"), 18))
         assertEquals("0.000000000000000001", SendAmounts.exact(BigInteger.ONE, 18))
         assertEquals("3", SendAmounts.exact(BigInteger.valueOf(3_000_000), 6))
@@ -808,6 +813,73 @@ class SendTest {
         val typed = s.prepare(request(xdai, 1_000))
         assertFalse(typed.all)
         assertEquals(BigInteger.valueOf(1_000), s.reprice(typed).request.amount)
+    }
+
+    @Test
+    fun `on Base, Max and the balance check count the L1 data fee the chain also takes`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val l1 = BigInteger.valueOf(400_000_000_000L)
+        val oracle = mutableListOf<String>()
+        chain.on["eth_call"] = { req ->
+            val call = req.getJSONArray("params").getJSONObject(0)
+            assertEquals(WalletSender.GAS_PRICE_ORACLE, call.getString("to"))
+            synchronized(oracle) { oracle += call.getString("data") }
+            "\"result\":\"0x" + l1.toString(16).padStart(64, '0') + "\""
+        }
+        val s = sender(chain)
+        val eth = TokenRegistry.native(base)
+        val max = s.prepare(SendRequest(base, eth, from, to, BigInteger.ONE), all = true)
+        // What the oracle priced is the unsigned transaction, ABI-encoded as getL1Fee(bytes).
+        assertTrue(oracle.last().startsWith(WalletSender.GET_L1_FEE))
+        assertEquals(l1.shiftLeft(1), max.l1Fee)
+        assertEquals(max.tx.maxFee + l1.shiftLeft(1), max.maxFee)
+        assertEquals(chain.balance - max.maxFee, max.request.amount)
+        assertEquals(chain.balance, max.nativeTotal)
+        // The review's fee detail says what the "up to" counts beyond gas.
+        assertEquals(feeDetail(max.tx) + " · plus up to 0.0000008 ETH to post it to L1", feeDetail(max))
+        // Gas and value alone fit, but op-geth also wants the L1 fee: refused here, not by the node.
+        assertMessage("Not enough ETH for the amount and the network fee") {
+            s.prepare(SendRequest(base, eth, from, to, chain.balance - max.tx.maxFee))
+        }
+        // Priced again, still Max, still counting it.
+        assertEquals(chain.balance, s.reprice(max).nativeTotal)
+        // An answer that isn't one word is no L1 fee of zero.
+        chain.on["eth_call"] = { "\"result\":\"0x\"" }
+        assertMessage("The RPC’s answer made no sense") { s.prepare(SendRequest(base, eth, from, to, BigInteger.ONE)) }
+        // A chain with no L1 fee isn't asked for one.
+        val calls = oracle.size
+        chain.on.remove("eth_call")
+        assertEquals(BigInteger.ZERO, s.prepare(request()).l1Fee)
+        assertEquals(calls, oracle.size)
+        assertFalse(synchronized(chain.methods) { chain.methods.toList() }.takeLast(8).contains("eth_call"))
+    }
+
+    @Test
+    fun `a Base send's L1 fee survives a restart, so its status shows the same fee`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        chain.on["eth_call"] = { "\"result\":\"0x" + BigInteger.valueOf(5_000).toString(16).padStart(64, '0') + "\"" }
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        val s = sender(chain, journal = FileSendJournal(journalFile()))
+        val quote = s.prepare(SendRequest(base, TokenRegistry.native(base), from, to, BigInteger.ONE))
+        s.submit(quote, signer())
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        val restored = sender(chain, journal = FileSendJournal(journalFile())).status.value!!.quote
+        assertEquals(BigInteger.valueOf(10_000), restored.l1Fee)
+        assertEquals(quote.maxFee, restored.maxFee)
+    }
+
+    @Test
+    fun `getL1Fee call data is the selector, the bytes' offset and length, and the bytes padded to a word`() {
+        assertEquals(
+            WalletSender.GET_L1_FEE,
+            "0x" + baby.freedom.mobile.ens.Keccak256.digest("getL1Fee(bytes)".toByteArray()).toHex().take(8),
+        )
+        val data = WalletSender.getL1FeeData(byteArrayOf(2, 0x7f))
+        assertEquals(
+            "0x49948e0e" + "0".repeat(62) + "20" + "0".repeat(63) + "2" + "027f" + "0".repeat(60),
+            data,
+        )
+        assertEquals(10 + 64 * 3, WalletSender.getL1FeeData(ByteArray(32)).length)
     }
 
     @Test
