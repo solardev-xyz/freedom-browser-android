@@ -41,11 +41,34 @@ internal fun radiclePromptCopy(ask: RadicleAsk): RadiclePromptCopy = when (ask) 
         Strings.get(R.string.radicle_prompt_unseed_detail),
         Strings.get(R.string.radicle_prompt_unseed_allow),
     )
-    is RadicleAsk.Signing -> RadiclePromptCopy(
-        Strings.get(R.string.radicle_prompt_signing_request),
-        Strings.get(R.string.radicle_prompt_signing_detail),
-        Strings.get(R.string.common_allow),
-    )
+    is RadicleAsk.Signing -> if (ask.previousDid == null) {
+        RadiclePromptCopy(
+            Strings.get(R.string.radicle_prompt_signing_request),
+            Strings.get(R.string.radicle_prompt_signing_detail),
+            Strings.get(R.string.common_allow),
+        )
+    } else {
+        RadiclePromptCopy(
+            Strings.get(R.string.radicle_prompt_signing_changed_request),
+            if (ask.previousDid.isEmpty()) {
+                Strings.get(R.string.radicle_prompt_signing_changed_detail_device)
+            } else {
+                Strings.get(R.string.radicle_prompt_signing_changed_detail, shortDid(ask.previousDid))
+            },
+            Strings.get(R.string.common_allow),
+        )
+    }
+}
+
+/**
+ * The identity a signing prompt asks about, as a label and the DID in
+ * full (a spoofed or unexpected one hides in its tail); null for a
+ * prompt that names none.
+ */
+internal fun radiclePromptIdentity(ask: RadicleAsk): Pair<String, String>? {
+    if (ask !is RadicleAsk.Signing || ask.did.isEmpty()) return null
+    val label = Strings.get(if (ask.wallet) R.string.radicle_prompt_identity_wallet else R.string.radicle_prompt_identity_own)
+    return label to ask.did
 }
 
 /**
@@ -76,6 +99,7 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
         is RadicleAsk.Unseed -> ask.rid
         else -> null
     }
+    val identity = radiclePromptIdentity(ask)
     AlertDialog(
         onDismissRequest = { if (guard.accepts()) request.respond(false) },
         icon = { Icon(icon, contentDescription = null) },
@@ -92,6 +116,11 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
                 if (rid != null) {
                     Spacer(Modifier.height(8.dp))
                     Text(rid, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                }
+                if (identity != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(identity.first, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                    Text(identity.second, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                 }
                 Spacer(Modifier.height(12.dp))
                 Text(

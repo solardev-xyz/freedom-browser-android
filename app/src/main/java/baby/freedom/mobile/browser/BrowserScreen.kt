@@ -99,6 +99,7 @@ import baby.freedom.swarm.MyotisNetwork
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
+import baby.freedom.swarm.RadicleStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -666,10 +667,14 @@ fun BrowserScreen(
     LaunchedEffect(Unit) {
         NodeIdentitySync.get(context).notices.collect { change ->
             val restarting = currentRunNodeEnabled && currentNodeInfo.status != NodeStatus.Stopped
-            snackbarHostState.showSnackbar(
-                nodeIdentityNotice(change, restarting),
-                duration = SnackbarDuration.Long,
-            )
+            // Radicle too (#328), when the user has it on.
+            val radicleOn = currentRunNodeEnabled && RadicleClient.enabled
+            // Like Swarm's: the restart may already be under way by now.
+            val radicleRestarting = radicleOn && RadicleClient.state.value.status.let {
+                it != RadicleStatus.Stopped && it != RadicleStatus.Error
+            }
+            val notice = nodeIdentityNotice(change, restarting, radicleOn, radicleRestarting) ?: return@collect
+            snackbarHostState.showSnackbar(notice, duration = SnackbarDuration.Long)
         }
     }
 

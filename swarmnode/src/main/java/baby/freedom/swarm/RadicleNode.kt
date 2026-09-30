@@ -2,7 +2,9 @@ package baby.freedom.swarm
 
 import android.util.Log
 import java.io.File
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantReadWriteLock
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
@@ -29,11 +31,12 @@ import org.json.JSONObject
  *
  * The Android counterpart of iOS's `RadicleNode` and desktop's
  * `radicle-embedded.js`: one node per process (the Rust layer holds it in
- * a global slot), a profile under [Config.home] whose identity key is
- * created on first start and reused after, and a seed book dialled right
- * after start. The `no-spawn` build serves peers' fetches in-process, so
- * repositories this node seeds are served back out without any child
- * process.
+ * a global slot), a profile under [Config.home], and a seed book dialled
+ * right after start. The node runs as the wallet's Radicle identity
+ * ([Config.identity], #328) when there is one; otherwise as the
+ * profile's own key, created on first start and reused after. The
+ * `no-spawn` build serves peers' fetches in-process, so repositories this
+ * node seeds are served back out without any child process.
  *
  * Every UniFFI export is synchronous and blocking; all of them run on
  * [scope]'s IO threads, never the caller's. Results are the JSON strings
@@ -65,12 +68,37 @@ class RadicleNode internal constructor(
          * (there's no `rad` CLI); it only has to bind.
          */
         val shortSocketDir: String,
+        /**
+         * The identity to run as instead of the profile's own key (#328):
+         * the wallet's, read again at every boot — or null for the
+         * profile's own. Its [HostIdentity.secret] is zeroed after use.
+         * Throws when it can't tell right now (the wallet's keys are there
+         * but can't be opened): a boot then fails with that reason instead
+         * of quietly running as the profile's own key, and [reloadIdentity]
+         * leaves the node as it is.
+         */
+        val identity: () -> HostIdentity? = { null },
     )
+
+    /**
+     * A Radicle identity the host keeps (#328): [secret] is the 32-byte
+     * Ed25519 secret seed, [did] its `did:key:z6Mk…`. It goes to
+     * libradicle from memory and is never written to [Config.home];
+     * [wipe] it when done, and never log it.
+     */
+    class HostIdentity(internal val secret: ByteArray, val did: String) {
+        fun wipe() = secret.fill(0)
+
+        override fun toString(): String = "HostIdentity($did)"
+    }
 
     /** The libradicle-uniffi calls [RadicleNode] makes; swapped for a fake in tests. */
     internal interface Ops {
         fun setSocketPath(path: String)
         fun start(home: String, alias: String): String
+
+        /** [start] as [secretKey] (32 bytes), which the library zeroes its own copy of. */
+        fun startWithKey(home: String, alias: String, secretKey: ByteArray): String
         fun connectSeeds(timeoutMs: Int): String
         fun identity(): String
         fun status(): String
@@ -92,6 +120,8 @@ class RadicleNode internal constructor(
                 android.system.Os.setenv("RAD_SOCKET", path, true)
             override fun start(home: String, alias: String) =
                 uniffi.libradicle_uniffi.start(home, alias)
+            override fun startWithKey(home: String, alias: String, secretKey: ByteArray) =
+                uniffi.libradicle_uniffi.startWithKey(home, alias, secretKey)
             override fun connectSeeds(timeoutMs: Int) =
                 uniffi.libradicle_uniffi.connectSeeds(timeoutMs.toUInt())
             override fun identity() = uniffi.libradicle_uniffi.identity()
@@ -169,6 +199,41 @@ class RadicleNode internal constructor(
     /** Whether a node is up in this process. Touched only on [lifecycle]. */
     private var booted = false
 
+    /**
+     * The DID of the [Config.identity] the node up now booted as, or `""`
+     * for the profile's own key. Touched only on [lifecycle].
+     */
+    private var bootedAs = ""
+
+    /**
+     * The DID the native node up now answers to, as its start returned
+     * it, or `""` while none is up (cleared before every shutdown and
+     * every boot). What [call] checks a write's [AS_DID] against.
+     */
+    @Volatile
+    private var runningAs = ""
+
+    /**
+     * [runningAs] when that is the wallet's identity ([Config.identity]'s
+     * DID), else `""`. Set before [runningAs] and cleared with it, so a
+     * DID read back as [runningAs] is labelled from the same boot: what
+     * [call] answers `identity` with as [WALLET_IDENTITY].
+     */
+    @Volatile
+    private var runningWalletDid = ""
+
+    /**
+     * Orders identity-bound [call]s (#328) against a boot: a write holds
+     * the read side from its [AS_DID] check through its native call, and
+     * [bootNode] takes the write side to clear [runningAs] before the
+     * native start. So a write that passed its check as the old identity
+     * has finished (against the old node, or a stopped one) before the
+     * node can come up as another, and one that checks after sees `""`
+     * or the new DID — it can never sign as an identity it wasn't
+     * allowed for.
+     */
+    private val callGate = ReentrantReadWriteLock()
+
     @Volatile
     private var poller: Job? = null
 
@@ -206,6 +271,15 @@ class RadicleNode internal constructor(
         @Volatile var rolledBack = false
         /** The coroutine running this call, rollback included. */
         lateinit var job: Job
+
+        /** Whether this call is still running; true until its [job] is even set. */
+        val running: Boolean get() = !this::job.isInitialized || job.isActive
+
+        /** Suspends until this call, rollback included, is over. */
+        suspend fun join() {
+            while (!this::job.isInitialized) delay(CANCEL_RETRY_MS)
+            job.join()
+        }
     }
 
     /** The seed-by-RID fetch in flight, or null. */
@@ -272,6 +346,8 @@ class RadicleNode internal constructor(
                 return@launch
             }
             replayPendingUnseeds()
+            val wallet = bootedAs.isNotEmpty()
+            publish(gen) { _state.value.copy(walletIdentity = wallet) }
             refreshIdentity(gen)
             refreshRepos(gen)
             // Under the lock, like [publish]: [stop] writes Stopping before it
@@ -293,12 +369,104 @@ class RadicleNode internal constructor(
         if (socket.absolutePath.toByteArray().size > MAX_SOCKET_PATH) {
             ops.setSocketPath(File(config.shortSocketDir, "rad.sock").absolutePath)
         }
-        val result = json(ops.start(config.home, config.alias))
+        // The wallet's key is there but can't be opened: fail (Retry, or the
+        // next bind, boots again) rather than run as the profile's own key.
+        val host = try {
+            config.identity()
+        } catch (e: Exception) {
+            Log.w(TAG, "radicle identity unreadable: ${e.message}")
+            return SwarmStrings.get(R.string.swarmnode_radicle_identity_unreadable)
+        }
+        // Wait for identity-bound writes still running against the node
+        // before (see [callGate]); one that won't return fails this boot
+        // (Retry, the next bind or the next reload boots again) rather than
+        // coming up while a write checked against the old identity could
+        // still reach the new one.
+        if (!callGate.writeLock().tryLock(WRITE_DRAIN_MS, TimeUnit.MILLISECONDS)) {
+            host?.wipe()
+            Log.w(TAG, "radicle boot: a write as the previous identity is still running")
+            return SwarmStrings.get(R.string.swarmnode_radicle_write_still_running)
+        }
+        try {
+            runningAs = ""
+            runningWalletDid = ""
+        } finally {
+            callGate.writeLock().unlock()
+        }
+        val raw = try {
+            if (host == null) ops.start(config.home, config.alias) else ops.startWithKey(config.home, config.alias, host.secret)
+        } finally {
+            host?.wipe()
+        }
+        val result = json(raw)
         val error = result?.optString("error").orEmpty()
+        val did = result?.optString("did").orEmpty()
         return when {
             result == null -> SwarmStrings.get(R.string.swarmnode_radicle_unreadable_start)
-            result.optString("did").isNotEmpty() -> null
+            did.isNotEmpty() -> {
+                bootedAs = host?.did.orEmpty()
+                runningWalletDid = if (host != null && did == host.did) did else ""
+                runningAs = did
+                if (host != null && did != host.did) Log.w(TAG, "radicle booted as $did, not the wallet's ${host.did}")
+                null
+            }
             else -> error.ifEmpty { SwarmStrings.get(R.string.swarmnode_radicle_start_failed) }
+        }
+    }
+
+    /**
+     * The identity [Config.identity] gives changed (#328: a wallet was
+     * created, imported or removed): a node that's up as another one
+     * restarts as it, and one whose boot failed boots again. One that
+     * isn't up yet is left alone — its boot reads the identity anyway. Runs on [lifecycle], after any boot or
+     * shutdown already asked for, so it sees what that one booted as.
+     */
+    fun reloadIdentity() {
+        scope.launch(lifecycle) {
+            if (!booted) {
+                // A boot that failed (the wallet's key couldn't be opened, say)
+                // tries again now that the identity changed.
+                synchronized(this@RadicleNode) {
+                    if (wanted && _state.value.status == RadicleStatus.Error) start()
+                }
+                return@launch
+            }
+            val want = runCatching { config.identity()?.let { it.wipe(); it.did }.orEmpty() }.getOrElse {
+                // The wallet's keys are there but can't be opened right now:
+                // keep the node as it is rather than guess, and try again at
+                // the next reload (every bind and every wallet change).
+                Log.w(TAG, "radicle identity unreadable; not restarting: ${it.message}")
+                return@launch
+            }
+            if (want == bootedAs) return@launch
+            // The checks and both calls under one hold of the lock they take
+            // (it's reentrant), which [seed] registers its run under too: a
+            // user's [stop] lands either before (this sees `wanted` false and
+            // leaves the node off) or after the restart (and stops the node it
+            // boots), never in between; and a seed lands either before (and
+            // is waited for below) or after the restart is queued (and runs
+            // against the new node), never between the check and the stop.
+            val fetch = synchronized(this@RadicleNode) {
+                if (!wanted) return@launch
+                // Moving to the wallet's identity keeps what the node seeds, so
+                // a first fetch still running isn't cut short (a stop would
+                // cancel it and take its policy back): the restart waits for
+                // it, and asks again once it's over. Going back to the
+                // device's own key (the wallet was removed) doesn't wait.
+                val running = if (want.isEmpty()) null else lastRun?.takeIf { it.epoch == nodeEpoch.get() && it.running }
+                if (running == null) {
+                    Log.i(TAG, "radicle identity changed → restarting")
+                    // Both queue behind this job on [lifecycle], in this order.
+                    stop()
+                    start()
+                }
+                running
+            } ?: return@launch
+            Log.i(TAG, "radicle identity changed; restarting once the fetch of ${fetch.rid} ends")
+            scope.launch {
+                fetch.join()
+                reloadIdentity()
+            }
         }
     }
 
@@ -348,6 +516,8 @@ class RadicleNode internal constructor(
                         editPendingUnseeds { it - last.rid }
                     }
                 }
+                runningAs = ""
+                runningWalletDid = ""
                 error = runCatching { json(ops.shutdown())?.optString("error").orEmpty() }
                     .getOrElse { it.message ?: it.javaClass.simpleName }
                 nodeEpoch.incrementAndGet()
@@ -596,9 +766,40 @@ class RadicleNode internal constructor(
             RadicleStatus.Starting -> return errorJson("Radicle node is starting", "node-not-ready")
             else -> return errorJson("Radicle node is not running", "node-stopped")
         }
-        return runCatching { ops.call(method, args) }
-            .getOrElse { errorJson(it.message ?: it.javaClass.simpleName, "native-failed") }
+        val asDid = args.optString(AS_DID)
+        if (asDid.isEmpty()) return if (method == "identity") identity() else native(method, args)
+        // A write a site was allowed to make as one identity (#328): refused
+        // if the node now runs as another. The check and the native call
+        // under one hold of [callGate]'s read side, so a restart can't boot
+        // the node as another identity between them. A boot draining the
+        // gate means the node is on its way down or up: not ready.
+        val gate = callGate.readLock()
+        if (!gate.tryLock()) return errorJson("Radicle node is restarting", "node-not-ready")
+        return try {
+            if (asDid != runningAs) errorJson("Radicle identity changed", IDENTITY_CHANGED) else native(method, args)
+        } finally {
+            gate.unlock()
+        }
     }
+
+    /**
+     * The library's `identity`, with [WALLET_IDENTITY]: whether its DID is
+     * the wallet's. Read from the boot that answered, so a label is never
+     * another boot's (a UI's pushed state can lag a restart); an answer
+     * that doesn't match the boot now up is `node-not-ready`.
+     */
+    private fun identity(): String {
+        val raw = native("identity", JSONObject())
+        val o = json(raw) ?: return raw
+        if (o.has("error")) return raw
+        val did = o.optString("did")
+        val wallet = runningWalletDid
+        if (did.isEmpty() || did != runningAs) return errorJson("Radicle node is restarting", "node-not-ready")
+        return o.put(WALLET_IDENTITY, wallet.isNotEmpty() && wallet == did).toString()
+    }
+
+    private fun native(method: String, args: JSONObject): String = runCatching { ops.call(method, args) }
+        .getOrElse { errorJson(it.message ?: it.javaClass.simpleName, "native-failed") }
 
     /**
      * Dial the seed book for generation [gen]. Skipped only while a dial
@@ -656,6 +857,11 @@ class RadicleNode internal constructor(
         internal const val SEED_TIMEOUT_MS = 120_000
         /** How long a stop waits for a cancelled seed to roll back before shutting down anyway. */
         internal const val SEED_STOP_WAIT_MS = 10_000L
+        /**
+         * How long a boot waits for identity-bound writes still running
+         * against the node before it (see [callGate]); past it, the boot fails.
+         */
+        internal const val WRITE_DRAIN_MS = 70_000L
         /** How often an unconfirmed fetch cancel is asked again. */
         internal const val CANCEL_RETRY_MS = 50L
         internal const val PENDING_UNSEED_FILE = "pending-unseed"
@@ -680,6 +886,22 @@ class RadicleNode internal constructor(
             "issues", "issue", "patches", "patch",
             "createIssue", "commentIssue", "editIssueState", "commentPatch",
         )
+
+        /**
+         * An argument [call] takes for any method: the DID the caller
+         * expects the node to run as. The call is refused (`identity-changed`)
+         * if it runs as another. The library ignores it.
+         */
+        const val AS_DID = "asDid"
+
+        /**
+         * In [call]'s `identity` answer: true when the DID is the wallet's
+         * (#328), false for the device's own. Not for pages.
+         */
+        const val WALLET_IDENTITY = "walletIdentity"
+
+        /** [call]'s reason when the node doesn't run as [AS_DID]. */
+        const val IDENTITY_CHANGED = "identity-changed"
 
         internal fun errorJson(message: String, reason: String? = null): String =
             JSONObject().put("error", message).apply { if (reason != null) put("reason", reason) }.toString()

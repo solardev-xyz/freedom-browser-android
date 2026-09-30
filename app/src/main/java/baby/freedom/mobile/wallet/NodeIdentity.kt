@@ -5,10 +5,10 @@ import java.math.BigInteger
 import java.util.Base64
 
 /**
- * The node identities derived from the wallet's recovery phrase (#77) —
- * a cross-platform contract: the same phrase gives the same Swarm
- * account and overlay and the same IPFS PeerID here as on desktop
- * (`identity/derivation.js`, `formats.js`) and iOS.
+ * The node identities derived from the wallet's recovery phrase (#77,
+ * #328) — a cross-platform contract: the same phrase gives the same Swarm
+ * account and overlay, the same IPFS PeerID and the same Radicle DID here
+ * as on desktop (`identity/derivation.js`, `formats.js`) and iOS.
  *
  *  - Swarm: the secp256k1 key at BIP-44 [SWARM_PATH] (desktop's
  *    `BEE_WALLET`). ant gets it as `signing_key` with a 32-zero
@@ -18,6 +18,10 @@ import java.util.Base64
  *  - IPFS: the Ed25519 key at SLIP-0010 [IPFS_PATH]; [peerId] and
  *    [libp2pPrivateKey] are the kubo `Identity.PeerID` / `PrivKey`
  *    desktop writes.
+ *  - Radicle: the Ed25519 key at SLIP-0010 [RADICLE_PATH] (desktop's
+ *    `RADICLE`); [radicleDid] is desktop's `did:key:z6Mk…`. It goes to
+ *    libradicle as the 32-byte secret seed ([radicleSecret]), from
+ *    memory: nothing writes it to the Radicle profile.
  *
  * Holds secrets: [wipe] it when done, and never log it ([toString]
  * prints the public parts only).
@@ -27,9 +31,16 @@ class NodeIdentity internal constructor(
     internal val swarmKey: ByteArray,
     /** 32-byte Ed25519 private key for the IPFS PeerID. */
     internal val ipfsKey: ByteArray,
+    /**
+     * 32-byte Ed25519 private key for the Radicle DID (#328), or null for
+     * keys stored before it was derived ([NodeIdentityStore] version 1).
+     */
+    internal val radicleKey: ByteArray?,
 ) {
     init {
-        require(swarmKey.size == 32 && ipfsKey.size == 32) { "node keys are 32 bytes" }
+        require(swarmKey.size == 32 && ipfsKey.size == 32 && (radicleKey == null || radicleKey.size == 32)) {
+            "node keys are 32 bytes"
+        }
     }
 
     /** The Swarm account's address, EIP-55 checksummed (`0x…`). */
@@ -53,6 +64,18 @@ class NodeIdentity internal constructor(
         val pubProto = byteArrayOf(0x08, 0x01, 0x12, 0x20) + ipfsPublicKey
         Base58.encode(byteArrayOf(0x00, pubProto.size.toByte()) + pubProto)
     }
+
+    /**
+     * Radicle's `did:key:z6Mk…`: `did:key:z` + base58btc of the Ed25519
+     * multicodec (`0xed 0x01`) and the public key; null without a
+     * [radicleKey].
+     */
+    val radicleDid: String? by lazy {
+        radicleKey?.let { "did:key:z" + Base58.encode(byteArrayOf(0xed.toByte(), 0x01) + Ed25519.publicKey(it)) }
+    }
+
+    /** A copy of the Radicle secret seed for libradicle, which the caller zeroes. Secret. */
+    internal fun radicleSecret(): ByteArray? = radicleKey?.copyOf()
 
     /** kubo `Identity.PrivKey`: base64 of the libp2p PrivateKey protobuf (`priv ‖ pub`). Secret. */
     internal fun libp2pPrivateKey(): String {
@@ -83,9 +106,10 @@ class NodeIdentity internal constructor(
     fun wipe() {
         swarmKey.fill(0)
         ipfsKey.fill(0)
+        radicleKey?.fill(0)
     }
 
-    override fun toString(): String = "NodeIdentity(swarm=$swarmAddress, peerId=$peerId)"
+    override fun toString(): String = "NodeIdentity(swarm=$swarmAddress, peerId=$peerId, radicle=$radicleDid)"
 
     companion object {
         /**
@@ -99,11 +123,15 @@ class NodeIdentity internal constructor(
          */
         const val SWARM_PATH = "m/44'/60'/0'/0/1"
         const val IPFS_PATH = "m/44'/73405'/0'/0'/0'"
+        const val RADICLE_PATH = "m/44'/73404'/0'/0'/0'"
         private const val SWARM_NETWORK_ID = 1
 
-        /** Derives both identities from a 64-byte BIP-39 seed (see [Vault.withSeed]). */
-        fun derive(seed: ByteArray): NodeIdentity =
-            NodeIdentity(HdKeys.secp256k1(seed, SWARM_PATH), HdKeys.ed25519(seed, IPFS_PATH))
+        /** Derives every node identity from a 64-byte BIP-39 seed (see [Vault.withSeed]). */
+        fun derive(seed: ByteArray): NodeIdentity = NodeIdentity(
+            HdKeys.secp256k1(seed, SWARM_PATH),
+            HdKeys.ed25519(seed, IPFS_PATH),
+            HdKeys.ed25519(seed, RADICLE_PATH),
+        )
 
         /** EIP-55 mixed-case checksum of a 20-byte address. */
         internal fun checksum(address: ByteArray): String {

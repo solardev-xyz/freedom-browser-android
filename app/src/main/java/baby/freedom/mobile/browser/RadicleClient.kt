@@ -9,6 +9,7 @@ import android.system.StructPollfd
 import android.util.Log
 import baby.freedom.mobile.node.INodeService
 import baby.freedom.swarm.RadicleInfo
+import baby.freedom.swarm.RadicleNode
 import baby.freedom.swarm.RadicleStatus
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Semaphore
@@ -192,6 +193,8 @@ object RadicleClient {
     const val REASON_STOPPED = "node-stopped"
     const val REASON_NOT_READY = "node-not-ready"
     const val REASON_TIMEOUT = "timeout"
+    /** `:node` refused a write made as an identity the node no longer runs as (#328). */
+    const val REASON_IDENTITY_CHANGED = RadicleNode.IDENTITY_CHANGED
 
     /** A read's deadline: storage reads are local, so this is generous. */
     const val READ_TIMEOUT_MS = 30_000L

@@ -222,6 +222,8 @@ class NodeService : Service() {
         override fun reloadIdentity() {
             if (doomed) return
             scope.launch(Dispatchers.IO) { restartSwarmIfStale("node identity changed") }
+            // Radicle too (#328): restarts only if it's up as another identity.
+            radicleNode.reloadIdentity()
         }
 
         override fun setSwarmMode(light: Boolean, gnosisRpc: String?, gnosisUserRpcs: List<String>?, gnosisRpcs: List<String>?) {
@@ -691,11 +693,15 @@ class NodeService : Service() {
         // [INodeService.startRadicle] on every bind while the setting is
         // on (the setting lives in the UI process's DataStore). Its profile
         // lives under files/radicle; the control socket stays there too
-        // unless that path is too long for a unix socket.
+        // unless that path is too long for a unix socket. It runs as the
+        // wallet's Radicle identity (#328) when there is one, handed to
+        // libradicle from memory at each boot; the profile's own key
+        // (kept in files/radicle/keys) otherwise.
         radicleNode = RadicleNode(
             RadicleNode.Config(
                 home = filesDir.resolve("radicle").absolutePath,
                 shortSocketDir = cacheDir.absolutePath,
+                identity = { identityStore.radicle(vaultStore) },
             ),
         )
         radicleObserver = radicleNode.state

@@ -56,10 +56,22 @@ class RadicleProvider(
 ) {
     /** Where grants live: [baby.freedom.mobile.data.RadicleGrantStore] in the app. */
     interface Grants {
-        /** null: not connected; else whether it has the signing tier. */
-        suspend fun signingFor(origin: String): Boolean?
+        /**
+         * null: not connected; else the DID it may sign as (#328), or `""`
+         * for the connection tier only. A signing grant covers only that
+         * identity: the node may since run as another.
+         */
+        suspend fun signingFor(origin: String): String?
         suspend fun connect(origin: String): Boolean
-        suspend fun grantSigning(origin: String): Boolean
+
+        /**
+         * The DID [origin] may sign as, or could before the Radicle identity
+         * changed; null if it never could. Only for the prompt's wording.
+         */
+        suspend fun signedBefore(origin: String): String? = null
+
+        /** Give connected [origin] the signing tier for [did] only. */
+        suspend fun grantSigning(origin: String, did: String): Boolean
         suspend fun revoke(origin: String): Boolean
     }
 
@@ -134,16 +146,16 @@ class RadicleProvider(
         if (method == "radicle_getCapabilities") return Reply.Ok(capabilities(origin))
         if (method == "radicle_requestAccess") return requestAccess(origin, ask)
 
-        val signing = grants.signingFor(origin)
+        val signingAs = grants.signingFor(origin)
             ?: return Reply.Err(UNAUTHORIZED, "Origin not connected. Call radicle_requestAccess first.", "not_connected")
         if (method == "radicle_disconnect") return disconnect(origin)
-        if (method == "radicle_getNodeStatus") return nodeStatus(signing)
+        if (method == "radicle_getNodeStatus") return nodeStatus(signingAs)
         node.unavailableReason()?.let {
             return Reply.Err(UNAVAILABLE, RadicleClient.unavailableMessage(it), it)
         }
         return when (tier) {
             Tier.Connection -> connectionMethod(origin, method, params, ask)
-            Tier.Signing -> signingMethod(origin, method, params, signing, ask)
+            Tier.Signing -> signingMethod(origin, method, params, signingAs, ask)
             Tier.None -> Reply.Err(UNSUPPORTED, "Unknown method: $method")
         }
     }
@@ -186,7 +198,7 @@ class RadicleProvider(
         return Reply.Ok(JSONObject().put("connected", false))
     }
 
-    private suspend fun nodeStatus(signing: Boolean): Reply {
+    private suspend fun nodeStatus(signingAs: String): Reply {
         val info = node.state.value
         val running = node.unavailableReason() == null
         val result = JSONObject().put("running", running).put("status", info.status.name.lowercase())
@@ -199,7 +211,10 @@ class RadicleProvider(
             // The alias is gossiped network-wide; the NID pins the user to
             // one node, so it waits for the signing tier.
             id?.optString("alias")?.takeIf { it.isNotEmpty() }?.let { result.put("alias", it) }
-            if (signing) id?.optString("nid")?.takeIf { it.isNotEmpty() }?.let { result.put("nid", it) }
+            // Only for the identity the site was allowed to know (#328).
+            if (signingAs.isNotEmpty() && id?.optString("did") == signingAs) {
+                id.optString("nid").takeIf { it.isNotEmpty() }?.let { result.put("nid", it) }
+            }
         }
         return Reply.Ok(result)
     }
@@ -381,7 +396,7 @@ class RadicleProvider(
         origin: String,
         method: String,
         params: JSONObject,
-        signing: Boolean,
+        signingAs: String,
         ask: suspend (RadicleAsk) -> Boolean,
     ): Reply {
         // Checked before the prompt: nobody is asked about a write that
@@ -394,20 +409,39 @@ class RadicleProvider(
                 is Validated.Ok -> v
             }
         }
-        if (!signing) {
-            if (!ask(RadicleAsk.Signing(origin))) return rejected()
-            if (!grants.grantSigning(origin)) return Reply.Err(UNAUTHORIZED, "Origin not connected", "not_connected")
+        // The identity the node runs as now. A grant covers only the one it
+        // was given for (#328: the wallet's or the device's own), so a site
+        // allowed to act as the other asks again before it learns this one.
+        var identity = when (val a = callIo("identity", JSONObject())) {
+            is RadicleClient.Answer.Failed -> return nativeError(a, "identity unavailable")
+            is RadicleClient.Answer.Ok -> a.value as? JSONObject
         }
-        if (write == null) {
-            return when (val a = callIo("identity", JSONObject())) {
-                is RadicleClient.Answer.Ok -> Reply.Ok(a.value)
-                is RadicleClient.Answer.Failed -> nativeError(a, "identity unavailable")
+        val did = identity?.optString("did").orEmpty()
+        if (did.isEmpty()) return Reply.Err(INTERNAL, "identity unavailable", "native_failed")
+        if (did != signingAs) {
+            // Name the identity asked about, and say when the site was allowed
+            // another one: allowing this links the two for it.
+            // Whether [did] is the wallet's comes with it from `:node`, not from
+            // the UI's copy of the node state, which lags a restart.
+            val wallet = identity?.optBoolean(RadicleNode.WALLET_IDENTITY) == true
+            val before = previousIdentity(runCatching { grants.signedBefore(origin) }.getOrNull(), did, wallet)
+            if (!ask(RadicleAsk.Signing(origin, did, wallet, before))) return rejected()
+            // The node may have restarted as another identity while the
+            // prompt was up: the grant is for the one the user was asked
+            // about, and only while the node still runs as it.
+            identity = when (val a = callIo("identity", JSONObject())) {
+                is RadicleClient.Answer.Failed -> return nativeError(a, "identity unavailable")
+                is RadicleClient.Answer.Ok -> a.value as? JSONObject
             }
+            if (identity?.optString("did").orEmpty() != did) return identityChanged()
+            if (!grants.grantSigning(origin, did)) return Reply.Err(UNAUTHORIZED, "Origin not connected", "not_connected")
         }
+        if (write == null) return Reply.Ok(JSONObject((identity ?: JSONObject()).toString()).apply { remove(RadicleNode.WALLET_IDENTITY) })
         if (!takeWriteSlot(origin)) {
             return Reply.Err(INTERNAL, "Too many writes; try again in a minute", "rate_limited")
         }
-        val (call, args) = write.call to write.args
+        // `:node` refuses the write if the node has meanwhile restarted as another identity.
+        val (call, args) = write.call to JSONObject(write.args.toString()).put(RadicleNode.AS_DID, did)
         return when (val a = callIo(call, args, RadicleClient.WRITE_TIMEOUT_MS)) {
             is RadicleClient.Answer.Failed -> nativeError(a, "write failed")
             is RadicleClient.Answer.Ok -> {
@@ -415,6 +449,20 @@ class RadicleProvider(
                 if (value?.has("id") == true) Reply.Ok(value) else Reply.Err(INTERNAL, "write failed", "native_failed")
             }
         }
+    }
+
+    /**
+     * What a signing prompt for [did] says the site was allowed before
+     * ([RadicleAsk.Signing.previousDid]), from what it could sign as
+     * ([Grants.signedBefore]): null for nothing, or for [did] itself; `""`
+     * for a grant from before #328 (the device's own identity, DID not
+     * recorded) when [did] is the wallet's — for the device's own it's the
+     * same one again.
+     */
+    private fun previousIdentity(before: String?, did: String, wallet: Boolean): String? = when {
+        before == null || before == did -> null
+        before.isEmpty() -> if (wallet) "" else null
+        else -> before
     }
 
     /** [validateWrite]'s answer: the node call and its arguments, or why the write is refused. */
@@ -539,8 +587,16 @@ class RadicleProvider(
 
     private fun rejected() = Reply.Err(USER_REJECTED, "User rejected the request")
 
+    /**
+     * The node runs as another identity than the one the site was allowed
+     * to act as (#328): nothing was written; the next call asks again.
+     */
+    private fun identityChanged() =
+        Reply.Err(UNAUTHORIZED, "The Radicle identity changed; call again to ask the user", "identity_changed")
+
     /** Desktop's `nativeError`: the node's message, with a reason read off it. */
     private fun nativeError(a: RadicleClient.Answer.Failed, fallback: String): Reply.Err {
+        if (a.reason == RadicleClient.REASON_IDENTITY_CHANGED) return identityChanged()
         if (a.reason == RadicleClient.REASON_STOPPED || a.reason == RadicleClient.REASON_NOT_READY ||
             a.reason == RadicleClient.REASON_DISABLED
         ) {
@@ -614,6 +670,17 @@ sealed interface RadicleAsk {
     /** Stop seeding [rid]. */
     data class Unseed(override val origin: String, val rid: String) : RadicleAsk
 
-    /** The user's Radicle identity, and writing as them. */
-    data class Signing(override val origin: String) : RadicleAsk
+    /**
+     * The user's Radicle identity [did] (the wallet's when [wallet], else
+     * the device's own), and writing as it. [previousDid] is the other
+     * identity the site was allowed to act as before (#328), if any: `""`
+     * when that was the device's own identity, from before grants named
+     * one, whose DID wasn't recorded.
+     */
+    data class Signing(
+        override val origin: String,
+        val did: String = "",
+        val wallet: Boolean = false,
+        val previousDid: String? = null,
+    ) : RadicleAsk
 }
