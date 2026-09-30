@@ -1641,6 +1641,7 @@ fun BrowserScreen(
         showSettings = false
         showNode = false
         showRadicle = false
+        showLogs = null
         showWallet = false
         showTabSwitcher = false
         showHistory = false
