@@ -22,10 +22,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import baby.freedom.mobile.R
 
 /**
  * The URL actions a long-press on the capsule's domain label offers:
@@ -139,7 +141,7 @@ internal fun copyUrlToClipboard(context: Context, url: String) {
     // a toast on top of it would be a second, redundant one. Below that
     // the copy is silent, which reads as the tap having missed.
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-        Toast.makeText(context, "URL copied", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, context.getString(R.string.browser_url_copied), Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -205,7 +207,7 @@ internal fun CapsuleUrlActionsMenu(
             ) {
                 if (canCopy) {
                     DropdownMenuItem(
-                        text = { MenuItemLabel("Copy URL") },
+                        text = { MenuItemLabel(stringResource(R.string.browser_url_copy)) },
                         leadingIcon = {
                             Icon(Icons.Filled.ContentCopy, contentDescription = null)
                         },
@@ -215,7 +217,7 @@ internal fun CapsuleUrlActionsMenu(
                         },
                     )
                     DropdownMenuItem(
-                        text = { MenuItemLabel("Share") },
+                        text = { MenuItemLabel(stringResource(R.string.common_share)) },
                         leadingIcon = { Icon(Icons.Filled.Share, contentDescription = null) },
                         onClick = {
                             onDismiss()
@@ -225,7 +227,7 @@ internal fun CapsuleUrlActionsMenu(
                 }
                 if (canPaste) {
                     DropdownMenuItem(
-                        text = { MenuItemLabel("Paste and go") },
+                        text = { MenuItemLabel(stringResource(R.string.browser_url_paste_and_go)) },
                         leadingIcon = {
                             Icon(Icons.Filled.ContentPaste, contentDescription = null)
                         },

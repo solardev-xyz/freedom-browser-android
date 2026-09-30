@@ -42,6 +42,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
@@ -53,6 +54,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 
 /**
  * What the WebView last reported for a tab's find session:
@@ -92,9 +95,9 @@ internal fun findCountLabel(result: FindResult?): String =
  */
 internal fun findCountSpoken(result: FindResult?): String = when {
     result == null -> ""
-    result.matches == 0 -> "No matches"
-    result.active == 0 -> "${result.matches} matches"
-    else -> "Match ${result.active} of ${result.matches}"
+    result.matches == 0 -> Strings.get(R.string.browser_find_no_matches)
+    result.active == 0 -> Strings.plural(R.plurals.browser_find_matches, result.matches, result.matches)
+    else -> Strings.get(R.string.browser_find_match_of, result.active, result.matches)
 }
 
 /**
@@ -380,7 +383,7 @@ internal fun FindBar(
                         Box(contentAlignment = Alignment.CenterStart) {
                             if (fieldValue.text.isEmpty()) {
                                 Text(
-                                    "Find in page",
+                                    stringResource(R.string.browser_find_in_page),
                                     style = textStyle,
                                     color = colors.onSurfaceVariant,
                                 )
@@ -409,9 +412,9 @@ internal fun FindBar(
                     },
             )
             val canStep = findStepEnabled(find.searching, result)
-            FindBarButton(Icons.Filled.KeyboardArrowUp, "Previous match", canStep) { onStep(false) }
-            FindBarButton(Icons.Filled.KeyboardArrowDown, "Next match", canStep) { onStep(true) }
-            FindBarButton(Icons.Filled.Close, "Close find", true, onClose)
+            FindBarButton(Icons.Filled.KeyboardArrowUp, stringResource(R.string.browser_find_previous_match), canStep) { onStep(false) }
+            FindBarButton(Icons.Filled.KeyboardArrowDown, stringResource(R.string.browser_find_next_match), canStep) { onStep(true) }
+            FindBarButton(Icons.Filled.Close, stringResource(R.string.browser_find_close), true, onClose)
         }
         if (loading) {
             CapsuleLoadTrace(

@@ -13,6 +13,8 @@ import android.webkit.WebViewClient
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import java.io.ByteArrayInputStream
 
 /**
@@ -78,11 +80,11 @@ data class BlockedPopup(
 
 /** What the notice says for [entry], whose address shows as [shown] (null: none to show). */
 internal fun blockedPopupLabel(entry: BlockedPopup, shown: String?): String = when {
-    entry.pending -> "Reading its address…"
-    shown != null && entry.posted -> "A form sent to $shown (its data can't be sent again from here)"
+    entry.pending -> Strings.get(R.string.browser_popup_reading_address)
+    shown != null && entry.posted -> Strings.get(R.string.browser_popup_form_sent_to_long, shown)
     shown != null -> shown
-    entry.unread -> "Its address wasn't read (too many pop-ups at once)"
-    else -> "A blank window (no address to open)"
+    entry.unread -> Strings.get(R.string.browser_popup_address_unread)
+    else -> Strings.get(R.string.browser_popup_blank_window)
 }
 
 /**

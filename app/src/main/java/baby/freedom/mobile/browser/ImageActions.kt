@@ -16,6 +16,7 @@ import android.webkit.MimeTypeMap
 import android.webkit.WebResourceRequest
 import android.widget.Toast
 import androidx.core.content.FileProvider
+import baby.freedom.mobile.R
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -450,7 +451,7 @@ internal suspend fun copyImageToClipboard(context: Context, image: FetchedImage,
     clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "Image", uri))
     // Same rule as [copyUrlToClipboard]: Android 13+ confirms copies itself.
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-        Toast.makeText(context, "Image copied", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, context.getString(R.string.browser_image_copied), Toast.LENGTH_SHORT).show()
     }
     return true
 }
