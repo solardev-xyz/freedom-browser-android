@@ -54,6 +54,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
+import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
@@ -191,14 +192,26 @@ private fun SendLinkNote(prefill: SendPrefill) {
                 ?: stringResource(R.string.send_link_filled),
             style = MaterialTheme.typography.bodyMedium,
         )
-        if (prefill.chainAssumed) {
+        prefill.chainGuess?.let { guess ->
             Text(
-                stringResource(R.string.send_link_chain_assumed),
+                when (guess) {
+                    ChainGuess.ETHEREUM_DEFAULT -> stringResource(R.string.send_link_chain_assumed)
+                    ChainGuess.ONLY_CHAIN_WITH_TOKEN -> stringResource(
+                        R.string.send_link_chain_from_token,
+                        prefillChainName(prefill),
+                    )
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
+}
+
+/** The network [prefill]'s asset is on, by name (its chain ID when Freedom has no name for it). */
+internal fun prefillChainName(prefill: SendPrefill): String {
+    val id = prefill.tokenKey.substringBefore(':')
+    return BuiltInChains.ALL.firstOrNull { it.id.toString() == id }?.name ?: id
 }
 
 /** The block explorer's page for [hash], or null when the chain has no explorer. */

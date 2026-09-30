@@ -563,7 +563,20 @@ fun BrowserScreen(
             scope.launch { snackbarHostState.showSnackbar(text, duration = SnackbarDuration.Long) }
         }
         EthereumLinks.onNotice = notice
-        onDispose { if (EthereumLinks.onNotice === notice) EthereumLinks.onNotice = null }
+        // A link the user's own address redirected to (R1-M1): Send with
+        // no page's ask behind it, as for one typed in — for the tab on
+        // screen only; one the user has since left is dropped.
+        val open: (BrowserState, SendPrefill) -> Unit = { tab, prefill ->
+            if (tabs.active.id == tab.id) {
+                linkSend?.closed()
+                linkSend = LinkSend(prefill, prompt = null)
+            }
+        }
+        EthereumLinks.onOpenSend = open
+        onDispose {
+            if (EthereumLinks.onNotice === notice) EthereumLinks.onNotice = null
+            if (EthereumLinks.onOpenSend === open) EthereumLinks.onOpenSend = null
+        }
     }
     // Any full-screen panel over the browser (they're all opaque).
     val overlayShown = showSettings || showNode || showRadicle || showLogs != null || showWallet || walletRequest != null ||
@@ -2836,6 +2849,7 @@ fun BrowserScreen(
                 },
                 sendLink = linkSend?.prefill,
                 onSendStarted = { linkSend?.started = true },
+                onSendShown = { linkSend?.shown = true },
             )
         }
     }

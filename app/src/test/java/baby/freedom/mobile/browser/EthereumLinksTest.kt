@@ -46,7 +46,7 @@ class EthereumLinksTest {
     @Test
     fun `a link naming no network is filled in as Ethereum, and says so`() {
         assertEquals(
-            SendPrefill(site, "1:native", payee, BigInteger.TEN, chainAssumed = true),
+            SendPrefill(site, "1:native", payee, BigInteger.TEN, chainGuess = ChainGuess.ETHEREUM_DEFAULT),
             send("ethereum:$payee?value=10"),
         )
     }
@@ -64,9 +64,16 @@ class EthereumLinksTest {
         )
         // A known token with no network: the one wallet chain it's on.
         assertEquals(
-            SendPrefill(site, "1:${usdc.lowercase()}", payee, BigInteger("5000000"), chainAssumed = true),
+            SendPrefill(site, "1:${usdc.lowercase()}", payee, BigInteger("5000000"), chainGuess = ChainGuess.ONLY_CHAIN_WITH_TOKEN),
             send("ethereum:$usdc/transfer?address=$payee&uint256=5e6"),
         )
+        // …which may be Gnosis Chain, and the page then names Gnosis Chain, not Ethereum (R1-F1).
+        val gnosisOnly = send("ethereum:$xbzz/transfer?address=$payee&uint256=1e16")
+        assertEquals(
+            SendPrefill(site, "100:${xbzz.lowercase()}", payee, BigInteger("10000000000000000"), chainGuess = ChainGuess.ONLY_CHAIN_WITH_TOKEN),
+            gnosisOnly,
+        )
+        assertEquals("Gnosis Chain", prefillChainName(gnosisOnly))
         assertTrue(refused("ethereum:$xbzz@1/transfer?address=$payee&uint256=1").contains("isn’t one Send knows"))
         assertTrue(refused("ethereum:$payee/transfer?address=$xbzz&uint256=1").contains("which network"))
     }
@@ -144,5 +151,13 @@ class EthereumLinksTest {
         assertNull(externalAppLaunch("ethereum:$payee", "baby.freedom.mobile"))
         assertTrue(isEthereumLink("Ethereum:$payee"))
         assertFalse(isEthereumLink("https://ethereum.org/"))
+    }
+
+    @Test
+    fun `leaving a link's Send page pauses the tab only once the user has seen it`() {
+        assertEquals(EthAnswer.Approved(), linkSendAnswer(started = true, shown = true))
+        assertEquals(EthAnswer.Rejected, linkSendAnswer(started = false, shown = true))
+        // Closed while the wallet was still loading: nothing was turned down (R1-M3).
+        assertEquals(EthAnswer.Unseen, linkSendAnswer(started = false, shown = false))
     }
 }

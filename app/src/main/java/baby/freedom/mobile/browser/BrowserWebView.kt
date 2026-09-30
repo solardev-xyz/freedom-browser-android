@@ -2683,10 +2683,17 @@ private fun buildRefreshableWebView(
         // remembered answer) for the page that asked, then the app is
         // started. An `intent:` no app can take goes to its http(s)
         // fallback instead, as a page navigation would.
-        fun offerExternalLink(view: WebView, pageUrl: String?, tab: BrowserState, url: String, doc: Int) {
+        fun offerExternalLink(view: WebView, pageUrl: String?, tab: BrowserState, url: String, doc: Int, userNamed: Boolean = false) {
             // A payment link (#317): the wallet's Send page, not an app.
+            // One the user's own address answered with (a redirect) is
+            // theirs, as if typed: no ask filed against the page on
+            // screen, which never asked and mustn't be paused for it.
             if (isEthereumLink(url)) {
-                EthereumLinks.fromPage(view.context, tab, pageUrl, doc, url)
+                if (userNamed) {
+                    EthereumLinks.fromUserNamed(view.context, tab, pageUrl, url)
+                } else {
+                    EthereumLinks.fromPage(view.context, tab, pageUrl, doc, url)
+                }
                 return
             }
             val origin = permissionOriginKey(pageUrl)
@@ -3517,7 +3524,7 @@ private fun buildRefreshableWebView(
                         // link — not the page on screen, which didn't ask,
                         // nor the address typed, which may have been an
                         // open redirect to it (#173, R1-F2).
-                        offerExternalLink(askingView, userNamedAsker, state, target, EthereumProviders.currentDocument(state.id))
+                        offerExternalLink(askingView, userNamedAsker, state, target, EthereumProviders.currentDocument(state.id), userNamed = true)
                     } else if (waiting) {
                         askingView.postDelayed({
                             if (latch.giveUp(input, offer)) {

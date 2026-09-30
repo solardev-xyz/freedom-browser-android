@@ -25,8 +25,8 @@ internal fun isEthereumLink(url: String?): Boolean = schemeOf(url) == ETHEREUM_L
  * the page looks up as it does a typed one, #277) and how much ([amount],
  * in the asset's base units; null when the link names none). [origin] is
  * the site whose link it was, null for one the user typed or pasted into
- * the address bar. [chainAssumed]: the link named no network, and
- * Ethereum was filled in for it.
+ * the address bar. [chainGuess]: the link named no network, and which
+ * one was filled in for it, and why (null: the link named it).
  *
  * Only a starting point: every field stays editable, and nothing is sent
  * without the page's own review and confirmation.
@@ -36,8 +36,20 @@ data class SendPrefill(
     val tokenKey: String,
     val recipient: String,
     val amount: BigInteger?,
-    val chainAssumed: Boolean = false,
+    val chainGuess: ChainGuess? = null,
 )
+
+/**
+ * Why a payment link naming no network (#317) was filled in on the one
+ * it was, so the Send page can say so truthfully.
+ */
+enum class ChainGuess {
+    /** A native-currency link: Ethereum, EIP-681's mainnet default (and desktop's reading). */
+    ETHEREUM_DEFAULT,
+
+    /** A token link: the one wallet network Send knows that token on — Gnosis Chain for xBZZ, say. */
+    ONLY_CHAIN_WITH_TOKEN,
+}
 
 /** Where a payment link goes (#317): the Send page, or a sentence saying why not. */
 internal sealed interface EthereumLinkRoute {
@@ -77,8 +89,9 @@ internal fun addressBarEthereumLink(input: String, source: SubmitSource, private
  * refuses, and what Send can't pay: a network other than the wallet's
  * ([TokenRegistry.WALLET_CHAIN_IDS]) or a token it doesn't know. A link
  * naming no network is taken as Ethereum's — desktop's reading, EIP-681's
- * mainnet default — and the page says so ([SendPrefill.chainAssumed]); a
- * token with no network is looked for on the wallet's chains.
+ * mainnet default — and the page says so ([SendPrefill.chainGuess]); a
+ * token with no network is looked for on the wallet's chains, and the page
+ * names the one it was found on.
  */
 internal fun ethereumLinkRoute(url: String, private: Boolean, walletReady: Boolean, origin: String?): EthereumLinkRoute {
     if (private) return EthereumLinkRoute.Refuse(Strings.get(R.string.send_link_private))
@@ -126,7 +139,11 @@ internal fun ethereumLinkRoute(url: String, private: Boolean, walletReady: Boole
             tokenKey = key,
             recipient = payment.recipient,
             amount = payment.amount,
-            chainAssumed = payment.chainId == null,
+            chainGuess = when {
+                payment.chainId != null -> null
+                token == null -> ChainGuess.ETHEREUM_DEFAULT
+                else -> ChainGuess.ONLY_CHAIN_WITH_TOKEN
+            },
         ),
     )
 }
@@ -173,6 +190,29 @@ object EthereumLinks {
         }
     }
 
+    /**
+     * Opens Send for a link the user named themselves, with no page's ask
+     * behind it (the browser's Send page, while composed): the tab and
+     * what to fill in. Main thread.
+     */
+    var onOpenSend: ((BrowserState, SendPrefill) -> Unit)? = null
+
+    /**
+     * The link [url] that the address the user submitted on [tab]
+     * redirected to, from the site [askerUrl] whose hop answered with it
+     * (R1-M1). The user's submit was the tap, so it opens as a link typed
+     * into the address bar does — no ask of the tab's document, which
+     * never asked, and nothing to pause if it's left. Main thread.
+     */
+    fun fromUserNamed(context: Context, tab: BrowserState, askerUrl: String?, url: String) {
+        val origin = permissionOriginKey(askerUrl)
+        when (val route = ethereumLinkRoute(url, tab.private, walletReady(context), origin)) {
+            is EthereumLinkRoute.Refuse -> onNotice?.invoke(route.reason)
+            EthereumLinkRoute.Drop -> Unit
+            is EthereumLinkRoute.OpenSend -> onOpenSend?.invoke(tab, route.prefill)
+        }
+    }
+
     /** A wallet is there to send from, locked or not. */
     fun walletReady(context: Context): Boolean = when (Vault.get(context).state.value) {
         is Vault.State.Locked, is Vault.State.Unlocked -> true
@@ -191,12 +231,24 @@ internal class LinkSend(val prefill: SendPrefill, val prompt: EthereumPromptRequ
     /** A send from the page has started. */
     var started = false
 
+    /** The Send page itself has been on screen (not only the wallet loading behind it). */
+    var shown = false
+
     /**
      * The page is left: the ask is answered — approved if a send went out
-     * from it, else rejected, which pauses the tab's wallet asks until the
-     * user navigates it ([EthereumProviders.allowPrompts]).
+     * from it; rejected if the user saw Send and left it, which pauses the
+     * tab's wallet asks until the user navigates it
+     * ([EthereumProviders.allowPrompts]); and, closed before Send ever
+     * showed, refused without that pause ([EthAnswer.Unseen]).
      */
     fun closed() {
-        prompt?.respond(if (started) EthAnswer.Approved() else EthAnswer.Rejected)
+        prompt?.respond(linkSendAnswer(started, shown))
     }
+}
+
+/** How a payment link's ask is answered when its Send page is left (#317); see [LinkSend.closed]. */
+internal fun linkSendAnswer(started: Boolean, shown: Boolean): EthAnswer = when {
+    started -> EthAnswer.Approved()
+    shown -> EthAnswer.Rejected
+    else -> EthAnswer.Unseen
 }

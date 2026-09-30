@@ -40,6 +40,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -72,6 +73,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
@@ -636,7 +638,10 @@ private fun lostWalletAdvice(
  * Opened for a payment link ([sendLink], #317) it starts on the Send
  * page, filled in from the link, and leaving that page closes the wallet
  * again, back to the page the link was on. [onSendStarted]: a send from
- * that page has started.
+ * that page has started; [onSendShown]: the Send page itself came on
+ * screen. Until the wallet's networks and accounts are read, a link's
+ * page shows only a spinner, never the wallet home; while a feature's
+ * [request] is up the home page shows for it, and Send comes back after.
  */
 @Composable
 fun WalletScreen(
@@ -646,6 +651,7 @@ fun WalletScreen(
     onDismiss: () -> Unit,
     sendLink: SendPrefill? = null,
     onSendStarted: () -> Unit = {},
+    onSendShown: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val vault = remember(context) { Vault.get(context) }
@@ -870,10 +876,23 @@ fun WalletScreen(
         return
     }
     val sendFrom = accountList?.active
-    // A link's page waits for the networks: its asset is looked up among them.
-    if (sending && sendFrom != null && (state is Vault.State.Locked || state is Vault.State.Unlocked) &&
+    // A link's Send page stays the page for as long as the link is open,
+    // except while a feature's request needs the home page: `sending`,
+    // which that request clears, would otherwise never bring it back (R1-M2).
+    val linkSending = sendLink != null && request == null
+    // A link's page waits for the account and the networks (its asset is
+    // looked up among them) on a spinner of its own, not the wallet home,
+    // whose ✕ would read as turning the link down (R1-M3).
+    if (linkSending && (state is Vault.State.Locked || state is Vault.State.Unlocked) &&
+        (sendFrom == null || walletChains == null)
+    ) {
+        LinkSendLoading(onBack = onDismiss)
+        return
+    }
+    if ((sending || linkSending) && sendFrom != null && (state is Vault.State.Locked || state is Vault.State.Unlocked) &&
         (sendLink == null || walletChains != null)
     ) {
+        if (sendLink != null) LaunchedEffect(sendLink) { onSendShown() }
         SendPage(
             account = sendFrom,
             chains = walletChains.orEmpty(),
@@ -2135,5 +2154,16 @@ private fun PhraseWord(
         )
         Spacer(Modifier.width(PHRASE_NUMBER_GAP))
         Text(word, style = wordStyle)
+    }
+}
+
+/** A payment link's Send page (#317) while the wallet reads its account and networks. */
+@Composable
+private fun LinkSendLoading(onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    FullScreenScaffold(title = stringResource(R.string.send_title), onDismiss = onBack) {
+        Box(Modifier.fillMaxSize().testTag("send-link-loading"), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
     }
 }

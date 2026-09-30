@@ -350,4 +350,5 @@
     <string name="send_link_filled_from_site">Filled in from a payment link on %1$s. Check every field before you review.</string>
     <string name="send_link_filled">Filled in from a payment link. Check every field before you review.</string>
     <string name="send_link_chain_assumed">The link doesn’t name a network, so Ethereum is filled in. Pick another asset if the payment is meant for another network.</string>
+    <string name="send_link_chain_from_token">The link doesn’t name a network. %1$s is filled in: it’s the only network Send knows this token on. Check the payment is meant for it.</string>
 </resources>

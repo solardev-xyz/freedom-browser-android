@@ -372,7 +372,7 @@ object EthereumProviders {
                 pending[tab.id]?.remove(request)
                 if (tab.ethereumPrompt === request) tab.ethereumPrompt = null
             }
-            if (answer !is EthAnswer.Approved && live()) blockedTabs += tab.id
+            if (answer !is EthAnswer.Approved && answer != EthAnswer.Unseen && live()) blockedTabs += tab.id
             if (live()) answer else EthAnswer.Rejected
         }
     }

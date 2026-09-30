@@ -112,6 +112,13 @@ sealed interface EthAnswer {
     data object Paused : EthAnswer
 
     /**
+     * Left before it was ever shown (#317): a payment link's Send page
+     * closed while it was still loading. Refused like [Rejected], but the
+     * user turned nothing down, so the tab isn't paused.
+     */
+    data object Unseen : EthAnswer
+
+    /**
      * [account]: the one the user picked to share, for [EthAsk.Connect];
      * [payment]: the offer picked and any allowance granted, for [EthAsk.Payment];
      * [alwaysApprove]: for [EthAsk.SendTransaction], also turn its
