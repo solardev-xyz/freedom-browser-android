@@ -116,30 +116,61 @@ data class ChainAccessPolicy(
 }
 
 /**
- * Who is asking. A page-driven read (a dapp's `eth_call`, a `web3://`
- * app) names the page's origin; the wallet's own reads name none. Only a
- * page-driven read trades verification for latency ([ChainDataRouter.INTERACTIVE_DEADLINE_MS]):
- * nobody is waiting on a frame for the wallet's.
+ * Who is asking. A site's read names the site's origin; the wallet's own
+ * reads name none. Two separate things follow from it:
+ *
+ * - [site]: the read is of something a site chose, so it mustn't cost the
+ *   wallet's own reads anything shared in the proof tiers — it gets a
+ *   site's share of their slots, and its miss or failure never backs a
+ *   tier off on its own ([VerifiedChainSource.request]).
+ * - [interactive]: a page is waiting on a frame for it, so it trades
+ *   verification for latency ([ChainDataRouter.INTERACTIVE_DEADLINE_MS]).
+ *   Only a page-driven read ([forPage]: a dapp's `eth_call`, a `web3://`
+ *   app) is; a read the wallet makes *about* a site's choice
+ *   ([forSiteChoice]: an x402 offer's token contract) keeps the chain's
+ *   full timeout, since it needs a verified answer, not a fast one
+ *   (#329 R5-F1).
  */
-class RoutingContext private constructor(val origin: String?) {
-    val interactive: Boolean get() = origin != null
+class RoutingContext private constructor(
+    val origin: String?,
+    val interactive: Boolean,
+) {
+    val site: Boolean get() = origin != null
 
-    override fun equals(other: Any?) = other is RoutingContext && other.origin == origin
-    override fun hashCode() = origin.hashCode()
-    override fun toString() = "RoutingContext(${origin ?: "wallet"})"
+    override fun equals(other: Any?) =
+        other is RoutingContext && other.origin == origin && other.interactive == interactive
+    override fun hashCode() = origin.hashCode() * 31 + interactive.hashCode()
+    override fun toString() = when {
+        origin == null -> "RoutingContext(wallet)"
+        interactive -> "RoutingContext($origin)"
+        else -> "RoutingContext($origin, not interactive)"
+    }
 
     companion object {
-        val WALLET = RoutingContext(null)
+        val WALLET = RoutingContext(null, interactive = false)
 
         /**
-         * Desktop's `normalizeRoutingOrigin`: trimmed, non-empty, at most
-         * 2048 characters, no control characters — anything else counts
-         * as the wallet's own read.
+         * A page's own read. The origin is desktop's
+         * `normalizeRoutingOrigin`: trimmed, non-empty, at most 2048
+         * characters, no control characters — anything else counts as the
+         * wallet's own read.
          */
-        fun forPage(origin: String?): RoutingContext {
+        fun forPage(origin: String?): RoutingContext =
+            normalize(origin)?.let { RoutingContext(it, interactive = true) } ?: WALLET
+
+        /**
+         * The wallet's read of something site [origin] chose (an x402
+         * offer's token contract): the site's for the proof tiers' slots
+         * and back-off, but not a page's latency trade — it waits for
+         * verification as long as the wallet's own reads do.
+         */
+        fun forSiteChoice(origin: String?): RoutingContext =
+            normalize(origin)?.let { RoutingContext(it, interactive = false) } ?: WALLET
+
+        private fun normalize(origin: String?): String? {
             val t = origin?.trim()
-            if (t.isNullOrEmpty() || t.length > 2048 || t.any { it.code <= 31 || it.code == 127 }) return WALLET
-            return RoutingContext(t)
+            if (t.isNullOrEmpty() || t.length > 2048 || t.any { it.code <= 31 || it.code == 127 }) return null
+            return t
         }
     }
 }
@@ -208,8 +239,8 @@ interface VerifiedChainSource {
      * the state it proves from them. Throw [ChainRpcException.Rpc] with
      * `deterministic` set for an answer that is itself an error (a
      * revert); anything else thrown means "couldn't answer", and the walk
-     * moves on. [context] says whose read it is: a page's
-     * ([RoutingContext.interactive]) is one the page chose, and mustn't
+     * moves on. [context] says whose read it is: a site's
+     * ([RoutingContext.site]) is one the site chose, and mustn't
      * cost the wallet's own reads anything shared (a back-off, slots).
      */
     suspend fun request(

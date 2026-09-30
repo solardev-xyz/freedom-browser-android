@@ -22,7 +22,7 @@ import org.json.JSONTokener
  * one that doesn't exist, so that `null` is never passed on as a
  * verified "no"). Those move on to the next tier. Never broadcasts.
  *
- * A page's read ([RoutingContext.interactive]) is sent as one: the
+ * A site's read ([RoutingContext.site]) is sent as a page's: the
  * router stops waiting for it after 2 s, but the engine can't cancel a
  * started read, so the service keeps it to a share of its slots
  * ([IMyotisService.read]'s `page`) and a site looping slow calls can't
@@ -32,7 +32,7 @@ internal class MyotisChainSource(private val link: Link = Link.Default) : Verifi
     /** The light client as this source sees it; a seam for tests. */
     interface Link {
         fun isReady(chainId: Long): Boolean
-        /** [page]: a site's read ([RoutingContext.interactive]), which the service gives fewer slots. */
+        /** [page]: a site's read ([RoutingContext.site]), which the service gives fewer slots. */
         suspend fun read(chainId: Long, method: String, paramsJson: String, page: Boolean): String
 
         object Default : Link {
@@ -59,7 +59,7 @@ internal class MyotisChainSource(private val link: Link = Link.Default) : Verifi
     ): ChainDataResult {
         if (method !in MyotisReads.METHODS) throw Unanswered("the light client doesn't serve $method")
         val reply = try {
-            JSONTokener(link.read(chainId, method, params.toString(), context.interactive)).nextValue() as? JSONObject
+            JSONTokener(link.read(chainId, method, params.toString(), context.site)).nextValue() as? JSONObject
         } catch (_: Exception) {
             null
         } ?: throw Unanswered("unexpected answer from the light client")

@@ -22,6 +22,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -399,12 +400,41 @@ class ChainDataRouterTest {
     }
 
     @Test
+    fun aSitesChoiceReadWaitsForTheQuorumLikeTheWallets() = runTest {
+        // An x402 offer's token contract, read for the site
+        // (forSiteChoice): the site's for the proof tiers, but not a
+        // page's 2 s latency trade — only a verified decimals() counts, so
+        // on RPCs slower than 2 s it must still reach the quorum
+        // (#329 R5-F1). A page's own read of the same falls through.
+        val net = Net()
+        listOf(a, b, c, d).forEach { url -> net.handlers[url] = { delay(2_500); ok("0x6") } }
+        val policy: (Chain) -> ChainAccessPolicy = { ChainAccessPolicy(listOf(ChainSource.QUORUM, ChainSource.DIRECT), listOf(ChainSource.DIRECT), timeoutMs = 5_000) }
+
+        val choice = router(net, listOf(chain()), policy)
+            .request(137, "eth_blockNumber", context = RoutingContext.forSiteChoice("https://pay.example"))
+        assertEquals(ChainSource.QUORUM, choice.trust.source)
+        assertEquals(ChainTrust.Level.VERIFIED, choice.trust.level)
+
+        val page = router(net, listOf(chain()), policy)
+            .request(137, "eth_blockNumber", context = RoutingContext.forPage("https://pay.example"))
+        assertEquals(ChainSource.DIRECT, page.trust.source)
+        assertEquals(ChainTrust.Level.UNVERIFIED, page.trust.level)
+    }
+
+    @Test
     fun routingContextNormalizesOrigins() {
         assertEquals(RoutingContext.WALLET, RoutingContext.forPage(null))
         assertEquals(RoutingContext.WALLET, RoutingContext.forPage("  "))
         assertEquals(RoutingContext.WALLET, RoutingContext.forPage("https://a\u0000b"))
         assertEquals(RoutingContext.WALLET, RoutingContext.forPage("x".repeat(2049)))
         assertEquals("https://app.example", RoutingContext.forPage(" https://app.example ").origin)
+        assertEquals(RoutingContext.WALLET, RoutingContext.forSiteChoice("  "))
+        val choice = RoutingContext.forSiteChoice(" https://app.example ")
+        assertEquals("https://app.example", choice.origin)
+        assertTrue("a site's for the proof tiers", choice.site)
+        assertFalse("but no page is waiting on a frame", choice.interactive)
+        assertTrue(RoutingContext.forPage("https://app.example").interactive)
+        assertNotEquals(RoutingContext.forPage("https://app.example"), choice)
     }
 
     // ---- verified sources ----
@@ -581,7 +611,7 @@ class ChainDataRouterTest {
             transport = net.transport,
             verifiedSources = mapOf(ChainSource.COLIBRI to colibri),
         )
-        val site = WalletRpc(r, RoutingContext.forPage("https://pay.example"))
+        val site = WalletRpc(r, RoutingContext.forSiteChoice("https://pay.example"))
         val wallet = WalletRpc(r)
         try {
             val decimals = site.call(100, JSONObject().put("to", "0x" + "11".repeat(20)).put("data", "0x313ce567"))

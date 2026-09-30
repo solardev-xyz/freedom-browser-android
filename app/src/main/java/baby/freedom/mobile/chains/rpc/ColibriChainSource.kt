@@ -53,8 +53,8 @@ import org.json.JSONObject
  * read not checking out doesn't count: it says nothing about the others.
  *
  * Only the wallet's and the Swarm node's own reads count directly. A
- * page's read ([RoutingContext.interactive]: `window.ethereum`,
- * `web3://`) is one the page chose — a call that takes the prover long
+ * site's read ([RoutingContext.site]: `window.ethereum`, `web3://`,
+ * an x402 offer's token contract) is one the site chose — a call that takes the prover long
  * to prove, or never proves, under a 2 s wait — so its miss or failure
  * proves nothing about the prover, and on its own would let any site
  * take the tier away from the wallet. It only asks for a **canary**: a
@@ -124,7 +124,7 @@ internal class ColibriChainSource(
         // A page's read gets only a share of the slots (see the class
         // kdoc), taken before the shared one so a page at its share never
         // holds a shared slot even for a moment.
-        val page = context.interactive
+        val page = context.site
         if (page && pagesInFlight.incrementAndGet() > maxPageInFlight) {
             pagesInFlight.decrementAndGet()
             throw Unanswered("Colibri is busy with sites' reads")
@@ -141,7 +141,7 @@ internal class ColibriChainSource(
         fun failed() {
             if (!counted.compareAndSet(false, true)) return
             // A page's read only asks the canary (see the class kdoc).
-            if (context.interactive) canary(chainId, rpcs) else backoff.failed()
+            if (context.site) canary(chainId, rpcs) else backoff.failed()
         }
         val blockNumber = method == "eth_blockNumber"
         val call = scope.async {

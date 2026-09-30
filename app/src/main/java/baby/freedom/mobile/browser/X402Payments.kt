@@ -285,9 +285,10 @@ object X402Payments {
             val chains = ChainStore.get(app).chainsOrUnreadable.first().orEmpty()
             // The offers' token contracts are the site's choice: read as the site's reads, so
             // one it makes slow to prove can't back the proof tiers off, or take their slots,
-            // from the wallet's own reads (#329 R4-F1). Still only a verified answer counts
-            // ([tokenReadTrusted]).
-            val rpc = WalletRpc(ChainDataRouter.get(app), RoutingContext.forPage(d.origin))
+            // from the wallet's own reads (#329 R4-F1). But not as a page's latency trade: only
+            // a verified answer counts ([tokenReadTrusted]), so they wait for the quorum as long
+            // as the wallet's own reads do, not a page's 2 s (#329 R5-F1).
+            val rpc = WalletRpc(ChainDataRouter.get(app), RoutingContext.forSiteChoice(d.origin))
             val (options, unreadable) = options(d.required, chains, rpc, account?.address)
             val unusable = d.required.unusable + unreadable
             val allowances = store.allowances.first()

@@ -20,9 +20,11 @@ class WalletRpc(
     /**
      * Whose reads these are: the wallet's own by default. A read of
      * something a site chose — an x402 offer's token contract — is the
-     * site's ([RoutingContext.forPage]), so a slow or unprovable contract
+     * site's ([RoutingContext.forSiteChoice]), so a slow or unprovable contract
      * of its choosing gets a page's share of the proof tiers' slots and
-     * can't back them off for the wallet's own reads (#329 R4-F1).
+     * can't back them off for the wallet's own reads (#329 R4-F1) —
+     * while still waiting the chain's full timeout for a verified answer,
+     * not a page's 2 s (#329 R5-F1).
      */
     private val context: RoutingContext = RoutingContext.WALLET,
 ) {

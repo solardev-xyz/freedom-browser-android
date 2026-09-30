@@ -116,7 +116,7 @@ class WalletRpcTest {
         )
         val tx = JSONObject().put("to", "0x" + "11".repeat(20)).put("data", "0x313ce567")
         WalletRpc(router).call(100, tx)
-        WalletRpc(router, RoutingContext.forPage("https://pay.example")).call(100, tx)
-        assertEquals(listOf(RoutingContext.WALLET, RoutingContext.forPage("https://pay.example")), seen.toList())
+        WalletRpc(router, RoutingContext.forSiteChoice("https://pay.example")).call(100, tx)
+        assertEquals(listOf(RoutingContext.WALLET, RoutingContext.forSiteChoice("https://pay.example")), seen.toList())
     }
 }
