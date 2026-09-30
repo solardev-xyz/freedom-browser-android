@@ -329,7 +329,12 @@ class TorRoutingTest {
             listOf("socks5://[::1]:9150"),
             TorRouting.proxyConfigFor(v6).proxyRules.map { it.url },
         )
-        assertEquals(TorRouting.CODE_PROXY_DOWN, TorRouting.refusalCode(true, true, external = true))
+        assertEquals(
+            TorRouting.CODE_PROXY_DOWN,
+            TorRouting.refusalCode(true, true, external = true, externalRunning = true),
+        )
+        // Tor stopped (or never started): nothing checked the proxy (#305 R1-M1).
+        assertEquals(TorRouting.CODE_NOT_RUNNING, TorRouting.refusalCode(true, true, external = true))
         assertEquals(TorRouting.CODE_OFF, TorRouting.refusalCode(true, false, external = true))
         val down = TorRouting.refusalHtml(onion, TorRouting.CODE_PROXY_DOWN, TorInfo(), orbot)
         assertTrue(down.contains("<h1>Tor proxy isn't reachable</h1>"))
@@ -548,7 +553,7 @@ class TorRoutingTest {
             TorRouting.setExternal(context, orbot, confirmed = true)
             assertEquals(TorRouting.CODE_PROXY_CHECKING, TorRouting.documentRefusalCode())
             // A verdict: the proxy page, as before.
-            TorRouting.setExternal(context, orbot, confirmed = false)
+            TorRouting.setExternal(context, orbot, confirmed = false, running = true)
             assertEquals(TorRouting.CODE_PROXY_DOWN, TorRouting.documentRefusalCode())
             TorRouting.setEnabled(context, false)
             assertEquals(TorRouting.CODE_OFF, TorRouting.documentRefusalCode())
@@ -568,6 +573,42 @@ class TorRoutingTest {
         // Only that page refreshes.
         val down = TorRouting.refusalHtml(onion, TorRouting.CODE_PROXY_DOWN, TorInfo(), orbot)
         assertFalse(down.contains("http-equiv=\"refresh\""))
+    }
+
+    @Test
+    fun `an external proxy's Tor switched off (or never started) is "not running", not "no Tor client answers"`() {
+        // R1-M1: stopping Tor on the Nodes page publishes the proxy with no
+        // check pending and none running; nothing asked the proxy, so the
+        // page says what the embedded client's would.
+        val context = android.content.ContextWrapper(null)
+        val real = TorRouting.setOverride
+        TorRouting.setOverride = { _, _, done -> done.run() }
+        val orbot = SocksEndpoint("127.0.0.1", 9050)
+        try {
+            TorRouting.resetForTest(supported = true)
+            TorRouting.setEnabled(context, true)
+            // Settings loaded, Tor not started at launch.
+            TorRouting.setExternal(context, orbot, confirmed = false)
+            assertEquals(TorRouting.CODE_NOT_RUNNING, TorRouting.documentRefusalCode())
+            // Started, and the check found nothing there.
+            TorRouting.setExternal(context, orbot, confirmed = false, running = true)
+            assertEquals(TorRouting.CODE_PROXY_DOWN, TorRouting.documentRefusalCode())
+            // Stopped on the Nodes page (MainActivity.stopExternalTor).
+            TorRouting.setExternal(context, orbot, confirmed = false)
+            assertEquals(TorRouting.CODE_NOT_RUNNING, TorRouting.documentRefusalCode())
+            // A stale embedded error doesn't reach the external page.
+            TorRouting.onState(context, TorInfo(status = TorStatus.Error, errorMessage = "arti failed"))
+            val page = TorRouting.documentRefusalHtml(onion)
+            assertTrue(page.contains("<h1>Tor isn't running</h1>"))
+            assertTrue(page.contains("Nodes page"))
+            assertFalse(page.contains("no Tor client"))
+            assertFalse(page.contains("Orbot"))
+            assertFalse(page.contains("arti failed"))
+            assertFalse(page.contains("couldn't start"))
+        } finally {
+            TorRouting.setOverride = real
+            TorRouting.resetForTest(supported = null)
+        }
     }
 
     @Test
@@ -592,7 +633,7 @@ class TorRoutingTest {
             TorRouting.setExternal(context, orbot, confirmed = false, pending = true)
             assertEquals(TorRouting.CODE_PROXY_CHECKING, TorRouting.documentRefusalCode())
             // Idle means nothing without a pending verdict.
-            TorRouting.setExternal(context, orbot, confirmed = false, idle = true)
+            TorRouting.setExternal(context, orbot, confirmed = false, idle = true, running = true)
             assertEquals(TorRouting.CODE_PROXY_DOWN, TorRouting.documentRefusalCode())
         } finally {
             TorRouting.setOverride = real

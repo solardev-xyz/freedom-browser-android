@@ -1219,7 +1219,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     ) {
         if (proxy != torProxy || !torRunning) return
         torInfoFlow.value = info
-        TorRouting.setExternal(this, proxy, confirmed, unreached, pending, idle)
+        TorRouting.setExternal(this, proxy, confirmed, unreached, pending, idle, running = true)
     }
 
     private fun stopExternalTor() {

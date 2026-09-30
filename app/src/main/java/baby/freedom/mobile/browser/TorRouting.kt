@@ -156,6 +156,17 @@ object TorRouting {
     private var externalIdle = false
 
     /**
+     * Whether Tor runs with [external] as its client — started from the
+     * Nodes page or at launch, and not stopped since. While it doesn't,
+     * nothing checks the proxy, so a refused onion document hears "Tor
+     * isn't running" ([CODE_NOT_RUNNING]), as with the embedded client,
+     * not "no Tor client answers" ([CODE_PROXY_DOWN]) about a proxy no one
+     * asked (#305 R1-M1).
+     */
+    @Volatile
+    private var externalRunning = false
+
+    /**
      * Open until [settingsLoaded]: Settings → Tor (on/off, the client) and
      * whether Tor starts at launch haven't been read yet. [refusalFor]
      * waits for it (bounded, [SETTINGS_WAIT_MS]), so an onion link that
@@ -276,8 +287,9 @@ object TorRouting {
      * its last check found Tor there that couldn't reach onion sites
      * ([TorProxy.Watch.unreached]); [pending] while its verdict is
      * awaited ([externalPending]): onion requests wait for it; [idle] when
-     * that verdict waits for the Activity to start again ([externalIdle]).
-     * Main thread.
+     * that verdict waits for the Activity to start again ([externalIdle]);
+     * [running] while Tor runs with it as its client ([externalRunning]),
+     * false once stopped (or before it's started). Main thread.
      */
     fun setExternal(
         context: Context,
@@ -286,8 +298,10 @@ object TorRouting {
         unreached: Boolean = false,
         pending: Boolean = false,
         idle: Boolean = false,
+        running: Boolean = false,
     ) {
         external = proxy
+        externalRunning = proxy != null && running
         externalConfirmed = proxy != null && confirmed
         externalUnreached = proxy != null && unreached
         externalPending = proxy != null && !confirmed && pending
@@ -351,6 +365,7 @@ object TorRouting {
         externalUnreached = false
         externalPending = false
         externalIdle = false
+        externalRunning = false
         settingsKnown = CountDownLatch(0)
         held.set(0)
         routed = null
@@ -489,16 +504,23 @@ object TorRouting {
                 "text/plain", "utf-8", 502, "Tor Not Running", headers, ByteArrayInputStream(ByteArray(0)),
             )
         }
-        val proxy = external
         val code = documentRefusalCode()
         refusedDocument(code, req.isForMainFrame)
         return WebResourceResponse(
             "text/html", "utf-8", 503, "Tor Not Running",
             headers + (NAME_RESOLUTION_ERROR_HEADER to code),
-            ByteArrayInputStream(
-                refusalHtml(uri.host.orEmpty(), code, info, proxy, externalUnreached).toByteArray(Charsets.UTF_8),
-            ),
+            ByteArrayInputStream(documentRefusalHtml(uri.host.orEmpty(), code).toByteArray(Charsets.UTF_8)),
         )
+    }
+
+    /**
+     * The refusal page for [host] with [code]: in external mode without the
+     * embedded client's state, which says nothing about the external one
+     * (a stale "Tor couldn't start" from Arti, #305 R1-M1).
+     */
+    internal fun documentRefusalHtml(host: String, code: String = documentRefusalCode()): String {
+        val proxy = external
+        return refusalHtml(host, code, if (proxy != null) TorInfo() else info, proxy, externalUnreached)
     }
 
     /**
@@ -510,7 +532,7 @@ object TorRouting {
      * else [refusalCode]'s.
      */
     internal fun documentRefusalCode(): String = when {
-        !awaitingExternal() -> refusalCode(supported, enabled, external != null)
+        !awaitingExternal() -> refusalCode(supported, enabled, external != null, externalRunning)
         externalIdle -> CODE_PROXY_PAUSED
         else -> CODE_PROXY_CHECKING
     }
@@ -665,10 +687,22 @@ object TorRouting {
             .setReverseBypassEnabled(true)
             .build()
 
-    internal fun refusalCode(supported: Boolean?, enabled: Boolean, external: Boolean = false): String = when {
+    /**
+     * The refusal page code with no external check pending: an [external]
+     * proxy's [CODE_PROXY_DOWN] only while Tor runs with it
+     * ([externalRunning]) — stopped (or not started), it's "Tor isn't
+     * running" as with the embedded client: nothing checked the proxy
+     * (#305 R1-M1).
+     */
+    internal fun refusalCode(
+        supported: Boolean?,
+        enabled: Boolean,
+        external: Boolean = false,
+        externalRunning: Boolean = false,
+    ): String = when {
         supported == false -> CODE_UNSUPPORTED
         !enabled -> CODE_OFF
-        external -> CODE_PROXY_DOWN
+        external && externalRunning -> CODE_PROXY_DOWN
         else -> CODE_NOT_RUNNING
     }
 
@@ -707,8 +741,7 @@ object TorRouting {
         } else "Tor proxy isn't reachable" to
             "This is an onion site, reachable only over Tor. Freedom sends onion sites to the Tor " +
             "proxy at <code>${proxy ?: "(not set)"}</code> (Settings &rarr; Tor), and no Tor client " +
-            "answers there right now. Start Orbot (or your Tor app), and Tor on the Nodes page, then " +
-            "try again. Freedom never opens onion sites without Tor."
+            "answers there right now. Start Orbot (or your Tor app), then try again. Freedom never opens onion sites without Tor."
         CODE_OFF -> "Tor is off" to
             "This is an onion site, reachable only over Tor. Turn on Tor in Settings &rarr; Tor " +
             "and start it, then try again. Only <code>.onion</code> sites use Tor; every other " +
