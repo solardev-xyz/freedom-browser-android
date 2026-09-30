@@ -231,4 +231,35 @@ class PopupBlockerTest {
         assertFalse(FullyInView.wholly(300f, androidx.compose.ui.geometry.Rect(0f, 250f, 100f, 340f)))
         assertFalse(FullyInView.wholly(300f, androidx.compose.ui.geometry.Rect(0f, -20f, 100f, 60f)))
     }
+
+    @Test
+    fun `a row taller than the scrolled area counts once all of it has been in view`() {
+        // #292 R6-M1: a 500 px row in a 270 px area can never be wholly
+        // inside it; scrolling through it end to end is what counts.
+        fun box(top: Float) = androidx.compose.ui.geometry.Rect(0f, top, 100f, top + 500f)
+        var seen = FullyInView.Seen.after(null, 270f, box(0f))!!
+        assertFalse(seen.all)
+        seen = FullyInView.Seen.after(seen, 270f, box(-150f))!!
+        assertFalse(seen.all)
+        seen = FullyInView.Seen.after(seen, 270f, box(-230f))!!
+        assertTrue(seen.all)
+        // Scrolled away again: still seen.
+        assertTrue(FullyInView.Seen.after(seen, 270f, box(400f))!!.all)
+        // Its height changed (new contents): starts over.
+        val taller = androidx.compose.ui.geometry.Rect(0f, -230f, 100f, 290f)
+        assertFalse(FullyInView.Seen.after(seen, 270f, taller)!!.all)
+    }
+
+    @Test
+    fun `a jump that skips part of a tall row doesn't count that part as seen`() {
+        fun box(top: Float) = androidx.compose.ui.geometry.Rect(0f, top, 100f, top + 900f)
+        // Top 0..270 seen, then a jump to 630..900: 270..630 never shown.
+        val top = FullyInView.Seen.after(null, 270f, box(0f))
+        val jumped = FullyInView.Seen.after(top, 270f, box(-630f))!!
+        assertFalse(jumped.all)
+        assertEquals(630f, jumped.from)
+        // Out of view entirely: nothing new, nothing lost.
+        assertEquals(jumped, FullyInView.Seen.after(jumped, 270f, box(300f)))
+        assertEquals(null, FullyInView.Seen.after(null, 270f, box(300f)))
+    }
 }
