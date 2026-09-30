@@ -130,15 +130,25 @@ class WalletScreenTest {
     }
 
     @Test
-    fun `only a phrase-sized paste may be cleared unread (#241)`() {
+    fun `a word the keyboard puts in is no paste, and only a phrase-sized paste may be cleared unread (#241)`() {
         val pastes = PastedPhrases()
-        // Swipe typing and keyboard suggestions insert a word at a time.
-        pastes.add(listOf("abandon"))
-        pastes.add(listOf("abandon", "ability"))
-        pastes.add(emptyList())
-        assertEquals(2, pastes.words.size)
+        // Swipe typing and keyboard suggestions insert a word at a time:
+        // no paste at all, so leaving the page never reads the clipboard.
+        pastes.add("abandon")
+        pastes.add("ability ")
+        pastes.add(" about")
+        pastes.add("")
+        pastes.add("…")
+        assertTrue(pastes.words.isEmpty())
         assertFalse(pastes.clipIsPaste)
-        pastes.add(clipWords(twelve))
+        // Two words at once are a paste, but no phrase-sized one.
+        pastes.add("abandon ability")
+        assertEquals(1, pastes.words.size)
+        assertFalse(pastes.clipIsPaste)
+        pastes.add(twelve.replace(" ", ","))
+        assertTrue(pastes.clipIsPaste)
+        pastes.forget()
+        pastes.add(twelve)
         assertTrue(pastes.clipIsPaste)
         pastes.forget()
         assertTrue(pastes.words.isEmpty())

@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
 import android.content.ClipboardManager
 import androidx.activity.ComponentActivity
@@ -16,10 +17,12 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.wallet.Mnemonic
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -53,6 +56,23 @@ class ImportPhraseClipboardTest {
 
     private fun setClip(text: String) = rule.runOnIdle {
         clipboard.setPrimaryClip(ClipData.newPlainText("Notes", text))
+    }
+
+    /**
+     * When Freedom last read the clipboard, as the system records it
+     * (`READ_CLIPBOARD`, the app op Android's "pasted from your clipboard"
+     * notice is shown for): a typed phrase must never cause one. The
+     * record's absolute times only, so two looks with no read between
+     * them agree.
+     */
+    private fun lastClipboardRead(): String {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val pkg = instrumentation.targetContext.packageName
+        val out = instrumentation.uiAutomation.executeShellCommand("dumpsys appops --package $pkg")
+        val text = android.os.ParcelFileDescriptor.AutoCloseInputStream(out).use { it.readBytes().decodeToString() }
+        // "READ_CLIPBOARD (allow):\n  null=[\n    Access: [top-s] 2026-09-30 02:46:10.958 (-2s21ms)\n  ]"
+        val section = text.substringAfter("READ_CLIPBOARD (", "").substringBefore("]\n", "")
+        return Regex("""Access: \[[^]]*]\s*(\S+ \S+)""").findAll(section).joinToString { it.groupValues[1] }
     }
 
     /** The page, with an import that never completes: like a cancelled or failed authentication. */
@@ -131,10 +151,10 @@ class ImportPhraseClipboardTest {
     }
 
     /**
-     * Freedom losing window focus with the page up, as on Home or another
-     * app coming to the front: a dialog window of its own takes focus here.
+     * Freedom losing window focus to a window of its own (a dialog): the
+     * clipboard can still be read then, so what's on it decides.
      */
-    private fun loseFocus(block: () -> Unit) {
+    private fun loseFocusToOwnWindow(block: () -> Unit) {
         val dialog = rule.runOnIdle { android.app.Dialog(rule.activity).apply { setTitle("focus"); show() } }
         rule.waitUntil(5_000) { rule.runOnIdle { !rule.activity.hasWindowFocus() } }
         rule.waitForIdle()
@@ -145,14 +165,62 @@ class ImportPhraseClipboardTest {
         }
     }
 
+    /**
+     * Freedom losing window focus to another app, Home here: the clipboard
+     * can't be read by Freedom then (Android checks the focused window's
+     * uid), so anything cleared was cleared unread. [block] gets to read it
+     * as the shell may, with `READ_CLIPBOARD_IN_BACKGROUND`, and is told
+     * what Freedom itself reads (nothing, proving it couldn't look).
+     */
+    private fun goHome(block: (ownRead: String?) -> Unit) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        assertTrue(instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME))
+        rule.waitUntil(10_000) { rule.runOnIdle { !rule.activity.hasWindowFocus() } }
+        rule.waitForIdle()
+        // Freedom's own view, without focus: nothing, whatever is there.
+        val ownRead = clipText()
+        val shell = instrumentation.uiAutomation
+        shell.adoptShellPermissionIdentity("android.permission.READ_CLIPBOARD_IN_BACKGROUND")
+        try {
+            block(ownRead)
+        } finally {
+            shell.dropShellPermissionIdentity()
+        }
+    }
+
     @Test
-    fun pastedPhraseIsClearedWhenFreedomLosesFocus() {
+    fun pastedPhraseIsClearedWhenFreedomLosesFocusToItsOwnWindow() {
         setClip(twelve)
         paste()
-        loseFocus {
-            // The page is still up, nothing else happened: cleared unread.
+        loseFocusToOwnWindow {
+            // The page is still up, the clipboard readable: the paste is there, cleared.
             assertTrue(shown)
             assertEquals(null, clipText())
+        }
+    }
+
+    @Test
+    fun pastedPhraseIsClearedUnreadWhenFreedomGoesToTheBackground() {
+        setClip(twelve)
+        paste()
+        goHome { ownRead ->
+            assertTrue(shown)
+            assertEquals(null, ownRead)
+            // Cleared without Freedom being able to look: the clipIsPaste path.
+            assertEquals(null, clipText())
+        }
+    }
+
+    @Test
+    fun somethingCopiedSinceThePasteIsLeftAloneWhenFreedomGoesToTheBackground() {
+        setClip(twelve)
+        paste()
+        setClip("https://example.com")
+        goHome { ownRead ->
+            // Unreadable to Freedom (so the check above really ran blind)…
+            assertEquals(null, ownRead)
+            // …and not cleared: a change was seen since the paste.
+            assertEquals("https://example.com", clipText())
         }
     }
 
@@ -161,7 +229,7 @@ class ImportPhraseClipboardTest {
         setClip(twelve)
         paste()
         setClip("https://example.com")
-        loseFocus { assertEquals("https://example.com", clipText()) }
+        loseFocusToOwnWindow { assertEquals("https://example.com", clipText()) }
         // …and on Back once focus is back, read and still left alone.
         pressBack()
         assertEquals("https://example.com", clipText())
@@ -173,7 +241,26 @@ class ImportPhraseClipboardTest {
         setClip(twelve)
         rule.onNode(field).performTextInput("abandon")
         rule.waitForIdle()
-        loseFocus { assertEquals(twelve, clipText()) }
+        goHome { assertEquals(twelve, clipText()) }
+    }
+
+    @Test
+    fun aPhraseTypedAWordAtATimeNeverReadsTheClipboard() {
+        // Swipe typing, or a keyboard suggestion taken, puts a whole word in
+        // at once: no paste, so leaving the page doesn't read the clipboard
+        // (and Android shows no "pasted from your clipboard" notice).
+        setClip(twelve)
+        for (word in twelve.split(" ")) {
+            rule.onNode(field).performTextInput("$word ")
+            rule.waitForIdle()
+        }
+        val reads = lastClipboardRead()
+        pressBack()
+        assertFalse(shown)
+        assertEquals(reads, lastClipboardRead())
+        assertEquals(twelve, clipText())
+        // The watch works: that read of the test's own was seen.
+        assertNotEquals(reads, lastClipboardRead())
     }
 
     @Test
@@ -183,7 +270,9 @@ class ImportPhraseClipboardTest {
         setClip(twelve)
         rule.onNode(field).performTextInput("a")
         rule.waitForIdle()
+        val reads = lastClipboardRead()
         pressBack()
+        assertEquals(reads, lastClipboardRead())
         assertNotNull(clipText())
     }
 }

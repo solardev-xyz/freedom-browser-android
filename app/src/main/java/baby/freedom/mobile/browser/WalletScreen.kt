@@ -383,19 +383,30 @@ internal fun insertedText(before: TextFieldValue, after: TextFieldValue): String
 /**
  * What was pasted into the Import page's field and may still be on the
  * clipboard (#241): the words of each paste, and whether a phrase-sized
- * one ([Mnemonic.IMPORT_WORD_COUNTS]' smallest or more words, so neither a
- * swiped word nor a keyboard's multi-letter suggestion counts) is the last
- * thing seen happening to the clipboard while Freedom had focus. A phrase
- * pasted from a keyboard's own clipboard history, not the clipboard, reads
- * as one too, so losing focus then clears whatever is on the clipboard —
+ * one ([Mnemonic.IMPORT_WORD_COUNTS]' smallest or more words) is the last
+ * thing seen happening to the clipboard while Freedom had focus.
+ *
+ * A paste is text of more than one word inserted at once ([add]). The
+ * keyboard also inserts a whole word at once — a swiped word, an accepted
+ * suggestion — and that is no paste: counting it would read the clipboard
+ * on the way out (Android's "pasted from your clipboard" notice) for a
+ * phrase that was only typed. So a single word pasted on its own is left
+ * on the clipboard; one word of a phrase is no phrase. A phrase pasted
+ * from a keyboard's own clipboard history, not the clipboard, reads as a
+ * paste too, so losing focus then clears whatever is on the clipboard —
  * the same trade-off [PhraseClipboard] makes at its deadline.
  */
 internal class PastedPhrases {
     val words = mutableListOf<List<String>>()
     var clipIsPaste = false
 
-    fun add(pasted: List<String>) {
-        if (pasted.isEmpty()) return
+    /** Notes [inserted], the text one edit put in the field ([insertedText]), if it was a paste. */
+    fun add(inserted: String) {
+        // Letters-only words, as the clipboard is matched: a swiped word with
+        // the space the keyboard adds after it is one word, and a phrase
+        // pasted with commas and no spaces still counts as the paste it is.
+        val pasted = clipWords(inserted)
+        if (pasted.size < 2) return
         words += pasted
         if (pasted.size >= MIN_PHRASE_WORDS) clipIsPaste = true
     }
@@ -1573,8 +1584,8 @@ internal fun ImportPhrasePage(
     // A TextFieldValue so a paste over a selection can be told from typing.
     var field by remember { mutableStateOf(TextFieldValue("")) }
     val phrase = field.text
-    // The words of each paste (more than one character inserted at once,
-    // also over a selection it replaced), in memory only: what may still be
+    // The words of each paste (more than one word inserted at once, also
+    // over a selection it replaced — [PastedPhrases.add]), in memory only: what may still be
     // on the clipboard (#241). Taken off it at Import — the words are in
     // the field now, whatever the authentication does — and, whatever else
     // happens (Back, the page closed from outside), when the page goes;
@@ -1642,8 +1653,7 @@ internal fun ImportPhrasePage(
                         OutlinedTextField(
                             value = field,
                             onValueChange = {
-                                val inserted = insertedText(field, it)
-                                if (inserted.length > 1) pastes.add(clipWords(inserted))
+                                pastes.add(insertedText(field, it))
                                 field = it
                             },
                             enabled = !busy,
