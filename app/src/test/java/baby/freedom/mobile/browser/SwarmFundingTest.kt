@@ -597,6 +597,55 @@ class SwarmFundingTest {
     }
 
     @Test
+    fun `an untracked call found mined while its own earlier Connect still runs owes no second connect`() {
+        val chain = FakeChain()
+        funding().apply {
+            noteSend(status(SendStatus.Stage.Unconfirmed))
+            untrack()
+        }
+        val free = kotlinx.coroutines.flow.MutableStateFlow(true)
+        val spends = kotlinx.coroutines.flow.MutableStateFlow<StampClient.Spend>(StampClient.Spend.Idle)
+        // As StampClient does: a started connect holds the node until it ends.
+        val f = SwarmFunding(
+            File(tmp.root, "funding.json"),
+            connect = {
+                if (free.value) {
+                    connects += it
+                    free.value = false
+                    spends.value = StampClient.Spend.Running(StampClient.Kind.Connect, it)
+                    true
+                } else {
+                    false
+                }
+            },
+            spends = spends, chain = chain, confirmAfterMs = 30_000, now = { 0L }, connectFree = free,
+        )
+        f.start(emptyFlow())
+        // The user's Connect starts (ticket 1); the chain then shows the call mined, and the
+        // app's own connect (ticket 2) is refused because ticket 1 runs: nothing is owed.
+        assertTrue(f.connectNow())
+        chain.receipt = receipt("0x1")
+        chain.minedCount = BigInteger.TWO
+        runBlocking { f.checkChain() }
+        assertTrue(f.pending.value!!.mined)
+        assertNull(f.connectOwed.value)
+        // The first connect fails: the card's Connect is offered, no automatic retry.
+        spends.value = StampClient.Spend.Failed(StampClient.Kind.Connect, batch, "batch not found")
+        free.value = true
+        Thread.sleep(100)
+        assertEquals(listOf(batch), connects)
+        assertNull(f.connectOwed.value)
+
+        // Control: with that connect seen ended, a later record of the batch mined while
+        // the node is busy with other work is owed its connect as before.
+        f.forget()
+        free.value = false
+        f.noteSend(status(SendStatus.Stage.Pending))
+        f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
+        assertEquals(batch, f.connectOwed.value)
+    }
+
+    @Test
     fun `an untracked call found mined while the node is busy is connected once it's free`() {
         val chain = FakeChain()
         funding().apply {
