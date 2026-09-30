@@ -1,6 +1,5 @@
 package baby.freedom.mobile.browser
 
-import android.os.SystemClock
 import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
@@ -20,7 +19,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -31,7 +29,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -60,7 +57,6 @@ import java.math.BigInteger
 import java.math.RoundingMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -421,14 +417,9 @@ private fun FundReview(
 ) {
     val request = quote.request
     val chain = request.chain
-    val guard = remember(quote) { PromptTapGuard(SystemClock::uptimeMillis) }
-    var armed by remember(quote) { mutableStateOf(false) }
-    LaunchedEffect(quote) {
-        withFrameNanos { }
-        guard.onShown()
-        delay(guard.remainingMs())
-        armed = true
-    }
+    val tap = rememberArmedTapGuard(quote, PromptTapGuard.SPEND_PROTECTION_MS)
+    val guard = tap.guard
+    val armed = tap.armed
     Column {
         SectionCard(title = "Review") {
             ReviewRow("What", summary)
@@ -450,9 +441,10 @@ private fun FundReview(
         Spacer(Modifier.height(12.dp))
         notice?.let { MutedText(it) }
         error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+        ObscuredTapNotice(tap)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             OutlinedButton(onClick = onCancel, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Cancel") }
-            Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy, modifier = Modifier.weight(1f)) {
+            Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy, modifier = Modifier.weight(1f).protectedPress(tap)) {
                 if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Confirm and send")
             }
         }

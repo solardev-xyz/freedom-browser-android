@@ -1,6 +1,5 @@
 package baby.freedom.mobile.browser
 
-import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -34,14 +33,12 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -76,7 +73,6 @@ import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 internal const val SEND_TITLE = "Send"
@@ -479,8 +475,10 @@ private fun AssetPicker(
 /**
  * What will be signed, before anything is: network, from, to, amount,
  * the most the fee can be and the nonce. Confirm ignores taps for the
- * first [PromptTapGuard.PROTECTION_MS] the review is on screen, so the
- * tap that opened it can't also confirm it.
+ * first [PromptTapGuard.SPEND_PROTECTION_MS] the review is on screen, so
+ * the tap that opened it can't also confirm it, and drops a press begun
+ * before then or one another app's window covered; other apps' overlays
+ * are hidden while it's up (#240, [protectedPress]).
  */
 @Composable
 private fun SendReviewSection(
@@ -494,14 +492,9 @@ private fun SendReviewSection(
     val request = quote.request
     val chain = request.chain
     val token = request.token
-    val guard = remember(quote) { PromptTapGuard(SystemClock::uptimeMillis) }
-    var armed by remember(quote) { mutableStateOf(false) }
-    LaunchedEffect(quote) {
-        withFrameNanos { }
-        guard.onShown()
-        delay(guard.remainingMs())
-        armed = true
-    }
+    val tap = rememberArmedTapGuard(quote, PromptTapGuard.SPEND_PROTECTION_MS)
+    val guard = tap.guard
+    val armed = tap.armed
     SectionCard(title = "Review") {
         ReviewRow("Network", chain.name)
         ReviewRow("Asset", token.symbol, address = token.address)
@@ -534,12 +527,13 @@ private fun SendReviewSection(
         FieldNote(it, error = true)
         Spacer(Modifier.height(8.dp))
     }
+    ObscuredTapNotice(tap)
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         OutlinedButton(onClick = onEdit, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Edit") }
         Button(
             onClick = { if (guard.accepts()) onConfirm() },
             enabled = armed && !busy,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f).protectedPress(tap),
         ) {
             if (busy) {
                 CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))

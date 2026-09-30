@@ -1,6 +1,5 @@
 package baby.freedom.mobile.browser
 
-import android.os.SystemClock
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,7 +14,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -34,20 +32,17 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -61,7 +56,6 @@ import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.ui.isLight
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -187,9 +181,13 @@ private fun successGreen() = if (MaterialTheme.colorScheme.isLight) Color(0xFF15
  * over whatever the app is showing. Signing asks for the wallet to be
  * unlocked (biometric or screen lock) as part of the approval — a
  * Ledger's account (#142) signs on the Ledger instead; Back
- * rejects. Like the send review, the approve button ignores taps for
- * the first [PromptTapGuard.PROTECTION_MS] the sheet is on screen, so a
- * tap meant for what was there before can't approve it.
+ * rejects. Like the send review, the approve button ignores taps until
+ * the sheet has been on screen and untouched for
+ * [PromptTapGuard.SPEND_PROTECTION_MS] (a connect
+ * [PromptTapGuard.PROTECTION_MS]), so a tap meant for what was there
+ * before can't approve it; it also drops a press begun before then or
+ * one another app's window covered, and other apps' overlays are hidden
+ * while it's up (#240, [protectedPress]).
  */
 @Composable
 internal fun RemoteSigningHost() {
@@ -211,14 +209,13 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
     var picked by remember(approval) { mutableStateOf((request as? OpenLvSession.Request.Connect)?.suggested) }
     var busy by remember(approval) { mutableStateOf(false) }
     var error by remember(approval) { mutableStateOf<String?>(null) }
-    val guard = remember(approval) { PromptTapGuard(SystemClock::uptimeMillis) }
-    var armed by remember(approval) { mutableStateOf(false) }
-    LaunchedEffect(approval) {
-        withFrameNanos { }
-        guard.onShown()
-        delay(guard.remainingMs())
-        armed = true
-    }
+    // Sign and Send can't be taken back: they arm later (#240).
+    val tap = rememberArmedTapGuard(
+        approval,
+        if (request is OpenLvSession.Request.Connect) PromptTapGuard.PROTECTION_MS else PromptTapGuard.SPEND_PROTECTION_MS,
+    )
+    val guard = tap.guard
+    val armed = tap.armed
     val backedUp = when (val s = vaultState) {
         is Vault.State.Locked -> s.info.backedUp
         is Vault.State.Unlocked -> s.info.backedUp
@@ -255,13 +252,14 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
         onDismissRequest = reject,
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
     ) {
+        RestartsTapGuardInWindow(guard)
         val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.9f).dp
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             modifier = Modifier.padding(16.dp).widthIn(max = 560.dp).fillMaxWidth().heightIn(max = maxHeight).imePadding(),
         ) {
-            Column(Modifier.padding(20.dp)) {
+            Column(Modifier.restartsTapGuard(guard).padding(20.dp)) {
                 Text(title, style = MaterialTheme.typography.titleLarge)
                 Text(
                     // The phone can't tell who made the code: a web page can show one too.
@@ -272,7 +270,7 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
                 Spacer(Modifier.height(12.dp))
                 Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
                     when (request) {
-                        is OpenLvSession.Request.Connect -> ConnectBody(request, picked) { picked = it }
+                        is OpenLvSession.Request.Connect -> ConnectBody(request, picked, tap, enabled = !busy) { picked = it }
                         is OpenLvSession.Request.PersonalSign -> PersonalSignBody(request)
                         is OpenLvSession.Request.TypedData -> TypedDataBody(request)
                         is OpenLvSession.Request.SendTransaction -> SendTransactionBody(request)
@@ -290,9 +288,10 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
                     }
                 }
                 Spacer(Modifier.height(16.dp))
+                ObscuredTapNotice(tap)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     OutlinedButton(onClick = reject, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Reject") }
-                    Button(onClick = approve, enabled = armed && !busy, modifier = Modifier.weight(1f)) {
+                    Button(onClick = approve, enabled = armed && !busy, modifier = Modifier.weight(1f).protectedPress(tap)) {
                         if (busy) {
                             CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                         } else {
@@ -313,8 +312,20 @@ internal fun ledgerOf(request: OpenLvSession.Request): baby.freedom.mobile.walle
     is OpenLvSession.Request.Connect -> null
 }
 
+/**
+ * The account to add, guarded like the Connect button
+ * ([protectedSelectable]): a press before the dialog armed, or one
+ * through another app's window, doesn't change which address the
+ * computer learns (#287 R4-M1).
+ */
 @Composable
-private fun ConnectBody(request: OpenLvSession.Request.Connect, picked: WalletAccount?, onPick: (WalletAccount) -> Unit) {
+internal fun ConnectBody(
+    request: OpenLvSession.Request.Connect,
+    picked: WalletAccount?,
+    tap: ArmedTapGuard,
+    enabled: Boolean,
+    onPick: (WalletAccount) -> Unit,
+) {
     Text(
         "The code you scanned asks to add an account of this wallet. It learns the account’s address, nothing else; " +
             "every signature or transaction it asks for later is shown here first.",
@@ -327,10 +338,10 @@ private fun ConnectBody(request: OpenLvSession.Request.Connect, picked: WalletAc
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
-                    .selectable(selected = selected, role = Role.RadioButton, onClick = { onPick(account) })
+                    .protectedSelectable(tap, selected = selected, enabled = enabled) { onPick(account) }
                     .padding(vertical = 4.dp),
             ) {
-                RadioButton(selected = selected, onClick = null)
+                RadioButton(selected = selected, onClick = null, enabled = tap.armed && enabled)
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
                     Text(account.name, fontWeight = FontWeight.Medium)

@@ -1,6 +1,5 @@
 package baby.freedom.mobile.browser
 
-import android.os.SystemClock
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,8 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -42,14 +39,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -67,7 +62,6 @@ import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.ledger.LedgerTypedDataHashes
 import java.net.URI
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** What an approval sheet says: its title, what the site wants, and the approve button's label. */
@@ -96,9 +90,14 @@ internal fun ethApprovalCopy(ask: EthAsk): EthApprovalCopy = when (ask) {
  *
  * Like the site-permission prompt, the buttons, a swipe down, a tap
  * outside and Back all ignore input for the first
- * [PromptTapGuard.PROTECTION_MS] the sheet is on screen, counted from its
- * first drawn frame, so a page can't time its request to catch a tap
- * meant for the page. Everything but the action rejects.
+ * [PromptTapGuard.PROTECTION_MS] the sheet is on screen — for Sign, Send
+ * and Pay [PromptTapGuard.SPEND_PROTECTION_MS] (#240) — counted from its
+ * first drawn frame and started over by every touch before then, so a
+ * page can't time its request to catch a tap meant for the page, nor keep
+ * a "tap fast here" game going until the sheet arms. The action also
+ * drops a press begun before that, or one another app's window covered
+ * ([protectedPress]); other apps' overlays are hidden while the sheet is
+ * up (Android 12+). Everything but the action rejects.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -110,8 +109,15 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
     val walletAccounts = remember(context) { WalletAccounts.get(context) }
     val vaultState by vault.state.collectAsState()
     val accountList by walletAccounts.accounts.collectAsState()
-    val guard = remember(request) { PromptTapGuard(SystemClock::uptimeMillis) }
-    var armed by remember(request) { mutableStateOf(false) }
+    // Sign and Send can't be taken back: they arm later (#240).
+    val spends = ask is EthAsk.SignMessage || ask is EthAsk.SignTypedData || ask is EthAsk.SendTransaction ||
+        ask is EthAsk.Payment
+    val tap = rememberArmedTapGuard(
+        request,
+        if (spends) PromptTapGuard.SPEND_PROTECTION_MS else PromptTapGuard.PROTECTION_MS,
+    )
+    val guard = tap.guard
+    val armed = tap.armed
     var busy by remember(request) { mutableStateOf(false) }
     var error by remember(request) { mutableStateOf<String?>(null) }
     var picked by remember(request) { mutableStateOf<String?>(null) }
@@ -123,12 +129,6 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
         skipPartiallyExpanded = true,
         confirmValueChange = { it != SheetValue.Hidden || (guard.accepts() && !busy) },
     )
-    LaunchedEffect(request) {
-        withFrameNanos { }
-        guard.onShown()
-        delay(guard.remainingMs())
-        armed = true
-    }
 
     val accounts = accountList?.accounts
     val connectAccount = accounts?.let { list ->
@@ -175,12 +175,16 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
     }
 
     ModalBottomSheet(
-        onDismissRequest = { if (guard.accepts() && !busy) request.respond(EthAnswer.Rejected) },
+        onDismissRequest = {
+            if (guard.accepts() && !busy) request.respond(EthAnswer.Rejected) else guard.noteInput()
+        },
         sheetState = sheetState,
         modifier = Modifier.testTag("ethereum-approval"),
     ) {
+        RestartsTapGuardInWindow(guard)
         Column(
             modifier = Modifier
+                .restartsTapGuard(guard)
                 .fillMaxWidth()
                 .navigationBarsPadding()
                 .padding(horizontal = 24.dp)
@@ -205,6 +209,8 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                         accounts = accounts,
                         selected = connectAccount,
                         noWallet = vaultState == Vault.State.Empty || accounts == null,
+                        tap = tap,
+                        enabled = !busy,
                         onPick = { picked = it.address },
                         onSetUp = request.setUpWallet,
                     )
@@ -213,7 +219,8 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                     is EthAsk.SendTransaction -> SendBody(
                         ask,
                         always,
-                        enabled = armed && !busy,
+                        tap,
+                        enabled = !busy,
                         locked = vaultState is Vault.State.Locked,
                         onAlways = { always = it },
                     )
@@ -242,6 +249,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             Spacer(Modifier.height(16.dp))
+            ObscuredTapNotice(tap)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(
                     onClick = { if (guard.accepts() && !busy) request.respond(EthAnswer.Rejected) },
@@ -251,7 +259,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                 Button(
                     onClick = ::approve,
                     enabled = armed && !busy && canApprove,
-                    modifier = Modifier.weight(1f).testTag("ethereum-approve"),
+                    modifier = Modifier.weight(1f).protectedPress(tap).testTag("ethereum-approve"),
                 ) {
                     if (busy) {
                         CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
@@ -310,12 +318,20 @@ private fun OriginStrip(origin: String, request: String) {
     }
 }
 
+/**
+ * What a Connect shares, with the account picker. The rows are guarded
+ * like the Connect button ([protectedSelectable]): a press before the
+ * sheet armed, or one through another app's window, doesn't change the
+ * account the site will see (#287 R4-M1).
+ */
 @Composable
-private fun ConnectBody(
+internal fun ConnectBody(
     ask: EthAsk.Connect,
     accounts: List<WalletAccount>?,
     selected: WalletAccount?,
     noWallet: Boolean,
+    tap: ArmedTapGuard,
+    enabled: Boolean,
     onPick: (WalletAccount) -> Unit,
     onSetUp: () -> Unit,
 ) {
@@ -337,10 +353,11 @@ private fun ConnectBody(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
-                .selectable(selected = account == selected, role = Role.RadioButton, onClick = { onPick(account) })
-                .padding(vertical = 4.dp),
+                .protectedSelectable(tap, selected = account == selected, enabled = enabled) { onPick(account) }
+                .padding(vertical = 4.dp)
+                .testTag("ethereum-connect-account"),
         ) {
-            if (accounts.size > 1) RadioButton(selected = account == selected, onClick = null)
+            if (accounts.size > 1) RadioButton(selected = account == selected, onClick = null, enabled = tap.armed && enabled)
             Column(Modifier.padding(start = if (accounts.size > 1) 8.dp else 0.dp)) {
                 Text(accountLabel(account), style = MaterialTheme.typography.bodyLarge)
                 AddressText(account.address, MaterialTheme.typography.bodySmall, MaterialTheme.colorScheme.onSurfaceVariant)
@@ -382,7 +399,7 @@ private fun SignTypedDataBody(ask: EthAsk.SignTypedData) {
 }
 
 @Composable
-private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, enabled: Boolean, locked: Boolean, onAlways: (Boolean) -> Unit) {
+private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, tap: ArmedTapGuard, enabled: Boolean, locked: Boolean, onAlways: (Boolean) -> Unit) {
     val quote = ask.quote
     val request = quote.request
     val chain = request.chain
@@ -421,7 +438,7 @@ private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, enabled: Bool
         if (ask.ruled) {
             Note(autoApproveRuledNote(quote.replaces != null, highFee = !GasOracle.quiet(quote.tx.fees, chain.id), locked = locked))
         } else {
-            AutoApproveSwitch(rule, chain.name, always, enabled, onAlways)
+            AutoApproveSwitch(rule, chain.name, always, tap, enabled, onAlways)
         }
     }
     Spacer(Modifier.height(8.dp))
@@ -434,10 +451,19 @@ private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, enabled: Bool
 /**
  * "Always approve … on this contract" (#112), with exactly what it covers
  * written out in full under it. Off until the user turns it on; it only
- * takes effect with the sheet's own Confirm.
+ * takes effect with the sheet's own Confirm. Guarded like the Confirm
+ * itself ([protectedToggle]): a press before the sheet armed, or one
+ * through another app's window, doesn't turn it on (#287 R3-M1).
  */
 @Composable
-private fun AutoApproveSwitch(rule: AutoApproveRule, chain: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+internal fun AutoApproveSwitch(
+    rule: AutoApproveRule,
+    chain: String,
+    checked: Boolean,
+    tap: ArmedTapGuard,
+    enabled: Boolean,
+    onChange: (Boolean) -> Unit,
+) {
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -448,12 +474,12 @@ private fun AutoApproveSwitch(rule: AutoApproveRule, chain: String, checked: Boo
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onChange)
+                    .protectedToggle(tap, value = checked, role = Role.Switch, enabled = enabled, onValueChange = onChange)
                     .testTag("ethereum-always-approve"),
             ) {
                 Text(autoApproveSwitchLabel(rule), style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
                 Spacer(Modifier.width(8.dp))
-                Switch(checked = checked, onCheckedChange = null, enabled = enabled)
+                Switch(checked = checked, onCheckedChange = null, enabled = tap.armed && enabled)
             }
             Spacer(Modifier.height(4.dp))
             Text(

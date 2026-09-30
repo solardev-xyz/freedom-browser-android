@@ -511,34 +511,61 @@ fun contextMenuAdmitted(lastTurn: PromptTurn, pageUncovered: Boolean): Boolean =
  * so it can ask the user to double-tap where Allow is about to render
  * and have the second tap land on the prompt. Like Chrome's permission
  * dialogs, the prompt ignores its buttons until it has been on screen
- * for [PROTECTION_MS]: long enough that a tap aimed at the page before
+ * for [protectionMs]: long enough that a tap aimed at the page before
  * it appeared can't reach it, short enough that nobody reading it
  * notices.
  *
+ * Until it arms, every touch on the prompt ([noteInput]) starts the
+ * period over, so it arms only once it has been on screen *and* left
+ * alone for [protectionMs] (#240): a page's "tap fast here" game lined
+ * up with the button keeps it disarmed for as long as the taps keep
+ * coming, however long that is. Once armed it stays armed. Sign and
+ * Send use the longer [SPEND_PROTECTION_MS].
+ *
  * [clock] is a monotonic millisecond clock (`SystemClock.uptimeMillis`).
  */
-class PromptTapGuard(private val clock: () -> Long) {
+class PromptTapGuard(private val protectionMs: Long, private val clock: () -> Long) {
+    constructor(clock: () -> Long) : this(PROTECTION_MS, clock)
+
     private var shownAt: Long? = null
+    private var quietSince: Long? = null
+    private var armed = false
 
     /** The prompt's first frame is on screen; start the protection period. */
     fun onShown() {
         if (shownAt == null) shownAt = clock()
     }
 
+    /** A touch on the prompt: before it has armed, the period starts over. */
+    fun noteInput() {
+        if (!accepts()) quietSince = clock()
+    }
+
     /** Whether a button press now is a deliberate answer. */
     fun accepts(): Boolean {
-        val shown = shownAt ?: return false
-        return clock() - shown >= PROTECTION_MS
+        if (armed) return true
+        armed = remainingMs(clock()) == 0L && shownAt != null
+        return armed
     }
 
     /** Milliseconds until [accepts] turns true (0 once it has). */
-    fun remainingMs(): Long {
-        val shown = shownAt ?: return PROTECTION_MS
-        return (PROTECTION_MS - (clock() - shown)).coerceAtLeast(0)
+    fun remainingMs(): Long = if (armed) 0 else remainingMs(clock())
+
+    private fun remainingMs(now: Long): Long {
+        val shown = shownAt ?: return protectionMs
+        val from = maxOf(shown, quietSince ?: shown)
+        return (protectionMs - (now - from)).coerceAtLeast(0)
     }
 
     companion object {
         const val PROTECTION_MS = 500L
+
+        /**
+         * Sign and Send (#240): a signature or a payment can't be taken
+         * back, so these sheets give a tap aimed elsewhere twice as long
+         * to have landed before they listen.
+         */
+        const val SPEND_PROTECTION_MS = 1_000L
     }
 }
 

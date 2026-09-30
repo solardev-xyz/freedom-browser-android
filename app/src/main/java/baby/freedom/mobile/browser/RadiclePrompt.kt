@@ -1,6 +1,5 @@
 package baby.freedom.mobile.browser
 
-import android.os.SystemClock
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
@@ -15,17 +14,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
 
 /** What a [RadicleAsk] prompt says: the request, what it means, and the Allow button's label. */
 internal data class RadiclePromptCopy(val request: String, val detail: String, val allow: String)
@@ -72,14 +64,9 @@ internal fun radiclePromptCopy(ask: RadicleAsk): RadiclePromptCopy = when (ask) 
 fun RadiclePromptDialog(request: RadiclePromptRequest) {
     val ask = request.ask
     val copy = radiclePromptCopy(ask)
-    val guard = remember(request) { PromptTapGuard(SystemClock::uptimeMillis) }
-    var armed by remember(request) { mutableStateOf(false) }
-    LaunchedEffect(request) {
-        withFrameNanos { }
-        guard.onShown()
-        delay(guard.remainingMs())
-        armed = true
-    }
+    val tap = rememberArmedTapGuard(request)
+    val guard = tap.guard
+    val armed = tap.armed
     val icon = when (ask) {
         is RadicleAsk.Connect -> Icons.Filled.Hub
         is RadicleAsk.Seed -> Icons.Filled.CloudDownload
@@ -114,10 +101,15 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                ObscuredTapNotice(tap)
             }
         },
         confirmButton = {
-            TextButton(enabled = armed, onClick = { if (guard.accepts()) request.respond(true) }) {
+            TextButton(
+                enabled = armed,
+                onClick = { if (guard.accepts()) request.respond(true) },
+                modifier = Modifier.protectedPress(tap),
+            ) {
                 Text(copy.allow)
             }
         },

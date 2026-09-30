@@ -1,6 +1,5 @@
 package baby.freedom.mobile.browser
 
-import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -40,7 +39,6 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -514,8 +512,11 @@ private fun QuoteCard(state: QuoteState, deposit: Boolean) {
 
 /**
  * The confirmation every spend goes through. Its buttons (and a tap
- * outside) ignore taps for the first [PromptTapGuard.PROTECTION_MS] it's
- * on screen, so a tap meant for the page under it can't confirm.
+ * outside) ignore taps for the first [PromptTapGuard.SPEND_PROTECTION_MS]
+ * it's on screen, so a tap meant for the page under it can't confirm;
+ * confirm also drops a press begun before then or one another app's
+ * window covered, and other apps' overlays are hidden while it's up
+ * (#240, [protectedPress]).
  */
 @Composable
 internal fun SpendConfirmDialog(
@@ -525,20 +526,24 @@ internal fun SpendConfirmDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val guard = remember { PromptTapGuard(SystemClock::uptimeMillis) }
-    var armed by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        withFrameNanos { }
-        guard.onShown()
-        delay(guard.remainingMs())
-        armed = true
-    }
+    val tap = rememberArmedTapGuard(Unit, PromptTapGuard.SPEND_PROTECTION_MS)
+    val guard = tap.guard
+    val armed = tap.armed
     AlertDialog(
         onDismissRequest = { if (guard.accepts()) onDismiss() },
         title = { Text(title) },
-        text = { Text(body) },
+        text = {
+            Column {
+                Text(body)
+                ObscuredTapNotice(tap)
+            }
+        },
         confirmButton = {
-            TextButton(enabled = armed, onClick = { if (guard.accepts()) onConfirm() }) { Text(confirmLabel) }
+            TextButton(
+                enabled = armed,
+                onClick = { if (guard.accepts()) onConfirm() },
+                modifier = Modifier.protectedPress(tap),
+            ) { Text(confirmLabel) }
         },
         dismissButton = {
             TextButton(enabled = armed, onClick = { if (guard.accepts()) onDismiss() }) { Text("Cancel") }

@@ -1,6 +1,5 @@
 package baby.freedom.mobile.browser
 
-import android.os.SystemClock
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,7 +11,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -35,14 +33,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -54,7 +50,6 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.Vault
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -194,9 +189,11 @@ internal fun swarmSignIdentity(ask: SwarmAsk.Sign): String =
  * Signing needs the wallet open: the action asks for the screen lock
  * first when it isn't, and with no wallet on the device at all it opens
  * wallet setup once approved. Like the other approval sheets, the buttons, a
- * swipe down, a tap outside and Back all ignore input for the first
- * [PromptTapGuard.PROTECTION_MS] it is on screen, counted from its first
- * drawn frame. Everything but the action rejects.
+ * swipe down, a tap outside and Back all ignore input until it has been
+ * on screen, untouched, for [PromptTapGuard.PROTECTION_MS] — a signature
+ * [PromptTapGuard.SPEND_PROTECTION_MS] — counted from its first drawn
+ * frame and restarted by every touch anywhere in its window until then
+ * (#240). Everything but the action rejects.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -210,8 +207,13 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
     val context = LocalContext.current
     val vault = remember(context) { Vault.get(context) }
     val vaultState by vault.state.collectAsState()
-    val guard = remember(request) { PromptTapGuard(SystemClock::uptimeMillis) }
-    var armed by remember(request) { mutableStateOf(false) }
+    // A signature can't be taken back: it arms later, like the wallet's Sign (#240).
+    val tap = rememberArmedTapGuard(
+        request,
+        if (ask is SwarmAsk.Sign) PromptTapGuard.SPEND_PROTECTION_MS else PromptTapGuard.PROTECTION_MS,
+    )
+    val guard = tap.guard
+    val armed = tap.armed
     var busy by remember(request) { mutableStateOf(false) }
     var error by remember(request) { mutableStateOf<String?>(null) }
     var always by remember(request) { mutableStateOf(false) }
@@ -220,12 +222,6 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
         skipPartiallyExpanded = true,
         confirmValueChange = { it != SheetValue.Hidden || (guard.accepts() && !busy) },
     )
-    LaunchedEffect(request) {
-        withFrameNanos { }
-        guard.onShown()
-        delay(guard.remainingMs())
-        armed = true
-    }
     // No wallet yet: approving opens wallet setup (SwarmProviders.askOnTab), so there's nothing to unlock here.
     val needsWallet = ask is SwarmAsk.Sign && ask.needsWallet && vaultState is Vault.State.Empty
     val needsUnlock = ask is SwarmAsk.Sign && !needsWallet && vaultState !is Vault.State.Unlocked
@@ -262,8 +258,10 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
         sheetState = sheetState,
         modifier = Modifier.testTag("swarm-approval"),
     ) {
+        RestartsTapGuardInWindow(guard)
         Column(
             modifier = Modifier
+                .restartsTapGuard(guard)
                 .fillMaxWidth()
                 .navigationBarsPadding()
                 .padding(horizontal = 24.dp)
@@ -356,7 +354,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 8.dp)
-                            .toggleable(value = always, enabled = armed && !busy, role = Role.Switch, onValueChange = { always = it })
+                            .protectedToggle(tap, value = always, role = Role.Switch, enabled = !busy) { always = it }
                             .testTag("swarm-always-approve"),
                     ) {
                         Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
@@ -370,6 +368,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             Spacer(Modifier.height(16.dp))
+            ObscuredTapNotice(tap)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(
                     onClick = ::reject,
@@ -379,7 +378,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                 Button(
                     onClick = ::approve,
                     enabled = armed && !busy,
-                    modifier = Modifier.weight(1f).testTag("swarm-approve"),
+                    modifier = Modifier.weight(1f).protectedPress(tap).testTag("swarm-approve"),
                 ) {
                     if (busy) {
                         CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
