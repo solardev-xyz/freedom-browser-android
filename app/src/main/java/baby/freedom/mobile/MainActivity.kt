@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.viewModels
@@ -151,7 +152,7 @@ class MainActivity : ComponentActivity() {
     /** Wakes that loop early (after Start Orbot, or a failed onion load). */
     private val externalTorNudge = Channel<Unit>(Channel.CONFLATED)
 
-    /** [TorRouting.externalFailed]: an onion load failed through the proxy — re-check it now (R1-M1). */
+    /** [TorRouting.externalFailed] / the refusal page shown: re-check the proxy now (R1-M1, R3-F1). */
     private val externalTorFailed: () -> Unit = { externalTorNudge.trySend(Unit) }
     private lateinit var settings: NodeSettings
 
@@ -936,13 +937,24 @@ class MainActivity : ComponentActivity() {
      *    refused, a real one connected) every [TorProxy.RECHECK_MS], and
      *    at once when a routed onion page fails to load
      *    ([TorRouting.externalFailed]); gone or no longer Tor → refused
-     *    again. The canary alone isn't enough: a plain SOCKS5 proxy that
-     *    took the port refuses it too (R2-F1).
+     *    again at once. The canary alone isn't enough: a plain SOCKS5 proxy
+     *    that took the port refuses it too (R2-F1). One exception
+     *    ([TorProxy.afterCheck]): a check where the canary is still refused
+     *    as Tor does but neither probe onion was reached keeps it routed
+     *    for one more check [TorProxy.RETRY_MS] later — a slow circuit on a
+     *    flaky link isn't a gone proxy; a second one in a row refuses it
+     *    (R3-F1).
      *  - not confirmed: the check again [TorProxy.RETRY_MS] after nothing
      *    listened, so starting Orbot later is picked up without a tap;
-     *    after a proxy that listens but isn't (or can't reach) Tor, backing
-     *    off to [TorProxy.RETRY_MAX_MS] ([TorProxy.nextCheckMs]), as each
-     *    full probe has that proxy look up the probe onions (R1-M2).
+     *    after Tor that answers but couldn't reach an onion, within
+     *    [TorProxy.FAST_RETRY_WINDOW_MS] of its last pass, every
+     *    [TorProxy.RECHECK_MS] (R3-F1); after a proxy that listens but
+     *    isn't (or can't reach) Tor otherwise, backing off to
+     *    [TorProxy.RETRY_MAX_MS] ([TorProxy.nextCheckMs]), as each full
+     *    probe has that proxy look up the probe onions (R1-M2). The
+     *    refusal page being shown checks sooner too (no sooner than
+     *    [TorProxy.RETRY_MS] after the last check), so trying an onion
+     *    site again soon finds it routed once it passes (R3-F1).
      *
      * While the Activity is stopped nothing checks, so `.onion` isn't
      * routed to the proxy meanwhile (fail closed: a proxy that dies in
@@ -956,56 +968,73 @@ class MainActivity : ComponentActivity() {
         torRunning = true
         publishExternalTor(proxy, externalTorChecking(proxy), confirmed = false)
         externalTorJob = lifecycleScope.launch {
-            // Found to be Tor; routed only while also started.
-            var confirmed = false
-            var backoff = TorProxy.RETRY_MS
+            var watch = TorProxy.Watch()
+            var lastCheckAt = 0L
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 try {
                     while (true) {
-                        // Always the full probe, a real onion included, even
+                        // Always the full check, a real onion included, even
                         // for a proxy already confirmed: the canary alone
                         // passes a plain SOCKS5 proxy that took the port
-                        // meanwhile (R2-F1).
-                        val result = when (val now = TorProxy.recheck(proxy)) {
-                            TorProxy.Probe.Tor -> {
-                                if (!confirmed) {
-                                    publishExternalTor(
-                                        proxy,
-                                        TorInfo(
-                                            status = TorStatus.Starting,
-                                            socksPort = proxy.port,
-                                            summary = "Reaching a .onion site through $proxy…",
-                                        ),
-                                        confirmed = false,
-                                    )
-                                }
-                                TorProxy.probe(proxy)
+                        // meanwhile (R2-F1). The canary once, then the onions
+                        // (not probe(), which would send it again, R3-M1).
+                        val canary = TorProxy.recheck(proxy)
+                        val result = if (canary == TorProxy.Probe.Tor) {
+                            if (!watch.confirmed) {
+                                publishExternalTor(
+                                    proxy,
+                                    TorInfo(
+                                        status = TorStatus.Starting,
+                                        socksPort = proxy.port,
+                                        summary = "Reaching a .onion site through $proxy…",
+                                    ),
+                                    confirmed = false,
+                                    unreached = watch.unreached,
+                                )
                             }
-                            else -> now
+                            TorProxy.reachOnion(proxy)
+                        } else {
+                            canary
                         }
-                        confirmed = result == TorProxy.Probe.Tor
+                        lastCheckAt = SystemClock.elapsedRealtime()
+                        val next = TorProxy.afterCheck(watch, canary, result, lastCheckAt)
+                        watch = next.watch
                         publishExternalTor(
                             proxy,
-                            if (confirmed) {
-                                TorInfo(status = TorStatus.Running, progress = 100, socksPort = proxy.port)
-                            } else {
-                                externalTorError(proxy, result)
+                            when {
+                                result == TorProxy.Probe.Tor ->
+                                    TorInfo(status = TorStatus.Running, progress = 100, socksPort = proxy.port)
+                                // Kept routed for one quick check more (R3-F1).
+                                watch.confirmed -> TorInfo(
+                                    status = TorStatus.Running,
+                                    progress = 100,
+                                    socksPort = proxy.port,
+                                    summary = "Didn't reach a .onion site just now; checking again…",
+                                )
+                                else -> externalTorError(proxy, result, watch.unreached)
                             },
-                            confirmed,
+                            watch.confirmed,
+                            watch.unreached,
                         )
-                        val wait = TorProxy.nextCheckMs(result, backoff)
-                        backoff = if (TorProxy.backsOff(result)) wait else TorProxy.RETRY_MS
-                        // A nudge (Start Orbot, a failed onion load) checks
-                        // at once, and starts the back-off over.
-                        if (withTimeoutOrNull(wait) { externalTorNudge.receive() } != null) {
-                            backoff = TorProxy.RETRY_MS
+                        // A nudge (Start Orbot, a failed onion load, the
+                        // refusal page shown) checks sooner, and starts the
+                        // back-off over — but never within RETRY_MS of the
+                        // last check, so a page retrying in a loop can't make
+                        // it probe back to back.
+                        if (withTimeoutOrNull(next.waitMs) { externalTorNudge.receive() } != null) {
+                            watch = watch.copy(backoffMs = TorProxy.RETRY_MS)
+                            val gap = lastCheckAt + TorProxy.RETRY_MS - SystemClock.elapsedRealtime()
+                            if (gap > 0) delay(gap)
                         }
                     }
                 } finally {
                     // Stopped (or Tor stopped / switched, where this drops
                     // out in publishExternalTor): nothing checks until the
-                    // Activity is back, so stop routing onion here meanwhile.
-                    if (confirmed) publishExternalTor(proxy, externalTorChecking(proxy), confirmed = false)
+                    // Activity is back, so stop routing onion here meanwhile,
+                    // and on return it's routed only once a check passes
+                    // (no grace carried over).
+                    if (watch.confirmed) publishExternalTor(proxy, externalTorChecking(proxy), confirmed = false)
+                    watch = watch.copy(confirmed = false, graceUsed = false)
                 }
             }
         }
@@ -1014,14 +1043,24 @@ class MainActivity : ComponentActivity() {
     private fun externalTorChecking(proxy: SocksEndpoint) =
         TorInfo(status = TorStatus.Starting, socksPort = proxy.port, summary = "Checking $proxy…")
 
-    private fun externalTorError(proxy: SocksEndpoint, result: TorProxy.Probe) =
-        TorInfo(status = TorStatus.Error, socksPort = proxy.port, errorMessage = TorProxy.describe(result, proxy))
+    private fun externalTorError(proxy: SocksEndpoint, result: TorProxy.Probe, unreached: Boolean = false) =
+        TorInfo(
+            status = TorStatus.Error,
+            socksPort = proxy.port,
+            errorMessage = TorProxy.describe(result, proxy) +
+                if (unreached) " Checking again shortly." else "",
+        )
 
     /** Main thread; a state for a proxy no longer in use, or after Tor stopped, is dropped. */
-    private fun publishExternalTor(proxy: SocksEndpoint, info: TorInfo, confirmed: Boolean) {
+    private fun publishExternalTor(
+        proxy: SocksEndpoint,
+        info: TorInfo,
+        confirmed: Boolean,
+        unreached: Boolean = false,
+    ) {
         if (proxy != torProxy || !torRunning) return
         torInfoFlow.value = info
-        TorRouting.setExternal(this, proxy, confirmed)
+        TorRouting.setExternal(this, proxy, confirmed, unreached)
     }
 
     private fun stopExternalTor() {

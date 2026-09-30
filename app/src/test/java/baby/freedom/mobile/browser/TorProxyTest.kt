@@ -263,6 +263,76 @@ class TorProxyTest {
     }
 
     @Test
+    fun `a confirmed Tor that can't reach an onion once stays routed for one quick check`() {
+        // R3-F1: the canary still refused as Tor does, the onions slow on a
+        // flaky link — not "gone" on the first miss.
+        val tor = TorProxy.Probe.Tor
+        val slow = TorProxy.Probe.NoOnion(-1)
+        var next = TorProxy.afterCheck(TorProxy.Watch(), tor, tor, nowMs = 1_000)
+        assertTrue(next.watch.confirmed)
+        assertEquals(TorProxy.RECHECK_MS, next.waitMs)
+        next = TorProxy.afterCheck(next.watch, tor, slow, nowMs = 21_000)
+        assertTrue(next.watch.confirmed)
+        assertTrue(next.watch.unreached)
+        assertEquals(TorProxy.RETRY_MS, next.waitMs)
+        // Passing again forgets the miss.
+        val back = TorProxy.afterCheck(next.watch, tor, tor, nowMs = 26_000)
+        assertEquals(TorProxy.Watch(confirmed = true, confirmedAtMs = 26_000), back.watch)
+        // A second miss in a row: refused, and checked every RECHECK_MS
+        // (no back-off) while Tor still answers, within the window.
+        next = TorProxy.afterCheck(next.watch, tor, TorProxy.Probe.NoOnion(1), nowMs = 26_000)
+        assertFalse(next.watch.confirmed)
+        assertTrue(next.watch.unreached)
+        assertEquals(TorProxy.RECHECK_MS, next.waitMs)
+        repeat(20) { i ->
+            next = TorProxy.afterCheck(next.watch, tor, slow, nowMs = 46_000L + i * 20_000)
+            assertEquals(TorProxy.RECHECK_MS, next.waitMs)
+            assertFalse(next.watch.confirmed)
+        }
+        // Past the window, the usual back-off.
+        next = TorProxy.afterCheck(next.watch, tor, slow, nowMs = 21_000 + TorProxy.FAST_RETRY_WINDOW_MS)
+        assertEquals(10_000L, next.waitMs)
+        next = TorProxy.afterCheck(next.watch, tor, slow, nowMs = 31_000 + TorProxy.FAST_RETRY_WINDOW_MS)
+        assertEquals(20_000L, next.waitMs)
+        // And Tor getting through again routes it.
+        next = TorProxy.afterCheck(next.watch, tor, tor, nowMs = 51_000 + TorProxy.FAST_RETRY_WINDOW_MS)
+        assertTrue(next.watch.confirmed)
+        assertFalse(next.watch.unreached)
+    }
+
+    @Test
+    fun `a confirmed proxy that stops refusing the canary gets no grace`() {
+        // The listener isn't the Tor that was confirmed (R2-F1): refused on
+        // the first such check.
+        val confirmed = TorProxy.afterCheck(TorProxy.Watch(), TorProxy.Probe.Tor, TorProxy.Probe.Tor, 0).watch
+        listOf(
+            TorProxy.Probe.NotListening,
+            TorProxy.Probe.NotSocks,
+            TorProxy.Probe.NotTor,
+            TorProxy.Probe.NoOnion(-1), // the canary itself got no refusal
+        ).forEach { canary ->
+            val next = TorProxy.afterCheck(confirmed, canary, canary, 20_000)
+            assertFalse(canary.toString(), next.watch.confirmed)
+            assertFalse(canary.toString(), next.watch.unreached)
+            assertEquals(TorProxy.nextCheckMs(canary, TorProxy.RETRY_MS), next.waitMs)
+        }
+        // Nor a proxy never confirmed that can't reach an onion: backs off.
+        val never = TorProxy.afterCheck(TorProxy.Watch(), TorProxy.Probe.Tor, TorProxy.Probe.NoOnion(4), 0)
+        assertFalse(never.watch.confirmed)
+        assertEquals(10_000L, never.waitMs)
+    }
+
+    @Test
+    fun `the canary is sent once per check`() = runBlocking {
+        // R3-M1: recheck, then reachOnion — not recheck and then probe.
+        val asked = Collections.synchronizedList(mutableListOf<String>())
+        val tor = socks5(asked) { if (it == TorProxy.CANARY_ONION) 1 else 0 }
+        assertEquals(TorProxy.Probe.Tor, TorProxy.recheck(tor))
+        assertEquals(TorProxy.Probe.Tor, TorProxy.reachOnion(tor))
+        assertEquals(listOf("${TorProxy.CANARY_ONION}:80", "${TorProxy.PROBE_ONIONS[0]}:80"), asked.toList())
+    }
+
+    @Test
     fun `nothing listening`() = runBlocking {
         val closed = closedPort()
         assertEquals(TorProxy.Probe.NotListening, TorProxy.probe(closed))

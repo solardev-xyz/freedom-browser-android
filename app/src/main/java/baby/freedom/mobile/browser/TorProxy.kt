@@ -200,6 +200,22 @@ object TorProxy {
     ): Probe {
         val canary = recheck(endpoint, handshakeTimeoutMs, canaryTimeoutMs)
         if (canary != Probe.Tor) return canary
+        return reachOnion(endpoint, onions, handshakeTimeoutMs, onionTimeoutMs)
+    }
+
+    /**
+     * The second half of [probe], for a proxy [recheck] just found
+     * refusing the canary: a CONNECT to each of [onions] in turn until one
+     * succeeds. On its own it proves nothing — only after that refusal
+     * (MainActivity's loop runs the two itself, so the canary is sent once
+     * per check, R3-M1).
+     */
+    suspend fun reachOnion(
+        endpoint: SocksEndpoint,
+        onions: List<String> = PROBE_ONIONS,
+        handshakeTimeoutMs: Long = HANDSHAKE_TIMEOUT_MS,
+        onionTimeoutMs: Long = ONION_TIMEOUT_MS,
+    ): Probe {
         var last: Probe = Probe.NoOnion(-1)
         for (onion in onions) {
             when (val result = connectOnion(endpoint, onion, handshakeTimeoutMs, onionTimeoutMs)) {
@@ -356,6 +372,86 @@ object TorProxy {
         result == Probe.Tor -> RECHECK_MS
         !backsOff(result) -> RETRY_MS
         else -> (backoffMs * 2).coerceIn(RETRY_MS, RETRY_MAX_MS)
+    }
+
+    /**
+     * After a confirmed proxy stopped reaching onion sites while it still
+     * refuses the canary as Tor does: how long it's checked every
+     * [RECHECK_MS] with no back-off, so a Tor on a flaky link (or during
+     * an onion-service DoS wave) is routed again soon after it recovers
+     * (R3-F1). Past this, the usual back-off.
+     */
+    const val FAST_RETRY_WINDOW_MS = 10 * 60_000L
+
+    /**
+     * The checking loop's state between checks (MainActivity, #275).
+     *
+     * @property confirmed found to be Tor: `.onion` is routed to it.
+     * @property graceUsed a confirmed proxy's last check refused the canary
+     *   as Tor does but reached neither probe onion, and it was kept routed
+     *   for one quick check more (R3-F1).
+     * @property unreached the last check found the canary refused as Tor
+     *   does, but no onion site reached — "Tor that can't get through
+     *   right now", not "no Tor client there" (the refusal page says so).
+     * @property backoffMs the last backing-off wait ([nextCheckMs]).
+     * @property confirmedAtMs when (`elapsedRealtime`) it last passed, or `null`.
+     */
+    data class Watch(
+        val confirmed: Boolean = false,
+        val graceUsed: Boolean = false,
+        val unreached: Boolean = false,
+        val backoffMs: Long = RETRY_MS,
+        val confirmedAtMs: Long? = null,
+    )
+
+    /** [afterCheck]'s answer: the new state, and how long to wait before the next check. */
+    data class Next(val watch: Watch, val waitMs: Long)
+
+    /**
+     * The loop's next state after a check at [nowMs] (`elapsedRealtime`)
+     * whose [recheck] said [canary] and whose verdict is [result] ([canary]
+     * itself, or [reachOnion]'s after a refusal).
+     *
+     *  - Tor: confirmed, checked again in [RECHECK_MS].
+     *  - The canary refused as Tor does but no probe onion reached, for a
+     *    confirmed proxy: once, it stays routed and is checked again in
+     *    [RETRY_MS] — one slow circuit on a flaky link isn't "gone" (R3-F1).
+     *    A second such check in a row, and it's refused. Anything else — no
+     *    listener, not SOCKS, the canary "connected", no refusal — is
+     *    refused at once, no grace (the listener isn't the Tor that was
+     *    confirmed, R2-F1).
+     *  - Refused after such an "unreached" check within
+     *    [FAST_RETRY_WINDOW_MS] of the last pass: checked every
+     *    [RECHECK_MS] (no back-off), so it's routed again soon after Tor gets
+     *    through (R3-F1).
+     *  - Else [nextCheckMs]'s wait: [RETRY_MS] with nothing listening, a
+     *    growing back-off for a proxy that isn't (or can't reach) Tor.
+     */
+    fun afterCheck(watch: Watch, canary: Probe, result: Probe, nowMs: Long): Next {
+        if (result == Probe.Tor) {
+            return Next(Watch(confirmed = true, confirmedAtMs = nowMs), RECHECK_MS)
+        }
+        val unreached = canary == Probe.Tor && result is Probe.NoOnion
+        if (unreached && watch.confirmed && !watch.graceUsed) {
+            return Next(watch.copy(graceUsed = true, unreached = true), RETRY_MS)
+        }
+        val recent = watch.confirmedAtMs?.let { nowMs - it in 0 until FAST_RETRY_WINDOW_MS } == true
+        if (unreached && recent) {
+            return Next(
+                watch.copy(confirmed = false, graceUsed = false, unreached = true, backoffMs = RETRY_MS),
+                RECHECK_MS,
+            )
+        }
+        val wait = nextCheckMs(result, watch.backoffMs)
+        return Next(
+            watch.copy(
+                confirmed = false,
+                graceUsed = false,
+                unreached = unreached,
+                backoffMs = if (backsOff(result)) wait else RETRY_MS,
+            ),
+            wait,
+        )
     }
 
     // --- Orbot -----------------------------------------------------------

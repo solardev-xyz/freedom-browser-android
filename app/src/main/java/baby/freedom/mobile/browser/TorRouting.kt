@@ -101,6 +101,14 @@ object TorRouting {
     private var externalConfirmed = false
 
     /**
+     * Whether [external]'s last check found a Tor client that couldn't
+     * reach onion sites ([TorProxy.Watch.unreached]) — for the refusal
+     * page's copy while it isn't routed (R3-F1).
+     */
+    @Volatile
+    private var externalUnreached = false
+
+    /**
      * The Tor SOCKS endpoint `*.onion` is routed to — set only once the
      * WebView has confirmed the override naming it — or `null` while onion
      * requests are refused. Cleared *before* an override moves away from
@@ -152,11 +160,14 @@ object TorRouting {
     /**
      * Settings → Tor's client (#275): [proxy] for an external SOCKS proxy,
      * `null` for the embedded one; [confirmed] once [TorProxy.probe] found
-     * a Tor client there (and while it still listens). Main thread.
+     * a Tor client there (and while it still listens); [unreached] when
+     * its last check found Tor there that couldn't reach onion sites
+     * ([TorProxy.Watch.unreached]). Main thread.
      */
-    fun setExternal(context: Context, proxy: SocksEndpoint?, confirmed: Boolean) {
+    fun setExternal(context: Context, proxy: SocksEndpoint?, confirmed: Boolean, unreached: Boolean = false) {
         external = proxy
         externalConfirmed = proxy != null && confirmed
+        externalUnreached = proxy != null && unreached
         apply(context)
     }
 
@@ -172,6 +183,7 @@ object TorRouting {
         info = TorInfo()
         external = null
         externalConfirmed = false
+        externalUnreached = false
         routed = null
         target = null
         refusing = false
@@ -223,6 +235,19 @@ object TorRouting {
         if (!isRoutedExternal) return
         Log.i(TAG, "onion load failed through socks5://$routed → re-checking it")
         onExternalFailure.get()?.invoke()
+    }
+
+    /**
+     * An onion page got refusal page [code]; for the *Tor proxy* one
+     * ([CODE_PROXY_DOWN], R3-F1): check the
+     * external proxy now rather than at the next scheduled check (which
+     * may be minutes off, backing off), so trying again soon can find it
+     * routed. The listener spaces checks at least [TorProxy.RETRY_MS]
+     * apart, so a page reloading in a loop doesn't make it probe back to
+     * back. Any thread (the interceptor's).
+     */
+    internal fun refusedDocument(code: String) {
+        if (code == CODE_PROXY_DOWN) onExternalFailure.get()?.invoke()
     }
 
     private fun apply(context: Context) {
@@ -284,11 +309,12 @@ object TorRouting {
         }
         val proxy = external
         val code = refusalCode(supported, enabled, proxy != null)
+        refusedDocument(code)
         return WebResourceResponse(
             "text/html", "utf-8", 503, "Tor Not Running",
             headers + (NAME_RESOLUTION_ERROR_HEADER to code),
             ByteArrayInputStream(
-                refusalHtml(uri.host.orEmpty(), code, info, proxy).toByteArray(Charsets.UTF_8),
+                refusalHtml(uri.host.orEmpty(), code, info, proxy, externalUnreached).toByteArray(Charsets.UTF_8),
             ),
         )
     }
@@ -452,14 +478,28 @@ object TorRouting {
 
     /**
      * Title and description (HTML) of the refusal page for [code]; [proxy]
-     * is the external SOCKS proxy for [CODE_PROXY_DOWN].
+     * is the external SOCKS proxy for [CODE_PROXY_DOWN], and [unreached]
+     * whether its last check found Tor there that couldn't reach onion
+     * sites (so not "no Tor client answers", R3-F1).
      */
-    internal fun refusalCopy(code: String, info: TorInfo, proxy: SocksEndpoint? = null): Pair<String, String> = when (code) {
+    internal fun refusalCopy(
+        code: String,
+        info: TorInfo,
+        proxy: SocksEndpoint? = null,
+        unreached: Boolean = false,
+    ): Pair<String, String> = when (code) {
         CODE_UNSUPPORTED -> "Tor needs a newer WebView" to
             "This is an onion site, reachable only over Tor. This device's Android System " +
             "WebView can't send just <code>.onion</code> sites through Tor, so Freedom doesn't " +
             "open them. Update Android System WebView, then try again."
-        CODE_PROXY_DOWN -> "Tor proxy isn't reachable" to
+        CODE_PROXY_DOWN -> if (unreached) {
+            "Tor can't reach onion sites" to
+                "This is an onion site, reachable only over Tor. The Tor client at " +
+                "<code>${proxy ?: "(not set)"}</code> (Settings &rarr; Tor) answers, but couldn't " +
+                "reach an onion site when Freedom last checked: its connection may be down or slow. " +
+                "Freedom is checking again; try again in a moment. Freedom never opens onion sites " +
+                "without Tor."
+        } else "Tor proxy isn't reachable" to
             "This is an onion site, reachable only over Tor. Freedom sends onion sites to the Tor " +
             "proxy at <code>${proxy ?: "(not set)"}</code> (Settings &rarr; Tor), and no Tor client " +
             "answers there right now. Start Orbot (or your Tor app), and Tor on the Nodes page, then " +
@@ -480,8 +520,14 @@ object TorRouting {
             )
     }
 
-    internal fun refusalHtml(host: String, code: String, info: TorInfo, proxy: SocksEndpoint? = null): String {
-        val (title, description) = refusalCopy(code, info, proxy)
+    internal fun refusalHtml(
+        host: String,
+        code: String,
+        info: TorInfo,
+        proxy: SocksEndpoint? = null,
+        unreached: Boolean = false,
+    ): String {
+        val (title, description) = refusalCopy(code, info, proxy, unreached)
         fun esc(t: String) = t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         val error = info.errorMessage?.takeIf { code == CODE_NOT_RUNNING && info.status == TorStatus.Error }
         val details = esc(host) + "\n\n" + code + (error?.let { "\n" + esc(it) } ?: "")

@@ -431,6 +431,33 @@ class TorRoutingTest {
     }
 
     @Test
+    fun `the Tor proxy refusal page re-checks the proxy, and says when Tor answers but can't get through`() {
+        // R3-F1: unrouted, nothing else would check before the next
+        // scheduled check; the page itself asks for one.
+        var checks = 0
+        val listener: () -> Unit = { checks++ }
+        val orbot = SocksEndpoint("127.0.0.1", 9050)
+        try {
+            TorRouting.setOnExternalFailure(listener)
+            TorRouting.refusedDocument(TorRouting.CODE_OFF)
+            TorRouting.refusedDocument(TorRouting.CODE_NOT_RUNNING)
+            assertEquals(0, checks)
+            TorRouting.refusedDocument(TorRouting.CODE_PROXY_DOWN)
+            assertEquals(1, checks)
+
+            val gone = TorRouting.refusalHtml(onion, TorRouting.CODE_PROXY_DOWN, TorInfo(), orbot, unreached = false)
+            assertTrue(gone.contains("no Tor client"))
+            val slow = TorRouting.refusalHtml(onion, TorRouting.CODE_PROXY_DOWN, TorInfo(), orbot, unreached = true)
+            assertTrue(slow.contains("<h1>Tor can't reach onion sites</h1>"))
+            assertTrue(slow.contains("127.0.0.1:9050"))
+            assertFalse(slow.contains("no Tor client"))
+        } finally {
+            TorRouting.clearOnExternalFailure(listener)
+            TorRouting.resetForTest(supported = null)
+        }
+    }
+
+    @Test
     fun `nothing to wait for without an override`() {
         TorRouting.resetForTest(supported = false)
         var released = false
