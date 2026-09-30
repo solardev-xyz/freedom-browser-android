@@ -64,6 +64,12 @@ class RadicleProvider(
         suspend fun signingFor(origin: String): String?
         suspend fun connect(origin: String): Boolean
 
+        /**
+         * The DID [origin] may sign as, or could before the Radicle identity
+         * changed; null if it never could. Only for the prompt's wording.
+         */
+        suspend fun signedBefore(origin: String): String? = null
+
         /** Give connected [origin] the signing tier for [did] only. */
         suspend fun grantSigning(origin: String, did: String): Boolean
         suspend fun revoke(origin: String): Boolean
@@ -413,7 +419,11 @@ class RadicleProvider(
         val did = identity?.optString("did").orEmpty()
         if (did.isEmpty()) return Reply.Err(INTERNAL, "identity unavailable", "native_failed")
         if (did != signingAs) {
-            if (!ask(RadicleAsk.Signing(origin))) return rejected()
+            // Name the identity asked about, and say when the site was allowed
+            // another one: allowing this links the two for it.
+            val before = runCatching { grants.signedBefore(origin) }.getOrNull()?.takeIf { it.isNotEmpty() && it != did }
+            val wallet = node.state.value.walletIdentity
+            if (!ask(RadicleAsk.Signing(origin, did, wallet, before))) return rejected()
             // The node may have restarted as another identity while the
             // prompt was up: the grant is for the one the user was asked
             // about, and only while the node still runs as it.
@@ -644,6 +654,15 @@ sealed interface RadicleAsk {
     /** Stop seeding [rid]. */
     data class Unseed(override val origin: String, val rid: String) : RadicleAsk
 
-    /** The user's Radicle identity, and writing as them. */
-    data class Signing(override val origin: String) : RadicleAsk
+    /**
+     * The user's Radicle identity [did] (the wallet's when [wallet], else
+     * the device's own), and writing as it. [previousDid] is the other
+     * identity the site was allowed to act as before (#328), if any.
+     */
+    data class Signing(
+        override val origin: String,
+        val did: String = "",
+        val wallet: Boolean = false,
+        val previousDid: String? = null,
+    ) : RadicleAsk
 }

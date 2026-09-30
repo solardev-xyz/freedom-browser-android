@@ -69,6 +69,10 @@
     <string name="radicle_prompt_unseed_detail">Your node will stop sharing it and drop it from your seeded list.</string>
     <string name="radicle_prompt_unseed_allow">Stop seeding</string>
     <string name="radicle_prompt_signing_request">wants to act as you on Radicle</string>
+    <string name="radicle_prompt_signing_changed_request">wants to act as your new Radicle identity</string>
+    <string name="radicle_prompt_signing_changed_detail">You allowed it to act as another identity (%1$s). Your Radicle identity has changed since then: allowing this also shows it the one above, so it can link the two. It can then open issues, comment and change issue states signed with this key, without asking again. What it writes is published to the network under your name and can\'t be taken back.</string>
+    <string name="radicle_prompt_identity_wallet">Your wallet\'s identity (the same on any device with your recovery phrase)</string>
+    <string name="radicle_prompt_identity_own">This device\'s own identity</string>
     <string name="radicle_prompt_signing_detail">It will see your Radicle identity (DID and node ID) and can open issues, comment and change issue states signed with your key, without asking again. What it writes is published to the network under your name and can\'t be taken back.</string>
 
     <!-- RadApi.kt -->

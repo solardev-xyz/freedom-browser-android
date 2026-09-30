@@ -105,6 +105,7 @@ object RadicleProviders {
             grants = object : RadicleProvider.Grants {
                 override suspend fun signingFor(origin: String) = store.grantFor(origin)?.let { it.signingAs.orEmpty() }
                 override suspend fun connect(origin: String) = store.connect(origin)
+                override suspend fun signedBefore(origin: String) = store.grantFor(origin)?.let { it.signingAs ?: it.signedAs }
                 override suspend fun grantSigning(origin: String, did: String) = store.grantSigning(origin, did)
                 override suspend fun revoke(origin: String) = store.revoke(origin)
             },

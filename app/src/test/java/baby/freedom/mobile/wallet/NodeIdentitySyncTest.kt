@@ -299,25 +299,25 @@ class NodeIdentitySyncTest {
     }
 
     @Test
-    fun `an adoption waits for the grants to be taken back, a removal doesn't`() = runBlocking {
-        var fail = true
+    fun `a grant store that can't be written doesn't hold up an adoption or a removal`() = runBlocking {
+        var calls = 0
         val flaky = NodeIdentitySync(vault, store, scope, io = Dispatchers.Unconfined, beforeRadicleChange = {
-            check(!fail) { "grant store unwritable" }
+            calls++
+            check(false) { "grant store unwritable" }
         })
         vault.create(abandon12, auth, imported = false)
-        // Nothing adopted while the grants can't be taken back...
-        assertNull(flaky.reconcile(vault.state.value))
-        assertTrue(store.isEmpty())
-        // ...and the next unlock tries again.
-        fail = false
-        vault.lock()
-        vault.unlock(auth)
-        assertNotNull(flaky.reconcile(vault.state.value))
+        // Adopted anyway (grants name their DID, so none is honored for the
+        // new identity): the Swarm node gets the wallet's account now, not
+        // at some later vault change.
+        val adopted = flaky.reconcile(vault.state.value) as NodeIdentitySync.Change.Adopted
+        assertTrue(adopted.swarmChanged)
+        assertFalse(store.isEmpty())
+        assertEquals(1, calls)
         // A removal wipes the keys regardless.
-        fail = true
         vault.remove()
         assertEquals(NodeIdentitySync.Change.Dropped, flaky.reconcile(vault.state.value))
         assertFalse(file.exists())
+        assertEquals(2, calls)
     }
 
     @Test

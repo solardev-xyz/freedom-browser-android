@@ -41,18 +41,27 @@ class RadicleGrantStoreTest {
 
         assertTrue(store.dropSigning())
 
-        // Still connected, none signing: each asks before it learns the new identity.
+        // Still connected, none signing: each asks before it learns the new
+        // identity, and remembers the one it could sign as for that prompt.
         assertEquals(
             listOf(
-                RadicleGrantStore.Grant("https://a.example"),
+                RadicleGrantStore.Grant("https://a.example", signedAs = DEVICE),
                 RadicleGrantStore.Grant("https://b.example"),
-                RadicleGrantStore.Grant("https://c.example"),
+                RadicleGrantStore.Grant("https://c.example", signedAs = DEVICE),
             ),
             store.all.first(),
         )
+        assertTrue(store.all.first().none { it.signing })
+        // Connecting again keeps that; a second change doesn't lose it.
+        assertTrue(store.connect("https://c.example"))
+        assertTrue(store.dropSigning())
+        assertEquals(DEVICE, store.grantFor("https://c.example")?.signedAs)
         // And may be granted it again.
         assertTrue(store.grantSigning("https://a.example", WALLET))
-        assertEquals(WALLET, store.grantFor("https://a.example")?.signingAs)
+        assertEquals(RadicleGrantStore.Grant("https://a.example", signingAs = WALLET), store.grantFor("https://a.example"))
+        // Disconnecting forgets both.
+        assertTrue(store.revoke("https://c.example"))
+        assertNull(store.grantFor("https://c.example"))
     }
 
     @Test

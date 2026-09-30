@@ -368,6 +368,83 @@ class RadicleNodeTest {
     }
 
     @Test
+    fun aWriteCheckedAsTheOldIdentityFinishesBeforeTheNodeBootsAsTheNew() {
+        val fake = FakeOps()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val ops = object : RadicleNode.Ops by fake {
+            override fun call(method: String, args: JSONObject): String {
+                if (method == "createIssue") {
+                    entered.countDown()
+                    release.await(5, TimeUnit.SECONDS)
+                }
+                return """{"id":"made-by-${if (fake.running) "live" else "stopped"}"}"""
+            }
+        }
+        val host = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        val node = RadicleNode(
+            config.copy(identity = { host.get()?.let { RadicleNode.HostIdentity(ByteArray(32) { 1 }, it) } }),
+            ops,
+        )
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        val own = "did:key:z6MkTest"
+        val wallet = "did:key:z6MkWallet"
+        // A write as the device's own identity passes its check, then stalls.
+        val answer = java.util.concurrent.atomic.AtomicReference<String>()
+        val writer = Thread { answer.set(node.call("createIssue", JSONObject().put(RadicleNode.AS_DID, own))) }
+        writer.start()
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+        // Meanwhile the wallet is imported and the node restarts as it.
+        host.set(wallet)
+        fake.startResult = """{"did":"$wallet"}"""
+        node.reloadIdentity()
+        Thread.sleep(400)
+        // The old node is shut down, but the new one doesn't boot while the
+        // write checked against the old identity is still running.
+        assertFalse("startWithKey" in fake.calls)
+        release.countDown()
+        writer.join(5_000)
+        assertTrue(answer.get().contains("made-by"))
+        await("restarted as the wallet's", node) { it.status == RadicleStatus.Running && it.walletIdentity }
+        // Now a write allowed for the old identity is refused, one for the new goes through.
+        assertEquals(
+            RadicleNode.IDENTITY_CHANGED,
+            JSONObject(node.call("createIssue", JSONObject().put(RadicleNode.AS_DID, own))).getString("reason"),
+        )
+        assertEquals("made-by-live", JSONObject(node.call("createIssue", JSONObject().put(RadicleNode.AS_DID, wallet))).getString("id"))
+        node.dispose()
+    }
+
+    @Test
+    fun aSeedRacingAnIdentityReloadIsNeverCutShort() {
+        // Whatever the interleaving, a seed the node accepted is either
+        // waited for (no cancel, no rollback) or refused as not running.
+        repeat(30) { i ->
+            val ops = FakeOps()
+            val host = java.util.concurrent.atomic.AtomicReference<String?>(null)
+            val node = RadicleNode(
+                config.copy(identity = { host.get()?.let { RadicleNode.HostIdentity(ByteArray(32) { 1 }, it) } }),
+                ops,
+            )
+            node.start()
+            await("running $i", node) { it.status == RadicleStatus.Running }
+            host.set("did:key:z6MkWallet")
+            val seeder = Thread { node.seed(rid) }
+            node.reloadIdentity()
+            seeder.start()
+            seeder.join()
+            Thread.sleep(100)
+            assertFalse("round $i: ${ops.calls}", ops.calls.any { it.startsWith("cancel:") || it.startsWith("unseed:") })
+            ops.releaseClone.countDown()
+            await("round $i restarted", node) { it.status == RadicleStatus.Running && it.walletIdentity }
+            assertFalse("round $i: ${ops.calls}", ops.calls.any { it.startsWith("cancel:") || it.startsWith("unseed:") })
+            node.dispose()
+            await("round $i stopped", node) { it.status == RadicleStatus.Stopped }
+        }
+    }
+
+    @Test
     fun goingBackToTheOwnKeyDoesntWaitForAFetch() {
         val ops = FakeOps()
         val host = java.util.concurrent.atomic.AtomicReference<String?>("did:key:z6MkWallet")

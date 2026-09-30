@@ -34,8 +34,10 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * Every change is also a new Radicle identity, so before it's written
  * [beforeRadicleChange] takes sites' Radicle signing grants back
- * (`RadicleGrantStore.dropSigning`): a site that could read and write as
- * the old identity asks again before it gets the new one.
+ * (`RadicleGrantStore.dropSigning`), best effort. A site that could read
+ * and write as the old identity asks again before it gets the new one
+ * either way — each grant names the DID it was given for — and its
+ * prompt says the identity changed.
  *
  * Each change goes to the [setOnChanged] listener — the activity has
  * `:node` restart the Swarm and Radicle nodes with it — and to
@@ -51,9 +53,12 @@ class NodeIdentitySync internal constructor(
     private val scope: CoroutineScope,
     private val io: CoroutineDispatcher = Dispatchers.IO,
     /**
-     * Run before the Radicle identity changes (see the class comment). A
-     * failure stops an adoption (the next unlock tries again), but not a
-     * removal: the removed wallet's keys are wiped regardless.
+     * Run before the Radicle identity changes (see the class comment).
+     * Best effort: a failure is logged and the change goes ahead, for an
+     * adoption as for a removal. Each grant names the DID it was given
+     * for, so one this couldn't take back still isn't honored for the new
+     * identity — and a grant-store write failing mustn't keep the Swarm
+     * node from adopting the wallet's account (even with Radicle off).
      */
     private val beforeRadicleChange: suspend () -> Unit = {},
 ) {
@@ -144,7 +149,7 @@ class NodeIdentitySync internal constructor(
             return null
         }
         return try {
-            beforeRadicleChange()
+            takeBackRadicleGrants()
             store.write(tag, identity)
             Change.Adopted(identity.swarmAddress, identity.radicleDid.orEmpty(), swarmChanged = !hadSwarm)
         } finally {
@@ -154,13 +159,18 @@ class NodeIdentitySync internal constructor(
 
     private suspend fun drop(): Change? {
         if (store.isEmpty()) return null
-        try {
-            beforeRadicleChange()
-        } catch (t: Throwable) {
-            Log.w(TAG, "taking back Radicle signing grants failed: ${t.javaClass.simpleName}")
-        }
+        takeBackRadicleGrants()
         store.wipe()
         return Change.Dropped
+    }
+
+    private suspend fun takeBackRadicleGrants() {
+        try {
+            beforeRadicleChange()
+        } catch (e: Throwable) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            Log.w(TAG, "taking back Radicle signing grants failed: ${e.javaClass.simpleName}")
+        }
     }
 
     companion object {

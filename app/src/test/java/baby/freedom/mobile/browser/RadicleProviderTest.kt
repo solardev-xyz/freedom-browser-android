@@ -27,7 +27,10 @@ class RadicleProviderTest {
     /** origin → the DID it may sign as, `""` for connection only. */
     private class MemoryGrants : RadicleProvider.Grants {
         val map = HashMap<String, String>()
+        /** origin → the DID it could sign as before the identity changed. */
+        val before = HashMap<String, String>()
         override suspend fun signingFor(origin: String) = map[origin]
+        override suspend fun signedBefore(origin: String) = map[origin]?.ifEmpty { null } ?: before[origin]
         override suspend fun connect(origin: String): Boolean {
             if (origin !in map) map[origin] = ""
             return true
@@ -279,7 +282,11 @@ class RadicleProviderTest {
         assertEquals(RadicleProvider.USER_REJECTED, err(req("radicle_createIssue", JSONObject(issue.toString()))).code)
         assertEquals(RadicleProvider.USER_REJECTED, err(req("radicle_getIdentity")).code)
         assertTrue(node.calls.none { it.first == "createIssue" })
-        assertEquals(listOf(RadicleAsk.Signing(site), RadicleAsk.Signing(site)), asked)
+        // Each prompt names the identity asked about and the one allowed before.
+        val changed = RadicleAsk.Signing(site, ME, wallet = false, previousDid = "did:key:z6MkDevice")
+        assertEquals(listOf(changed, changed), asked)
+        assertTrue(radiclePromptCopy(changed).detail.contains("z6MkDe"))
+        assertEquals(ME, radiclePromptIdentity(changed)?.second)
         assertEquals("did:key:z6MkDevice", grants.map[site])
         answer = true
         assertEquals(ME, (ok(req("radicle_getIdentity")) as JSONObject).getString("did"))
@@ -429,6 +436,36 @@ class RadicleProviderTest {
         assertEquals(PromptTurn.Radicle, modalPromptTurn(true, true, false, false, radicleWaiting = true, radicleHasTurn = true))
         assertEquals(PromptTurn.DownloadOffer, modalPromptTurn(false, true, true, false, radicleWaiting = true, radicleHasTurn = true))
         assertEquals(PromptTurn.None, modalPromptTurn(false, false, false, true, radicleWaiting = true, radicleHasTurn = true))
+    }
+
+    @Test
+    fun `a site whose grant was taken back at an identity change hears it's a different identity`() {
+        // dropSigning ran at the wallet import: connection tier, signed as the device's.
+        grants.map[site] = ""
+        grants.before[site] = "did:key:z6MkDevice"
+        node.state.value = node.state.value.copy(walletIdentity = true)
+        answer = false
+        err(req("radicle_getIdentity"))
+        val ask = asked.single() as RadicleAsk.Signing
+        assertEquals(RadicleAsk.Signing(site, ME, wallet = true, previousDid = "did:key:z6MkDevice"), ask)
+        val copy = radiclePromptCopy(ask)
+        assertEquals("wants to act as your new Radicle identity", copy.request)
+        assertTrue(copy.detail.contains("can link the two"))
+        assertTrue(radiclePromptIdentity(ask)!!.first.startsWith("Your wallet's identity"))
+        // One that was never allowed another gets the plain prompt, still naming the identity.
+        asked.clear()
+        grants.before.clear()
+        node.state.value = node.state.value.copy(walletIdentity = false)
+        err(req("radicle_getIdentity"))
+        val plain = asked.single() as RadicleAsk.Signing
+        assertNull(plain.previousDid)
+        assertEquals("wants to act as you on Radicle", radiclePromptCopy(plain).request)
+        assertEquals("This device's own identity" to ME, radiclePromptIdentity(plain))
+        // Nor is the identity it was allowed before a "change".
+        asked.clear()
+        grants.before[site] = ME
+        err(req("radicle_getIdentity"))
+        assertNull((asked.single() as RadicleAsk.Signing).previousDid)
     }
 
     @Test

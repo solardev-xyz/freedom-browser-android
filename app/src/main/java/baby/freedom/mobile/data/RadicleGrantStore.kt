@@ -38,8 +38,14 @@ import kotlinx.coroutines.flow.map
  * corrupt file is replaced with an empty one.
  */
 class RadicleGrantStore internal constructor(private val store: DataStore<Preferences>) {
-    /** One site's grant: [signingAs] is the DID it may sign as, or null for the connection tier only. */
-    data class Grant(val origin: String, val signingAs: String? = null) {
+    /**
+     * One site's grant: [signingAs] is the DID it may sign as, or null for
+     * the connection tier only. [signedAs] is the DID a connection-tier
+     * site could sign as before [dropSigning] took that back (the Radicle
+     * identity changed), so its next signing prompt can say the identity
+     * is a different one; null if it never could.
+     */
+    data class Grant(val origin: String, val signingAs: String? = null, val signedAs: String? = null) {
         /** It may sign as some identity (maybe not the node's current one). */
         val signing: Boolean get() = signingAs != null
 
@@ -59,12 +65,15 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
                 val name = k.name
                 if (!name.startsWith(PREFIX)) return@mapNotNull null
                 val tier = v as? String ?: return@mapNotNull null
-                val signingAs = when {
-                    tier == CONNECTION || tier == SIGNING -> null
-                    tier.startsWith(SIGNING_AS) && tier.length > SIGNING_AS.length -> tier.removePrefix(SIGNING_AS)
-                    else -> return@mapNotNull null
+                val origin = name.removePrefix(PREFIX)
+                when {
+                    tier == CONNECTION || tier == SIGNING -> Grant(origin)
+                    tier.startsWith(SIGNING_AS) && tier.length > SIGNING_AS.length ->
+                        Grant(origin, signingAs = tier.removePrefix(SIGNING_AS))
+                    tier.startsWith(SIGNED_AS) && tier.length > SIGNED_AS.length ->
+                        Grant(origin, signedAs = tier.removePrefix(SIGNED_AS))
+                    else -> null
                 }
-                Grant(name.removePrefix(PREFIX), signingAs)
             }.sortedBy { it.origin }
         }
 
@@ -76,9 +85,10 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
         null
     }
 
-    /** Connect [origin] (keeping a signing grant it already has); `false` if it couldn't be written. */
+    /** Connect [origin] (keeping a grant it already has); `false` if it couldn't be written. */
     suspend fun connect(origin: String): Boolean = write {
-        if (it[keyOf(origin)]?.startsWith(SIGNING_AS) != true) it[keyOf(origin)] = CONNECTION
+        val tier = it[keyOf(origin)]
+        if (tier == null || !(tier.startsWith(SIGNING_AS) || tier.startsWith(SIGNED_AS))) it[keyOf(origin)] = CONNECTION
     }
 
     /**
@@ -103,12 +113,15 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
      * must ask before it learns or writes as the new one. `false` if the
      * store couldn't be written. (Each grant names its identity anyway, so
      * one this misses still isn't honored for another; this also clears
-     * the old identity's grants for good.)
+     * the old identity's grants for good.) Each site keeps the DID it
+     * could sign as ([Grant.signedAs]), for its next prompt to name.
      */
     suspend fun dropSigning(): Boolean = write { prefs ->
         prefs.asMap().forEach { (k, v) ->
-            if (k.name.startsWith(PREFIX) && v is String && (v == SIGNING || v.startsWith(SIGNING_AS))) {
-                prefs[stringPreferencesKey(k.name)] = CONNECTION
+            if (!k.name.startsWith(PREFIX) || v !is String) return@forEach
+            when {
+                v == SIGNING -> prefs[stringPreferencesKey(k.name)] = CONNECTION
+                v.startsWith(SIGNING_AS) -> prefs[stringPreferencesKey(k.name)] = SIGNED_AS + v.removePrefix(SIGNING_AS)
             }
         }
     }
@@ -132,6 +145,8 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
         /** Before #328: signing for no identity in particular, read as [CONNECTION]. */
         private const val SIGNING = "signing"
         private const val SIGNING_AS = "signing:"
+        /** Connection tier, once allowed to sign as the DID that follows ([Grant.signedAs]). */
+        private const val SIGNED_AS = "signed:"
         private const val TAG = "RadicleGrantStore"
 
         private val Context.radicleGrantStore by preferencesDataStore(
