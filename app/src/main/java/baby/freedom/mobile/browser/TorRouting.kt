@@ -80,6 +80,18 @@ object TorRouting {
     const val CODE_UNSUPPORTED = "tor_unsupported"
     const val CODE_PROXY_DOWN = "tor_proxy_down"
 
+    /**
+     * An onion document refused while the external proxy's check is still
+     * pending ([externalPending]) — the hold ran out, or [MAX_HELD] were
+     * already waiting: "checking", not "no Tor client answers", and the
+     * page tries again by itself ([CHECKING_REFRESH_S]) so it loads once
+     * the proxy passes (#305 R2-F1).
+     */
+    const val CODE_PROXY_CHECKING = "tor_proxy_checking"
+
+    /** How soon the [CODE_PROXY_CHECKING] page asks again (a meta refresh, no script). */
+    const val CHECKING_REFRESH_S = 5
+
     /** `null` until [init]; false when the WebView can't do reverse-bypass proxying. */
     @Volatile
     var supported: Boolean? = null
@@ -129,10 +141,15 @@ object TorRouting {
 
     /**
      * How long an onion request waits for [externalPending]'s check: the
-     * greeting, the canary and a real onion `CONNECT` through a running
-     * Orbot take a few seconds; past this it gets the refusal.
+     * whole first check at its own deadlines ([TorProxy.CHECK_MAX_MS] —
+     * the greeting and canary, then every probe onion, which a slow
+     * circuit can take up to its full 45 s each to reach), plus a margin
+     * for publishing the verdict and the WebView confirming the override.
+     * A shorter hold refused a slow but working Tor mid-check (#305
+     * R2-F1); past this the check is late, and the request gets the
+     * [CODE_PROXY_CHECKING] page, which asks again by itself.
      */
-    const val HOLD_MS = 30_000L
+    val HOLD_MS = TorProxy.CHECK_MAX_MS + 5_000L
 
     /**
      * At most this many onion requests wait at once; more are refused at
@@ -392,7 +409,9 @@ object TorRouting {
      * as a refused ENS document is), a subresource an empty 502. `null`
      * for a non-onion request, or while Tor is routed. While an external
      * proxy's check is pending it first waits for that check's verdict
-     * ([awaitExternalVerdict], #305 R1-F1). The interceptor's thread.
+     * ([awaitExternalVerdict], #305 R1-F1); a document refused with that
+     * check still pending gets the [CODE_PROXY_CHECKING] page, which asks
+     * again by itself (R2-F1). The interceptor's thread.
      */
     fun refusalFor(req: WebResourceRequest): WebResourceResponse? {
         val uri = req.url ?: return null
@@ -405,7 +424,7 @@ object TorRouting {
             )
         }
         val proxy = external
-        val code = refusalCode(supported, enabled, proxy != null)
+        val code = documentRefusalCode()
         refusedDocument(code, req.isForMainFrame)
         return WebResourceResponse(
             "text/html", "utf-8", 503, "Tor Not Running",
@@ -415,6 +434,15 @@ object TorRouting {
             ),
         )
     }
+
+    /**
+     * The refusal page for an onion document refused now: while the
+     * external proxy's check is still pending (the hold ran out, or
+     * [MAX_HELD] were already held) [CODE_PROXY_CHECKING] — nothing has
+     * said no Tor client answers yet (#305 R2-F1) — else [refusalCode]'s.
+     */
+    internal fun documentRefusalCode(): String =
+        if (awaitingExternal()) CODE_PROXY_CHECKING else refusalCode(supported, enabled, external != null)
 
     /**
      * Open [url] for a native fetch: a `.onion` URL through the routed Tor
@@ -589,6 +617,10 @@ object TorRouting {
             "This is an onion site, reachable only over Tor. This device's Android System " +
             "WebView can't send just <code>.onion</code> sites through Tor, so Freedom doesn't " +
             "open them. Update Android System WebView, then try again."
+        CODE_PROXY_CHECKING -> "Checking the Tor proxy" to
+            "This is an onion site, reachable only over Tor. Freedom is still checking the Tor " +
+            "proxy at <code>${proxy ?: "(not set)"}</code> (Settings &rarr; Tor); this page loads " +
+            "by itself once it passes. Freedom never opens onion sites without Tor."
         CODE_PROXY_DOWN -> if (unreached) {
             "Tor can't reach onion sites" to
                 "This is an onion site, reachable only over Tor. The Tor client at " +
@@ -628,7 +660,12 @@ object TorRouting {
         fun esc(t: String) = t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         val error = info.errorMessage?.takeIf { code == CODE_NOT_RUNNING && info.status == TorStatus.Error }
         val details = esc(host) + "\n\n" + code + (error?.let { "\n" + esc(it) } ?: "")
-        return inPlaceErrorPageHtml(title, description, details)
+        return inPlaceErrorPageHtml(
+            title,
+            description,
+            details,
+            refreshSeconds = CHECKING_REFRESH_S.takeIf { code == CODE_PROXY_CHECKING },
+        )
     }
 }
 

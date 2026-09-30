@@ -527,6 +527,50 @@ class TorRoutingTest {
     }
 
     @Test
+    fun `the hold spans the whole first check, and a document refused mid-check says so`() {
+        // R2-F1: a slow but working Tor can take the probe's own deadlines
+        // (the canary, then up to 45 s per probe onion) to pass; a shorter
+        // hold refused it mid-check with "no Tor client answers".
+        assertTrue(TorProxy.CHECK_MAX_MS >= 100_000L)
+        assertTrue(TorRouting.HOLD_MS > TorProxy.CHECK_MAX_MS)
+        val context = android.content.ContextWrapper(null)
+        val real = TorRouting.setOverride
+        val pending = java.util.Collections.synchronizedList(mutableListOf<Runnable>())
+        TorRouting.setOverride = { _, _, done -> pending += done }
+        val orbot = SocksEndpoint("127.0.0.1", 9050)
+        try {
+            TorRouting.resetForTest(supported = true)
+            TorRouting.setEnabled(context, true)
+            pending.removeAt(0).run()
+            TorRouting.setExternal(context, orbot, confirmed = false, pending = true)
+            assertEquals(TorRouting.CODE_PROXY_CHECKING, TorRouting.documentRefusalCode())
+            // Confirmed, the WebView not yet: still no verdict to show.
+            TorRouting.setExternal(context, orbot, confirmed = true)
+            assertEquals(TorRouting.CODE_PROXY_CHECKING, TorRouting.documentRefusalCode())
+            // A verdict: the proxy page, as before.
+            TorRouting.setExternal(context, orbot, confirmed = false)
+            assertEquals(TorRouting.CODE_PROXY_DOWN, TorRouting.documentRefusalCode())
+            TorRouting.setEnabled(context, false)
+            assertEquals(TorRouting.CODE_OFF, TorRouting.documentRefusalCode())
+        } finally {
+            TorRouting.setOverride = real
+            TorRouting.resetForTest(supported = null)
+        }
+        val checking = TorRouting.refusalHtml(onion, TorRouting.CODE_PROXY_CHECKING, TorInfo(), orbot)
+        assertTrue(checking.contains("<h1>Checking the Tor proxy</h1>"))
+        assertTrue(checking.contains("127.0.0.1:9050"))
+        assertFalse(checking.contains("no Tor client"))
+        assertFalse(checking.contains("Start Orbot"))
+        // It asks again by itself (a meta refresh, still no script), so it
+        // loads once the proxy passes.
+        assertTrue(checking.contains("<meta http-equiv=\"refresh\" content=\"${TorRouting.CHECKING_REFRESH_S}\">"))
+        assertFalse(checking.contains("<script"))
+        // Only that page refreshes.
+        val down = TorRouting.refusalHtml(onion, TorRouting.CODE_PROXY_DOWN, TorInfo(), orbot)
+        assertFalse(down.contains("http-equiv=\"refresh\""))
+    }
+
+    @Test
     fun `nothing to wait for without an override`() {
         TorRouting.resetForTest(supported = false)
         var released = false

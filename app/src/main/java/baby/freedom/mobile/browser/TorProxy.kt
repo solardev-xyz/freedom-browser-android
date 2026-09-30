@@ -179,6 +179,16 @@ object TorProxy {
     const val ONION_TIMEOUT_MS = 45_000L
 
     /**
+     * The longest one full check (MainActivity's loop: [recheck], then
+     * [reachOnion]) can take at its default deadlines: a handshake and the
+     * canary, then a handshake and [ONION_TIMEOUT_MS] for each of
+     * [PROBE_ONIONS]. [TorRouting.HOLD_MS] is sized from it (#305 R2-F1).
+     */
+    val CHECK_MAX_MS: Long
+        get() = HANDSHAKE_TIMEOUT_MS + CANARY_TIMEOUT_MS +
+            PROBE_ONIONS.size * (HANDSHAKE_TIMEOUT_MS + ONION_TIMEOUT_MS)
+
+    /**
      * Whether [endpoint] is a Tor SOCKS proxy: [recheck] first (a SOCKS5
      * greeting with no authentication, and a CONNECT to [CANARY_ONION]
      * that must *not* succeed), then a CONNECT to each of [onions] in turn

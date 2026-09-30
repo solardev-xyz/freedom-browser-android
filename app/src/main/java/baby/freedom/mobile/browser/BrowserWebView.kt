@@ -374,16 +374,19 @@ internal fun nameResolutionRefusalHtml(
  * response (no script, nothing fetched): [title], [descriptionHtml], and
  * [detailsHtml] in the details box (both already escaped), with a
  * Try again link that reloads the entry — or goes to [retryHref]
- * (escaped) instead. [nameResolutionRefusal]'s and [TorRouting]'s
- * refusals, and a failed web load's page ([netErrorPageHtml]).
+ * (escaped) instead; with [refreshSeconds], the entry is asked for again
+ * after that long by a meta refresh (a GET of the same address, still no
+ * script). [nameResolutionRefusal]'s and [TorRouting]'s refusals, and a
+ * failed web load's page ([netErrorPageHtml]).
  */
 internal fun inPlaceErrorPageHtml(
     title: String,
     descriptionHtml: String,
     detailsHtml: String,
     retryHref: String = "",
+    refreshSeconds: Int? = null,
 ): String =
-    """<!doctype html><html lang="en"><head><meta charset="utf-8">
+    """<!doctype html><html lang="en"><head><meta charset="utf-8">${refreshSeconds?.let { "\n<meta http-equiv=\"refresh\" content=\"$it\">" }.orEmpty()}
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
 <title>$title</title><style>
