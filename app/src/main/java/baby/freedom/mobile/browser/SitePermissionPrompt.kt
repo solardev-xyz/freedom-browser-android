@@ -112,7 +112,7 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
                             .heightIn(min = 48.dp)
                             .protectedToggle(tap, value = remember, role = Role.Checkbox) { remember = it },
                     ) {
-                        Checkbox(checked = remember, onCheckedChange = null)
+                        Checkbox(checked = remember, onCheckedChange = null, enabled = tap.armed)
                         Text(
                             "Remember this decision",
                             style = MaterialTheme.typography.bodyMedium,

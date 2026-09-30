@@ -24,6 +24,7 @@ import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -414,6 +415,39 @@ class OpenLvSessionTest {
             .put("message", JSONObject().put("to", "desktop"))
         s.onRequest(1, 4, "eth_signTypedData_v4", JSONArray().put(ledgerAccount.address).put(payload.toString()))
         s.awaitSheet().decide(OpenLvSession.Decision.Approve())
+        assertEquals(OpenLvSession.REJECTED_CODE, error(engine.next()))
+    }
+
+    @Test
+    fun `a Ledger account's typed data the Ledger can't show field by field is flagged on the sheet with the hashes it will show (#239)`() {
+        val (s, engine) = session(FakeEngine(), LedgerKeys())
+        s.startOnScope()
+        // 256 ids: one more than the device takes in an array.
+        val payload = JSONObject()
+            .put("types", JSONObject().put("Batch", JSONArray().put(JSONObject().put("name", "ids").put("type", "uint8[]"))))
+            .put("domain", JSONObject().put("name", "Shop"))
+            .put("primaryType", "Batch")
+            .put("message", JSONObject().put("ids", JSONArray(List(256) { 7 })))
+        val data = Eip712.parseStrict(payload.toString())
+        for ((id, account) in listOf(ledgerAccount, account0).withIndex()) {
+            s.onRequest(1, id + 1, "eth_signTypedData_v4", JSONArray().put(account.address).put(payload.toString()))
+            val sheet = s.awaitSheet()
+            val hashes = (sheet.request as OpenLvSession.Request.TypedData).ledgerHashes
+            if (account == ledgerAccount) {
+                assertArrayEquals(Eip712.hashStruct(data.types, "EIP712Domain", data.domain, 0), hashes!!.domain)
+                assertArrayEquals(Eip712.hashStruct(data.types, "Batch", data.message, 0), hashes.message)
+            } else {
+                assertNull(hashes)
+            }
+            sheet.decide(OpenLvSession.Decision.Reject)
+            assertEquals(OpenLvSession.REJECTED_CODE, error(engine.next()))
+        }
+        // What the Ledger streams field by field carries no warning.
+        payload.getJSONObject("message").put("ids", JSONArray(List(255) { 7 }))
+        s.onRequest(1, 9, "eth_signTypedData_v4", JSONArray().put(ledgerAccount.address).put(payload.toString()))
+        val sheet = s.awaitSheet()
+        assertNull((sheet.request as OpenLvSession.Request.TypedData).ledgerHashes)
+        sheet.decide(OpenLvSession.Decision.Reject)
         assertEquals(OpenLvSession.REJECTED_CODE, error(engine.next()))
     }
 

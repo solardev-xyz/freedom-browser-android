@@ -277,7 +277,10 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
                     }
                     ledgerOf(request)?.let {
                         Spacer(Modifier.height(8.dp))
-                        Text("You’ll check and confirm this on your Ledger (${it.deviceName}) next.", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            ledgerNote(it.deviceName, hashesOnly = (request as? OpenLvSession.Request.TypedData)?.ledgerHashes != null),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
                     error?.let {
                         Spacer(Modifier.height(8.dp))
@@ -384,6 +387,7 @@ private fun TypedDataBody(request: OpenLvSession.Request.TypedData) {
     ReviewRow("Type", request.primaryType)
     TypedLines("Domain", request.domain)
     TypedLines("Message", request.message)
+    request.ledgerHashes?.let { LedgerHashesOnly(it) }
     Spacer(Modifier.height(4.dp))
     Text(
         "Typed data can authorise things — a permit to spend your tokens, an order, a multisig transaction. " +

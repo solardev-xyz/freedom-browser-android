@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.wallet.ledger.Ledger
@@ -672,6 +673,51 @@ class SafeChain(private val rpc: WalletRpc) {
 
     suspend fun balance(chainId: Long, address: String): BigInteger = rpc.balance(chainId, address).value
 
+    /**
+     * [safe]'s state at one block: its nonce, owners and modules (null when
+     * the list is longer than one page or unreadable in shape), and with
+     * [withBalance] its native balance. What a self-call is checked against
+     * has to come from one block: the router sends each read to whichever
+     * node it picks, so separate "latest" reads can pair a stale owner list
+     * with a current nonce (#255 R2-F1). Every read here names the block
+     * [eth_blockNumber] gave; a node that doesn't have it fails the read,
+     * and the caller shows no check at all.
+     */
+    suspend fun snapshot(chainId: Long, safe: String, withBalance: Boolean = false): Snapshot {
+        val block = rpc.blockNumber(chainId).value
+        val tag = "0x" + block.toString(16)
+        return Snapshot(
+            block = block,
+            nonce = SafeProtocol.decodeUint(call(chainId, safe, SafeProtocol.NONCE_CALL, tag)) ?: throw SafeException("The Safe gave no nonce."),
+            owners = SafeProtocol.decodeAddresses(call(chainId, safe, SafeProtocol.OWNERS_CALL, tag)) ?: throw SafeException("The Safe gave no owner list."),
+            modules = SafeProtocol.decodeModules(call(chainId, safe, SafeProtocol.MODULES_CALL, tag)),
+            balance = if (withBalance) rpc.balance(chainId, safe, tag).value else null,
+        )
+    }
+
+    /** A Safe as it stood at [block] ([snapshot]). */
+    data class Snapshot(val block: Long, val nonce: BigInteger, val owners: List<String>, val modules: List<String>?, val balance: BigInteger?)
+
+    /**
+     * Whether [guard] passes a v1.4.1 Safe's `setGuard` check (GS300):
+     * it has code and answers `supportsInterface(Guard)` with true. A call
+     * the node says reverts is a no, as it is for the Safe; any other
+     * failure throws, and means "not known". The guard's author controls
+     * both reads (the code can be deployed later, and the answer can depend
+     * on the caller or change), so a false is never proof the Safe would
+     * refuse it when the transaction actually executes.
+     */
+    suspend fun guardSupported(chainId: Long, guard: String): Boolean {
+        if (rpc.code(chainId, guard).value.length <= 2) return false
+        val answer = try {
+            call(chainId, guard, SafeProtocol.SUPPORTS_GUARD_CALL)
+        } catch (e: ChainRpcException.Rpc) {
+            if (e.data != null || e.code == ChainRpcException.EXECUTION_REVERTED) return false
+            throw e
+        }
+        return SafeProtocol.decodeBool(answer) ?: false
+    }
+
     /** How many of [address]'s transactions are mined: an account nonce below it can't be mined any more. */
     suspend fun minedCount(chainId: Long, address: String): BigInteger = rpc.transactionCount(chainId, address, "latest").value
 
@@ -698,8 +744,8 @@ class SafeChain(private val rpc: WalletRpc) {
         }
     }
 
-    private suspend fun call(chainId: Long, to: String, data: String): String =
-        rpc.call(chainId, JSONObject().put("to", to).put("data", data)).value
+    private suspend fun call(chainId: Long, to: String, data: String, block: String = "latest"): String =
+        rpc.call(chainId, JSONObject().put("to", to).put("data", data), block).value
 
     companion object {
         fun get(context: Context) = SafeChain(WalletRpc(ChainDataRouter.get(context.applicationContext)))

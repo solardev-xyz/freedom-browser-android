@@ -59,6 +59,7 @@ import baby.freedom.mobile.wallet.SendAmounts
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.WalletAccounts
+import baby.freedom.mobile.wallet.ledger.LedgerTypedDataHashes
 import java.net.URI
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -238,7 +239,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
             ledger?.let {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "You’ll check and confirm this on your Ledger (${it.deviceName}) next.",
+                    ledgerNote(it.deviceName, hashesOnly = (ask as? EthAsk.SignTypedData)?.ledgerHashes != null),
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.testTag("ethereum-ledger-note"),
                 )
@@ -389,6 +390,7 @@ private fun SignTypedDataBody(ask: EthAsk.SignTypedData) {
     Row0("Type", ask.primaryType, mono = true)
     Label("Data")
     Block(ask.messageJson, mono = true, whole = "The signature covers all of the data.")
+    ask.ledgerHashes?.let { LedgerHashesOnly(it) }
     Spacer(Modifier.height(8.dp))
     Note(
         "Typed data can authorise a transfer or a trade (a permit, an order) without a transaction. " +
@@ -541,6 +543,35 @@ private fun AddChainBody(ask: EthAsk.AddChain) {
 
 /** `host[:port]` of [url] (an accepted RPC has no user info). */
 private fun hostOf(url: String): String = runCatching { URI(url).rawAuthority }.getOrNull() ?: url
+
+/** The line under a sheet whose signature a Ledger ([deviceName]) makes; [hashesOnly]: it shows [LedgerHashesOnly]'s hashes. */
+internal fun ledgerNote(deviceName: String, hashesOnly: Boolean): String =
+    if (hashesOnly) {
+        "You’ll confirm this on your Ledger ($deviceName) next, where it shows only the two hashes above."
+    } else {
+        "You’ll check and confirm this on your Ledger ($deviceName) next."
+    }
+
+/**
+ * Typed data a Ledger can't show field by field (an array over 255, a
+ * name over 255 bytes, a missing nested struct): it signs [hashes] of it
+ * instead, so its screen no longer backs up what this sheet shows — said
+ * before the user approves, with the hashes to compare (#239).
+ */
+@Composable
+internal fun LedgerHashesOnly(hashes: LedgerTypedDataHashes) {
+    Spacer(Modifier.height(8.dp))
+    Column(Modifier.testTag("ledger-hashes-only")) {
+        Note(
+            "Your Ledger can’t show this data field by field. It will show only these two hashes of it, and signs them " +
+                "only with Blind signing on — so its screen can’t confirm the data above. Check the data here, " +
+                "and that the Ledger shows these same hashes.",
+            warn = true,
+        )
+        Row0("Domain hash", hashes.domainHex, mono = true)
+        Row0("Message hash", hashes.messageHex, mono = true)
+    }
+}
 
 @Composable
 internal fun Label(text: String) {

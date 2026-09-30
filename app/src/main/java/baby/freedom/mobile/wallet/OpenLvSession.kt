@@ -6,7 +6,9 @@ import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.wallet.ledger.Ledger
+import baby.freedom.mobile.wallet.ledger.LedgerApdus
 import baby.freedom.mobile.wallet.ledger.LedgerException
+import baby.freedom.mobile.wallet.ledger.LedgerTypedDataHashes
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -131,6 +133,8 @@ class OpenLvSession internal constructor(
             val message: List<Eip712.Line>,
             val chainId: BigInteger?,
             val chain: Chain?,
+            /** Set when [account] is a Ledger's that can't show this field by field: it will show only these hashes (#239). */
+            val ledgerHashes: LedgerTypedDataHashes? = null,
         ) : Request
 
         /** `eth_sendTransaction`, priced; [notice] says why it's shown again, if it is. */
@@ -336,22 +340,30 @@ class OpenLvSession internal constructor(
     private suspend fun signTypedData(sid: Int, params: JSONArray): OpenLvResponse {
         val account = accountFor(params.opt(0)) ?: return notThisWallet(params.opt(0))
         // Off the main thread: the payload is the peer's, up to Eip712.MAX_JSON of it.
-        val (typed, digest, lines) = try {
+        val (typed, digest, lines, ledgerHashes) = try {
             withContext(Dispatchers.Default) {
                 val td = Eip712.parseStrict(params.opt(1))
-                Triple(td, Eip712.digest(td), Eip712.lines(td))
+                // What the peer can make a Ledger show only as hashes, the sheet says so (#239).
+                Parsed(td, Eip712.digest(td), Eip712.lines(td), if (account.isLedger) LedgerApdus.blindHashes(td) else null)
             }
         } catch (e: Eip712.Invalid) {
             return invalid(e.message ?: "The typed data can’t be read.")
         }
         val domainChain = typed.chainId
         val chain = domainChain?.takeIf { it.bitLength() < 63 }?.toLong()?.let { id -> chains().firstOrNull { it.id == id } }
-        val request = Request.TypedData(account, typed.primaryType, lines.first, lines.second, domainChain, chain)
+        val request = Request.TypedData(account, typed.primaryType, lines.first, lines.second, domainChain, chain, ledgerHashes)
         return when (ask(sid, request)) {
             Decision.Reject -> REJECTED
             is Decision.Approve -> signed { keys.signTypedData(account, typed, digest) }
         }
     }
+
+    private data class Parsed(
+        val data: Eip712.TypedData,
+        val digest: ByteArray,
+        val lines: Pair<List<Eip712.Line>, List<Eip712.Line>>,
+        val ledgerHashes: LedgerTypedDataHashes?,
+    )
 
     private suspend fun sendTransaction(sid: Int, params: JSONArray): OpenLvResponse {
         val tx = params.opt(0) as? JSONObject ?: return invalid("Expected [transaction].")

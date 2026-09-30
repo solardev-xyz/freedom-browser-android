@@ -75,10 +75,10 @@ class StandingGrantTapjackDeviceTest {
     private fun showing(content: @Composable () -> Unit, label: String) {
         ActivityScenario.launch(ComponentActivity::class.java).use { scenario ->
             scenario.onActivity { it.setContent { FreedomTheme { content() } } }
-            val switch = findToggle(label)
+            findToggle(label)
             // Well past arming (SwarmPrompt's publish ask arms at the ordinary delay; 2 s covers both).
             SystemClock.sleep(2_000)
-            tap(switch, MotionEvent.FLAG_WINDOW_IS_OBSCURED)
+            tap(findToggle(label), MotionEvent.FLAG_WINDOW_IS_OBSCURED)
             SystemClock.sleep(500)
             assertFalse("an obscured tap turned the switch on", checked(label))
             assertTrue(onScreen(OBSCURED_TAP_MESSAGE))
@@ -253,22 +253,19 @@ class StandingGrantTapjackDeviceTest {
         return if (text.isCheckable) text else text.parent?.takeIf { it.isCheckable }
     }
 
+    /**
+     * Where [label]'s switch is once it has stopped moving: a bottom sheet
+     * can still be sliding up well after its content is in the tree on a
+     * loaded host, and a tap aimed at an earlier position misses.
+     */
     private fun findToggle(label: String): Rect {
-        val until = SystemClock.uptimeMillis() + 5_000
-        var settling = true
+        val until = SystemClock.uptimeMillis() + 8_000
+        var last: Rect? = null
         while (SystemClock.uptimeMillis() < until) {
-            val node = toggle(label)
-            if (node != null && settling) {
-                settling = false
-                SystemClock.sleep(1_000)
-                continue
-            }
-            if (node != null) {
-                val r = Rect()
-                node.getBoundsInScreen(r)
-                if (!r.isEmpty) return r
-            }
-            SystemClock.sleep(100)
+            val r = toggle(label)?.let { node -> Rect().also { node.getBoundsInScreen(it) } }?.takeUnless { it.isEmpty }
+            if (r != null && r == last) return r
+            last = r
+            SystemClock.sleep(300)
         }
         throw AssertionError("no \"$label\" switch on screen")
     }

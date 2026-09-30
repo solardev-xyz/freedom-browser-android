@@ -28,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -459,6 +460,45 @@ class EthereumProviderTest {
         assertEquals(BuiltInChains.ETHEREUM, shown.chain)
         assertTrue(shown.messageJson.contains("Hello, Bob!"))
         assertEquals(-32602, code(call("eth_signTypedData_v4", JSONArray().put(main.address).put("{\"types\":{}}"))))
+    }
+
+    @Test
+    fun `a Ledger account's typed data the Ledger can't show field by field is flagged on the sheet with the hashes it will show (#239)`() {
+        val ledger = WalletAccount(-1, "Ledger", "0xcccccccccccccccccccccccccccccccccccccccc", baby.freedom.mobile.wallet.ledger.LedgerKey("44'/60'/0'/0/0", "AA:BB:CC:DD:EE:FF", "Nano X"))
+        wallet.list = listOf(main, second, ledger)
+        // 256 ids: one more than the device takes in an array.
+        val long = JSONObject()
+            .put("types", JSONObject()
+                .put("EIP712Domain", JSONArray().put(JSONObject().put("name", "name").put("type", "string")))
+                .put("Batch", JSONArray().put(JSONObject().put("name", "ids").put("type", "uint8[]"))))
+            .put("primaryType", "Batch")
+            .put("domain", JSONObject().put("name", "Shop"))
+            .put("message", JSONObject().put("ids", JSONArray(List(256) { 7 })))
+        answer = { EthAnswer.Rejected }
+        for (account in listOf(ledger, main)) {
+            ok(call("wallet_revokePermissions", JSONArray().put(JSONObject().put("eth_accounts", JSONObject()))))
+            connect(account)
+            answer = { EthAnswer.Rejected }
+            assertEquals(4001, code(call("eth_signTypedData_v4", JSONArray().put(account.address).put(long))))
+            val hashes = (asks.single() as EthAsk.SignTypedData).ledgerHashes
+            if (account == ledger) {
+                val data = Eip712.parse(long.toString())
+                assertArrayEquals(Eip712.hashStruct(data.types, "EIP712Domain", data.domain, 0), hashes!!.domain)
+                assertArrayEquals(Eip712.hashStruct(data.types, "Batch", data.message, 0), hashes.message)
+            } else {
+                // The phone signs it itself: no Ledger, nothing to warn about.
+                assertNull(hashes)
+            }
+        }
+        // What the Ledger streams field by field carries no warning.
+        ok(call("wallet_revokePermissions", JSONArray().put(JSONObject().put("eth_accounts", JSONObject()))))
+        connect(ledger)
+        answer = { EthAnswer.Approved() }
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
+        asks.clear()
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_signTypedData_v4", JSONArray().put(ledger.address).put(mail))))
+        assertNull((asks.single() as EthAsk.SignTypedData).ledgerHashes)
     }
 
     @Test
