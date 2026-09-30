@@ -89,3 +89,23 @@ internal fun rendererGoneBody(gone: BrowserState.RendererGone): String =
     } else {
         "Android needed the memory it was using. Your other tabs are fine. Reload to open it again."
     }
+
+/**
+ * Whether the chrome's Back / Forward ([pending], [HISTORY_BACK_JS] /
+ * [HISTORY_FORWARD_JS]) is dropped instead of handed to the WebView: it
+ * has no entry to step to ([canStep] false) while a restore still has
+ * the tab's page to put back ([putBackArmed], [BrowserState.afterBlank]).
+ * That's a tab rebuilt after its renderer went away (#260) whose history
+ * *Clear cookies & site data* dropped: handed, the step would stop the
+ * put-back and leave the tab on its blank entry, its page gone (R2-F1).
+ * Dropped, the page comes back — as a live tab stays on its page when
+ * the same clear left it nothing to go back to.
+ */
+internal fun stepDroppedForPutBack(pending: String, putBackArmed: Boolean, canStep: (Int) -> Boolean): Boolean {
+    val step = when (pending) {
+        HISTORY_BACK_JS -> -1
+        HISTORY_FORWARD_JS -> 1
+        else -> return false
+    }
+    return putBackArmed && !canStep(step)
+}

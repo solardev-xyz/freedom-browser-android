@@ -158,4 +158,37 @@ class TabsRendererGoneTest {
         assertEquals(restore.submit, bare.submit)
         assertEquals(restore.overPage, bare.overPage)
     }
+
+    @Test
+    fun `a gone tab offers no find or print until it is rebuilt`() {
+        val tabs = twoTabs()
+        val tab = tabs.active
+        assertTrue(tab.hasPageToActOn)
+        tabs.rendererGone(tab, crashed = false) { null }
+        assertFalse(tab.hasPageToActOn)
+        tab.recoverRenderer()
+        assertTrue(tab.hasPageToActOn)
+        tab.navigateHome()
+        assertFalse(tab.hasPageToActOn)
+    }
+
+    @Test
+    fun `a step with nowhere to go is dropped only while a put-back waits`() {
+        val none: (Int) -> Boolean = { false }
+        val both: (Int) -> Boolean = { true }
+        // Rebuilt without history (R2-F1): Back and Forward keep the page.
+        assertTrue(stepDroppedForPutBack(HISTORY_BACK_JS, putBackArmed = true, canStep = none))
+        assertTrue(stepDroppedForPutBack(HISTORY_FORWARD_JS, putBackArmed = true, canStep = none))
+        // A restored history has the entry: the step goes in.
+        assertFalse(stepDroppedForPutBack(HISTORY_BACK_JS, putBackArmed = true, canStep = both))
+        // Asks about its own direction.
+        val backOnly: (Int) -> Boolean = { it == -1 }
+        assertFalse(stepDroppedForPutBack(HISTORY_BACK_JS, putBackArmed = true, canStep = backOnly))
+        assertTrue(stepDroppedForPutBack(HISTORY_FORWARD_JS, putBackArmed = true, canStep = backOnly))
+        // Nothing to put back: handed as ever.
+        assertFalse(stepDroppedForPutBack(HISTORY_BACK_JS, putBackArmed = false, canStep = none))
+        // Not a step: the user's own navigation supersedes the put-back.
+        assertFalse(stepDroppedForPutBack("https://c.example/", putBackArmed = true, canStep = none))
+        assertFalse(stepDroppedForPutBack(HOME_URL, putBackArmed = true, canStep = none))
+    }
 }

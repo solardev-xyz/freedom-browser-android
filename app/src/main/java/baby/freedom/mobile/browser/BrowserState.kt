@@ -579,6 +579,14 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     }
 
     /**
+     * Whether there's a page for Find in page and Print to act on: not
+     * the home surface, and not a tab whose renderer went away (#260),
+     * which has no WebView to search or print until it's rebuilt.
+     */
+    val hasPageToActOn: Boolean
+        get() = url.isNotBlank() && rendererGone == null
+
+    /**
      * An address to put back once the WebView's blank home entry has
      * finished loading — and, if [submit], to submit. Set by
      * [BrowserWebViewHost] for a reopened tab whose restored (or

@@ -1109,6 +1109,12 @@ fun BrowserWebViewHost(
                             }
                             val wv = webViews[tab.id] ?: return@collectLatest
                             tab.handedNavCounter = counter
+                            // A Back / Forward the restore's put-back
+                            // must outlive (#260 R2-F1): see
+                            // [stepDroppedForPutBack].
+                            if (stepDroppedForPutBack(pending, tab.afterBlank != null, wv::canGoBackOrForward)) {
+                                return@collectLatest
+                            }
                             // Abort any in-flight load first. Without this,
                             // hitting Home (or otherwise navigating) mid-
                             // load lets Chromium keep firing late
@@ -1238,9 +1244,14 @@ fun BrowserWebViewHost(
         // hook the switcher shows the indicator but no toggle.
         if (WebViewFeature.isFeatureSupported(WebViewFeature.MUTE_AUDIO)) {
             tabs.setAudioMuted = { tab, muted ->
-                webViews[tab.id]?.let { wv ->
+                val wv = webViews[tab.id]
+                if (wv != null) {
                     WebViewCompat.setAudioMuted(wv, muted)
                     tab.audioMuted = WebViewCompat.isAudioMuted(wv)
+                } else if (tab.rendererGone != null) {
+                    // No WebView until it's rebuilt (#260), which
+                    // applies the tab's mute to the new one.
+                    tab.audioMuted = muted
                 }
             }
         }
