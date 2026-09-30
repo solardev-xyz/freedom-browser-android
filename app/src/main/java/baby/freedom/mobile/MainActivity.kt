@@ -56,6 +56,7 @@ import baby.freedom.mobile.node.IMyotisCallback
 import baby.freedom.mobile.node.IMyotisService
 import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
+import baby.freedom.mobile.node.MyotisChains
 import baby.freedom.mobile.node.MyotisLink
 import baby.freedom.mobile.node.MyotisService
 import baby.freedom.mobile.node.NodeService
@@ -76,6 +77,7 @@ import baby.freedom.mobile.wallet.PhraseBackupJob
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.MyotisInfo
+import baby.freedom.swarm.MyotisNetwork
 import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.RadicleInfo
@@ -86,6 +88,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import java.io.File
 import kotlinx.coroutines.launch
@@ -178,9 +181,13 @@ class MainActivity : ComponentActivity() {
     }
 
     // The Myotis light client (#72) lives in its own `:myotis` process,
-    // bound while [NodeSettings.myotisEnabled] is on — see [MyotisService].
+    // bound while at least one of its chains is switched on
+    // ([MyotisChains], #274) — see [MyotisService].
     @Volatile
     private var myotisBinder: IMyotisService? = null
+
+    /** The chains [MyotisChains] last asked for: relayed on every (re)connect. */
+    private var myotisNetworks: Set<MyotisNetwork> = emptySet()
 
     // Read by [myotisCallback] on a binder thread.
     @Volatile
@@ -202,6 +209,9 @@ class MainActivity : ComponentActivity() {
             // Before registering: the first state arrives on registration.
             MyotisLink.connected(this@MainActivity, b)
             runCatching { b.registerCallback(myotisCallback) }
+            // After registering, which reports Starting until the chains
+            // are chosen: this call starts them.
+            relayMyotisNetworks(b)
             // onStart/onStop may have run before the binding came up.
             runCatching {
                 if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) b.onAppForeground()
@@ -420,10 +430,18 @@ class MainActivity : ComponentActivity() {
         }
 
         // The Myotis light client (#72, off by default) follows its
-        // switch live, independent of the Swarm node's.
+        // per-chain switches live (#274), independent of the Swarm node's:
+        // bound while any chain is on, told which.
+        MyotisChains.init(settings)
         lifecycleScope.launch {
-            settings.myotisEnabled.distinctUntilChanged().collect { enabled ->
-                if (enabled) bindMyotis() else unbindMyotis()
+            MyotisChains.running.filterNotNull().distinctUntilChanged().collect { chains ->
+                myotisNetworks = chains
+                if (chains.isEmpty()) {
+                    unbindMyotis()
+                } else {
+                    bindMyotis()
+                    myotisBinder?.let(::relayMyotisNetworks)
+                }
             }
         }
 
@@ -573,8 +591,7 @@ class MainActivity : ComponentActivity() {
                     val runNodeEnabled by settings.runNodeEnabled
                         .collectAsState(initial = true)
                     val myotisInfo by myotisInfoFlow.collectAsState()
-                    val myotisEnabled by settings.myotisEnabled
-                        .collectAsState(initial = false)
+                    val myotisRunning by MyotisChains.running.collectAsState()
                     val pendingLinks by incomingSession.queue.pending.collectAsState()
                     val torInfo by torInfoFlow.collectAsState()
                     val torEnabled by settings.torEnabled.collectAsState(initial = false)
@@ -584,8 +601,8 @@ class MainActivity : ComponentActivity() {
                         runNodeEnabled = runNodeEnabled,
                         onToggleRunNode = ::onToggleRunNode,
                         myotisInfo = myotisInfo,
-                        myotisEnabled = myotisEnabled,
-                        onToggleMyotis = ::onToggleMyotis,
+                        myotisRunning = myotisRunning,
+                        onRunMyotisChain = MyotisChains::set,
                         onMyotisRecovery = ::onMyotisRecovery,
                         onEnsureIpfsStarted = ::onEnsureIpfsStarted,
                         onIpfsToggle = ::onIpfsToggle,
@@ -793,9 +810,10 @@ class MainActivity : ComponentActivity() {
         else runCatching { binder?.stopIpfs() }
     }
 
-    /** The light-client switch on the node page (#72): persisted, and followed in [onCreate]. */
-    private fun onToggleMyotis(enabled: Boolean) {
-        lifecycleScope.launch { settings.setMyotisEnabled(enabled) }
+    /** Tell `:myotis` which chains to run ([MyotisChains]); it starts and stops them one by one. */
+    private fun relayMyotisNetworks(binder: IMyotisService) {
+        val chainIds = myotisNetworks.map { it.chainId }.toLongArray()
+        runCatching { binder.setNetworks(chainIds) }
     }
 
     /** A chain row's Retry / Repair sync data (#195); the service ignores it unless it applies. */

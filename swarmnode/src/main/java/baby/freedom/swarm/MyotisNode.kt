@@ -31,11 +31,19 @@ import kotlin.math.abs
  * ([MyotisChainStatus]), published on [state].
  *
  * Lifecycle is create → start → (pause / resume with the app's
- * foreground) → stop. The engine requires start/pause/resume/stop to be
- * serialized per handle and every one of them may block (stop has no
- * wall-clock bound), so every engine call runs on one queue ([ops]) in
- * the order it was asked for: a Stop sent right after a Start always
- * lands after it, and a status poll never reads a handle mid-teardown.
+ * foreground) → stop. Which chains run is the user's choice per chain
+ * (#274, [setNetworks]): a chain switched off is stopped and forgets its
+ * per-chain state, one switched on boots as at start, and the other
+ * chain carries on untouched either way. The engine requires
+ * start/pause/resume/stop to be serialized per handle and every one of
+ * them may block (stop has no wall-clock bound), so every engine call
+ * runs on one queue ([ops]) in the order it was asked for: a Stop sent
+ * right after a Start always lands after it, and a status poll never
+ * reads a handle mid-teardown. The one exception is the stop of a
+ * single chain switched off while the other runs ([stopChain]): its
+ * handle has already left the queue's bookkeeping, so nothing else can
+ * reach it, and it drains on its own coroutine ([stopping]) rather than
+ * holding up the other chain's polls, pause and recovery.
  *
  * Stale-anchor checkpoint recovery (#195): when a chain parks on a trust
  * anchor older than the engine's weak-subjectivity bound, the node asks
@@ -107,6 +115,7 @@ class MyotisNode internal constructor(
 
     private sealed interface Op {
         data object Start : Op
+        class SetNetworks(val networks: Set<MyotisNetwork>, val start: Boolean = false) : Op
         class Stop(val done: CompletableDeferred<Unit>? = null) : Op
         data object Background : Op
         data object Foreground : Op
@@ -115,6 +124,7 @@ class MyotisNode internal constructor(
         class Retry(val network: MyotisNetwork) : Op
         class Repair(val network: MyotisNetwork) : Op
         class Barrier(val done: CompletableDeferred<Unit>) : Op
+        class Stopped(val network: MyotisNetwork) : Op
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -129,8 +139,23 @@ class MyotisNode internal constructor(
     /** Each running chain's generation (its data directory and anchor). */
     private val generations = LinkedHashMap<MyotisNetwork, MyotisGeneration>()
 
+    /**
+     * Chains switched off whose `engine.stop` is still draining off the
+     * queue ([stopChain]). A chain in here that's switched back on waits
+     * for its stop ([Op.Stopped]) before it boots again, since its engine
+     * still holds the data directory. Written on the queue; read by
+     * [awaitIdle] and [shutdown].
+     */
+    private val stopping: MutableMap<MyotisNetwork, Job> = java.util.concurrent.ConcurrentHashMap()
+
     /** Set once [startEngines] got as far as the chains; cleared by [stopEngines]. */
     private var started = false
+
+    /** [start] was asked for and no [stop] since: a chain switched on boots. */
+    private var wanted = false
+
+    /** The chains [setNetworks] last asked for (all of [networks] until it's called), in [networks] order. */
+    private var enabled: List<MyotisNetwork> = networks
 
     /**
      * Chains parked on a stale trust anchor. The handle is paused —
@@ -253,12 +278,17 @@ class MyotisNode internal constructor(
                     // Nobody awaits most ops: never let one take the
                     // queue (or the process) down.
                     Log.e(TAG, "myotis $op failed", t)
-                    if (op is Op.Start) {
+                    if (op is Op.Start || (op is Op.SetNetworks && op.start)) {
                         publish(MyotisStatus.Error, t.message ?: t.javaClass.simpleName)
                     }
                 } finally {
                     when (op) {
-                        is Op.Stop -> op.done?.complete(Unit)
+                        is Op.Stop -> op.done?.let { done ->
+                            // The owning service exits once this returns:
+                            // let a chain's stop still draining finish first.
+                            stopping.values.toList().forEach { it.join() }
+                            done.complete(Unit)
+                        }
                         is Op.Barrier -> op.done.complete(Unit)
                         else -> Unit
                     }
@@ -278,6 +308,27 @@ class MyotisNode internal constructor(
     /** Start every chain's engine. No-op while already started. */
     fun start() {
         ops.trySend(Op.Start)
+    }
+
+    /**
+     * Run only [chains] (#274): start the ones not running yet (if the
+     * engines are started or [start] was asked for), stop and forget the
+     * rest. With none left the light client is [MyotisStatus.Stopped]
+     * until one is switched back on. Before the first call, [start] runs
+     * every chain.
+     */
+    fun setNetworks(chains: Set<MyotisNetwork>) {
+        ops.trySend(Op.SetNetworks(chains))
+    }
+
+    /**
+     * [setNetworks] then [start], as one step: the start runs only if the
+     * switch didn't already try one — a chain switched on while every
+     * chain had failed retries the start once, not twice. With the same
+     * chains as before it's a plain [start] (a failed start is retried).
+     */
+    fun run(chains: Set<MyotisNetwork>) {
+        ops.trySend(Op.SetNetworks(chains, start = true))
     }
 
     /** Stop every chain's engine. Returns at once; the engines drain on the queue. */
@@ -336,11 +387,16 @@ class MyotisNode internal constructor(
         return engine.ethCall(handle, to, data, "latest") ?: """{"error":"no result from the engine"}"""
     }
 
-    /** Wait until every op sent so far has run. Tests only. */
-    internal suspend fun awaitIdle() {
-        val done = CompletableDeferred<Unit>()
-        ops.send(Op.Barrier(done))
-        done.await()
+    /** Wait until every op sent so far has run, and every chain's stop with it. Tests only. */
+    internal suspend fun awaitIdle(stops: Boolean = true) {
+        while (true) {
+            val done = CompletableDeferred<Unit>()
+            ops.send(Op.Barrier(done))
+            done.await()
+            val pending = stopping.values.toList()
+            if (!stops || pending.isEmpty()) return
+            pending.forEach { it.join() }
+        }
     }
 
     /** Run one status poll now, as the ticker would. Tests only. */
@@ -350,8 +406,21 @@ class MyotisNode internal constructor(
 
     private fun apply(op: Op) {
         when (op) {
-            Op.Start -> startEngines()
-            is Op.Stop -> stopEngines()
+            Op.Start -> {
+                wanted = true
+                startEngines()
+            }
+            is Op.SetNetworks -> {
+                val triedStart = setEnabled(op.networks)
+                if (op.start) {
+                    wanted = true
+                    if (!triedStart) startEngines()
+                }
+            }
+            is Op.Stop -> {
+                wanted = false
+                stopEngines()
+            }
             Op.Background -> {
                 foreground = false
                 polling = false
@@ -419,12 +488,25 @@ class MyotisNode internal constructor(
                 }
             }
             is Op.Barrier -> Unit
+            is Op.Stopped -> {
+                stopping.remove(op.network)
+                // Switched back on while it was stopping: boot it now.
+                if (started && op.network in enabled && op.network !in handles && op.network !in recovery) {
+                    startChain(op.network)
+                    if (!settleIfNothingRuns()) refreshStatus()
+                }
+            }
         }
     }
 
     private fun startEngines() {
         if (started) return
         startErrors.clear()
+        if (enabled.isEmpty()) {
+            // Every chain switched off: nothing to run until one comes back.
+            _state.value = MyotisInfo()
+            return
+        }
         publish(MyotisStatus.Starting)
         val abi = engine.init()
         if (abi != engine.expectedAbi) {
@@ -434,47 +516,139 @@ class MyotisNode internal constructor(
             )
             return
         }
-        for (network in networks) {
-            val generation = try {
-                store.load(network).also { store.checkNativeMarker(it, network) }
-            } catch (e: MyotisCheckpointException) {
-                if (e.error == MyotisCheckpointError.AnchorMismatch) {
-                    // The engine once contradicted this generation's checkpoint:
-                    // blocked until Retry fetches a fresh one.
-                    recovery[network] = Recovery(
-                        MyotisRecovery.Phase.Blocked,
-                        reason = MyotisRecoveryReason.AnchorMismatch,
-                        forStaleAnchor = false,
-                    )
-                    Log.w(TAG, "${network.engineName}: current generation was rejected, not booting it")
-                    continue
-                }
-                // Offers Repair: a fresh generation, the old data kept.
-                recovery[network] = Recovery(MyotisRecovery.Phase.Blocked, reason = MyotisRecoveryReason.of(e.error))
-                Log.w(TAG, "${network.engineName}: saved sync data unusable (${e.error.code})")
-                continue
-            }
-            generations[network] = generation
-            when (val boot = boot(network, generation)) {
-                is Boot.Started -> {
-                    handles[network] = boot.handle
-                    Log.i(TAG, "${network.engineName}: started (handle ${boot.handle}, ${generation.describe()})")
-                }
-                is Boot.Failed ->
-                    if (boot.reason == MyotisRecoveryReason.Storage) {
-                        recovery[network] = Recovery(MyotisRecovery.Phase.Blocked, reason = boot.reason)
-                    } else {
-                        startErrors[network] = boot.message
-                    }
-            }
-        }
-        if (handles.isEmpty() && recovery.isEmpty()) {
+        for (network in enabled) startChain(network)
+        if (nothingRuns()) {
             publish(MyotisStatus.Error, startErrors.values.distinct().joinToString("; "))
             return
         }
         started = true
         polling = foreground
         refreshStatus()
+    }
+
+    /**
+     * No chain switched on has an engine, a recovery, or a stop to wait
+     * out before it boots: only start errors are left, which is the
+     * light client failing, not running.
+     */
+    private fun nothingRuns(): Boolean =
+        handles.isEmpty() && recovery.isEmpty() && enabled.none { it in stopping }
+
+    /**
+     * After a chain was switched off or booted mid-session: if only failed
+     * chains are left, report [MyotisStatus.Error] the way [startEngines]
+     * does, and drop back to not started so the next switch retries the
+     * start of every chain. True if it did.
+     */
+    private fun settleIfNothingRuns(): Boolean {
+        if (!nothingRuns()) return false
+        readable = emptyMap()
+        polling = false
+        started = false
+        publish(MyotisStatus.Error, startErrors.values.distinct().joinToString("; "))
+        return true
+    }
+
+    /**
+     * Boot [network] from its current generation: its engine in [handles],
+     * or why not in [recovery] (blocked) or [startErrors]. Shared by the
+     * first start and a chain switched on later ([setEnabled]).
+     */
+    private fun startChain(network: MyotisNetwork) {
+        // Its engine is still stopping and holds the directory: [Op.Stopped] boots it.
+        if (network in stopping) return
+        val generation = try {
+            store.load(network).also { store.checkNativeMarker(it, network) }
+        } catch (e: MyotisCheckpointException) {
+            if (e.error == MyotisCheckpointError.AnchorMismatch) {
+                // The engine once contradicted this generation's checkpoint:
+                // blocked until Retry fetches a fresh one.
+                recovery[network] = Recovery(
+                    MyotisRecovery.Phase.Blocked,
+                    reason = MyotisRecoveryReason.AnchorMismatch,
+                    forStaleAnchor = false,
+                )
+                Log.w(TAG, "${network.engineName}: current generation was rejected, not booting it")
+                return
+            }
+            // Offers Repair: a fresh generation, the old data kept.
+            recovery[network] = Recovery(MyotisRecovery.Phase.Blocked, reason = MyotisRecoveryReason.of(e.error))
+            Log.w(TAG, "${network.engineName}: saved sync data unusable (${e.error.code})")
+            return
+        }
+        generations[network] = generation
+        when (val boot = boot(network, generation)) {
+            is Boot.Started -> {
+                handles[network] = boot.handle
+                Log.i(TAG, "${network.engineName}: started (handle ${boot.handle}, ${generation.describe()})")
+            }
+            is Boot.Failed ->
+                if (boot.reason == MyotisRecoveryReason.Storage) {
+                    recovery[network] = Recovery(MyotisRecovery.Phase.Blocked, reason = boot.reason)
+                } else {
+                    startErrors[network] = boot.message
+                }
+        }
+    }
+
+    /**
+     * The user's per-chain switches (#274, [setNetworks]). Before a start,
+     * only recorded. Started: a chain switched off is stopped and forgets
+     * its park, recovery and error — switched on again it starts afresh
+     * from its generation — and one switched on boots. With no chain left
+     * the engines stop; a chain switched on while [start] stands (the
+     * engines stopped that way, or every chain failed) starts them again.
+     * True if that ran [startEngines].
+     */
+    private fun setEnabled(chains: Set<MyotisNetwork>): Boolean {
+        val next = networks.filter { it in chains }
+        if (next == enabled) return false
+        val removed = enabled - next.toSet()
+        val added = next - enabled.toSet()
+        enabled = next
+        if (!started) {
+            if (!wanted) return false
+            startEngines()
+            return true
+        }
+        if (next.isEmpty()) {
+            stopEngines()
+            return false
+        }
+        for (network in removed) stopChain(network)
+        for (network in added) startChain(network)
+        if (!settleIfNothingRuns()) refreshStatus()
+        return false
+    }
+
+    /**
+     * Stop [network]'s engine and drop everything kept for it, leaving the
+     * other chains alone. The stop itself has no wall-clock bound, so it
+     * runs off the queue ([stopping]): the handle is out of [handles] and
+     * [readable] first, so no op or read reaches it again.
+     */
+    private fun stopChain(network: MyotisNetwork) {
+        readable = readable - network
+        val handle = handles.remove(network)
+        startErrors.remove(network)
+        parked.remove(network)
+        released.remove(network)
+        enginePaused.remove(network)
+        recovery.remove(network)?.job?.cancel()
+        attempts.remove(network)
+        generations.remove(network)
+        if (handle != null) {
+            stopping[network] = scope.launch {
+                try {
+                    engine.stop(handle)
+                    Log.i(TAG, "${network.engineName}: stopped (switched off)")
+                } catch (t: Throwable) {
+                    Log.e(TAG, "${network.engineName}: stop failed", t)
+                } finally {
+                    ops.trySend(Op.Stopped(network))
+                }
+            }
+        }
     }
 
     private sealed interface Boot {
