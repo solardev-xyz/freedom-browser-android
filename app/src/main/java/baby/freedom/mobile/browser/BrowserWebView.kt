@@ -1940,6 +1940,7 @@ private fun buildRefreshableWebView(
         // (#86) before anything else touches it: Chromium only takes a
         // profile change on a WebView that has never been used.
         if (state.private) PrivateProfile.attach(this)
+        tabId = state.id
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -4325,6 +4326,9 @@ private class GestureArmingNodeProvider(
  * protected: Chromium's unconsumed overscroll, and the scroll range.
  */
 internal class PageWebView(context: Context) : WebView(context) {
+    /** The tab this WebView shows; set by the tab that owns it. */
+    var tabId: Long = -1L
+
     /** [destroy] has been called: nothing may be asked of this WebView any more. */
     var destroyed = false
         private set
@@ -4838,7 +4842,7 @@ internal class PageWebView(context: Context) : WebView(context) {
             cacheBypass.loadStarting(bypass = loadingBypassingCache)
         }
         // A server this run answered "send none" asks again (#316).
-        if (!loadsNothing) ClientCertificates.onBrowserLoad()
+        if (!loadsNothing) ClientCertificates.onBrowserLoad(tabId)
         val usersStep = if (url == null) reloadingByUser else url == HISTORY_BACK_JS || url == HISTORY_FORWARD_JS
         onBrowserInitiatedLoad(url, url != null && loadingNamedByUser, usersStep, url != null && loadingRedirectCorrection)
     }

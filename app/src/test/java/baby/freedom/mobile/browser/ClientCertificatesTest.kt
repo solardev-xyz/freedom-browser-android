@@ -19,65 +19,60 @@ class ClientCertificatesTest {
     @Test
     fun `a private tab sends none and is never asked, whatever a normal tab picked`() {
         val c = ClientCertChoices()
-        assertEquals(ClientCertPlan.SendNone, c.planFor(private = true, "mtls.example", 443))
+        assertEquals(ClientCertPlan.SendNone, c.planFor(private = true, "mtls.example", 443, 2L))
         c.answered("mtls.example", 443, "alice", c.generation)
-        assertEquals(ClientCertPlan.SendNone, c.planFor(private = true, "mtls.example", 443))
-        assertEquals(ClientCertPlan.Send("alice"), c.planFor(private = false, "mtls.example", 443))
+        assertEquals(ClientCertPlan.SendNone, c.planFor(private = true, "mtls.example", 443, 2L))
+        assertEquals(ClientCertPlan.Send("alice"), c.planFor(private = false, "mtls.example", 443, 2L))
     }
 
     @Test
     fun `a normal tab asks until the user answers, then the answer holds per host and port`() {
         val c = ClientCertChoices()
-        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443, 2L))
         c.answered("mtls.example", 443, "alice", c.generation)
-        assertEquals(ClientCertPlan.Send("alice"), c.planFor(false, "MTLS.example", 443))
+        assertEquals(ClientCertPlan.Send("alice"), c.planFor(false, "MTLS.example", 443, 2L))
         // Another port, another host: their own question.
-        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 8443))
-        assertEquals(ClientCertPlan.Ask, c.planFor(false, "other.example", 443))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 8443, 2L))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "other.example", 443, 2L))
     }
 
     @Test
-    fun `a refusal answers the requests already waiting, and the next one asks again`() {
+    fun `a refusal holds for the tab until the browser loads something in it`() {
         val c = ClientCertChoices()
+        c.loaded(2L)
         val asking = c.ticket()
         val queued = c.ticket()
         // Deny, Back, or "no certificates" before one is installed.
         c.answered("mtls.example", 443, null, c.generation)
-        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "mtls.example", 443, asking))
-        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "mtls.example", 443, queued))
-        // A reload (or another tab) after the answer: asked again, so a
-        // certificate installed since, or an accidental Deny, isn't a dead end.
-        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443, c.ticket()))
-        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "mtls.example", 443, 2L, asking))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "mtls.example", 443, 2L, queued))
+        // The page keeps connecting (an iframe on a timer, a poll: a server
+        // that requires a certificate asks on every new connection), or
+        // opens a tab of its own: no chooser again (R4-F1).
+        repeat(3) { assertEquals(ClientCertPlan.Refuse, c.planFor(false, "mtls.example", 443, 2L, c.ticket())) }
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "mtls.example", 443, 7L, c.ticket()))
+        // A load in another tab doesn't lift it here...
+        c.loaded(3L)
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "mtls.example", 443, 2L, c.ticket()))
+        // ...but asks there (a new tab the user opened, say).
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443, 3L, c.ticket()))
+        // The tab's own reload asks again, so a certificate installed
+        // since, or an accidental Deny, isn't a dead end.
+        c.loaded(2L)
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443, 2L, c.ticket()))
         // …and picking one then holds.
         c.answered("mtls.example", 443, "alice", c.generation)
-        assertEquals(ClientCertPlan.Send("alice"), c.planFor(false, "mtls.example", 443, queued))
+        assertEquals(ClientCertPlan.Send("alice"), c.planFor(false, "mtls.example", 443, 2L, queued))
     }
 
     @Test
-    fun `a request queued behind a refused chooser takes the refusal, a later one opens its own`() = runBlocking {
+    fun `a closed tab's loads are forgotten`() {
         val c = ClientCertChoices()
-        val lock = Mutex()
-        val onScreen = MutableStateFlow<Long?>(2L)
-        val queuedTicket = c.ticket()
-        val first = chooseInTurn(
-            c, lock, "mtls.example", 443, 2L, onScreen, MutableStateFlow(false), MutableStateFlow(false),
-            c.ticket(),
-        ) { null }
-        assertEquals(ClientCertPlan.Refuse, first)
-        var opened = 0
-        val queued = chooseInTurn(
-            c, lock, "mtls.example", 443, 2L, onScreen, MutableStateFlow(false), MutableStateFlow(false),
-            queuedTicket,
-        ) { opened++; "alice" }
-        assertEquals(ClientCertPlan.Refuse, queued)
-        assertEquals(0, opened)
-        val later = chooseInTurn(
-            c, lock, "mtls.example", 443, 2L, onScreen, MutableStateFlow(false), MutableStateFlow(false),
-            c.ticket(),
-        ) { opened++; "alice" }
-        assertEquals(ClientCertPlan.Send("alice"), later)
-        assertEquals(1, opened)
+        c.loaded(2L)
+        c.answered("mtls.example", 443, null, c.generation)
+        c.loaded(2L)
+        c.tabClosed(2L)
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "mtls.example", 443, 2L, c.ticket()))
     }
 
     @Test
@@ -87,10 +82,10 @@ class ClientCertificatesTest {
         c.answered("other.example", 443, null, c.generation)
         val openedAt = c.generation
         c.clear()
-        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443))
-        assertEquals(ClientCertPlan.Ask, c.planFor(false, "other.example", 443))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443, 2L))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "other.example", 443, 2L))
         c.answered("mtls.example", 443, "alice", openedAt)
-        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443, 2L))
     }
 
     @Test
@@ -98,7 +93,7 @@ class ClientCertificatesTest {
         val c = ClientCertChoices()
         c.answered("mtls.example", 443, "gone", c.generation)
         c.forget("mtls.example", 443)
-        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443, 2L))
     }
 
     @Test
@@ -147,7 +142,7 @@ class ClientCertificatesTest {
             "alice"
         }
         assertEquals(ClientCertPlan.SendNone, plan)
-        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443, 2L))
     }
 
     @Test
@@ -158,7 +153,7 @@ class ClientCertificatesTest {
             MutableStateFlow(2L), MutableStateFlow(false), MutableStateFlow(false),
         ) { "alice" }
         assertEquals(ClientCertPlan.Send("alice"), plan)
-        assertEquals(ClientCertPlan.Send("alice"), c.planFor(false, "mtls.example", 443))
+        assertEquals(ClientCertPlan.Send("alice"), c.planFor(false, "mtls.example", 443, 2L))
     }
 
     @Test
@@ -194,7 +189,7 @@ class ClientCertificatesTest {
         ClientCertificates.refused()
         assertTrue(ClientCertificates.emptiesTableOnLoad)
         // ...which empties the table once.
-        ClientCertificates.onBrowserLoad()
+        ClientCertificates.onBrowserLoad(2L)
         assertFalse(ClientCertificates.emptiesTableOnLoad)
         // Clearing site data empties it too.
         ClientCertificates.refused()
@@ -249,7 +244,7 @@ class ClientCertificatesTest {
         assertEquals(ClientCertPlan.SendNone, withTimeout(2_000) { plan.await() })
         assertFalse(lock.isLocked)
         // Nothing remembered: the next request asks again.
-        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443, 2L))
     }
 
     @Test
