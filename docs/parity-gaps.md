@@ -17,7 +17,7 @@ The row list starts from the [26 Sep 2026 feature inventory](https://vibing.at/f
 - **Android** went from v0.6.10 to v0.6.13, and every gap the last pass filed is closed. [#259](https://github.com/solardev-xyz/freedom-browser-android/issues/259)–[#270](https://github.com/solardev-xyz/freedom-browser-android/issues/270), [#272](https://github.com/solardev-xyz/freedom-browser-android/issues/272)–[#280](https://github.com/solardev-xyz/freedom-browser-android/issues/280) and [#283](https://github.com/solardev-xyz/freedom-browser-android/issues/283) (with its follow-up [#284](https://github.com/solardev-xyz/freedom-browser-android/issues/284)) shipped. [#271](https://github.com/solardev-xyz/freedom-browser-android/issues/271) (browser profiles) was closed as not planned: the maintainers decided against profiles for now.
 - **Desktop** has four new commits since the last pass's `32f8bbe`, all about linking Arti on macOS and the release smoke test; nothing user-facing. This pass reads its unreleased `changelog.d/` fragments and wallet sidebar more closely than the last one did, and that turned up gaps the last pass missed: scriptlets and uBlock Origin filters ([#318](https://github.com/solardev-xyz/freedom-browser-android/issues/318)), TLS client certificates ([#316](https://github.com/solardev-xyz/freedom-browser-android/issues/316)), `ethereum:` links ([#317](https://github.com/solardev-xyz/freedom-browser-android/issues/317)), single-account key export ([#323](https://github.com/solardev-xyz/freedom-browser-android/issues/323)) and the GitHub → Radicle bridge ([#324](https://github.com/solardev-xyz/freedom-browser-android/issues/324)).
 - **iOS** is unchanged (`ee1024a` both times). Its column still differs a lot from the 26 Sep inventory, because it added private tabs, find in page, downloads, context menus, site permissions, app links, manifests, `.tez` and transaction history between the two.
-- **Also new**: gaps in browser basics that have been there all along, compared with desktop (close all tabs, opening a bookmark in a new tab, searching downloads), and polish (licences, translations). Ledger over USB was deferred when [#142](https://github.com/solardev-xyz/freedom-browser-android/issues/142) shipped Bluetooth and is now filed.
+- **Also new**: gaps in browser basics that have been there all along, compared with desktop (closing other tabs, opening a bookmark in a new tab, searching downloads), and polish (licences, translations). Ledger over USB was deferred when [#142](https://github.com/solardev-xyz/freedom-browser-android/issues/142) shipped Bluetooth and is now filed.
 
 ## New gap issues
 
@@ -27,7 +27,7 @@ The row list starts from the [26 Sep 2026 feature inventory](https://vibing.at/f
 | [#317](https://github.com/solardev-xyz/freedom-browser-android/issues/317) | Open EIP-681 `ethereum:` links in the Send page (today WebView's stock *ERR_UNKNOWN_URL_SCHEME* page) | ✅ | ❌ | S |
 | [#318](https://github.com/solardev-xyz/freedom-browser-android/issues/318) | Ad blocking: scriptlets and uBlock Origin filters, which block YouTube video ads | ✅ | ❌ | L |
 | [#319](https://github.com/solardev-xyz/freedom-browser-android/issues/319) | Ledger over USB-C (OTG), for the Nano S Plus and other devices without Bluetooth | ✅ | ❌ | M |
-| [#320](https://github.com/solardev-xyz/freedom-browser-android/issues/320) | Tab switcher: Close all tabs and Close other tabs | ✅ | ❌ | S |
+| [#320](https://github.com/solardev-xyz/freedom-browser-android/issues/320) | Tab switcher: Close all tabs and Close other tabs | 🟡 Close Other Tabs and Close Tabs to the Right, no Close all | ❌ | S |
 | [#321](https://github.com/solardev-xyz/freedom-browser-android/issues/321) | Bookmarks and history: open an entry in a new or private tab | ✅ | ❌ | S |
 | [#322](https://github.com/solardev-xyz/freedom-browser-android/issues/322) | Downloads: search the list, and optionally ask where to save each file | ✅ | ❌ | M |
 | [#323](https://github.com/solardev-xyz/freedom-browser-android/issues/323) | Wallet: show one account's private key for export | ✅ | ❌ | S |
@@ -142,7 +142,7 @@ The row list starts from the [26 Sep 2026 feature inventory](https://vibing.at/f
 |---|---|---|---|---|
 | Tabs and a tab switcher | ✅ | ✅ tab strip | ✅ | [`TabSwitcher.kt`](https://github.com/solardev-xyz/freedom-browser-android/blob/main/app/src/main/java/baby/freedom/mobile/browser/TabSwitcher.kt) |
 | Reopen closed tab, reorder tabs | ✅ | ✅ | 🟡 reopen only | [#90](https://github.com/solardev-xyz/freedom-browser-android/issues/90) |
-| Close all tabs, close other tabs | ❌ | ✅ | ❌ | **new:** [#320](https://github.com/solardev-xyz/freedom-browser-android/issues/320) |
+| Close all tabs, close other tabs | ❌ | 🟡 close others and close to the right, no close all | ❌ | **new:** [#320](https://github.com/solardev-xyz/freedom-browser-android/issues/320) |
 | Audio indicator and per-tab mute | ✅ | ✅ | ❌ | [#91](https://github.com/solardev-xyz/freedom-browser-android/issues/91) |
 | `window.open` and `target=_blank` open a new tab | ✅ | ✅ | ✅ | [#82](https://github.com/solardev-xyz/freedom-browser-android/issues/82) |
 | Pop-up blocker with per-site allow | ✅ | ✅ | ❌ | [#261](https://github.com/solardev-xyz/freedom-browser-android/issues/261) |
