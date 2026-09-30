@@ -33,10 +33,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.SendAmounts
 import baby.freedom.mobile.wallet.TxRecord
@@ -44,36 +48,45 @@ import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
 
-internal const val TX_HISTORY_TITLE = "Transactions"
-
 /** How many of the latest the wallet page lists before "All transactions". */
 internal const val TX_HISTORY_PREVIEW = 5
 
 /** "Sent 0.5 xDAI": what a record moved. */
-internal fun txTitle(r: TxRecord): String = "Sent ${SendAmounts.exact(r.amount, r.tokenDecimals)} ${r.tokenSymbol}"
+internal fun txTitle(r: TxRecord): String =
+    Strings.get(R.string.wallet_history_title_sent, SendAmounts.exact(r.amount, r.tokenDecimals), r.tokenSymbol)
 
 /** A record's status as a heading and the sentence under it. */
 internal fun txStatusText(r: TxRecord): Pair<String, String> {
     // The fee is in the chain's own currency, as it was named when sent.
     val chain = Chain(id = r.chainId, name = r.chainName, symbol = r.chainSymbol, decimals = r.chainDecimals, rpcUrls = emptyList())
-    val block = r.block?.let { "block ${"%,d".format(Locale.ROOT, it)}" }
+    // The block number as explorers write it, whatever the phone's language: chain data, like the nonce.
+    val block = r.block?.let { "%,d".format(Locale.ROOT, it) }
     val fee = r.feePaid?.let { feeText(it, chain) }
     return when (r.status) {
-        TxRecord.Status.PENDING -> "Pending" to "Not mined yet. It may still go through; the explorer shows where it stands."
-        TxRecord.Status.CONFIRMED -> "Confirmed" to listOfNotNull(block?.let { "Mined in $it" } ?: "Mined", fee?.let { "fee $it" }).joinToString(" · ")
-        TxRecord.Status.FAILED -> "Failed on chain" to "Mined" + (block?.let { " in $it" } ?: "") +
-            ", but the transfer itself failed, so nothing arrived. The network fee" + (fee?.let { " ($it)" } ?: "") + " was still paid."
-        TxRecord.Status.REPLACED -> "Replaced" to "Never mined: another transaction from this account used its nonce (${r.nonce}), " +
-            "so this one can’t go through any more."
-        TxRecord.Status.UNKNOWN -> "Outcome unknown" to "No receipt found, and this account’s nonce (${r.nonce}) has been used " +
-            "since, by this transaction or another. It was sent too long ago for the network to still say which; " +
-            "the explorer shows what happened."
+        TxRecord.Status.PENDING ->
+            Strings.get(R.string.wallet_history_status_pending) to Strings.get(R.string.wallet_history_status_pending_text)
+        TxRecord.Status.CONFIRMED -> Strings.get(R.string.wallet_history_status_confirmed) to when {
+            block != null && fee != null -> Strings.get(R.string.wallet_history_confirmed_block_fee, block, fee)
+            block != null -> Strings.get(R.string.wallet_history_confirmed_block, block)
+            fee != null -> Strings.get(R.string.wallet_history_confirmed_fee, fee)
+            else -> Strings.get(R.string.wallet_history_confirmed)
+        }
+        TxRecord.Status.FAILED -> Strings.get(R.string.wallet_history_status_failed) to when {
+            block != null && fee != null -> Strings.get(R.string.wallet_history_failed_block_fee, block, fee)
+            block != null -> Strings.get(R.string.wallet_history_failed_block, block)
+            fee != null -> Strings.get(R.string.wallet_history_failed_fee, fee)
+            else -> Strings.get(R.string.wallet_history_failed)
+        }
+        TxRecord.Status.REPLACED -> Strings.get(R.string.wallet_history_status_replaced) to
+            Strings.get(R.string.wallet_history_status_replaced_text, r.nonce.toString())
+        TxRecord.Status.UNKNOWN -> Strings.get(R.string.wallet_history_status_unknown) to
+            Strings.get(R.string.wallet_history_status_unknown_text, r.nonce.toString())
     }
 }
 
 /** The list row's second line: status, chain and when. */
 internal fun txSubtitle(r: TxRecord, format: DateFormat = txDateFormat()): String =
-    "${txStatusText(r).first} · ${r.chainName} · ${format.format(Date(r.sentAt))}"
+    Strings.get(R.string.wallet_history_subtitle, txStatusText(r).first, r.chainName, format.format(Date(r.sentAt)))
 
 internal fun txDateFormat(): DateFormat = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
 
@@ -114,7 +127,8 @@ private fun TxRow(r: TxRecord, onOpen: (TxRecord) -> Unit) {
             Text(txTitle(r), fontWeight = FontWeight.Medium)
             Text(txSubtitle(r), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(
-                "To " + (r.toName?.let { "$it · " } ?: "") + shortAddress(r.to),
+                r.toName?.let { stringResource(R.string.wallet_history_row_to_named, it, shortAddress(r.to)) }
+                    ?: stringResource(R.string.wallet_history_row_to, shortAddress(r.to)),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
             )
@@ -127,10 +141,10 @@ private fun TxRow(r: TxRecord, onOpen: (TxRecord) -> Unit) {
 /** The wallet page's latest sends from the active account, with a way to all of them. */
 @Composable
 internal fun TxHistorySection(records: List<TxRecord>, onOpen: (TxRecord) -> Unit, onShowAll: () -> Unit) {
-    SectionCard(title = TX_HISTORY_TITLE) {
+    SectionCard(title = stringResource(R.string.wallet_history_title)) {
         if (records.isEmpty()) {
             Text(
-                "Nothing sent from this account yet.",
+                stringResource(R.string.wallet_history_empty),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -138,8 +152,8 @@ internal fun TxHistorySection(records: List<TxRecord>, onOpen: (TxRecord) -> Uni
             records.take(TX_HISTORY_PREVIEW).forEach { TxRow(it, onOpen) }
             if (records.size > TX_HISTORY_PREVIEW) {
                 PageRow(
-                    title = "All transactions",
-                    subtitle = "${records.size} sent from this account",
+                    title = stringResource(R.string.wallet_history_all),
+                    subtitle = pluralStringResource(R.plurals.wallet_history_all_count, records.size, records.size),
                     style = PageRowStyle.Inset,
                     leadingIcon = Icons.Filled.History,
                     onClick = onShowAll,
@@ -153,16 +167,16 @@ internal fun TxHistorySection(records: List<TxRecord>, onOpen: (TxRecord) -> Uni
 @Composable
 internal fun TxHistoryPage(accountName: String, records: List<TxRecord>, onOpen: (TxRecord) -> Unit, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
-    FullScreenScaffold(title = TX_HISTORY_TITLE, onDismiss = onBack) {
+    FullScreenScaffold(title = stringResource(R.string.wallet_history_title), onDismiss = onBack) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
             item("list") {
-                SectionCard(title = "Sent from $accountName") {
+                SectionCard(title = stringResource(R.string.wallet_history_sent_from, accountName)) {
                     if (records.isEmpty()) {
-                        Text("Nothing sent from this account yet.", style = MaterialTheme.typography.bodyMedium)
+                        Text(stringResource(R.string.wallet_history_empty), style = MaterialTheme.typography.bodyMedium)
                     }
                     records.forEach { TxRow(it, onOpen) }
                 }
@@ -178,7 +192,7 @@ internal fun TxDetailPage(r: TxRecord, onOpenUrl: (String) -> Unit, onBack: () -
     val (title, text) = txStatusText(r)
     val (icon, tint) = statusIcon(r)
     val format = txDateFormat()
-    FullScreenScaffold(title = "Transaction", onDismiss = onBack) {
+    FullScreenScaffold(title = stringResource(R.string.wallet_history_detail_title), onDismiss = onBack) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -195,20 +209,29 @@ internal fun TxDetailPage(r: TxRecord, onOpenUrl: (String) -> Unit, onBack: () -
                         }
                     }
                     Spacer(Modifier.height(8.dp))
-                    TxField("Amount", "${SendAmounts.exact(r.amount, r.tokenDecimals)} ${r.tokenSymbol}", mono = true)
-                    TxField("To", r.toName, address = r.to)
-                    TxField("From", null, address = r.from)
-                    TxField("Network", r.chainName)
-                    r.tokenAddress?.let { TxField("${r.tokenSymbol} contract", null, address = it) }
-                    TxField("Sent", format.format(Date(r.sentAt)))
-                    TxField("Nonce", r.nonce.toString(), mono = true)
-                    TxField("Transaction", r.hash, mono = true)
+                    TxField(
+                        stringResource(R.string.wallet_history_field_amount),
+                        "${SendAmounts.exact(r.amount, r.tokenDecimals)} ${r.tokenSymbol}",
+                        mono = true,
+                    )
+                    TxField(stringResource(R.string.wallet_history_field_to), r.toName, address = r.to)
+                    TxField(stringResource(R.string.wallet_history_field_from), null, address = r.from)
+                    TxField(stringResource(R.string.wallet_history_field_network), r.chainName)
+                    r.tokenAddress?.let {
+                        TxField(stringResource(R.string.wallet_history_field_contract, r.tokenSymbol), null, address = it)
+                    }
+                    TxField(stringResource(R.string.wallet_history_field_sent), format.format(Date(r.sentAt)))
+                    TxField(stringResource(R.string.wallet_history_field_nonce), r.nonce.toString(), mono = true)
+                    TxField(stringResource(R.string.wallet_history_field_transaction), r.hash, mono = true)
                 }
             }
             explorerTxUrl(r)?.let { url ->
                 item("explorer") {
                     OutlinedButton(onClick = { onOpenUrl(url) }, modifier = Modifier.fillMaxWidth()) {
-                        Text("View on ${android.net.Uri.parse(url).host ?: "the explorer"}")
+                        Text(
+                            android.net.Uri.parse(url).host?.let { stringResource(R.string.wallet_history_view_on, it) }
+                                ?: stringResource(R.string.wallet_history_view_on_explorer),
+                        )
                     }
                 }
             }
