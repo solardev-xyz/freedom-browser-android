@@ -58,11 +58,27 @@ class NodeApiGuardTest {
 
     @Test
     fun `the refusal is recognised by its header, whatever its case, and nothing else is`() {
-        assertTrue(NodeApiGuard.isRefusal(mapOf(NodeApiGuard.REFUSAL_HEADER to "1")))
-        assertTrue(NodeApiGuard.isRefusal(mapOf("x-node-api-refused" to "1")))
-        assertFalse(NodeApiGuard.isRefusal(mapOf("Content-Type" to "text/plain")))
-        assertFalse(NodeApiGuard.isRefusal(emptyMap()))
-        assertFalse(NodeApiGuard.isRefusal(null))
+        val wallet = "http://127.0.0.1:1633/wallet"
+        assertTrue(NodeApiGuard.isRefusal("GET", wallet, mapOf(NodeApiGuard.REFUSAL_HEADER to "1"), ""))
+        assertTrue(NodeApiGuard.isRefusal("GET", wallet, mapOf("x-node-api-refused" to "1"), ""))
+        assertFalse(NodeApiGuard.isRefusal("GET", wallet, mapOf("Content-Type" to "text/plain"), ""))
+        assertFalse(NodeApiGuard.isRefusal("GET", wallet, emptyMap(), ""))
+        assertFalse(NodeApiGuard.isRefusal("GET", wallet, null, ""))
+    }
+
+    @Test
+    fun `a server's own response can't pass for the refusal`() {
+        // Loaded straight from the server, unstripped (R6-F1): the external
+        // node's content page, a LAN node's read, the dapp surface.
+        val header = mapOf(NodeApiGuard.REFUSAL_HEADER to "1")
+        val external = "http://192.168.1.10:1633"
+        assertFalse(NodeApiGuard.isRefusal("GET", "$external/bzz/abc/", header, external))
+        assertFalse(NodeApiGuard.isRefusal("GET", "http://nas.lan:1633/wallet", header, "http://nas.lan:1633"))
+        assertFalse(NodeApiGuard.isRefusal("GET", "http://192.168.1.20:1633/wallet", header, ""))
+        assertFalse(NodeApiGuard.isRefusal("GET", "http://127.0.0.1:1633/bzz/abc/", header, ""))
+        assertFalse(NodeApiGuard.isRefusal("GET", "https://example.com/wallet", header, ""))
+        // A request the guard does refuse is answered before the network.
+        assertTrue(NodeApiGuard.isRefusal("POST", "http://192.168.1.20:1633/stamps/1/17", header, ""))
     }
 
     @Test
@@ -71,7 +87,7 @@ class NodeApiGuardTest {
             val passed = gatewayResponseHeaders(
                 mapOf(null to listOf("HTTP/1.1 404 Not Found"), name to listOf("1"), "Content-Type" to listOf("text/html")),
             )
-            assertFalse(name, NodeApiGuard.isRefusal(passed))
+            assertFalse(name, NodeApiGuard.isRefusal("GET", "http://127.0.0.1:1633/wallet", passed, ""))
             assertFalse(name, nameResolutionErrorIn(passed) != null)
             assertTrue(passed["Content-Type"] == "text/html")
         }

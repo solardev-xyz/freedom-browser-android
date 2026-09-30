@@ -116,9 +116,23 @@ internal object NodeApiGuard {
      */
     internal const val REFUSAL_HEADER = "X-Node-Api-Refused"
 
-    /** Is a response with [headers] this guard's refusal? */
-    internal fun isRefusal(headers: Map<String, String>?): Boolean =
-        headers?.keys?.any { it.equals(REFUSAL_HEADER, ignoreCase = true) } == true
+    /**
+     * Is a response with [headers] to a [method] request for [url] this
+     * guard's refusal? The header alone isn't proof: a URL the WebView
+     * loads straight from a server (an external Swarm node's own `/bzz/…`
+     * page, which no interceptor proxies or strips) could send it too and
+     * keep its own error body on screen (R6-F1). So the request must also
+     * be one [refuses] answers here, which never reaches the network, and
+     * whose answer therefore can only have come from [refusalFor].
+     */
+    internal fun isRefusal(
+        method: String,
+        url: String,
+        headers: Map<String, String>?,
+        externalSwarm: String = Gateways.externalSwarmBase,
+    ): Boolean =
+        headers?.keys?.any { it.equals(REFUSAL_HEADER, ignoreCase = true) } == true &&
+            refuses(method, url, externalSwarm)
 
     /**
      * Is a [method] request to [url] one for the node's gateway, outside the

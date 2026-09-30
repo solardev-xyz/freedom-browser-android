@@ -3424,7 +3424,7 @@ private fun buildRefreshableWebView(
                 // Likewise the node-API guard's refusal (#283): its text says
                 // why; the "not found yet, node still connecting" page would
                 // blame the node and retry a request that is always refused.
-                if (NodeApiGuard.isRefusal(errorResponse?.responseHeaders)) {
+                if (NodeApiGuard.isRefusal(req.method.orEmpty(), failed, errorResponse?.responseHeaders)) {
                     Log.i(LOG_TAG, "main-frame HTTP $status for $failed → node API refused in place")
                     return
                 }
