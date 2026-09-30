@@ -55,6 +55,16 @@ class TextLocaleDeviceTest {
         val faDigits = String.format(Locale.forLanguageTag("fa-IR"), "%d", 17)
         assertEquals(true, faDigits != "17")
         assertEquals("$faDigits matches", TextLocale.plural(fa, R.plurals.browser_find_matches, 17, 17))
+        // Identifiers stay in plain digits even as the plural's count or
+        // beside it (#313 R4-M1, R4-M2): a list-update number, a chain's decimals.
+        assertEquals(
+            "Updated to version 42; the built-in EasyList stays, it's newer",
+            TextLocale.plural(fa, R.plurals.settings_adblock_updated_builtin_newer, 1, 42, "EasyList"),
+        )
+        assertEquals(
+            "xDAI (xDAI), 18 decimals",
+            TextLocale.plural(fa, R.plurals.names_currency_detail, 18, "xDAI", "xDAI", 18),
+        )
         // One copy per text language, whichever context asks (#313 R2-M2).
         assertEquals(true, TextLocale.resources(fa) === TextLocale.resources(ja))
         // An English phone keeps its own resources.

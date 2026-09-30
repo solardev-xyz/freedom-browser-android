@@ -128,10 +128,13 @@
     <string name="settings_adblock_using_update_and_builtin_damaged">%1$s for %2$s; the built-in %3$s (update %4$s\'s %5$s failed its hash check)</string>
     <string name="settings_checking">Checking…</string>
     <string name="settings_adblock_updated">Updated to version %1$s</string>
-    <!-- The count is the number of built-in lists named in %2$s. -->
+    <!--
+      %1$s: the list-update number, plain digits like the sibling version lines;
+      the count is the number of built-in lists named in %2$s.
+    -->
     <plurals name="settings_adblock_updated_builtin_newer">
-        <item quantity="one">Updated to version %1$d; the built-in %2$s stays, it\'s newer</item>
-        <item quantity="other">Updated to version %1$d; the built-in %2$s stay, they\'re newer</item>
+        <item quantity="one">Updated to version %1$s; the built-in %2$s stays, it\'s newer</item>
+        <item quantity="other">Updated to version %1$s; the built-in %2$s stay, they\'re newer</item>
     </plurals>
     <string name="settings_adblock_builtin_newer">Version %1$s on the feed is older than the built-in lists; they stay in use</string>
     <string name="settings_adblock_up_to_date_version">Up to date (version %1$s)</string>

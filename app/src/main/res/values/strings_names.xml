@@ -96,10 +96,13 @@
     <string name="names_chain_section">Chain</string>
     <string name="names_chain_id">Chain ID</string>
     <string name="names_currency">Currency</string>
-    <!-- %1$s: currency name, %2$s: symbol, %3$d: decimals (the plural's count) -->
+    <!--
+      %1$s: currency name, %2$s: symbol, %3$s: decimals (the plural's count),
+      in plain digits like the chain ID and send_eth_currency's decimals.
+    -->
     <plurals name="names_currency_detail">
-        <item quantity="one">%1$s (%2$s), %3$d decimal</item>
-        <item quantity="other">%1$s (%2$s), %3$d decimals</item>
+        <item quantity="one">%1$s (%2$s), %3$s decimal</item>
+        <item quantity="other">%1$s (%2$s), %3$s decimals</item>
     </plurals>
     <string name="names_block_explorer">Block explorer</string>
     <string name="names_block_explorer_none">None</string>
