@@ -511,12 +511,19 @@ object NodeLogs {
     private var generation = 0
 
     /**
-     * [elapsedMs] of the last [clear] (null: none yet): where the reader
-     * picks logcat up again. Monotonic, not wall-clock: a clock set back
-     * after a clear must not move the restart point, or the end of the
-     * settle window, by the size of the step (R2-M1).
+     * [elapsedMs] of the last [clear] (null: none yet), for the settle
+     * window. Monotonic, not wall-clock: a clock set back after a clear
+     * must not stretch the window by the size of the step (R2-M1).
      */
     private var clearedAtElapsed: Long? = null
+
+    /**
+     * [wallMs] as it read at the last [clear] (0: none yet), not moved
+     * by a clock step since: logcat's stamps are the clock as
+     * it read when each line was logged, so this is what the lines
+     * logged before the clear are stamped at or below (R3-M1).
+     */
+    private var clearedAtWall = 0L
 
     /** The wall clock; tests stand in their own. */
     @Volatile
@@ -550,8 +557,7 @@ object NodeLogs {
         // Only what this process logged: logcat's buffer can still hold an
         // earlier process's lines under the same (reused) PID.
         val sinceMs = System.currentTimeMillis() - (SystemClock.elapsedRealtime() - Process.getStartElapsedRealtime())
-        val since = formatSince(sinceMs)
-        val thread = Thread({ follow(pid, since, processName, route) }, "node-logs")
+        val thread = Thread({ follow(pid, sinceMs, processName, route) }, "node-logs")
         thread.isDaemon = true
         reader = thread
         thread.start()
@@ -573,10 +579,14 @@ object NodeLogs {
         synchronized(lock) {
             generation++
             clearedAtElapsed = elapsedMs()
+            clearedAtWall = wallMs()
             rings.values.forEach { it.clear() }
         }
         logcat?.destroy()
     }
+
+    /** [clearedAtWall], for [restartFrom]. */
+    internal fun clearedAtWallMs(): Long = synchronized(lock) { clearedAtWall }
 
     /** The current [generation], for [keep]. */
     internal fun generation(): Int = synchronized(lock) { generation }
@@ -616,14 +626,14 @@ object NodeLogs {
         logcat?.destroy()
     }
 
-    private fun follow(pid: Int, since: String, processName: String, route: (String, String) -> NodeLogSource?) {
-        var from = since
+    private fun follow(pid: Int, sinceMs: Long, processName: String, route: (String, String) -> NodeLogSource?) {
+        // The latest stamp of an entry logcat has handed over (0: none yet).
+        var seenMs = 0L
         while (!stopped) {
-            // Never from before the latest clear: one that came while the
-            // reader slept after logcat went away would otherwise be undone
-            // by the restart re-reading what was cleared (R5-M1).
-            val (gen, clearedAt) = synchronized(lock) { generation to clearedAtWallMs() }
-            from = startFrom(from, clearedAt)
+            // Never from before the latest clear (R5-M1), nor from before
+            // an entry already read (R3-M1): see [restartFrom].
+            val (gen, clearedAt) = synchronized(lock) { generation to clearedAtWall }
+            val from = formatSince(restartFrom(sinceMs, seenMs, clearedAt))
             var proc: java.lang.Process? = null
             try {
                 // Binary: one entry per log write, however many lines it holds (LogcatEntries).
@@ -636,6 +646,7 @@ object NodeLogs {
                 val entries = LogcatEntries(proc.inputStream)
                 while (true) {
                     val line = entries.next() ?: break
+                    if (line.atMs > seenMs) seenMs = line.atMs
                     if (line.tag in NOISE_TAGS || processName.endsWith(line.tag)) continue
                     val source = route(line.tag, line.message) ?: continue
                     if (!keep(gen, source, line.format(), LogRing.kindOf(line.tag, line.message), line.atMs)) break
@@ -650,32 +661,30 @@ object NodeLogs {
             if (stopped) break
             // Cleared: pick up from the clear (the loop's top), at once.
             if (generation() != gen) continue
-            // logcat went away (rare): pick up from now, not from the start again.
-            from = formatSince(wallMs())
+            // logcat went away (rare): pick up after what was read, not from the start again.
             Thread.sleep(RESTART_DELAY_MS)
         }
     }
 
     /**
-     * The last [clear] as a wall-clock time by today's clock (0: none):
-     * its monotonic time moved by how far the clocks stand apart now,
-     * so a clock set back since the clear moves it back too (R2-M1).
+     * Where logcat starts (its `-T`, wall-clock ms): this process's start
+     * ([sinceMs]), just after the latest entry already read ([seenMs]; 0:
+     * none), or the latest clear ([clearedAtWallMs], as the clock read
+     * then; 0: none), whichever is latest.
+     *
+     * All three are stamps as the clock read at the time, never moved by
+     * a step since (R3-M1). logd starts a `-T` read at the first entry
+     * stamped after it and sends everything logged from there on, so
+     * after the clock is set back by N, a `-T` of "now", or of the clear
+     * moved back by N, would send N worth of entries again — read
+     * already, or logged before the clear, whose own stamps are still on
+     * the clock as it was. A clock set back only costs the entries
+     * logged while logcat was away (the restart delay) that are stamped
+     * below the floor; entries logged after it starts come live.
      */
-    internal fun clearedAtWallMs(): Long = synchronized(lock) {
-        val cleared = clearedAtElapsed ?: return 0L
-        cleared + (wallMs() - elapsedMs())
-    }
-
-    /** Where logcat starts: [from], or the latest clear if that came after it. */
-    internal fun startFrom(from: String, clearedAtMs: Long): String =
-        if (clearedAtMs > parseSince(from)) formatSince(clearedAtMs) else from
+    internal fun restartFrom(sinceMs: Long, seenMs: Long, clearedAtWallMs: Long): Long =
+        maxOf(sinceMs, if (seenMs > 0) seenMs + 1 else 0L, clearedAtWallMs)
 
     /** logcat's `-T` time, `<seconds>.<millis>`, for a wall-clock [ms]. */
     internal fun formatSince(ms: Long): String = String.format(Locale.US, "%d.%03d", ms / 1000, ms % 1000)
-
-    /** The wall-clock millis of a [formatSince] time. */
-    internal fun parseSince(since: String): Long {
-        val dot = since.indexOf('.')
-        return since.substring(0, dot).toLong() * 1000 + since.substring(dot + 1).toLong()
-    }
 }

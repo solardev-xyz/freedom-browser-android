@@ -462,10 +462,6 @@ class NodeLogsTest {
         c.wall += NodeLogs.SETTLE_MS; c.elapsed += NodeLogs.SETTLE_MS
         assertTrue(NodeLogs.keep(gen, NodeLogSource.Ipfs, "settled", atMs = c.wall))
         assertEquals("settled", NodeLogs.text(NodeLogSource.Ipfs))
-        // logcat restarts from the clear by today's clock, not an hour ahead of every new entry.
-        assertEquals(5_000_000L - hour, NodeLogs.clearedAtWallMs())
-        val now = NodeLogs.formatSince(c.wall)
-        assertEquals(now, NodeLogs.startFrom(now, NodeLogs.clearedAtWallMs()))
     }
 
     @Test
@@ -487,13 +483,49 @@ class NodeLogsTest {
 
     @Test
     fun `logcat never restarts from before the latest clear`() {
-        // logcat went away at 1000.250; the user cleared at 1003.007 while the reader slept (R5-M1).
-        assertEquals("1003.007", NodeLogs.startFrom("1000.250", 1_003_007L))
-        // A clear before the restart point leaves it be; no clear yet (0) too.
-        assertEquals("1000.250", NodeLogs.startFrom("1000.250", 999_000L))
-        assertEquals("1000.250", NodeLogs.startFrom("1000.250", 0L))
-        assertEquals(1_000_050L, NodeLogs.parseSince(NodeLogs.formatSince(1_000_050L)))
+        // The last entry read was stamped 1000.250; the user cleared at 1003.007 while the reader slept (R5-M1).
+        assertEquals(1_003_007L, NodeLogs.restartFrom(900_000L, 1_000_250L, 1_003_007L))
+        // A clear before the last entry read leaves it be: just after that entry, not again.
+        assertEquals(1_000_251L, NodeLogs.restartFrom(900_000L, 1_000_250L, 999_000L))
+        // Nothing read and no clear yet (0): from the process's start.
+        assertEquals(900_000L, NodeLogs.restartFrom(900_000L, 0L, 0L))
         assertEquals("1000.050", NodeLogs.formatSince(1_000_050L))
+    }
+
+    /**
+     * What logd sends for `logcat -T [startMs]` (LogReader.cpp,
+     * LogReaderThread.cpp): from the first entry stamped after it, every
+     * later one in the order they were logged, but those stamped at or
+     * before it.
+     */
+    private fun logdReplay(stamps: List<Long>, startMs: Long): List<Long> {
+        val first = stamps.indexOfFirst { it > startMs }
+        if (first < 0) return emptyList()
+        return stamps.drop(first).filter { it > startMs }
+    }
+
+    @Test
+    fun `a clock set back after a clear doesn't bring the cleared lines back on a restart`() = withClocks(1_790_757_602_000L, 70_000L) { c ->
+        // Swarm lines logged 10:38:54-10:39:25, read live; the user clears at 10:40:02 (R3-M1).
+        val hour = 3_600_000L
+        val clearAt = c.wall
+        val before = (0 until 32).map { clearAt - 68_000L + it * 1_000L }
+        val seen = before.last()
+        NodeLogs.clear()
+        // 30 s on, the clock is set back an hour, then logcat goes away and restarts.
+        c.wall += 30_000; c.elapsed += 30_000
+        c.wall -= hour
+        val after = listOf(c.wall - 2_000, c.wall - 1_000, c.wall + 1_000) // logged since the step
+        val from = NodeLogs.restartFrom(clearAt - 200_000L, seen, NodeLogs.clearedAtWallMs())
+        val replayed = logdReplay(before + after, from)
+        // Not one line from before the clear comes back.
+        assertTrue(replayed.none { it in before })
+        // Before this fix, "now" by today's clock: logd would send every one of them again.
+        assertEquals(before, logdReplay(before + after, c.wall).filter { it in before })
+        // A line logged once logcat is back comes live, and past the settle window it's kept.
+        c.wall += NodeLogs.SETTLE_MS; c.elapsed += NodeLogs.SETTLE_MS
+        assertTrue(NodeLogs.keep(NodeLogs.generation(), NodeLogSource.Swarm, "live", atMs = c.wall))
+        assertEquals("live", NodeLogs.text(NodeLogSource.Swarm))
     }
 
     // ---- Binary logcat entries (R1-F1) ----
