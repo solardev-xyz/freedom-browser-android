@@ -1464,6 +1464,13 @@ fun BrowserScreen(
         shortcuts?.target = target
         onDispose { if (shortcuts?.target === target) shortcuts.target = null }
     }
+    val fullscreenPage = tabs.fullscreen?.view
+    DisposableEffect(shortcuts, fullscreenPage) {
+        shortcuts?.fullscreenPage = fullscreenPage
+        onDispose {
+            if (shortcuts != null && shortcuts.fullscreenPage === fullscreenPage) shortcuts.fullscreenPage = null
+        }
+    }
 
     // Wire the WebView layer's "route this URL through submit" hook up
     // to this screen's [submit] function. The callback lives on

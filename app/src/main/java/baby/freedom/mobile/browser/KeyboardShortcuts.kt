@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import android.view.KeyEvent
 import android.view.KeyboardShortcutGroup
 import android.view.KeyboardShortcutInfo
+import android.view.View
 
 /**
  * The browser's hardware-keyboard shortcuts (#270): tablets, Chromebooks,
@@ -180,6 +181,17 @@ class KeyboardShortcutRouter {
     /** Installed by the browser screen while it's composed; null otherwise. */
     @Volatile
     var target: ShortcutTarget? = null
+
+    /**
+     * The view a page's HTML5 fullscreen is shown in
+     * (`WebChromeClient.onShowCustomView`), while it's up. It stands in
+     * for the page's WebView: Chromium moves the page — its focus and
+     * input connection included — into it, so a text field focused in
+     * fullscreen is the page's even though no [android.webkit.WebView]
+     * has focus (#307 R3-F1).
+     */
+    @Volatile
+    var fullscreenPage: View? = null
 
     /** Keys whose press [beforeViews] took, and whose release it still owes itself. */
     private val takenDown = mutableSetOf<Int>()

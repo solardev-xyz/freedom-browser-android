@@ -13,6 +13,7 @@ import android.view.KeyEvent
 import android.view.KeyboardShortcutGroup
 import android.view.Menu
 import android.view.View
+import android.view.inputmethod.InputMethodManager
 import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -738,11 +739,26 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     // field has focus, before the focused view sees the key; that field
     // gets the rest first ([KeyboardShortcutRouter]). The browser's own
     // fields (address bar, find bar) keep Alt+←/→ as caret keys.
+    //
+    // A page in HTML5 fullscreen has its focus in the fullscreen view,
+    // not in its WebView, and is still the page (#307 R3-F1). That view
+    // answers `onCheckIsTextEditor()` false even with a field focused
+    // (and so does the WebView behind it), so there the page is editing
+    // when the focused view in it holds a live input connection: the IME
+    // is served by it and accepting text — true with a page field focused, by a tap
+    // or from script, and false on the page body, on a focused link or
+    // once the field is blurred (API 36 emulator).
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val focus = currentFocus
-        val webView = focus.enclosingWebView()
-        val pageEditing = webView?.onCheckIsTextEditor() == true
-        val fieldEditing = webView == null && focus?.onCheckIsTextEditor() == true
+        val fullscreen = shortcuts.fullscreenPage
+        val page = focus.enclosingPage(fullscreen)
+        val pageEditing = when {
+            page == null -> false
+            page === fullscreen -> getSystemService(InputMethodManager::class.java)
+                ?.let { it.isActive(focus) && it.isAcceptingText } == true
+            else -> page.onCheckIsTextEditor()
+        }
+        val fieldEditing = page == null && focus?.onCheckIsTextEditor() == true
         if (shortcuts.beforeViews(event, pageEditing, fieldEditing)) return true
         return super.dispatchKeyEvent(event)
     }
@@ -759,10 +775,11 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         data.addAll(keyboardShortcutGroups(privateTabs = PrivateProfile.isSupported()))
     }
 
-    private fun View?.enclosingWebView(): WebView? {
+    /** The page view (a WebView, or [fullscreen]) this view is, or is inside; null if none. */
+    private fun View?.enclosingPage(fullscreen: View?): View? {
         var v: View? = this
         while (v != null) {
-            if (v is WebView) return v
+            if (v is WebView || (fullscreen != null && v === fullscreen)) return v
             v = v.parent as? View
         }
         return null

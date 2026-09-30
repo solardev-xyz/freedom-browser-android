@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
 import android.webkit.WebView
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
@@ -68,7 +69,8 @@ class KeyboardShortcutsDeviceTest {
     private fun page(name: String) = """
         <!doctype html><meta name=viewport content="width=device-width"><title>$name</title>
         <input id=f style="font-size:20px"> <a id=two href="/two" style="font-size:20px">two</a>
-        <div id=fs style="font-size:20px;background:#08f" onclick="this.requestFullscreen()">fullscreen</div>
+        <div id=fs style="font-size:20px;background:#08f"><span id=go onclick="fs.requestFullscreen()">fullscreen</span>
+          <input id=g style="font-size:20px"></div>
         <p style="height:3000px">$name</p>
         <script>
           window.__keys = JSON.parse(sessionStorage.getItem('$name') || '[]');
@@ -402,12 +404,97 @@ class KeyboardShortcutsDeviceTest {
         press(KeyEvent.KEYCODE_TAB, ctrl)
         waitFor("back on the page's tab") { onActivity { tabs.activeIndex == 0 } }
         val view = focusField("one", field = false)
-        tap(view, "fs")
+        tap(view, "go")
         waitFor("fullscreen") { onActivity { tabs.fullscreen != null } }
         press(KeyEvent.KEYCODE_TAB, ctrl)
         waitFor("the other tab, out of fullscreen") {
             onActivity { tabs.activeIndex == 1 && tabs.fullscreen == null }
         }
+    }
+
+    /** Focus is in the view the page's HTML5 fullscreen is shown in (Chromium's view, or inside it). */
+    private fun focusInFullscreen(activity: MainActivity): Boolean {
+        val fs = tabs.fullscreen?.view ?: return false
+        var v: View? = activity.currentFocus
+        while (v != null && v !== fs) v = v.parent as? View
+        return v != null
+    }
+
+    /**
+     * [name]'s page in HTML5 fullscreen, with the text field inside the
+     * fullscreen element focused by a tap on the fullscreen view.
+     */
+    private fun focusFieldInFullscreen(name: String): WebView {
+        val view = focusField(name, field = false)
+        tap(view, "go")
+        waitFor("fullscreen") { onActivity { tabs.fullscreen != null } }
+        waitFor("the fullscreen element laid out") {
+            js(view, "document.fullscreenElement && document.fullscreenElement.id") == "\"fs\""
+        }
+        Thread.sleep(500)
+        val box = js(view, "var r = document.getElementById('g').getBoundingClientRect(); " +
+            "[r.left + r.width / 2, r.top + r.height / 2].join(',')").trim('"').split(',')
+        val (x, y) = onActivity {
+            val fs = tabs.fullscreen!!.view
+            val at = IntArray(2).also(fs::getLocationOnScreen)
+            val density = fs.resources.displayMetrics.density
+            (at[0] + box[0].toFloat() * density).toInt() to (at[1] + box[1].toFloat() * density).toInt()
+        }
+        shell("input tap $x $y")
+        // (The fullscreen view answers onCheckIsTextEditor() false even
+        // now; the browser reads its input connection instead.)
+        waitFor("focus in the fullscreen field") {
+            js(view, "document.activeElement.id") == "\"g\"" &&
+                onActivity {
+                    val imm = it.getSystemService(InputMethodManager::class.java)
+                    focusInFullscreen(it) && imm.isAcceptingText
+                }
+        }
+        return view
+    }
+
+    // #307 R3-F1: in HTML5 fullscreen the focused view is the fullscreen
+    // view, not a WebView; a text field there is still the page's, and
+    // gets a non-reserved shortcut first.
+    @Test
+    fun aFullscreenPageThatPreventsCtrlFKeepsIt() {
+        launch("/one")
+        val view = focusFieldInFullscreen("one")
+        js(view, "__prevent = true")
+        press(KeyEvent.KEYCODE_F, ctrl)
+        waitFor("the page's keydown") { keys(view, "one") == "C-f" }
+        Thread.sleep(1_000)
+        assertFalse(onActivity { tabs.active.find.open })
+        assertTrue("still fullscreen", onActivity { tabs.fullscreen != null })
+    }
+
+    // …and off a field, fullscreen or not, the browser takes it first.
+    @Test
+    fun ctrlFOverAFullscreenPageBodyIsTheBrowsers() {
+        launch("/one")
+        val view = focusField("one", field = false)
+        js(view, "__prevent = true")
+        tap(view, "go")
+        waitFor("fullscreen") { onActivity { tabs.fullscreen != null } }
+        waitFor("the fullscreen view focused") {
+            onActivity(::focusInFullscreen)
+        }
+        press(KeyEvent.KEYCODE_F, ctrl)
+        waitFor("find bar, out of fullscreen") {
+            onActivity { tabs.active.find.open && tabs.fullscreen == null }
+        }
+        assertEquals("", keys(view, "one"))
+    }
+
+    @Test
+    fun ctrlFInAFullscreenFieldGoesToThePageFirst() {
+        launch("/one")
+        val view = focusFieldInFullscreen("one")
+        press(KeyEvent.KEYCODE_F, ctrl)
+        waitFor("find bar, out of fullscreen") {
+            onActivity { tabs.active.find.open && tabs.fullscreen == null }
+        }
+        assertEquals("C-f", keys(view, "one"))
     }
 
     // #307 R2-M2: in the address bar Alt+←/→ move the caret; the page
