@@ -115,7 +115,7 @@ class MyotisNode internal constructor(
 
     private sealed interface Op {
         data object Start : Op
-        class SetNetworks(val networks: Set<MyotisNetwork>) : Op
+        class SetNetworks(val networks: Set<MyotisNetwork>, val start: Boolean = false) : Op
         class Stop(val done: CompletableDeferred<Unit>? = null) : Op
         data object Background : Op
         data object Foreground : Op
@@ -278,7 +278,7 @@ class MyotisNode internal constructor(
                     // Nobody awaits most ops: never let one take the
                     // queue (or the process) down.
                     Log.e(TAG, "myotis $op failed", t)
-                    if (op is Op.Start) {
+                    if (op is Op.Start || (op is Op.SetNetworks && op.start)) {
                         publish(MyotisStatus.Error, t.message ?: t.javaClass.simpleName)
                     }
                 } finally {
@@ -319,6 +319,16 @@ class MyotisNode internal constructor(
      */
     fun setNetworks(chains: Set<MyotisNetwork>) {
         ops.trySend(Op.SetNetworks(chains))
+    }
+
+    /**
+     * [setNetworks] then [start], as one step: the start runs only if the
+     * switch didn't already try one — a chain switched on while every
+     * chain had failed retries the start once, not twice. With the same
+     * chains as before it's a plain [start] (a failed start is retried).
+     */
+    fun run(chains: Set<MyotisNetwork>) {
+        ops.trySend(Op.SetNetworks(chains, start = true))
     }
 
     /** Stop every chain's engine. Returns at once; the engines drain on the queue. */
@@ -400,7 +410,13 @@ class MyotisNode internal constructor(
                 wanted = true
                 startEngines()
             }
-            is Op.SetNetworks -> setEnabled(op.networks)
+            is Op.SetNetworks -> {
+                val triedStart = setEnabled(op.networks)
+                if (op.start) {
+                    wanted = true
+                    if (!triedStart) startEngines()
+                }
+            }
             is Op.Stop -> {
                 wanted = false
                 stopEngines()
@@ -582,24 +598,27 @@ class MyotisNode internal constructor(
      * from its generation — and one switched on boots. With no chain left
      * the engines stop; a chain switched on while [start] stands (the
      * engines stopped that way, or every chain failed) starts them again.
+     * True if that ran [startEngines].
      */
-    private fun setEnabled(chains: Set<MyotisNetwork>) {
+    private fun setEnabled(chains: Set<MyotisNetwork>): Boolean {
         val next = networks.filter { it in chains }
-        if (next == enabled) return
+        if (next == enabled) return false
         val removed = enabled - next.toSet()
         val added = next - enabled.toSet()
         enabled = next
         if (!started) {
-            if (wanted) startEngines()
-            return
+            if (!wanted) return false
+            startEngines()
+            return true
         }
         if (next.isEmpty()) {
             stopEngines()
-            return
+            return false
         }
         for (network in removed) stopChain(network)
         for (network in added) startChain(network)
         if (!settleIfNothingRuns()) refreshStatus()
+        return false
     }
 
     /**

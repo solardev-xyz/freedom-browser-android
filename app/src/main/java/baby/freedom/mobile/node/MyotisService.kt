@@ -72,10 +72,10 @@ class MyotisService : Service() {
         override fun setNetworks(chainIds: LongArray?) {
             val node = node ?: return
             val chains = chainIds?.asList().orEmpty().mapNotNull { MyotisNetwork.forChain(it) }.toSet()
-            // On the node's queue, in call order: the chains are chosen
-            // before the start boots them.
-            node.setNetworks(chains)
-            node.start()
+            // One op on the node's queue: the chains are chosen before the
+            // start boots them, and a switch that already retried a failed
+            // start (setEnabled) isn't followed by a second one.
+            node.run(chains)
             configured = true
         }
 

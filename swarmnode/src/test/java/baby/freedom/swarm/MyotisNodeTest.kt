@@ -924,4 +924,47 @@ class MyotisNodeTest {
         assertEquals("SYNCING", gnosis.beaconState)
         assertNull(gnosis.recovery)
     }
+
+    @Test
+    fun `run chooses the chains before the first start boots them`() {
+        val engine = FakeEngine()
+        val node = node(engine)
+        node.run(setOf(MyotisNetwork.Gnosis))
+        idle(node)
+        assertEquals(listOf("init", "create gnosis", "start 2", "window 2 1"), engine.calls)
+        assertEquals(MyotisStatus.Running, node.state.value.status)
+    }
+
+    @Test
+    fun `run switching a chain on after every chain failed retries the start once`() {
+        val engine = FakeEngine(startAnswers = mutableMapOf(1L to false, 2L to false))
+        val node = node(engine)
+        node.run(setOf(MyotisNetwork.Mainnet))
+        idle(node)
+        assertEquals(MyotisStatus.Error, node.state.value.status)
+
+        engine.calls.clear()
+        node.run(setOf(MyotisNetwork.Mainnet, MyotisNetwork.Gnosis))
+        idle(node)
+        // One retry of the whole start, not the switch's retry and then the start's.
+        assertEquals(1, engine.calls.count { it == "init" })
+        assertEquals(1, engine.calls.count { it == "create gnosis" })
+        assertEquals(MyotisStatus.Error, node.state.value.status)
+    }
+
+    @Test
+    fun `run with the same chains after a failed start retries it`() {
+        val engine = FakeEngine(startAnswers = mutableMapOf(1L to false, 2L to false))
+        val node = node(engine)
+        node.run(setOf(MyotisNetwork.Mainnet))
+        idle(node)
+        assertEquals(MyotisStatus.Error, node.state.value.status)
+
+        engine.startAnswers.clear()
+        engine.calls.clear()
+        node.run(setOf(MyotisNetwork.Mainnet))
+        idle(node)
+        assertEquals(listOf("init", "create mainnet", "start 1", "window 1 1"), engine.calls)
+        assertEquals(MyotisStatus.Running, node.state.value.status)
+    }
 }
