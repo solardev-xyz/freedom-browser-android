@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -3008,6 +3010,7 @@ private fun OverflowMenuButton(
     // Lift the popup clear of the toolbar's own top padding plus a
     // little air, so it floats above the pill instead of touching it.
     val popupGapPx = with(LocalDensity.current) { 12.dp.roundToPx() }
+    val statusBarPx = WindowInsets.statusBars.getTop(LocalDensity.current)
 
     Box(
         modifier = Modifier.onGloballyPositioned { coords ->
@@ -3046,11 +3049,19 @@ private fun OverflowMenuButton(
                 onDismissRequest = { menuExpanded = false },
                 properties = PopupProperties(focusable = true),
             ) {
+                // No taller than the room between the status bar and the
+                // gap above the Menu button, so a menu that has to scroll
+                // does so there instead of being clamped to the top of
+                // the window and covering the toolbar and its own anchor.
+                val maxHeight = with(LocalDensity.current) {
+                    popupMaxHeightAbove(anchorBounds!!.top, popupGapPx, statusBarPx).toDp()
+                }
                 Surface(
                     shape = MaterialTheme.shapes.large,
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     tonalElevation = 3.dp,
                     shadowElevation = 3.dp,
+                    modifier = Modifier.heightIn(max = maxHeight),
                 ) {
                     // [IntrinsicSize.Max] makes the Column size to
                     // its widest child's natural width. Without
@@ -3301,22 +3312,10 @@ private fun OverflowMenuButton(
                             },
                         )
                         val peersLabel = if (peerCount == 1L) "1 peer" else "$peerCount peers"
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(peersLabel) },
-                            // The row's text is only the count; say where
-                            // it goes (#279).
-                            modifier = Modifier.semantics { contentDescription = "Nodes, $peersLabel" },
-                            leadingIcon = {
-                                Icon(
-                                    painter = painterResource(baby.freedom.mobile.R.drawable.ic_nodes),
-                                    contentDescription = null,
-                                )
-                            },
-                            onClick = {
-                                menuExpanded = false
-                                onOpenNode()
-                            },
-                        )
+                        NodesMenuItem(peersLabel) {
+                            menuExpanded = false
+                            onOpenNode()
+                        }
                     }
                 }
             }
@@ -3366,6 +3365,7 @@ private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
             color = MaterialTheme.colorScheme.onSurface
                 .let { if (enabled) it else it.copy(alpha = disabledAlpha) },
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             autoSize = TextAutoSize.StepBased(
                 minFontSize = if (labelFloor.value < labelStyle.fontSize.value) labelFloor else labelStyle.fontSize,
                 maxFontSize = labelStyle.fontSize,
@@ -3480,6 +3480,41 @@ internal class AnchoredAboveProvider(
         return IntOffset(x, y)
     }
 }
+
+/**
+ * The overflow menu's Nodes row: the drawn text is only the peer count,
+ * so its TalkBack name says where it goes (#279). The count is replaced
+ * in the semantics, not added to, so it is read once.
+ */
+@Composable
+internal fun NodesMenuItem(peersLabel: String, onClick: () -> Unit) {
+    DropdownMenuItem(
+        text = {
+            Box(Modifier.clearAndSetSemantics { contentDescription = nodesMenuDescription(peersLabel) }) {
+                MenuItemLabel(peersLabel)
+            }
+        },
+        leadingIcon = {
+            Icon(
+                painter = painterResource(baby.freedom.mobile.R.drawable.ic_nodes),
+                contentDescription = null,
+            )
+        },
+        onClick = onClick,
+    )
+}
+
+/**
+ * The tallest [AnchoredAboveProvider]'s popup may be and still sit wholly
+ * between the status bar and [gapPx] above an anchor whose top edge is
+ * [anchorTop] (window px). A taller popup would be clamped to the top of
+ * the window and hang down over the anchor itself.
+ */
+internal fun popupMaxHeightAbove(anchorTop: Int, gapPx: Int, topInsetPx: Int): Int =
+    (anchorTop - gapPx - topInsetPx).coerceAtLeast(0)
+
+/** TalkBack's name for the overflow menu's Nodes row (#279): where it goes, then the count it shows. */
+internal fun nodesMenuDescription(peersLabel: String): String = "Nodes, $peersLabel"
 
 /**
  * What TalkBack says of a load on the address bar (#279): the phase the

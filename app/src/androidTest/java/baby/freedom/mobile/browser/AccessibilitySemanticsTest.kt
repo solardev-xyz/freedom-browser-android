@@ -9,9 +9,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsOff
@@ -121,4 +128,35 @@ class AccessibilitySemanticsTest {
         rule.waitForIdle()
         assertEquals(listOf("Alpha"), tabs.tabs.map { it.title })
     }
+
+    @Test
+    fun theNodesMenuRowReadsItsCountOnce() {
+        rule.setContent { MaterialTheme { NodesMenuItem("101 peers") {} } }
+        val row = rule.onNode(hasClickAction()).fetchSemanticsNode().config
+        assertEquals(listOf("Nodes, 101 peers"), row.getOrNull(SemanticsProperties.ContentDescription))
+        // The drawn "101 peers" is not handed over a second time as text.
+        assertTrue(row.getOrNull(SemanticsProperties.Text).isNullOrEmpty())
+    }
+
+    @Test
+    fun theCopyLabelKeepsItsWidthAndSaysOnlyTheShownWord() {
+        var copied by mutableStateOf(false)
+        rule.setContent {
+            val base = LocalDensity.current
+            // A large font, where "Copied" is noticeably wider than "Copy".
+            CompositionLocalProvider(LocalDensity provides Density(base.density, fontScale = 2f)) {
+                MaterialTheme {
+                    OutlinedButton(onClick = {}) { CopyLabel(copied, Modifier.testTag("copy")) }
+                }
+            }
+        }
+        val before = rule.onNodeWithTag("copy", useUnmergedTree = true).fetchSemanticsNode().size
+        assertEquals(listOf("Copy"), rule.onNode(hasClickAction()).fetchSemanticsNode().config[SemanticsProperties.Text].map { it.text })
+        copied = true
+        rule.waitForIdle()
+        val after = rule.onNodeWithTag("copy", useUnmergedTree = true).fetchSemanticsNode().size
+        assertEquals(before, after)
+        assertEquals(listOf("Copied"), rule.onNode(hasClickAction()).fetchSemanticsNode().config[SemanticsProperties.Text].map { it.text })
+    }
 }
+

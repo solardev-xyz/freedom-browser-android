@@ -49,4 +49,17 @@ class AccessibilityLabelsTest {
         assertEquals(AddressPlaceholders.sortedByDescending { it.length }, AddressPlaceholders)
         AddressPlaceholders.forEach { assert(it.startsWith("Search")) }
     }
+
+    @Test
+    fun `the Nodes menu row names where it goes and then the count`() {
+        assertEquals("Nodes, 101 peers", nodesMenuDescription("101 peers"))
+    }
+
+    @Test
+    fun `a popup above an anchor is capped to the room between the status bar and the gap`() {
+        // Anchor top at 2000 px, a 36 px gap, a 140 px status bar.
+        assertEquals(1824, popupMaxHeightAbove(anchorTop = 2000, gapPx = 36, topInsetPx = 140))
+        // No room at all is zero, never negative.
+        assertEquals(0, popupMaxHeightAbove(anchorTop = 100, gapPx = 36, topInsetPx = 140))
+    }
 }

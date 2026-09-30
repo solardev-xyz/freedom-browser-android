@@ -58,6 +58,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.draw.alpha
+import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -2050,7 +2053,7 @@ private fun RecoveryPhrasePage(
                             ) {
                                 Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text(if (copied) "Copied" else "Copy")
+                                CopyLabel(copied)
                             }
                             OutlinedButton(onClick = hide) {
                                 Icon(Icons.Filled.VisibilityOff, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -2069,6 +2072,22 @@ private fun RecoveryPhrasePage(
             }
             error?.let { message -> item("error") { ErrorText(message) } }
         }
+    }
+}
+
+/**
+ * "Copy", or "Copied" once tapped, in a slot always as wide as the wider
+ * of the two: both are laid out, the unshown one invisible and silent.
+ * [SheetButtonRow] picks side by side or stacked from the buttons' widths,
+ * so a label that grew on the tap could flip the layout under the finger
+ * (#279).
+ */
+@Composable
+internal fun CopyLabel(copied: Boolean, modifier: Modifier = Modifier) {
+    val hidden = Modifier.alpha(0f).clearAndSetSemantics {}
+    Box(contentAlignment = Alignment.Center, modifier = modifier) {
+        Text("Copy", modifier = if (copied) hidden else Modifier)
+        Text("Copied", modifier = if (copied) Modifier else hidden)
     }
 }
 
