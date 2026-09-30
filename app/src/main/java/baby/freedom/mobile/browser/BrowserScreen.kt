@@ -491,6 +491,10 @@ fun BrowserScreen(
     // and whether it was added from a private tab.
     var editBookmark by rememberSaveable { mutableStateOf<Long?>(null) }
     var editBookmarkPrivate by rememberSaveable { mutableStateOf(false) }
+    // Whether the Bookmarks list was opened from a private tab, fixed at
+    // that moment, so its Edit dialog keeps the keyboard from learning
+    // what's typed there (#296 R1-M1).
+    var bookmarksPrivate by rememberSaveable { mutableStateOf(false) }
     var showDownloads by rememberSaveable { mutableStateOf(false) }
     var addressFocused by remember { mutableStateOf(false) }
     // Suggestions should only appear once the user has actively changed
@@ -607,7 +611,8 @@ fun BrowserScreen(
     // (#86) — and so does a private download's notice (it names the
     // file) until it has left the screen.
     PrivateScreenGuard(privateOnScreen || downloadNotices.privateShowing)
-    val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
+    val isBookmarked by remember(repo, state.url) { repo.isBookmarked(state.url) }
+        .collectAsState(initial = false)
 
     // IPFS load progress (#94): while the active tab is busy on content
     // the IPFS node serves, poll the node's retrieval-progress snapshot
@@ -1943,7 +1948,10 @@ fun BrowserScreen(
                     onOpenNode = { showNode = true },
                     onOpenTabs = { showTabSwitcher = true },
                     onOpenHistory = { showHistory = true },
-                    onOpenBookmarks = { showBookmarks = true },
+                    onOpenBookmarks = {
+                        bookmarksPrivate = state.private
+                        showBookmarks = true
+                    },
                     onOpenDownloads = { showDownloads = true },
                     onReload = reloadPage,
                     // Stop covers both halves of a load: the WebView's
@@ -2167,6 +2175,7 @@ fun BrowserScreen(
     if (showBookmarks) {
         BookmarksScreen(
             repo = repo,
+            private = bookmarksPrivate,
             onDismiss = { showBookmarks = false },
             onOpen = { url ->
                 showBookmarks = false

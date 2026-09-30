@@ -11,8 +11,12 @@ interface BookmarkDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entry: BookmarkEntry): Long
 
-    @Query("DELETE FROM bookmarks WHERE url = :url")
-    suspend fun deleteByUrl(url: String)
+    @Query("DELETE FROM bookmarks WHERE id = :id")
+    suspend fun delete(id: Long)
+
+    /** Every bookmark, once, for matching an address under any spelling (`BookmarkUrls.key`). */
+    @Query("SELECT * FROM bookmarks")
+    suspend fun allOnce(): List<BookmarkEntry>
 
     /** In the user's order (#264): [BookmarkEntry.position], ties newest first. */
     @Query("SELECT * FROM bookmarks ORDER BY position ASC, id DESC")
@@ -45,9 +49,6 @@ interface BookmarkDao {
             "ORDER BY createdAt DESC LIMIT :limit",
     )
     fun search(q: String, limit: Int): Flow<List<BookmarkEntry>>
-
-    @Query("SELECT EXISTS(SELECT 1 FROM bookmarks WHERE url = :url)")
-    fun isBookmarked(url: String): Flow<Boolean>
 
     @Query("DELETE FROM bookmarks")
     suspend fun clear()

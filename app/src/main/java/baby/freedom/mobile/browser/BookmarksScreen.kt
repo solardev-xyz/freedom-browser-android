@@ -57,6 +57,7 @@ import baby.freedom.mobile.data.BookmarkEntry
 import baby.freedom.mobile.data.BrowsingRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -73,10 +74,14 @@ import kotlinx.coroutines.launch
  * gets the same moves as actions on the row. The order is saved
  * ([BrowsingRepository.moveBookmark]) and is the Home page tiles' order
  * too.
+ *
+ * [private] is whether it was opened from a private tab: the edit
+ * dialog's fields then don't let the keyboard learn what's typed.
  */
 @Composable
 fun BookmarksScreen(
     repo: BrowsingRepository,
+    private: Boolean,
     onDismiss: () -> Unit,
     onOpen: (String) -> Unit,
 ) {
@@ -94,6 +99,13 @@ fun BookmarksScreen(
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
     val reorder = remember(listState, repo) {
         BookmarkReorder(listState) { id, afterId -> repo.moveBookmark(id, afterId) }
+    }
+    val dropped = reorder.pendingDrop
+    // A drop that didn't change the saved order (it failed, or the list
+    // had changed under it) gets no new list from Room, so stop showing
+    // the dragged copy once the save says so (#296 R1-M2).
+    LaunchedEffect(dropped) {
+        if (dropped != null && !dropped.await()) reorder.dropFailed(dropped)
     }
     // A dropped row keeps the order it was dropped in until the saved
     // order arrives, so it doesn't jump back for a frame.
@@ -162,7 +174,7 @@ fun BookmarksScreen(
         BookmarkEditDialog(
             repo = repo,
             id = id,
-            private = false,
+            private = private,
             onDismiss = { editingId = null },
         )
     }
@@ -269,9 +281,13 @@ private const val REORDER_SCROLL_STEP = 24f
  */
 private class BookmarkReorder(
     private val list: LazyListState,
-    private val onDrop: (id: Long, afterId: Long?) -> Unit,
+    private val onDrop: (id: Long, afterId: Long?) -> Deferred<Boolean>,
 ) {
     var order: List<BookmarkEntry>? by mutableStateOf(null)
+        private set
+
+    /** The last drop's save, until it's done: whether it changed the stored order. */
+    var pendingDrop: Deferred<Boolean>? by mutableStateOf(null)
         private set
     var draggedId: Long? by mutableStateOf(null)
         private set
@@ -288,6 +304,16 @@ private class BookmarkReorder(
 
     /** The saved list changed: once no row is held, show it again. */
     fun stored() {
+        if (draggedId == null) order = null
+    }
+
+    /**
+     * [drop] saved nothing, so no new list is coming: show the stored
+     * order again — unless another drag has started since.
+     */
+    fun dropFailed(drop: Deferred<Boolean>) {
+        if (pendingDrop !== drop) return
+        pendingDrop = null
         if (draggedId == null) order = null
     }
 
@@ -378,7 +404,7 @@ private class BookmarkReorder(
             order = null
             return
         }
-        onDrop(id, ids.getOrNull(ids.indexOf(id) - 1))
+        pendingDrop = onDrop(id, ids.getOrNull(ids.indexOf(id) - 1))
     }
 }
 

@@ -1,6 +1,8 @@
 package baby.freedom.mobile.data
 
 import androidx.room.Room
+import baby.freedom.mobile.browser.BookmarkAddress
+import baby.freedom.mobile.browser.bookmarkAddress
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
@@ -10,6 +12,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.json.JSONObject
@@ -137,10 +140,13 @@ class BookmarksDatabaseTest {
             assertEquals(BookmarkEditResult.Saved, repo.editBookmark(c, "C2", "https://c.example/").await())
 
             // Move c to the bottom, then a to the top.
-            repo.moveBookmark(c, a)
+            assertTrue(repo.moveBookmark(c, a).await())
             awaitOrder(listOf("https://b.example/", "vitalik.eth", "https://c.example/"))
-            repo.moveBookmark(a, null)
+            assertTrue(repo.moveBookmark(a, null).await())
             awaitOrder(listOf("vitalik.eth", "https://b.example/", "https://c.example/"))
+            // A move that goes nowhere writes nothing, and says so (#296 R1-M2).
+            assertFalse(repo.moveBookmark(a, null).await())
+            assertFalse(repo.moveBookmark(999, null).await())
             // A new one still lands on top of a hand-made order.
             repo.bookmark("https://d.example/", "D").await()
             assertEquals(
@@ -152,6 +158,47 @@ class BookmarksDatabaseTest {
             repo.unbookmark("https://b.example/")
             awaitOrder(listOf("https://d.example/", "vitalik.eth", "https://c.example/"))
             assertEquals(BookmarkEditResult.Gone, repo.editBookmark(b, "B", "https://b.example/").await())
+        } finally {
+            db.close()
+        }
+    }
+
+    /**
+     * #296 R1-F1: a bookmark whose address was edited to another spelling
+     * of the page (`localhost:8730` for the page's `http://localhost:8730/`,
+     * `ens://x.eth` for `ipfs://x.eth/`) is still that page's bookmark —
+     * the star is filled, re-adding finds it, Remove removes it, and the
+     * edit dialog's duplicate check sees it.
+     */
+    @Test
+    fun anotherSpellingOfTheSamePageIsTheSameBookmark() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val repo = BrowsingRepository(db)
+        suspend fun starred(url: String) = withTimeout(5_000) { repo.isBookmarked(url).first() }
+        try {
+            val page = "http://localhost:8730/"
+            val a = repo.bookmark(page, "Local").await()!!
+            val typed = (bookmarkAddress("localhost:8730") as BookmarkAddress.Ok).url
+            assertEquals(BookmarkEditResult.Saved, repo.editBookmark(a, "Local", typed).await())
+            assertEquals(page, db.bookmarks().byId(a)!!.url)
+            assertTrue(starred(page))
+            // Even a row saved in another spelling before this fix.
+            db.bookmarks().update(a, "http://LOCALHOST:8730", "Local")
+            assertTrue(starred(page))
+            assertEquals(a, repo.bookmark(page, "Again").await())
+            assertEquals(1, db.bookmarks().all().first().size)
+
+            val n = repo.bookmark("ipfs://x.eth/", "X").await()!!
+            assertTrue(starred("x.eth"))
+            assertTrue(starred("bzz://x.eth"))
+            val dup = repo.editBookmark(a, "Local", (bookmarkAddress("ens://x.eth") as BookmarkAddress.Ok).url).await()
+            assertTrue(dup is BookmarkEditResult.Duplicate)
+            assertEquals(BookmarkEditResult.Saved, repo.editBookmark(n, "X", "x.eth").await())
+
+            repo.unbookmark(page)
+            withTimeout(5_000) { db.bookmarks().all().first { list -> list.none { it.id == a } } }
+            assertFalse(starred(page))
+            assertTrue(starred("ipfs://x.eth/"))
         } finally {
             db.close()
         }

@@ -7,12 +7,16 @@ import baby.freedom.mobile.data.BrowsingRepository
  * the address bar reads what's typed into it ([AddressInput]):
  *
  *  - a dweb form — `name.eth`, `ens://…`, `bzz://…` (a hash or a name),
- *    `ipfs://…`, `ipns://…`, `rad://…` / `rad:…` — is kept as typed, so
- *    opening the bookmark resolves it again like typing it would, and a
- *    bare `name.eth` doesn't turn into `https://name.eth`;
+ *    `ipfs://…`, `ipns://…`, `rad://…` / `rad:…` — stays a dweb address,
+ *    so opening the bookmark resolves it again like typing it would, and
+ *    a bare `name.eth` doesn't turn into `https://name.eth`;
  *  - an ordinary address gets what Enter would add ([UrlParser.toUrl]):
- *    `example.com` → `https://example.com`, `localhost:8080` →
- *    `http://localhost:8080`, a `.onion` host → `http://…`;
+ *    `example.com` → `https://example.com/`, `localhost:8080` →
+ *    `http://localhost:8080/`, a `.onion` host → `http://…`;
+ *  - either way it is saved in the spelling the page itself reports
+ *    ([BookmarkUrls.canonical]: `ens://X.eth` → `x.eth`, a `/` path, a
+ *    lowercase host), so the star shows it as bookmarked and re-adding
+ *    the page finds it (#296 R1-F1);
  *  - text Enter would search the web for is refused (a bookmark is an
  *    address, not a search), and so is a page history and bookmarks
  *    never keep ([BrowsingRepository.isRecordable]: `about:`,
@@ -35,7 +39,7 @@ internal fun bookmarkAddress(input: String): BookmarkAddress {
         AddressInput.Kind.Url -> UrlParser.toUrl(trimmed, searchTemplate = "")
     }
     return if (BrowsingRepository.isRecordable(url)) {
-        BookmarkAddress.Ok(url)
+        BookmarkAddress.Ok(BookmarkUrls.canonical(url))
     } else {
         BookmarkAddress.Invalid("This address can't be bookmarked")
     }

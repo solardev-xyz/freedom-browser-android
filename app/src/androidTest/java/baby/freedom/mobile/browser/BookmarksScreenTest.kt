@@ -58,7 +58,7 @@ class BookmarksScreenTest {
             for (t in listOf("C", "B", "A")) repo.bookmark("https://$t.example/", t).await()
         }
         assertEquals(listOf("A", "B", "C"), titles())
-        rule.setContent { MaterialTheme { BookmarksScreen(repo, onDismiss = {}, onOpen = {}) } }
+        rule.setContent { MaterialTheme { BookmarksScreen(repo, private = false, onDismiss = {}, onOpen = {}) } }
         rule.waitForIdle()
 
         // First row: only down-moves.
@@ -77,7 +77,7 @@ class BookmarksScreenTest {
     @Test
     fun rowMenuEditRenamesAndReaddresses() {
         runBlocking { repo.bookmark("https://a.example/", "A").await() }
-        rule.setContent { MaterialTheme { BookmarksScreen(repo, onDismiss = {}, onOpen = {}) } }
+        rule.setContent { MaterialTheme { BookmarksScreen(repo, private = false, onDismiss = {}, onOpen = {}) } }
         rule.onNode(hasContentDescription("Bookmark options")).performClick()
         rule.onNodeWithText("Edit").performClick()
         rule.onNode(hasSetTextAction() and hasText("A")).performTextReplacement("Renamed")

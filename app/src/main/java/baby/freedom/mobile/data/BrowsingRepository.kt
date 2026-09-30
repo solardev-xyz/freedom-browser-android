@@ -4,6 +4,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteException
 import android.util.Log
 import androidx.room.withTransaction
+import baby.freedom.mobile.browser.BookmarkUrls
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
@@ -11,7 +12,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
@@ -83,7 +86,25 @@ class BrowsingRepository internal constructor(
         }
     }
 
-    fun isBookmarked(url: String): Flow<Boolean> = db.bookmarks().isBookmarked(url)
+    /**
+     * Whether [url] is bookmarked, under any spelling of it
+     * ([BookmarkUrls.key]): an edited bookmark saved as `x.eth` still
+     * fills the star on the page shown as `ipfs://x.eth/` (#296 R1-F1).
+     */
+    fun isBookmarked(url: String): Flow<Boolean> {
+        val key = BookmarkUrls.key(url)
+        return bookmarks
+            .map { list -> list.any { BookmarkUrls.key(it.url) == key } }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+    }
+
+    /** The bookmark that is [url] under any spelling of it ([BookmarkUrls.key]). */
+    private suspend fun bookmarkFor(url: String, except: Long? = null): BookmarkEntry? {
+        db.bookmarks().byUrl(url)?.takeIf { it.id != except }?.let { return it }
+        val key = BookmarkUrls.key(url)
+        return db.bookmarks().allOnce().firstOrNull { it.id != except && BookmarkUrls.key(it.url) == key }
+    }
 
     /**
      * Address-bar auto-complete suggestions.
@@ -129,7 +150,7 @@ class BrowsingRepository internal constructor(
         if (!isRecordable(url)) return@async null
         try {
             db.withTransaction {
-                db.bookmarks().byUrl(url)?.id ?: db.bookmarks().upsert(
+                bookmarkFor(url)?.id ?: db.bookmarks().upsert(
                     BookmarkEntry(
                         url = url,
                         title = title,
@@ -158,9 +179,9 @@ class BrowsingRepository internal constructor(
     fun editBookmark(id: Long, title: String, url: String): Deferred<BookmarkEditResult> = scope.async {
         try {
             db.withTransaction {
-                val other = db.bookmarks().byUrl(url)
+                val other = bookmarkFor(url, except = id)
                 when {
-                    other != null && other.id != id ->
+                    other != null ->
                         BookmarkEditResult.Duplicate(other.title, other.url)
                     db.bookmarks().update(id, url, title) == 0 -> BookmarkEditResult.Gone
                     else -> BookmarkEditResult.Saved
@@ -175,26 +196,41 @@ class BrowsingRepository internal constructor(
     /**
      * Put bookmark [id] right after [afterId] in the user's order, or
      * first for a null [afterId] (#264, see [movedAfter]), and renumber
-     * them all 0, 1, 2…
+     * them all 0, 1, 2… Completes with whether the stored order was
+     * written: false for a move that goes nowhere (or whose bookmark is
+     * gone) and for a failed write, when Room sends no new list — so a
+     * list showing the move ahead of the save knows to show the stored
+     * order again (#296 R1-M2).
      */
-    fun moveBookmark(id: Long, afterId: Long?) {
-        scope.launch {
-            try {
-                db.withTransaction {
-                    val order = movedAfter(db.bookmarks().orderedIds(), id, afterId) ?: return@withTransaction
-                    order.forEachIndexed { index, bookmark ->
-                        db.bookmarks().setPosition(bookmark, index.toLong())
-                    }
+    fun moveBookmark(id: Long, afterId: Long?): Deferred<Boolean> = scope.async {
+        try {
+            db.withTransaction {
+                val order = movedAfter(db.bookmarks().orderedIds(), id, afterId) ?: return@withTransaction false
+                order.forEachIndexed { index, bookmark ->
+                    db.bookmarks().setPosition(bookmark, index.toLong())
                 }
-            } catch (e: SQLiteException) {
-                // The list stays in its old order, which is what it shows.
-                Log.w(TAG, "moveBookmark: ${e.message}")
+                true
             }
+        } catch (e: SQLiteException) {
+            Log.w(TAG, "moveBookmark: ${e.message}")
+            false
         }
     }
 
+    /** Remove [url]'s bookmark, whichever spelling of it was saved ([BookmarkUrls.key]). */
     fun unbookmark(url: String) {
-        scope.launch { db.bookmarks().deleteByUrl(url) }
+        scope.launch {
+            try {
+                db.withTransaction {
+                    val key = BookmarkUrls.key(url)
+                    db.bookmarks().allOnce()
+                        .filter { it.url == url || BookmarkUrls.key(it.url) == key }
+                        .forEach { db.bookmarks().delete(it.id) }
+                }
+            } catch (e: SQLiteException) {
+                Log.w(TAG, "unbookmark: ${e.message}")
+            }
+        }
     }
 
     fun clearHistory() {

@@ -16,27 +16,38 @@ class BookmarkAddressTest {
     private fun ok(input: String) = (bookmarkAddress(input) as BookmarkAddress.Ok).url
 
     @Test
-    fun `dweb forms stay as typed`() {
-        for (s in listOf(
-            "vitalik.eth", "vitalik.eth/docs", "ens://vitalik.eth", "bzz://vitalik.eth",
-            "bzz://" + "ab".repeat(32) + "/index.html",
-            "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
-            "ipns://ipfs.tech",
-            "rad://z3gqcJUoA1n9HaHKufZs5FCSGazv5",
-            "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+    fun `dweb forms stay dweb addresses, in the spelling the page reports`() {
+        val hash = "ab".repeat(32)
+        val cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        val rid = "z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        for ((typed, saved) in listOf(
+            "vitalik.eth" to "vitalik.eth",
+            "vitalik.eth/docs" to "vitalik.eth/docs",
+            "vitalik.eth/" to "vitalik.eth",
+            "ens://vitalik.eth" to "vitalik.eth",
+            "ENS://Vitalik.ETH/" to "vitalik.eth",
+            "bzz://vitalik.eth" to "bzz://vitalik.eth",
+            "bzz://" + hash.uppercase() + "/index.html" to "bzz://$hash/index.html",
+            "ipfs://$cid" to "ipfs://$cid",
+            "ipns://ipfs.tech" to "ipns://ipfs.tech",
+            "rad://$rid" to "rad://$rid",
+            "rad:$rid" to "rad://$rid",
         )) {
-            assertEquals(s, s, ok(" $s "))
+            assertEquals(typed, saved, ok(" $typed "))
         }
     }
 
     @Test
     fun `ordinary addresses get what Enter adds`() {
-        assertEquals("https://example.com", ok("example.com"))
+        assertEquals("https://example.com/", ok("example.com"))
         assertEquals("https://example.com/a?b=1", ok("  example.com/a?b=1 "))
         assertEquals("http://localhost:8080/x", ok("localhost:8080/x"))
-        assertEquals("http://example.onion", ok("example.onion"))
-        assertEquals("https://10.0.0.1:8080", ok("10.0.0.1:8080"))
+        assertEquals("http://localhost:8730/", ok("localhost:8730"))
+        assertEquals("http://example.onion/", ok("example.onion"))
+        assertEquals("https://10.0.0.1:8080/", ok("10.0.0.1:8080"))
         assertEquals("http://example.com/", ok("http://example.com/"))
+        assertEquals("https://example.com/?q=1", ok("HTTPS://Example.COM:443?q=1"))
+        assertEquals("https://xn--bcher-kva.de/", ok("bücher.de"))
     }
 
     @Test
