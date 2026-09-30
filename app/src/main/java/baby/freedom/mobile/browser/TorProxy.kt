@@ -165,7 +165,7 @@ object TorProxy {
      */
     internal const val CANARY_ONION = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaad.onion"
 
-    /** Tor answers [CANARY_ONION] without the network; more than this is inconclusive, not proof. */
+    /** Tor refuses [CANARY_ONION] without the network, at once; no refusal within this isn't Tor. */
     const val CANARY_TIMEOUT_MS = 10_000L
 
     /** Connect + SOCKS5 greeting; a loopback listener answers at once. */
@@ -211,13 +211,18 @@ object TorProxy {
     }
 
     /**
-     * Whether a proxy [probe] found to be Tor still looks like it, without
-     * a circuit: the greeting, and a CONNECT to [CANARY_ONION] answered
-     * with an error (or not within [canaryTimeoutMs] — inconclusive, not a
-     * sign of a proxy that answers before dialing, which answers at once).
-     * [Probe.Tor] if so, else what's there now: [Probe.NotListening],
-     * [Probe.NotSocks], or [Probe.NotTor] for a proxy that "connected" the
-     * impossible onion — something else took the port.
+     * The first half of [probe], without a circuit: the greeting, and a
+     * CONNECT to [CANARY_ONION] that must be *refused* — answered with a
+     * SOCKS error reply, as Tor does at once (`05 01`, or `05 F6` with
+     * ExtendedErrors). [Probe.Tor] means only "may be Tor": a plain SOCKS5
+     * proxy refuses the canary too (it can't resolve it), so it's never
+     * enough on its own to route onion (R2-F1). No reply at all — a
+     * timeout, the connection closed, a read error — is [Probe.NoOnion]
+     * `(-1)`, not a pass: Tor always answers, while a proxy that dials
+     * before answering and takes long upstream would otherwise pass here
+     * and then "connect" the real onion too (R2-F2). Else what's there:
+     * [Probe.NotListening], [Probe.NotSocks], or [Probe.NotTor] for a
+     * proxy that "connected" the impossible onion.
      */
     suspend fun recheck(
         endpoint: SocksEndpoint,
@@ -225,7 +230,7 @@ object TorProxy {
         canaryTimeoutMs: Long = CANARY_TIMEOUT_MS,
     ): Probe = when (val r = connectOnion(endpoint, CANARY_ONION, handshakeTimeoutMs, canaryTimeoutMs)) {
         Probe.Tor -> Probe.NotTor
-        is Probe.NoOnion -> Probe.Tor
+        is Probe.NoOnion -> if (r.code >= 0) Probe.Tor else r
         else -> r
     }
 
@@ -325,7 +330,11 @@ object TorProxy {
 
     // --- Re-checking (MainActivity's loop) --------------------------------
 
-    /** A proxy confirmed as Tor: how often it's [recheck]ed. */
+    /**
+     * A proxy confirmed as Tor: how often it's [probe]d again — the full
+     * probe, a real onion included, since only that tells Tor from a plain
+     * SOCKS5 proxy that took the port meanwhile (R2-F1).
+     */
     const val RECHECK_MS = 20_000L
 
     /** Nothing listening: how soon to look again (starting Orbot is picked up quickly). */

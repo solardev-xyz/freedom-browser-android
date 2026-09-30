@@ -932,10 +932,12 @@ class MainActivity : ComponentActivity() {
      * refuses a `.onion` name that can't exist and connects a real one),
      * and only then does [TorRouting] send `.onion` to it. While the
      * Activity is started it keeps checking:
-     *  - confirmed: [TorProxy.recheck] (greeting + the impossible onion,
-     *    no circuit) every [TorProxy.RECHECK_MS], and at once when a
-     *    routed onion page fails to load ([TorRouting.externalFailed]);
-     *    gone → refused again.
+     *  - confirmed: the same full [TorProxy.probe] (the impossible onion
+     *    refused, a real one connected) every [TorProxy.RECHECK_MS], and
+     *    at once when a routed onion page fails to load
+     *    ([TorRouting.externalFailed]); gone or no longer Tor → refused
+     *    again. The canary alone isn't enough: a plain SOCKS5 proxy that
+     *    took the port refuses it too (R2-F1).
      *  - not confirmed: the check again [TorProxy.RETRY_MS] after nothing
      *    listened, so starting Orbot later is picked up without a tap;
      *    after a proxy that listens but isn't (or can't reach) Tor, backing
@@ -945,9 +947,9 @@ class MainActivity : ComponentActivity() {
      * While the Activity is stopped nothing checks, so `.onion` isn't
      * routed to the proxy meanwhile (fail closed: a proxy that dies in
      * the background, or another app taking its port, gets no onion
-     * requests from background tabs), and the recheck on return restores
-     * it (R1-M1). Status goes through [torInfoFlow] like the embedded
-     * client's.
+     * requests from background tabs), and on return it's routed again
+     * only once a full probe passes (R1-M1, R2-F1). Status goes through
+     * [torInfoFlow] like the embedded client's.
      */
     private fun startExternalTor(proxy: SocksEndpoint) {
         externalTorJob?.cancel()
@@ -960,11 +962,13 @@ class MainActivity : ComponentActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 try {
                     while (true) {
-                        val result = if (confirmed) {
-                            TorProxy.recheck(proxy)
-                        } else {
-                            when (val now = TorProxy.recheck(proxy)) {
-                                TorProxy.Probe.Tor -> {
+                        // Always the full probe, a real onion included, even
+                        // for a proxy already confirmed: the canary alone
+                        // passes a plain SOCKS5 proxy that took the port
+                        // meanwhile (R2-F1).
+                        val result = when (val now = TorProxy.recheck(proxy)) {
+                            TorProxy.Probe.Tor -> {
+                                if (!confirmed) {
                                     publishExternalTor(
                                         proxy,
                                         TorInfo(
@@ -974,10 +978,10 @@ class MainActivity : ComponentActivity() {
                                         ),
                                         confirmed = false,
                                     )
-                                    TorProxy.probe(proxy)
                                 }
-                                else -> now
+                                TorProxy.probe(proxy)
                             }
+                            else -> now
                         }
                         confirmed = result == TorProxy.Probe.Tor
                         publishExternalTor(
