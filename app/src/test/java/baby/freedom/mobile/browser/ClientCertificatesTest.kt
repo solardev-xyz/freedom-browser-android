@@ -76,6 +76,45 @@ class ClientCertificatesTest {
     }
 
     @Test
+    fun `a request queued behind a refused chooser takes the refusal, one after a reload opens its own`() = runBlocking {
+        val c = ClientCertChoices()
+        val lock = Mutex()
+        val onScreen = MutableStateFlow<Long?>(2L)
+        c.loaded(2L)
+        val queuedTicket = c.ticket()
+        val first = chooseInTurn(
+            c, lock, "mtls.example", 443, 2L, onScreen, MutableStateFlow(false), MutableStateFlow(false),
+            c.ticket(),
+        ) { null }
+        assertEquals(ClientCertPlan.Refuse, first)
+        var opened = 0
+        val queued = chooseInTurn(
+            c, lock, "mtls.example", 443, 2L, onScreen, MutableStateFlow(false), MutableStateFlow(false),
+            queuedTicket,
+        ) { opened++; "alice" }
+        assertEquals(ClientCertPlan.Refuse, queued)
+        assertEquals(0, opened)
+        // A later request from the same page (a new connection it opens):
+        // still refused, no chooser (R4-F1).
+        assertEquals(
+            ClientCertPlan.Refuse,
+            chooseInTurn(
+                c, lock, "mtls.example", 443, 2L, onScreen, MutableStateFlow(false), MutableStateFlow(false),
+                c.ticket(),
+            ) { opened++; "alice" },
+        )
+        assertEquals(0, opened)
+        // Once the user reloads, a request opens its own chooser.
+        c.loaded(2L)
+        val later = chooseInTurn(
+            c, lock, "mtls.example", 443, 2L, onScreen, MutableStateFlow(false), MutableStateFlow(false),
+            c.ticket(),
+        ) { opened++; "alice" }
+        assertEquals(ClientCertPlan.Send("alice"), later)
+        assertEquals(1, opened)
+    }
+
+    @Test
     fun `clearing site data forgets every answer, including one given by a chooser opened before`() {
         val c = ClientCertChoices()
         c.answered("mtls.example", 443, "alice", c.generation)
