@@ -17,11 +17,13 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -57,9 +59,10 @@ import org.json.JSONObject
  *    [Eip712]);
  *  - `eth_sendTransaction`: priced by the wallet's own send flow
  *    ([WalletSender.prepare] — its nonce, fees and gas estimate, as
- *    desktop asks), reviewed on a sheet, then signed and broadcast by
- *    [WalletSender] like any send of the wallet's, which then follows it
- *    on the wallet page. The answer is the hash once a node took it.
+ *    desktop asks) under a sheet saying so ([Request.Pricing]),
+ *    reviewed on a sheet, then signed and broadcast by [WalletSender]
+ *    like any send of the wallet's, which then follows it on the
+ *    wallet page. The answer is the hash once a node took it.
  *
  * One sheet at a time; a request arriving while one is up is refused
  * (-32002). A new scan replaces the session, and a closed or failed one
@@ -138,6 +141,18 @@ class OpenLvSession internal constructor(
             /** Set when [account] is a Ledger's that can't show this field by field: it will show only these hashes (#239). */
             val ledgerHashes: LedgerTypedDataHashes? = null,
         ) : Request
+
+        /**
+         * `eth_sendTransaction` from [account] to [to] on [chain], while
+         * the wallet prices it: shown the moment the request checks out,
+         * before any of that network work, with only Reject. Until then
+         * a transaction from a wallet account takes no longer, and holds
+         * the one-sheet slot no longer, than a stranger's refusal — so
+         * nothing about it (a -32002 to a second request, a session that
+         * ends with no sheet ever shown) tells the peer the account is
+         * this wallet's before the user has seen a sheet ([accountFor]).
+         */
+        data class Pricing(val account: WalletAccount, val chain: Chain, val to: String, val amount: BigInteger) : Request
 
         /** `eth_sendTransaction`, priced; [notice] says why it's shown again, if it is. */
         data class SendTransaction(val quote: SendQuote, val notice: String? = null) : Request
@@ -325,6 +340,30 @@ class OpenLvSession internal constructor(
         }
     }
 
+    /**
+     * Shows [request] while [work] runs, and gives its result — or null
+     * if the sheet is closed (or the session ends) first; [work] is then
+     * cancelled but not waited for. Whatever [work] throws is thrown. The
+     * sheet is taken down when this returns, unless something already
+     * replaced it.
+     */
+    private suspend fun <T : Any> showWhile(sid: Int, request: Request, work: suspend () -> T): T? {
+        if (sid != this.sid) return null
+        val approval = Approval(request, CompletableDeferred())
+        _approval.value = approval
+        // Not joined once cancelled: a Reject is answered at once, not when a stalled RPC gives up.
+        val result = scope.async { work() }
+        return try {
+            select<T?> {
+                result.onAwait { it }
+                approval.answer.onAwait { null }
+            }
+        } finally {
+            result.cancel()
+            if (_approval.value === approval) _approval.value = null
+        }
+    }
+
     private suspend fun requestAccounts(sid: Int): OpenLvResponse {
         sharedAccount?.let { return OpenLvResponse.Result(JSONArray().put(it.address)) }
         val list = keys.accounts() ?: return NO_WALLET
@@ -405,8 +444,10 @@ class OpenLvSession internal constructor(
         )
         var notice: String? = null
         while (true) {
+            // A sheet first, then the network work (R2-F1): see Request.Pricing.
             val quote = try {
-                sender.prepare(request)
+                showWhile(sid, Request.Pricing(account, chain, request.to, value)) { sender.prepare(request) }
+                    ?: return REJECTED
             } catch (e: SendException) {
                 // Only after the user saw it: what went wrong says the account is this
                 // wallet's, and often its balance ([accountFor]). Closed, not approved.
@@ -469,9 +510,11 @@ class OpenLvSession internal constructor(
      * The wallet account [address] names (any case), or null. Each signing
      * request looks it up only once everything else in it has checked out:
      * an unknown address is refused at once (4100), and from there on a
-     * known one gets no answer until a sheet has shown — the request's own
-     * sheet, or, for a transaction that can't be priced (not enough funds,
-     * a call that would revert), [Request.CantSend]. So a request malformed
+     * known one gets no answer, and holds the one-sheet slot, only once a
+     * sheet has shown — the request's own; for a transaction, the
+     * [Request.Pricing] sheet put up before any network work, then the
+     * priced one or, if it can't be priced (not enough funds, a call that
+     * would revert), [Request.CantSend]. So a request malformed
      * in some other way is refused alike for both, and a peer can't learn,
      * with no sheet ever showing, whether an address it likes is one of this
      * wallet's (Ledger accounts too), none of which it was ever given — nor

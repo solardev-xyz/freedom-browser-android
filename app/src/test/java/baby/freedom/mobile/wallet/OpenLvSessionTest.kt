@@ -145,6 +145,10 @@ class OpenLvSessionTest {
 
     private val sent = mutableListOf<String>()
 
+    /** While set, pricing (the nonce read) waits for it: a slow network. */
+    @Volatile
+    private var stallPricing: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
     private fun rpc() = WalletRpc(
         ChainDataRouter(
             chains = { listOf<Chain>(gnosis) },
@@ -153,7 +157,10 @@ class OpenLvSessionTest {
                 fun q(v: Long) = "\"result\":\"0x${v.toString(16)}\""
                 val answer = when (req.getString("method")) {
                     "eth_getBalance" -> q(1_000_000_000_000_000_000L)
-                    "eth_getTransactionCount" -> q(3)
+                    "eth_getTransactionCount" -> {
+                        stallPricing?.await() // suspends, and lets a cancelled caller go, as the real transport does
+                        q(3)
+                    }
                     "eth_getBlockByNumber" -> "\"result\":{\"number\":\"0x10\",\"baseFeePerGas\":\"0x7\"}"
                     "eth_maxPriorityFeePerGas" -> q(1)
                     "eth_estimateGas" -> q(50_000)
@@ -184,7 +191,12 @@ class OpenLvSessionTest {
 
     private fun OpenLvSession.startOnScope(uri: String = "openlv://session") = runBlocking { withContext(thread) { start(uri) } }
 
-    private fun OpenLvSession.awaitSheet(): OpenLvSession.Approval = runBlocking { withTimeout(5_000) { approval.first { it != null }!! } }
+    /** The next sheet the user acts on: past a transaction's [OpenLvSession.Request.Pricing] one. */
+    private fun OpenLvSession.awaitSheet(): OpenLvSession.Approval =
+        runBlocking { withTimeout(5_000) { approval.first { it != null && it.request !is OpenLvSession.Request.Pricing }!! } }
+
+    private fun OpenLvSession.awaitPricing(): OpenLvSession.Approval =
+        runBlocking { withTimeout(5_000) { approval.first { it?.request is OpenLvSession.Request.Pricing }!! } }
 
     private fun result(r: Triple<Int, Int, OpenLvResponse>): Any = (r.third as OpenLvResponse.Result).json
 
@@ -582,6 +594,51 @@ class OpenLvSessionTest {
     }
 
     @Test
+    fun `a wallet account's transaction shows a sheet before it's priced, so nothing else tells it from a stranger's`() {
+        // While pricing, a second request's -32002 or a session ending with no
+        // sheet ever shown would say the account is this wallet's (R2-F1).
+        val (s, engine) = session()
+        s.startOnScope()
+        s.onRequest(1, 1, "wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x64")))
+        engine.next()
+        fun tx(from: String) = JSONArray().put(
+            JSONObject().put("from", from).put("to", account1.address).put("value", "0x1").put("chainId", "0x64"),
+        )
+        val stall = kotlinx.coroutines.CompletableDeferred<Unit>()
+        stallPricing = stall
+        try {
+            s.onRequest(1, 2, "eth_sendTransaction", tx(account0.address))
+            // Up before any answer, while the network is still out.
+            val pricing = s.awaitPricing()
+            val req = pricing.request as OpenLvSession.Request.Pricing
+            assertEquals(account0, req.account)
+            assertEquals(gnosis.id, req.chain.id)
+            assertEquals(account1.address, req.to)
+            assertEquals(BigInteger.ONE, req.amount)
+            assertNull(engine.responses.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS))
+            // A second request is busy only once the user can see why.
+            s.onRequest(1, 3, "personal_sign", JSONArray().put("0x68656c6c6f").put(account0.address))
+            assertEquals(OpenLvSession.BUSY, error(engine.next()))
+            // Rejecting it answers at once, the stalled pricing notwithstanding.
+            pricing.decide(OpenLvSession.Decision.Reject)
+            val rejected = engine.next()
+            assertEquals(2, rejected.second)
+            assertEquals(OpenLvSession.REJECTED_CODE, error(rejected))
+            assertNull(s.approval.value)
+
+            // The session ending while it's priced takes the sheet with it, as any other.
+            s.onRequest(1, 4, "eth_sendTransaction", tx(account0.address))
+            s.awaitPricing()
+            s.onLink(1, OpenLvLink.Disconnected)
+            assertEquals(OpenLvSession.REJECTED_CODE, error(engine.next()))
+        } finally {
+            stall.complete(Unit)
+            stallPricing = null
+        }
+        assertTrue(synchronized(sent) { sent.isEmpty() })
+    }
+
+    @Test
     fun `call data over the cap is refused before it's priced or shown`() {
         val (s, engine) = session()
         s.startOnScope()
@@ -611,7 +668,7 @@ class OpenLvSessionTest {
         val first = s.awaitSheet()
         assertNull((first.request as OpenLvSession.Request.SendTransaction).notice)
         first.decide(OpenLvSession.Decision.Approve())
-        val again = runBlocking { withTimeout(5_000) { s.approval.first { it != null && it !== first }!! } }
+        val again = runBlocking { withTimeout(5_000) { s.approval.first { it != null && it !== first && it.request !is OpenLvSession.Request.Pricing }!! } }
         val notice = (again.request as OpenLvSession.Request.SendTransaction).notice!!
         assertTrue(notice, notice.contains("Ledger approval came over three minutes"))
         assertFalse(notice, notice.contains("over a minute old"))
@@ -632,7 +689,7 @@ class OpenLvSessionTest {
         val first = s.awaitSheet()
         now.addAndGet(WalletSender.QUOTE_TTL_MS) // the sheet stood for a minute
         first.decide(OpenLvSession.Decision.Approve())
-        val again = runBlocking { withTimeout(5_000) { s.approval.first { it != null && it !== first }!! } }
+        val again = runBlocking { withTimeout(5_000) { s.approval.first { it != null && it !== first && it.request !is OpenLvSession.Request.Pricing }!! } }
         val notice = (again.request as OpenLvSession.Request.SendTransaction).notice!!
         assertTrue(notice, notice.contains("over a minute old"))
         again.decide(OpenLvSession.Decision.Reject)
