@@ -759,4 +759,16 @@ class ExternalAppsTest {
         assertFalse(sameRequestUrl("https://example.com:8443/", "https://example.com/"))
         assertFalse(sameRequestUrl("https://example.com/?a", "https://example.com/?b"))
     }
+
+    @Test
+    fun webIntentWithNoPackageSkipsBrowsers() {
+        // intent://x#Intent;scheme=https;end — would reach the default
+        // browser, which may be Freedom's own IncomingLinkActivity.
+        assertTrue(mustSkipBrowsers("https", null))
+        assertTrue(mustSkipBrowsers("HTTP", null))
+        // A named app gets the link; Freedom's own package is refused earlier.
+        assertFalse(mustSkipBrowsers("https", "com.example.app"))
+        assertFalse(mustSkipBrowsers("zoomus", null))
+        assertFalse(mustSkipBrowsers(null, null))
+    }
 }

@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.util.Log
 import java.net.URISyntaxException
@@ -659,7 +660,27 @@ internal fun externalAppLaunch(url: String, ownPackage: String): ExternalAppLaun
     }
     intent.addCategory(Intent.CATEGORY_BROWSABLE)
     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    if (mustSkipBrowsers(intent.scheme, intent.`package`)) {
+        intent.addFlags(Intent.FLAG_ACTIVITY_REQUIRE_NON_BROWSER)
+    }
     return ExternalAppLaunch(ExternalScheme(scheme), intent, fallbackUrl)
+}
+
+/**
+ * Whether an app-link launch whose data has [dataScheme] and that names
+ * [pkg] (null: any app) must skip browsers. An `intent:` URL carrying an
+ * http(s) address with no package is a web link like any other, and a
+ * web link resolves to the default browser — which may be Freedom
+ * itself ([IncomingLinkActivity] takes every http(s) link), so the
+ * "open in another app" prompt would end in a new Freedom tab opened
+ * as if from another app, the address the page chose. Only a non-browser
+ * app (one with a link filter for that site) may take it; if none can,
+ * the launch fails like any link with no app, and the tab goes to the
+ * fallback address if the page gave one.
+ */
+internal fun mustSkipBrowsers(dataScheme: String?, pkg: String?): Boolean {
+    val s = dataScheme?.lowercase() ?: return false
+    return pkg == null && (s == "http" || s == "https")
 }
 
 /**
@@ -683,8 +704,18 @@ internal fun parseIntentUrl(
 
 /** Start [launch]; `false` when no app on the device can take it. */
 internal fun startExternalApp(context: Context, launch: ExternalAppLaunch): Boolean = try {
-    context.startActivity(launch.intent)
-    true
+    // Never back into this app: whatever the intent names, if Android
+    // would hand it to one of Freedom's own activities it's no app link.
+    val target = context.packageManager
+        .resolveActivity(launch.intent, PackageManager.MATCH_DEFAULT_ONLY)
+        ?.activityInfo?.packageName
+    if (target == context.packageName) {
+        Log.i("ExternalApps", "${launch.scheme.scheme}: resolves to this app, not launched")
+        false
+    } else {
+        context.startActivity(launch.intent)
+        true
+    }
 } catch (_: ActivityNotFoundException) {
     false
 } catch (e: SecurityException) {

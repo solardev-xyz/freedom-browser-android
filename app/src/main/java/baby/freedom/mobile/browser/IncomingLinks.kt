@@ -76,10 +76,45 @@ object IncomingLinks {
         if (t.isEmpty()) return null
         link(t)?.let { return Incoming.Open(it) }
         EMBEDDED_WEB_LINK.find(t)?.value
-            ?.trimEnd('.', ',', ';', ':', '!', '?', ')', ']', '"', '\'', '»', '”', '’')
+            ?.let(::trimTrailingPunctuation)
             ?.let(::link)
             ?.let { return Incoming.Open(it) }
         return search(t)
+    }
+
+    /**
+     * [url] (a link found inside text) without the sentence punctuation
+     * that follows it: `.`, `,`, quotes, and a closing `)` or `]` — but
+     * only a bracket with no partner inside the link, so the one closing
+     * `/wiki/Mercury_(planet)` stays and the one closing "(see https://…)"
+     * goes.
+     */
+    internal fun trimTrailingPunctuation(url: String): String {
+        var end = url.length
+        while (end > 0) {
+            val c = url[end - 1]
+            val cut = when (c) {
+                '.', ',', ';', ':', '!', '?', '"', '\'', '»', '”', '’' -> true
+                ')' -> unbalanced(url, end, '(', ')')
+                ']' -> unbalanced(url, end, '[', ']')
+                else -> false
+            }
+            if (!cut) break
+            end--
+        }
+        return url.substring(0, end)
+    }
+
+    /** More [close] than [open] in `url[0, end)`: the last [close] isn't the link's. */
+    private fun unbalanced(url: String, end: Int, open: Char, close: Char): Boolean {
+        var depth = 0
+        for (i in 0 until end) {
+            when (url[i]) {
+                open -> depth++
+                close -> depth--
+            }
+        }
+        return depth < 0
     }
 
     /**

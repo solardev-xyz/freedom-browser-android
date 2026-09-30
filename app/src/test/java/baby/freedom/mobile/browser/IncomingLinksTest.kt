@@ -54,6 +54,28 @@ class IncomingLinksTest {
     }
 
     @Test
+    fun bracketsThatBelongToTheLinkStay() {
+        assertEquals(
+            Incoming.Open("http://host/wiki/Mercury_(planet)"),
+            IncomingLinks.fromSharedText("Mercury http://host/wiki/Mercury_(planet)"),
+        )
+        assertEquals(
+            Incoming.Open("https://en.wikipedia.org/wiki/Mercury_(planet)"),
+            IncomingLinks.fromSharedText("Read (https://en.wikipedia.org/wiki/Mercury_(planet))."),
+        )
+        assertEquals(
+            Incoming.Open("https://example.com/a[1]"),
+            IncomingLinks.fromSharedText("Item: https://example.com/a[1]"),
+        )
+        assertEquals(
+            Incoming.Open("https://example.com/a"),
+            IncomingLinks.fromSharedText("[see https://example.com/a]!"),
+        )
+        assertEquals("https://x/y_(z)", IncomingLinks.trimTrailingPunctuation("https://x/y_(z)\"),."))
+        assertEquals("https://x/", IncomingLinks.trimTrailingPunctuation("https://x/)])"))
+    }
+
+    @Test
     fun sharedLinkOpens() {
         assertEquals(Incoming.Open("https://youtu.be/abc"), IncomingLinks.fromSharedText("https://youtu.be/abc"))
         assertEquals(Incoming.Open("bzz://abcd"), IncomingLinks.fromSharedText(" bzz://abcd\n"))
