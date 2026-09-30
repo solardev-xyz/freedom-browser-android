@@ -713,6 +713,16 @@ void ant_free_string(char *ptr);
  * The gateway's chain wiring is captured here, once. A host serving
  * chain reads itself must call ant_set_chain_transport BEFORE this.
  *
+ * CORS: the gateway allows cross-origin reads only for the origins last
+ * set with ant_set_gateway_cors. By default none: it sends no CORS
+ * headers, so no page from another origin can read its responses.
+ * (Up to 0.5.48 it always allowed the `null` origin; hosts that relied
+ * on that must now call ant_set_gateway_cors explicitly.)
+ * CORS only stops reads: any page can still send CORS-simple requests,
+ * which execute — including the spending routes POST
+ * /stamps/{amount}/{depth} and POST /chequebook/deposit (see
+ * ant_set_gateway_cors; issue #105).
+ *
  * Returns true on success (or if a gateway is already running on this
  * handle). On failure returns false and writes an allocated message to
  * *out_err (free with ant_free_string). Idempotent: a second call while
@@ -723,6 +733,43 @@ bool ant_start_gateway(const AntHandle *handle,
                        bool light_mode,
                        const char *gnosis_rpc,
                        char **out_err);
+
+/*
+ * Set the CORS origins the in-process gateway allows (new after 0.5.48).
+ * Takes effect at the next ant_start_gateway; call it before the first
+ * start or after ant_stop_gateway — while a gateway is running it fails
+ * and changes nothing.
+ *
+ * `origins` points at `origins_len` NUL-terminated UTF-8 strings,
+ * matched like bee's cors-allowed-origins: an exact origin such as
+ * "https://app.example" (case-insensitive), "*" for any origin, or
+ * "null" for opaque origins. NULL / origins_len == 0 clears the list —
+ * the default — so the gateway sends no CORS headers and no page from
+ * another origin can read its responses. Blank entries are ignored.
+ *
+ * The gateway has no auth: an allowed page can read /wallet, /addresses,
+ * /stamps, ... and send preflighted requests (e.g. uploads with Swarm-*
+ * headers). "null" matches ANY page whose request was
+ * redirected across origins (the Fetch spec taints its Origin to
+ * "null"), and "*" matches every page — allow them only if that is
+ * acceptable.
+ *
+ * This list protects READS only; an empty list does not block writes.
+ * A CORS-simple request needs no preflight, so any page can still
+ * fetch(url, {method: "POST", mode: "no-cors"}) against
+ * POST /stamps/{amount}/{depth} or POST /chequebook/deposit and the
+ * gateway executes it, spending the wallet's xBZZ, even though the page
+ * cannot read the reply. Do not rely on this call to protect funds.
+ *
+ * Returns true on success. On failure (NULL handle, gateway running,
+ * NULL or non-UTF-8 entry) returns false, leaves the stored list
+ * unchanged and writes an allocated message to *out_err (free with
+ * ant_free_string).
+ */
+bool ant_set_gateway_cors(const AntHandle *handle,
+                          const char *const *origins,
+                          size_t origins_len,
+                          char **out_err);
 
 /*
  * Stop the in-process HTTP gateway started by ant_start_gateway.

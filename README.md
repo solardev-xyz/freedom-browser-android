@@ -68,7 +68,7 @@ source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 #    libfreedom_mobile_ffi.so" below). Chained with && so a failed step
 #    stops before a stale or chain-less .so is copied.
 git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
-  git -C /tmp/freedom-mobile-ffi checkout v0.12.4 &&
+  git -C /tmp/freedom-mobile-ffi checkout v0.12.5 &&
   scripts/build-ffi.sh /tmp/freedom-mobile-ffi &&
   mkdir -p swarmnode/src/main/jniLibs &&
   cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
@@ -255,7 +255,7 @@ FREEDOM_ANDROID="$PWD"
 # 1. Clone freedom-mobile-ffi at the ref release.yml pins as FFI_REF,
 #    somewhere outside this repo.
 git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
-  git -C /tmp/freedom-mobile-ffi checkout v0.12.4
+  git -C /tmp/freedom-mobile-ffi checkout v0.12.5
 
 # 2. Cross-compile both ABIs. Needs cargo-ndk + ANDROID_NDK_HOME; rustup
 #    installs the pinned toolchain + targets from rust-toolchain.toml.
@@ -280,7 +280,7 @@ mkdir -p swarmnode/src/main/jniLibs
 cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
 ```
 
-The Kotlin side talks to it through the hand-written JNI shims in `swarmnode/src/main/cpp/` (built into `libfreedom_jni.so` by the module's CMake step): `ant_jni.c` wraps the ant C API (`ant_init`, `ant_start_gateway` — the bee-shaped HTTP gateway on `127.0.0.1:1633` —, `ant_peer_count`, `ant_shutdown`) and `freedom_ipfs_jni.c` wraps the freedom-ipfs loopback-gateway surface. Both shims call `freedom_mobile_init_logging()` (header `freedom_mobile.h`, freedom-mobile-ffi's own export) before starting their node: the `tracing` subscriber is process-wide and the first node to claim it wins, so without it ant's log subscriber would keep freedom-ipfs's progress recorder out and `freedom_ipfs_node_progress_snapshot_json` would stay empty (#156). When upgrading, refresh the vendored `swarmnode/src/main/cpp/{ant.h,freedom_ipfs.h,freedom_mobile.h}` from the build's `target/android/headers/` along with the `.so`s, and bump the pinned (ant, freedom-ipfs) tags in freedom-mobile-ffi's `Cargo.toml` — the same aggregator also feeds the iOS xcframework, so both platforms move versions together.
+The Kotlin side talks to it through the hand-written JNI shims in `swarmnode/src/main/cpp/` (built into `libfreedom_jni.so` by the module's CMake step): `ant_jni.c` wraps the ant C API (`ant_init`, `ant_start_gateway` — the bee-shaped HTTP gateway on `127.0.0.1:1633`, started with an empty CORS allow-list through `ant_set_gateway_cors` so no page on another origin can read its answers (#284) —, `ant_peer_count`, `ant_shutdown`) and `freedom_ipfs_jni.c` wraps the freedom-ipfs loopback-gateway surface. Both shims call `freedom_mobile_init_logging()` (header `freedom_mobile.h`, freedom-mobile-ffi's own export) before starting their node: the `tracing` subscriber is process-wide and the first node to claim it wins, so without it ant's log subscriber would keep freedom-ipfs's progress recorder out and `freedom_ipfs_node_progress_snapshot_json` would stay empty (#156). When upgrading, refresh the vendored `swarmnode/src/main/cpp/{ant.h,freedom_ipfs.h,freedom_mobile.h}` from the build's `target/android/headers/` along with the `.so`s, and bump the pinned (ant, freedom-ipfs) tags in freedom-mobile-ffi's `Cargo.toml` — the same aggregator also feeds the iOS xcframework, so both platforms move versions together.
 
 Since freedom-mobile-ffi v0.12 the library also links the Myotis Ethereum light client (`myotis_*` exports; not optional upstream). The app drives it through `swarmnode/src/main/cpp/myotis_jni.c` (header `myotis_engine.h`, vendored from the myotis tag freedom-mobile-ffi pins — v0.1.12, engine ABI 32; refresh it with `FFI_REF`) from its own `:myotis` process, off by default and switched on from the node page (#72) — Ethereum and Gnosis each with their own switch and start-at-launch choice (#274), so a chain that's off costs no battery or data, and names resolve without it through Colibri or the RPCs, as with the light client off. When a chain's embedded trust anchor is older than the engine's weak-subjectivity bound (Gnosis: 3 sync-committee periods, ~34 h; mainnet: 13, ~15 days) the chain parks in `STALE_ANCHOR`, and the node recovers it from a fresh finalized checkpoint agreed by an external quorum of checkpoint-sync authorities (mainnet 2 of 3 seats from 7, Gnosis 2 of 3), bootstrapped into a new sync-state generation via `myotis_create_with_checkpoint` (#195; `MyotisCheckpointQuorum.kt`, `MyotisGenerationStore.kt`). Unlike desktop and iOS it doesn't corroborate the quorum with a Colibri proof (the app's Colibri verifier serves name resolution only, #100); it never accepts a stale anchor or raises the bound. The library is built with ant's `chain` feature so the gateway's `/wallet`, `/stamps`, `/chequebook` and `/chainstate` read Gnosis while the Swarm node runs in light mode (see [Swarm node mode and publish setup](#swarm-node-mode-and-publish-setup)); in ultra-light mode, the default, there's no chain traffic and those endpoints answer bee's zero-stubs.
 

@@ -212,8 +212,12 @@
 
       async function checkSwarmStatus() {
         try {
-          const res = await fetch('http://127.0.0.1:1633/health');
-          return { running: res.ok };
+          // no-cors: this page's origin is `null`, and the gateway allows
+          // no CORS origins (#284), so a CORS fetch could never read the
+          // answer. An opaque answer still proves the gateway is up; a
+          // gateway that isn't listening rejects the fetch.
+          await fetch('http://127.0.0.1:1633/health', { mode: 'no-cors', cache: 'no-store' });
+          return { running: true };
         } catch (e) {
           return { running: false };
         }

@@ -23,10 +23,12 @@ import java.io.ByteArrayInputStream
  * `/chequebook/…`, `/balances`, `/settlements`, `/peers`, `/topology`,
  * `/pins`, `/tags`. The gateway sits on localhost, which pages may reach
  * (it's the documented dapp write path, and the interceptor even answers
- * its CORS preflights), a `no-cors` POST needs no preflight at all, and
- * ant answers `Origin: null` with `Access-Control-Allow-Origin: null` —
- * so any page could read those answers from a sandboxed iframe, a
- * `data:` worker or anything else with an opaque origin.
+ * its CORS preflights), and a `no-cors` POST needs no preflight at all.
+ * Up to ant 0.5.48 the gateway also answered `Origin: null` with
+ * `Access-Control-Allow-Origin: null`, so any page could read those
+ * answers from a sandboxed iframe, a `data:` worker or anything else with
+ * an opaque origin; since #284 it allows no CORS origin at all
+ * ([SwarmNode.GATEWAY_CORS_ORIGINS]).
  *
  * So every page request to the gateway port on a host that may be this
  * device (see below) — from a tab, a private tab, a worker or a service
@@ -44,9 +46,12 @@ import java.io.ByteArrayInputStream
  * without a WebView at all. What keeps the funds safe from all of them
  * is the node's own chain transport (`ant_jni.c`), which refuses every
  * broadcast but the transactions of a spend the user confirmed in the
- * app ([baby.freedom.swarm.SpendGuard]). The reads have no such backstop
- * in the node yet: ant's FFI gateway pins its CORS allow-list to `null`
- * (tracked upstream, see `docs/virtual-origins-hardening.md`).
+ * app ([baby.freedom.swarm.SpendGuard]). What keeps the reads private
+ * from them is the gateway's empty CORS allow-list (#284,
+ * [SwarmNode.GATEWAY_CORS_ORIGINS]): a page on another origin, a
+ * redirected (`Origin: null`) fetch included, can send the request but
+ * never read the answer. (A non-browser app on the device can still read
+ * them; CORS is a browser's rule, and the gateway has no auth.)
  *
  * Matched by the gateway's port, and by host only as far as a URL can
  * prove it isn't the device: any DNS name that resolves to 127.0.0.1
