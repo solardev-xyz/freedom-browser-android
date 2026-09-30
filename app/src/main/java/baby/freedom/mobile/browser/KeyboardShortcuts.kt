@@ -21,12 +21,18 @@ import android.view.KeyboardShortcutInfo
  * [repeats]: held down, the key keeps acting (stepping through tabs or
  * zoom levels). The others act once per press — a held Ctrl+W closes
  * one tab, not every tab.
+ *
+ * [caretKey]: the key is also a text field's own caret movement (Alt+←/→
+ * jumps to the line's start or end), so while one of the browser's own
+ * fields — the address bar, the find bar — is being edited, it's the
+ * field's, not the shortcut's.
  */
 enum class Shortcut(
     val label: String,
     val group: Group,
     val reserved: Boolean = false,
     val repeats: Boolean = false,
+    val caretKey: Boolean = false,
 ) {
     NewTab("New tab", Group.Tabs, reserved = true),
     NewPrivateTab("New private tab", Group.Tabs, reserved = true),
@@ -41,8 +47,8 @@ enum class Shortcut(
     ZoomIn("Zoom in", Group.Page, repeats = true),
     ZoomOut("Zoom out", Group.Page, repeats = true),
     ZoomReset("Reset zoom", Group.Page),
-    Back("Back", Group.Navigation),
-    Forward("Forward", Group.Navigation),
+    Back("Back", Group.Navigation, caretKey = true),
+    Forward("Forward", Group.Navigation, caretKey = true),
     History("History", Group.Navigation),
     Downloads("Downloads", Group.Navigation),
     ;
@@ -162,27 +168,48 @@ fun interface ShortcutTarget {
  * field's even though nothing is typed: zoom from the keyboard acts once
  * focus is off the field.
  *
- * Presses only: a release goes where it would have gone anyway.
+ * A [Shortcut.caretKey] shortcut is left to one of the browser's own text
+ * fields while it's being edited ([fieldEditing]).
+ *
+ * Shortcuts act on the press. A press [beforeViews] took takes its
+ * release with it, so the view that has focus — a page included — never
+ * sees a key-up whose key-down it never saw. A press the page was handed
+ * first keeps its release where it goes anyway: the page saw the down.
  */
 class KeyboardShortcutRouter {
     /** Installed by the browser screen while it's composed; null otherwise. */
     @Volatile
     var target: ShortcutTarget? = null
 
+    /** Keys whose press [beforeViews] took, and whose release it still owes itself. */
+    private val takenDown = mutableSetOf<Int>()
+
     /**
      * From `Activity.dispatchKeyEvent`; [pageEditing]: an editable element
-     * in a page has focus (`WebView.onCheckIsTextEditor`). True if taken.
+     * in a page has focus (`WebView.onCheckIsTextEditor`); [fieldEditing]:
+     * one of the browser's own text fields has. True if taken.
      */
-    fun beforeViews(event: KeyEvent, pageEditing: Boolean): Boolean =
-        beforeViews(Press.of(event), pageEditing)
+    fun beforeViews(event: KeyEvent, pageEditing: Boolean, fieldEditing: Boolean = false): Boolean =
+        beforeViews(Press.of(event), pageEditing, fieldEditing)
 
     /** From `WebViewClient.onUnhandledKeyEvent`. True if taken. */
     fun unhandledInPage(event: KeyEvent): Boolean = unhandledInPage(Press.of(event))
 
-    internal fun beforeViews(press: Press, pageEditing: Boolean): Boolean {
-        val shortcut = press.shortcut() ?: return false
-        if (pageEditing && !shortcut.reserved) return false
-        return run(shortcut, press)
+    internal fun beforeViews(press: Press, pageEditing: Boolean, fieldEditing: Boolean = false): Boolean {
+        when (press.action) {
+            KeyEvent.ACTION_UP -> return takenDown.remove(press.keyCode)
+            KeyEvent.ACTION_DOWN -> Unit
+            else -> return false
+        }
+        val shortcut = press.shortcut()
+        val taken = shortcut != null &&
+            (!pageEditing || shortcut.reserved) &&
+            !(fieldEditing && shortcut.caretKey) &&
+            run(shortcut, press)
+        // A press not taken — also one after a taken press whose release
+        // never came this way — lets its release go on as well.
+        if (taken) takenDown += press.keyCode else takenDown -= press.keyCode
+        return taken
     }
 
     internal fun unhandledInPage(press: Press): Boolean {

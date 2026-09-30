@@ -170,4 +170,56 @@ class KeyboardShortcutsTest {
         assertFalse(Shortcut.CloseTab.repeats)
         assertFalse(Shortcut.NewTab.repeats)
     }
+
+    private fun up(keyCode: Int, meta: Int) = Press(KeyEvent.ACTION_UP, keyCode, meta)
+
+    @Test
+    fun `a taken press takes its release, whatever modifiers are still held`() {
+        val target = Recorder()
+        val router = KeyboardShortcutRouter().apply { this.target = target }
+        assertTrue(router.beforeViews(down(KeyEvent.KEYCODE_W, ctrl), pageEditing = true))
+        // Ctrl let go first: the W's release is still the shortcut's.
+        assertTrue(router.beforeViews(up(KeyEvent.KEYCODE_W, 0), pageEditing = true))
+        // Only once.
+        assertFalse(router.beforeViews(up(KeyEvent.KEYCODE_W, 0), pageEditing = true))
+        // A held key: every repeat, then one release.
+        router.beforeViews(down(KeyEvent.KEYCODE_TAB, ctrl), pageEditing = false)
+        router.beforeViews(down(KeyEvent.KEYCODE_TAB, ctrl, repeat = 1), pageEditing = false)
+        assertTrue(router.beforeViews(up(KeyEvent.KEYCODE_TAB, ctrl), pageEditing = false))
+    }
+
+    @Test
+    fun `a press not taken keeps its release`() {
+        val target = Recorder()
+        val router = KeyboardShortcutRouter().apply { this.target = target }
+        // Page first: the page saw the press, so it sees the release.
+        assertFalse(router.beforeViews(down(KeyEvent.KEYCODE_F, ctrl), pageEditing = true))
+        assertTrue(router.unhandledInPage(down(KeyEvent.KEYCODE_F, ctrl)))
+        assertFalse(router.beforeViews(up(KeyEvent.KEYCODE_F, ctrl), pageEditing = true))
+        // A panel up: nothing taken, nothing owed.
+        target.active = false
+        assertFalse(router.beforeViews(down(KeyEvent.KEYCODE_T, ctrl), pageEditing = false))
+        assertFalse(router.beforeViews(up(KeyEvent.KEYCODE_T, ctrl), pageEditing = false))
+        // A taken press whose release went elsewhere owes nothing once the
+        // key is pressed again and not taken.
+        target.active = true
+        assertTrue(router.beforeViews(down(KeyEvent.KEYCODE_T, ctrl), pageEditing = false))
+        assertFalse(router.beforeViews(down(KeyEvent.KEYCODE_T, 0), pageEditing = false))
+        assertFalse(router.beforeViews(up(KeyEvent.KEYCODE_T, 0), pageEditing = false))
+    }
+
+    @Test
+    fun `the browser's own text field keeps Alt+arrows as caret keys`() {
+        val target = Recorder()
+        val router = KeyboardShortcutRouter().apply { this.target = target }
+        assertFalse(router.beforeViews(down(KeyEvent.KEYCODE_DPAD_LEFT, alt), pageEditing = false, fieldEditing = true))
+        assertFalse(router.beforeViews(down(KeyEvent.KEYCODE_DPAD_RIGHT, alt), pageEditing = false, fieldEditing = true))
+        assertFalse(router.beforeViews(up(KeyEvent.KEYCODE_DPAD_RIGHT, alt), pageEditing = false, fieldEditing = true))
+        assertTrue(target.seen.isEmpty())
+        // Every other shortcut still acts from it.
+        assertTrue(router.beforeViews(down(KeyEvent.KEYCODE_F, ctrl), pageEditing = false, fieldEditing = true))
+        assertTrue(router.beforeViews(down(KeyEvent.KEYCODE_TAB, ctrl), pageEditing = false, fieldEditing = true))
+        assertEquals(listOf(Shortcut.FindInPage to false, Shortcut.NextTab to false), target.seen)
+        assertEquals(setOf(Shortcut.Back, Shortcut.Forward), Shortcut.entries.filter { it.caretKey }.toSet())
+    }
 }

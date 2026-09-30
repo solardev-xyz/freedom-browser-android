@@ -1394,9 +1394,19 @@ fun BrowserScreen(
     // menu row does, under the same conditions. Not while a full-screen
     // panel is up: its own fields and buttons get the keys, and nothing
     // changes behind it.
+    //
+    // Over HTML5 fullscreen (#307 R2-F1) a shortcut first leaves it, as
+    // Back and Esc do: every one of them either changes what the screen
+    // shows — another tab, a panel, the address bar, the find bar — or
+    // acts on the page the fullscreen view stands in front of, and none
+    // of that may happen unseen behind a view that stays up.
     val onShortcut = ShortcutTarget { shortcut, repeat ->
         if (overlayShown) return@ShortcutTarget false
+        // Belt and braces for [Shortcut.caretKey]: the address field keeps
+        // Alt+←/→ even if the focused view didn't say it's an editor.
+        if (shortcut.caretKey && addressFocused) return@ShortcutTarget false
         if (repeat && !shortcut.repeats) return@ShortcutTarget true
+        tabs.exitFullscreen()
         // Ctrl+L, and a new tab the user will type an address into.
         val requestAddressFocus = {
             pageKeyboardHandoff = true

@@ -68,6 +68,7 @@ class KeyboardShortcutsDeviceTest {
     private fun page(name: String) = """
         <!doctype html><meta name=viewport content="width=device-width"><title>$name</title>
         <input id=f style="font-size:20px"> <a id=two href="/two" style="font-size:20px">two</a>
+        <div id=fs style="font-size:20px;background:#08f" onclick="this.requestFullscreen()">fullscreen</div>
         <p style="height:3000px">$name</p>
         <script>
           window.__keys = JSON.parse(sessionStorage.getItem('$name') || '[]');
@@ -76,6 +77,11 @@ class KeyboardShortcutsDeviceTest {
             __keys.push((e.ctrlKey ? 'C-' : '') + (e.shiftKey ? 'S-' : '') + (e.altKey ? 'A-' : '') + e.key);
             sessionStorage.setItem('$name', JSON.stringify(__keys));
             if (__prevent && e.ctrlKey) e.preventDefault();
+          });
+          document.addEventListener('keyup', function (e) {
+            var ups = JSON.parse(sessionStorage.getItem('$name-up') || '[]');
+            ups.push(e.key);
+            sessionStorage.setItem('$name-up', JSON.stringify(ups));
           });
         </script>
     """.trimIndent()
@@ -202,6 +208,12 @@ class KeyboardShortcutsDeviceTest {
         js(view, "JSON.parse(sessionStorage.getItem('$name') || '[]').join(' ')").trim('"')
             // The modifier keys' own keydowns aren't what's being checked.
             .split(' ').filter { it.isNotEmpty() && it.substringAfterLast('-') !in MODIFIER_KEYS }
+            .joinToString(" ")
+
+    /** The keyups [name]'s page has seen, modifiers left out. */
+    private fun keyUps(view: WebView, name: String) =
+        js(view, "JSON.parse(sessionStorage.getItem('$name-up') || '[]').join(' ')").trim('"')
+            .split(' ').filter { it.isNotEmpty() && it !in MODIFIER_KEYS }
             .joinToString(" ")
 
     private companion object {
@@ -356,5 +368,64 @@ class KeyboardShortcutsDeviceTest {
         press(KeyEvent.KEYCODE_DPAD_LEFT, alt)
         waitFor("back on one") { onActivity { tabs.active.url == url("/one") } }
         assertEquals("A-ArrowLeft", keys(two, "two"))
+    }
+
+    // #307 R2-M1: a taken shortcut's release goes with its press — the
+    // page never sees a keyup for a keydown it never saw. A plain key
+    // typed after it shows the page's keyups are heard. (The API 36
+    // WebView also drops such an orphan keyup itself, so this guards the
+    // outcome; the router's own part is KeyboardShortcutsTest's.)
+    @Test
+    fun aTakenShortcutsReleaseNeverReachesThePage() {
+        launch("/one")
+        for (field in listOf(true, false)) {
+            val view = focusField("one", field)
+            js(view, "sessionStorage.removeItem('one-up')")
+            // The only tab: Ctrl+Tab is taken and changes nothing, so
+            // focus stays where it was for the release.
+            press(KeyEvent.KEYCODE_TAB, ctrl)
+            press(KeyEvent.KEYCODE_X)
+            waitFor("x's keyup") { keyUps(view, "one").isNotEmpty() }
+            Thread.sleep(500)
+            assertFalse(keyUps(view, "one"), "Tab" in keyUps(view, "one").split(' '))
+        }
+    }
+
+    // #307 R2-F1: a shortcut over a page's HTML5 fullscreen leaves it
+    // first, so the tab it switches to is the one on screen.
+    @Test
+    fun aTabShortcutLeavesFullscreenFirst() {
+        launch("/one")
+        focusField("one", field = false)
+        press(KeyEvent.KEYCODE_T, ctrl)
+        waitFor("a new tab") { onActivity { tabs.tabs.size == 2 && tabs.activeIndex == 1 } }
+        press(KeyEvent.KEYCODE_TAB, ctrl)
+        waitFor("back on the page's tab") { onActivity { tabs.activeIndex == 0 } }
+        val view = focusField("one", field = false)
+        tap(view, "fs")
+        waitFor("fullscreen") { onActivity { tabs.fullscreen != null } }
+        press(KeyEvent.KEYCODE_TAB, ctrl)
+        waitFor("the other tab, out of fullscreen") {
+            onActivity { tabs.activeIndex == 1 && tabs.fullscreen == null }
+        }
+    }
+
+    // #307 R2-M2: in the address bar Alt+←/→ move the caret; the page
+    // behind stays where it is.
+    @Test
+    fun altArrowsInTheAddressBarStayTheFields() {
+        launch("/one")
+        val one = focusField("one", field = false)
+        tap(one, "two")
+        focusField("two", field = false)
+        waitFor("history to go back to") { onActivity { tabs.active.canGoBack } }
+        press(KeyEvent.KEYCODE_L, ctrl)
+        waitFor("address bar focus") {
+            onActivity { it.currentFocus !is WebView && it.currentFocus?.onCheckIsTextEditor() == true }
+        }
+        press(KeyEvent.KEYCODE_DPAD_LEFT, alt)
+        Thread.sleep(1_500)
+        assertEquals(url("/two"), onActivity { tabs.active.url })
+        assertTrue(onActivity { it.currentFocus !is WebView })
     }
 }

@@ -736,10 +736,14 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
 
     // A reserved shortcut anywhere, and any shortcut unless a page's text
     // field has focus, before the focused view sees the key; that field
-    // gets the rest first ([KeyboardShortcutRouter]).
+    // gets the rest first ([KeyboardShortcutRouter]). The browser's own
+    // fields (address bar, find bar) keep Alt+←/→ as caret keys.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        val pageEditing = currentFocus.enclosingWebView()?.onCheckIsTextEditor() == true
-        if (shortcuts.beforeViews(event, pageEditing)) return true
+        val focus = currentFocus
+        val webView = focus.enclosingWebView()
+        val pageEditing = webView?.onCheckIsTextEditor() == true
+        val fieldEditing = webView == null && focus?.onCheckIsTextEditor() == true
+        if (shortcuts.beforeViews(event, pageEditing, fieldEditing)) return true
         return super.dispatchKeyEvent(event)
     }
 
