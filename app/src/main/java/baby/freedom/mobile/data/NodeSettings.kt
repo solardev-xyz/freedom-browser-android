@@ -23,6 +23,8 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
@@ -57,8 +59,10 @@ import org.json.JSONObject
  * ## Appearance key
  *
  * `appearance` is an [Appearance.key] (`system`, `light`, `dark`),
- * absent for `system` (#269). `MainActivity` applies it as the app's
- * night mode ([Appearance.apply]).
+ * absent until the user first makes a choice (#269) — picking System
+ * default then stores `system`, so absent and `system` both mean follow
+ * the system. `MainActivity` applies it as the app's night mode
+ * ([Appearance.apply]).
  *
  * ## Name resolution keys (#102)
  *
@@ -275,10 +279,25 @@ class NodeSettings private constructor(
         return true
     }
 
-    /** Settings → Appearance → Theme (#269); [Appearance.System] until chosen. */
-    val appearance: Flow<Appearance> = store.data.map { prefs ->
-        Appearance.fromKey(prefs[Keys.APPEARANCE])
-    }
+    /**
+     * Settings → Appearance → Theme (#269); [Appearance.System] until chosen.
+     *
+     * A read error doesn't end the flow: DataStore's `data` stops at the
+     * first failure, and both readers (the app's night mode, the Compose
+     * chrome) live as long as the Activity, so a transient `IOException`
+     * would otherwise stop every later choice from being applied until
+     * the next launch. It is logged and read again after a short back-off
+     * (capped at [APPEARANCE_RETRY_MAX_MS]); readers keep the last value
+     * meanwhile.
+     */
+    val appearance: Flow<Appearance> = store.data
+        .map { prefs -> Appearance.fromKey(prefs[Keys.APPEARANCE]) }
+        .retryWhen { cause, attempt ->
+            if (cause is CancellationException) return@retryWhen false
+            Log.w(TAG, "reading the appearance setting failed (${cause.javaClass.simpleName}); retrying")
+            delay((APPEARANCE_RETRY_FIRST_MS shl attempt.coerceAtMost(5L).toInt()).coerceAtMost(APPEARANCE_RETRY_MAX_MS))
+            true
+        }
 
     suspend fun setAppearance(appearance: Appearance) {
         store.edit { it[Keys.APPEARANCE] = appearance.key }
@@ -669,6 +688,8 @@ class NodeSettings private constructor(
         private var instance: NodeSettings? = null
 
         private const val TAG = "NodeSettings"
+        internal const val APPEARANCE_RETRY_FIRST_MS = 1_000L
+        internal const val APPEARANCE_RETRY_MAX_MS = 30_000L
         private const val MAINNET = 1L
         private const val MIGRATE_RETRY_MS = 30_000L
         private const val MIGRATE_RETRY_MAX_MS = 30 * 60_000L

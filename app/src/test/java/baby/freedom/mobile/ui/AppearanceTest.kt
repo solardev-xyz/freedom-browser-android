@@ -9,8 +9,21 @@ import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.data.NodeSettingsEnsRpcTest.MemoryStore
 import baby.freedom.mobile.data.RpcKeyStore
 import javax.crypto.KeyGenerator
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -20,7 +33,7 @@ import org.junit.Test
 class AppearanceTest {
     private val aes = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
 
-    private fun settings(file: MemoryStore = MemoryStore()) = NodeSettings.forTesting(
+    private fun settings(file: DataStore<Preferences> = MemoryStore()) = NodeSettings.forTesting(
         file,
         ChainStore(MemoryStore()),
         RpcKeyStore(MemoryStore(), AesGcmCipher { aes }),
@@ -64,5 +77,33 @@ class AppearanceTest {
     fun `keys round-trip`() {
         for (choice in Appearance.entries) assertEquals(choice, Appearance.fromKey(choice.key))
         assertEquals(Appearance.System, Appearance.fromKey(null))
+    }
+
+    /** A store whose reads fail (as DataStore's `data` does, ending the flow) [failures] times first. */
+    private class FlakyStore(private val file: MemoryStore, failures: Int) : DataStore<Preferences> {
+        val left = AtomicInteger(failures)
+        override val data: Flow<Preferences> = flow {
+            if (left.getAndDecrement() > 0) throw IOException("disk hiccup")
+            emitAll(file.data)
+        }
+        override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences) =
+            file.updateData(transform)
+    }
+
+    @Test
+    fun `a read error doesn't end the flow, so a later choice still arrives`() = runTest {
+        val file = MemoryStore()
+        val settings = settings(FlakyStore(file, failures = 2))
+        val seen = mutableListOf<Appearance>()
+        val reader = launch { settings.appearance.take(2).toList(seen) }
+        runCurrent()
+        assertTrue("nothing read while the store is failing", seen.isEmpty())
+        advanceTimeBy(NodeSettings.APPEARANCE_RETRY_FIRST_MS * 3 + 1)
+        runCurrent()
+        assertEquals(listOf(Appearance.System), seen)
+        settings.setAppearance(Appearance.Dark)
+        runCurrent()
+        assertEquals(listOf(Appearance.System, Appearance.Dark), seen)
+        reader.join()
     }
 }
