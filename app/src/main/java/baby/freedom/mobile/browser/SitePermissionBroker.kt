@@ -241,6 +241,69 @@ class SitePermissionBroker private constructor(
         tabLocks.remove(tabId)
     }
 
+    // ---------------------------------------------------------------
+    // Pop-ups (#261)
+    // ---------------------------------------------------------------
+
+    /**
+     * Origins with a remembered pop-ups allow, mirrored from the store so
+     * [popupsAllowed] can answer synchronously inside `onCreateWindow`.
+     * Empty until the store's first read lands, and while it can't be
+     * read: a pop-up is then blocked with a notice, from which the user
+     * can still open it.
+     */
+    @Volatile
+    private var storedPopupAllows: Set<String> = emptySet()
+
+    init {
+        scope.launch {
+            store.all.collect { records ->
+                storedPopupAllows = records
+                    .filter {
+                        it.permission == SitePermission.POPUPS.key &&
+                            PermissionDecision.fromStored(it.decision) == PermissionDecision.ALLOW
+                    }
+                    .mapTo(HashSet()) { it.origin }
+            }
+        }
+    }
+
+    /**
+     * Whether [origin]'s pages in [tab] may open pop-ups without a user
+     * gesture: the user allowed it — remembered, or this run; in a
+     * private tab, this private session only (nothing remembered counts
+     * there, as for every other permission).
+     */
+    fun popupsAllowed(tab: BrowserState, origin: String?): Boolean {
+        origin ?: return false
+        return when (sessionFor(tab).decisionFor(origin, SitePermission.POPUPS)) {
+            PermissionDecision.ALLOW -> true
+            PermissionDecision.DENY -> false
+            null -> !tab.private && origin in storedPopupAllows
+        }
+    }
+
+    /**
+     * "Always allow pop-ups on this site" from [tab]'s blocked-pop-up
+     * notice: remembered, and listed in Settings; from a private tab,
+     * for the private session only. Applies at once — the session tier
+     * holds it while the store write is in flight.
+     */
+    fun allowPopups(tab: BrowserState, origin: String) {
+        val tier = sessionFor(tab)
+        tier.record(origin, SitePermission.POPUPS, PermissionDecision.ALLOW, remembered = false)
+        if (tab.private) return
+        scope.launch {
+            // A failed write leaves it a session decision, which Settings
+            // shows as such — the truth.
+            if (!store.set(origin, SitePermission.POPUPS.key, PermissionDecision.ALLOW.stored)) return@launch
+            if (tier.decisionFor(origin, SitePermission.POPUPS) == PermissionDecision.ALLOW) {
+                storedPopupAllows = storedPopupAllows + origin
+                tier.record(origin, SitePermission.POPUPS, PermissionDecision.ALLOW, remembered = true)
+            }
+        }
+    }
+
     /** The last private tab has closed (#86): forget its answers. */
     fun onPrivateSessionEnded() {
         privateSession = PermissionSession(embargoes = false)
@@ -270,6 +333,8 @@ class SitePermissionBroker private constructor(
     /** Forget [entry] everywhere, so the site has to ask again. */
     fun revoke(entry: SitePermissionEntry) {
         session.revoke(entry.origin, entry.permission)
+        // Off at once, not only once the store's next read lands.
+        if (entry.permission == SitePermission.POPUPS) storedPopupAllows = storedPopupAllows - entry.origin
         scope.launch { store.remove(entry.origin, entry.permission.key) }
     }
 
