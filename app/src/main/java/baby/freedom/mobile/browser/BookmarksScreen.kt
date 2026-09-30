@@ -449,9 +449,11 @@ private class BookmarkReorder(
  * scrolls.
  *
  * A long press that ends without the finger having moved past touch
- * slop was no drag: it calls [onHeld] with the row's id, which opens
- * that row's menu (#321). Only a long press does — a press on the
- * handle is a drag from its first move.
+ * slop was no drag: the row never moves (the finger's sub-slop jitter
+ * isn't fed to the drag, so it can't reorder or edge-scroll either),
+ * and lifting calls [onHeld] with the row's id, which opens that row's
+ * menu (#321). Only a long press does — a press on the handle is a drag
+ * from its first move.
  */
 private suspend fun PointerInputScope.bookmarkDragGestures(
     reorder: BookmarkReorder,
@@ -487,8 +489,12 @@ private suspend fun PointerInputScope.bookmarkDragGestures(
     val held = reorder.draggedId
     onStart()
     var travelled = Offset.Zero
-    // Once past slop it was a drag, even if the row ends up back where it started.
-    var dragged = false
+    // Once past slop it was a drag, even if the row ends up back where it
+    // started. From the handle it already is; after a long press the row
+    // doesn't move at all until the finger has gone past slop, so a still
+    // finger's jitter can't move it — nor, on a row at the list's edge,
+    // start the edge auto-scroll that would carry it through the list.
+    var dragged = !longPress
     var lifted = false
     try {
         if (pending != 0f) onDrag(pending)
@@ -502,7 +508,13 @@ private suspend fun PointerInputScope.bookmarkDragGestures(
                 break
             }
             travelled += delta
-            if (travelled.getDistance() > viewConfiguration.touchSlop) dragged = true
+            if (!dragged) {
+                if (travelled.getDistance() <= viewConfiguration.touchSlop) continue
+                dragged = true
+                // Catch the row up with the finger's travel so far.
+                if (travelled.y != 0f) onDrag(travelled.y)
+                continue
+            }
             if (delta.y != 0f) onDrag(delta.y)
         }
     } finally {
