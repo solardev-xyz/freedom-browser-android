@@ -38,7 +38,14 @@ import java.security.cert.X509Certificate
 
 /** What to do with a site's request for a TLS client certificate (#316). */
 internal sealed interface ClientCertPlan {
-    /** Send nothing, and remember nothing: a private tab ([ClientCertRequest.ignore]). */
+    /**
+     * Send no certificate ([ClientCertRequest.ignore]) and record no
+     * answer of ours for the server: a private tab, a request withdrawn
+     * while it waited (its tab closed, its page gone), no screen to open
+     * the chooser from, or a chooser that failed. Like [Refuse], it
+     * leaves an empty answer in WebView's own table, which the browser's
+     * next load empties ([ClientCertificates.onBrowserLoad]).
+     */
     data object SendNone : ClientCertPlan
 
     /**
