@@ -34,7 +34,8 @@ import androidx.compose.ui.unit.dp
  * A page chooses when a pop-up is blocked, so it chooses when this
  * appears: its buttons ignore taps until it has been on screen, and left
  * alone, for [PromptTapGuard.PROTECTION_MS] — re-armed whenever a new
- * entry shifts what's under the finger — like the permission prompt's,
+ * entry or an address arriving shifts what's under the finger
+ * ([BlockedPopups.layoutKey]) — like the permission prompt's,
  * so a tap aimed at the page can't land on "Always allow".
  *
  * The site is named in full (wrapping, never ellipsised: a host's tail is
@@ -54,7 +55,11 @@ fun BlockedPopupNotice(
     modifier: Modifier = Modifier,
 ) {
     val entries = popups.entries
-    val tap = rememberArmedTapGuard(entries.lastOrNull()?.id)
+    // Re-armed whenever the rows or buttons move ([BlockedPopups.layoutKey]):
+    // a new entry, an address arriving, the "and N more" line — not for
+    // a count ticking up, so a page blocking in a loop can't keep it
+    // disarmed.
+    val tap = rememberArmedTapGuard(popups.layoutKey)
     val origin = popups.origin
     val site = origin?.let(::permissionOriginDisplay)
     Surface(
@@ -94,11 +99,7 @@ fun BlockedPopupNotice(
                 val openable = shown != null && isOpenableInTab(shown)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        when {
-                            entry.pending -> "Reading its address…"
-                            shown != null -> shown
-                            else -> "A blank window (no address to open)"
-                        },
+                        blockedPopupLabel(entry, shown),
                         style = MaterialTheme.typography.bodySmall,
                         color = if (shown != null) {
                             MaterialTheme.colorScheme.onSurface

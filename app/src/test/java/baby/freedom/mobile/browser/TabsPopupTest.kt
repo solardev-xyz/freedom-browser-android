@@ -35,6 +35,24 @@ class TabsPopupTest {
     }
 
     @Test
+    fun `a popup opened behind lands after its opener without switching the tab on screen`() {
+        // #261 / #292 R1-M3: a background tab's allowed, gesture-less
+        // window.open must not take the screen from the tab the user is on.
+        val tabs = tabsWith(3)
+        tabs.switchTo(2)
+        val onScreen = tabs.active
+        val popup = tabs.adoptPopup(tabs.tabs[0], activate = false)
+        assertEquals(4, tabs.tabs.size)
+        assertSame(popup, tabs.tabs[1])
+        assertSame(onScreen, tabs.active)
+        // Opened after the active tab: the index needs no shift.
+        tabs.switchTo(0)
+        val later = tabs.adoptPopup(tabs.tabs[3], activate = false)
+        assertSame(later, tabs.tabs[4])
+        assertSame(tabs.tabs[0], tabs.active)
+    }
+
+    @Test
     fun `popup schedules no load of its own`() {
         // Chromium loads the popup's URL into the handed-back WebView
         // itself; a load from us would break the window.opener link.

@@ -26,7 +26,7 @@ class PopupBlockerTest {
     fun `a blocked pop-up shows at once and gets its address when the probe reports`() {
         val popups = BlockedPopups()
         val doc = popups.document
-        val id = popups.add("https://a.example", pending = true)
+        val id = popups.add("https://a.example", pending = true)!!
         assertEquals(listOf(BlockedPopup(id, url = null, pending = true)), popups.entries)
         assertEquals("https://a.example", popups.origin)
         popups.resolve(doc, id, "https://pay.example/checkout")
@@ -37,7 +37,7 @@ class PopupBlockerTest {
     fun `a late probe report for a document the tab has left is dropped`() {
         val popups = BlockedPopups()
         val doc = popups.document
-        val id = popups.add("https://a.example", pending = true)
+        val id = popups.add("https://a.example", pending = true)!!
         popups.startDocument()
         assertTrue(popups.entries.isEmpty())
         assertNull(popups.origin)
@@ -46,14 +46,65 @@ class PopupBlockerTest {
     }
 
     @Test
-    fun `a page blocked in a loop keeps only the newest entries but counts them all`() {
+    fun `a page blocked in a loop keeps the first entries and only counts the rest`() {
         val popups = BlockedPopups()
         val ids = (1..10).map { popups.add("https://a.example", pending = false) }
         assertEquals(10, popups.count)
         assertEquals(BlockedPopups.MAX_ENTRIES, popups.entries.size)
-        assertEquals(ids.takeLast(BlockedPopups.MAX_ENTRIES), popups.entries.map { it.id })
+        assertEquals(ids.take(BlockedPopups.MAX_ENTRIES), popups.entries.map { it.id })
+        // Past the cap nothing is listed: no id, so no probe is started for it.
+        assertTrue(ids.drop(BlockedPopups.MAX_ENTRIES).all { it == null })
         assertEquals("10 pop-ups blocked", blockedPopupsTitle(popups.count))
         assertEquals("Pop-up blocked", blockedPopupsTitle(1))
+    }
+
+    @Test
+    fun `the tap guard's key moves with the rows, not with a count ticking up in a loop`() {
+        // #292 R1-M2, R1-M4.
+        val popups = BlockedPopups()
+        val doc = popups.document
+        val keys = mutableListOf(popups.layoutKey)
+        val first = popups.add("https://a.example", pending = true)!!
+        keys += popups.layoutKey
+        popups.resolve(doc, first, "https://pay.example/checkout")
+        keys += popups.layoutKey
+        popups.add("https://a.example", pending = false, unread = true)
+        popups.add("https://a.example", pending = false, unread = true)
+        keys += popups.layoutKey
+        popups.add("https://a.example", pending = false, unread = true)
+        keys += popups.layoutKey // "and 1 more" appears
+        // An address arriving, a new row, the "more" line: each re-arms.
+        assertEquals(keys.size, keys.toSet().size)
+        // A loop past that only changes the count: the guard can arm.
+        val full = popups.layoutKey
+        repeat(50) { popups.add("https://a.example", pending = false, unread = true) }
+        assertEquals(full, popups.layoutKey)
+        assertEquals(54, popups.count)
+    }
+
+    @Test
+    fun `a window refused unprobed says its address wasn't read, not that it was blank`() {
+        // #292 R1-M1.
+        val popups = BlockedPopups()
+        val doc = popups.document
+        val refused = popups.add("https://a.example", pending = false, unread = true)!!
+        assertEquals(
+            "Its address wasn't read (too many pop-ups at once)",
+            blockedPopupLabel(popups.entries.single { it.id == refused }, shown = null),
+        )
+        val failed = popups.add("https://a.example", pending = true)!!
+        popups.unread(doc, failed)
+        val entry = popups.entries.single { it.id == failed }
+        assertFalse(entry.pending)
+        assertTrue(entry.unread)
+        // A probe that ran and saw no navigation: a genuinely blank window.
+        val blank = popups.add("https://a.example", pending = true)!!
+        popups.resolve(doc, blank, null)
+        assertEquals(
+            "A blank window (no address to open)",
+            blockedPopupLabel(popups.entries.single { it.id == blank }, shown = null),
+        )
+        assertEquals("Reading its address…", blockedPopupLabel(BlockedPopup(9, pending = true), shown = null))
     }
 
     @Test

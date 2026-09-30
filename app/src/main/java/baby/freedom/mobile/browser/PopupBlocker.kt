@@ -59,7 +59,23 @@ data class BlockedPopup(
     val url: String? = null,
     /** Its [PopupProbe] hasn't reported yet. */
     val pending: Boolean = false,
+    /**
+     * Its address was never read: refused without a probe (the tab
+     * already had [BlockedPopups.MAX_LIVE_PROBES] running, or one
+     * couldn't be set up), or Chromium never bound the window to its
+     * probe. Not a blank window: it may
+     * well have had one.
+     */
+    val unread: Boolean = false,
 )
+
+/** What the notice says for [entry], whose address shows as [shown] (null: none to show). */
+internal fun blockedPopupLabel(entry: BlockedPopup, shown: String?): String = when {
+    entry.pending -> "Reading its address…"
+    shown != null -> shown
+    entry.unread -> "Its address wasn't read (too many pop-ups at once)"
+    else -> "A blank window (no address to open)"
+}
 
 /**
  * Whether a page window opens (as a new tab) rather than being blocked:
@@ -74,7 +90,11 @@ fun popupOpens(isUserGesture: Boolean, siteAllowed: Boolean): Boolean = isUserGe
  * stale [document]) is dropped. Main thread only.
  */
 class BlockedPopups {
-    /** Newest last; at most [MAX_ENTRIES], the oldest dropped first. */
+    /**
+     * The first [MAX_ENTRIES] blocked, in order; later ones are only
+     * [count]ed. Kept, not rotated, so a page blocking in a loop can't
+     * keep changing what's under the user's finger ([layoutKey]).
+     */
     var entries by mutableStateOf<List<BlockedPopup>>(emptyList())
         private set
 
@@ -108,10 +128,11 @@ class BlockedPopups {
 
     /**
      * A pop-up of the document on screen, on [origin], was blocked. With
-     * [pending] its address is still being read; [resolve] fills it in.
-     * Returns its id.
+     * [pending] its address is still being read ([resolve] fills it in);
+     * with [unread] it won't be. Returns its id, or null when the notice
+     * is already full and it is only counted — no address to read then.
      */
-    fun add(origin: String?, pending: Boolean): Long {
+    fun add(origin: String?, pending: Boolean, unread: Boolean = false): Long? {
         if (this.origin != origin) {
             entries = emptyList()
             count = 0
@@ -119,9 +140,26 @@ class BlockedPopups {
         }
         this.origin = origin
         count++
-        val entry = BlockedPopup(nextId++, pending = pending)
-        entries = (entries + entry).takeLast(MAX_ENTRIES)
+        if (entries.size >= MAX_ENTRIES) return null
+        val entry = BlockedPopup(nextId++, pending = pending, unread = unread && !pending)
+        entries = entries + entry
         return entry.id
+    }
+
+    /**
+     * Everything that moves the notice's rows and buttons: its entries as
+     * shown (an address arriving adds lines and an Open button) and
+     * whether the "and N more" line is up. The notice's tap guard is
+     * keyed by it, so it re-arms whenever what's under a finger may have
+     * changed; a growing count alone changes only text in place.
+     */
+    val layoutKey: Any
+        get() = entries to (count > entries.size)
+
+    /** A probe couldn't be started for pop-up [id]: its address won't be read. */
+    fun unread(document: Int, id: Long) {
+        if (document != this.document) return
+        entries = entries.map { if (it.id == id) it.copy(pending = false, unread = true) else it }
     }
 
     /**
@@ -154,7 +192,7 @@ class BlockedPopups {
     }
 
     companion object {
-        /** Entries the notice keeps; a page blocked in a loop doesn't grow it. */
+        /** Entries the notice lists; a page blocked in a loop doesn't grow it. */
         const val MAX_ENTRIES = 3
 
         /**
@@ -185,12 +223,21 @@ internal object PopupProbe {
 
     /**
      * Hand [resultMsg]'s transport a probe and report the window's
-     * address (or null) to [onResult], once, on the main thread. False
+     * address (or null) to [onResult], once, on the main thread, with
+     * `bound` false when Chromium never gave the probe the window at
+     * all (logged as "Popup WebView bind failed: no pending content"
+     * when a page opens windows in a burst) — its address then simply
+     * wasn't read, which isn't the same as a blank window. False
      * if the probe couldn't be set up — the window is then refused.
      * [private]: the opener is a private tab, whose windows Chromium
      * creates on the private profile; the probe has to be on it too.
      */
-    fun start(context: Context, private: Boolean, resultMsg: Message, onResult: (String?) -> Unit): Boolean {
+    fun start(
+        context: Context,
+        private: Boolean,
+        resultMsg: Message,
+        onResult: (url: String?, bound: Boolean) -> Unit,
+    ): Boolean {
         val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
         val probe = try {
             WebView(if (private) PrivateWindowContext.of(context) else context).also { view ->
@@ -202,13 +249,13 @@ internal object PopupProbe {
         }
         val main = Handler(Looper.getMainLooper())
         var done = false
-        fun finish(url: String?) {
+        fun finish(url: String?, bound: Boolean = true) {
             if (done) return
             done = true
             main.removeCallbacksAndMessages(probe)
             // Not from inside the probe's own callback.
             main.post { runCatching { probe.destroy() } }
-            onResult(url)
+            onResult(url, bound)
         }
         probe.settings.apply {
             javaScriptEnabled = false
@@ -237,7 +284,14 @@ internal object PopupProbe {
         return try {
             transport.webView = probe
             resultMsg.sendToTarget()
-            main.postAtTime({ finish(null) }, probe, android.os.SystemClock.uptimeMillis() + TIMEOUT_MS)
+            // No navigation in time. A window Chromium did hand over has
+            // an address by now (`about:blank` if the page only wrote
+            // into it); one it never bound to the probe has none.
+            main.postAtTime(
+                { finish(null, bound = runCatching { probe.url }.getOrNull() != null) },
+                probe,
+                android.os.SystemClock.uptimeMillis() + TIMEOUT_MS,
+            )
             true
         } catch (e: Exception) {
             Log.w(TAG, "probe not handed to Chromium", e)

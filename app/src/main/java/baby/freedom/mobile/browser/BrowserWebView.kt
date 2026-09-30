@@ -941,8 +941,15 @@ fun BrowserWebViewHost(
             // The popup's first navigation is Chromium's own, already
             // under way in its WebView: a load of its own for the IPFS
             // phase line (#94), like a link the WebView follows.
-            onCreateWindow = {
-                attach(tabs.adoptPopup(opener = tab).also { it.beginLoad(inWebView = true) })
+            //
+            // A window opened with no gesture (a site allowed pop-ups,
+            // #261) is a timer's, not the user's: it takes the screen
+            // only while its opener's page is what's on screen, and
+            // otherwise opens behind, so a background tab can't switch
+            // the tab under the user (#292 R1-M3).
+            onCreateWindow = { isUserGesture ->
+                val activate = isUserGesture || sitePermissions.isOnScreen(tab.id)
+                attach(tabs.adoptPopup(opener = tab, activate = activate).also { it.beginLoad(inWebView = true) })
             },
             onCloseWindow = { tabs.closePopup(tab) },
             popupsAllowed = { origin -> sitePermissions.popupsAllowed(tab, origin) },
@@ -954,16 +961,18 @@ fun BrowserWebViewHost(
                 val popups = tab.blockedPopups
                 val document = popups.document
                 val probing = popups.liveProbes < BlockedPopups.MAX_LIVE_PROBES
-                val id = popups.add(origin, pending = probing)
-                if (!probing) return@buildRefreshableWebView false
+                // Null: the notice is full and it is only counted — no
+                // address to read for it.
+                val id = popups.add(origin, pending = probing, unread = !probing)
+                if (!probing || id == null) return@buildRefreshableWebView false
                 popups.liveProbes++
-                val started = PopupProbe.start(context, tab.private, resultMsg) { url ->
+                val started = PopupProbe.start(context, tab.private, resultMsg) { url, bound ->
                     popups.liveProbes--
-                    popups.resolve(document, id, url)
+                    if (bound) popups.resolve(document, id, url) else popups.unread(document, id)
                 }
                 if (!started) {
                     popups.liveProbes--
-                    popups.resolve(document, id, null)
+                    popups.unread(document, id)
                 }
                 started
             },
@@ -1450,7 +1459,8 @@ private fun buildRefreshableWebView(
     onRecoverNodes: () -> Unit = {},
     restoring: Boolean = false,
     fileChooser: FileChooser? = null,
-    onCreateWindow: () -> WebView,
+    /** A new tab for a page window; [isUserGesture] as Chromium reported it. */
+    onCreateWindow: (isUserGesture: Boolean) -> WebView,
     onCloseWindow: () -> Unit,
     popupsAllowed: (origin: String?) -> Boolean = { false },
     onPopupBlocked: (origin: String?, resultMsg: Message) -> Boolean = { _, _ -> false },
@@ -3788,9 +3798,9 @@ private fun buildRefreshableWebView(
             // tab's WebView goes back to Chromium through the transport,
             // and Chromium loads the popup's URL into it itself — as a
             // real popup, so `window.opener` works and an OAuth-style
-            // flow can post its result back to this page. Only gesture-
-            // initiated requests get here at all: see
-            // `setSupportMultipleWindows` above.
+            // flow can post its result back to this page. A window with
+            // no user gesture gets here too, and is judged by the pop-up
+            // blocker below (#261).
             override fun onCreateWindow(
                 view: WebView?,
                 isDialog: Boolean,
@@ -3808,7 +3818,7 @@ private fun buildRefreshableWebView(
                         return onPopupBlocked(origin, resultMsg)
                     }
                 }
-                transport.webView = onCreateWindow()
+                transport.webView = onCreateWindow(isUserGesture)
                 resultMsg.sendToTarget()
                 return true
             }
