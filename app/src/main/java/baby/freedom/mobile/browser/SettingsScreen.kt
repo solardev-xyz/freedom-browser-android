@@ -223,6 +223,10 @@ fun SettingsScreen(
     val searchRows = visibleSettingsRows(
         query, SECTION_SEARCH, searchSectionRows(searchEngine, customSearchTemplate),
     )
+    val defaultBrowser = rememberDefaultBrowserState()
+    val defaultBrowserRows = visibleSettingsRows(
+        query, DefaultBrowser.SECTION, defaultBrowserRows(defaultBrowser.isDefault),
+    )
     val adblockRows = visibleSettingsRows(
         query, SECTION_ADBLOCK,
         adblockSectionRows(adblockCategories, adblockAllowlist, adblockStatus, adblockUpdate),
@@ -249,7 +253,7 @@ fun SettingsScreen(
         visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
     } else emptySet()
     val nothingMatches = listOf(
-        walletRows, searchRows, adblockRows, ensRows, rpcRows, browsingRows, permissionRows, nodeRows,
+        walletRows, searchRows, defaultBrowserRows, adblockRows, ensRows, rpcRows, browsingRows, permissionRows, nodeRows,
         torRows,
         chainRows, aboutRows, otherRows, ipfsRows,
     ).all { it.isEmpty() }
@@ -351,6 +355,9 @@ fun SettingsScreen(
                         customTemplate = customSearchTemplate,
                         onClick = { pickSearchEngine = true },
                     )
+                }
+                if (defaultBrowserRows.isNotEmpty()) item("default-browser") {
+                    DefaultBrowserSection(defaultBrowser)
                 }
                 if (adblockRows.isNotEmpty()) item("adblock") {
                     AdblockSection(

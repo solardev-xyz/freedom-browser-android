@@ -203,6 +203,7 @@ freedom-browser-android/
 ├── app/                          # Android application (Compose + Material 3)
 │   └── src/main/java/baby/freedom/mobile/
 │       ├── MainActivity.kt       # hosts the Compose tree, binds NodeService
+│       ├── IncomingLinkActivity.kt # links, shares, searches from other apps → MainActivity
 │       ├── browser/              # tabs, address bar, WebView, resolver
 │       ├── ens/                  # Keccak256, ENS contenthash, Universal Resolver
 │       └── node/NodeService.kt   # foreground service owning the Swarm node

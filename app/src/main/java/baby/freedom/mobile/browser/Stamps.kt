@@ -240,17 +240,44 @@ internal object StampClient {
      */
     val node = MutableStateFlow(NodeInfo())
 
+    /** Guards [service] against [attach]/[publish]/[detach] racing each other. */
+    private val binding = Any()
+
+    /** [b] is this process's binder to `:node` now; [publish] and [detach] are keyed to it. */
+    fun attach(b: INodeService) {
+        synchronized(binding) { service = b }
+    }
+
     /**
-     * This process stopped hearing from `:node` (an unbind, the Activity's
-     * destroy, or `:node` dying): drop the binder and reset [node] to
-     * Stopped, as a fresh Activity's own flow used to start. [node] is
-     * process-wide, so without this a recreated Activity (the task swiped
-     * away while the process stays cached) would first show the previous
-     * binding's last state until its own bind reports (#291 R5-M1).
+     * `:node` reported [info] over the binding [from]. Dropped unless [from]
+     * is still the current binding: a report already in flight on a binder
+     * thread when its Activity unbound would otherwise land after [detach]
+     * and leave a stale state for the next Activity to start from
+     * (#291 R6-M2).
      */
-    fun detach() {
-        service = null
-        node.value = NodeInfo()
+    fun publish(from: INodeService?, info: NodeInfo) {
+        synchronized(binding) {
+            if (from != null && service === from) node.value = info
+        }
+    }
+
+    /**
+     * This process stopped hearing from `:node` over [from] (an unbind, the
+     * Activity's destroy, or `:node` dying): drop the binder and reset
+     * [node] to Stopped, as a fresh Activity's own flow used to start.
+     * [node] is process-wide, so without this a recreated Activity (the task
+     * swiped away while the process stays cached) would first show the
+     * previous binding's last state until its own bind reports (#291 R5-M1).
+     * Only if [from] is still the current binding: an older Activity's late
+     * `onDestroy` must not wipe a newer instance's binder and state
+     * (#291 R6-M1, the #207 compare-and-clear pattern).
+     */
+    fun detach(from: INodeService?) {
+        synchronized(binding) {
+            if (from == null || service !== from) return
+            service = null
+            node.value = NodeInfo()
+        }
     }
 
     sealed interface Answer {

@@ -74,7 +74,7 @@ internal object PhraseClipboard {
     internal const val CLIP_LABEL = "Recovery phrase"
 
     /** `ClipDescription.EXTRA_IS_SENSITIVE`, a plain string key, so it's set on every API level. */
-    private const val EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE"
+    internal const val EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE"
     private const val PREFS = "phrase_clipboard"
     private const val KEY_DUE_AT = "due_at_elapsed"
     private const val KEY_BOOT = "due_at_boot"
@@ -95,11 +95,23 @@ internal object PhraseClipboard {
      */
     val copied: StateFlow<Boolean> = _copied.asStateFlow()
 
+    /**
+     * Flags [clip] as sensitive ([EXTRA_IS_SENSITIVE]), keeping whatever
+     * else its description carries: on API 33+ the system's copy preview
+     * then shows dots instead of the text, and keyboards that honour the
+     * flag (Gboard) keep it out of their clipboard history.
+     */
+    fun markSensitive(clip: ClipData) {
+        val extras = clip.description.extras?.let(::PersistableBundle) ?: PersistableBundle()
+        extras.putBoolean(EXTRA_IS_SENSITIVE, true)
+        clip.description.extras = extras
+    }
+
     fun copy(context: Context, words: List<String>, now: Long = SystemClock.elapsedRealtime()) {
         val app = context.applicationContext
         val clipboard = app.getSystemService(ClipboardManager::class.java) ?: return
         val clip = ClipData.newPlainText(CLIP_LABEL, words.joinToString(" "))
-        clip.description.extras = PersistableBundle().apply { putBoolean(EXTRA_IS_SENSITIVE, true) }
+        markSensitive(clip)
         clipboard.setPrimaryClip(clip)
         pendingHash = phraseHash(words)
         _copied.value = true

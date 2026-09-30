@@ -10,6 +10,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.viewModels
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -26,11 +27,10 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import baby.freedom.mobile.browser.BrowserScreen
-import baby.freedom.mobile.browser.DeepLinkQueue
+import baby.freedom.mobile.browser.IncomingLinks
 import baby.freedom.mobile.browser.EthereumProviders
 import baby.freedom.mobile.browser.X402Payments
 import baby.freedom.mobile.browser.Gateways
-import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.Adblock
 import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.browser.OnchainApps
@@ -45,7 +45,6 @@ import baby.freedom.mobile.browser.RadicleControls
 import baby.freedom.mobile.browser.TorControls
 import baby.freedom.mobile.browser.TorRouting
 import baby.freedom.mobile.browser.UnverifiedOrigins
-import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.browser.statusBarIconsDark
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
@@ -79,6 +78,7 @@ import baby.freedom.swarm.SwarmNode
 import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -121,16 +121,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var settings: NodeSettings
 
     /**
-     * App Links that arrived after the UI was already composed (see
-     * [onNewIntent]), waiting to be opened in tabs, oldest first. Cold-start links
-     * don't use this — they're passed straight in as the initial URL.
+     * Links, shares and searches from other apps (#268, handed on by
+     * [IncomingLinkActivity]) waiting to be opened in tabs, oldest first:
+     * the one the app was cold-started from, and each [onNewIntent]. In a
+     * ViewModel, so a relaunch before one has its tab doesn't drop it.
      */
-    private val deepLinkQueue = DeepLinkQueue()
-
-    /** Publishes [onNewIntent] links into [deepLinkQueue] in arrival order. */
-    private val deepLinks = OrderedDeepLinks(lifecycleScope, Dispatchers.Default) {
-        deepLinkQueue.offer(it)
-    }
+    private val incomingSession: IncomingSession by viewModels()
 
     // The page theme colour the browser paints behind the status bar,
     // as ARGB, or null when it shows the app background there (#92).
@@ -159,7 +155,7 @@ class MainActivity : ComponentActivity() {
 
     private val callback = object : INodeCallback.Stub() {
         override fun onStateChanged(info: NodeInfo?) {
-            if (info != null) infoFlow.value = info
+            if (info != null) StampClient.publish(binder, info)
         }
 
         override fun onIpfsStateChanged(info: IpfsInfo?) {
@@ -268,9 +264,9 @@ class MainActivity : ComponentActivity() {
             val b = INodeService.Stub.asInterface(service) ?: return
             binder = b
             RadicleClient.service = b
-            StampClient.service = b
+            StampClient.attach(b)
             runCatching { b.registerCallback(callback) }
-            runCatching { b.state?.let { infoFlow.value = it } }
+            runCatching { b.state?.let { StampClient.publish(b, it) } }
             runCatching {
                 b.ipfsState?.let {
                     ipfsInfoFlow.value = it
@@ -298,9 +294,9 @@ class MainActivity : ComponentActivity() {
         override fun onServiceDisconnected(name: ComponentName?) {
             // `:node` died unexpectedly. A clean toggle-off goes through
             // [setRunNodeEnabled] instead, which sets Stopped explicitly.
+            StampClient.detach(binder)
             binder = null
             RadicleClient.service = null
-            StampClient.detach()
             ipfsInfoFlow.value = IpfsInfo()
             radicleInfoFlow.value = RadicleInfo()
             Gateways.setIpfsBase("")
@@ -464,28 +460,39 @@ class MainActivity : ComponentActivity() {
         // see [FirstBuildGate]) — a restored tab loads straight away.
         Adblock.start(this)
 
-        // A cold start from an App Link opens straight at the shared
-        // content instead of the home surface. A Unicode ENS link
-        // (`xn--…` host) needs the ENSIP-15 tables to map back to its
-        // name, and the warm-up above has only just started — so parse
-        // it on Default once they're decoded and compose then, rather
-        // than decode them on Main here (every later main-thread parse
-        // is cheap once the tables are warm).
-        val link = intent
-        if (!EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(deepLinkData(link))) {
+        // A cold start from a link (#268) opens straight at it instead of
+        // the home surface: queued before the first composition, which
+        // puts it in the first tab. A Unicode ENS link (`xn--…` host)
+        // needs the ENSIP-15 tables to map back to its name, and the
+        // warm-up above has only just started — so it's parsed on Default
+        // once they're decoded, and the UI composed then, rather than
+        // decode them on Main here (every later main-thread parse is cheap
+        // once the tables are warm).
+        //
+        // Only a launch that is the link's own: not a relaunch that
+        // restores tabs (the same intent comes back after process death),
+        // nor a relaunch from Recents, which replays the intent the task
+        // was first started with.
+        val ownLaunch = savedInstanceState == null &&
+            intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY == 0
+        // A relaunch while that link is still parsing ([IncomingSession])
+        // waits for it the same way, so it still gets the first tab.
+        val coldLink = if (ownLaunch) {
+            submitIncoming(intent).also { incomingSession.coldStart = it }
+        } else {
+            incomingSession.coldStart
+        }
+        if (coldLink != null) {
             lifecycleScope.launch {
-                val startUrl = withContext(Dispatchers.Default) {
-                    EnsNormalize.warm()
-                    displayUrlForDeepLink(link)
-                }
-                showBrowser(startUrl ?: HOME_URL)
+                coldLink.join()
+                showBrowser()
             }
         } else {
-            showBrowser(displayUrlForDeepLink(link) ?: HOME_URL)
+            showBrowser()
         }
     }
 
-    private fun showBrowser(startUrl: String) {
+    private fun showBrowser() {
         setContent {
             FreedomTheme {
                 SystemBarsForScheme()
@@ -504,7 +511,7 @@ class MainActivity : ComponentActivity() {
                     val myotisInfo by myotisInfoFlow.collectAsState()
                     val myotisEnabled by settings.myotisEnabled
                         .collectAsState(initial = false)
-                    val pendingLinks by deepLinkQueue.pending.collectAsState()
+                    val pendingLinks by incomingSession.queue.pending.collectAsState()
                     val torInfo by torInfoFlow.collectAsState()
                     val torEnabled by settings.torEnabled.collectAsState(initial = false)
                     BrowserScreen(
@@ -534,9 +541,8 @@ class MainActivity : ComponentActivity() {
                             supported = TorRouting.supported != false,
                             onRun = ::onToggleTor,
                         ),
-                        initialUrl = startUrl,
                         deepLink = pendingLinks.firstOrNull(),
-                        onDeepLinkHandled = deepLinkQueue::handled,
+                        onDeepLinkHandled = incomingSession.queue::handled,
                         onRecoverNodes = ::onRecoverNodes,
                         ipfsProgressSnapshot = ::ipfsProgressSnapshot,
                         ipfsCounters = ::ipfsCounters,
@@ -599,41 +605,28 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * An App Link tapped while the app was already running. The
-     * manifest declares `singleTop` so the link lands here instead of
-     * spawning a second activity instance — the user's open tabs
-     * survive.
+     * A link from another app while the browser was already running
+     * ([IncomingLinkActivity] starts us `singleTop` in our own task), so
+     * it lands here instead of in a second activity instance — the
+     * user's open tabs survive.
      */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        // Same off-Main parse as a cold-start link if the ENSIP-15
-        // tables are still decoding (a link tapped right after launch);
-        // [deepLinks] keeps a later ASCII link from overtaking it.
-        val slow = !EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(deepLinkData(intent))
-        deepLinks.submit(slow) {
-            if (slow) EnsNormalize.warm()
-            displayUrlForDeepLink(intent)
-        }
+        submitIncoming(intent)
     }
-
-    private fun deepLinkData(intent: Intent?): String? =
-        intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString
 
     /**
-     * The user-facing display URL for an incoming `VIEW` intent, or
-     * `null` if it isn't one of our virtual origins.
+     * Queue what [intent] asks to open (#268), read through the same
+     * gate [IncomingLinkActivity] used — any app can start this exported
+     * activity directly — and mapped to its address-bar form by
+     * [IncomingSession.submit].
      *
-     * The translation goes through [VirtualOrigin] — the label
-     * encodings are never parsed here, so the deep-link path can't
-     * drift from the mapping the WebView and the redirector use. A
-     * `null` return also acts as the gate: an intent aimed at some
-     * other https host (a stale filter, an explicit `am start`) is
-     * ignored rather than loaded.
+     * Returns the job still parsing it, or null once it's queued (or
+     * there was nothing to queue).
      */
-    private fun displayUrlForDeepLink(intent: Intent?): String? {
-        return deepLinkData(intent)?.let { VirtualOrigin.displayUrlFor(it) }
-    }
+    private fun submitIncoming(intent: Intent?): Job? =
+        IncomingLinks.from(intent)?.let(incomingSession::submit)
 
     /**
      * Foreground / background transitions are relayed to the `:node`
@@ -914,12 +907,14 @@ class MainActivity : ComponentActivity() {
         if (!bound) return
         runCatching { binder?.unregisterCallback(callback) }
         runCatching { unbindService(connection) }
-        binder = null
-        RadicleClient.service = null
         // Unbound, the callback no longer moves the process-wide node
         // state, so it goes back to Stopped rather than stay at the last
-        // report for the next Activity to start from (#291 R5-M1).
-        StampClient.detach()
+        // report for the next Activity to start from (#291 R5-M1) — keyed
+        // to this instance's own binder, and before [binder] is cleared so
+        // a late report from it is dropped too (#291 R6-M1, R6-M2).
+        StampClient.detach(binder)
+        binder = null
+        RadicleClient.service = null
         bound = false
     }
 }

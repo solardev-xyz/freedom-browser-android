@@ -14,9 +14,10 @@ at the right content instead — a universal-link capability the desktop
 
 The app side is already done: `AndroidManifest.xml` carries an
 `android:autoVerify="true"` intent filter for `*.bzz.freedom.baby`,
-`*.ipfs.freedom.baby`, `*.ipns.freedom.baby` and `*.ens.freedom.baby`,
-and `MainActivity` routes the incoming URL back through
-`VirtualOrigin.displayUrlFor` before opening it. What is missing is the
+`*.ipfs.freedom.baby`, `*.ipns.freedom.baby` and `*.ens.freedom.baby`
+(on `IncomingLinkActivity`, which receives every link from another app
+and hands it to `MainActivity`), and `MainActivity` routes the incoming
+URL back through `VirtualOrigin.displayUrlFor` before opening it. What is missing is the
 domain's half of the handshake.
 
 ## Where the file goes
