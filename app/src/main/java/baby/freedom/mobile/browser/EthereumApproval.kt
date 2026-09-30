@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -209,6 +208,8 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                         accounts = accounts,
                         selected = connectAccount,
                         noWallet = vaultState == Vault.State.Empty || accounts == null,
+                        tap = tap,
+                        enabled = !busy,
                         onPick = { picked = it.address },
                         onSetUp = request.setUpWallet,
                     )
@@ -316,12 +317,20 @@ private fun OriginStrip(origin: String, request: String) {
     }
 }
 
+/**
+ * What a Connect shares, with the account picker. The rows are guarded
+ * like the Connect button ([protectedSelectable]): a press before the
+ * sheet armed, or one through another app's window, doesn't change the
+ * account the site will see (#287 R4-M1).
+ */
 @Composable
-private fun ConnectBody(
+internal fun ConnectBody(
     ask: EthAsk.Connect,
     accounts: List<WalletAccount>?,
     selected: WalletAccount?,
     noWallet: Boolean,
+    tap: ArmedTapGuard,
+    enabled: Boolean,
     onPick: (WalletAccount) -> Unit,
     onSetUp: () -> Unit,
 ) {
@@ -343,10 +352,11 @@ private fun ConnectBody(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
-                .selectable(selected = account == selected, role = Role.RadioButton, onClick = { onPick(account) })
-                .padding(vertical = 4.dp),
+                .protectedSelectable(tap, selected = account == selected, enabled = enabled) { onPick(account) }
+                .padding(vertical = 4.dp)
+                .testTag("ethereum-connect-account"),
         ) {
-            if (accounts.size > 1) RadioButton(selected = account == selected, onClick = null)
+            if (accounts.size > 1) RadioButton(selected = account == selected, onClick = null, enabled = tap.armed && enabled)
             Column(Modifier.padding(start = if (accounts.size > 1) 8.dp else 0.dp)) {
                 Text(accountLabel(account), style = MaterialTheme.typography.bodyLarge)
                 AddressText(account.address, MaterialTheme.typography.bodySmall, MaterialTheme.colorScheme.onSurfaceVariant)

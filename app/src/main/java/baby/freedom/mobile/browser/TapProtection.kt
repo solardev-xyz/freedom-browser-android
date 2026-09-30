@@ -10,6 +10,7 @@ import android.view.View
 import android.view.ViewTreeObserver
 import android.view.Window
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -246,6 +247,26 @@ internal fun Modifier.protectedToggle(
     enabled = tap.armed && enabled,
     role = role,
     onValueChange = { if (tap.guard.accepts()) onValueChange(it) },
+)
+
+/**
+ * For a choice row on a guarded surface whose pick the confirm acts on
+ * (the account a Connect sheet shares): guarded like [protectedToggle],
+ * so a press that began before the guard armed or that passed through
+ * another app's window can't change which account the later, clean
+ * Connect tap discloses (#287 R4-M1). Enabled only once [tap] is armed
+ * and [enabled].
+ */
+internal fun Modifier.protectedSelectable(
+    tap: ArmedTapGuard,
+    selected: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+): Modifier = protectedPress(tap).selectable(
+    selected = selected,
+    enabled = tap.armed && enabled,
+    role = Role.RadioButton,
+    onClick = { if (tap.guard.accepts()) onClick() },
 )
 
 /** A [PromptTapGuard] and whether its surface's buttons are enabled yet. */

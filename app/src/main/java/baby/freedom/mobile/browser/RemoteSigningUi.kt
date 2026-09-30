@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -44,7 +43,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -272,7 +270,7 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
                 Spacer(Modifier.height(12.dp))
                 Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
                     when (request) {
-                        is OpenLvSession.Request.Connect -> ConnectBody(request, picked) { picked = it }
+                        is OpenLvSession.Request.Connect -> ConnectBody(request, picked, tap, enabled = !busy) { picked = it }
                         is OpenLvSession.Request.PersonalSign -> PersonalSignBody(request)
                         is OpenLvSession.Request.TypedData -> TypedDataBody(request)
                         is OpenLvSession.Request.SendTransaction -> SendTransactionBody(request)
@@ -311,8 +309,20 @@ internal fun ledgerOf(request: OpenLvSession.Request): baby.freedom.mobile.walle
     is OpenLvSession.Request.Connect -> null
 }
 
+/**
+ * The account to add, guarded like the Connect button
+ * ([protectedSelectable]): a press before the dialog armed, or one
+ * through another app's window, doesn't change which address the
+ * computer learns (#287 R4-M1).
+ */
 @Composable
-private fun ConnectBody(request: OpenLvSession.Request.Connect, picked: WalletAccount?, onPick: (WalletAccount) -> Unit) {
+internal fun ConnectBody(
+    request: OpenLvSession.Request.Connect,
+    picked: WalletAccount?,
+    tap: ArmedTapGuard,
+    enabled: Boolean,
+    onPick: (WalletAccount) -> Unit,
+) {
     Text(
         "The code you scanned asks to add an account of this wallet. It learns the account’s address, nothing else; " +
             "every signature or transaction it asks for later is shown here first.",
@@ -325,10 +335,10 @@ private fun ConnectBody(request: OpenLvSession.Request.Connect, picked: WalletAc
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
-                    .selectable(selected = selected, role = Role.RadioButton, onClick = { onPick(account) })
+                    .protectedSelectable(tap, selected = selected, enabled = enabled) { onPick(account) }
                     .padding(vertical = 4.dp),
             ) {
-                RadioButton(selected = selected, onClick = null)
+                RadioButton(selected = selected, onClick = null, enabled = tap.armed && enabled)
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
                     Text(account.name, fontWeight = FontWeight.Medium)

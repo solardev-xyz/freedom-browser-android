@@ -20,7 +20,10 @@ import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.ui.FreedomTheme
+import baby.freedom.mobile.wallet.OpenLvSession
+import baby.freedom.mobile.wallet.WalletAccount
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -37,6 +40,11 @@ import org.junit.runner.RunWith
  * the switch on, and the sheet says why; a clean tap does. Taps are
  * injected through the real input pipeline on real clocks, like
  * [ApprovalTapjackDeviceTest].
+ *
+ * #287 R4-M1: the same holds for the account picker on both Connect
+ * sheets (a site's and a scanned code's): neither a tap before the sheet
+ * armed nor an obscured one after changes which account is shared; a
+ * clean one does.
  */
 @RunWith(AndroidJUnit4::class)
 class StandingGrantTapjackDeviceTest {
@@ -83,6 +91,106 @@ class StandingGrantTapjackDeviceTest {
         val ask = SwarmAsk.Publish("https://game.example", SwarmAsk.Publish.Kind.Data, 10, "text/plain", null, emptyList())
         val label = swarmPromptCopy(ask).always!!
         showing({ SwarmPromptSheet(SwarmPromptRequest(ask)) }, label)
+    }
+
+    private val first = WalletAccount(0, "Alpha", "0x1111111111111111111111111111111111111111")
+    private val second = WalletAccount(1, "Bravo", "0x2222222222222222222222222222222222222222")
+
+    @Composable
+    private fun ethereumPicker(protectionMs: Long) {
+        val tap = rememberArmedTapGuard(Unit, protectionMs)
+        var picked by remember { mutableStateOf(first) }
+        Column(Modifier.padding(16.dp)) {
+            ConnectBody(
+                EthAsk.Connect("https://game.example", BuiltInChains.GNOSIS), listOf(first, second), picked,
+                noWallet = false, tap = tap, enabled = true, onPick = { picked = it }, onSetUp = {},
+            )
+            ObscuredTapNotice(tap)
+        }
+    }
+
+    @Composable
+    private fun remotePicker(protectionMs: Long) {
+        val tap = rememberArmedTapGuard(Unit, protectionMs)
+        var picked by remember { mutableStateOf(first) }
+        Column(Modifier.padding(16.dp)) {
+            ConnectBody(OpenLvSession.Request.Connect(listOf(first, second), first), picked, tap, enabled = true) { picked = it }
+            ObscuredTapNotice(tap)
+        }
+    }
+
+    private fun picking(content: @Composable () -> Unit) {
+        ActivityScenario.launch(ComponentActivity::class.java).use { scenario ->
+            scenario.onActivity { it.setContent { FreedomTheme { content() } } }
+            findRow(second.name)
+            SystemClock.sleep(2_000)
+            // Found again once laid out and armed: an address line can still settle after the first frame.
+            tap(findRow(second.name), MotionEvent.FLAG_WINDOW_IS_OBSCURED)
+            SystemClock.sleep(500)
+            assertFalse("an obscured tap picked the other account", rowChecked(second.name))
+            assertTrue(rowChecked(first.name))
+            assertTrue(onScreen(OBSCURED_TAP_MESSAGE))
+            tap(findRow(second.name))
+            assertTrue("a clean tap didn't pick the other account", waitRowChecked(second.name))
+            assertFalse(rowChecked(first.name))
+        }
+    }
+
+    /** A picker that hasn't armed (a minute's protection): a clean tap on another account changes nothing. */
+    private fun pickingEarly(content: @Composable () -> Unit) {
+        ActivityScenario.launch(ComponentActivity::class.java).use { scenario ->
+            scenario.onActivity { it.setContent { FreedomTheme { content() } } }
+            tap(findRow(second.name))
+            SystemClock.sleep(500)
+            assertFalse("a tap before the sheet armed picked the other account", rowChecked(second.name))
+            assertTrue(rowChecked(first.name))
+        }
+    }
+
+    @Test
+    fun anObscuredTapDoesNotChangeTheSitesConnectAccount() = picking { ethereumPicker(PromptTapGuard.PROTECTION_MS) }
+
+    @Test
+    fun anObscuredTapDoesNotChangeTheScannedCodesConnectAccount() = picking { remotePicker(PromptTapGuard.PROTECTION_MS) }
+
+    @Test
+    fun aTapBeforeArmingDoesNotChangeTheSitesConnectAccount() = pickingEarly { ethereumPicker(60_000) }
+
+    @Test
+    fun aTapBeforeArmingDoesNotChangeTheScannedCodesConnectAccount() = pickingEarly { remotePicker(60_000) }
+
+    /** The radio row whose (merged) text starts with [name]. */
+    private fun row(name: String): AccessibilityNodeInfo? =
+        roots().firstNotNullOfOrNull { findRowIn(it, name) }
+
+    private fun findRowIn(node: AccessibilityNodeInfo, name: String): AccessibilityNodeInfo? {
+        if (node.isCheckable && node.text?.toString()?.startsWith(name) == true) return node
+        if (node.text?.toString() == name) node.parent?.takeIf { it.isCheckable }?.let { return it }
+        return (0 until node.childCount).firstNotNullOfOrNull { i -> node.getChild(i)?.let { findRowIn(it, name) } }
+    }
+
+    private fun findRow(name: String): Rect {
+        val until = SystemClock.uptimeMillis() + 5_000
+        while (SystemClock.uptimeMillis() < until) {
+            row(name)?.let { node ->
+                val r = Rect()
+                node.getBoundsInScreen(r)
+                if (!r.isEmpty) return r
+            }
+            SystemClock.sleep(100)
+        }
+        throw AssertionError("no \"$name\" account row on screen")
+    }
+
+    private fun rowChecked(name: String): Boolean = row(name)?.isChecked == true
+
+    private fun waitRowChecked(name: String): Boolean {
+        val until = SystemClock.uptimeMillis() + 2_000
+        while (SystemClock.uptimeMillis() < until) {
+            if (rowChecked(name)) return true
+            SystemClock.sleep(50)
+        }
+        return false
     }
 
     private fun roots() = automation.windows.mapNotNull { it.root } + listOfNotNull(automation.rootInActiveWindow)
