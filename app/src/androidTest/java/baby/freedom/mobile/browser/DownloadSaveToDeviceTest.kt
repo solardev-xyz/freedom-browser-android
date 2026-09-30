@@ -41,6 +41,8 @@ class DownloadSaveToDeviceTest {
     @After
     fun cleanUp() {
         manager.afterFetchForTest = null
+        manager.allocatableForTest = null
+        manager.pickedRoomForTest = null
         rows.forEach { manager.remove(it) }
         files.forEach { runCatching { resolver.delete(it, null, null) } }
     }
@@ -65,7 +67,7 @@ class DownloadSaveToDeviceTest {
     private fun bytesOf(uri: Uri): ByteArray = resolver.openInputStream(uri)!!.use { it.readBytes() }
 
     /** Offer [url] as the server names it, and accept it into [saveTo]. */
-    private fun startAndAccept(url: String, saveTo: Uri) {
+    private fun startAndAccept(url: String, saveTo: Uri, onNoLastingAccess: () -> Unit = {}): DownloadOffer {
         val serverName = "server-${System.nanoTime()}.bin"
         manager.start(
             tabId = 322L,
@@ -78,7 +80,8 @@ class DownloadSaveToDeviceTest {
         )
         val offer = manager.offers.value.last { it.fileName == serverName }
         assertEquals("application/octet-stream", offer.mimeType)
-        manager.accept(offer.key, saveTo)
+        manager.accept(offer.key, saveTo, onNoLastingAccess)
+        return offer
     }
 
     private fun await(saveTo: Uri, what: (DownloadEntry) -> Boolean): DownloadEntry = runBlocking {
@@ -162,5 +165,107 @@ class DownloadSaveToDeviceTest {
             assertTrue(exists(saveTo))
             assertArrayEquals(old, bytesOf(saveTo))
         }
+    }
+
+    @Test
+    fun aReplacedFileIsMarkedAsTheUsersAndNeverDeleted() {
+        // R1-M1: the row knows which document the picker created (and may
+        // go again) and which the user picked to replace (which never goes).
+        val old = "old content".toByteArray()
+        server(file(), file()).use { server ->
+            val fresh = picked("fresh-${System.nanoTime()}.bin")
+            val existing = picked("replaced-${System.nanoTime()}.bin", old)
+            startAndAccept(server.url("/f").toString(), fresh)
+            startAndAccept(server.url("/f").toString(), existing)
+            assertTrue(await(fresh) { it.status == DownloadStatus.COMPLETED }.saveToCreated)
+            assertFalse(await(existing) { it.status == DownloadStatus.COMPLETED }.saveToCreated)
+            assertArrayEquals(body, bytesOf(existing))
+        }
+        // A replaced file emptied by a copy that failed part-way stays.
+        val emptied = picked("emptied-${System.nanoTime()}.bin")
+        DownloadSaveTo.discard(context, emptied, created = false)
+        assertTrue(exists(emptied))
+        // (MediaStore may take a moment to know a new item's size, and a
+        // document of unknown size is never deleted.)
+        val deadline = System.currentTimeMillis() + 10_000
+        while (exists(emptied) && System.currentTimeMillis() < deadline) {
+            DownloadSaveTo.discard(context, emptied, created = true)
+            if (exists(emptied)) Thread.sleep(200)
+        }
+        assertFalse(exists(emptied))
+    }
+
+    @Test
+    fun thePickedDocumentsOwnVolumeDecidesWhetherItFits() {
+        // R1-F1: the primary volume being full doesn't hold back a pick
+        // with room (an SD card) ...
+        manager.allocatableForTest = { dir -> if (dir == manager.sharedStorageDirForTest()) 0L else Long.MAX_VALUE / 2 }
+        manager.pickedRoomForTest = { Long.MAX_VALUE / 2 }
+        server(file()).use { server ->
+            val saveTo = picked("roomy-${System.nanoTime()}.bin")
+            startAndAccept(server.url("/f").toString(), saveTo)
+            await(saveTo) { it.status == DownloadStatus.COMPLETED }
+            assertArrayEquals(body, bytesOf(saveTo))
+        }
+        // ... and a full pick pauses — before `wt` has touched the file
+        // it would replace.
+        manager.allocatableForTest = { Long.MAX_VALUE / 2 }
+        manager.pickedRoomForTest = { 0L }
+        val old = "old content".toByteArray()
+        server(file()).use { server ->
+            val saveTo = picked("full-${System.nanoTime()}.bin", old)
+            startAndAccept(server.url("/f").toString(), saveTo)
+            await(saveTo) { it.status == DownloadStatus.PAUSED }
+            assertArrayEquals(old, bytesOf(saveTo))
+        }
+    }
+
+    @Test
+    fun theRoomOfAPickedDocumentIsItsVolumes() {
+        val saveTo = picked("room-${System.nanoTime()}.bin", ByteArray(1000))
+        val room = DownloadSaveTo.roomFor(resolver, saveTo)!!
+        // At least what the file holds, and what the volume has free.
+        assertTrue(room >= 1000)
+        assertTrue(room >= android.os.Environment.getExternalStorageDirectory().usableSpace / 2)
+    }
+
+    @Test
+    fun aPlainWriteIsTruncatedByHand() {
+        // R1-M3: the `w` fallback must not leave the old file's tail.
+        val file = java.io.File(context.cacheDir, "trunc-${System.nanoTime()}.bin")
+        file.writeBytes(ByteArray(5000) { 7 })
+        val fd = android.os.ParcelFileDescriptor.open(file, android.os.ParcelFileDescriptor.MODE_WRITE_ONLY)
+        DownloadSaveTo.truncating(fd) { error("a file is truncated, its size isn't asked") }.use { it.write(byteArrayOf(1, 2, 3)) }
+        assertArrayEquals(byteArrayOf(1, 2, 3), file.readBytes())
+        file.delete()
+        // A pipe can't be emptied: fine into an empty document, refused
+        // into one with something in it (or of unknown size).
+        val (read, write) = android.os.ParcelFileDescriptor.createPipe()
+        DownloadSaveTo.truncating(write) { 0L }.close()
+        read.close()
+        for (size in listOf(5L, null)) {
+            val (r, w) = android.os.ParcelFileDescriptor.createPipe()
+            try {
+                DownloadSaveTo.truncating(w) { size }
+                org.junit.Assert.fail("a pipe into a document holding $size bytes was accepted")
+            } catch (_: java.io.FileNotFoundException) {
+            }
+            r.close()
+        }
+    }
+
+    @Test
+    fun noLastingGrantStartsNothingAndLeavesTheOfferUp() {
+        // R1-M4: a document Freedom can't keep access to (no persistable
+        // grant) isn't downloaded into: the user is told, and the prompt
+        // stays up to pick elsewhere.
+        val told = java.util.concurrent.CountDownLatch(1)
+        val ungranted = android.provider.DocumentsContract.buildDocumentUri(
+            "com.android.externalstorage.documents", "primary:Download/ungranted-${System.nanoTime()}.bin",
+        )
+        val offer = startAndAccept("https://example.invalid/f", ungranted) { told.countDown() }
+        assertTrue(told.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        assertTrue(manager.offers.value.any { it.key == offer.key })
+        manager.decline(offer.key)
     }
 }

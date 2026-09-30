@@ -143,6 +143,14 @@ data class DownloadEntry(
      * `Download/Freedom` like every download before v6.
      */
     val saveTo: String? = null,
+    /**
+     * Whether the picker created [saveTo] for this download (an empty
+     * new file), so a download that doesn't finish may delete it again.
+     * False for an existing file the user picked to replace, which is
+     * never deleted (#322).
+     */
+    @ColumnInfo(defaultValue = "0")
+    val saveToCreated: Boolean = false,
 )
 
 /** Values of [DownloadEntry.status]. Strings, so the column reads in `sqlite3`. */

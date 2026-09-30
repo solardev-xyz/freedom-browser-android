@@ -2837,11 +2837,21 @@ fun BrowserScreen(
         .collectAsState(initial = false)
     var savingOffer by rememberSaveable { mutableStateOf<Long?>(null) }
     val saveAsPicker = rememberLauncherForActivityResult(SaveAsContract()) { uri ->
-        val key = savingOffer ?: return@rememberLauncherForActivityResult
+        val key = savingOffer
         savingOffer = null
-        if (uri != null) {
-            downloads.accept(key, uri)
-            askForDownloadNotifications()
+        when {
+            uri == null -> Unit
+            // A result nothing is waiting for: its document goes again.
+            key == null -> downloads.abandonSaveTo(uri)
+            else -> {
+                downloads.accept(key, uri) {
+                    // No lasting grant: the prompt stays up to pick elsewhere.
+                    android.widget.Toast.makeText(
+                        context, R.string.browser_download_save_to_no_access, android.widget.Toast.LENGTH_LONG,
+                    ).show()
+                }
+                askForDownloadNotifications()
+            }
         }
     }
     tabOffers.firstOrNull()?.takeIf { promptTurn == PromptTurn.DownloadOffer }?.let { offer ->
@@ -2849,7 +2859,11 @@ fun BrowserScreen(
             offer = offer,
             othersWaiting = tabOffers.size - 1,
             dropped = droppedOffers[activeTabId] ?: 0,
-            onAccept = {
+            onAccept = accept@{
+                // A picker already up (a double tap on Download): one is
+                // enough, and a second's document would have nobody to
+                // save into it.
+                if (savingOffer != null) return@accept
                 val picked = asksWhereToSave(askWhereToSave, offer.private) && try {
                     saveAsPicker.launch(SaveAsRequest(offer.fileName, offer.mimeType))
                     savingOffer = offer.key

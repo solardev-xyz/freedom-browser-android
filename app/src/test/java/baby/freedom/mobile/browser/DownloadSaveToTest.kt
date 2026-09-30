@@ -82,15 +82,16 @@ class DownloadSaveToTest {
     @Test
     fun anAcceptedOfferGetsThePickedDocument() {
         val offers = DownloadOffers()
-        val started = mutableListOf<String?>()
+        val started = mutableListOf<PickedDocument?>()
         offers.offer(1, "https://example.com", "a.pdf", "x", -1, mimeType = "application/pdf") { started += it }
         offers.offer(1, "https://example.com", "b.pdf", "x", -1) { started += it }
         val (a, b) = offers.pending.value
         assertEquals("application/pdf", a.mimeType)
         assertEquals("application/octet-stream", b.mimeType)
-        assertTrue(offers.accept(a.key, "content://docs/a"))
+        val pick = PickedDocument("content://docs/a", created = true)
+        assertTrue(offers.accept(a.key, pick))
         assertTrue(offers.accept(b.key))
-        assertEquals(listOf("content://docs/a", null), started)
+        assertEquals(listOf(pick, null), started)
     }
 
     @Test
@@ -98,12 +99,29 @@ class DownloadSaveToTest {
         // Its tab closed while the Save as picker was up: nothing starts,
         // and the manager deletes the document the picker created.
         val offers = DownloadOffers()
-        var started: String? = "not started"
+        var started: PickedDocument? = PickedDocument("not started", created = false)
         offers.offer(7, "https://example.com", "a.pdf", "x", -1) { started = it }
         val key = offers.pending.value.single().key
         offers.retainTabs(emptySet())
-        assertFalse(offers.accept(key, "content://docs/a"))
-        assertEquals("not started", started)
+        assertFalse(offers.accept(key, PickedDocument("content://docs/a", created = true)))
+        assertEquals("not started", started?.uri)
         assertNull(offers.pending.value.firstOrNull())
+    }
+
+    @Test
+    fun onlyAnEmptyJustModifiedPickCountsAsCreated() {
+        val now = 1_000_000_000L
+        // The picker's new, empty file.
+        assertTrue(pickedDocumentIsNew(size = 0, lastModified = now - 2_000, now = now))
+        // A provider that doesn't report the time: an empty pick is taken as new.
+        assertTrue(pickedDocumentIsNew(size = 0, lastModified = null, now = now))
+        // A little clock skew the other way.
+        assertTrue(pickedDocumentIsNew(size = 0, lastModified = now + 30_000, now = now))
+        // An existing file with something in it, or of unknown size: the user's.
+        assertFalse(pickedDocumentIsNew(size = 10, lastModified = now, now = now))
+        assertFalse(pickedDocumentIsNew(size = null, lastModified = now, now = now))
+        // An existing empty file last touched long ago: the user's too (R1-M1).
+        assertFalse(pickedDocumentIsNew(size = 0, lastModified = now - PICKED_NEW_WINDOW_MS - 1, now = now))
+        assertFalse(pickedDocumentIsNew(size = 0, lastModified = now + 3_600_000, now = now))
     }
 }

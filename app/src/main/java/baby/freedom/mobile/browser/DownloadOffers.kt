@@ -46,7 +46,7 @@ class DownloadOffer internal constructor(
      */
     val mimeType: String = "application/octet-stream",
     /** Starts the download; with the document the user picked to save it as, if any (#322). */
-    internal val start: (saveTo: String?) -> Unit,
+    internal val start: (saveTo: PickedDocument?) -> Unit,
 )
 
 /**
@@ -97,7 +97,7 @@ internal class DownloadOffers {
         totalBytes: Long,
         private: Boolean = false,
         mimeType: String = "application/octet-stream",
-        start: (saveTo: String?) -> Unit,
+        start: (saveTo: PickedDocument?) -> Unit,
     ): Boolean {
         val offer = DownloadOffer(
             nextKey.getAndIncrement(), tabId, requestedBy, fileName, source, totalBytes, private, mimeType, start,
@@ -125,7 +125,7 @@ internal class DownloadOffers {
      * picked to save it as (#322). False when [key] was no longer
      * waiting (answered, or its tab closed) — nothing was started.
      */
-    fun accept(key: Long, saveTo: String? = null): Boolean {
+    fun accept(key: Long, saveTo: PickedDocument? = null): Boolean {
         val offer = take(key) ?: return false
         offer.start(saveTo)
         return true

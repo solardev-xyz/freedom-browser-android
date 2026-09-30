@@ -141,6 +141,7 @@ class BookmarksDatabaseTest {
                 assertNull(d.note)
                 assertNull(d.userAgent)
                 assertNull(d.saveTo)
+                assertFalse(d.saveToCreated)
                 assertEquals(listOf("vitalik.eth"), db.bookmarks().all().first().map { it.url })
             }
         } finally {
@@ -180,6 +181,7 @@ class BookmarksDatabaseTest {
                 assertTrue(d.resumable)
                 assertEquals("UA", d.userAgent)
                 assertNull(d.saveTo)
+                assertFalse(d.saveToCreated)
             }
         } finally {
             db.close()

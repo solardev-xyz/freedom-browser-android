@@ -104,13 +104,24 @@ fun DownloadsScreen(
     var retrying by rememberSaveable { mutableStateOf<Long?>(null) }
     val entries by remember { downloads.downloads }.collectAsState(initial = emptyList())
     val saveAsPicker = rememberLauncherForActivityResult(SaveAsContract()) { uri ->
-        val id = retrying ?: return@rememberLauncherForActivityResult
+        val id = retrying
         retrying = null
         if (uri == null) return@rememberLauncherForActivityResult
-        val entry = entries.firstOrNull { it.id == id }
-        if (entry != null) downloads.retry(entry, uri) else downloads.abandonSaveTo(uri)
+        val entry = id?.let { entries.firstOrNull { it.id == id } }
+        if (entry == null) {
+            // Its row went meanwhile, or a result nothing is waiting for.
+            downloads.abandonSaveTo(uri)
+        } else {
+            downloads.retry(entry, uri) {
+                android.widget.Toast.makeText(
+                    context, R.string.browser_download_save_to_no_access, android.widget.Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
     }
-    val retry = { entry: DownloadEntry ->
+    val retry = retry@{ entry: DownloadEntry ->
+        // A picker already up (a double tap on Retry): one is enough.
+        if (retrying != null) return@retry
         val picking = asksWhereToSave(askWhereToSave, private = entry.id < 0) && try {
             saveAsPicker.launch(SaveAsRequest(entry.fileName, entry.mimeType))
             retrying = entry.id

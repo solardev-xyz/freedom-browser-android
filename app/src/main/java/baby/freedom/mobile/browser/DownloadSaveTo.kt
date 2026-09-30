@@ -5,10 +5,15 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.os.ParcelFileDescriptor
+import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import androidx.activity.result.contract.ActivityResultContract
 import baby.freedom.mobile.data.DownloadEntry
+import java.io.FileNotFoundException
 import java.io.OutputStream
 
 private const val LOG_TAG = "Downloads"
@@ -41,14 +46,39 @@ internal object DownloadSaveTo {
     /** The modes a download's grant is taken and given back with. */
     private const val MODES = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
 
-    /** Keep the picker's grant on [uri] past the activity that got it. */
-    fun hold(context: Context, uri: Uri) {
-        runCatching { context.contentResolver.takePersistableUriPermission(uri, MODES) }
-            // A provider that doesn't offer persistable grants still
-            // works while the activity lives; only a download outliving
-            // it can't write there.
+    /**
+     * Keep the picker's grant on [uri] past the activity that got it,
+     * and look at what was picked: an empty file the picker just
+     * created ([PickedDocument.created]), or an existing one to replace.
+     *
+     * [PickedDocument.lasting] is false when no lasting grant could be
+     * taken (a provider that doesn't offer persistable grants): then the
+     * download couldn't write there — nor delete the file again — once
+     * the activity is gone, so the caller must not start it. Call off
+     * the main thread: it asks the provider.
+     */
+    fun hold(context: Context, uri: Uri): PickedDocument {
+        val resolver = context.contentResolver
+        val created = pickedDocumentIsNew(
+            size = documentSize(resolver, uri),
+            lastModified = documentLastModified(resolver, uri),
+            now = System.currentTimeMillis(),
+        )
+        val lasting = runCatching { resolver.takePersistableUriPermission(uri, MODES) }
             .onFailure { Log.w(LOG_TAG, "no persistable grant on the picked document", it) }
+            .isSuccess || ownMediaItem(context, uri)
+        return PickedDocument(uri.toString(), created, lasting)
     }
+
+    /**
+     * A `MediaStore` item Freedom created itself (the device tests' stand-in
+     * for a pick) is Freedom's to write for good, with no grant.
+     */
+    private fun ownMediaItem(context: Context, uri: Uri): Boolean =
+        uri.authority == MediaStore.AUTHORITY && runCatching {
+            context.contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.OWNER_PACKAGE_NAME), null, null, null)
+                ?.use { c -> c.moveToFirst() && c.getString(0) == context.packageName }
+        }.getOrNull() == true
 
     /** Give back the grant on [uri]; the download that held it has ended. */
     fun release(context: Context, uri: Uri) {
@@ -59,14 +89,15 @@ internal object DownloadSaveTo {
 
     /**
      * An unfinished download that won't finish ends here: its document
-     * goes if nothing was ever written into it — the empty file the
-     * picker created — and its grant is given back. A document with
-     * bytes in it is left alone: the user may have picked an existing
-     * file to replace, and a download that didn't finish never touched
-     * it ([truncate] empties one whose copy failed part-way first).
+     * goes if the picker [created] it for this download and nothing is
+     * in it, and its grant is given back. A file the user picked to
+     * replace is never deleted — it was theirs before the download.
+     * (Its old content is gone once a copy into it has started, though:
+     * `wt` empties it, and a copy that fails part-way leaves it empty,
+     * see [truncate].)
      */
-    fun discard(context: Context, uri: Uri) {
-        if (documentSize(context.contentResolver, uri) == 0L) {
+    fun discard(context: Context, uri: Uri, created: Boolean) {
+        if (created && documentSize(context.contentResolver, uri) == 0L) {
             runCatching {
                 if (DocumentsContract.isDocumentUri(context, uri)) {
                     DocumentsContract.deleteDocument(context.contentResolver, uri)
@@ -92,23 +123,67 @@ internal object DownloadSaveTo {
     }
 
     /**
-     * The picked document, opened to be written from its start: `wt`
-     * truncates what's there (a copy that failed part-way before), and a
-     * provider that doesn't know `wt` gets plain `w`.
+     * The picked document, opened to be written from its start and
+     * emptied first: `wt`. A provider that refuses `wt` gets plain `w`,
+     * which doesn't truncate on a file-backed provider, so the file is
+     * truncated by hand ([truncating]) — and when it can't be (a pipe)
+     * while there's something in the document, the open fails rather
+     * than leave the old file's tail after the new bytes.
      */
-    fun openForWriting(resolver: ContentResolver, uri: Uri): OutputStream? =
+    fun openForWriting(resolver: ContentResolver, uri: Uri): OutputStream? {
         try {
-            resolver.openOutputStream(uri, "wt")
+            return resolver.openOutputStream(uri, "wt")
         } catch (_: IllegalArgumentException) {
-            resolver.openOutputStream(uri, "w")
         } catch (_: UnsupportedOperationException) {
-            resolver.openOutputStream(uri, "w")
+        } catch (_: FileNotFoundException) {
+            // Some providers refuse an unknown mode this way; a document
+            // that's really gone fails the `w` open below just the same.
         }
+        val fd = resolver.openFileDescriptor(uri, "w") ?: return null
+        return truncating(fd) { documentSize(resolver, uri) }
+    }
+
+    /**
+     * [fd], emptied and wrapped for writing from its start. [size] is
+     * asked only when [fd] can't be truncated (a pipe, not a file): an
+     * empty document (0) is fine to stream into; one with anything in it,
+     * or whose size isn't known, isn't — [FileNotFoundException].
+     */
+    internal fun truncating(fd: ParcelFileDescriptor, size: () -> Long?): OutputStream {
+        val truncated = runCatching {
+            if (!OsConstants.S_ISREG(Os.fstat(fd.fileDescriptor).st_mode)) error("not a file")
+            Os.ftruncate(fd.fileDescriptor, 0)
+            Os.lseek(fd.fileDescriptor, 0, OsConstants.SEEK_SET)
+        }.isSuccess
+        if (!truncated && size() != 0L) {
+            runCatching { fd.close() }
+            throw FileNotFoundException("the picked document can't be emptied to write it afresh")
+        }
+        return ParcelFileDescriptor.AutoCloseOutputStream(fd)
+    }
 
     /** Empty the picked document after a copy into it failed part-way, so [discard] may delete it. */
     fun truncate(resolver: ContentResolver, uri: Uri) {
         runCatching { openForWriting(resolver, uri)?.close() }
     }
+
+    /**
+     * How many bytes [uri]'s document can grow to: the free space of the
+     * volume it's on plus what it holds now (a rewrite frees that). Null
+     * when that can't be told — a provider that streams through a pipe
+     * rather than handing out the file — which doesn't block the copy
+     * (running out of room while copying still pauses the download).
+     * Asked of the document itself, not of the primary shared volume: a
+     * pick on an SD card has that card's room, not internal storage's.
+     */
+    fun roomFor(resolver: ContentResolver, uri: Uri): Long? = runCatching {
+        resolver.openFileDescriptor(uri, "r")?.use { pfd ->
+            val st = Os.fstat(pfd.fileDescriptor)
+            if (!OsConstants.S_ISREG(st.st_mode)) return@use null
+            val vfs = Os.fstatvfs(pfd.fileDescriptor)
+            vfs.f_bavail * vfs.f_frsize + st.st_size
+        }
+    }.getOrNull()
 
     /** [uri]'s size, or null when the provider won't say. */
     private fun documentSize(resolver: ContentResolver, uri: Uri): Long? = runCatching {
@@ -116,7 +191,38 @@ internal object DownloadSaveTo {
             if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else null
         }
     }.getOrNull()
+
+    /** [uri]'s last-modified time (epoch ms), or null when the provider won't say. */
+    private fun documentLastModified(resolver: ContentResolver, uri: Uri): Long? = runCatching {
+        resolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_LAST_MODIFIED), null, null, null)?.use { c ->
+            if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else null
+        }
+    }.getOrNull()
 }
+
+/**
+ * A document picked in the *Save as* picker, as [DownloadSaveTo.hold]
+ * found it. [created]: the picker made it for this download (an empty
+ * new file), so a download that doesn't finish may delete it again;
+ * false for an existing file picked to replace. [lasting]: Freedom can
+ * still write it once the activity that picked it is gone.
+ */
+internal data class PickedDocument(val uri: String, val created: Boolean, val lasting: Boolean = true)
+
+/** How long after it was last modified an empty picked file still counts as just created. */
+internal const val PICKED_NEW_WINDOW_MS = 5 * 60 * 1000L
+
+/**
+ * Whether a picked document is the empty file the picker just created,
+ * rather than an existing file the user picked to replace: it's empty
+ * ([size] 0; unknown counts as not) and was modified only just now —
+ * an existing empty file last touched long ago is the user's, and stays.
+ * A provider that doesn't report the time can't tell the two apart; an
+ * empty document from it is taken as new, so the picker's own file
+ * doesn't outlive a download that failed.
+ */
+internal fun pickedDocumentIsNew(size: Long?, lastModified: Long?, now: Long): Boolean =
+    size == 0L && (lastModified == null || now - lastModified in -60_000L..PICKED_NEW_WINDOW_MS)
 
 /** One of `ContentResolver.persistedUriPermissions`, as far as the sweeps need it. */
 internal data class PersistedGrant(val uri: String, val write: Boolean)
