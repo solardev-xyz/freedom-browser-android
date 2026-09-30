@@ -306,6 +306,100 @@ class ProofSourcesTest {
     }
 
     @Test
+    fun `a block past the proven head skips the prover, until the head could have reached it`() = runTest {
+        // Send's "block pinned + 16 doesn't exist yet" check (R3-M2): the
+        // prover can't prove a block it doesn't have, and every prover
+        // saying so costs a round trip in the shared verifier.
+        val now = AtomicLong(1_000_000)
+        val v = Verifier(JSONObject().put("status", "success").put("result", JSONObject().put("number", "0x64")))
+        val source = ColibriChainSource(
+            EnsColibri(v, http = { _, _, _, _, _ -> throw IOException("no network in this test") }),
+            present = { true },
+            clock = now::get,
+        )
+        // No proven head yet: nothing is skipped.
+        assertNull(source.knownHead(100))
+        val ahead = JSONArray().put("0x72").put(false)
+        source.request(100, "eth_getBlockByNumber", ahead, emptyList())
+        assertEquals(1, v.created.size)
+        assertEquals(100L, source.knownHead(100))
+        assertEquals("0x64", source.request(100, "eth_blockNumber", JSONArray(), emptyList()).result)
+        assertEquals(2, v.created.size)
+
+        // Block 114 (0x72) is past head 100: straight to the next tier.
+        try {
+            source.request(100, "eth_getBlockByNumber", ahead, emptyList())
+            fail()
+        } catch (_: ColibriChainSource.Unanswered) {
+        }
+        // State at a future block likewise; the head itself, a block
+        // before it, "latest" and another chain are still asked.
+        try {
+            source.request(100, "eth_getBalance", JSONArray().put(address).put("0x65"), emptyList())
+            fail()
+        } catch (_: ColibriChainSource.Unanswered) {
+        }
+        assertEquals(2, v.created.size)
+        source.request(100, "eth_getBlockByNumber", JSONArray().put("0x64").put(false), emptyList())
+        source.request(100, "eth_getBalance", JSONArray().put(address).put("0x10"), emptyList())
+        source.request(100, "eth_getBalance", balance, emptyList())
+        source.request(1, "eth_getBlockByNumber", ahead, emptyList())
+        assertEquals(6, v.created.size)
+        assertNull(source.knownHead(137))
+
+        // Fourteen Gnosis slots later the head may have reached it.
+        now.addAndGet(13 * ColibriChainSource.SLOT_MS.getValue(100))
+        assertEquals(113L, source.knownHead(100))
+        runCatching { source.request(100, "eth_getBlockByNumber", ahead, emptyList()) }
+        assertEquals(6, v.created.size)
+        now.addAndGet(ColibriChainSource.SLOT_MS.getValue(100))
+        source.request(100, "eth_getBlockByNumber", ahead, emptyList())
+        assertEquals(7, v.created.size)
+        // A skip is no failure: the chain isn't backed off.
+        assertNull(source.gap(100))
+    }
+
+    @Test
+    fun `a receipt the prover refused skips it for a slot, not the chain`() = runTest {
+        // A receipt poll in the head block: each prover answers its own 500
+        // until the next block is in. The next polls go to the quorum.
+        val now = AtomicLong(1_000_000)
+        val v = Roundtrip(JSONObject().put("status", "error").put("error", "prover: block not found"))
+        val source = ColibriChainSource(
+            EnsColibri(v, http = { _, _, _, _, _ ->
+                EnsColibri.Http.Reply(500, """{"error":"The Block after 0x2a can not be found in the execution layer!"}""".toByteArray())
+            }),
+            present = { true },
+            clock = now::get,
+        )
+        val receipt = JSONArray().put(hash)
+        try {
+            source.request(100, "eth_getTransactionReceipt", receipt, emptyList())
+            fail()
+        } catch (e: EnsColibri.Failure) {
+            assertFalse(e.unreachable)
+        }
+        assertEquals(1, v.created.get())
+        now.addAndGet(4_000)
+        try {
+            source.request(100, "eth_getTransactionReceipt", JSONArray().put(hash.uppercase().replace("0X", "0x")), emptyList())
+            fail()
+        } catch (_: ColibriChainSource.Unanswered) {
+        }
+        assertEquals(1, v.created.get())
+        // Another hash, the transaction itself, and the other chain are asked.
+        runCatching { source.request(100, "eth_getTransactionReceipt", JSONArray().put("0x" + "ef".repeat(32)), emptyList()) }
+        runCatching { source.request(100, "eth_getTransactionByHash", receipt, emptyList()) }
+        runCatching { source.request(1, "eth_getTransactionReceipt", receipt, emptyList()) }
+        assertEquals(4, v.created.get())
+        assertNull(source.gap(100))
+        // A slot on, the receipt is asked again.
+        now.addAndGet(ColibriChainSource.HOLD_MS)
+        runCatching { source.request(100, "eth_getTransactionReceipt", receipt, emptyList()) }
+        assertEquals(5, v.created.get())
+    }
+
+    @Test
     fun `an unreachable prover is skipped for a while, then asked again`() = runTest {
         val now = AtomicLong(1_000_000)
         val v = Roundtrip(JSONObject().put("status", "error").put("error", "all provers failed"))

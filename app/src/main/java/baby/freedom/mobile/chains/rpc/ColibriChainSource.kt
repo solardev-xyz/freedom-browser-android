@@ -70,6 +70,18 @@ import org.json.JSONObject
  * most [maxPageInFlight] of them (as [baby.freedom.mobile.node.RouterReadSlots]
  * does for Myotis); a page read past that share moves straight on to the
  * next tier, and the rest stay the wallet's and the Swarm node's.
+ *
+ * **Reads the prover can't prove yet** skip the tier outright rather
+ * than cost a round trip to every prover (three on Gnosis) inside the
+ * verifier name resolution shares, each answering its own 500 ("the
+ * block after N can not be found"): a read at a numbered block past the
+ * chain's head as last proven here ([knownHead], moved on by one
+ * [SLOT_MS] per slot since), such as
+ * [baby.freedom.mobile.wallet.Send]'s check that a block some way past
+ * the head doesn't exist yet; and, for one slot after a prover refused it, the same receipt or
+ * transaction by hash, which a receipt poll in the head block asks for
+ * again every few seconds ([HOLD_MS]). A head this tier never proved
+ * skips nothing.
  */
 internal class ColibriChainSource(
     private val colibri: EnsColibri,
@@ -90,6 +102,35 @@ internal class ColibriChainSource(
     private val pagesInFlight = AtomicInteger()
     private val backoffs = ConcurrentHashMap<Long, Backoff>()
     private val canaries = ConcurrentHashMap<Long, Canary>()
+
+    /** Per chain: the highest block a proof here named, and when ([clock]) it was learned. */
+    private val heads = ConcurrentHashMap<Long, Pair<Long, Long>>()
+
+    /** `chain method hash` → until when ([clock]) a by-hash read the prover refused skips the tier. */
+    private val holds = ConcurrentHashMap<String, Long>()
+
+    /**
+     * The chain's head as far as this tier knows: the highest block a
+     * proof named, plus one per slot since; `null` before any proof.
+     */
+    internal fun knownHead(chainId: Long): Long? {
+        val (block, at) = heads[chainId] ?: return null
+        val elapsed = (clock() - at).coerceAtLeast(0)
+        return block + elapsed / (SLOT_MS[chainId] ?: MIN_SLOT_MS)
+    }
+
+    private fun sawBlock(chainId: Long, block: Long?) {
+        if (block == null) return
+        val now = clock()
+        heads.merge(chainId, block to now) { old, new -> if (new.first > old.first) new else old }
+    }
+
+    /** The key a by-hash read is held under, `null` for any other read. */
+    private fun holdKey(chainId: Long, method: String, params: JSONArray): String? {
+        if (method !in BY_HASH) return null
+        val hash = (params.opt(0) as? String)?.lowercase() ?: return null
+        return "$chainId $method $hash"
+    }
 
     override fun isAvailable(chainId: Long): Boolean = gap(chainId) == null
 
@@ -120,6 +161,21 @@ internal class ColibriChainSource(
         TAG_PARAM[method]?.let { i ->
             val tag = params.opt(i)
             if (tag == "pending") throw Unanswered("$method at \"pending\" can't be proven")
+            val number = (tag as? String)?.takeIf { it.startsWith("0x") && it.length in 3..17 }
+                ?.let { runCatching { it.substring(2).toLong(16) }.getOrNull() }
+            val head = knownHead(chainId)
+            if (number != null && head != null && number > head) {
+                throw Unanswered("block $number is past the proven head ($head)")
+            }
+        }
+        val held = holdKey(chainId, method, params)
+        if (held != null) {
+            val until = holds[held]
+            if (until != null) {
+                val left = until - clock()
+                if (left in 1..HOLD_MS) throw Unanswered("the prover couldn't prove this $method a moment ago")
+                holds.remove(held, until)
+            }
         }
         // A page's read gets only a share of the slots (see the class
         // kdoc), taken before the shared one so a page at its share never
@@ -158,7 +214,7 @@ internal class ColibriChainSource(
             } catch (e: EnsColibri.Failure) {
                 // This read's own proof failing isn't the provers
                 // being unreachable: other reads may still prove.
-                if (e.unreachable) failed()
+                if (e.unreachable) failed() else if (held != null) hold(held)
                 throw e
             } catch (e: Throwable) {
                 failed()
@@ -193,6 +249,8 @@ internal class ColibriChainSource(
         } else {
             raw
         }
+        val block = blockOf(raw)
+        sawBlock(chainId, block)
         val hosts = provers.ifEmpty {
             listOfNotNull(EnsColibri.CHAINS[chainId]?.provers?.firstOrNull()?.let(EnsColibri::hostOf))
         }
@@ -206,9 +264,16 @@ internal class ColibriChainSource(
                 queried = hosts,
                 k = 1,
                 m = 1,
-                block = blockOf(raw),
+                block = block,
             ),
         )
+    }
+
+    /** Hold [key]'s read off the tier for [HOLD_MS] (see the class kdoc). */
+    private fun hold(key: String) {
+        val now = clock()
+        if (holds.size >= MAX_HOLDS) holds.entries.removeIf { it.value - now !in 1..HOLD_MS }
+        if (holds.size < MAX_HOLDS) holds[key] = now + HOLD_MS
     }
 
     /**
@@ -225,7 +290,12 @@ internal class ColibriChainSource(
                 val proven = withTimeoutOrNull(backgroundMs) {
                     colibri.request(chainId, "eth_getBlockByNumber", JSONArray().put("latest").put(false), rpcs)
                 }
-                if (proven != null) backoff.succeeded() else backoff.failed()
+                if (proven != null) {
+                    backoff.succeeded()
+                    sawBlock(chainId, blockOf(proven.first.opt("result")))
+                } else {
+                    backoff.failed()
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: EnsColibri.Failure) {
@@ -307,6 +377,22 @@ internal class ColibriChainSource(
             "eth_call", "eth_getTransactionReceipt", "eth_getTransactionByHash",
             "eth_getBlockByNumber", "eth_getBlockByHash",
         )
+
+        /**
+         * A slot, per chain: how often a head moves on (Ethereum 12 s,
+         * Gnosis 5 s). [knownHead] counts one block per slot since the
+         * last proof, which can only overshoot the prover's head
+         * (a missed slot is no block), so it skips too little, never a
+         * block that exists.
+         */
+        val SLOT_MS = mapOf(1L to 12_000L, 100L to 5_000L)
+        private const val MIN_SLOT_MS = 1_000L
+
+        /** How long a by-hash read a prover refused skips the tier: one Ethereum slot. */
+        const val HOLD_MS = 12_000L
+        private const val MAX_HOLDS = 64
+
+        private val BY_HASH = setOf("eth_getTransactionReceipt", "eth_getTransactionByHash")
 
         /** Where each state read's block tag sits in its params. */
         private val TAG_PARAM = mapOf(
