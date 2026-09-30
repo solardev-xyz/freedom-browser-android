@@ -136,6 +136,21 @@ data class DownloadEntry(
      * answers the same way. Null on rows from before v5: the default.
      */
     val userAgent: String? = null,
+    /**
+     * The document the user picked to save the file as (#322), when
+     * *Ask where to save each file* was on: a Storage Access Framework
+     * URI the finished file is written through. Null: the file goes to
+     * `Download/Freedom` like every download before v6.
+     */
+    val saveTo: String? = null,
+    /**
+     * Whether the picker created [saveTo] for this download (an empty
+     * new file), so a download that doesn't finish may delete it again.
+     * False for an existing file the user picked to replace, which is
+     * never deleted (#322).
+     */
+    @ColumnInfo(defaultValue = "0")
+    val saveToCreated: Boolean = false,
 )
 
 /** Values of [DownloadEntry.status]. Strings, so the column reads in `sqlite3`. */
