@@ -214,8 +214,11 @@
         try {
           // no-cors: this page's origin is `null`, and the gateway allows
           // no CORS origins (#284), so a CORS fetch could never read the
-          // answer. An opaque answer still proves the gateway is up; a
-          // gateway that isn't listening rejects the fetch.
+          // answer. An opaque answer only proves *something* answered HTTP
+          // on :1633 — its status is hidden, so a 5xx, or another app bound
+          // to the port, also reads as running. That's fine for ant, whose
+          // /health always answers 200 once the gateway listens; a gateway
+          // that isn't listening rejects the fetch.
           await fetch('http://127.0.0.1:1633/health', { mode: 'no-cors', cache: 'no-store' });
           return { running: true };
         } catch (e) {
