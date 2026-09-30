@@ -8,8 +8,9 @@
 #
 # Jobs (#309): `ffi` builds libfreedom_mobile_ffi.so, one matrix job per
 # ABI, `colibri` builds libc4.so and `unit-tests` runs the JVM tests, all
-# in parallel; `apk` needs all three, packages what they built, and only
-# then publishes. The two native libraries are cached with actions/cache,
+# in parallel; `apk` packages the two libraries as soon as they're there,
+# alongside the tests; `publish` needs both `apk` and `unit-tests`, so
+# nothing is released unless the tests passed. The two native libraries are cached with actions/cache,
 # keyed on everything that shapes them (see each job's "Cache key" step),
 # and a hit skips their build entirely; the checks after the build run on
 # a hit too (scripts/check-native-libs.sh, and the Radicle bindings
@@ -31,6 +32,10 @@
 # entries from being evicted (GitHub drops caches unused for 7 days). A
 # release that still misses (evicted, or tagged within minutes of the
 # bump) just builds from source, in about 25 min instead of about 10.
+# There's no Rust build cache (Swatinem/rust-cache) any more: its ~1 GB
+# target dir per ABI, saved on a tag's own ref, could never be restored by
+# a later tag, and it would crowd the finished libraries out of the
+# repo's 10 GB cache budget.
 #
 # Secrets: KEYSTORE_BASE64 (the release keystore, base64),
 # KEYSTORE_PASSWORD, KEY_ALIAS. APKs are signed with this one key
@@ -142,13 +147,6 @@ jobs:
       - name: Install cargo-ndk
         if: steps.cache.outputs.cache-hit != 'true'
         run: cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked
-
-      - name: Rust cache
-        if: steps.cache.outputs.cache-hit != 'true'
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: freedom-mobile-ffi
-          key: ${{ matrix.abi }}
 
       - name: Build libfreedom_mobile_ffi.so (${{ matrix.abi }})
         if: steps.cache.outputs.cache-hit != 'true'
@@ -295,11 +293,9 @@ jobs:
         run: ./gradlew --no-daemon :app:testDebugUnitTest
 
   apk:
-    needs: [ffi, colibri, unit-tests]
+    needs: [ffi, colibri]
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -380,8 +376,31 @@ jobs:
           cd dist && sha256sum * > SHA256SUMS
           echo "=== release contents ===" && ls -la && cat SHA256SUMS
 
-      - name: Publish release
+      # Only a tag's APKs leave the job: a dry run's release-signed APKs
+      # of an arbitrary branch aren't put up for download.
+      - name: Hand the release to the publish job
         if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v6
+        with:
+          name: release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [apk, unit-tests]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the release
+        uses: actions/download-artifact@v7
+        with:
+          name: release
+          path: dist
+
+      - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
           files: dist/*
