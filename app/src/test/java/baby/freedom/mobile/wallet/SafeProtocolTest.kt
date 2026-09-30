@@ -164,6 +164,33 @@ class SafeProtocolTest {
     }
 
     @Test
+    fun `a shared message with hidden characters shows them, not nothing`() {
+        // Visible words followed by tag characters (U+E0020…), a bidi override and a zero-width
+        // space: the digest matches the text, so parseRequest takes it, but drawn as is the
+        // owner would see only the first words and sign the rest unseen.
+        val hidden = "Log in to app.example" + String(Character.toChars(0xE0061)) + "\u202Eevil\u200B"
+        val shared = SafeProtocol.shareText(SafeProtocol.messageTypedData(safe, 100, hidden), hidden)
+        val m = SafeProtocol.parseRequest(shared) as SafeProtocol.Request.Message
+        assertEquals(hidden, m.text)
+        assertEquals("Log in to app.example\\u{E0061}\\u202Eevil\\u200B", m.shownText)
+        // Plain words are shown as they are.
+        val plain = SafeProtocol.parseRequest(SafeProtocol.shareText(JSONObject(messageTypedData), "hello safe")) as SafeProtocol.Request.Message
+        assertEquals("hello safe", plain.shownText)
+    }
+
+    @Test
+    fun `a pending message the phone proposed shows its hidden characters as the co-sign page does (R1-M1)`() {
+        val hidden = "Log in to app.example" + String(Character.toChars(0xE0061)) + "\u202Eevil\u200B"
+        val pending = SafePending(
+            id = "0x" + "11".repeat(32), safe = safe, kind = SafePending.Kind.MESSAGE, chainId = 100,
+            typedData = "{}", threshold = 2, signatures = emptyList(), createdAt = 0, text = hidden,
+        )
+        assertEquals("Log in to app.example\\u{E0061}\\u202Eevil\\u200B", pending.shownText)
+        assertEquals(Eip712.visible(hidden), pending.shownText)
+        assertNull(pending.copy(kind = SafePending.Kind.TX, text = null).shownText)
+    }
+
+    @Test
     fun `requests Freedom wouldn't build are refused`() {
         fun with(change: (JSONObject) -> Unit) = JSONObject(safeTxTypedData).also(change).toString()
         val refused = listOf(

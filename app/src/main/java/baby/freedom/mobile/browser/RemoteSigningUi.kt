@@ -255,6 +255,10 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
             stringResource(R.string.signing_remote_title_sign_typed_data) to stringResource(R.string.signing_remote_action_sign)
         is OpenLvSession.Request.SendTransaction ->
             stringResource(R.string.signing_remote_title_send_transaction) to stringResource(R.string.signing_remote_action_confirm_send)
+        // Nothing to approve: only Close.
+        is OpenLvSession.Request.CantSend -> stringResource(R.string.signing_remote_title_cant_send) to null
+        // Nothing to approve yet: only Reject, until the priced sheet replaces it.
+        is OpenLvSession.Request.Pricing -> stringResource(R.string.signing_remote_title_send_transaction) to null
     }
     Dialog(
         onDismissRequest = reject,
@@ -282,6 +286,8 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
                         is OpenLvSession.Request.PersonalSign -> PersonalSignBody(request)
                         is OpenLvSession.Request.TypedData -> TypedDataBody(request)
                         is OpenLvSession.Request.SendTransaction -> SendTransactionBody(request)
+                        is OpenLvSession.Request.CantSend -> CantSendBody(request)
+                        is OpenLvSession.Request.Pricing -> PricingBody(request)
                     }
                     ledgerOf(request)?.let {
                         Spacer(Modifier.height(8.dp))
@@ -298,12 +304,18 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
                 Spacer(Modifier.height(16.dp))
                 ObscuredTapNotice(tap)
                 SheetButtonRow {
-                    OutlinedButton(onClick = reject, enabled = !busy) { Text(stringResource(R.string.common_reject)) }
-                    Button(onClick = approve, enabled = armed && !busy, modifier = Modifier.protectedPress(tap)) {
-                        if (busy) {
-                            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
-                        } else {
-                            Text(action)
+                    if (action == null && request is OpenLvSession.Request.Pricing) {
+                        OutlinedButton(onClick = reject) { Text(stringResource(R.string.common_reject)) }
+                    } else if (action == null) {
+                        Button(onClick = reject) { Text(stringResource(R.string.common_close)) }
+                    } else {
+                        OutlinedButton(onClick = reject, enabled = !busy) { Text(stringResource(R.string.common_reject)) }
+                        Button(onClick = approve, enabled = armed && !busy, modifier = Modifier.protectedPress(tap)) {
+                            if (busy) {
+                                CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                            } else {
+                                Text(action)
+                            }
                         }
                     }
                 }
@@ -317,7 +329,7 @@ internal fun ledgerOf(request: OpenLvSession.Request): baby.freedom.mobile.walle
     is OpenLvSession.Request.PersonalSign -> request.account.ledger
     is OpenLvSession.Request.TypedData -> request.account.ledger
     is OpenLvSession.Request.SendTransaction -> request.quote.request.from.ledger
-    is OpenLvSession.Request.Connect -> null
+    is OpenLvSession.Request.Connect, is OpenLvSession.Request.CantSend, is OpenLvSession.Request.Pricing -> null
 }
 
 /**
@@ -449,6 +461,40 @@ internal fun TypedLines(title: String, lines: List<baby.freedom.mobile.wallet.Ei
             }
         }
     }
+}
+
+/** A transaction from one of the wallet's accounts, while the phone prices it. */
+@Composable
+private fun PricingBody(request: OpenLvSession.Request.Pricing) {
+    ReviewRow(stringResource(R.string.signing_review_network), request.chain.name)
+    ReviewRow(stringResource(R.string.signing_review_from), request.account.name, address = request.account.address)
+    ReviewRow(stringResource(R.string.signing_review_to), null, address = request.to)
+    ReviewRow(stringResource(R.string.signing_review_value), "${SendAmounts.exact(request.amount, request.chain.decimals)} ${request.chain.symbol}", mono = true)
+    Spacer(Modifier.height(8.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(12.dp))
+        Text(
+            stringResource(R.string.signing_remote_pricing),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** A transaction from one of the wallet's accounts the phone couldn't price, and why. */
+@Composable
+private fun CantSendBody(request: OpenLvSession.Request.CantSend) {
+    ReviewRow(stringResource(R.string.signing_review_network), request.chain.name)
+    ReviewRow(stringResource(R.string.signing_review_from), request.account.name, address = request.account.address)
+    Spacer(Modifier.height(4.dp))
+    Text(request.reason, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+    Spacer(Modifier.height(4.dp))
+    Text(
+        stringResource(R.string.signing_remote_cant_send_explained),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable

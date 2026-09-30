@@ -92,6 +92,13 @@ data class SafePending(
 ) {
     enum class Kind { TX, MESSAGE }
 
+    /**
+     * [text] as the pending page and its title show it: what would draw as
+     * nothing or rearrange the words written as a visible escape, as the
+     * co-sign page shows the same message ([SafeProtocol.Request.Message.shownText]).
+     */
+    val shownText: String? get() = text?.let(Eip712::visible)
+
     /** An abandoned execution: its hash, and the account and account nonce that sent it (null when not known). */
     data class AbandonedExec(val hash: String, val from: String? = null, val nonce: BigInteger? = null)
 

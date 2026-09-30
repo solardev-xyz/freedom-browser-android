@@ -117,7 +117,7 @@ internal fun safePolicy(safe: SafeAccount): String =
 internal fun safePendingTitle(p: SafePending): String = when (p.kind) {
     SafePending.Kind.TX -> p.payment?.let { Strings.get(R.string.safe_pending_title_send, SendAmounts.exact(it.amount, it.decimals), it.symbol) }
         ?: Strings.get(R.string.safe_pending_title_tx)
-    SafePending.Kind.MESSAGE -> Strings.get(R.string.safe_pending_title_message, p.text.orEmpty())
+    SafePending.Kind.MESSAGE -> Strings.get(R.string.safe_pending_title_message, p.shownText.orEmpty())
 }
 
 /** Where a pending item stands, with its signature count. */
@@ -1187,7 +1187,7 @@ private fun SafeRequestPage(
                         ReviewRow(stringResource(R.string.safe_label_safe_nonce), tx.nonce.toString())
                         ReviewRow(stringResource(R.string.safe_label_safetx_hash), p.id, mono = true)
                     } else {
-                        ReviewRow(stringResource(R.string.safe_label_text), p.text.orEmpty())
+                        ReviewRow(stringResource(R.string.safe_label_text), p.shownText.orEmpty())
                         ReviewRow(stringResource(R.string.safe_label_safemessage_hash), p.id, mono = true)
                     }
                     if (p.superseded) {
@@ -1626,7 +1626,7 @@ internal fun SafeCoSignPage(
                                 },
                             )
                         }
-                        is SafeProtocol.Request.Message -> ReviewRow(stringResource(R.string.safe_label_text), request.text)
+                        is SafeProtocol.Request.Message -> ReviewRow(stringResource(R.string.safe_label_text), request.shownText)
                     }
                     ReviewRow(
                         stringResource(if (request is SafeProtocol.Request.Tx) R.string.safe_label_safetx_hash else R.string.safe_label_safemessage_hash),
