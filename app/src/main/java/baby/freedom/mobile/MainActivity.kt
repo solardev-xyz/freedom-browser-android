@@ -21,6 +21,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -61,6 +62,7 @@ import baby.freedom.mobile.node.swarmModeFor
 import baby.freedom.mobile.node.ITorCallback
 import baby.freedom.mobile.node.ITorService
 import baby.freedom.mobile.node.TorService
+import baby.freedom.mobile.ui.Appearance
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.NodeIdentitySync
@@ -80,6 +82,7 @@ import baby.freedom.swarm.TorStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -358,6 +361,18 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Settings → Appearance (#269), followed live: the choice becomes
+        // the app's night mode, which re-themes the chrome and every
+        // page's `prefers-color-scheme` without a restart (see
+        // [Appearance]). Android keeps that mode across launches too, so
+        // this only writes it again, which changes nothing.
+        lifecycleScope.launch {
+            settings.appearance
+                .distinctUntilChanged()
+                .catch { android.util.Log.w("MainActivity", "reading the appearance setting failed (${it.javaClass.simpleName})") }
+                .collect { Appearance.apply(this@MainActivity, it) }
+        }
+
         // Honor the persisted preference on cold start. If the user had
         // the node enabled, start + bind right away; otherwise leave
         // the :node process dormant so we don't hold the state store
@@ -494,7 +509,11 @@ class MainActivity : ComponentActivity() {
 
     private fun showBrowser() {
         setContent {
-            FreedomTheme {
+            // Below Android 12, where there's no app night mode for
+            // [Appearance.apply] to set, this is what makes the chrome
+            // follow the choice; above, the configuration already agrees.
+            val appearance by settings.appearance.collectAsState(initial = Appearance.System)
+            FreedomTheme(darkTheme = appearance.isDark(isSystemInDarkTheme())) {
                 SystemBarsForScheme()
                 Surface(
                     modifier = Modifier.fillMaxSize(),

@@ -15,6 +15,7 @@ import baby.freedom.mobile.browser.ExternalEndpoints
 import baby.freedom.mobile.browser.SearchEngines
 import baby.freedom.mobile.browser.normalizeAllowlistHost
 import baby.freedom.mobile.ens.EnsRpcConfig
+import baby.freedom.mobile.ui.Appearance
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -52,6 +53,12 @@ import org.json.JSONObject
  * it has passed [baby.freedom.mobile.browser.SearchEngines.normalizeTemplate].
  * [searchTemplate] resolves the pair to the template the address bar
  * searches with.
+ *
+ * ## Appearance key
+ *
+ * `appearance` is an [Appearance.key] (`system`, `light`, `dark`),
+ * absent for `system` (#269). `MainActivity` applies it as the app's
+ * night mode ([Appearance.apply]).
  *
  * ## Name resolution keys (#102)
  *
@@ -266,6 +273,15 @@ class NodeSettings private constructor(
             it[Keys.SEARCH_ENGINE] = SearchEngines.CUSTOM_ID
         }
         return true
+    }
+
+    /** Settings → Appearance → Theme (#269); [Appearance.System] until chosen. */
+    val appearance: Flow<Appearance> = store.data.map { prefs ->
+        Appearance.fromKey(prefs[Keys.APPEARANCE])
+    }
+
+    suspend fun setAppearance(appearance: Appearance) {
+        store.edit { it[Keys.APPEARANCE] = appearance.key }
     }
 
     private val chainStore: ChainStore by lazy(chains)
@@ -612,6 +628,7 @@ class NodeSettings private constructor(
         val IPFS_ROUTING_MODE = stringPreferencesKey("ipfs_routing_mode")
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val SEARCH_CUSTOM_TEMPLATE = stringPreferencesKey("search_custom_template")
+        val APPEARANCE = stringPreferencesKey("appearance")
         /** Moved onto Ethereum mainnet's own RPCs in [ChainStore]; see [migrateEnsRpc]. */
         val LEGACY_ENS_RPC_CUSTOM = stringPreferencesKey("ens_rpc_custom_endpoints")
         val ENS_RPC_DISABLED_PUBLIC = stringSetPreferencesKey("ens_rpc_disabled_public")
