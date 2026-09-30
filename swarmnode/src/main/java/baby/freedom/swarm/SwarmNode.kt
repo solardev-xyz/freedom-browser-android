@@ -25,6 +25,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
+ * A chequebook deposit whose outcome the node couldn't tell: its transfer
+ * may already be out (#117). A type of its own, so the app tells it from
+ * a failure without reading [message], which is in the app language (#280).
+ */
+class DepositMaybeSentException(message: String) : RuntimeException(message)
+
+/**
  * Kotlin wrapper around the embedded ant light-node (`libant_ffi.so`,
  * bridged through [AntNative]).
  *
@@ -566,7 +573,7 @@ class SwarmNode internal constructor(
             }
             if (depositMaybeSent(answer, message)) {
                 synchronized(lock) { setUnconfirmedDeposit(UnconfirmedDeposit(want, before, amountPlur, clock(), bootId())) }
-                throw RuntimeException(
+                throw DepositMaybeSentException(
                     SwarmStrings.get(
                         R.string.swarmnode_deposit_maybe_sent_detail,
                         DEPOSIT_MAYBE_SENT,
@@ -733,6 +740,9 @@ class SwarmNode internal constructor(
             block(h, mode.gnosisRpc)
         } catch (e: IllegalStateException) {
             throw e
+        } catch (e: DepositMaybeSentException) {
+            // Scrubbed too, and still told apart by its type (#313 R1-M1).
+            throw DepositMaybeSentException(scrubRpc(e.message ?: e.javaClass.simpleName, mode.gnosisRpc))
         } catch (e: RuntimeException) {
             throw RuntimeException(scrubRpc(e.message ?: e.javaClass.simpleName, mode.gnosisRpc))
         }

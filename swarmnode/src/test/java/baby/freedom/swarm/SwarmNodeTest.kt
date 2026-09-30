@@ -682,7 +682,8 @@ class SwarmNodeTest {
         ops.chequebookBalancePlur = milliBzz.toString()
         // The POST read times out (no answer): the transfer may be out already.
         ops.onDeposit = { null }
-        val first = assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
+        // Its own type, which `:node` flags to the app (#313 R1-M1): never told by the words.
+        val first = assertThrows(DepositMaybeSentException::class.java) { node.depositChequebook(chequebook, milliBzz) }
         assertTrue(first.message!!, first.message!!.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT))
         fun posts() = ops.calls.count { it.startsWith("gateway:POST") }
         assertEquals(1, posts())
@@ -700,7 +701,7 @@ class SwarmNodeTest {
         assertEquals(2, posts())
         // …which again ended unanswered; past the hold, one goes ahead anyway.
         now += 15 * 60_000L
-        val third = assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
+        val third = assertThrows(DepositMaybeSentException::class.java) { node.depositChequebook(chequebook, milliBzz) }
         assertTrue(third.message!!.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT))
         assertEquals(3, posts())
         node.dispose()

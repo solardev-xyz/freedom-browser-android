@@ -116,7 +116,7 @@ internal class LedgerBleLink private constructor(
             throw LedgerException(LedgerException.Kind.NOT_FOUND)
         }
         val (spec, service) = LedgerBleFraming.SPECS.firstNotNullOfOrNull { s -> g.getService(s.service)?.let { s to it } }
-            ?: throw LedgerException(LedgerException.Kind.NOT_FOUND, Strings.get(R.string.signing_ledger_not_a_ble_ledger))
+            ?: throw LedgerException(LedgerException.Kind.NOT_FOUND, Strings.said(R.string.signing_ledger_not_a_ble_ledger))
         val notify = service.getCharacteristic(spec.notify) ?: throw LedgerException(LedgerException.Kind.NOT_FOUND)
         write = service.getCharacteristic(spec.write) ?: throw LedgerException(LedgerException.Kind.NOT_FOUND)
         g.setCharacteristicNotification(notify, true)

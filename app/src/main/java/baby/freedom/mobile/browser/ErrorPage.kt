@@ -50,7 +50,8 @@ import java.net.URLEncoder
  * a JSON table of the `errorpage_` strings the page uses ([stringsJson]),
  * handed to the page's own `window.__errorPageStrings`. Nothing is served
  * or exposed to other pages; the page shows nothing until the table
- * arrives.
+ * arrives, or — should it never come — shows its built-in English copy
+ * of [stringsJson] after 1.5 s (kept equal by `ErrorPageStringsTest`).
  */
 object ErrorPage {
     const val URL: String = "file:///android_asset/error/error.html"

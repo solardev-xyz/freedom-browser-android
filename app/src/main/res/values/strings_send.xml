@@ -253,10 +253,13 @@
     <string name="send_eth_switch_note">Only this site switches; other sites stay on their own network.</string>
     <string name="send_eth_chain_id">Chain ID</string>
     <string name="send_eth_currency_label">Currency</string>
-    <!-- %1$s: the currency's name; %2$s: its symbol; %3$d: its decimals. -->
+    <!--
+      %1$s: the currency's name; %2$s: its symbol; %3$s: its decimals, as the
+      site gave them (plain digits, like the chain ID: the user checks them).
+    -->
     <plurals name="send_eth_currency">
-        <item quantity="one">%1$s (%2$s, %3$d decimal)</item>
-        <item quantity="other">%1$s (%2$s, %3$d decimals)</item>
+        <item quantity="one">%1$s (%2$s, %3$s decimal)</item>
+        <item quantity="other">%1$s (%2$s, %3$s decimals)</item>
     </plurals>
     <string name="send_eth_rpc">RPC</string>
     <string name="send_eth_explorer">Explorer</string>

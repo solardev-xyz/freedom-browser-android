@@ -3,6 +3,7 @@ package baby.freedom.mobile.wallet
 import baby.freedom.mobile.R
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.l10n.Said
 import baby.freedom.mobile.l10n.Strings
 import java.math.BigDecimal
 import java.math.BigInteger
@@ -32,7 +33,13 @@ import org.json.JSONTokener
  * as every encoder does (they aren't signed, and nothing shows them).
  */
 object Eip712 {
-    class Invalid(message: String) : Exception(message)
+    /**
+     * The typed data can't be signed as sent: [message] for the user, in
+     * the app language; [english] for the site or peer that sent it (#280).
+     */
+    class Invalid(message: String, val english: String = message) : Exception(message) {
+        constructor(said: Said) : this(said.text, said.english)
+    }
 
     data class Field(val name: String, val type: String)
 
@@ -137,7 +144,7 @@ object Eip712 {
     fun parseStrict(raw: Any?): TypedData = parse(raw, strict = true)
 
     private fun parse(raw: Any?, strict: Boolean): TypedData {
-        if (strict && raw is String && raw.length > MAX_JSON) throw Invalid(Strings.get(R.string.send_typed_too_large))
+        if (strict && raw is String && raw.length > MAX_JSON) throw Invalid(Strings.said(R.string.send_typed_too_large))
         val o = when (raw) {
             is JSONObject -> raw
             is String -> try {
@@ -154,7 +161,7 @@ object Eip712 {
         val domain = o.opt("domain") as? JSONObject ?: throw Invalid("domain is missing")
         val message = when (val m = o.opt("message")) {
             is JSONObject -> m
-            null, JSONObject.NULL -> if (strict && primaryType != DOMAIN) throw Invalid(Strings.get(R.string.send_typed_no_message)) else JSONObject()
+            null, JSONObject.NULL -> if (strict && primaryType != DOMAIN) throw Invalid(Strings.said(R.string.send_typed_no_message)) else JSONObject()
             else -> throw Invalid("message isn't an object")
         }
         val types = LinkedHashMap<String, List<Field>>()
@@ -168,11 +175,11 @@ object Eip712 {
                 // Checked before anything walks it: a page-sized type string is never scanned more than once (#215 R3-F1).
                 if (ftype.length > MAX_TYPE_CHARS) throw Invalid("field $name.$fname has a type that's too long")
                 // A label on the sheet: never one that could carry a hidden character.
-                if (strict && !IDENT.matches(fname)) throw Invalid(Strings.get(R.string.send_typed_malformed_field, name))
+                if (strict && !IDENT.matches(fname)) throw Invalid(Strings.said(R.string.send_typed_malformed_field, name))
                 Field(fname, ftype)
             }
             if (strict && types.getValue(name).map { it.name }.toSet().size != types.getValue(name).size) {
-                throw Invalid(Strings.get(R.string.send_typed_duplicate_field, name))
+                throw Invalid(Strings.said(R.string.send_typed_duplicate_field, name))
             }
         }
         if (!types.containsKey("EIP712Domain")) {
@@ -338,7 +345,7 @@ object Eip712 {
         val message = ArrayList<Line>()
         if (td.primaryType != DOMAIN) describe(td.primaryType, td.message, td.types, 0, message)
         val shown = (domain + message).sumOf { it.label.length.toLong() + it.value.length }
-        if (shown > MAX_SHOWN) throw Invalid(Strings.get(R.string.send_typed_too_long))
+        if (shown > MAX_SHOWN) throw Invalid(Strings.said(R.string.send_typed_too_long))
         domain to message
     }
 
@@ -347,7 +354,7 @@ object Eip712 {
     }
 
     private fun describeValue(type: String, value: Any?, types: Map<String, List<Field>>, label: String, depth: Int, out: MutableList<Line>) {
-        if (out.size >= MAX_LINES) throw Invalid(Strings.get(R.string.send_typed_too_many_fields))
+        if (out.size >= MAX_LINES) throw Invalid(Strings.said(R.string.send_typed_too_many_fields))
         if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
         val array = arrayType(type)
         when {
@@ -406,7 +413,7 @@ object Eip712 {
             UINT.find(base)?.groupValues?.get(1)?.let(::bits) != null ||
             INT.find(base)?.groupValues?.get(1)?.let(::bits) != null ||
             BYTES_N.find(base)?.groupValues?.get(1)?.toIntOrNull()?.let { it in 1..32 } == true
-        if (!ok) throw Invalid(Strings.get(R.string.send_typed_unknown_type, type))
+        if (!ok) throw Invalid(Strings.said(R.string.send_typed_unknown_type, type))
     }
 
     private fun bits(digits: String): Int? = digits.toIntOrNull()?.takeIf { it in 8..256 && it % 8 == 0 }
@@ -423,12 +430,12 @@ object Eip712 {
                 (value.length - 2) / 2 == BYTES_N.find(type)!!.groupValues[1].toInt()
             else -> value is Number || value is String
         }
-        if (!ok) throw Invalid(Strings.get(R.string.send_typed_invalid_value, name, type))
+        if (!ok) throw Invalid(Strings.said(R.string.send_typed_invalid_value, name, type))
     }
 
     private fun strictHex(value: Any?, where: String): ByteArray {
         val s = value as? String
-        if (s == null || !HEX.matches(s)) throw Invalid(Strings.get(R.string.send_typed_not_hex, where))
+        if (s == null || !HEX.matches(s)) throw Invalid(Strings.said(R.string.send_typed_not_hex, where))
         return hex(s)!!
     }
 
@@ -438,13 +445,13 @@ object Eip712 {
     } catch (e: Invalid) {
         throw e
     } catch (e: ClassCastException) {
-        throw Invalid(Strings.get(R.string.send_typed_mismatch))
+        throw Invalid(Strings.said(R.string.send_typed_mismatch))
     } catch (e: NullPointerException) {
-        throw Invalid(Strings.get(R.string.send_typed_mismatch))
+        throw Invalid(Strings.said(R.string.send_typed_mismatch))
     } catch (e: JSONException) {
-        throw Invalid(Strings.get(R.string.send_typed_mismatch))
+        throw Invalid(Strings.said(R.string.send_typed_mismatch))
     } catch (e: StackOverflowError) {
-        throw Invalid(Strings.get(R.string.send_typed_nested_too_deeply))
+        throw Invalid(Strings.said(R.string.send_typed_nested_too_deeply))
     }
 
     /** [t] with every `[n]` suffix taken off, in one pass over it (#215 R3-F1). */

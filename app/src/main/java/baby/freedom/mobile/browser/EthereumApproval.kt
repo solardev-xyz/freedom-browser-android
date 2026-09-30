@@ -544,7 +544,8 @@ private fun AddChainBody(ask: EthAsk.AddChain) {
     Row0(stringResource(R.string.send_eth_chain_id), chain.id.toString(), mono = true)
     Row0(
         stringResource(R.string.send_eth_currency_label),
-        pluralStringResource(R.plurals.send_eth_currency, chain.decimals, chain.currencyName, chain.symbol, chain.decimals),
+        // The site's decimals in plain digits, like the chain ID (#313 R1-M4).
+        pluralStringResource(R.plurals.send_eth_currency, chain.decimals, chain.currencyName, chain.symbol, chain.decimals.toString()),
     )
     Row0(stringResource(R.string.send_eth_rpc), chain.rpcUrls.joinToString("\n") { hostOf(it) }, mono = true)
     chain.explorerUrl?.let { Row0(stringResource(R.string.send_eth_explorer), hostOf(it), mono = true) }

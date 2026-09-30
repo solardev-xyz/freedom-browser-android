@@ -1972,7 +1972,7 @@ private val UPDATES_OPEN_SUBTITLE: String get() = Strings.get(R.string.settings_
  * it doesn't check, the store updates it. `null` otherwise.
  */
 internal fun appUpdateStoreLine(update: AppUpdateState): String? =
-    update.store?.let { Strings.get(R.string.settings_updates_from_store, it) }
+    update.store?.let { Strings.get(R.string.settings_updates_from_store, it.text) }
 
 /**
  * The line under **Check now**: a check under way, what the last one
@@ -1980,7 +1980,7 @@ internal fun appUpdateStoreLine(update: AppUpdateState): String? =
  * failed — with when it last ran, by [formatTime].
  */
 internal fun appUpdateLine(update: AppUpdateState, formatTime: (Long) -> String): String {
-    if (update.store != null) return Strings.get(R.string.settings_updates_come_from, update.store)
+    if (update.store != null) return Strings.get(R.string.settings_updates_come_from, update.store.text)
     if (update.checking) return Strings.get(R.string.settings_checking)
     val available = update.available
     val found = when {

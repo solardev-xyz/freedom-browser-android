@@ -31,6 +31,7 @@ import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.wallet.KeystoreVaultStore
 import baby.freedom.mobile.wallet.NodeIdentityStore
 import baby.freedom.swarm.AntChainTransport
+import baby.freedom.swarm.DepositMaybeSentException
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsNode
 import baby.freedom.swarm.NodeInfo
@@ -312,7 +313,10 @@ class NodeService : Service() {
                     runCatching { stampCallNow(method.orEmpty(), JSONObject(argsJson ?: "{}")) }
                         .getOrElse { e ->
                             Log.w(TAG, "stamp call $method failed: ${e.javaClass.simpleName}: ${e.message}")
-                            JSONObject().put("error", e.message ?: Strings.get(R.string.node_call_failed)).toString()
+                            JSONObject().put("error", e.message ?: Strings.get(R.string.node_call_failed))
+                                // By type, for the app to tell "may be out" from "failed" (#280).
+                                .apply { if (e is DepositMaybeSentException) put("maybeSent", true) }
+                                .toString()
                         }
                 }
                 runCatching {

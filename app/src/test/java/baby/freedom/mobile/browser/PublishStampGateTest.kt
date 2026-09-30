@@ -109,19 +109,19 @@ class PublishStampGateTest {
 
     @Test
     fun `a buy the page stopped waiting for stays running until the node ends it`() {
-        val timedOut = StampClient.Answer.Failed(StampClient.TIMED_OUT)
+        val timedOut = StampClient.Answer.Failed(StampClient.TIMED_OUT, timedOut = true)
         var waited = 0
         val buy = StampClient.spendOutcome(StampClient.Kind.Buy, null, timedOut) { waited++ }
         assertEquals("a timed-out buy waits for :node before it ends", 1, waited)
-        assertEquals(StampClient.Spend.Failed(StampClient.Kind.Buy, null, StampClient.BUY_OVERRAN), buy)
+        assertEquals(StampClient.Spend.Failed(StampClient.Kind.Buy, null, StampClient.BUY_OVERRAN, noReport = true), buy)
         // So may a connect (#115): it waits too, and says it didn't report back.
         val connect = StampClient.spendOutcome(StampClient.Kind.Connect, "cd", timedOut) { waited++ }
         assertEquals(2, waited)
-        assertEquals(StampClient.Spend.Failed(StampClient.Kind.Connect, "cd", StampClient.CONNECT_OVERRAN), connect)
+        assertEquals(StampClient.Spend.Failed(StampClient.Kind.Connect, "cd", StampClient.CONNECT_OVERRAN, noReport = true), connect)
 
         // An extend or a deposit never reloads the gateway: no wait.
         val extend = StampClient.spendOutcome(StampClient.Kind.Extend, "ab", timedOut) { waited++ }
-        assertEquals(StampClient.Spend.Failed(StampClient.Kind.Extend, "ab", StampClient.stillSendingMessage(StampClient.Kind.Extend)), extend)
+        assertEquals(StampClient.Spend.Failed(StampClient.Kind.Extend, "ab", StampClient.stillSendingMessage(StampClient.Kind.Extend), noReport = true), extend)
         StampClient.spendOutcome(StampClient.Kind.Deposit, null, timedOut) { waited++ }
         // Nor a buy that answered, either way.
         assertEquals(StampClient.Spend.Done(StampClient.Kind.Buy, null), StampClient.spendOutcome(StampClient.Kind.Buy, null, StampClient.Answer.Ok(JSONObject())) { waited++ })
@@ -159,7 +159,7 @@ class PublishStampGateTest {
         val answers = ArrayDeque(
             listOf(
                 StampClient.Answer.Ok(JSONObject().put("running", true)),
-                StampClient.Answer.Failed(StampClient.TIMED_OUT),
+                StampClient.Answer.Failed(StampClient.TIMED_OUT, timedOut = true),
                 StampClient.Answer.Failed("The Swarm node isn't running", unbound = true),
                 StampClient.Answer.Ok(JSONObject().put("running", true)),
                 StampClient.Answer.Ok(JSONObject().put("running", false)),

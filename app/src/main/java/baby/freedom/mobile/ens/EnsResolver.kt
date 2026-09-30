@@ -2596,8 +2596,12 @@ class EnsResolver internal constructor(
         /** Tries at a CCIP-Read name whose callback lands on a newer head than its first call. */
         private const val LIGHT_CLIENT_CCIP_ATTEMPTS = 3
 
-        /** How [EnsTrust.agreed] names the light client. */
-        val LIGHT_CLIENT_SOURCE: String get() = Strings.get(R.string.names_light_client_source)
+        /**
+         * How [EnsTrust.agreed] names the light client: a key, not words,
+         * since an answer's trust is cached; [EnsTrust.shownAgreed] shows
+         * it by name in the app language of the moment (#280).
+         */
+        const val LIGHT_CLIENT_SOURCE = "myotis-light-client"
         private const val RPC_MAX_RESPONSE_BYTES = 1L * 1024 * 1024
 
         // Per-gateway bounds for CCIP-Read fetches (same as the desktop

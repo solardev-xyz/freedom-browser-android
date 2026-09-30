@@ -299,8 +299,18 @@ internal object StampClient {
          * [unbound]: this process holds no binder to `:node` right now —
          * not proof `:node` is gone: the Activity that binds it may just
          * be being recreated while `:node` runs on.
+         * [timedOut]: no answer within the wait ([TIMED_OUT]'s words).
+         * [maybeSent]: `:node` says a deposit's transfer may already be
+         * out ([SwarmNode.DEPOSIT_MAYBE_SENT]'s words). Flags, never read
+         * off [message]: that is in the app language, which may change
+         * while a spend is held (#280).
          */
-        data class Failed(val message: String, val unbound: Boolean = false) : Answer
+        data class Failed(
+            val message: String,
+            val unbound: Boolean = false,
+            val timedOut: Boolean = false,
+            val maybeSent: Boolean = false,
+        ) : Answer
     }
 
     /** Runs [method] on the node and waits up to [timeoutMs]. Blocking; never throws. */
@@ -316,9 +326,9 @@ internal object StampClient {
         } finally {
             runCatching { pipe.close() }
         }
-        raw ?: return Answer.Failed(TIMED_OUT)
+        raw ?: return Answer.Failed(TIMED_OUT, timedOut = true)
         val o = runCatching { JSONObject(raw) }.getOrNull() ?: return Answer.Failed(Strings.get(R.string.stamps_node_answer_unreadable))
-        return o.optString("error").takeIf { it.isNotEmpty() }?.let { Answer.Failed(it) } ?: Answer.Ok(o)
+        return o.optString("error").takeIf { it.isNotEmpty() }?.let { Answer.Failed(it, maybeSent = o.optBoolean("maybeSent")) } ?: Answer.Ok(o)
     }
 
     /**
@@ -332,7 +342,7 @@ internal object StampClient {
         return when (val a = call("discover", JSONObject().put("id", id), timeoutMs = DISCOVER_TIMEOUT_MS)) {
             is Answer.Ok -> Result.success(registeredIds(a.json))
             is Answer.Failed -> {
-                if (a.message == TIMED_OUT) {
+                if (a.timedOut) {
                     // The page stopped waiting, but `:node` is most likely
                     // still scanning — and may yet adopt a chequebook and
                     // restart the gateway. The search stays Running (so no
@@ -379,18 +389,18 @@ internal object StampClient {
      */
     internal fun nodeWorkStillRunning(a: Answer): Boolean = when (a) {
         is Answer.Ok -> a.json.optBoolean("running", false)
-        is Answer.Failed -> a.message == TIMED_OUT || a.unbound
+        is Answer.Failed -> a.timedOut || a.unbound
     }
 
     /**
      * How a search that outlived the page's wait ended, from `:node`'s
      * last "discovering" answer ([awaitNodeWorkEnd]): what it found, or
-     * why it failed, if `:node` kept its outcome; [DISCOVER_OVERRAN] if
+     * why it failed, if `:node` kept its outcome; [DiscoverOverran] if
      * not (`:node` went away mid-search).
      */
     internal fun overranOutcome(end: Answer): Result<List<String>> {
         val outcome = (end as? Answer.Ok)?.json?.optJSONObject("outcome")
-            ?: return Result.failure(IllegalStateException(DISCOVER_OVERRAN))
+            ?: return Result.failure(DiscoverOverran())
         return outcome.optString("error").takeIf { it.isNotEmpty() }
             ?.let { Result.failure(IllegalStateException(it)) }
             ?: Result.success(registeredIds(outcome))
@@ -529,7 +539,13 @@ internal object StampClient {
         data object Idle : Spend
         data class Running(val kind: Kind, val batchId: String?) : Spend
         data class Done(val kind: Kind, val batchId: String?) : Spend
-        data class Failed(val kind: Kind, val batchId: String?, val message: String) : Spend
+        /**
+         * [noReport]: it ended without a clear answer — it outlived the
+         * wait, or a deposit may already be out — so it isn't called a
+         * failure. A flag, not read off [message], which is in the app
+         * language (#280).
+         */
+        data class Failed(val kind: Kind, val batchId: String?, val message: String, val noReport: Boolean = false) : Spend
     }
 
     private val _spend = MutableStateFlow<Spend>(Spend.Idle)
@@ -615,12 +631,12 @@ internal object StampClient {
     internal fun spendOutcome(kind: Kind, batchId: String?, a: Answer, awaitBuyEnd: () -> Unit): Spend = when (a) {
         is Answer.Ok -> Spend.Done(kind, batchId)
         is Answer.Failed -> when {
-            a.message != TIMED_OUT -> Spend.Failed(kind, batchId, a.message)
+            !a.timedOut -> Spend.Failed(kind, batchId, a.message, noReport = a.maybeSent)
             kind.mayRestartGateway -> {
                 awaitBuyEnd()
-                Spend.Failed(kind, batchId, if (kind == Kind.Connect) CONNECT_OVERRAN else BUY_OVERRAN)
+                Spend.Failed(kind, batchId, if (kind == Kind.Connect) CONNECT_OVERRAN else BUY_OVERRAN, noReport = true)
             }
-            else -> Spend.Failed(kind, batchId, stillSendingMessage(kind))
+            else -> Spend.Failed(kind, batchId, stillSendingMessage(kind), noReport = true)
         }
     }
 
@@ -648,6 +664,15 @@ internal object StampClient {
     internal val CONNECT_OVERRAN: String get() = Strings.get(R.string.stamps_connect_overran)
     internal val TIMED_OUT: String get() = Strings.get(R.string.stamps_node_timed_out)
     internal val DISCOVER_OVERRAN: String get() = Strings.get(R.string.stamps_discover_overran)
+
+    /**
+     * A search that outlived the page's wait and whose outcome never
+     * reached the app. Told apart by type, not by its words, which are
+     * read in the app language when shown (#280).
+     */
+    class DiscoverOverran : IllegalStateException() {
+        override val message: String get() = DISCOVER_OVERRAN
+    }
 
     /**
      * How often `:node` is asked after a search that outlived

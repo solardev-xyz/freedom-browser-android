@@ -14,6 +14,7 @@ import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.NameSystem
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.l10n.Said
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.ledger.Ledger
 import baby.freedom.mobile.wallet.ledger.LedgerException
@@ -39,8 +40,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
-/** A send the user can't make as asked, with what to tell them. */
-class SendException(message: String, cause: Throwable? = null) : Exception(message, cause)
+/**
+ * A send the user can't make as asked, with what to tell them ([message],
+ * in the app language) and what to tell a site or a peer that asked for
+ * it ([english]: developer-facing, never the user's language, #280).
+ */
+class SendException(message: String, cause: Throwable? = null, val english: String = message) : Exception(message, cause) {
+    constructor(said: Said, cause: Throwable? = null) : this(said.text, cause, said.english)
+}
 
 /** Typed amounts: `1.5` of a token with [decimals] decimals → base units. */
 object SendAmounts {
@@ -513,7 +520,7 @@ class GasOracle(private val rpc: WalletRpc) {
 
         internal fun legacy(gasPrice: BigInteger): EthTransaction.Fees.Legacy {
             // A zero price would sit in the mempool forever and hold every later nonce behind it.
-            if (gasPrice.signum() <= 0) throw SendException(Strings.get(R.string.send_no_gas_price))
+            if (gasPrice.signum() <= 0) throw SendException(Strings.said(R.string.send_no_gas_price))
             // Not refused when high (#233 R1-F1): a legacy price can't be clamped, and a chain
             // may just be priced that way (IoTeX 1000 gwei, Theta 4000). It's shown on a sheet
             // that says it's unusually high, and never sent without one ([quiet]).
@@ -815,7 +822,27 @@ data class SendStatus(val quote: SendQuote, val stage: Stage, val hash: String? 
             val stale: Boolean = false,
             val rejected: Boolean = false,
             val droppedSigned: Boolean = false,
-        ) : Stage
+        ) : Stage {
+            /**
+             * [message] in English, for the site or peer waiting on this
+             * send (#280); null once read back from the journal, where
+             * nobody waits on it any more. Not part of equality: the same
+             * failure, whichever language it's also written in.
+             */
+            var english: String? = null
+                private set
+
+            constructor(
+                message: String,
+                mayHaveGone: Boolean,
+                stale: Boolean = false,
+                rejected: Boolean = false,
+                droppedSigned: Boolean = false,
+                english: String?,
+            ) : this(message, mayHaveGone, stale, rejected, droppedSigned) {
+                this.english = english
+            }
+        }
 
         data object Pending : Stage
         data class Confirmed(val block: Long, val feePaid: BigInteger?) : Stage
@@ -1075,9 +1102,10 @@ class WalletSender internal constructor(
                     show(broadcasting)
                     return@withContext true
                 }
+                val notSaved = Strings.said(R.string.send_save_failed)
                 val failed = SendStatus(
                     quote,
-                    SendStatus.Stage.Failed(Strings.get(R.string.send_save_failed), false),
+                    SendStatus.Stage.Failed(notSaved.text, false, english = notSaved.english),
                 )
                 failedStatus = failed
                 snapshot(failed, null)
@@ -1125,17 +1153,17 @@ class WalletSender internal constructor(
             val tokenBalance = async {
                 token.address?.let { contract ->
                     val r = rpc.call(chainId, JSONObject().put("to", contract).put("data", Erc20.balanceOfData(from)))
-                    Erc20.decodeUint256(r.value) ?: throw SendException(Strings.get(R.string.send_token_no_balance, token.symbol))
+                    Erc20.decodeUint256(r.value) ?: throw SendException(Strings.said(R.string.send_token_no_balance, token.symbol))
                 }
             }
             val nonce = async { nonces.next(from, chainId) }
             val fees = async { gas.fees(chainId) }
             val held = tokenBalance.await() ?: native.await()
             // A site's call may carry no value: the fee check below says what's missing then.
-            if (held.signum() == 0 && request.dapp == null) throw SendException(Strings.get(R.string.send_no_token, token.symbol))
+            if (held.signum() == 0 && request.dapp == null) throw SendException(Strings.said(R.string.send_no_token, token.symbol))
             if (!all && request.amount > held) {
                 throw SendException(
-                    Strings.get(R.string.send_not_enough_token, token.symbol, SendAmounts.exact(held, token.decimals)),
+                    Strings.said(R.string.send_not_enough_token, token.symbol, SendAmounts.exact(held, token.decimals)),
                 )
             }
             // Max: all of a token; all of the native currency is priced first, then less the fee.
@@ -1165,13 +1193,13 @@ class WalletSender internal constructor(
             val has = SendAmounts.exact(nativeBalance, request.chain.decimals)
             if (all && token.isNative) {
                 val rest = nativeBalance - tx.maxFee
-                if (rest.signum() <= 0) throw SendException(Strings.get(R.string.send_not_enough_for_fee_all, symbol, fee, has))
+                if (rest.signum() <= 0) throw SendException(Strings.said(R.string.send_not_enough_for_fee_all, symbol, fee, has))
                 sending = sending.copy(amount = rest)
                 tx = tx.copy(value = rest)
             }
             if (tx.maxFee + tx.value > nativeBalance) {
                 val what = if (token.isNative && tx.value.signum() > 0) R.string.send_not_enough_for_amount_and_fee else R.string.send_not_enough_for_fee
-                throw SendException(Strings.get(what, symbol, fee, has))
+                throw SendException(Strings.said(what, symbol, fee, has))
             }
             SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash, sendsBefore)
         }
@@ -1180,7 +1208,7 @@ class WalletSender internal constructor(
     } catch (e: SendException) {
         throw e
     } catch (e: ChainRpcException) {
-        throw SendException(readFailure(e), e)
+        throw SendException(readFailureSaid(e), e)
     }
 
     /** Whether [quote] is too old to sign as is (its fees may no longer get it mined). */
@@ -1317,18 +1345,18 @@ class WalletSender internal constructor(
     private suspend fun signingFailed(quote: SendQuote, e: Exception) {
         when (e) {
             is QuoteStaleException -> failStale(quote, droppedSigned = false)
-            is SigningHeldException -> fail(quote, Strings.get(R.string.send_signing_held, e.message.orEmpty()), false)
+            is SigningHeldException -> fail(quote, Strings.said(R.string.send_signing_held, Said.of(e.message.orEmpty())), false)
             is VaultLockedException ->
-                fail(quote, Strings.get(R.string.send_signing_locked), false)
+                fail(quote, Strings.said(R.string.send_signing_locked), false)
             is LedgerException -> {
                 // The Ledger's own words: rejected, locked, disconnected, timed out… (#142)
-                val said = e.message.orEmpty()
+                val said = e.said
                 val rejected = e.kind == LedgerException.Kind.REJECTED || e.kind == LedgerException.Kind.CANCELLED
-                fail(quote, if (e.kind.saysNothingSent && said == e.kind.message) said else Strings.get(R.string.send_ledger_failed, said), false, rejected)
+                fail(quote, if (e.kind.saysNothingSent && !e.ownWords) said else Strings.said(R.string.send_ledger_failed, said), false, rejected)
             }
             else -> {
                 Log.w(TAG, "signing failed: ${e.javaClass.simpleName}")
-                fail(quote, Strings.get(R.string.send_signing_failed), false)
+                fail(quote, Strings.said(R.string.send_signing_failed), false)
             }
         }
     }
@@ -1338,8 +1366,13 @@ class WalletSender internal constructor(
         /** A node took it: [hash] is on its way (the wallet page follows it to a receipt). */
         data class Sent(val hash: String) : Broadcast
 
-        /** It didn't go out — or, with [mayHaveGone], can't be told (the wallet page offers Try again). */
-        data class Failed(val message: String, val mayHaveGone: Boolean) : Broadcast
+        /**
+         * It didn't go out — or, with [mayHaveGone], can't be told (the wallet page offers Try again).
+         * [english]: [message] for the peer that asked (#280).
+         */
+        data class Failed(val message: String, val mayHaveGone: Boolean, val english: String = message) : Broadcast {
+            constructor(said: Said, mayHaveGone: Boolean) : this(said.text, mayHaveGone, said.english)
+        }
 
         /** [Submit.BUSY]: another send is still unresolved; nothing signed. */
         data object Busy : Broadcast
@@ -1373,15 +1406,15 @@ class WalletSender internal constructor(
         val s = status.first { it?.quote !== quote || (it.stage != SendStatus.Stage.Signing && it.stage != SendStatus.Stage.Broadcasting) }
         if (s?.quote !== quote) {
             // Stopped on the phone (Stop tracking, or the wallet removed) while it was going out.
-            return Broadcast.Failed(Strings.get(R.string.send_stopped_on_phone), true)
+            return Broadcast.Failed(Strings.said(R.string.send_stopped_on_phone), true)
         }
         return when (val stage = s.stage) {
             is SendStatus.Stage.Failed -> when {
                 stage.stale -> Broadcast.Stale(stage.droppedSigned)
                 stage.rejected -> Broadcast.Rejected
-                else -> Broadcast.Failed(stage.message, stage.mayHaveGone)
+                else -> Broadcast.Failed(stage.message, stage.mayHaveGone, stage.english ?: NOT_SENT_ENGLISH)
             }
-            else -> s.hash?.let { Broadcast.Sent(it) } ?: Broadcast.Failed(Strings.get(R.string.send_no_hash), true)
+            else -> s.hash?.let { Broadcast.Sent(it) } ?: Broadcast.Failed(Strings.said(R.string.send_no_hash), true)
         }
     }
 
@@ -1587,12 +1620,14 @@ class WalletSender internal constructor(
     private suspend fun set(quote: SendQuote, stage: SendStatus.Stage, hash: String?): Boolean =
         journalThenShow(quote) { SendStatus(quote, stage, hash) }
 
-    private suspend fun fail(quote: SendQuote, message: String, mayHaveGone: Boolean, rejected: Boolean = false) =
-        journalThenShow(quote) { it.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone, rejected = rejected)) }
+    private suspend fun fail(quote: SendQuote, message: Said, mayHaveGone: Boolean, rejected: Boolean = false) =
+        journalThenShow(quote) {
+            it.copy(stage = SendStatus.Stage.Failed(message.text, mayHaveGone, rejected = rejected, english = message.english))
+        }
 
     private suspend fun failStale(quote: SendQuote, droppedSigned: Boolean) = journalThenShow(quote) {
-        val message = if (droppedSigned) STALE_WHILE_SIGNING else STALE_BEFORE_SIGNING
-        it.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone = false, stale = true, droppedSigned = droppedSigned))
+        val message = Strings.said(if (droppedSigned) R.string.send_stale_while_signing else R.string.send_stale_before_signing)
+        it.copy(stage = SendStatus.Stage.Failed(message.text, mayHaveGone = false, stale = true, droppedSigned = droppedSigned, english = message.english))
     }
 
     companion object {
@@ -1620,6 +1655,13 @@ class WalletSender internal constructor(
 
         /** A send the last process died broadcasting, as the next one finds it. */
         internal val INTERRUPTED: String get() = Strings.get(R.string.send_interrupted)
+
+        /**
+         * What a site or a peer hears for a failure with no English
+         * words of its own ([SendStatus.Stage.Failed.english] null):
+         * developer-facing, so never in the user's language (#280).
+         */
+        const val NOT_SENT_ENGLISH = "The transaction didn't go out."
 
         /** Why a send was dropped unsent: its quote aged past [SIGNED_TTL_MS] while it was signed. */
         internal val STALE_WHILE_SIGNING: String get() = Strings.get(R.string.send_stale_while_signing)
@@ -1686,31 +1728,34 @@ class WalletSender internal constructor(
             takeIf { it.startsWith("0x") && it.length in 3..66 }?.let { runCatching { BigInteger(it.substring(2), 16) }.getOrNull() }
 
         /** A read (balance, nonce, fee, estimate) that failed, for the user. */
-        internal fun readFailure(e: ChainRpcException): String = when (e) {
-            is ChainRpcException.UnknownChain -> Strings.get(R.string.send_read_unknown_chain)
-            is ChainRpcException.AllSourcesFailed -> Strings.get(R.string.send_read_no_rpc)
-            is ChainRpcException.Rpc -> Strings.get(R.string.send_read_rpc_error, clip(e.rpcMessage))
-            else -> Strings.get(R.string.send_read_nonsense)
+        internal fun readFailure(e: ChainRpcException): String = readFailureSaid(e).text
+
+        /** [readFailure], and the same in English for a site or a peer (#280). */
+        internal fun readFailureSaid(e: ChainRpcException): Said = when (e) {
+            is ChainRpcException.UnknownChain -> Strings.said(R.string.send_read_unknown_chain)
+            is ChainRpcException.AllSourcesFailed -> Strings.said(R.string.send_read_no_rpc)
+            is ChainRpcException.Rpc -> Strings.said(R.string.send_read_rpc_error, clip(e.rpcMessage))
+            else -> Strings.said(R.string.send_read_nonsense)
         }
 
         /** The gas estimate failed: the chain would refuse the transaction as it stands. */
         internal fun estimateFailure(e: ChainRpcException.Rpc, request: SendRequest): SendException {
             val symbol = request.chain.symbol
             val message = when {
-                e.insufficientFunds -> Strings.get(R.string.send_estimate_insufficient, symbol)
+                e.insufficientFunds -> Strings.said(R.string.send_estimate_insufficient, symbol)
                 e.data != null || e.code == ChainRpcException.EXECUTION_REVERTED || REVERTED.containsMatchIn(e.rpcMessage) -> {
                     val reason = e.data?.let(::revertReason) ?: REVERTED.find(e.rpcMessage)?.let { e.rpcMessage.substring(it.range.last + 1).trim(' ', ':') }
                     val why = reason?.takeIf { it.isNotBlank() }?.let(::clip)
                     when {
-                        request.dapp != null -> why?.let { Strings.get(R.string.send_estimate_contract_refuses_reason, it) }
-                            ?: Strings.get(R.string.send_estimate_contract_refuses)
-                        request.token.isNative -> why?.let { Strings.get(R.string.send_estimate_recipient_refuses_reason, it) }
-                            ?: Strings.get(R.string.send_estimate_recipient_refuses)
-                        else -> why?.let { Strings.get(R.string.send_estimate_token_refuses_reason, request.token.symbol, it) }
-                            ?: Strings.get(R.string.send_estimate_token_refuses, request.token.symbol)
+                        request.dapp != null -> why?.let { Strings.said(R.string.send_estimate_contract_refuses_reason, it) }
+                            ?: Strings.said(R.string.send_estimate_contract_refuses)
+                        request.token.isNative -> why?.let { Strings.said(R.string.send_estimate_recipient_refuses_reason, it) }
+                            ?: Strings.said(R.string.send_estimate_recipient_refuses)
+                        else -> why?.let { Strings.said(R.string.send_estimate_token_refuses_reason, request.token.symbol, it) }
+                            ?: Strings.said(R.string.send_estimate_token_refuses, request.token.symbol)
                     }
                 }
-                else -> Strings.get(R.string.send_estimate_failed, clip(e.rpcMessage))
+                else -> Strings.said(R.string.send_estimate_failed, clip(e.rpcMessage))
             }
             return SendException(message, e)
         }
@@ -1739,29 +1784,29 @@ class WalletSender internal constructor(
          * send's nonce ([NonceTracker.Abandoned.heldBy]), named instead of
          * [SendQuote.replaces] when the nonce is refused as used.
          */
-        internal fun broadcastFailure(e: ChainRpcException, quote: SendQuote, heldBy: String? = null): Pair<String, Boolean> {
+        internal fun broadcastFailure(e: ChainRpcException, quote: SendQuote, heldBy: String? = null): Pair<Said, Boolean> {
             val node = nodeErrorOf(e)
             val unanswered = (e as? ChainRpcException.AllSourcesFailed)?.unanswered == true
             val symbol = quote.request.chain.symbol
             val m = node?.rpcMessage?.lowercase().orEmpty()
             val nonce = quote.tx.nonce.toString()
             return when {
-                node == null -> Strings.get(R.string.send_broadcast_uncertain) to true
-                unanswered -> Strings.get(R.string.send_broadcast_one_unanswered, clip(node.rpcMessage)) to true
-                node.insufficientFunds -> Strings.get(R.string.send_broadcast_insufficient, symbol) to false
-                "nonce too high" in m -> Strings.get(R.string.send_broadcast_nonce_too_high, nonce) to false
+                node == null -> Strings.said(R.string.send_broadcast_uncertain) to true
+                unanswered -> Strings.said(R.string.send_broadcast_one_unanswered, clip(node.rpcMessage)) to true
+                node.insufficientFunds -> Strings.said(R.string.send_broadcast_insufficient, symbol) to false
+                "nonce too high" in m -> Strings.said(R.string.send_broadcast_nonce_too_high, nonce) to false
                 nonceUsed(e) && quote.replaces != null && heldBy != null ->
-                    Strings.get(R.string.send_broadcast_nonce_used_by_replacement, nonce, heldBy) to false
+                    Strings.said(R.string.send_broadcast_nonce_used_by_replacement, nonce, heldBy) to false
                 nonceUsed(e) && quote.replaces != null ->
-                    Strings.get(R.string.send_broadcast_nonce_used_by_stopped, nonce, quote.replaces) to false
-                nonceUsed(e) -> Strings.get(R.string.send_broadcast_nonce_used, nonce) to false
-                "invalid nonce" in m -> Strings.get(R.string.send_broadcast_invalid_nonce, nonce) to false
+                    Strings.said(R.string.send_broadcast_nonce_used_by_stopped, nonce, quote.replaces) to false
+                nonceUsed(e) -> Strings.said(R.string.send_broadcast_nonce_used, nonce) to false
+                "invalid nonce" in m -> Strings.said(R.string.send_broadcast_invalid_nonce, nonce) to false
                 "replacement" in m && "underpriced" in m && quote.replaces != null ->
-                    Strings.get(R.string.send_broadcast_stopped_holds_nonce, nonce) to false
-                "replacement" in m && "underpriced" in m -> Strings.get(R.string.send_broadcast_nonce_waiting, nonce) to false
+                    Strings.said(R.string.send_broadcast_stopped_holds_nonce, nonce) to false
+                "replacement" in m && "underpriced" in m -> Strings.said(R.string.send_broadcast_nonce_waiting, nonce) to false
                 "underpriced" in m || "fee cap" in m || "base fee" in m || "too low" in m ->
-                    Strings.get(R.string.send_broadcast_underpriced) to false
-                else -> Strings.get(R.string.send_broadcast_rpc_error, clip(node.rpcMessage)) to true
+                    Strings.said(R.string.send_broadcast_underpriced) to false
+                else -> Strings.said(R.string.send_broadcast_rpc_error, clip(node.rpcMessage)) to true
             }
         }
 

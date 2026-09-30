@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Text
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -153,7 +155,7 @@ class AppUpdatesTest {
         // A later release than the closed one shows again.
         assertEquals(release("v0.6.12"), state.copy(dismissedTag = "v0.6.11", latest = release("v0.6.12")).notice)
         assertNull(state.copy(enabled = false).notice)
-        assertNull(state.copy(store = "Google Play").notice)
+        assertNull(state.copy(store = Text.raw("Google Play")).notice)
         // Installed since: nothing to announce.
         assertNull(state.copy(installedName = "0.6.11").notice)
         assertNull(state.copy(installedName = "0.7.0").notice)
@@ -191,10 +193,10 @@ class AppUpdatesTest {
         )
         // A stamp with nothing found yet (the process died mid-check).
         assertEquals("Last checked day 5", appUpdateLine(base.copy(lastCheckedAt = 5), at))
-        assertEquals("Updates come from F-Droid", appUpdateLine(base.copy(store = "F-Droid"), at))
+        assertEquals("Updates come from F-Droid", appUpdateLine(base.copy(store = Text.raw("F-Droid")), at))
         assertEquals(
             "Installed from F-Droid, which keeps Freedom up to date: no check runs",
-            appUpdateStoreLine(base.copy(store = "F-Droid")),
+            appUpdateStoreLine(base.copy(store = Text.raw("F-Droid"))),
         )
         assertNull(appUpdateStoreLine(base))
     }
@@ -260,6 +262,20 @@ class AppUpdatesTest {
     private fun reason(f: Fetched) = (f as Fetched.Error).reason
 
     @Test
+    fun `a held failure and store name read in the app language of the moment`() {
+        // Kept as resources, not words, in state (#313 R1-M3).
+        val failed = UpdateCheckOutcome.Failed(Text.res(R.string.settings_updates_error_unreachable))
+        val store = storeTextFor("org.fdroid.fdroid")!!
+        val english = failed.reason
+        baby.freedom.mobile.l10n.inPseudoLanguage {
+            assertEquals("[xx] $english", failed.reason)
+            assertEquals("[xx] F-Droid", store.text)
+        }
+        assertEquals(english, failed.reason)
+        assertEquals("F-Droid", store.text)
+    }
+
+    @Test
     fun `only the deadline reads as GitHub taking too long`() = runBlocking {
         // A RuntimeException out of responseCode fails at once, and says so.
         val thrown = fetchLatestRelease(5_000) { FakeConnection({ throw IllegalStateException("boom") }) }
@@ -314,6 +330,6 @@ class AppUpdatesTest {
         state.value = state.value.copy(checking = false)
         assertTrue(state.claimCheck())
         // A store install never checks.
-        assertFalse(MutableStateFlow(AppUpdateState(store = "F-Droid")).claimCheck())
+        assertFalse(MutableStateFlow(AppUpdateState(store = Text.raw("F-Droid"))).claimCheck())
     }
 }

@@ -154,7 +154,8 @@
       // once the page has committed: evaluateJavascript calls
       // window.__errorPageStrings(table) (ErrorPage.stringsScript). Keys
       // are the `errorpage_` resources' names without that prefix.
-      // Nothing shows until then, so no half-English page flashes.
+      // Nothing shows until then, so no half-English page flashes; if it
+      // never comes, the page shows in English (FALLBACK, below).
       let S = {};
 
       // The string [key] with its `%1$s`-style arguments filled in.
@@ -389,12 +390,21 @@
         if (retryLabel) document.getElementById('retry-btn').textContent = retryLabel;
       }
 
-      // Run once, when the app hands over the strings; a table that came
-      // before this script ran was parked in window.__errorPageTable.
+      // The English text, in case the app's table never comes: the page
+      // is never left blank without a Retry. Kept equal to the English
+      // resources by ErrorPageStringsTest; the app's table, in the app's
+      // language, replaces it whenever it arrives.
+      const FALLBACK = /* EN-FALLBACK */{"page_default_title":"Content Unavailable","page_default_description":"This content could not be retrieved from the decentralized network. The address may be invalid, the content may no longer exist, or no peers are serving it.","page_continue_once":"Continue once","page_try_again":"Try Again","ens_not_found_title":"No content for this %1$s name","page_ens_not_found_tezos":"This Tezos Domains name doesn't point at a website. The owner may not have set a \u003ccode\u003eweb:content_url\u003c/code\u003e record, the name isn't registered, or it has expired.","page_ens_not_found_no_resolver":"This %1$s name doesn't point at any content yet. The owner may not have set a \u003ccode\u003econtenthash\u003c/code\u003e record, or the name has no resolver.","page_ens_not_found_unregistered":"This %1$s name doesn't point at any content yet. The owner may not have set a \u003ccode\u003econtenthash\u003c/code\u003e record, or the name isn't registered.","ens_wrong_protocol_title":"Name lives on a different network","page_wrong_protocol_networks":"This %1$s name resolves to %2$s content, not %3$s. The %4$s:// you typed asks for %3$s only, so Freedom did not switch networks for you.","page_open_on_network":"Open on %1$s","page_wrong_protocol_contenthash":"This %1$s name resolves to content on a different network than the scheme you typed asks for. Try the name on its own \u0026mdash; the browser will follow wherever its \u003ccode\u003econtenthash\u003c/code\u003e points.","page_wrong_protocol_website_record":"This %1$s name resolves to content on a different network than the scheme you typed asks for. Try the name on its own \u0026mdash; the browser will follow wherever its website record points.","unsupported_format_title":"Unsupported content format","page_unsupported_codec":"This %1$s name resolves to a content format Freedom Browser cannot load yet on mobile.","ens_invalid_name_title":"Not a valid %1$s name","ens_invalid_name_description":"This name breaks the ENSIP-15 naming rules (a disallowed character, mixed scripts, a lookalike, \u0026hellip;), so Freedom Browser won't look it up \u0026mdash; other %1$s apps refuse it too, and it could be mistaken for a different name. Check the spelling.","ens_name_too_long_title":"%1$s name too long","ens_name_too_long_description":"A label of this name is longer than the 255 bytes an %1$s lookup can carry, so Freedom Browser can't ask a resolver about it. Check the address.","not_cross_checked_title":"Not cross-checked","page_ens_unverified":"Only one %1$s RPC server answered for this %2$s name, so Freedom couldn't check its answer against another server. The address below may be right, but a single misbehaving server could have picked it.","rpc_disagreed_title":"RPC servers disagreed","page_ens_conflict":"The %1$s RPC servers Freedom asked gave different answers for this %2$s name. At least one of them is wrong \u0026mdash; or lying \u0026mdash; so nothing was loaded. Try again in a moment.","lookup_failed_title":"%1$s lookup failed","ccip_disabled_description":"This name is resolved through an off-chain gateway (CCIP-Read), which is turned off in Settings \u0026rarr; Name resolution.","tezos_rpc_unreachable_description":"Couldn't reach a Tezos RPC endpoint to resolve this name. Check your connection and try again.","ethereum_rpc_unreachable_description":"Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your connection, or the endpoints in Settings \u0026rarr; RPC providers, and try again.","page_web3_unverified":"Only one RPC server returned this onchain app's code, so Freedom couldn't check it against another server. It may be the real app, but a single misbehaving server could have changed it. Continue only if you trust that server with this app.","page_web3_conflict":"The RPC servers Freedom asked returned different code for this onchain app. At least one of them is wrong \u0026mdash; or lying \u0026mdash; so nothing was run. Try again in a moment.","page_web3_unknown_chain_title":"Unknown chain","page_web3_unknown_chain":"This app lives on a chain that isn't in your chain list, so Freedom doesn't know which RPC servers to ask. Add the chain in Settings, then try again.","page_web3_not_an_app_title":"Not an onchain app","page_web3_not_an_app":"The contract didn't return an ERC-8244 \u003ccode\u003ehtml()\u003c/code\u003e document on this chain. Check the address and the chain ID.","page_web3_too_large_title":"App too large","page_web3_too_large":"The app's document is larger than Freedom loads.","page_web3_invalid_title":"Not a web3:// app address","page_web3_invalid":"Freedom loads web3:// apps by contract address: \u003ccode\u003eweb3://0x\u0026hellip;[:chainId]/\u003c/code\u003e. Names are not supported yet.","page_web3_lookup_failed_title":"Couldn't read the app","page_web3_lookup_failed":"Couldn't get an answer from the chain's RPC servers. Check your connection and try again.","cert_title":"Connection isn't secure","cert_description_expired":"Freedom didn't load %1$s because its security certificate has expired.","cert_description_not_yet_valid":"Freedom didn't load %1$s because its security certificate isn't valid yet. If your device's date and time are wrong, correct them and try again.","cert_description_date_invalid":"Freedom didn't load %1$s because its security certificate has invalid dates.","cert_description_wrong_host":"Freedom didn't load %1$s because its security certificate was issued for a different site.","cert_description_untrusted":"Freedom didn't load %1$s because its security certificate wasn't issued by an authority this device trusts.","cert_description_invalid":"Freedom didn't load %1$s because its security certificate is not valid.","cert_description_risk":"Someone could be impersonating the site or intercepting the connection, or the site is misconfigured.","page_swarm_not_ready_title":"Content not ready yet","page_swarm_not_ready":"Couldn't find this content on the Swarm network yet. The node is still connecting to peers \u0026mdash; try again in a moment.","page_swarm_not_found_detail":"Swarm content not found (timeout)","page_swarm_node_stopped":"The Swarm node is not running. Open the Nodes panel %1$s from the menu to start it.","page_swarm_gateway_unreachable":"Couldn't reach the Swarm gateway. Check that the node is running and try again.","page_unknown_error":"Unknown error"}/* /EN-FALLBACK */;
+      const FALLBACK_AFTER_MS = 1500;
+
+      // Run when the app hands over the strings; a table that came before
+      // this script ran was parked in window.__errorPageTable. Once the
+      // app's own table ran, nothing replaces it.
       let started = false;
-      function start(table) {
-        if (started || !table || typeof table !== 'object') return;
-        started = true;
+      function start(table, fallback) {
+        if (started === true || !table || typeof table !== 'object') return;
+        if (started && fallback) return;
+        started = fallback ? 'fallback' : true;
         S = table;
         document.title = fmt('page_default_title');
         titleEl.textContent = fmt('page_default_title');
@@ -403,8 +413,9 @@
         document.getElementById('retry-btn').textContent = fmt('page_try_again');
         displayError().finally(() => document.body.classList.add('ready'));
       }
-      window.__errorPageStrings = start;
-      if (window.__errorPageTable) start(window.__errorPageTable);
+      window.__errorPageStrings = (table) => start(table, false);
+      if (window.__errorPageTable) start(window.__errorPageTable, false);
+      setTimeout(() => start(FALLBACK, true), FALLBACK_AFTER_MS);
 
       if (continueUrl) {
         const continueBtn = document.getElementById('continue-btn');

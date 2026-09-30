@@ -214,7 +214,8 @@ object EthereumProviders {
             } else if (stage.rejected) {
                 EthereumProvider.Submitted.Rejected
             } else {
-                EthereumProvider.Submitted.Failed(stage.message, status.hash.takeIf { stage.mayHaveGone })
+                // English, for the page (#280).
+                EthereumProvider.Submitted.Failed(stage.english ?: WalletSender.NOT_SENT_ENGLISH, status.hash.takeIf { stage.mayHaveGone })
             }
             else -> status.hash?.let { EthereumProvider.Submitted.Sent(it) }
                 ?: EthereumProvider.Submitted.Failed("The transaction didn't go out.", null)

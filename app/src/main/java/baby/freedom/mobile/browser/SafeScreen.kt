@@ -1883,7 +1883,8 @@ internal fun safeSelfCallThreshold(call: SafeSelfCall, owners: List<String>?, sa
     return when {
         t.signum() == 0 || t > BigInteger.valueOf(n.toLong()) -> Strings.plural(R.plurals.safe_threshold_impossible, n, n)
         t == BigInteger.ONE && n > 1 -> Strings.plural(R.plurals.safe_threshold_any_one, n, n)
-        else -> Strings.plural(R.plurals.safe_threshold_must_sign, n, t, n)
+        // The threshold as the request has it, in plain digits (#313 R1-M4).
+        else -> Strings.plural(R.plurals.safe_threshold_must_sign, n, t.toString(), n)
     }
 }
 

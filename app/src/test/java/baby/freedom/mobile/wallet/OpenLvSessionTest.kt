@@ -1,5 +1,9 @@
 package baby.freedom.mobile.wallet
 
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.PseudoLanguage
+import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.inPseudoLanguage
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
@@ -474,6 +478,39 @@ class OpenLvSessionTest {
         assertEquals("0x" + Keccak256.digest(raw.hexToBytes()).toHex(), hash)
         assertEquals(1, keys.ledgerSigned)
         assertEquals(true, keys.freshAsked) // the quote's age is checked once the Ledger is ready
+    }
+
+    @Test
+    fun `what the peer reads stays English in a translated build`() {
+        // The app language must not reach the peer (#313 R1-F1).
+        val (s, engine, keys) = session(FakeEngine(), LedgerKeys())
+        s.startOnScope()
+        s.onRequest(1, 1, "wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x64")))
+        engine.next()
+        inPseudoLanguage {
+            // A Ledger failure while signing a transaction: the wallet page's
+            // words are the app language's, the peer's English.
+            keys.ledgerFails = LedgerException(LedgerException.Kind.LOCKED)
+            val tx = JSONObject().put("from", ledgerAccount.address).put("to", account1.address).put("value", "0x1").put("chainId", "0x64")
+            s.onRequest(1, 2, "eth_sendTransaction", JSONArray().put(tx))
+            s.awaitSheet().decide(OpenLvSession.Decision.Approve())
+            val failed = engine.next().third as OpenLvResponse.Error
+            assertEquals(OpenLvSession.INTERNAL, failed.code)
+            assertFalse(failed.message, failed.message.contains(PseudoLanguage.MARK))
+            assertTrue(failed.message, failed.message.startsWith(Strings.english(R.string.signing_ledger_error_locked)))
+            // One that can't be priced: more than the account holds.
+            keys.ledgerFails = null
+            s.onRequest(1, 3, "eth_sendTransaction", JSONArray().put(JSONObject(tx.toString()).put("value", "0x" + "f".repeat(30))))
+            val unpriced = engine.next().third as OpenLvResponse.Error
+            assertFalse(unpriced.message, unpriced.message.contains(PseudoLanguage.MARK))
+            assertTrue(unpriced.message, unpriced.message.startsWith("Not enough"))
+            // A Ledger failure while signing a message.
+            keys.ledgerFails = LedgerException(LedgerException.Kind.DISCONNECTED)
+            s.onRequest(1, 4, "personal_sign", JSONArray().put("0x68656c6c6f").put(ledgerAccount.address))
+            s.awaitSheet().decide(OpenLvSession.Decision.Approve())
+            val message = engine.next().third as OpenLvResponse.Error
+            assertEquals("Ledger: " + Strings.english(R.string.signing_ledger_error_disconnected), message.message)
+        }
     }
 
     @Test

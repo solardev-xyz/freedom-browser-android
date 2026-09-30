@@ -118,12 +118,12 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
 
     /** Who gave a proof: the prover's host(s), or the prover by name. */
     private val prover: String
-        get() = trust.agreed.joinToString(Strings.get(R.string.names_trust_prover_separator))
+        get() = trust.shownAgreed.joinToString(Strings.get(R.string.names_trust_prover_separator))
             .ifEmpty { Strings.get(R.string.names_trust_colibri_prover) }
 
     /** The one server that answered, by host when known. */
     private val loneServer: String
-        get() = trust.agreed.singleOrNull() ?: Strings.get(R.string.names_trust_one_rpc_server)
+        get() = trust.shownAgreed.singleOrNull() ?: Strings.get(R.string.names_trust_one_rpc_server)
 
     /** One sentence on what the tier means for this answer. */
     val summary: String
@@ -290,7 +290,7 @@ internal fun TrustDetailsDialog(
                                 TrustTier.Verified -> stringResource(R.string.names_fact_agreed, trust.trust.agreed.size)
                                 TrustTier.Unverified -> stringResource(R.string.names_fact_answered_by)
                             },
-                            trust.trust.agreed.joinToString("\n"),
+                            trust.trust.shownAgreed.joinToString("\n"),
                         )
                     }
                     if (trust.trust.dissented.isNotEmpty()) {

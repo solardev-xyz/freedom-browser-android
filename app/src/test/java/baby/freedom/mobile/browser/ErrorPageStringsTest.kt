@@ -35,8 +35,20 @@ class ErrorPageStringsTest {
     @Test
     fun `the page takes its table from the app's script`() {
         // ErrorPage.stringsScript calls this, or parks the table here.
-        assertTrue(page.contains("window.__errorPageStrings = start;"))
-        assertTrue(page.contains("if (window.__errorPageTable) start(window.__errorPageTable);"))
+        assertTrue(page.contains("window.__errorPageStrings = (table) => start(table, false);"))
+        assertTrue(page.contains("if (window.__errorPageTable) start(window.__errorPageTable, false);"))
+    }
+
+    @Test
+    fun `the page falls back to the English table if the app's never comes`() {
+        // Never blank, never without Retry (#313 R1-M2): after a short wait
+        // it shows in English, and the app's table still replaces that.
+        val fallback = Regex("""/\* EN-FALLBACK \*/(.*?)/\* /EN-FALLBACK \*/""", RegexOption.DOT_MATCHES_ALL)
+            .find(page)?.groupValues?.get(1)
+        assertEquals("error.html's FALLBACK must equal the English strings", ErrorPage.stringsJson(), fallback)
+        assertTrue(page.contains("setTimeout(() => start(FALLBACK, true), FALLBACK_AFTER_MS);"))
+        assertTrue(page.contains("if (started === true || !table || typeof table !== 'object') return;"))
+        assertTrue(page.contains("if (started && fallback) return;"))
     }
 
     @Test

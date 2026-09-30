@@ -51,7 +51,6 @@ import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
-import baby.freedom.swarm.SwarmNode
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.CancellationException
@@ -94,7 +93,7 @@ internal fun discoverStatusText(discovery: StampClient.Discovery): String? = whe
     is StampClient.Discovery.Finished -> discovery.found.fold(
         onSuccess = { ids -> discoverOutcomeText(ids.size) },
         // It ran on after the page stopped waiting, and its outcome never reached the app.
-        onFailure = { if (it.message == StampClient.DISCOVER_OVERRAN) it.message else Strings.get(R.string.stamps_discover_failed, it.message) },
+        onFailure = { if (it is StampClient.DiscoverOverran) it.message else Strings.get(R.string.stamps_discover_failed, it.message) },
     )
 }
 
@@ -117,13 +116,13 @@ internal fun spendStatusText(spend: StampClient.Spend): String? = when (spend) {
         when (spend.kind) {
             // Outlived the page's wait (#222 R4-F1): no answer, so not a failure either.
             StampClient.Kind.Buy ->
-                if (spend.message == StampClient.BUY_OVERRAN) R.string.stamps_spend_buy_no_report else R.string.stamps_spend_buy_failed
+                if (spend.noReport) R.string.stamps_spend_buy_no_report else R.string.stamps_spend_buy_failed
             StampClient.Kind.Extend -> R.string.stamps_spend_extend_failed
             StampClient.Kind.Connect ->
-                if (spend.message == StampClient.CONNECT_OVERRAN) R.string.stamps_spend_connect_no_report else R.string.stamps_spend_connect_failed
+                if (spend.noReport) R.string.stamps_spend_connect_no_report else R.string.stamps_spend_connect_failed
             // Ended without a clear answer (#117): not a failure, it may be out.
             StampClient.Kind.Deposit ->
-                if (spend.message.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT)) R.string.stamps_spend_deposit_no_report else R.string.stamps_spend_deposit_failed
+                if (spend.noReport) R.string.stamps_spend_deposit_no_report else R.string.stamps_spend_deposit_failed
         },
         spend.message,
     )

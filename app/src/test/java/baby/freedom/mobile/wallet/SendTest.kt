@@ -1747,7 +1747,8 @@ class SendTest {
         )
         fun rpc(message: String) = ChainRpcException.Rpc(-32000, message, null)
         fun check(e: ChainRpcException, start: String, uncertain: Boolean) {
-            val (m, u) = WalletSender.broadcastFailure(e, quote)
+            val (said, u) = WalletSender.broadcastFailure(e, quote)
+            val m = said.text
             assertTrue(m, m.startsWith(start))
             assertEquals(m, uncertain, u)
         }
@@ -1760,11 +1761,12 @@ class SendTest {
         check(rpc("nonce too low"), "Not sent: nonce 4 was already used", false)
         check(rpc("OldNonce, Current: 5, tx: 4"), "Not sent: nonce 4 was already used", false)
         // Replacing a send given up on: a used nonce is most likely that one having gone through.
-        val (m, u) = WalletSender.broadcastFailure(rpc("nonce too low"), quote.copy(replaces = "0xab"))
+        val (m, u) = WalletSender.broadcastFailure(rpc("nonce too low"), quote.copy(replaces = "0xab")).let { it.first.text to it.second }
         assertTrue(m, m.contains("the send you stopped tracking went through (0xab)"))
         assertFalse(u)
         // Its own replacement found mined on that nonce: that's what's named (#257 R2-F1).
         val (held, heldUncertain) = WalletSender.broadcastFailure(rpc("nonce too low"), quote.copy(replaces = "0xab"), heldBy = "0xcd")
+            .let { it.first.text to it.second }
         assertTrue(held, held.contains("which went through (0xcd)"))
         assertFalse(held, "0xab" in held)
         assertFalse(heldUncertain)

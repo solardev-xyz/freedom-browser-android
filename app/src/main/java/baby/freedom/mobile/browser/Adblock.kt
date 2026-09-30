@@ -8,6 +8,7 @@ import androidx.annotation.StringRes
 import baby.freedom.mobile.R
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.Text
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -641,7 +642,7 @@ internal object Adblock {
         val app = appContext
         if (lists == null || settings == null || app == null) {
             // Only before [start]; say so rather than leave the row blank.
-            val outcome = AdblockUpdateOutcome.Failed(Strings.get(R.string.settings_adblock_not_started))
+            val outcome = AdblockUpdateOutcome.Failed(Text.res(R.string.settings_adblock_not_started))
             _updateState.value = AdblockUpdateState(checking = false, last = outcome)
             return outcome
         }

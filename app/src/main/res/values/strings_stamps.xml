@@ -34,7 +34,7 @@
     </plurals>
     <string name="stamps_node_answer_unreadable">The Swarm node\'s answer couldn\'t be read</string>
     <string name="stamps_something_went_wrong">Something went wrong</string>
-    <!-- %1$s: "it may already have been sent" (SwarmNode.DEPOSIT_MAYBE_SENT); keep it at the start. -->
+    <!-- %1$s: "it may already have been sent" (SwarmNode.DEPOSIT_MAYBE_SENT). -->
     <string name="stamps_deposit_still_sending">%1$s (the node is still sending it). The chequebook\'s balance shows it once it confirms</string>
     <string name="stamps_still_sending">The node is still sending the transactions. The list shows the stamp once they confirm.</string>
     <string name="stamps_node_not_running">The Swarm node isn\'t running</string>

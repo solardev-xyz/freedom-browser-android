@@ -266,10 +266,14 @@
         <item quantity="one">Any one of %1$d owners alone can then move everything in the Safe.</item>
         <item quantity="other">Any one of %1$d owners alone can then move everything in the Safe.</item>
     </plurals>
-    <!-- %1$d must sign, of %2$d owners (the count is the number of owners). -->
+    <!--
+      %1$s must sign (the threshold the transaction sets, in plain digits: the
+      user checks it against the request), of %2$d owners (the count is the
+      number of owners).
+    -->
     <plurals name="safe_threshold_must_sign">
-        <item quantity="one">%1$d of %2$d owners must then sign.</item>
-        <item quantity="other">%1$d of %2$d owners must then sign.</item>
+        <item quantity="one">%1$s of %2$d owners must then sign.</item>
+        <item quantity="other">%1$s of %2$d owners must then sign.</item>
     </plurals>
     <!-- A cancellation: %1$s is the Safe nonce, %2$s the amount it sends. -->
     <string name="safe_cancel_detail_no_value">A call from the Safe to itself with no data. It only uses up Safe nonce %1$s, so no other transaction with that nonce can execute.</string>

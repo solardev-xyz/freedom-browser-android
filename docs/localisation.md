@@ -69,6 +69,24 @@ app's files.
   / JSON-RPC error messages sent to pages (developer-facing), log lines,
   persisted keys, test fixtures, brand and network names inside a
   sentence stay in the resource text (`Swarm`, `ENS`, `IPFS`).
+- **One message for the user and a page or peer**: when a resource line
+  is shown in the wallet *and* returned to a site (EIP-1193) or an OpenLV
+  peer, build it with `Strings.said(R.string.x, …)`. That gives a `Said`
+  with `.text` (app language, for the UI) and `.english` (for the page or
+  peer). Never forward `.message` of a `SendException`, `LedgerException`
+  or `Eip712.Invalid` to a page; use its `english`/`said.english`. Otherwise
+  every connected site learns the user's language. `PseudoLanguage` in the
+  JVM tests shows a build where the two differ.
+- **Text held in state or a cache** (a last-check failure, a store name, a
+  cached trust answer): keep a `Text.res(R.string.x, …)` or a stable key,
+  and resolve it when shown. A string resolved once stays in the old
+  language after a per-app language change.
+- **Never decide by comparing text** to a resource (`message ==
+  SOME_STRING`, `startsWith(…)`): the text is translated and can change
+  while the value is held. Carry a flag, a type or an enum instead.
+- **Numbers the user checks against a site or peer** (chain IDs, token
+  decimals, a Safe threshold from a request): pass them as `%1$s` with
+  `toString()`, in plain digits like the fixed-format amounts.
 
 ## Pages Freedom serves
 
@@ -83,9 +101,12 @@ looks each one up instead of carrying English literals.
   without asking `shouldInterceptRequest`, so the app can't serve it.
   Once it has committed, `BrowserWebView` runs `ErrorPage.stringsScript()`
   in it (`onPageCommitVisible` and `onPageFinished`), handing the table to
-  the page's `window.__errorPageStrings`; the page stays hidden until then.
+  the page's `window.__errorPageStrings`. The page stays hidden until then.
+  If the table hasn't come after 1.5 s, the page shows its built-in English
+  copy (`FALLBACK`); the app's table still replaces it when it arrives.
   `ErrorPageStringsTest` checks that every key the page uses is in
-  `ErrorPage.PAGE_STRINGS`.
+  `ErrorPage.PAGE_STRINGS`, and that `FALLBACK` equals the English
+  resources. After changing an `errorpage_` string, update `FALLBACK` too.
 
 ## The lint check
 

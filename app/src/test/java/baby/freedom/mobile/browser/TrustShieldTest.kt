@@ -96,6 +96,11 @@ class TrustShieldTest {
         )
         // An unverified Myotis label can't exist, but mustn't pass for proven either.
         assertFalse(myotis.copy(verified = false).proven)
+        // Cached as a key, named in the app language of the moment (#313 R1-M3).
+        assertEquals(listOf("Myotis light client (on this device)"), myotis.shownAgreed)
+        baby.freedom.mobile.l10n.inPseudoLanguage {
+            assertEquals(listOf("[xx] Myotis light client (on this device)"), myotis.shownAgreed)
+        }
     }
 
     @Test

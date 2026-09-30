@@ -85,8 +85,7 @@
     <!-- How a deposit that may have gone out after all starts its error. -->
     <string name="swarmnode_deposit_maybe_sent">it may already have been sent</string>
     <!--
-      %1$s: swarmnode_deposit_maybe_sent, and keep it first: the app tells
-      this outcome from a failure by that start. %2$s: the node's reason.
+      %1$s: swarmnode_deposit_maybe_sent. %2$s: the node's reason.
     -->
     <string name="swarmnode_deposit_maybe_sent_detail">%1$s (%2$s). Check the chequebook\'s balance before depositing again</string>
     <string name="swarmnode_gateway_no_answer">the node\'s gateway didn\'t answer</string>

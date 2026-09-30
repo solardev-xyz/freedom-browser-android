@@ -60,7 +60,7 @@ internal class EnsGate(
         fun unverifiedDetail(result: EnsResult.Ok): String = buildList {
             add(Strings.get(R.string.names_gate_answer, result.uri))
             if (result.trust.agreed.isNotEmpty()) {
-                add(Strings.get(R.string.names_gate_from, result.trust.agreed.joinToString(", ")))
+                add(Strings.get(R.string.names_gate_from, result.trust.shownAgreed.joinToString(", ")))
             }
             add(Strings.get(R.string.names_gate_block, blockLabel(result.trust)))
             tooFewNote(result.trust)?.let(::add)
@@ -89,7 +89,7 @@ internal class EnsGate(
          */
         fun withTrustNote(detail: String, trust: EnsTrust): String {
             if (trust.verified) return detail
-            val from = trust.agreed.takeIf { it.isNotEmpty() }?.joinToString(", ")
+            val from = trust.shownAgreed.takeIf { it.isNotEmpty() }?.joinToString(", ")
                 ?: Strings.get(R.string.names_trust_one_rpc_server)
             val note = detail + "\n" + Strings.get(R.string.names_gate_not_cross_checked, from, blockLabel(trust))
             return tooFewNote(trust)?.let { "$note\n$it" } ?: note

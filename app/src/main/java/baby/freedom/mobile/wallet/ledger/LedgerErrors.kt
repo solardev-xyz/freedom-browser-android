@@ -2,6 +2,7 @@ package baby.freedom.mobile.wallet.ledger
 
 import androidx.annotation.StringRes
 import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Said
 import baby.freedom.mobile.l10n.Strings
 
 /**
@@ -9,8 +10,20 @@ import baby.freedom.mobile.l10n.Strings
  * as they are — desktop's `LEDGER_*` codes (`wallet/ledger/errors.js`),
  * plus the Bluetooth states a phone adds. Never carries anything the
  * device returned beyond its status word.
+ *
+ * [words]: said instead of [Kind]'s own line. [message] is in the app
+ * language, read when it's shown; [said] also carries the English a site
+ * or a peer hears (#280).
  */
-class LedgerException(val kind: Kind, message: String = kind.message, cause: Throwable? = null) : Exception(message, cause) {
+class LedgerException(val kind: Kind, private val words: Said? = null, cause: Throwable? = null) : Exception(null, cause) {
+    override val message: String get() = said.text
+
+    /** What went wrong, in the app language and in English. */
+    val said: Said get() = words ?: kind.said
+
+    /** Whether this says something of its own rather than [Kind]'s line. */
+    val ownWords: Boolean get() = words != null
+
     enum class Kind(@StringRes private val messageRes: Int) {
         BLUETOOTH_OFF(R.string.signing_ledger_error_bluetooth_off),
         BLUETOOTH_UNAVAILABLE(R.string.signing_ledger_error_bluetooth_unavailable),
@@ -32,6 +45,9 @@ class LedgerException(val kind: Kind, message: String = kind.message, cause: Thr
         ;
 
         val message: String get() = Strings.get(messageRes)
+
+        /** [message], and the same in English for a site or a peer (#280). */
+        val said: Said get() = Strings.said(messageRes)
 
         /**
          * Whether [message] already ends by saying nothing went out

@@ -98,11 +98,33 @@ class ChequebookTest {
             "The deposit didn't report back: it may already have been sent (chain transaction timed out). " +
                 "Check the chequebook's balance before depositing again",
             spendStatusText(
-                StampClient.Spend.Failed(
+                StampClient.spendOutcome(
                     StampClient.Kind.Deposit, null,
-                    "${baby.freedom.swarm.SwarmNode.DEPOSIT_MAYBE_SENT} (chain transaction timed out). " +
-                        "Check the chequebook's balance before depositing again",
-                ),
+                    StampClient.Answer.Failed(
+                        "${baby.freedom.swarm.SwarmNode.DEPOSIT_MAYBE_SENT} (chain transaction timed out). " +
+                            "Check the chequebook's balance before depositing again",
+                        maybeSent = true,
+                    ),
+                ) { throw AssertionError() },
+            ),
+        )
+        // Told by `:node`'s flag, not by the words (#313 R1-M1): a message held
+        // from another app language is still "didn't report back".
+        assertEquals(
+            "The deposit didn't report back: vielleicht schon gesendet",
+            spendStatusText(
+                StampClient.spendOutcome(
+                    StampClient.Kind.Deposit, null, StampClient.Answer.Failed("vielleicht schon gesendet", maybeSent = true),
+                ) { throw AssertionError() },
+            ),
+        )
+        // And a plain failure that happens to start with those words is still a failure.
+        assertEquals(
+            "The deposit failed: ${baby.freedom.swarm.SwarmNode.DEPOSIT_MAYBE_SENT}",
+            spendStatusText(
+                StampClient.spendOutcome(
+                    StampClient.Kind.Deposit, null, StampClient.Answer.Failed(baby.freedom.swarm.SwarmNode.DEPOSIT_MAYBE_SENT),
+                ) { throw AssertionError() },
             ),
         )
         // Nor is one the app stopped waiting for (the node is still on it).
@@ -110,9 +132,9 @@ class ChequebookTest {
             "The deposit didn't report back: it may already have been sent (the node is still sending it). " +
                 "The chequebook's balance shows it once it confirms",
             spendStatusText(
-                StampClient.Spend.Failed(
-                    StampClient.Kind.Deposit, null, StampClient.stillSendingMessage(StampClient.Kind.Deposit),
-                ),
+                StampClient.spendOutcome(
+                    StampClient.Kind.Deposit, null, StampClient.Answer.Failed(StampClient.TIMED_OUT, timedOut = true),
+                ) { throw AssertionError() },
             ),
         )
         assertEquals(
@@ -125,7 +147,9 @@ class ChequebookTest {
         assertEquals(
             "The stamp purchase didn't report back: it took longer than expected, and ended without telling the app " +
                 "how it went. The list shows the stamp if it was bought.",
-            spendStatusText(StampClient.Spend.Failed(StampClient.Kind.Buy, null, StampClient.BUY_OVERRAN)),
+            spendStatusText(
+                StampClient.spendOutcome(StampClient.Kind.Buy, null, StampClient.Answer.Failed(StampClient.TIMED_OUT, timedOut = true)) {},
+            ),
         )
         // Its outcome keeps the node page's entries reachable with the node off, as a stamp's does.
         assertTrue(stampsEntryShown(light.copy(status = NodeStatus.Stopped), StampClient.Spend.Done(StampClient.Kind.Deposit, null)))
