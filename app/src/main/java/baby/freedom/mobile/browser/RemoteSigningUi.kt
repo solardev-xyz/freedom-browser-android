@@ -478,7 +478,7 @@ private fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) 
             stringResource(R.string.signing_review_plain_transfer)
         },
     )
-    ReviewRow(stringResource(R.string.signing_review_network_fee), stringResource(R.string.signing_review_up_to, feeText(quote.tx.maxFee, chain)), mono = true, detail = feeDetail(quote.tx))
+    ReviewRow(stringResource(R.string.signing_review_network_fee), stringResource(R.string.signing_review_up_to, feeText(quote.maxFee, chain)), mono = true, detail = feeDetail(quote))
     quote.nativeTotal?.let { ReviewRow(stringResource(R.string.signing_review_total), stringResource(R.string.signing_review_up_to, feeText(it, chain)), mono = true) }
     ReviewRow(
         stringResource(R.string.signing_review_nonce),

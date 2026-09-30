@@ -110,6 +110,30 @@ internal fun feeDetail(tx: EthTransaction): String {
 }
 
 /**
+ * Why [input] isn't taken as an amount when it could be read two ways
+ * ([SendAmounts.ambiguous]: `1,234` is 1.234 or 1234), quoting it as
+ * the parser judged it (trimmed); null when it's not that. Every
+ * amount field [SendAmounts.parse] reads shows this over its own
+ * generic note, which would wrongly blame the decimals or say nothing
+ * was entered.
+ */
+internal fun ambiguousAmountNote(input: String): String? {
+    if (!SendAmounts.ambiguous(input)) return null
+    val typed = input.trim()
+    return Strings.get(R.string.send_amount_ambiguous, typed, typed.replace(',', '.'), typed.replace(",", ""))
+}
+
+/**
+ * [feeDetail] of [quote]'s transaction, plus, on an OP Stack rollup,
+ * the L1 data fee the review's "up to" also counts ([SendQuote.l1Fee]).
+ */
+internal fun feeDetail(quote: SendQuote): String {
+    val gas = feeDetail(quote.tx)
+    if (quote.l1Fee.signum() == 0) return gas
+    return Strings.get(R.string.send_fee_detail_l1, gas, feeText(quote.l1Fee, quote.request.chain))
+}
+
+/**
  * What of the review's "up to" fee is actually paid (#233): gas the
  * transaction doesn't use and, with a base fee, headroom the base fee
  * doesn't rise into stay in the account. The tip is paid on each unit
@@ -354,13 +378,13 @@ internal fun SendPage(
         else -> null
     }
 
-    fun prepare(request: SendRequest, sendAll: Boolean, then: (SendQuote) -> Unit = { quote = it }) {
+    fun price(then: (SendQuote) -> Unit, priced: suspend () -> SendQuote) {
         if (busy) return
         busy = true
         error = null
         scope.launch {
             try {
-                then(sender.prepare(request, sendAll))
+                then(priced())
             } catch (e: SendException) {
                 error = e.message
             } catch (e: CancellationException) {
@@ -372,6 +396,12 @@ internal fun SendPage(
             }
         }
     }
+
+    fun prepare(request: SendRequest, sendAll: Boolean, then: (SendQuote) -> Unit = { quote = it }) =
+        price(then) { sender.prepare(request, sendAll) }
+
+    /** [q] priced again as it was asked for: a Max send stays Max, less the new fee. */
+    fun reprice(q: SendQuote, then: (SendQuote) -> Unit = { quote = it }) = price(then) { sender.reprice(q) }
 
     // Back to the form from the review: whatever the Confirm was still
     // checking is dropped with the quote it was checking.
@@ -419,9 +449,9 @@ internal fun SendPage(
                             onBack()
                         },
                         onReviewAgain = {
-                            val request = current.quote.request
+                            val old = current.quote
                             sender.acknowledge()
-                            prepare(request, sendAll = false)
+                            reprice(old)
                         },
                         onDone = back,
                     )
@@ -440,7 +470,7 @@ internal fun SendPage(
                         onConfirm = {
                             // Priced too long ago to trust its fee: price it again and let the user look.
                             val reprice = {
-                                prepare(q.request, sendAll = false) { fresh ->
+                                reprice(q) { fresh ->
                                     quote = fresh
                                     notice = Strings.get(R.string.send_repriced_notice)
                                 }
@@ -621,6 +651,7 @@ internal fun SendPage(
                             }
                             if (token != null) {
                                 when {
+                                    SendAmounts.ambiguous(amount) -> FieldNote(ambiguousAmountNote(amount)!!, error = true)
                                     amount.isNotEmpty() && parsedAmount == null -> FieldNote(
                                         pluralText(R.plurals.send_amount_invalid, token.decimals, token.decimals),
                                         error = true,
@@ -761,9 +792,9 @@ private fun SendReviewSection(
         ReviewRow(stringResource(R.string.send_label_amount), "${SendAmounts.exact(request.amount, token.decimals)} ${token.symbol}", mono = true)
         ReviewRow(
             stringResource(R.string.send_label_network_fee),
-            stringResource(R.string.send_up_to, feeText(quote.tx.maxFee, chain)),
+            stringResource(R.string.send_up_to, feeText(quote.maxFee, chain)),
             mono = true,
-            detail = feeDetail(quote.tx),
+            detail = feeDetail(quote),
         )
         quote.nativeTotal?.let {
             ReviewRow(stringResource(R.string.send_label_total), stringResource(R.string.send_up_to, feeText(it, chain)), mono = true)

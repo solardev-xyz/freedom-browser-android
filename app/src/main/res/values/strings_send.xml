@@ -10,6 +10,8 @@
     <string name="send_title">Send</string>
     <string name="send_fee_detail_eip1559">Gas limit %1$s · up to %2$s per gas, tip %3$s</string>
     <string name="send_fee_detail_legacy">Gas limit %1$s · %2$s per gas</string>
+    <!-- %1$s: the gas detail above; %2$s: the most the L1 data fee can be, e.g. 0.0000004 ETH (an OP Stack rollup such as Base). -->
+    <string name="send_fee_detail_l1">%1$s · plus up to %2$s to post it to L1</string>
     <string name="send_fee_footnote_eip1559">The “up to” leaves room for unused gas and for the base fee to rise; what isn\'t used stays in the account. The tip is paid on the gas used, less only if the base fee rises into that room.</string>
     <string name="send_fee_footnote_legacy">The “up to” leaves room for unused gas, which stays in the account; the gas used is paid at the price above in full.</string>
     <string name="send_fee_footnote_high">This network fee is unusually high per gas; check it before you confirm. %1$s</string>
@@ -61,6 +63,8 @@
         <item quantity="one">Enter a positive amount with at most %1$s decimal</item>
         <item quantity="other">Enter a positive amount with at most %1$s decimals</item>
     </plurals>
+    <!-- %1$s: what the user typed, e.g. 1,234; %2$s: it with a decimal point (1.234); %3$s: without the comma (1234). -->
+    <string name="send_amount_ambiguous">%1$s could be %2$s or %3$s: write it with a point, or without the comma</string>
     <string name="send_all_note">All of it, less the network fee: the review shows the exact amount</string>
     <!-- %1$s: the balance, fixed format; %2$s: the token's symbol. -->
     <string name="send_balance_note">Balance %1$s %2$s</string>

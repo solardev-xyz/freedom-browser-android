@@ -1,5 +1,6 @@
 package baby.freedom.mobile.wallet
 
+import baby.freedom.mobile.browser.ambiguousAmountNote
 import baby.freedom.mobile.browser.explorerTxUrl
 import baby.freedom.mobile.browser.feeDetail
 import baby.freedom.mobile.browser.feeFootnote
@@ -58,6 +59,7 @@ class SendTest {
     private val from = WalletAccount(0, "Account 1", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
     private val to = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
     private val gnosis = BuiltInChains.GNOSIS.copy(rpcUrls = listOf("https://a.example", "https://b.example", "https://c.example"))
+    private val base = BuiltInChains.BASE.copy(rpcUrls = listOf("https://a.example", "https://b.example", "https://c.example"))
     private val xdai = TokenRegistry.native(gnosis)
     private val xbzz = TokenRegistry.builtins.first { it.symbol == "xBZZ" }
     private val gwei = BigInteger.valueOf(1_000_000_000L)
@@ -139,7 +141,7 @@ class SendTest {
 
         fun rpc() = WalletRpc(
             ChainDataRouter(
-                chains = { listOf<Chain>(gnosis) },
+                chains = { listOf<Chain>(gnosis, base) },
                 transport = RpcTransport { url, body, _ ->
                     if (down) throw IOException("down")
                     withReceiptHash(JSONObject(body), """{"jsonrpc":"2.0","id":1,${answer(JSONObject(body), url)}}""")
@@ -243,6 +245,22 @@ class SendTest {
         for (bad in listOf("", "0", "0.0", "-1", "1e3", "1.2.3", "1,000.5", "abc", "0x10", "1.0000001")) {
             assertNull(bad, SendAmounts.parse(bad, 6))
         }
+        // How the balance note groups thousands ("1,234"), so neither 1.234 nor 1234.
+        assertEquals("1,234", TokenAmounts.format(BigInteger.valueOf(1_234_000_000), 6))
+        for (grouped in listOf("1,234", "12,345", " 999,000 ")) {
+            assertTrue(grouped, SendAmounts.ambiguous(grouped))
+            assertNull(grouped, SendAmounts.parse(grouped, 18))
+        }
+        // A decimal comma that can't be a thousands separator is still one.
+        assertEquals(BigInteger("123000"), SendAmounts.parse("0,123", 6))
+        assertEquals(BigInteger("1230000"), SendAmounts.parse("1,23", 6))
+        assertEquals(BigInteger("1234500"), SendAmounts.parse("1,2345", 6))
+        assertEquals(BigInteger("1234000000"), SendAmounts.parse("1234", 6))
+        assertEquals(BigInteger("1234000"), SendAmounts.parse("1.234", 6))
+        assertFalse(SendAmounts.ambiguous("1.234"))
+        // Every amount field's note quotes it as judged: trimmed, no stray spaces.
+        assertEquals("999,000 could be 999.000 or 999000: write it with a point, or without the comma", ambiguousAmountNote(" 999,000 "))
+        assertNull(ambiguousAmountNote("1,23"))
         assertEquals("1.5", SendAmounts.exact(BigInteger("1500000000000000000"), 18))
         assertEquals("0.000000000000000001", SendAmounts.exact(BigInteger.ONE, 18))
         assertEquals("3", SendAmounts.exact(BigInteger.valueOf(3_000_000), 6))
@@ -772,6 +790,149 @@ class SendTest {
         assertEquals(chain.balance - native.tx.maxFee, native.request.amount)
         assertEquals(native.request.amount, native.tx.value)
         assertEquals(chain.balance, native.nativeTotal)
+    }
+
+    @Test
+    fun `a Max send priced again after the fee rose is still all of it, less the new fee`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        val max = s.prepare(request(xdai, 1), all = true)
+        assertTrue(max.all)
+        assertEquals(chain.balance, max.nativeTotal)
+        // The base fee rises by one wei before Confirm (the quote went stale, or a Ledger's did).
+        chain.baseFee = chain.baseFee!! + BigInteger.ONE
+        // The fixed amount plus the new fee is more than the account holds: what the page asked before.
+        assertMessage("Not enough xDAI for the amount and the network fee") { s.prepare(max.request) }
+        val again = s.reprice(max)
+        assertTrue(again.all)
+        assertTrue(again.tx.maxFee > max.tx.maxFee)
+        assertEquals(chain.balance - again.tx.maxFee, again.request.amount)
+        assertEquals(again.request.amount, again.tx.value)
+        assertEquals(chain.balance, again.nativeTotal)
+        // A typed amount stays the amount typed.
+        val typed = s.prepare(request(xdai, 1_000))
+        assertFalse(typed.all)
+        assertEquals(BigInteger.valueOf(1_000), s.reprice(typed).request.amount)
+    }
+
+    @Test
+    fun `on Base, a Safe's activation card counts the L1 fee Activate's prepare reserves (R2-M1)`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val l1 = BigInteger.valueOf(400_000_000_000L)
+        val oracle = mutableListOf<String>()
+        chain.on["eth_call"] = { req ->
+            val call = req.getJSONArray("params").getJSONObject(0)
+            assertEquals(WalletSender.GAS_PRICE_ORACLE, call.getString("to"))
+            synchronized(oracle) { oracle += call.getString("data") }
+            "\"result\":\"0x" + l1.toString(16).padStart(64, '0') + "\""
+        }
+        val owners = listOf(from.address, to)
+        val safe = SafeAccount(SafeProtocol.predictAddress(owners, 1, "7"), "", owners, 1, "7", base.id, false, 0)
+        val card = SafeChain(chain.rpc()).activation(safe, from.address)
+        val s = sender(chain)
+        val data = SafeProtocol.deploymentData(safe.owners, safe.threshold, safe.saltNonce)
+        suspend fun activate() =
+            s.prepare(SendRequest(base, TokenRegistry.native(base), from, SafeProtocol.FACTORY, BigInteger.ZERO, DappCall(null, data, null, null)))
+        chain.balance = card.maxFee - BigInteger.ONE
+        val short = SafeChain(chain.rpc()).activation(safe, from.address)
+        assertTrue(short.needsFunds)
+        assertEquals(BigInteger.ONE, short.shortfall)
+        assertMessage("Not enough ETH for the network fee") { activate() }
+        // Topped up by exactly the card's shortfall: the card says ready, and Activate prices it.
+        chain.balance += short.shortfall
+        assertFalse(SafeChain(chain.rpc()).activation(safe, from.address).needsFunds)
+        val quote = activate()
+        // Both priced the same transaction, so both reserve the same.
+        assertEquals(quote.maxFee, card.maxFee)
+        assertEquals(l1.shiftLeft(1), quote.l1Fee)
+        assertEquals(1, synchronized(oracle) { oracle.distinct().size })
+        // On a chain with no L1 fee the card asks no oracle.
+        val calls = oracle.size
+        val gnosisSafe = safe.copy(chainId = gnosis.id)
+        SafeChain(chain.rpc()).activation(gnosisSafe, from.address)
+        assertEquals(calls, oracle.size)
+    }
+
+    @Test
+    fun `on Base, Max and the balance check count the L1 data fee the chain also takes`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val l1 = BigInteger.valueOf(400_000_000_000L)
+        val oracle = mutableListOf<String>()
+        chain.on["eth_call"] = { req ->
+            val call = req.getJSONArray("params").getJSONObject(0)
+            assertEquals(WalletSender.GAS_PRICE_ORACLE, call.getString("to"))
+            synchronized(oracle) { oracle += call.getString("data") }
+            "\"result\":\"0x" + l1.toString(16).padStart(64, '0') + "\""
+        }
+        val s = sender(chain)
+        val eth = TokenRegistry.native(base)
+        val max = s.prepare(SendRequest(base, eth, from, to, BigInteger.ONE), all = true)
+        // What the oracle priced is the unsigned transaction, ABI-encoded as getL1Fee(bytes).
+        assertTrue(oracle.last().startsWith(WalletSender.GET_L1_FEE))
+        assertEquals(l1.shiftLeft(1), max.l1Fee)
+        assertEquals(max.tx.maxFee + l1.shiftLeft(1), max.maxFee)
+        assertEquals(chain.balance - max.maxFee, max.request.amount)
+        assertEquals(chain.balance, max.nativeTotal)
+        // The review's fee detail says what the "up to" counts beyond gas.
+        assertEquals(feeDetail(max.tx) + " · plus up to 0.0000008 ETH to post it to L1", feeDetail(max))
+        // Gas and value alone fit, but op-geth also wants the L1 fee: refused here, not by the node.
+        assertMessage("Not enough ETH for the amount and the network fee") {
+            s.prepare(SendRequest(base, eth, from, to, chain.balance - max.tx.maxFee))
+        }
+        // Priced again, still Max, still counting it.
+        assertEquals(chain.balance, s.reprice(max).nativeTotal)
+        // An answer that isn't one word is no L1 fee of zero.
+        chain.on["eth_call"] = { "\"result\":\"0x\"" }
+        assertMessage("The RPC’s answer made no sense") { s.prepare(SendRequest(base, eth, from, to, BigInteger.ONE)) }
+        // A chain with no L1 fee isn't asked for one.
+        val calls = oracle.size
+        chain.on.remove("eth_call")
+        assertEquals(BigInteger.ZERO, s.prepare(request()).l1Fee)
+        assertEquals(calls, oracle.size)
+        assertFalse(synchronized(chain.methods) { chain.methods.toList() }.takeLast(8).contains("eth_call"))
+    }
+
+    @Test
+    fun `a Base send's L1 fee survives a restart, so its status shows the same fee`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        chain.on["eth_call"] = { "\"result\":\"0x" + BigInteger.valueOf(5_000).toString(16).padStart(64, '0') + "\"" }
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        val s = sender(chain, journal = FileSendJournal(journalFile()))
+        val quote = s.prepare(SendRequest(base, TokenRegistry.native(base), from, to, BigInteger.ONE))
+        s.submit(quote, signer())
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        val restored = sender(chain, journal = FileSendJournal(journalFile())).status.value!!.quote
+        assertEquals(BigInteger.valueOf(10_000), restored.l1Fee)
+        assertEquals(quote.maxFee, restored.maxFee)
+    }
+
+    @Test
+    fun `getL1Fee call data is the selector, the bytes' offset and length, and the bytes padded to a word`() {
+        assertEquals(
+            WalletSender.GET_L1_FEE,
+            "0x" + baby.freedom.mobile.ens.Keccak256.digest("getL1Fee(bytes)".toByteArray()).toHex().take(8),
+        )
+        val data = WalletSender.getL1FeeData(byteArrayOf(2, 0x7f))
+        assertEquals(
+            "0x49948e0e" + "0".repeat(62) + "20" + "0".repeat(63) + "2" + "027f" + "0".repeat(60),
+            data,
+        )
+        assertEquals(10 + 64 * 3, WalletSender.getL1FeeData(ByteArray(32)).length)
+    }
+
+    @Test
+    fun `a receipt's fee includes an OP Stack chain's L1 fee, and a signed quantity is no quantity`() {
+        fun outcome(json: String) = WalletSender.outcomeOf(JSONObject(json))
+        // A Base transfer: 21000 gas at 0.01 gwei on L2, plus 0.00005 ETH to post it to L1.
+        val base = outcome("""{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x989680","l1Fee":"0x2d79883d2000"}""")
+        assertEquals(SendStatus.Stage.Confirmed(16, BigInteger("210000000000") + BigInteger("50000000000000")), base)
+        // An L1 chain's receipt has no l1Fee: gas times price, as before.
+        val l1 = outcome("""{"status":"0x0","blockNumber":"0x10","gasUsed":"0x100","effectiveGasPrice":"0x2"}""")
+        assertEquals(SendStatus.Stage.Reverted(16, BigInteger.valueOf(512)), l1)
+        // BigInteger would read "0x-5208" as -21000: an RPC could show a negative fee.
+        val signed = outcome("""{"status":"0x1","blockNumber":"0x10","gasUsed":"0x-5208","effectiveGasPrice":"0x1","l1Fee":"0x-1"}""")
+        assertEquals(SendStatus.Stage.Confirmed(16, null), signed)
+        assertNull(outcome("""{"status":"0x1","blockNumber":"0x-10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""))
     }
 
     @Test

@@ -443,9 +443,9 @@ private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, tap: ArmedTap
     }
     Row0(
         stringResource(R.string.send_label_network_fee),
-        stringResource(R.string.send_up_to, feeText(quote.tx.maxFee, chain)),
+        stringResource(R.string.send_up_to, feeText(quote.maxFee, chain)),
         mono = true,
-        detail = feeDetail(quote.tx),
+        detail = feeDetail(quote),
     )
     quote.nativeTotal?.takeIf { request.amount.signum() > 0 }?.let {
         Row0(stringResource(R.string.send_label_total), stringResource(R.string.send_up_to, feeText(it, chain)), mono = true)

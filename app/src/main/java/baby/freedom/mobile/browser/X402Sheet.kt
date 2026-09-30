@@ -107,7 +107,7 @@ internal class X402SheetState(val ask: X402Ask) {
     fun capProblem(): String? {
         if (!auto || ledger) return null
         val o = option ?: return null
-        val cap = cap() ?: return Strings.get(R.string.signing_x402_cap_enter_amount, o.symbol)
+        val cap = cap() ?: return ambiguousAmountNote(capText) ?: Strings.get(R.string.signing_x402_cap_enter_amount, o.symbol)
         if (cap < o.offer.amount) return Strings.get(R.string.signing_x402_cap_at_least, SendAmounts.exact(o.offer.amount, o.decimals), o.symbol)
         return null
     }
