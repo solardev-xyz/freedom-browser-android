@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         FaviconEntry::class,
         DownloadEntry::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -72,6 +72,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v3 -> v4: pause and resume for downloads (#265) — the If-Range
+         * validator, whether the server serves ranges, and a note.
+         * Additive; existing rows read as not resumable.
+         */
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `validator` TEXT")
+                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `resumable` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `note` TEXT")
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -79,7 +92,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "freedom.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                     .also { instance = it }
             }

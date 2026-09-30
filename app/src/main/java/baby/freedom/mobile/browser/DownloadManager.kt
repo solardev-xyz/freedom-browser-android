@@ -43,6 +43,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -52,6 +54,10 @@ private const val LOG_TAG = "Downloads"
 
 /** Folder under the shared Downloads collection that Freedom writes to. */
 private const val DOWNLOAD_SUBDIR = "Freedom"
+
+/** Where partial files live, under `noBackupFilesDir` (#265). */
+private const val PARTIAL_DIR = "downloads"
+private const val PARTIAL_SUFFIX = ".part"
 
 /** Minimum gap between two in-memory progress publications per download. */
 private const val PROGRESS_INTERVAL_MS = 200L
@@ -87,8 +93,12 @@ internal const val STORAGE_FLOOR_BYTES = 256L * 1024 * 1024
 /** How often, in bytes written, a running download re-checks free space. */
 private const val STORAGE_CHECK_EVERY_BYTES = 16L * 1024 * 1024
 
-/** Live byte counts of a running download. [total] is -1 when unknown. */
-data class DownloadProgress(val received: Long, val total: Long)
+/**
+ * Live byte counts of a running download. [total] is -1 when unknown.
+ * [saving]: every byte is in, and the file is being copied into
+ * Downloads (#265).
+ */
+data class DownloadProgress(val received: Long, val total: Long, val saving: Boolean = false)
 
 /** One-shot notices for the browser chrome's snackbar. */
 sealed class DownloadEvent {
@@ -121,17 +131,28 @@ sealed class DownloadEvent {
  *   ([downloadReferer]).
  * - **`data:`**: decoded in-process.
  *
- * Bytes stream straight into a pending `MediaStore.Downloads` entry
- * (`Download/Freedom/…`), which becomes visible to other apps only when
- * complete — no storage permission is needed on API 29+, and a
+ * Bytes stream into a partial file in the app's own storage
+ * (`no_backup/downloads/<id>.part`, #265), and only a complete file is
+ * copied into a `MediaStore.Downloads` entry (`Download/Freedom/…`) and
+ * published — no storage permission is needed on API 29+, and a
  * cancelled or failed download leaves nothing behind. Every download
  * gets a row in the `downloads` table (the history screen); running
  * byte counts live in [progress] only.
  *
+ * Pause and resume (#265): [pause] stops a download and keeps its
+ * partial file; [resume] asks for the rest with `Range`, guarded by
+ * `If-Range` against the validator the first response gave
+ * ([downloadValidator]). A server that ignores the range (or a file that
+ * changed) answers with the whole file, which is written from the start
+ * with a note. A lost connection pauses a download instead of failing
+ * it when its server serves ranges ([DownloadEntry.resumable]). Web
+ * downloads can always be paused; dweb ones only if the gateway serves
+ * ranges ([canPause]).
+ *
  * Lifetime: process-scoped, like [baby.freedom.mobile.data.BrowsingRepository].
  * Downloads survive the Activity; a process death mid-download is
- * swept up on the next start (the row is marked interrupted and the
- * half-written file deleted).
+ * swept up on the next start: a resumable row becomes paused with its
+ * partial file, any other is marked interrupted and its partial deleted.
  */
 class DownloadManager private constructor(context: Context) {
     private val appContext = context.applicationContext
@@ -161,6 +182,26 @@ class DownloadManager private constructor(context: Context) {
     /** Running jobs and what they block on; see [DownloadCancellation]. */
     private val cancellation = DownloadCancellation()
 
+    /**
+     * Held while a row changes hands between states from outside its
+     * job (#265): a row going RUNNING together with its job's
+     * registration ([enqueue], [resume]), and [pause] / [cancel] /
+     * [remove] reading a row to decide what to do. So a pause never
+     * sees a RUNNING row whose job isn't registered yet, and a resume
+     * never races a cancel of the same paused row.
+     */
+    private val transitions = Mutex()
+
+    /** Partial files (#265): app storage, never backed up, never visible to other apps. */
+    private val partialDir = File(appContext.noBackupFilesDir, PARTIAL_DIR)
+
+    private fun partialFile(id: Long) = File(partialDir, "$id$PARTIAL_SUFFIX")
+
+    private fun deletePartial(id: Long) {
+        val file = partialFile(id)
+        if (file.exists() && !file.delete()) Log.w(LOG_TAG, "couldn't delete partial download $id")
+    }
+
     private val _progress = MutableStateFlow<Map<Long, DownloadProgress>>(emptyMap())
     /** Running downloads' byte counts, keyed by [DownloadEntry.id]. */
     val progress: StateFlow<Map<Long, DownloadProgress>> = _progress.asStateFlow()
@@ -188,21 +229,51 @@ class DownloadManager private constructor(context: Context) {
 
     /**
      * Rows still "running" at startup belong to a previous process that
-     * died mid-download: nothing is fetching them any more. [start]
-     * waits for this so the sweep can't catch a download of this process.
+     * died mid-download: nothing is fetching them any more. One whose
+     * server serves ranges and that left a partial file becomes paused
+     * (#265); any other is marked interrupted and its partial deleted.
+     * A pending Downloads item (a death while saving) goes either way.
+     * Partial files no paused row owns go too — every private one
+     * among them, the private list having died with the process.
+     * [start] and [resume] wait for this so the sweep can't catch a
+     * download of this process.
      */
     private val staleSweep: Job = scope.launch {
         for (stale in dao.withStatus(DownloadStatus.RUNNING)) {
             stale.contentUri?.let { deleteQuietly(it) }
-            dao.update(
-                stale.copy(
-                    status = DownloadStatus.FAILED,
-                    contentUri = null,
-                    error = "Interrupted",
-                    finishedAt = System.currentTimeMillis(),
-                ),
-            )
+            val partial = partialFile(stale.id)
+            val kept = if (partial.exists()) partial.length() else 0L
+            if (stale.resumable && kept > 0) {
+                dao.update(
+                    stale.copy(
+                        status = DownloadStatus.PAUSED,
+                        contentUri = null,
+                        receivedBytes = kept,
+                        note = DOWNLOAD_INTERRUPTED_NOTE,
+                    ),
+                )
+            } else {
+                deletePartial(stale.id)
+                dao.update(
+                    stale.copy(
+                        status = DownloadStatus.FAILED,
+                        contentUri = null,
+                        error = DOWNLOAD_INTERRUPTED_NOTE,
+                        note = null,
+                        finishedAt = System.currentTimeMillis(),
+                    ),
+                )
+            }
         }
+        val paused = dao.withStatus(DownloadStatus.PAUSED).mapTo(HashSet()) { it.id }
+        for (file in partialDir.listFiles().orEmpty()) {
+            val id = file.name.removeSuffix(PARTIAL_SUFFIX).toLongOrNull()
+            if (id == null || id !in paused) file.delete()
+        }
+    }
+
+    init {
+        DownloadNotifications(appContext, scope, downloads, progress, ::canPause).start()
     }
 
     /**
@@ -299,39 +370,112 @@ class DownloadManager private constructor(context: Context) {
                     finishedAt = null,
                     refererOrigin = refererOrigin.takeIf { target is DownloadTarget.Web },
                 )
-            val id = if (session != null) {
-                privateRows.withLock {
-                    // Its session ended meanwhile: nothing to list it in.
-                    val id = privateSessions.allocate(session.generation) ?: return@launch
-                    memoryDao.insert(row.copy(id = id))
-                }
-            } else {
-                dao.insert(row)
-            }
-            _events.tryEmit(DownloadEvent.Started(id, initialName))
             val cookies = if (session != null) {
                 session.cookies
             } else {
                 runCatching { CookieManager.getInstance() }.getOrNull()
             }
-            val job = scope.launch(start = CoroutineStart.LAZY) {
-                run(id, target, userAgent, contentDisposition, refererOrigin, cookies)
+            transitions.withLock {
+                val id = if (session != null) {
+                    privateRows.withLock {
+                        // Its session ended meanwhile: nothing to list it in.
+                        val id = privateSessions.allocate(session.generation) ?: return@launch
+                        memoryDao.insert(row.copy(id = id))
+                    }
+                } else {
+                    dao.insert(row)
+                }
+                _events.tryEmit(DownloadEvent.Started(id, initialName))
+                launchJob(id, resuming = false) {
+                    run(id, target, userAgent, contentDisposition, refererOrigin, cookies, resuming = false)
+                }
             }
-            val cancelled = !cancellation.register(id, job)
-            // Cancelled before it began: run() never starts, so mark the
-            // row the way run() would have.
-            if (cancelled) {
-                job.cancel()
-                daoFor(id).get(id)?.let {
-                    daoFor(id).update(
-                        it.copy(
-                            status = DownloadStatus.CANCELLED,
-                            finishedAt = System.currentTimeMillis(),
-                        ),
+        }
+    }
+
+    /**
+     * Start [id]'s (RUNNING) row's job [block]. Called under
+     * [transitions]. A stop that got there first — possible only before
+     * a new row's insert is seen, as the Cancel button appears with it —
+     * leaves the row the way run() would have.
+     */
+    private suspend fun launchJob(id: Long, resuming: Boolean, block: suspend () -> Unit) {
+        val job = scope.launch(start = CoroutineStart.LAZY) { block() }
+        if (cancellation.register(id, job)) {
+            job.start()
+            return
+        }
+        val stop = cancellation.stopOf(id)
+        job.cancel()
+        val row = daoFor(id).get(id) ?: return
+        daoFor(id).update(
+            if (stop == DownloadStop.PAUSE) {
+                row.copy(status = DownloadStatus.PAUSED)
+            } else {
+                if (resuming) deletePartial(id)
+                row.copy(status = DownloadStatus.CANCELLED, finishedAt = System.currentTimeMillis())
+            },
+        )
+    }
+
+    /**
+     * Can [entry] be paused now? Running, and either a web download (a
+     * server that can't resume restarts it, with a note) or one whose
+     * server serves ranges — see [downloadCanPause].
+     */
+    fun canPause(entry: DownloadEntry): Boolean {
+        if (entry.status != DownloadStatus.RUNNING || entry.sourceUrl.isBlank()) return false
+        val target = classifyDownloadUrl(entry.sourceUrl, Gateways::isLocalGateway, Gateways::toDisplay)
+        return downloadCanPause(
+            isWeb = target is DownloadTarget.Web,
+            isData = target is DownloadTarget.Data,
+            resumable = entry.resumable,
+        )
+    }
+
+    /** Pause a running download (#265), keeping its partial file for [resume]. */
+    fun pause(id: Long) {
+        scope.launch {
+            transitions.withLock {
+                val row = daoFor(id).get(id) ?: return@withLock
+                if (canPause(row)) cancellation.cancel(id, DownloadStop.PAUSE)
+            }
+        }
+    }
+
+    /**
+     * Go on with a paused download (#265), from where its partial file
+     * ends. A private one only while its session is live.
+     */
+    fun resume(id: Long) {
+        scope.launch {
+            staleSweep.join()
+            transitions.withLock {
+                val row = daoFor(id).get(id)?.takeIf { it.status == DownloadStatus.PAUSED } ?: return@withLock
+                val cookies = if (id < 0) {
+                    if (!privateSessions.isLive(id)) return@withLock
+                    PrivateProfile.cookieManager()
+                } else {
+                    runCatching { CookieManager.getInstance() }.getOrNull()
+                }
+                val target = classifyDownloadUrl(row.sourceUrl, Gateways::isLocalGateway, Gateways::toDisplay)
+                daoFor(id).update(row.copy(status = DownloadStatus.RUNNING))
+                // A stop aimed at its last run (a second Pause tap that
+                // landed after it had paused) must not stop this one.
+                cancellation.forget(id)
+                launchJob(id, resuming = true) {
+                    run(
+                        id = id,
+                        target = target,
+                        // As [retry]: the app never overrides the WebView's
+                        // User-Agent, so the default is what was sent before.
+                        userAgent = runCatching { WebSettings.getDefaultUserAgent(appContext) }.getOrNull(),
+                        contentDisposition = null,
+                        refererOrigin = row.refererOrigin,
+                        cookies = cookies,
+                        resuming = true,
                     )
                 }
-            } else {
-                job.start()
             }
         }
     }
@@ -359,21 +503,82 @@ class DownloadManager private constructor(context: Context) {
     /** The history row for [id], if it still exists. */
     suspend fun entry(id: Long): DownloadEntry? = daoFor(id).get(id)
 
-    /** Stop a running download; its partial file is deleted. */
-    fun cancel(id: Long) = cancellation.cancel(id)
+    /** Stop a running or paused download; its partial file is deleted. */
+    fun cancel(id: Long) {
+        // At once, without the lock: a blocked read must end now.
+        cancellation.cancel(id)
+        scope.launch {
+            transitions.withLock {
+                val row = daoFor(id).get(id)
+                if (row?.status == DownloadStatus.PAUSED) {
+                    deletePartial(id)
+                    daoFor(id).update(
+                        row.copy(
+                            status = DownloadStatus.CANCELLED,
+                            note = null,
+                            finishedAt = System.currentTimeMillis(),
+                        ),
+                    )
+                }
+                // Not running: no job of this run is left to stop, and a
+                // mark must not stop a later resume of the row.
+                if (row?.status != DownloadStatus.RUNNING) cancellation.forget(id)
+            }
+        }
+    }
 
     /**
      * Forget a download. Only the history row goes — a completed file
      * stays in Downloads, where the user put it; a running one is
-     * cancelled first.
+     * cancelled first, and a paused one's partial file is deleted.
      */
     fun remove(id: Long) {
-        cancel(id)
+        cancellation.cancel(id)
         scope.launch {
-            daoFor(id).delete(id)
-            // A job registered after this finds no row and ends at once;
-            // an early-cancel mark has nothing left to guard.
-            cancellation.forget(id)
+            transitions.withLock {
+                daoFor(id).delete(id)
+                // A running job's own cancel deletes its partial; this
+                // gets a paused one's.
+                deletePartial(id)
+                // A job registered after this finds no row and ends at once;
+                // an early-cancel mark has nothing left to guard.
+                cancellation.forget(id)
+            }
+        }
+    }
+
+    /**
+     * Part of *Clear cookies & site data* (#265): no unfinished download
+     * keeps a partial file. Running and paused downloads are cancelled
+     * (running ones delete theirs as they stop), and any partial file
+     * no running download is writing goes.
+     */
+    fun discardUnfinished() {
+        scope.launch {
+            staleSweep.join()
+            transitions.withLock {
+                val running = HashSet<Long>()
+                for (d in listOf(dao, memoryDao)) {
+                    for (row in d.withStatus(DownloadStatus.RUNNING)) {
+                        running += row.id
+                        cancellation.cancel(row.id)
+                    }
+                    for (row in d.withStatus(DownloadStatus.PAUSED)) {
+                        d.update(
+                            row.copy(
+                                status = DownloadStatus.CANCELLED,
+                                note = null,
+                                finishedAt = System.currentTimeMillis(),
+                            ),
+                        )
+                        cancellation.forget(row.id)
+                    }
+                }
+                for (file in partialDir.listFiles().orEmpty()) {
+                    val id = file.name.removeSuffix(PARTIAL_SUFFIX).toLongOrNull()
+                    if (id == null || id !in running) file.delete()
+                }
+            }
         }
     }
 
@@ -421,11 +626,19 @@ class DownloadManager private constructor(context: Context) {
         val ended = privateSessions.end()
         if (ended.isEmpty()) return
         scope.launch {
-            privateRows.withLock {
-                for (running in memoryDao.withStatus(DownloadStatus.RUNNING)) {
-                    if (running.id in ended) cancel(running.id)
+            transitions.withLock {
+                privateRows.withLock {
+                    for (running in memoryDao.withStatus(DownloadStatus.RUNNING)) {
+                        // Its own cancel deletes its partial file as it stops.
+                        if (running.id in ended) cancellation.cancel(running.id)
+                    }
+                    // Paused ones (#265) have no job left to do it.
+                    for (paused in memoryDao.withStatus(DownloadStatus.PAUSED)) {
+                        if (paused.id in ended) deletePartial(paused.id)
+                    }
+                    for (id in ended) cancellation.forget(id)
+                    memoryDao.deleteRange(ended.first, ended.last)
                 }
-                memoryDao.deleteRange(ended.first, ended.last)
             }
         }
     }
@@ -444,6 +657,12 @@ class DownloadManager private constructor(context: Context) {
 
     // ---------------------------------------------------------------
 
+    /**
+     * Fetch [id]'s file into its partial file, then publish it. On a
+     * [resuming] run the row's name and type stand, and a partial file
+     * already there is continued: with `Range` / `If-Range` when the row
+     * has a validator, or else started over.
+     */
     private suspend fun run(
         id: Long,
         target: DownloadTarget,
@@ -451,74 +670,80 @@ class DownloadManager private constructor(context: Context) {
         contentDisposition: String?,
         refererOrigin: String?,
         cookies: CookieManager?,
+        resuming: Boolean,
     ) {
         val dao = daoFor(id)
         var entry = dao.get(id) ?: return
+        val partial = partialFile(id)
         var pending: Uri? = null
         // Set once the file is public: from then on it's the user's
         // file, and nothing here — a late cancel included — deletes it.
         var published = false
+        // Still fetching (false once every byte is in the partial file).
+        var fetching = true
         // Everything that can block on the network is tracked as soon as
         // it exists — each connection before connect(), then the body —
         // so [cancel] can close it (see [DownloadCancellation]).
         val job = currentCoroutineContext()[Job]
         val track: (AutoCloseable) -> Unit = { cancellation.track(id, job, it) }
         try {
-            val body = openBody(target, userAgent, contentDisposition, refererOrigin, cookies, track)
-            body.use { src ->
-                track(src)
-                currentCoroutineContext().ensureActive()
-                val mime = src.mimeType ?: entry.mimeType
-                val name = downloadFileName(
-                    contentDisposition = src.contentDisposition ?: contentDisposition,
-                    url = src.nameUrl,
-                    mimeType = mime,
-                    extensionForMime = ::extensionForMime,
-                )
-                if (!downloadFitsStorage(allocatableBytes(), src.length.coerceAtLeast(0), STORAGE_FLOOR_BYTES)) {
-                    throw DownloadFailure("Not enough storage")
+            var kept = if (resuming && partial.exists()) partial.length() else 0L
+            if (!resuming) partial.delete()
+            if (entry.totalBytes in 0 until kept) {
+                // Longer than the file it's part of: not to be trusted.
+                partial.delete()
+                kept = 0
+            }
+            // Paused (or killed) after every byte was in, while saving:
+            // nothing left to fetch.
+            val received = if (kept > 0 && kept == entry.totalBytes) {
+                kept
+            } else {
+                // The row is saved (and [entry] follows it) as soon as the
+                // headers are in, so a failure while reading the body
+                // knows whether the server can resume it.
+                fetchInto(entry, partial, kept, target, userAgent, contentDisposition, refererOrigin, cookies, track, resuming) {
+                    entry = it
+                    dao.update(it)
                 }
-                val uri = insertPendingDownload(resolver, "Download/$DOWNLOAD_SUBDIR", "dl$id", name, mime)
-                    ?: throw DownloadFailure("Couldn't create the file in Downloads")
-                pending = uri
+            }
+            fetching = false
+            currentCoroutineContext().ensureActive()
+            entry = entry.copy(totalBytes = received, receivedBytes = received)
+            dao.update(entry)
+            _progress.update { it + (id to DownloadProgress(received, received, saving = true)) }
+            // The copy into Downloads needs room for a second copy of
+            // the file until the partial one is deleted.
+            if (!downloadFitsStorage(allocatableBytes(sharedStorageDir()), partial.length(), STORAGE_FLOOR_BYTES)) {
+                throw DownloadFailure("Not enough storage")
+            }
+            val uri = insertPendingDownload(resolver, "Download/$DOWNLOAD_SUBDIR", "dl$id", entry.fileName, entry.mimeType)
+                ?: throw DownloadFailure("Couldn't create the file in Downloads")
+            pending = uri
+            entry = entry.copy(contentUri = uri.toString())
+            dao.update(entry)
+            copyToDownloads(partial, uri)
+            if (!publishPendingDownload(resolver, uri, entry.fileName)) {
+                throw DownloadFailure("Couldn't save the file in Downloads")
+            }
+            pending = null
+            published = true
+            afterPublishForTest?.invoke(id)
+            withContext(NonCancellable) {
+                partial.delete()
+                // MediaStore settles a name collision ("x (1).pdf") when
+                // the item stops being pending; show the name it chose.
+                val finalName = queryDisplayName(uri) ?: entry.fileName
                 entry = entry.copy(
-                    fileName = name,
-                    mimeType = mime,
-                    contentUri = uri.toString(),
-                    totalBytes = src.length,
+                    fileName = finalName,
+                    status = DownloadStatus.COMPLETED,
+                    totalBytes = received,
+                    receivedBytes = received,
+                    note = null,
+                    finishedAt = System.currentTimeMillis(),
                 )
                 dao.update(entry)
-                val received = copyWithProgress(id, src.stream, uri, src.length)
-                // With a Content-Length a short body is caught here, and a
-                // chunked body cut off mid-stream fails in read() (the
-                // chunk framing is incomplete). A close-delimited body —
-                // no length, not chunked, the HTTP/1.0 way — can't be
-                // checked: a connection that drops cleanly looks exactly
-                // like its end, so such a body is taken as complete. A
-                // reset still fails; the storage floor bounds the rest.
-                if (src.length >= 0 && received < src.length) {
-                    throw IOException("Connection closed early")
-                }
-                if (!publishPendingDownload(resolver, uri, name)) {
-                    throw DownloadFailure("Couldn't save the file in Downloads")
-                }
-                pending = null
-                published = true
-                afterPublishForTest?.invoke(id)
-                withContext(NonCancellable) {
-                    // MediaStore settles a name collision ("x (1).pdf") when
-                    // the item stops being pending; show the name it chose.
-                    val finalName = queryDisplayName(uri) ?: name
-                    entry = entry.copy(
-                        fileName = finalName,
-                        status = DownloadStatus.COMPLETED,
-                        totalBytes = received,
-                        receivedBytes = received,
-                        finishedAt = System.currentTimeMillis(),
-                    )
-                    dao.update(entry)
-                    _events.tryEmit(DownloadEvent.Completed(id, finalName))
-                }
+                _events.tryEmit(DownloadEvent.Completed(id, finalName))
             }
         } catch (t: Throwable) {
             // Finished: a cancel that lands now (withContext rethrows it
@@ -529,12 +754,18 @@ class DownloadManager private constructor(context: Context) {
                 return
             }
             // [cancel] closes the socket under a blocked read, so a
-            // cancelled download usually surfaces as an IOException, not
+            // stopped download usually surfaces as an IOException, not
             // a CancellationException — the job's state is the truth.
-            val cancelled = t is CancellationException || !currentCoroutineContext().isActive
-            if (!cancelled) Log.w(LOG_TAG, "download $id failed", t)
+            val stopped = t is CancellationException || !currentCoroutineContext().isActive
+            val stop = if (stopped) cancellation.stopOf(id) ?: DownloadStop.CANCEL else null
+            // A network failure part-way through a download its server
+            // can resume pauses it rather than failing it (#265).
+            val connectionLost = fetching && !stopped && t is IOException && t !is DownloadFailure &&
+                entry.resumable && partial.length() > 0
+            val pause = stop == DownloadStop.PAUSE || connectionLost
+            if (!stopped) Log.w(LOG_TAG, "download $id ${if (pause) "paused" else "failed"}", t)
             val reason = when {
-                cancelled -> null
+                stopped || pause -> null
                 t is DownloadFailure -> t.message ?: "Download failed"
                 t is IOException -> t.message?.takeIf { it.isNotBlank() }?.let { "Network error: $it" }
                     ?: "Network error"
@@ -542,21 +773,135 @@ class DownloadManager private constructor(context: Context) {
             }
             withContext(NonCancellable) {
                 pending?.let { deleteQuietly(it.toString()) }
-                dao.update(
-                    entry.copy(
-                        status = if (cancelled) DownloadStatus.CANCELLED else DownloadStatus.FAILED,
-                        contentUri = null,
-                        receivedBytes = _progress.value[id]?.received ?: 0,
-                        error = reason,
-                        finishedAt = System.currentTimeMillis(),
-                    ),
-                )
+                val received = _progress.value[id]?.received ?: entry.receivedBytes
+                if (pause) {
+                    // Without a validator a resume starts over anyway:
+                    // don't hold on to bytes it can't use. (A file whose
+                    // bytes are all in is only saved on resume, so it stays.)
+                    if (entry.validator == null && fetching) partial.delete()
+                    dao.update(
+                        entry.copy(
+                            status = DownloadStatus.PAUSED,
+                            contentUri = null,
+                            receivedBytes = if (partial.exists()) partial.length() else received,
+                            note = if (connectionLost) DOWNLOAD_CONNECTION_LOST_NOTE else null,
+                            error = null,
+                        ),
+                    )
+                } else {
+                    partial.delete()
+                    dao.update(
+                        entry.copy(
+                            status = if (stopped) DownloadStatus.CANCELLED else DownloadStatus.FAILED,
+                            contentUri = null,
+                            receivedBytes = received,
+                            error = reason,
+                            note = null,
+                            finishedAt = System.currentTimeMillis(),
+                        ),
+                    )
+                }
             }
             if (reason != null) _events.tryEmit(DownloadEvent.Failed(id, entry.fileName, reason))
             if (t is CancellationException) throw t
         } finally {
             cancellation.release(id)
             _progress.update { it - id }
+        }
+    }
+
+    /**
+     * Fetch the rest of [row]'s file into [partial], which holds [kept]
+     * bytes of it already. [save] is handed the row once the response's
+     * headers have been read (its name, size, validator, note); returns
+     * the file's length. On a [resuming] run the row keeps its name and
+     * type.
+     */
+    private suspend fun fetchInto(
+        row: DownloadEntry,
+        partial: File,
+        kept: Long,
+        target: DownloadTarget,
+        userAgent: String?,
+        contentDisposition: String?,
+        refererOrigin: String?,
+        cookies: CookieManager?,
+        track: (AutoCloseable) -> Unit,
+        resuming: Boolean,
+        save: suspend (DownloadEntry) -> Unit,
+    ): Long {
+        val id = row.id
+        var entry = row
+        // Only a validator makes a range safe to ask for.
+        var offset = if (entry.validator != null) kept else 0L
+        var src = openBody(target, userAgent, contentDisposition, refererOrigin, cookies, track,
+            downloadResumeHeaders(offset, entry.validator))
+        var answer = resumeAnswer(src.status, offset, src.contentRange, src.length)
+        if (answer is ResumeAnswer.AskWhole) {
+            // A range it can't use (416, or some other range): the whole file, then.
+            src.close()
+            offset = 0
+            src = openBody(target, userAgent, contentDisposition, refererOrigin, cookies, track, emptyMap())
+            answer = resumeAnswer(src.status, 0, src.contentRange, src.length)
+            if (answer !is ResumeAnswer.FromStart) {
+                src.close()
+                throw DownloadFailure("The server sent only part of the file")
+            }
+        }
+        src.use {
+            track(src)
+            currentCoroutineContext().ensureActive()
+            val fromStart = answer is ResumeAnswer.FromStart
+            val startAt = if (fromStart) 0L else offset
+            val total = if (answer is ResumeAnswer.Continue) answer.total else src.length
+            if (fromStart) {
+                // A whole response carries the validator a later resume
+                // checks against, and — on a first run — names the file.
+                // A resumed row keeps the name it has been listed under.
+                val validator = downloadValidator(src.etag, src.lastModified)
+                if (!resuming) {
+                    val mime = src.mimeType ?: entry.mimeType
+                    entry = entry.copy(
+                        mimeType = mime,
+                        fileName = downloadFileName(
+                            contentDisposition = src.contentDisposition ?: contentDisposition,
+                            url = src.nameUrl,
+                            mimeType = mime,
+                            extensionForMime = ::extensionForMime,
+                        ),
+                    )
+                }
+                entry = entry.copy(
+                    validator = validator,
+                    resumable = downloadResumable(src.acceptRanges, validator),
+                    // A resume that got the whole file had to start over.
+                    note = if (kept > 0) DOWNLOAD_RESTARTED_NOTE else null,
+                )
+            } else {
+                entry = entry.copy(note = null)
+            }
+            entry = entry.copy(totalBytes = total, receivedBytes = startAt)
+            if (!downloadFitsStorage(
+                    allocatableBytes(partialDir),
+                    if (total >= 0) (total - startAt).coerceAtLeast(0) else 0,
+                    STORAGE_FLOOR_BYTES,
+                )
+            ) {
+                throw DownloadFailure("Not enough storage")
+            }
+            save(entry)
+            val received = copyWithProgress(id, src.stream, partial, startAt, total)
+            // With a Content-Length a short body is caught here, and a
+            // chunked body cut off mid-stream fails in read() (the
+            // chunk framing is incomplete). A close-delimited body —
+            // no length, not chunked, the HTTP/1.0 way — can't be
+            // checked: a connection that drops cleanly looks exactly
+            // like its end, so such a body is taken as complete. A
+            // reset still fails; the storage floor bounds the rest.
+            if (total >= 0 && received < total) {
+                throw IOException("Connection closed early")
+            }
+            return received
         }
     }
 
@@ -568,6 +913,12 @@ class DownloadManager private constructor(context: Context) {
         val contentDisposition: String?,
         /** The URL whose last path segment names the file (final URL after redirects). */
         val nameUrl: String,
+        /** HTTP status: 200 or 206 — or 416, whose (empty) body stands for "no such range". */
+        val status: Int = 200,
+        val contentRange: String? = null,
+        val acceptRanges: String? = null,
+        val etag: String? = null,
+        val lastModified: String? = null,
         private val onClose: () -> Unit = {},
     ) : AutoCloseable {
         override fun close() {
@@ -586,6 +937,8 @@ class DownloadManager private constructor(context: Context) {
         refererOrigin: String?,
         cookies: CookieManager?,
         track: (AutoCloseable) -> Unit,
+        /** A resume's `Range` / `If-Range` ([downloadResumeHeaders]); empty for the whole file. */
+        rangeHeaders: Map<String, String>,
     ): Body = when (target) {
         is DownloadTarget.Data -> {
             val payload = parseDataUri(target.uri) ?: throw DownloadFailure("Malformed data: URI")
@@ -607,10 +960,11 @@ class DownloadManager private constructor(context: Context) {
             // (whose last segment for a bare root would be the hash).
             fetchDweb(gatewayUrl, nameUrl = target.displayUrl.let { d ->
                 if (d.contains("://")) d else "ens://$d"
-            }, track = track)
+            }, track = track, rangeHeaders = rangeHeaders)
         }
-        is DownloadTarget.LocalGateway -> fetchDweb(target.url, nameUrl = target.displayUrl, track = track)
-        is DownloadTarget.Web -> fetchWeb(target.url, userAgent, refererOrigin, cookies, track)
+        is DownloadTarget.LocalGateway ->
+            fetchDweb(target.url, nameUrl = target.displayUrl, track = track, rangeHeaders = rangeHeaders)
+        is DownloadTarget.Web -> fetchWeb(target.url, userAgent, refererOrigin, cookies, track, rangeHeaders)
         is DownloadTarget.Unsupported ->
             throw DownloadFailure("${target.scheme}: downloads aren't supported")
     }
@@ -619,6 +973,7 @@ class DownloadManager private constructor(context: Context) {
         gatewayUrl: String,
         nameUrl: String,
         track: (AutoCloseable) -> Unit,
+        rangeHeaders: Map<String, String>,
     ): Body {
         var lastStatus = 0
         for (delayMs in DWEB_RETRY_DELAYS_MS) {
@@ -641,6 +996,7 @@ class DownloadManager private constructor(context: Context) {
                     setRequestProperty("Swarm-Chunk-Retrieval-Timeout", "30s")
                     setRequestProperty("Swarm-Redundancy-Strategy", "3")
                     setRequestProperty("Swarm-Redundancy-Fallback-Mode", "true")
+                    rangeHeaders.forEach { (k, v) -> setRequestProperty(k, v) }
                 }
             } catch (_: java.net.ConnectException) {
                 throw DownloadFailure("Node not running")
@@ -651,7 +1007,7 @@ class DownloadManager private constructor(context: Context) {
                 continue
             }
             val status = conn.responseCode
-            if (status in 200..299) return bodyOf(conn, nameUrl)
+            if (status in 200..299 || (status == 416 && rangeHeaders.isNotEmpty())) return bodyOf(conn, nameUrl)
             lastStatus = status
             conn.disconnect()
             if (status !in DWEB_TRANSIENT_STATUSES) break
@@ -686,6 +1042,7 @@ class DownloadManager private constructor(context: Context) {
         refererOrigin: String?,
         cookies: CookieManager?,
         track: (AutoCloseable) -> Unit,
+        rangeHeaders: Map<String, String>,
     ): Body {
         var current = url
         repeat(MAX_REDIRECTS + 1) {
@@ -703,6 +1060,8 @@ class DownloadManager private constructor(context: Context) {
                 // Re-decided per hop: a redirect off the page's origin
                 // (or down to http) drops it.
                 downloadReferer(refererOrigin, current)?.let { setRequestProperty("Referer", it) }
+                // On every hop: the range is of the file, wherever it's served from.
+                rangeHeaders.forEach { (k, v) -> setRequestProperty(k, v) }
             }
             val status = conn.responseCode
             if (status in 300..399) {
@@ -714,6 +1073,7 @@ class DownloadManager private constructor(context: Context) {
                 }
                 return@repeat
             }
+            if (status == 416 && rangeHeaders.isNotEmpty()) return bodyOf(conn, current)
             if (status !in 200..299) {
                 conn.disconnect()
                 throw DownloadFailure("Server error $status")
@@ -723,36 +1083,58 @@ class DownloadManager private constructor(context: Context) {
         throw DownloadFailure("Too many redirects")
     }
 
-    private fun bodyOf(conn: HttpURLConnection, nameUrl: String): Body = Body(
-        stream = conn.inputStream,
-        length = conn.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L,
-        mimeType = normalizeMime(conn.contentType),
-        contentDisposition = conn.getHeaderField("Content-Disposition"),
-        nameUrl = nameUrl,
-        onClose = { conn.disconnect() },
-    )
+    private fun bodyOf(conn: HttpURLConnection, nameUrl: String): Body {
+        val status = conn.responseCode
+        return Body(
+            // A 416 has no body worth reading (and inputStream throws for it).
+            stream = if (status >= 400) java.io.ByteArrayInputStream(ByteArray(0)) else conn.inputStream,
+            length = conn.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L,
+            mimeType = normalizeMime(conn.contentType),
+            contentDisposition = conn.getHeaderField("Content-Disposition"),
+            nameUrl = nameUrl,
+            status = status,
+            contentRange = conn.getHeaderField("Content-Range"),
+            acceptRanges = conn.getHeaderField("Accept-Ranges"),
+            etag = conn.getHeaderField("ETag"),
+            lastModified = conn.getHeaderField("Last-Modified"),
+            onClose = { conn.disconnect() },
+        )
+    }
 
     /**
      * Bytes the shared-storage volume can still take (cache the system
      * may evict counted in); null when it can't be told, which doesn't
      * block the download.
      */
-    private fun allocatableBytes(): Long? = runCatching {
+    private fun allocatableBytes(dir: File): Long? = runCatching {
         val storage = appContext.getSystemService(StorageManager::class.java)
-        storage.getAllocatableBytes(storage.getUuidForPath(Environment.getExternalStorageDirectory()))
+        storage.getAllocatableBytes(storage.getUuidForPath(dir))
     }.getOrNull()
+
+    /** The shared-storage volume Downloads lives on. */
+    private fun sharedStorageDir(): File = Environment.getExternalStorageDirectory()
 
     private fun queryDisplayName(uri: Uri): String? = runCatching {
         resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
             ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
     }.getOrNull()
 
-    private suspend fun copyWithProgress(id: Long, input: InputStream, uri: Uri, total: Long): Long {
-        val out = resolver.openOutputStream(uri) ?: throw DownloadFailure("Couldn't write to Downloads")
-        var received = 0L
+    /**
+     * Append [input] to [file], which holds [startAt] bytes of the file
+     * already (0: write it afresh), publishing progress and re-checking
+     * free space as it goes. Returns the file's length.
+     */
+    private suspend fun copyWithProgress(id: Long, input: InputStream, file: File, startAt: Long, total: Long): Long {
+        partialDir.mkdirs()
+        val out = try {
+            FileOutputStream(file, startAt > 0)
+        } catch (_: IOException) {
+            throw DownloadFailure("Couldn't write the download")
+        }
+        var received = startAt
         var lastPublish = 0L
-        var nextStorageCheck = STORAGE_CHECK_EVERY_BYTES
-        _progress.update { it + (id to DownloadProgress(0, total)) }
+        var nextStorageCheck = startAt + STORAGE_CHECK_EVERY_BYTES
+        _progress.update { it + (id to DownloadProgress(received, total)) }
         out.use { sink ->
             val buffer = ByteArray(64 * 1024)
             while (true) {
@@ -764,7 +1146,7 @@ class DownloadManager private constructor(context: Context) {
                 if (received >= nextStorageCheck) {
                     nextStorageCheck = received + STORAGE_CHECK_EVERY_BYTES
                     val stillToWrite = if (total >= 0) (total - received).coerceAtLeast(0) else 0
-                    if (!downloadFitsStorage(allocatableBytes(), stillToWrite, STORAGE_FLOOR_BYTES)) {
+                    if (!downloadFitsStorage(allocatableBytes(partialDir), stillToWrite, STORAGE_FLOOR_BYTES)) {
                         throw DownloadFailure("Not enough storage")
                     }
                 }
@@ -777,6 +1159,22 @@ class DownloadManager private constructor(context: Context) {
         }
         _progress.update { it + (id to DownloadProgress(received, total)) }
         return received
+    }
+
+    /** Copy the finished partial [file] into the pending Downloads item [uri]. */
+    private suspend fun copyToDownloads(file: File, uri: Uri) {
+        val out = resolver.openOutputStream(uri) ?: throw DownloadFailure("Couldn't write to Downloads")
+        out.use { sink ->
+            file.inputStream().use { src ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val n = src.read(buffer)
+                    if (n < 0) break
+                    sink.write(buffer, 0, n)
+                }
+            }
+        }
     }
 
     private fun deleteQuietly(uri: String) {

@@ -17,6 +17,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ErrorOutline
@@ -52,7 +54,9 @@ import java.util.Date
  * Download history (#79): every download, newest first, with live
  * progress and Cancel while running, tap-to-open once complete, and
  * Retry for ones that failed or were cancelled. × on a finished row
- * only forgets the entry — the file stays in Downloads.
+ * only forgets the entry — the file stays in Downloads. A running
+ * download that can be paused has Pause, and a paused one Resume
+ * (#265); × on either cancels it and deletes its partial file.
  */
 @Composable
 fun DownloadsScreen(
@@ -90,6 +94,9 @@ fun DownloadsScreen(
                         live = progress[entry.id],
                         timestamp = dateFormat.format(Date(entry.finishedAt ?: entry.startedAt)),
                         onOpen = { onOpen(entry) },
+                        canPause = downloads.canPause(entry),
+                        onPause = { downloads.pause(entry.id) },
+                        onResume = { downloads.resume(entry.id) },
                         onCancel = { downloads.cancel(entry.id) },
                         onRetry = { downloads.retry(entry) },
                         onRemove = { downloads.remove(entry.id) },
@@ -100,17 +107,31 @@ fun DownloadsScreen(
     }
 }
 
+/** "12.0 MB of 40.0 MB", or "12.0 MB downloaded" with no known total. */
+private fun downloadBytesLine(received: Long, total: Long?): String =
+    if (total != null) "${formatBytes(received)} of ${formatBytes(total)}" else "${formatBytes(received)} downloaded"
+
 /** The status line under a download's name. */
 internal fun downloadStatusLine(entry: DownloadEntry, live: DownloadProgress?, timestamp: String): String =
     when (entry.status) {
         DownloadStatus.RUNNING -> {
             val received = live?.received ?: 0
             val total = live?.total?.takeIf { it > 0 } ?: entry.totalBytes.takeIf { it > 0 }
-            when {
+            val line = when {
                 live == null -> "Starting…"
-                total != null -> "${formatBytes(received)} of ${formatBytes(total)}"
-                else -> "${formatBytes(received)} downloaded"
+                live.saving -> "Saving to Downloads…"
+                else -> downloadBytesLine(received, total)
             }
+            // "Restarted from the beginning: …" after a resume that
+            // couldn't pick up where it left off.
+            entry.note?.let { "$line · $it" } ?: line
+        }
+        DownloadStatus.PAUSED -> {
+            val why = entry.note?.let { "Paused: ${it.replaceFirstChar(Char::lowercaseChar)}" } ?: "Paused"
+            val bytes = downloadBytesLine(entry.receivedBytes, entry.totalBytes.takeIf { it > 0 })
+            // No validator to check a range against: Resume starts over.
+            val whole = entry.totalBytes > 0 && entry.receivedBytes == entry.totalBytes
+            if (entry.validator == null && !whole) "$why · $bytes · resuming starts over" else "$why · $bytes"
         }
         DownloadStatus.COMPLETED -> "${formatBytes(entry.receivedBytes)} · $timestamp"
         DownloadStatus.CANCELLED -> "Cancelled · $timestamp"
@@ -123,14 +144,18 @@ private fun DownloadRow(
     live: DownloadProgress?,
     timestamp: String,
     onOpen: () -> Unit,
+    canPause: Boolean,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
     onCancel: () -> Unit,
     onRetry: () -> Unit,
     onRemove: () -> Unit,
 ) {
     val running = entry.status == DownloadStatus.RUNNING
+    val paused = entry.status == DownloadStatus.PAUSED
     val completed = entry.status == DownloadStatus.COMPLETED
     val failed = entry.status == DownloadStatus.FAILED
-    val canRetry = !running && !completed && entry.sourceUrl.isNotBlank()
+    val canRetry = !running && !paused && !completed && entry.sourceUrl.isNotBlank()
     val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
 
     Row(
@@ -179,6 +204,13 @@ private fun DownloadRow(
                 } else {
                     LinearProgressIndicator(modifier = modifier)
                 }
+            } else if (paused && entry.totalBytes > 0) {
+                LinearProgressIndicator(
+                    progress = { (entry.receivedBytes.toFloat() / entry.totalBytes).coerceIn(0f, 1f) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                )
             }
             Text(
                 downloadStatusLine(entry, live, timestamp),
@@ -191,7 +223,13 @@ private fun DownloadRow(
         if (canRetry) {
             RowAction(Icons.Filled.Refresh, "Retry", onRetry)
         }
-        if (running) {
+        if (running && canPause) {
+            RowAction(Icons.Filled.Pause, "Pause download", onPause)
+        }
+        if (paused) {
+            RowAction(Icons.Filled.PlayArrow, "Resume download", onResume)
+        }
+        if (running || paused) {
             RowAction(Icons.Filled.Close, "Cancel download", onCancel)
         } else {
             RowAction(Icons.Filled.Close, "Remove from list", onRemove)

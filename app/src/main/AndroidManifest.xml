@@ -181,6 +181,11 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- The download notifications' Pause / Resume / Cancel (#265). -->
+        <receiver
+            android:name=".browser.DownloadActionReceiver"
+            android:exported="false" />
+
         <!--
           NodeService lives in its own `:node` process so we can exit
           that process (and everything native inside it — ant's tokio

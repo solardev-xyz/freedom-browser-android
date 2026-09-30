@@ -594,7 +594,7 @@ fun SettingsScreen(
     if (confirmClearSiteData) {
         ConfirmDialog(
             title = "Clear cookies and site data?",
-            message = "Signs you out of most sites and wipes cached page data, cookies, form autofill, remembered page zoom levels and desktop-site choices from every open tab.",
+            message = "Signs you out of most sites and wipes cached page data, cookies, form autofill, remembered page zoom levels and desktop-site choices from every open tab. Unfinished downloads are cancelled.",
             confirmLabel = "Clear site data",
             onConfirm = {
                 onClearWebViewData()

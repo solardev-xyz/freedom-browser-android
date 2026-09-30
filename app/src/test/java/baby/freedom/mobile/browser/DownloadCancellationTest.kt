@@ -117,4 +117,62 @@ class DownloadCancellationTest {
             assertTrue("read still blocked after cancel", ended.await(5, TimeUnit.SECONDS))
         }
     }
+
+    @Test
+    fun `a stop is a cancel unless it's asked as a pause`() {
+        val c = DownloadCancellation()
+        val a = Job()
+        val b = Job()
+        c.register(10, a)
+        c.register(11, b)
+        c.cancel(10)
+        c.cancel(11, DownloadStop.PAUSE)
+        assertEquals(DownloadStop.CANCEL, c.stopOf(10))
+        assertEquals(DownloadStop.PAUSE, c.stopOf(11))
+        assertTrue(b.isCancelled)
+    }
+
+    @Test
+    fun `a cancel on top of a pause wins, and a pause doesn't undo a cancel`() = runBlocking {
+        // Jobs that, like a real download winding down in its catch
+        // block, are still cancelling when the second stop lands.
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        fun winding() = @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class) GlobalScope.launch {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+        }
+        val c = DownloadCancellation()
+        c.register(12, winding())
+        c.cancel(12, DownloadStop.PAUSE)
+        c.cancel(12)
+        assertEquals(DownloadStop.CANCEL, c.stopOf(12))
+        c.register(13, winding())
+        c.cancel(13)
+        c.cancel(13, DownloadStop.PAUSE)
+        assertEquals(DownloadStop.CANCEL, c.stopOf(13))
+        gate.complete(Unit)
+        Unit
+    }
+
+    @Test
+    fun `an early pause is reported as a pause to the refused job`() {
+        val c = DownloadCancellation()
+        c.cancel(14, DownloadStop.PAUSE)
+        assertFalse(c.register(14, Job()))
+        assertEquals(DownloadStop.PAUSE, c.stopOf(14))
+    }
+
+    @Test
+    fun `a resumed run isn't stopped by a mark aimed at its last run`() {
+        // A second Pause tap landed after the download had paused: once
+        // forgotten (as resume does), it can't stop the resumed run.
+        val c = DownloadCancellation()
+        val first = Job()
+        c.register(15, first)
+        c.cancel(15, DownloadStop.PAUSE)
+        first.complete()
+        c.cancel(15, DownloadStop.PAUSE)
+        c.forget(15)
+        assertTrue(c.register(15, Job()))
+        assertEquals(null, c.stopOf(15))
+    }
 }
