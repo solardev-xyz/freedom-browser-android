@@ -750,6 +750,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_libradicle_uniffi_checksum_func_start(
     ): Int
+    external fun uniffi_libradicle_uniffi_checksum_func_start_with_key(
+    ): Int
     external fun uniffi_libradicle_uniffi_checksum_func_status(
     ): Int
     external fun uniffi_libradicle_uniffi_checksum_func_tree(
@@ -831,6 +833,8 @@ internal object UniffiLib {
     external fun uniffi_libradicle_uniffi_fn_func_shutdown(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_libradicle_uniffi_fn_func_start(`home`: RustBuffer.ByValue,`alias`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_libradicle_uniffi_fn_func_start_with_key(`home`: RustBuffer.ByValue,`alias`: RustBuffer.ByValue,`secretKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_libradicle_uniffi_fn_func_status(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1038,6 +1042,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_libradicle_uniffi_checksum_func_start() and 0xFFFF) != 34743) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_libradicle_uniffi_checksum_func_start_with_key() and 0xFFFF) != 30183) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_libradicle_uniffi_checksum_func_status() and 0xFFFF) != 14863) {
@@ -1256,6 +1263,25 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
         val byteBuf = toUtf8(value)
         buf.putInt(byteBuf.limit())
         buf.put(byteBuf)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
+    override fun read(buf: ByteBuffer): ByteArray {
+        val len = buf.getInt()
+        val byteArr = ByteArray(len)
+        buf.get(byteArr)
+        return byteArr
+    }
+    override fun allocationSize(value: ByteArray): ULong {
+        return 4UL + value.size.toULong()
+    }
+    override fun write(value: ByteArray, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        buf.put(value)
     }
 }
 
@@ -1756,6 +1782,25 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         
         FfiConverterString.lower(`home`),
         FfiConverterString.lower(`alias`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Start the embedded node as `secret_key`, an identity the host keeps
+         * (a 32-byte Ed25519 secret seed), instead of the profile's own key file.
+         * Nothing secret is written to `home`, and `secret_key`'s bytes are zeroed
+         * before this returns. `{"did": "..."}` on success.
+         */ fun `startWithKey`(`home`: kotlin.String, `alias`: kotlin.String, `secretKey`: kotlin.ByteArray): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_libradicle_uniffi_fn_func_start_with_key(
+    
+        
+        FfiConverterString.lower(`home`),
+        FfiConverterString.lower(`alias`),
+        FfiConverterByteArray.lower(`secretKey`),_status)
 }
     )
     }

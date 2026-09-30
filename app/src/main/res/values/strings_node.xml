@@ -127,6 +127,10 @@
     <string name="node_identity_adopted_next_start">Your Swarm node will use your wallet\'s identity (%1$s) when it next starts.</string>
     <string name="node_identity_dropped_restarting">Wallet removed. Your Swarm node is restarting with this device\'s own identity.</string>
     <string name="node_identity_dropped_next_start">Wallet removed. Your Swarm node will use this device\'s own identity.</string>
+    <string name="node_identity_radicle_adopted_restarting">Your Radicle node is restarting as your wallet\'s identity (%1$s). Repositories it seeds stay seeded; what you published before stays signed by this device\'s own identity.</string>
+    <string name="node_identity_radicle_adopted_next_start">Your Radicle node will use your wallet\'s identity (%1$s) when it next starts. Repositories it seeds stay seeded; what you published before stays signed by this device\'s own identity.</string>
+    <string name="node_identity_radicle_dropped_restarting">Your Radicle node is restarting with this device\'s own identity.</string>
+    <string name="node_identity_radicle_dropped_next_start">Your Radicle node will use this device\'s own identity.</string>
 
     <!-- browser/NodeApiGuard.kt: the 403 page a web page's request to the node's own API gets.
          %1$s lists the API paths pages may use (/bzz, /bytes, …). -->

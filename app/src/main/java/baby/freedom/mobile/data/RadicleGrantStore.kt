@@ -77,6 +77,19 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
         return written && connected
     }
 
+    /**
+     * Take every site back to the connection tier: the user's Radicle
+     * identity changed (#328 — the node now runs as the wallet's, or as
+     * its own again), and a site allowed to know and write as the old one
+     * must ask before it learns or writes as the new one. `false` if the
+     * store couldn't be written.
+     */
+    suspend fun dropSigning(): Boolean = write { prefs ->
+        prefs.asMap().forEach { (k, v) ->
+            if (k.name.startsWith(PREFIX) && v == SIGNING) prefs[stringPreferencesKey(k.name)] = CONNECTION
+        }
+    }
+
     /** Drop [origin]'s grant, both tiers; `false` if the store couldn't be written. */
     suspend fun revoke(origin: String): Boolean = write { it.remove(keyOf(origin)) }
 

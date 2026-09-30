@@ -91,6 +91,8 @@ data class RadicleInfo(
     /** The node ID (`z6Mk…`), or `""` until it has started. */
     val nid: String = "",
     val alias: String = "",
+    /** The node runs as the wallet's Radicle identity (#328), not the profile's own key. */
+    val walletIdentity: Boolean = false,
     val connectedPeers: Int = 0,
     /** Explicitly seeded repositories, including ones still awaiting a first fetch. */
     val seededRepos: List<RadicleRepo> = emptyList(),

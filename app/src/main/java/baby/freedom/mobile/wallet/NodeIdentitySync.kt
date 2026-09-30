@@ -2,6 +2,7 @@ package baby.freedom.mobile.wallet
 
 import android.content.Context
 import android.util.Log
+import baby.freedom.mobile.data.RadicleGrantStore
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,11 +27,19 @@ import java.util.concurrent.atomic.AtomicReference
  *    derive them from the seed and store them: [Change.Adopted]. An
  *    unlock of the same vault finds them already there and does nothing,
  *    so the nodes only restart when the identity really changes. (A
- *    wallet made before #77 gets its identities on its first unlock.)
+ *    wallet made before #77 gets its identities on its first unlock, and
+ *    one whose keys were stored before #328 gets its Radicle key then —
+ *    its Swarm account stays as it was.)
  *  - The wallet is removed: wipe them, [Change.Dropped].
  *
- * Each change goes to the [setOnChanged] listener — the activity
- * restarts the Swarm node with it — and to [notices], which the browser
+ * Every change is also a new Radicle identity, so before it's written
+ * [beforeRadicleChange] takes sites' Radicle signing grants back
+ * (`RadicleGrantStore.dropSigning`): a site that could read and write as
+ * the old identity asks again before it gets the new one.
+ *
+ * Each change goes to the [setOnChanged] listener — the activity has
+ * `:node` restart the Swarm and Radicle nodes with it — and to
+ * [notices], which the browser
  * shows. The `:node`
  * process only ever reads the store, and only keys tagged with the
  * vault still on the device, so a crash between the vault and the store
@@ -41,10 +50,21 @@ class NodeIdentitySync internal constructor(
     private val store: NodeIdentityStore,
     private val scope: CoroutineScope,
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    /**
+     * Run before the Radicle identity changes (see the class comment). A
+     * failure stops an adoption (the next unlock tries again), but not a
+     * removal: the removed wallet's keys are wiped regardless.
+     */
+    private val beforeRadicleChange: suspend () -> Unit = {},
 ) {
     sealed interface Change {
-        /** The nodes now use the wallet's identities; [swarmAddress] is the Swarm account. */
-        data class Adopted(val swarmAddress: String) : Change
+        /**
+         * The nodes now use the wallet's identities: [swarmAddress] is the
+         * Swarm account, [radicleDid] the Radicle one. [swarmChanged] is
+         * false when only the Radicle identity is new (keys stored before
+         * #328 for this same wallet), so the Swarm node stays as it is.
+         */
+        data class Adopted(val swarmAddress: String, val radicleDid: String, val swarmChanged: Boolean = true) : Change
 
         /** The wallet is gone; the nodes are back to their own identities. */
         data object Dropped : Change
@@ -108,11 +128,14 @@ class NodeIdentitySync internal constructor(
         return change
     }
 
-    private fun adopt(): Change? {
+    private suspend fun adopt(): Change? {
         val tag = vault.identityTag() ?: return null
-        store.read(tag)?.let {
-            it.wipe()
-            return null
+        val stored = store.read(tag)
+        val hadSwarm = stored != null
+        if (stored != null) {
+            val complete = stored.radicleKey != null
+            stored.wipe()
+            if (complete) return null
         }
         val identity = try {
             vault.withSeed { NodeIdentity.derive(it) }
@@ -121,15 +144,21 @@ class NodeIdentitySync internal constructor(
             return null
         }
         return try {
+            beforeRadicleChange()
             store.write(tag, identity)
-            Change.Adopted(identity.swarmAddress)
+            Change.Adopted(identity.swarmAddress, identity.radicleDid.orEmpty(), swarmChanged = !hadSwarm)
         } finally {
             identity.wipe()
         }
     }
 
-    private fun drop(): Change? {
+    private suspend fun drop(): Change? {
         if (store.isEmpty()) return null
+        try {
+            beforeRadicleChange()
+        } catch (t: Throwable) {
+            Log.w(TAG, "taking back Radicle signing grants failed: ${t.javaClass.simpleName}")
+        }
         store.wipe()
         return Change.Dropped
     }
@@ -141,10 +170,15 @@ class NodeIdentitySync internal constructor(
         private var instance: NodeIdentitySync? = null
 
         fun get(context: Context): NodeIdentitySync = instance ?: synchronized(this) {
+            // The lambda below outlives the caller: never let it hold an activity.
+            val app = context.applicationContext
             instance ?: NodeIdentitySync(
                 vault = Vault.get(context),
                 store = NodeIdentityStore.get(context),
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+                beforeRadicleChange = {
+                    check(RadicleGrantStore.get(app).dropSigning()) { "couldn't take back Radicle signing grants" }
+                },
             ).also { instance = it }
         }
     }

@@ -19,9 +19,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The derived node identities on disk (#77): sealed, tied to the vault
- * they came from, and kept in step with the wallet — adopted on create,
- * import and a pre-#77 wallet's first unlock, left alone on a plain
+ * The derived node identities on disk (#77, #328): sealed, tied to the
+ * vault they came from, and kept in step with the wallet — adopted on
+ * create, import and a pre-#77 wallet's first unlock, completed with the
+ * Radicle key on a pre-#328 wallet's first unlock, left alone on a plain
  * unlock, dropped on Remove.
  */
 class NodeIdentitySyncTest {
@@ -71,17 +72,21 @@ class NodeIdentitySyncTest {
     @Test
     fun `create adopts the derived identity and seals it`() = runBlocking {
         vault.create(abandon12, auth, imported = false)
-        assertEquals(NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0"), reconcile())
+        assertEquals(NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", ABANDON_DID), reconcile())
         val tag = vault.identityTag()!!
         assertEquals(tag, store.storedTag())
         val read = store.read(tag)!!
         assertEquals("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", read.swarmAddress)
         assertEquals("12D3KooWKavfSLKnBEoUdrcsZKHE2tCWxrPkND6psrNRyL8DgtYW", read.peerId)
-        // Neither key is on disk in the clear.
+        assertEquals(ABANDON_DID, read.radicleDid)
+        // No key is on disk in the clear.
         val onDisk = file.readText()
         assertFalse(onDisk.contains("9a983cb3d832fbde5ab49d692b7a8bf5b5d232479c99333d0fc8e1d21f1b55b6"))
         assertFalse(onDisk.contains("6d7c32198dff963096b93296acb383c9b4f2bd85a4e52c123bfee1e5cd00c749"))
-        assertFalse(String(file.readBytes(), Charsets.ISO_8859_1).contains(String(read.swarmKey, Charsets.ISO_8859_1)))
+        assertFalse(onDisk.contains(ABANDON_RADICLE_KEY))
+        val raw = String(file.readBytes(), Charsets.ISO_8859_1)
+        assertFalse(raw.contains(String(read.swarmKey, Charsets.ISO_8859_1)))
+        assertFalse(raw.contains(String(read.radicleKey!!, Charsets.ISO_8859_1)))
     }
 
     @Test
@@ -103,7 +108,7 @@ class NodeIdentitySyncTest {
         vault.lock()
         assertTrue(store.isEmpty())
         vault.unlock(auth)
-        assertEquals(NodeIdentitySync.Change.Adopted("0x0D3eB21b6b21833A4939Cfff4810E9AE0758e12C"), reconcile())
+        assertEquals(NodeIdentitySync.Change.Adopted("0x0D3eB21b6b21833A4939Cfff4810E9AE0758e12C", LEGAL_DID), reconcile())
     }
 
     @Test
@@ -132,7 +137,7 @@ class NodeIdentitySyncTest {
         // The leftover is never handed out for the new wallet.
         assertNull(store.read(newTag))
         assertNull(store.boot(vaultStore))
-        assertEquals(NodeIdentitySync.Change.Adopted("0x0D3eB21b6b21833A4939Cfff4810E9AE0758e12C"), reconcile())
+        assertEquals(NodeIdentitySync.Change.Adopted("0x0D3eB21b6b21833A4939Cfff4810E9AE0758e12C", LEGAL_DID), reconcile())
         assertNull(store.read(oldTag))
         assertEquals("0x0D3eB21b6b21833A4939Cfff4810E9AE0758e12C", store.read(newTag)!!.swarmAddress)
     }
@@ -173,6 +178,114 @@ class NodeIdentitySyncTest {
         // Once the wallet is gone the node boots as its own, even before the sync wipes.
         vaultStore.record = null
         assertNull(store.boot(vaultStore))
+    }
+
+    @Test
+    fun `radicle hands the node the wallet's Radicle key, while locked`() = runBlocking {
+        assertNull(store.radicle(vaultStore))
+        vault.create(abandon12, auth, imported = false)
+        reconcile()
+        vault.lock()
+        val host = store.radicle(vaultStore)!!
+        assertEquals(ABANDON_DID, host.did)
+        // The secret is the swarmnode module's own (internal); read it the long way.
+        val secret = host.javaClass.getDeclaredField("secret").apply { isAccessible = true }.get(host) as ByteArray
+        assertEquals(ABANDON_RADICLE_KEY, secret.joinToString("") { "%02x".format(it) })
+        // Only the DID is printed.
+        assertEquals("HostIdentity($ABANDON_DID)", host.toString())
+        host.wipe()
+        assertTrue(secret.all { it == 0.toByte() })
+        // Once the wallet is gone the node runs as its own again.
+        vaultStore.record = null
+        assertNull(store.radicle(vaultStore))
+    }
+
+    @Test
+    fun `keys stored before Radicle keep booting Swarm and get the Radicle key on the next unlock`() = runBlocking {
+        vault.create(abandon12, auth, imported = false)
+        val tag = vault.identityTag()!!
+        writeVersion1(tag, NodeIdentity.derive(abandon12.seed()))
+        vault.lock()
+        // While locked: Swarm boots as the wallet, Radicle as its own key.
+        assertEquals("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", store.boot(vaultStore)!!.swarmAddress)
+        assertNull(store.radicle(vaultStore))
+        assertNull(store.read(tag)!!.radicleKey)
+        // The next unlock adds the Radicle key; the Swarm account stays.
+        vault.unlock(auth)
+        assertEquals(
+            NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", ABANDON_DID, swarmChanged = false),
+            reconcile(),
+        )
+        assertEquals(2, org.json.JSONObject(file.readText()).getInt("version"))
+        assertEquals(ABANDON_DID, store.radicle(vaultStore)!!.did)
+        assertEquals("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", store.boot(vaultStore)!!.swarmAddress)
+        // And then it's complete: a further unlock is a no-op.
+        vault.lock()
+        vault.unlock(auth)
+        assertNull(reconcile())
+    }
+
+    /** The node identity file as #77 (version 1) wrote it: Swarm and IPFS keys only. */
+    private fun writeVersion1(tag: String, identity: NodeIdentity) {
+        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, keys.key(create = true))
+        cipher.updateAAD(tag.toByteArray())
+        val sealed = cipher.doFinal(identity.swarmKey + identity.ipfsKey)
+        identity.wipe()
+        file.parentFile!!.mkdirs()
+        file.writeText(
+            org.json.JSONObject()
+                .put("version", 1)
+                .put("vault", tag)
+                .put("iv", java.util.Base64.getEncoder().encodeToString(cipher.iv))
+                .put("sealed", java.util.Base64.getEncoder().encodeToString(sealed))
+                .toString(),
+        )
+    }
+
+    @Test
+    fun `sites' Radicle signing grants are taken back before the identity changes`() = runBlocking {
+        // What the store held each time the grants were taken back.
+        val seen = mutableListOf<String?>()
+        val withGrants = NodeIdentitySync(vault, store, scope, io = Dispatchers.Unconfined, beforeRadicleChange = {
+            seen += store.storedTag()
+        })
+        vault.create(abandon12, auth, imported = false)
+        withGrants.reconcile(vault.state.value)
+        // Before the keys were written: nothing stored yet.
+        assertEquals(listOf<String?>(null), seen)
+        // A plain unlock changes nothing, so nothing is taken back.
+        vault.lock()
+        vault.unlock(auth)
+        assertNull(withGrants.reconcile(vault.state.value))
+        assertEquals(1, seen.size)
+        // Remove: before the keys are wiped.
+        val tag = vault.identityTag()
+        vault.remove()
+        assertEquals(NodeIdentitySync.Change.Dropped, withGrants.reconcile(vault.state.value))
+        assertEquals(listOf(null, tag), seen)
+    }
+
+    @Test
+    fun `an adoption waits for the grants to be taken back, a removal doesn't`() = runBlocking {
+        var fail = true
+        val flaky = NodeIdentitySync(vault, store, scope, io = Dispatchers.Unconfined, beforeRadicleChange = {
+            check(!fail) { "grant store unwritable" }
+        })
+        vault.create(abandon12, auth, imported = false)
+        // Nothing adopted while the grants can't be taken back...
+        assertNull(flaky.reconcile(vault.state.value))
+        assertTrue(store.isEmpty())
+        // ...and the next unlock tries again.
+        fail = false
+        vault.lock()
+        vault.unlock(auth)
+        assertNotNull(flaky.reconcile(vault.state.value))
+        // A removal wipes the keys regardless.
+        fail = true
+        vault.remove()
+        assertEquals(NodeIdentitySync.Change.Dropped, flaky.reconcile(vault.state.value))
+        assertFalse(file.exists())
     }
 
     @Test
@@ -219,7 +332,7 @@ class NodeIdentitySyncTest {
 
     @Test
     fun `notices say what changed and whether the node restarts`() {
-        val adopted = NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0")
+        val adopted = NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", ABANDON_DID)
         assertEquals(
             "Your Swarm node now uses your wallet's identity (0x6Fac…b9C0). Restarting it…",
             nodeIdentityNotice(adopted, restarting = true),
@@ -232,5 +345,46 @@ class NodeIdentitySyncTest {
             "Wallet removed. Your Swarm node is restarting with this device's own identity.",
             nodeIdentityNotice(NodeIdentitySync.Change.Dropped, restarting = true),
         )
+    }
+
+    @Test
+    fun `notices mention the Radicle node only while it's on`() {
+        val adopted = NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", ABANDON_DID)
+        val kept = "Repositories it seeds stay seeded; what you published before stays signed by this device's own identity."
+        assertEquals(
+            "Your Swarm node now uses your wallet's identity (0x6Fac…b9C0). Restarting it… " +
+                "Your Radicle node is restarting as your wallet's identity (z6Mkgb…8gAn). $kept",
+            nodeIdentityNotice(adopted, restarting = true, radicleOn = true, radicleRestarting = true),
+        )
+        assertEquals(
+            "Your Swarm node will use your wallet's identity (0x6Fac…b9C0) when it next starts. " +
+                "Your Radicle node will use your wallet's identity (z6Mkgb…8gAn) when it next starts. $kept",
+            nodeIdentityNotice(adopted, restarting = false, radicleOn = true, radicleRestarting = false),
+        )
+        // A pre-#328 wallet's upgrade: only Radicle changed.
+        val radicleOnly = adopted.copy(swarmChanged = false)
+        assertEquals(
+            "Your Radicle node is restarting as your wallet's identity (z6Mkgb…8gAn). $kept",
+            nodeIdentityNotice(radicleOnly, restarting = true, radicleOn = true, radicleRestarting = true),
+        )
+        // ...and with Radicle off there's nothing to say.
+        assertNull(nodeIdentityNotice(radicleOnly, restarting = true, radicleOn = false))
+        assertEquals(
+            "Wallet removed. Your Swarm node is restarting with this device's own identity. " +
+                "Your Radicle node is restarting with this device's own identity.",
+            nodeIdentityNotice(NodeIdentitySync.Change.Dropped, restarting = true, radicleOn = true, radicleRestarting = true),
+        )
+        assertEquals(
+            "Wallet removed. Your Swarm node will use this device's own identity. " +
+                "Your Radicle node will use this device's own identity.",
+            nodeIdentityNotice(NodeIdentitySync.Change.Dropped, restarting = false, radicleOn = true),
+        )
+    }
+
+    private companion object {
+        /** Desktop's Radicle DID and key for `abandon ×11 about` (see NodeIdentityTest). */
+        const val ABANDON_DID = "did:key:z6Mkgb93MjdiDEUrHVCY2X4EfaSwzoFCorViqqPnjoQX8gAn"
+        const val ABANDON_RADICLE_KEY = "b262e62fc6a558fd045ca68dd7000e30a135f678bc0816935e13ebe6a97e14bd"
+        const val LEGAL_DID = "did:key:z6MkeUQ9N8WURkVFFn8jrdrmTQBWjLdrqwBsNUjtFVFTuEZi"
     }
 }

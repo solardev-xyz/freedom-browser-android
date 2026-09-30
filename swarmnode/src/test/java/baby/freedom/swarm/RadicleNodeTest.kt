@@ -38,6 +38,20 @@ class RadicleNodeTest {
             if (startResult.contains("did")) running = true
             return startResult
         }
+        /** The key each [startWithKey] got, as it was when the call began. */
+        val keysGiven: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        /** The arrays [startWithKey] got, to check they're zeroed afterwards. */
+        val keyArrays: MutableList<ByteArray> = Collections.synchronizedList(mutableListOf())
+        override fun startWithKey(home: String, alias: String, secretKey: ByteArray): String {
+            keysGiven += secretKey.joinToString("") { "%02x".format(it) }
+            keyArrays += secretKey
+            calls += "startWithKey"
+            starts.incrementAndGet()
+            startEntered.countDown()
+            releaseStart.await(5, TimeUnit.SECONDS)
+            if (startResult.contains("did")) running = true
+            return startResult
+        }
         override fun connectSeeds(timeoutMs: Int): String {
             calls += "connectSeeds"
             return """{"connected":$peers,"target":4}"""
@@ -162,6 +176,96 @@ class RadicleNodeTest {
         assertTrue("seed book dialled", "connectSeeds" in ops.calls)
         // The default socket path fits, so RAD_SOCKET is left alone.
         assertNull(ops.movedSocket)
+        node.dispose()
+    }
+
+    @Test
+    fun aHostIdentityBootsWithItsKeyZeroedAfterAndShowsAsTheWallets() {
+        val ops = FakeOps().apply { startResult = """{"did":"did:key:z6MkWallet"}""" }
+        val key = ByteArray(32) { 7 }
+        val node = RadicleNode(config.copy(identity = { RadicleNode.HostIdentity(key.copyOf(), "did:key:z6MkWallet") }), ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running && it.connectedPeers == 3 }
+        assertEquals(listOf("startWithKey"), ops.calls.filter { it.startsWith("start") })
+        assertEquals(listOf("07".repeat(32)), ops.keysGiven)
+        // The copy handed over is zeroed once the call returns.
+        assertTrue(ops.keyArrays.single().all { it == 0.toByte() })
+        assertTrue(node.state.value.walletIdentity)
+        node.dispose()
+    }
+
+    @Test
+    fun withoutAHostIdentityTheProfilesOwnKeyBoots() {
+        val ops = FakeOps()
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running && it.connectedPeers == 3 }
+        assertEquals(listOf("start"), ops.calls.filter { it.startsWith("start") })
+        assertFalse(node.state.value.walletIdentity)
+        node.dispose()
+    }
+
+    @Test
+    fun reloadIdentityRestartsOnlyANodeUpAsAnotherIdentity() {
+        val ops = FakeOps()
+        val host = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        val node = RadicleNode(
+            config.copy(identity = { host.get()?.let { RadicleNode.HostIdentity(ByteArray(32) { 1 }, it) } }),
+            ops,
+        )
+        // Not started: nothing to restart (the next boot reads it anyway).
+        node.reloadIdentity()
+        Thread.sleep(100)
+        assertEquals(0, ops.starts.get())
+
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running && it.connectedPeers == 3 }
+        // Same identity (the device's own): left alone.
+        node.reloadIdentity()
+        Thread.sleep(200)
+        assertEquals(listOf("start"), ops.calls.filter { it.startsWith("start") })
+
+        // A wallet appears: shut down, then up as the wallet's.
+        host.set("did:key:z6MkWallet")
+        node.reloadIdentity()
+        await("restarted as the wallet's", node) {
+            it.status == RadicleStatus.Running && it.walletIdentity && ops.calls.count { c -> c == "startWithKey" } == 1
+        }
+        val order = ops.calls.filter { it == "start" || it == "startWithKey" || it == "shutdown" }
+        assertEquals(listOf("start", "shutdown", "startWithKey"), order)
+        // Asked again for the same identity: no second restart.
+        node.reloadIdentity()
+        Thread.sleep(200)
+        assertEquals(2, ops.starts.get())
+
+        // The wallet is removed: back to the profile's own key.
+        host.set(null)
+        node.reloadIdentity()
+        await("back to its own", node) { it.status == RadicleStatus.Running && !it.walletIdentity && ops.starts.get() == 3 }
+        assertEquals("start", ops.calls.last { it == "start" || it == "startWithKey" })
+        node.dispose()
+    }
+
+    @Test
+    fun reloadIdentityLeavesAStoppedNodeStopped() {
+        val ops = FakeOps()
+        val host = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        val node = RadicleNode(
+            config.copy(identity = { host.get()?.let { RadicleNode.HostIdentity(ByteArray(32) { 1 }, it) } }),
+            ops,
+        )
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        node.stop()
+        await("stopped", node) { it.status == RadicleStatus.Stopped && "shutdown" in ops.calls }
+        host.set("did:key:z6MkWallet")
+        node.reloadIdentity()
+        Thread.sleep(200)
+        assertEquals(RadicleStatus.Stopped, node.state.value.status)
+        assertEquals(1, ops.starts.get())
+        // Turned on again later, it boots as the wallet's.
+        node.start()
+        await("running as the wallet's", node) { it.status == RadicleStatus.Running && it.walletIdentity }
         node.dispose()
     }
 

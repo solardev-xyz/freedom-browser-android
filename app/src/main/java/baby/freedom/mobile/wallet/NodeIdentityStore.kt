@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
+import baby.freedom.swarm.RadicleNode
 import java.io.File
 import java.security.KeyStore
 import java.security.MessageDigest
@@ -37,8 +38,8 @@ fun VaultRecord.identityTag(): String {
  * relaunch: the seed only ever lives in memory ([Vault]), but ant has
  * to boot as the same Swarm account every time.
  *
- * Only the two derived 32-byte keys are kept — never the phrase or the
- * seed — sealed with AES-256-GCM under their own Android Keystore key
+ * Only the derived 32-byte keys are kept — Swarm, IPFS and (#328)
+ * Radicle; never the phrase or the seed — sealed with AES-256-GCM under their own Android Keystore key
  * ([KeystoreNodeKeys]: hardware-backed, StrongBox when there is one). That
  * key needs no user authentication, since the node boots in the
  * background; what it protects against is the file being read off the
@@ -47,6 +48,10 @@ fun VaultRecord.identityTag(): String {
  * vault it was derived from ([VaultRecord.identityTag], bound into the
  * GCM tag as associated data), so keys left over from a removed or
  * replaced wallet are never used.
+ *
+ * Version 1 files (#77) hold the Swarm and IPFS keys only; they still
+ * boot Swarm, and [NodeIdentitySync] rewrites them as version 2, with the
+ * Radicle key, at the wallet's next unlock.
  */
 class NodeIdentityStore internal constructor(
     private val file: File,
@@ -83,22 +88,27 @@ class NodeIdentityStore internal constructor(
             cipher.updateAAD(vaultTag.toByteArray())
             val plain = cipher.doFinal(sealed)
             try {
-                if (plain.size != 64) return null
-                NodeIdentity(plain.copyOfRange(0, 32), plain.copyOfRange(32, 64))
+                val radicle = when (o.optInt("version") to plain.size) {
+                    1 to 64 -> null
+                    VERSION to 96 -> plain.copyOfRange(64, 96)
+                    else -> return null
+                }
+                NodeIdentity(plain.copyOfRange(0, 32), plain.copyOfRange(32, 64), radicle)
             } finally {
                 plain.fill(0)
             }
         }.getOrNull()
     }
 
-    /** Seals [identity]'s keys as belonging to the vault tagged [vaultTag], replacing whatever was there. */
+    /** Seals [identity]'s keys (all three) as belonging to the vault tagged [vaultTag], replacing whatever was there. */
     fun write(vaultTag: String, identity: NodeIdentity) {
+        val radicle = requireNotNull(identity.radicleKey) { "no Radicle key" }
         val key = keys.key(create = true) ?: error("no node identity key")
         val cipher = Cipher.getInstance(TRANSFORMATION)
         // The provider picks the IV (the Keystore insists on it).
         cipher.init(Cipher.ENCRYPT_MODE, key)
         cipher.updateAAD(vaultTag.toByteArray())
-        val plain = identity.swarmKey + identity.ipfsKey
+        val plain = identity.swarmKey + identity.ipfsKey + radicle
         val sealed = try {
             cipher.doFinal(plain)
         } finally {
@@ -128,7 +138,7 @@ class NodeIdentityStore internal constructor(
 
     private fun readFile(): JSONObject? {
         if (!file.exists()) return null
-        return runCatching { JSONObject(file.readText()) }.getOrNull()?.takeIf { it.optInt("version") == VERSION }
+        return runCatching { JSONObject(file.readText()) }.getOrNull()?.takeIf { it.optInt("version") in 1..VERSION }
     }
 
     /**
@@ -149,8 +159,25 @@ class NodeIdentityStore internal constructor(
         }
     }.getOrNull()
 
+    /**
+     * What the `:node` process boots the Radicle node as (#328): the
+     * wallet's Radicle identity (its secret seed, which the caller wipes,
+     * and DID) — or null when there's no wallet, no keys derived from this
+     * one yet, or only version-1 keys without a Radicle one. Never throws.
+     */
+    fun radicle(vault: VaultStore): RadicleNode.HostIdentity? = runCatching {
+        val tag = vault.read()?.identityTag() ?: return null
+        val identity = read(tag) ?: return null
+        try {
+            val did = identity.radicleDid ?: return null
+            RadicleNode.HostIdentity(identity.radicleSecret() ?: return null, did)
+        } finally {
+            identity.wipe()
+        }
+    }.getOrNull()
+
     companion object {
-        private const val VERSION = 1
+        private const val VERSION = 2
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
 

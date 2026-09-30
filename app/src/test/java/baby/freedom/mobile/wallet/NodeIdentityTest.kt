@@ -8,16 +8,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The node identities (#77) against the cross-platform golden vectors:
- * iOS's `docs/ipfs-identity-golden-vectors.md` for IPFS, desktop's
- * `identity/derivation.js` + `formats.js` (ethers / micro-key-producer)
- * for Swarm, and the BIP-32, SLIP-0010 and RFC 8032 spec vectors for the
- * layers underneath.
+ * The node identities (#77, #328) against the cross-platform golden
+ * vectors: iOS's `docs/ipfs-identity-golden-vectors.md` for IPFS,
+ * desktop's `identity/derivation.js` + `formats.js` (ethers /
+ * micro-key-producer) for Swarm and Radicle, and the BIP-32, SLIP-0010
+ * and RFC 8032 spec vectors for the layers underneath. (iOS reserves
+ * Radicle's `73404` path but doesn't derive a Radicle key yet; its
+ * SLIP-0010 Ed25519 vectors above cover the same routine.)
  */
 class NodeIdentityTest {
     private val abandon12 = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
     private val abandon24 = (List(23) { "abandon" } + "art").joinToString(" ")
     private val legal12 = "legal winner thank year wave sausage worth useful legal winner thank yellow"
+    private val zoo24 = (List(23) { "zoo" } + "vote").joinToString(" ")
 
     private fun identity(phrase: String) = NodeIdentity.derive(Mnemonic.parse(phrase).seed())
 
@@ -75,6 +78,27 @@ class NodeIdentityTest {
     }
 
     @Test
+    fun `radicle key and DID match desktop`() {
+        // Desktop's createRadicleIdentity(): did:key:z + base58btc(0xed01 ‖ pub).
+        val vectors = listOf(
+            Triple(abandon12, "b262e62fc6a558fd045ca68dd7000e30a135f678bc0816935e13ebe6a97e14bd", "did:key:z6Mkgb93MjdiDEUrHVCY2X4EfaSwzoFCorViqqPnjoQX8gAn"),
+            Triple(abandon24, "14cfd81768839aca0361b7958f3a7a8f71f8faf9c28e67ead84a3e1d8f8ac761", "did:key:z6MkwHejd1BmzHvuKyDrXzRd37FVyTYew2PWAisppvLTEBRm"),
+            Triple(legal12, "4cde184bf7f8c878043678a3b609f7738020ba56fb58c93fe377fa970da8cf11", "did:key:z6MkeUQ9N8WURkVFFn8jrdrmTQBWjLdrqwBsNUjtFVFTuEZi"),
+            Triple(zoo24, "a9c7473d8086233b781c74e75e017d8746fa1109116b93a9501285fe76b5172b", "did:key:z6MkvS4xEqArbArSx3kKsNUyT1wky5p3LyTcYPjMy6zvwSiH"),
+        )
+        for ((phrase, key, did) in vectors) {
+            val id = identity(phrase)
+            assertEquals(phrase, key, id.radicleKey!!.hex())
+            assertEquals(phrase, did, id.radicleDid)
+            assertEquals(key, id.radicleSecret()!!.hex())
+        }
+        // Its own path: not the IPFS key.
+        val a = identity(abandon12)
+        assertFalse(a.radicleKey!!.contentEquals(a.ipfsKey))
+        assertEquals("1fbc19d1e386f9969c5e7925d71ce5b332b399ee632b17f4743a3248823e248b", Ed25519.publicKey(a.radicleKey!!).hex())
+    }
+
+    @Test
     fun `ant identity document carries the key and a zero overlay nonce, no libp2p key`() {
         val id = identity(abandon12)
         val json = org.json.JSONObject(String(id.antIdentityJson(), Charsets.UTF_8))
@@ -89,15 +113,18 @@ class NodeIdentityTest {
         val s = id.toString()
         assertFalse(s.contains(id.swarmKey.hex()))
         assertFalse(s.contains(id.ipfsKey.hex()))
+        assertFalse(s.contains(id.radicleKey!!.hex()))
         assertTrue(s.contains(id.peerId))
+        assertTrue(s.contains(id.radicleDid!!))
     }
 
     @Test
-    fun `wipe zeroes both keys`() {
+    fun `wipe zeroes every key`() {
         val id = identity(abandon12)
         id.wipe()
         assertTrue(id.swarmKey.all { it.toInt() == 0 })
         assertTrue(id.ipfsKey.all { it.toInt() == 0 })
+        assertTrue(id.radicleKey!!.all { it.toInt() == 0 })
     }
 
     // ---- Spec vectors for the layers underneath ----

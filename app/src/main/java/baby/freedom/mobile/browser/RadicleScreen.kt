@@ -223,6 +223,12 @@ private fun RadicleStatusSection(
 @Composable
 private fun RadicleIdentitySection(info: RadicleInfo) {
     SectionCard(title = stringResource(R.string.radicle_section_identity)) {
+        // Where the identity comes from (#328): the wallet's recovery
+        // phrase — the same DID as on desktop — or the node's own key.
+        DetailRow(
+            stringResource(R.string.node_identity),
+            stringResource(if (info.walletIdentity) R.string.node_identity_wallet else R.string.node_identity_own),
+        )
         DetailRow(stringResource(R.string.radicle_identity_alias), info.alias)
         DetailRow(stringResource(R.string.radicle_identity_peers), info.connectedPeers.toString())
         StackedValue(stringResource(R.string.radicle_identity_did), info.did)
