@@ -48,4 +48,10 @@ interface IMyotisService {
      * can't take.
      */
     oneway void ethCall(long chainId, String to, String data, boolean probe, IMyotisCallResult result);
+
+    /** The light client's recent log lines (#276), like INodeService.getLogs. */
+    String getLogs();
+
+    /** Forget the kept log lines, like INodeService.clearLogs. */
+    oneway void clearLogs();
 }

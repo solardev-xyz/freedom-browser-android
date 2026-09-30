@@ -155,4 +155,15 @@ interface INodeService {
      * service is started again.
      */
     boolean stopWhenIdle();
+
+    /**
+     * The recent log lines (#276) of one of this process's nodes —
+     * `source` is a NodeLogSource ordinal: Swarm, IPFS or Radicle — oldest
+     * first, newline-joined, from a bounded in-memory ring with page
+     * addresses already taken out (NodeLogs). "" for an unknown source.
+     */
+    String getLogs(int source);
+
+    /** Forget every node's kept log lines (#276): Clear cookies & site data. */
+    oneway void clearLogs();
 }

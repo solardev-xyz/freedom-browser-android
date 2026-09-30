@@ -1,5 +1,6 @@
 package baby.freedom.mobile.node
 
+import android.app.Application
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
@@ -56,6 +57,10 @@ class TorService : Service() {
             cb ?: return
             callbacks.unregister(cb)
         }
+
+        override fun getLogs(): String = NodeLogs.text(NodeLogSource.Tor)
+
+        override fun clearLogs() = NodeLogs.clear()
     }
 
     /**
@@ -72,6 +77,7 @@ class TorService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        NodeLogs.start(Application.getProcessName()) { _, _ -> NodeLogSource.Tor }
         if (exiting) {
             Log.i(TAG, "created while the previous client is still stopping; waiting for the process exit")
             return

@@ -835,9 +835,11 @@ fun BrowserWebViewHost(
     tabs: TabsState,
     modifier: Modifier = Modifier,
     covered: Boolean = false,
+    onPrivateSessionEnded: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val privateSessionEnded = rememberUpdatedState(onPrivateSessionEnded)
     val repo = remember(context) { BrowsingRepository.get(context) }
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     val pageZoom = remember(context) { PageZoom.get(context) }
@@ -922,7 +924,13 @@ fun BrowserWebViewHost(
      * what the app itself kept for the session in memory: its
      * site-permission answers, zoom levels, downloads list (a private
      * download still running is cancelled, as in Chrome) and the
-     * onchain apps let through despite a warning (#123).
+     * onchain apps let through despite a warning (#123). Then
+     * [onPrivateSessionEnded]: the node processes' logs go too (#276,
+     * R3-M3) — scrubbed, but the timing and volume of what the private
+     * tabs fetched is in them, and a line can't be told apart by tab, so
+     * every node's lines go, as with *Clear cookies & site data*. So do
+     * those logged in the next [baby.freedom.mobile.node.NodeLogs.SETTLE_MS]:
+     * the nodes go on with a closed tab's requests for a while (R1-M1).
      */
     fun endPrivateSession() {
         PrivateProfile.discard()
@@ -932,6 +940,7 @@ fun BrowserWebViewHost(
         desktopSites.clearPrivate()
         DownloadManager.get(context).endPrivateSession()
         OnchainApps.onPrivateSessionEnded()
+        privateSessionEnded.value()
     }
 
     // Per-tab navigation observers (coroutine jobs, tracked so we can cancel

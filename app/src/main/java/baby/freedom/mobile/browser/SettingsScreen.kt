@@ -156,6 +156,8 @@ fun SettingsScreen(
     radicle: RadicleControls = RadicleControls(),
     onOpenRadicle: () -> Unit = {},
     onOpenWallet: () -> Unit = {},
+    /** Open the node logs page (#276) at the IPFS node's. */
+    onOpenIpfsLogs: () -> Unit = {},
     /** A newer release's page (#272), in a new tab in front of Settings. */
     onOpenUrl: (String) -> Unit = {},
 ) {
@@ -490,6 +492,7 @@ fun SettingsScreen(
                         settings = settings,
                         ipfsInfo = ipfsInfo,
                         onIpfsToggle = onIpfsToggle,
+                        onOpenLogs = onOpenIpfsLogs,
                     )
                 }
                 if (nothingMatches) item("no-match") {
@@ -619,7 +622,7 @@ fun SettingsScreen(
     if (confirmClearSiteData) {
         ConfirmDialog(
             title = "Clear cookies and site data?",
-            message = "Signs you out of most sites and wipes cached page data, cookies, form autofill, remembered page zoom levels and desktop-site choices from every open tab. Unfinished downloads are cancelled.",
+            message = "Signs you out of most sites and wipes cached page data, cookies, form autofill, remembered page zoom levels and desktop-site choices from every open tab, and the nodes' recent logs. Unfinished downloads are cancelled.",
             confirmLabel = "Clear site data",
             onConfirm = {
                 onClearWebViewData()
@@ -2086,6 +2089,7 @@ private fun IpfsSection(
     settings: NodeSettings,
     ipfsInfo: IpfsInfo,
     onIpfsToggle: (Boolean) -> Unit,
+    onOpenLogs: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val routingMode by settings.ipfsRoutingMode
@@ -2133,6 +2137,7 @@ private fun IpfsSection(
                 Spacer(Modifier.height(8.dp))
                 DetailRow("Error", err, singleLine = false)
             }
+            LogsButton(onOpenLogs)
         }
 
         if ("routing" in visible) {

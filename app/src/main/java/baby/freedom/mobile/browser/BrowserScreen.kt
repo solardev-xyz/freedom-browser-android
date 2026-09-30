@@ -85,6 +85,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.node.NodeLogSource
 import baby.freedom.mobile.wallet.NodeIdentitySync
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.ens.EnsInput
@@ -467,6 +468,10 @@ fun BrowserScreen(
     ipfsCounters: () -> LongArray? = { null },
     onStatusBarTint: (Int?) -> Unit = {},
     onPanelShown: (Boolean) -> Unit = {},
+    /** A node's recent log lines (#276), or null while its process isn't running. Blocking. */
+    readNodeLogs: (NodeLogSource) -> String? = { null },
+    /** Every running node forgets its kept log lines (part of Clear cookies & site data). */
+    clearNodeLogs: () -> Unit = {},
     /** Hardware-keyboard shortcuts (#270): this screen is their target while composed. */
     shortcuts: KeyboardShortcutRouter? = null,
 ) {
@@ -499,6 +504,8 @@ fun BrowserScreen(
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showNode by rememberSaveable { mutableStateOf(false) }
     var showRadicle by rememberSaveable { mutableStateOf(false) }
+    // The node logs page (#276), at this node's; over whichever node card opened it.
+    var showLogs by rememberSaveable { mutableStateOf<NodeLogSource?>(null) }
     var showWallet by rememberSaveable { mutableStateOf(false) }
     // A feature asking for an identity (#75: created lazily, never forced)
     // opens the wallet page over whatever is up; see [Vault.requireUnlocked].
@@ -542,7 +549,7 @@ fun BrowserScreen(
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
     // Any full-screen panel over the browser (they're all opaque).
-    val overlayShown = showSettings || showNode || showRadicle || showWallet || walletRequest != null ||
+    val overlayShown = showSettings || showNode || showRadicle || showLogs != null || showWallet || walletRequest != null ||
         showTabSwitcher ||
         showHistory || showBookmarks || showDownloads
     val downloads = remember(context) { DownloadManager.get(context) }
@@ -1634,6 +1641,7 @@ fun BrowserScreen(
         showSettings = false
         showNode = false
         showRadicle = false
+        showLogs = null
         showWallet = false
         showTabSwitcher = false
         showHistory = false
@@ -1983,6 +1991,8 @@ fun BrowserScreen(
                 tabs = tabs,
                 modifier = Modifier.fillMaxSize(),
                 covered = overlayShown,
+                // Closing the last private tab clears the nodes' logs (#276).
+                onPrivateSessionEnded = clearNodeLogs,
             )
             // Home overlay. Rendered whenever the tab hasn't loaded
             // a real page (fresh tab, or user navigated home). The
@@ -2427,8 +2437,11 @@ fun BrowserScreen(
                 // Closed tabs carry their saved back/forward history.
                 tabs.forgetClosedTabs()
                 tabs.clearWebViewData?.invoke()
+                // The nodes' logs can name what was browsed (#276).
+                clearNodeLogs()
             },
             onDismiss = { showSettings = false },
+            onOpenIpfsLogs = { showLogs = NodeLogSource.Ipfs },
         )
     }
 
@@ -2457,6 +2470,7 @@ fun BrowserScreen(
                 tabs.requestOpenInNewTab?.invoke(url, false, false)
             },
             onDismiss = { showNode = false },
+            onOpenLogs = { showLogs = it },
         )
     }
 
@@ -2473,6 +2487,17 @@ fun BrowserScreen(
             ),
             runNodeEnabled = runNodeEnabled,
             onDismiss = { showRadicle = false },
+            onOpenLogs = { showLogs = NodeLogSource.Radicle },
+        )
+    }
+
+    // Over the node card that opened it; Back returns there.
+    showLogs?.let { source ->
+        NodeLogsScreen(
+            initial = source,
+            read = readNodeLogs,
+            onDismiss = { showLogs = null },
+            externalTor = tor.proxy != null,
         )
     }
 

@@ -72,6 +72,7 @@ import baby.freedom.mobile.node.IMyotisCallback
 import baby.freedom.mobile.node.IMyotisService
 import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
+import baby.freedom.mobile.node.NodeLogSource
 import baby.freedom.mobile.node.MyotisChains
 import baby.freedom.mobile.node.MyotisLink
 import baby.freedom.mobile.node.MyotisService
@@ -92,11 +93,15 @@ import baby.freedom.mobile.wallet.PhraseBackup
 import baby.freedom.mobile.wallet.PhraseBackupJob
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.swarm.IpfsInfo
+import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisNetwork
 import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
+import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.RadicleInfo
+import baby.freedom.swarm.RadicleStatus
+import baby.freedom.swarm.SwarmNode
 import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
 import kotlinx.coroutines.Dispatchers
@@ -720,6 +725,8 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                         ipfsCounters = ::ipfsCounters,
                         onStatusBarTint = { statusBarTint = it },
                         onPanelShown = { panelShown = it },
+                        readNodeLogs = ::readNodeLogs,
+                        clearNodeLogs = ::clearNodeLogs,
                         shortcuts = shortcuts,
                     )
                 }
@@ -939,6 +946,38 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
      */
     private fun ipfsProgressSnapshot(): String? =
         runCatching { binder?.ipfsProgress }.getOrNull()
+
+    /**
+     * A node's recent log lines (#276) from the process it runs in, or null
+     * while the node is off: its process isn't bound, or — Swarm, IPFS and
+     * Radicle share `:node` — the process runs for another node but this
+     * one is stopped. Blocking binder call.
+     */
+    private fun readNodeLogs(source: NodeLogSource): String? = runCatching {
+        val off = when (source) {
+            NodeLogSource.Swarm -> infoFlow.value.status == NodeStatus.Stopped
+            NodeLogSource.Ipfs -> ipfsInfoFlow.value.status == IpfsStatus.Stopped
+            NodeLogSource.Radicle -> radicleInfoFlow.value.status == RadicleStatus.Stopped
+            NodeLogSource.Tor, NodeLogSource.LightClient -> false
+        }
+        if (off) return@runCatching null
+        when (source) {
+            NodeLogSource.Swarm, NodeLogSource.Ipfs, NodeLogSource.Radicle -> binder?.getLogs(source.ordinal)
+            NodeLogSource.Tor -> torBinder?.logs
+            NodeLogSource.LightClient -> myotisBinder?.logs
+        }
+    }.getOrNull()
+
+    /**
+     * Part of *Clear cookies & site data* (#276): every node process that's
+     * running forgets the log lines it kept. One-way calls — nothing waits.
+     * A process that isn't bound isn't running, and keeps no lines.
+     */
+    private fun clearNodeLogs() {
+        runCatching { binder?.clearLogs() }
+        runCatching { torBinder?.clearLogs() }
+        runCatching { myotisBinder?.clearLogs() }
+    }
 
     /** The IPFS node's retrieval / routing counters, same terms as above. */
     private fun ipfsCounters(): LongArray? =

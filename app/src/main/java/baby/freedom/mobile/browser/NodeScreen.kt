@@ -38,6 +38,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.node.NodeLogSource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -93,6 +94,8 @@ fun NodeScreen(
      * a transaction's explorer page, from the fund-and-buy page (#115).
      */
     onOpenUrl: (String) -> Unit = {},
+    /** Open the node logs page (#276) at this node's. */
+    onOpenLogs: (NodeLogSource) -> Unit = {},
 ) {
     val triple = nodeStatusTriple(nodeInfo.status)
     val context = LocalContext.current
@@ -173,6 +176,7 @@ fun NodeScreen(
                     runNodeEnabled = runNodeEnabled,
                     external = externalSwarm.isNotEmpty(),
                     onToggleRunNode = onToggleRunNode,
+                    onOpenLogs = { onOpenLogs(NodeLogSource.Swarm) },
                 )
             }
             item("details") {
@@ -193,7 +197,7 @@ fun NodeScreen(
                 GatewaySection(externalSwarm = externalSwarm)
             }
             item("tor") {
-                TorSection(tor)
+                TorSection(tor, onOpenLogs = { onOpenLogs(NodeLogSource.Tor) })
             }
             item("myotis") {
                 LightClientSection(
@@ -203,6 +207,7 @@ fun NodeScreen(
                     atLaunch = myotisAtLaunch,
                     onAtLaunch = { network, on -> scope.launch { settings.setMyotisStartOnLaunch(network, on) } },
                     onRecovery = onMyotisRecovery,
+                    onOpenLogs = { onOpenLogs(NodeLogSource.LightClient) },
                 )
             }
         }
@@ -215,6 +220,7 @@ private fun StatusSection(
     runNodeEnabled: Boolean,
     external: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
+    onOpenLogs: () -> Unit,
 ) {
     SectionCard(title = "Swarm node") {
         Row(
@@ -244,6 +250,7 @@ private fun StatusSection(
                 onCheckedChange = onToggleRunNode,
             )
         }
+        LogsButton(onOpenLogs)
     }
 }
 
@@ -430,6 +437,7 @@ private fun LightClientSection(
     atLaunch: Set<MyotisNetwork>?,
     onAtLaunch: (MyotisNetwork, Boolean) -> Unit,
     onRecovery: (chainId: Long, repair: Boolean) -> Unit,
+    onOpenLogs: () -> Unit,
 ) {
     val on = running.orEmpty()
     val shown = lightClientInfoFor(info, on)
@@ -468,6 +476,7 @@ private fun LightClientSection(
                 onRecovery = onRecovery,
             )
         }
+        LogsButton(onOpenLogs)
     }
 }
 
@@ -710,7 +719,7 @@ data class TorControls(
 )
 
 @Composable
-private fun TorSection(tor: TorControls) {
+private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
     val info = if (tor.enabled && (tor.running || tor.info.status == TorStatus.Error)) {
         tor.info
     } else {
@@ -767,6 +776,8 @@ private fun TorSection(tor: TorControls) {
                 TextButton(onClick = tor.onOpenOrbot) { Text("Open Orbot") }
             }
         }
+        // An external client's logs are in that app, not here.
+        if (proxy == null) LogsButton(onOpenLogs)
     }
 }
 
