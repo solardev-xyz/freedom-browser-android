@@ -211,6 +211,29 @@ class SafeSelfCallTest {
     }
 
     @Test
+    fun `the Sign card's outdated gate reads the same nonce as the row`() {
+        // R4-M1: a self-call at 7, snapshot at 7, a later separate read at 8. The row says
+        // "next transaction", so Sign must not say "can no longer execute" — and the reverse.
+        val call = SafeSelfCall.ChangeThreshold(BigInteger.ONE)
+        val seven = BigInteger.valueOf(7)
+        val eight = BigInteger.valueOf(8)
+        val atSeven = SafeChain.Snapshot(1, seven, listOf(owner), emptyList(), null)
+        val atEight = SafeChain.Snapshot(1, eight, listOf(owner), emptyList(), null)
+        assertFalse(safeTxOutdated(call, atSeven, eight, seven))
+        assertTrue(safeTxOutdated(call, atEight, seven, seven))
+        // Before the snapshot, and for any other transaction, the separate read decides.
+        assertTrue(safeTxOutdated(call, null, eight, seven))
+        assertTrue(safeTxOutdated(null, atSeven, eight, seven))
+        assertFalse(safeTxOutdated(null, atEight, seven, seven))
+        assertFalse(safeTxOutdated(call, null, null, seven))
+        // Agreement with the row for every combination.
+        for (snap in listOf(null, atSeven, atEight)) for (n in listOf(null, seven, eight)) for (c in listOf(null, call)) {
+            val shown = safeNonceShown(c, snap, n)
+            assertEquals(shown != null && shown > seven, safeTxOutdated(c, snap, n, seven))
+        }
+    }
+
+    @Test
     fun `signing is cleared by one predicate`() {
         assertTrue(safeSelfCallCleared(null, acknowledged = false))
         assertTrue(safeSelfCallCleared(SafeSelfCall.Cancel, acknowledged = false))

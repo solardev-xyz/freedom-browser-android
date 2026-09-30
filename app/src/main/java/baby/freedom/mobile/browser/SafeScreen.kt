@@ -1595,7 +1595,7 @@ internal fun SafeCoSignPage(
                 SectionCard(title = "Sign") {
                     val ownersNow = owners
                     val mine = ownersNow?.let { list -> accounts.filter { a -> list.any { it.equals(a.address, ignoreCase = true) } } }.orEmpty()
-                    val outdated = request is SafeProtocol.Request.Tx && nonce != null && nonce!! > request.tx.nonce
+                    val outdated = request is SafeProtocol.Request.Tx && safeTxOutdated(selfCall, snapshot, nonce, request.tx.nonce)
                     val s = signature
                     when {
                         s != null -> {
@@ -1854,6 +1854,15 @@ internal fun safeStateApplies(call: SafeSelfCall, snapshot: SafeChain.Snapshot?,
  */
 internal fun safeNonceShown(call: SafeSelfCall?, snapshot: SafeChain.Snapshot?, nonce: BigInteger?): BigInteger? =
     if (call != null && snapshot != null) snapshot.nonce else nonce
+
+/**
+ * Whether the Safe is already past [txNonce], so there's nothing to sign.
+ * Goes by the same [safeNonceShown] value as the *Safe nonce* row, so the
+ * row's "can never execute" and the Sign card's "can no longer execute"
+ * always agree.
+ */
+internal fun safeTxOutdated(call: SafeSelfCall?, snapshot: SafeChain.Snapshot?, nonce: BigInteger?, txNonce: BigInteger): Boolean =
+    safeNonceShown(call, snapshot, nonce)?.let { it > txNonce } == true
 
 /** Whether the Safe's checks on this call go by its owners or its modules: owner, threshold and module calls. */
 private val SafeSelfCall.readsOwnersOrModules: Boolean
