@@ -295,6 +295,33 @@ class TabsStateTest {
     }
 
     @Test
+    fun `the stack cap counts tabs, not closes, and keeps the newest close whole`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        fun bulk(prefix: String, n: Int) {
+            repeat(n) { i -> tabs.newTab().visit("$prefix$i") }
+            tabs.closeAllTabs()
+        }
+        // 3 × 8 = 24 tabs > 20: the oldest close goes as a whole.
+        bulk("a", 8)
+        bulk("b", 8)
+        bulk("c", 8)
+        assertEquals("c7", tabs.reopenClosedTab()?.title)
+        assertEquals(8, tabs.tabs.size)
+        tabs.closeAllTabs()
+        tabs.reopenClosedTab() // the c tabs again, from their own entry
+        assertEquals("b7", tabs.reopenClosedTab()?.title)
+        assertNull(tabs.reopenClosedTab())
+
+        // One close of more tabs than the cap is kept whole, alone.
+        tabs.closeAllTabs()
+        bulk("d", TabsState.MAX_CLOSED_TABS + 5)
+        val back = tabs.reopenClosedTab()
+        assertEquals("d${TabsState.MAX_CLOSED_TABS + 4}", back?.title)
+        assertEquals(TabsState.MAX_CLOSED_TABS + 5, tabs.tabs.size)
+        assertNull(tabs.reopenClosedTab())
+    }
+
+    @Test
     fun `a popup the page closes itself is not offered for reopen`() {
         val tabs = threeTabs()
         val popup = tabs.adoptPopup(tabs.active)

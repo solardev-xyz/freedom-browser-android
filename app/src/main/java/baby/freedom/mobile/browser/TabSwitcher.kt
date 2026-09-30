@@ -476,9 +476,7 @@ private suspend fun PointerInputScope.reorderGestures(
     if (!reorder.start(press.position)) return@awaitEachGesture
     val held = reorder.draggedId ?: return@awaitEachGesture
     onStart()
-    // How far the finger went while holding the card: lifted within the
-    // touch slop, the long press was a hold, not a drag (#320).
-    var travel = Offset.Zero
+    val hold = HoldCheck(viewConfiguration.touchSlop)
     var lifted = false
     try {
         val pointer = press.id
@@ -491,13 +489,32 @@ private suspend fun PointerInputScope.reorderGestures(
                 lifted = true
                 break
             }
-            travel += delta
+            hold.move(delta)
             if (delta != Offset.Zero) onDrag(delta)
         }
     } finally {
         reorder.end()
     }
-    if (lifted && travel.getDistance() < viewConfiguration.touchSlop) onHold(held)
+    if (lifted && hold.isHold) onHold(held)
+}
+
+/**
+ * Whether a long press let go was a hold (open the tab's menu) or a drag
+ * (#320): a hold if the finger never left the touch [slop] around where
+ * the press landed. Farthest reach, not net travel — dragging a card out
+ * and back (swapping it, then swapping it back) and lifting near the
+ * start is still a drag.
+ */
+internal class HoldCheck(private val slop: Float) {
+    private var travel = Offset.Zero
+
+    var isHold = true
+        private set
+
+    fun move(delta: Offset) {
+        travel += delta
+        if (travel.getDistance() >= slop) isHold = false
+    }
 }
 
 @Composable

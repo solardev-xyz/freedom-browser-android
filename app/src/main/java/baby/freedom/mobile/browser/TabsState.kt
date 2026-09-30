@@ -135,7 +135,11 @@ class TabsState(
      */
     class BulkClose(val count: Int, val undo: ClosedGroup?)
 
-    /** Most recently closed last. Capped at [MAX_CLOSED_TABS] entries. */
+    /**
+     * Most recently closed last. Capped at [MAX_CLOSED_TABS] tabs in
+     * all, dropping the oldest entries — except the newest, kept whole
+     * even when it alone holds more ([rememberClosed]).
+     */
     private val closedTabs = mutableStateListOf<ClosedGroup>()
 
     /** There is a closed tab [reopenClosedTab] can bring back. */
@@ -510,7 +514,13 @@ class TabsState(
         if (kept.isEmpty()) return null
         val group = ClosedGroup(kept, activeAt, placeholderId)
         closedTabs.add(group)
-        while (closedTabs.size > MAX_CLOSED_TABS) closedTabs.removeAt(0)
+        // Bounded by tabs, not entries: each carries a thumbnail and a
+        // saved WebView state, so twenty bulk closes of many tabs each
+        // would otherwise pile up. Oldest entries go first; the newest
+        // always stays whole, so its Undo brings back every tab it
+        // closed (those were all open a moment ago anyway).
+        var held = closedTabs.sumOf { it.tabs.size }
+        while (closedTabs.size > 1 && held > MAX_CLOSED_TABS) held -= closedTabs.removeAt(0).tabs.size
         return group
     }
 
@@ -799,8 +809,10 @@ class TabsState(
 
     companion object {
         /**
-         * How many closes [reopenClosedTab] can walk back through — a
-         * bulk close (#320) counts once, however many tabs it took.
+         * How many closed tabs the reopen stack keeps, across all its
+         * entries: oldest entries are dropped once it holds more. The
+         * newest entry is kept whole even past this, so a bulk close
+         * (#320) of more tabs can still be undone in full.
          */
         const val MAX_CLOSED_TABS = 20
 
