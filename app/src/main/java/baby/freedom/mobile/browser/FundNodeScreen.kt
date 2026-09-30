@@ -32,7 +32,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
@@ -40,6 +42,7 @@ import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.data.ChainStore
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.SendAmounts
@@ -77,19 +80,21 @@ import org.json.JSONObject
 /** Why the page can't fund the node now, or null when it can. */
 internal fun fundNodeBlockedReason(node: NodeInfo, pending: SwarmFunding.Pending?): String? =
     stampSpendBlockedReason(node) ?: when {
-        fundingAddress(node) == null -> "The node isn't running as your wallet's identity."
-        pending != null && !pending.mined && pending.tracked -> "A stamp your wallet is buying for the node is still going out."
-        pending != null && !pending.mined -> "Connect or dismiss the stamp your wallet stopped following first."
-        pending != null -> "Connect the stamp your wallet already bought for the node first."
+        fundingAddress(node) == null -> Strings.get(R.string.stamps_fund_not_wallet_identity)
+        pending != null && !pending.mined && pending.tracked -> Strings.get(R.string.stamps_fund_pending_going_out)
+        pending != null && !pending.mined -> Strings.get(R.string.stamps_fund_pending_untracked)
+        pending != null -> Strings.get(R.string.stamps_fund_pending_mined)
         else -> null
     }
 
 /** One line on what the transaction pays, for the quote and the review. */
 internal fun fundNodeSummary(plan: SwarmFunder.Plan, days: Long): String =
-    "${formatStampBytes(effectiveStampBytes(plan.depth))} for ${daysLabel(days)}: " +
-        "swaps ${formatXdaiCeiling(plan.xdaiForSwap)} for about ${formatBzz(plan.expectedBzz)} " +
-        "(at least ${formatBzz(plan.minBzz)}), buys the stamp for ${formatBzz(plan.stampCostPlur)}, and sends the node " +
-        "${formatXdai(plan.xdaiForNode)} and the xBZZ the stamp doesn't use."
+    Strings.get(
+        R.string.stamps_fund_summary,
+        formatStampBytes(effectiveStampBytes(plan.depth)), daysLabel(days),
+        formatXdaiCeiling(plan.xdaiForSwap), formatBzz(plan.expectedBzz), formatBzz(plan.minBzz),
+        formatBzz(plan.stampCostPlur), formatXdai(plan.xdaiForNode),
+    )
 
 /** What the fund-node review shows beside the quote's own rows: [fundNodeSummary] and the node paid. */
 internal data class FundReviewRows(val summary: String, val node: String)
@@ -181,11 +186,9 @@ internal fun fundLedgerFresh(held: () -> String?, stale: () -> Boolean): () -> B
     !stale()
 }
 
-internal const val FUND_PAGE_CLOSED =
-    "The Fund page was closed before the Ledger was ready. Open it and review again."
+internal val FUND_PAGE_CLOSED: String get() = Strings.get(R.string.stamps_fund_page_closed)
 
-internal const val FUND_REVIEW_NODE_CHANGED =
-    "The node is no longer running as the account this review pays. Cancel and review again."
+internal val FUND_REVIEW_NODE_CHANGED: String get() = Strings.get(R.string.stamps_fund_review_node_changed)
 
 /** An open review: the [quote] and the [plan] and [days] it was built from, kept together (#242). */
 private class FundReviewing(val plan: SwarmFunder.Plan, val days: Long, val quote: SendQuote)
@@ -209,8 +212,7 @@ internal fun chainReadTrusted(trust: ChainTrust): Boolean = when (trust.level) {
     ChainTrust.Level.UNVERIFIED -> false
 }
 
-internal const val POOL_PRICE_UNVERIFIED =
-    "The pool's price isn't verified (not enough RPCs agreed on it). Try again, or add an RPC of your own in Settings."
+internal val POOL_PRICE_UNVERIFIED: String get() = Strings.get(R.string.stamps_pool_price_unverified)
 
 /** The pool's price, as xDAI per xBZZ to 6 significant digits. */
 internal fun formatSpotPrice(sqrtPriceX96: BigInteger): String =
@@ -259,7 +261,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
     var error by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     // Until the record's been read, a stamp already on its way can't be ruled out.
-    val blocked = if (funding == null) "Checking for a stamp your wallet already bought…" else fundNodeBlockedReason(nodeInfo, pending)
+    val blocked = if (funding == null) stringResource(R.string.stamps_fund_checking_pending) else fundNodeBlockedReason(nodeInfo, pending)
 
     // The node's price for the batch (ant's quote: what a buy would pay per
     // chunk, and the chequebook deposit a first one makes), and the pool's
@@ -272,7 +274,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                 StampClient.call("quote", JSONObject().put("depth", depth).put("days", days))
             }
             val q = when (a) {
-                is StampClient.Answer.Ok -> stampQuoteFrom(a.json) ?: throw SendException("The node's price couldn't be read")
+                is StampClient.Answer.Ok -> stampQuoteFrom(a.json) ?: throw SendException(Strings.get(R.string.stamps_price_unreadable))
                 is StampClient.Answer.Failed -> throw SendException(a.message)
             }
             val slot0 = rpc.call(SwarmFunder.CHAIN_ID, JSONObject().put("to", SwarmFunder.POOL).put("data", SwarmFunder.SLOT0_DATA))
@@ -280,17 +282,17 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                 Log.i(TAG, "pool price not verified (${slot0.trust.level.name.lowercase()}, ${slot0.trust.dissented.size} dissented)")
                 throw SendException(POOL_PRICE_UNVERIFIED)
             }
-            val sqrt = SwarmFunder.sqrtPriceFrom(slot0.value) ?: throw SendException("The pool's price couldn't be read")
+            val sqrt = SwarmFunder.sqrtPriceFrom(slot0.value) ?: throw SendException(Strings.get(R.string.stamps_pool_price_unreadable))
             Priced.Ready(q, sqrt)
         } catch (e: CancellationException) {
             throw e
         } catch (e: SendException) {
-            Priced.Failed(e.message ?: "No price right now")
+            Priced.Failed(e.message ?: Strings.get(R.string.stamps_no_price))
         } catch (e: ChainRpcException) {
             Priced.Failed(WalletSender.readFailure(e))
         } catch (e: Exception) {
             Log.i(TAG, "pricing failed (${e.javaClass.simpleName})")
-            Priced.Failed("No price right now")
+            Priced.Failed(Strings.get(R.string.stamps_no_price))
         }
     }
     val payerBalance by produceState<BigInteger?>(null, payer?.address, refresh) {
@@ -338,7 +340,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
         }
     }
     BackHandler(onBack = back)
-    FullScreenScaffold(title = "Fund and buy a stamp", onDismiss = back) {
+    FullScreenScaffold(title = stringResource(R.string.stamps_fund_title), onDismiss = back) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -349,13 +351,8 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
             // From the plan the quote was built from, never the one priced live (#242).
             val rows = r?.let { fundReviewRows(it.quote, it.plan, it.days) }
             item("intro") {
-                SectionCard(title = "One transaction") {
-                    MutedText(
-                        "Your wallet pays for everything at once: it swaps xDAI for xBZZ, buys a postage stamp " +
-                            "that belongs to the node, and sends the node xDAI for its own transactions — through " +
-                            "the SwarmNodeFunder contract, as Freedom on desktop and iOS do. Once it's mined, the " +
-                            "node connects the stamp and, the first time, sets up its chequebook.",
-                    )
+                SectionCard(title = stringResource(R.string.stamps_fund_one_transaction)) {
+                    MutedText(stringResource(R.string.stamps_fund_intro))
                 }
             }
             val f = funding
@@ -406,7 +403,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                                 // Price the pool and the fee again: both can have moved.
                                 reviewing = null
                                 refresh++
-                                notice = "The quote was over a minute old, so it's been priced again. Check it and review again."
+                                notice = Strings.get(R.string.stamps_fund_quote_stale)
                                 return@FundReview
                             }
                             busy = true
@@ -420,12 +417,11 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                                             reviewing = null
                                             notice = null
                                         }
-                                        WalletSender.Submit.BUSY -> error = "Another send is still going out, or may have. " +
-                                            "Settle it (or stop tracking it) on the wallet's Send page first."
+                                        WalletSender.Submit.BUSY -> error = Strings.get(R.string.stamps_fund_send_busy)
                                         WalletSender.Submit.STALE -> {
                                             reviewing = null
                                             refresh++
-                                            notice = "The quote was over a minute old, so it's been priced again. Check it and review again."
+                                            notice = Strings.get(R.string.stamps_fund_quote_stale)
                                         }
                                     }
                                 } catch (e: CancellationException) {
@@ -441,14 +437,14 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                 }
                 else -> {
                     item("size") {
-                        SectionCard(title = "Stamp size") {
+                        SectionCard(title = stringResource(R.string.stamps_fund_stamp_size)) {
                             STAMP_DEPTHS.forEach { d ->
-                                ChoiceRow(selected = d == depth, label = formatStampBytes(effectiveStampBytes(d)), sub = "Depth $d") { depth = d }
+                                ChoiceRow(selected = d == depth, label = formatStampBytes(effectiveStampBytes(d)), sub = stringResource(R.string.stamps_depth_n, d)) { depth = d }
                             }
                         }
                     }
                     item("duration") {
-                        SectionCard(title = "Duration") {
+                        SectionCard(title = stringResource(R.string.stamps_duration)) {
                             STAMP_BUY_DAYS.forEach { n -> ChoiceRow(selected = n == days, label = daysLabel(n)) { days = n } }
                         }
                     }
@@ -458,7 +454,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                     item("act") {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             notice?.let { MutedText(it) }
-                            (blocked ?: if (payer == null) "Set up a wallet first." else null)?.let { MutedText(it) }
+                            (blocked ?: if (payer == null) stringResource(R.string.stamps_fund_set_up_wallet) else null)?.let { MutedText(it) }
                             error?.let {
                                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                             }
@@ -467,7 +463,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                                 enabled = blocked == null && payer != null && plan != null && !busy && sendStatus?.inFlight != true,
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
-                                if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Review")
+                                if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text(stringResource(R.string.stamps_fund_review))
                             }
                         }
                     }
@@ -492,34 +488,39 @@ private fun FundQuoteCard(
     payerBalance: BigInteger?,
     chain: Chain,
 ) {
-    SectionCard(title = "Quote") {
+    SectionCard(title = stringResource(R.string.stamps_fund_quote)) {
         when {
-            priced is Priced.Loading -> MutedText("Asking the node and the pool for today's prices…")
-            priced is Priced.Failed -> MutedText("No price right now: ${priced.message}")
-            plan == null -> MutedText("The node isn't running as your wallet's identity.")
+            priced is Priced.Loading -> MutedText(stringResource(R.string.stamps_fund_asking_prices))
+            priced is Priced.Failed -> MutedText(stringResource(R.string.stamps_no_price_reason, priced.message))
+            plan == null -> MutedText(stringResource(R.string.stamps_fund_not_wallet_identity))
             priced is Priced.Ready -> {
-                DetailRow("Stamp", "${formatStampBytes(effectiveStampBytes(plan.depth))}, ${daysLabel(days)}")
-                DetailRow("Stamp cost", formatBzz(plan.stampCostPlur))
+                DetailRow(
+                    stringResource(R.string.stamps_stamp),
+                    stringResource(R.string.stamps_size_and_duration, formatStampBytes(effectiveStampBytes(plan.depth)), daysLabel(days)),
+                )
+                DetailRow(stringResource(R.string.stamps_fund_stamp_cost), formatBzz(plan.stampCostPlur))
                 if (plan.depositPlur.signum() > 0) {
-                    DetailRow("Chequebook deposit", formatBzz(plan.depositPlur))
-                    SubLine("The node moves this into its new chequebook when it connects the stamp.")
+                    DetailRow(stringResource(R.string.stamps_chequebook_deposit), formatBzz(plan.depositPlur))
+                    SubLine(stringResource(R.string.stamps_fund_deposit_note))
                 }
-                DetailRow("Pool price", "1 xBZZ = ${formatSpotPrice(plan.sqrtPriceX96)}")
-                SubLine("Uniswap v3 BZZ/WXDAI, 0.3% fee")
-                DetailRow("Swap", formatXdaiCeiling(plan.xdaiForSwap))
-                SubLine("For about ${formatBzz(plan.expectedBzz)}; at least ${formatBzz(plan.minBzz)}, or it reverts (5% slippage)")
-                DetailRow("To the node", formatXdai(plan.xdaiForNode))
-                SubLine("Gas for its chequebook and its own transactions; unused xBZZ goes to the node too")
-                DetailRow("Total", formatXdaiCeiling(plan.value))
-                SubLine("Plus the network fee, shown in the review")
+                DetailRow(stringResource(R.string.stamps_fund_pool_price), stringResource(R.string.stamps_fund_pool_price_value, formatSpotPrice(plan.sqrtPriceX96)))
+                SubLine(stringResource(R.string.stamps_fund_pool_name))
+                DetailRow(stringResource(R.string.stamps_fund_swap), formatXdaiCeiling(plan.xdaiForSwap))
+                SubLine(stringResource(R.string.stamps_fund_swap_note, formatBzz(plan.expectedBzz), formatBzz(plan.minBzz)))
+                DetailRow(stringResource(R.string.stamps_fund_to_node), formatXdai(plan.xdaiForNode))
+                SubLine(stringResource(R.string.stamps_fund_to_node_note))
+                DetailRow(stringResource(R.string.stamps_fund_total), formatXdaiCeiling(plan.value))
+                SubLine(stringResource(R.string.stamps_fund_total_note))
                 payer?.let { p ->
-                    DetailRow("Paid by", p.name)
+                    DetailRow(stringResource(R.string.stamps_fund_paid_by), p.name)
                     SubLine(
-                        "Holds " + (payerBalance?.let(::formatXdai) ?: "…") +
-                            if (payerBalance != null && payerBalance < plan.value) " — not enough" else "",
+                        stringResource(
+                            if (payerBalance != null && payerBalance < plan.value) R.string.stamps_fund_holds_not_enough else R.string.stamps_fund_holds,
+                            payerBalance?.let(::formatXdai) ?: "…",
+                        ),
                     )
                 }
-                SubLine("On ${chain.name}")
+                SubLine(stringResource(R.string.stamps_fund_on_chain, chain.name))
             }
         }
     }
@@ -546,19 +547,23 @@ private fun FundReview(
     val guard = tap.guard
     val armed = tap.armed
     Column {
-        SectionCard(title = "Review") {
-            ReviewRow("What", summary)
-            ReviewRow("Node", null, address = node)
-            ReviewRow("Network", chain.name)
-            ReviewRow("Paid by", request.from.name, address = request.from.address)
-            ReviewRow("Contract", "SwarmNodeFunder", address = request.to)
-            ReviewRow("Amount", "${SendAmounts.exact(request.amount, request.token.decimals)} ${request.token.symbol}", mono = true)
-            ReviewRow("Network fee", "up to ${feeText(quote.tx.maxFee, chain)}", mono = true, detail = feeDetail(quote.tx))
-            ReviewRow("Nonce", quote.tx.nonce.toString(), detail = nonceDetail(quote))
+        SectionCard(title = stringResource(R.string.stamps_fund_review)) {
+            ReviewRow(stringResource(R.string.stamps_fund_what), summary)
+            ReviewRow(stringResource(R.string.stamps_fund_node), null, address = node)
+            ReviewRow(stringResource(R.string.stamps_fund_network), chain.name)
+            ReviewRow(stringResource(R.string.stamps_fund_paid_by), request.from.name, address = request.from.address)
+            ReviewRow(stringResource(R.string.stamps_fund_contract), "SwarmNodeFunder", address = request.to)
+            ReviewRow(stringResource(R.string.stamps_fund_amount), "${SendAmounts.exact(request.amount, request.token.decimals)} ${request.token.symbol}", mono = true)
+            ReviewRow(
+                stringResource(R.string.stamps_fund_network_fee),
+                stringResource(R.string.stamps_fund_fee_up_to, feeText(quote.tx.maxFee, chain)),
+                mono = true,
+                detail = feeDetail(quote.tx),
+            )
+            ReviewRow(stringResource(R.string.stamps_fund_nonce), quote.tx.nonce.toString(), detail = nonceDetail(quote))
             Spacer(Modifier.height(4.dp))
             Text(
-                "A real transaction on Gnosis Chain that can't be undone. " + feeFootnote(quote.tx) +
-                    " If the pool can't give at least the xBZZ above, it reverts and only the fee is lost.",
+                stringResource(R.string.stamps_fund_review_note, feeFootnote(quote.tx)),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -570,9 +575,9 @@ private fun FundReview(
         error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         ObscuredTapNotice(tap)
         SheetButtonRow {
-            OutlinedButton(onClick = onCancel, enabled = !busy) { Text("Cancel") }
+            OutlinedButton(onClick = onCancel, enabled = !busy) { Text(stringResource(R.string.common_cancel)) }
             Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy && confirmable, modifier = Modifier.protectedPress(tap)) {
-                if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Confirm and send")
+                if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text(stringResource(R.string.stamps_fund_confirm_and_send))
             }
         }
     }
@@ -598,26 +603,21 @@ internal fun pendingStampText(
     val otherNode = fundingAddress(nodeInfo)?.equals(p.node, ignoreCase = true) == false
     // Unmined and not followed by the wallet: say what the chain shows, and what Dismiss would lose.
     val untracked = when {
-        superseded -> "Its transaction can never be mined: the paying account's nonce went to another transaction. " +
-            "There's no stamp, so dismiss it."
-        p.hash != null -> "It isn't mined yet as far as Gnosis Chain shows. The app keeps checking its transaction " +
-            "and connects the stamp if it lands. Dismissing forgets the batch: a stamp that lands afterwards " +
-            "can't be connected."
-        else -> "It may or may not have been mined. If it was, Connect adds the stamp to the node. Dismissing " +
-            "forgets the batch: a stamp that lands afterwards can't be connected."
+        superseded -> Strings.get(R.string.stamps_pending_superseded)
+        p.hash != null -> Strings.get(R.string.stamps_pending_not_mined_yet)
+        else -> Strings.get(R.string.stamps_pending_maybe_mined)
     }
     return when {
-        !p.mined && p.tracked -> "Your wallet's transaction is going out; the node connects the stamp once it's mined."
-        connecting -> "The node is connecting it…"
-        otherNode -> "It was bought for another node account (${p.node}), which has to be running to connect it."
+        !p.mined && p.tracked -> Strings.get(R.string.stamps_pending_going_out)
+        connecting -> Strings.get(R.string.stamps_pending_connecting)
+        otherNode -> Strings.get(R.string.stamps_pending_other_node, p.node)
         // Ahead of an earlier failed Connect: a connect owed now supersedes it (found mined since).
-        owed && p.mined -> "Mined. The node connects it to publish with it as soon as the stamp work or upload " +
-            "it's busy with ends."
-        failed != null && p.mined -> "Connecting it failed: ${failed.message}"
-        failed != null -> "Connecting it failed: ${failed.message} $untracked"
-        !p.mined -> "Your wallet stopped following its transaction. $untracked"
-        else -> "Mined. Connect adds it to the node to publish with it" +
-            (stampsBlockedReason(nodeInfo)?.let { " once it can: $it" } ?: ".")
+        owed && p.mined -> Strings.get(R.string.stamps_pending_owed)
+        failed != null && p.mined -> Strings.get(R.string.stamps_pending_connect_failed, failed.message)
+        failed != null -> Strings.get(R.string.stamps_pending_connect_failed_untracked, failed.message, untracked)
+        !p.mined -> Strings.get(R.string.stamps_pending_stopped_following, untracked)
+        else -> stampsBlockedReason(nodeInfo)?.let { Strings.get(R.string.stamps_pending_mined_blocked, it) }
+            ?: Strings.get(R.string.stamps_pending_mined)
     }
 }
 
@@ -640,9 +640,12 @@ internal fun PendingStampCard(
     val otherNode = fundingAddress(nodeInfo)?.equals(p.node, ignoreCase = true) == false
     val discovery by StampClient.discovery.collectAsState()
     val publishing by Publisher.state.collectAsState()
-    SectionCard(title = "Stamp from your wallet") {
-        DetailRow("Stamp", "${formatStampBytes(effectiveStampBytes(p.depth))}, ${daysLabel(p.days)}")
-        DetailRow("Batch", shortBatchId(p.batchId), mono = true)
+    SectionCard(title = stringResource(R.string.stamps_pending_title)) {
+        DetailRow(
+            stringResource(R.string.stamps_stamp),
+            stringResource(R.string.stamps_size_and_duration, formatStampBytes(effectiveStampBytes(p.depth)), daysLabel(p.days)),
+        )
+        DetailRow(stringResource(R.string.stamps_pending_batch), shortBatchId(p.batchId), mono = true)
         MutedText(pendingStampText(p, nodeInfo, spend, superseded, owed))
         if (p.mined || !p.tracked) {
             Spacer(Modifier.height(8.dp))
@@ -652,8 +655,8 @@ internal fun PendingStampCard(
                     // Not over a search or an upload: a connect may reload the gateway.
                     enabled = StampClient.canRestartGateway(spend, discovery, publishing) &&
                         !otherNode && stampSpendBlockedReason(nodeInfo) == null,
-                ) { Text("Connect") }
-                TextButton(onClick = onForget, enabled = !connecting) { Text("Dismiss") }
+                ) { Text(stringResource(R.string.stamps_connect)) }
+                TextButton(onClick = onForget, enabled = !connecting) { Text(stringResource(R.string.stamps_dismiss)) }
             }
         }
     }

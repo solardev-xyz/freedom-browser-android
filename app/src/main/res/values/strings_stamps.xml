@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Postage stamps, the chequebook and funding the node from the wallet
+  (#116, #117, #115). Token amounts (xBZZ, xDAI) are passed in already
+  formatted and stay fixed-format: `.` decimal point, no grouping.
+-->
+<resources>
+    <!-- Stamps.kt -->
+    <string name="stamps_bytes_tb">%1$s TB</string>
+    <string name="stamps_bytes_gb">%1$s GB</string>
+    <string name="stamps_bytes_mb">%1$s MB</string>
+    <string name="stamps_bytes_kb">%1$s kB</string>
+    <string name="stamps_bytes_b">%1$s B</string>
+    <string name="stamps_ttl_expired">Expired</string>
+    <string name="stamps_ttl_under_a_minute">Under a minute</string>
+    <!-- Two units of time left, largest first: "12 days 4 hours". -->
+    <string name="stamps_ttl_two_units">%1$s %2$s</string>
+    <plurals name="stamps_days">
+        <item quantity="one">%d day</item>
+        <item quantity="other">%d days</item>
+    </plurals>
+    <plurals name="stamps_hours">
+        <item quantity="one">%d hour</item>
+        <item quantity="other">%d hours</item>
+    </plurals>
+    <plurals name="stamps_minutes">
+        <item quantity="one">%d minute</item>
+        <item quantity="other">%d minutes</item>
+    </plurals>
+    <!-- %1$s: ant's xDAI estimate; %2$s: the most the swap takes; %3$s: the most the gas costs (all with their unit); %4$d: the number of transactions. -->
+    <plurals name="stamps_spend_cost">
+        <item quantity="one">The node pays from its xDAI: it swaps what it needs for xBZZ, about %1$s including gas. At most, it swaps %2$s and pays up to %3$s of gas on top, across up to %4$d transaction.</item>
+        <item quantity="other">The node pays from its xDAI: it swaps what it needs for xBZZ, about %1$s including gas. At most, it swaps %2$s and pays up to %3$s of gas on top, across up to %4$d transactions.</item>
+    </plurals>
+    <string name="stamps_node_answer_unreadable">The Swarm node\'s answer couldn\'t be read</string>
+    <string name="stamps_something_went_wrong">Something went wrong</string>
+    <!-- %1$s: "it may already have been sent" (SwarmNode.DEPOSIT_MAYBE_SENT); keep it at the start. -->
+    <string name="stamps_deposit_still_sending">%1$s (the node is still sending it). The chequebook\'s balance shows it once it confirms</string>
+    <string name="stamps_still_sending">The node is still sending the transactions. The list shows the stamp once they confirm.</string>
+    <string name="stamps_node_not_running">The Swarm node isn\'t running</string>
+    <!-- Follows "The stamp purchase didn't report back: ". -->
+    <string name="stamps_buy_overran">it took longer than expected, and ended without telling the app how it went. The list shows the stamp if it was bought.</string>
+    <!-- Follows "Connecting the stamp didn't report back: ". -->
+    <string name="stamps_connect_overran">it took longer than expected, and ended without telling the app how it went. If the stamp doesn\'t show in the list, try Connect again.</string>
+    <string name="stamps_node_timed_out">The Swarm node didn\'t answer in time</string>
+    <string name="stamps_discover_overran">The search took longer than expected, and ended without telling the app what it found. The list shows any stamps it registered.</string>
+
+    <!-- StampsScreen.kt -->
+    <string name="stamps_node_starting">The Swarm node is starting…</string>
+    <string name="stamps_node_off">Turn on the Swarm node to see its postage stamps.</string>
+    <string name="stamps_need_light_mode">Postage stamps need light mode, which connects the node to Gnosis Chain. Switch it on under Publishing on the node page.</string>
+    <string name="stamps_need_wallet_identity">Set up a wallet first, so the node runs as your wallet\'s identity (publish setup, step 1).</string>
+    <string name="stamps_discover_none">No other stamps: this account owns none that are still paid for.</string>
+    <plurals name="stamps_discover_found">
+        <item quantity="one">Found %d stamp this account owns; it\'s in the list below.</item>
+        <item quantity="other">Found %d stamps this account owns; they\'re in the list below.</item>
+    </plurals>
+    <string name="stamps_discover_running">Searching Gnosis Chain for stamps this account bought…</string>
+    <string name="stamps_discover_failed">Couldn\'t look: %1$s</string>
+    <string name="stamps_spend_running_buy">Buying the stamp… The node swaps xDAI for the xBZZ it needs, buys the stamp, and waits for each transaction to confirm on Gnosis Chain. This takes a minute or two.</string>
+    <string name="stamps_spend_running_extend">Extending the stamp… The node swaps xDAI for the xBZZ it needs, tops the stamp up, and waits for each transaction to confirm. This takes a minute or two.</string>
+    <string name="stamps_spend_running_deposit">Depositing… The node moves the xBZZ into its chequebook and waits for the transaction to confirm on Gnosis Chain. This takes up to a minute.</string>
+    <string name="stamps_spend_running_connect">Connecting the stamp your wallet bought… The node checks it on Gnosis Chain and, the first time, sets up its chequebook. This takes up to a few minutes.</string>
+    <string name="stamps_spend_done_buy">Stamp bought. It becomes usable once the network has seen it, usually within a minute.</string>
+    <string name="stamps_spend_done_extend">Stamp extended.</string>
+    <string name="stamps_spend_done_deposit">Deposited into the chequebook.</string>
+    <string name="stamps_spend_done_connect">Stamp connected: the node publishes with it.</string>
+    <!-- %1$s: why, or how it ended. -->
+    <string name="stamps_spend_buy_no_report">The stamp purchase didn\'t report back: %1$s</string>
+    <string name="stamps_spend_buy_failed">Buying the stamp failed: %1$s</string>
+    <string name="stamps_spend_extend_failed">Extending the stamp failed: %1$s</string>
+    <string name="stamps_spend_connect_no_report">Connecting the stamp didn\'t report back: %1$s</string>
+    <string name="stamps_spend_connect_failed">Connecting the stamp your wallet bought failed: %1$s</string>
+    <string name="stamps_spend_deposit_no_report">The deposit didn\'t report back: %1$s</string>
+    <string name="stamps_spend_deposit_failed">The deposit failed: %1$s</string>
+    <string name="stamps_publish_running_note">A publish is uploading. Buy or search for stamps once it has finished.</string>
+    <string name="stamps_title_buy">Buy a postage stamp</string>
+    <string name="stamps_title_extend">Extend stamp</string>
+    <string name="stamps_title_detail">Postage stamp</string>
+    <string name="stamps_title_list">Postage stamps</string>
+    <string name="stamps_reading">Reading the node\'s stamps…</string>
+    <string name="stamps_no_longer_listed">The node no longer lists this stamp.</string>
+    <string name="stamps_intro">A postage stamp pre-pays the Swarm network for storing what you publish: a capacity, for a time. The node pays for stamps from its own account on Gnosis Chain.</string>
+    <string name="stamps_buy_a_stamp">Buy a stamp</string>
+    <string name="stamps_none_yet">No stamps yet.</string>
+    <string name="stamps_find_owned">Find stamps you already own</string>
+    <string name="stamps_open_stamp">Open stamp</string>
+    <string name="stamps_capacity">Capacity</string>
+    <string name="stamps_used">Used</string>
+    <string name="stamps_time_left">Time left</string>
+    <string name="stamps_unknown">Unknown</string>
+    <!-- %1$s: the expiry date and time. -->
+    <string name="stamps_until">Until %1$s</string>
+    <string name="stamps_stamp">Stamp</string>
+    <string name="stamps_batch_id">Batch ID</string>
+    <string name="stamps_up_to_if_even">Up to %1$s if every bucket fills evenly</string>
+    <string name="stamps_depth">Depth</string>
+    <string name="stamps_immutable">Immutable</string>
+    <string name="stamps_yes">Yes</string>
+    <string name="stamps_no">No</string>
+    <string name="stamps_extend">Extend</string>
+    <string name="stamps_checking_connected">Checking which stamp the node uploads with…</string>
+    <string name="stamps_extend_other_active">Only the stamp the node uploads with can be extended in this version of Freedom, and that\'s another one.</string>
+    <string name="stamps_extend_intro">Add time to this stamp before it runs out: once it expires, what was published with it is no longer paid for.</string>
+    <string name="stamps_size">Size</string>
+    <string name="stamps_depth_n">Depth %1$d</string>
+    <string name="stamps_duration">Duration</string>
+    <string name="stamps_buy">Buy</string>
+    <string name="stamps_buy_confirm_title">Buy this postage stamp?</string>
+    <!-- %1$s: capacity; %2$s: duration; %3$s: cost; %4$s: the xDAI sentence (stamps_spend_cost). -->
+    <string name="stamps_buy_confirm_body">%1$s for %2$s, for %3$s. %4$s These are real transactions on Gnosis Chain and can\'t be undone.</string>
+    <!-- %1$s: capacity; %2$s: duration; %3$s: cost; %4$s: chequebook deposit; %5$s: the xDAI sentence (stamps_spend_cost). -->
+    <string name="stamps_buy_confirm_body_deposit">%1$s for %2$s, for %3$s, plus %4$s into the node\'s new chequebook. %5$s These are real transactions on Gnosis Chain and can\'t be undone.</string>
+    <string name="stamps_extend_only_active">Only the stamp the node uploads with can be extended in this version of Freedom.</string>
+    <string name="stamps_add">Add</string>
+    <string name="stamps_extend_confirm_title">Extend this postage stamp?</string>
+    <!-- %1$s: duration; %2$s: short batch id; %3$s: cost; %4$s: the xDAI sentence (stamps_spend_cost). -->
+    <string name="stamps_extend_confirm_body">%1$s more for %2$s, for %3$s. %4$s These are real transactions on Gnosis Chain and can\'t be undone.</string>
+    <string name="stamps_price_unreadable">The node\'s price couldn\'t be read</string>
+    <string name="stamps_estimated_cost">Estimated cost</string>
+    <string name="stamps_asking_price">Asking the node for today\'s price…</string>
+    <string name="stamps_no_price_reason">No price right now: %1$s</string>
+    <string name="stamps_cost">Cost</string>
+    <string name="stamps_chequebook_deposit">Chequebook deposit</string>
+    <string name="stamps_deposit_first_stamp_note">Once, with the first stamp: backs what the node pays other nodes for storing your data.</string>
+    <string name="stamps_node_xbzz">Node\'s xBZZ</string>
+    <string name="stamps_swapped_from_xdai">Swapped from xDAI</string>
+    <string name="stamps_xdai_needed">xDAI needed</string>
+    <string name="stamps_xdai_needed_note">The swap plus gas. What isn\'t used stays in the node\'s account.</string>
+    <string name="stamps_node_xdai">Node\'s xDAI</string>
+    <string name="stamps_send_more_xdai">Send %1$s more to the node\'s address first (publish setup, step 3).</string>
+    <string name="stamps_banner_in_progress">In progress</string>
+    <string name="stamps_banner_failed">Didn\'t finish</string>
+    <string name="stamps_banner_done">Done</string>
+    <string name="stamps_cd_failed">Failed</string>
+    <string name="stamps_cd_done">Done</string>
+    <string name="stamps_usable">Usable</string>
+    <string name="stamps_not_usable_yet">Not usable yet</string>
+    <string name="stamps_used_percent">%1$d%%</string>
+
+    <!-- FundNodeScreen.kt -->
+    <string name="stamps_fund_not_wallet_identity">The node isn\'t running as your wallet\'s identity.</string>
+    <string name="stamps_fund_pending_going_out">A stamp your wallet is buying for the node is still going out.</string>
+    <string name="stamps_fund_pending_untracked">Connect or dismiss the stamp your wallet stopped following first.</string>
+    <string name="stamps_fund_pending_mined">Connect the stamp your wallet already bought for the node first.</string>
+    <!-- %1$s: capacity; %2$s: duration; %3$s: xDAI swapped; %4$s: expected xBZZ; %5$s: minimum xBZZ; %6$s: stamp cost; %7$s: xDAI to the node. -->
+    <string name="stamps_fund_summary">%1$s for %2$s: swaps %3$s for about %4$s (at least %5$s), buys the stamp for %6$s, and sends the node %7$s and the xBZZ the stamp doesn\'t use.</string>
+    <string name="stamps_fund_page_closed">The Fund page was closed before the Ledger was ready. Open it and review again.</string>
+    <string name="stamps_fund_review_node_changed">The node is no longer running as the account this review pays. Cancel and review again.</string>
+    <string name="stamps_pool_price_unverified">The pool\'s price isn\'t verified (not enough RPCs agreed on it). Try again, or add an RPC of your own in Settings.</string>
+    <string name="stamps_fund_checking_pending">Checking for a stamp your wallet already bought…</string>
+    <string name="stamps_pool_price_unreadable">The pool\'s price couldn\'t be read</string>
+    <string name="stamps_no_price">No price right now</string>
+    <string name="stamps_fund_title">Fund and buy a stamp</string>
+    <string name="stamps_fund_one_transaction">One transaction</string>
+    <string name="stamps_fund_intro">Your wallet pays for everything at once: it swaps xDAI for xBZZ, buys a postage stamp that belongs to the node, and sends the node xDAI for its own transactions — through the SwarmNodeFunder contract, as Freedom on desktop and iOS do. Once it\'s mined, the node connects the stamp and, the first time, sets up its chequebook.</string>
+    <string name="stamps_fund_quote_stale">The quote was over a minute old, so it\'s been priced again. Check it and review again.</string>
+    <string name="stamps_fund_send_busy">Another send is still going out, or may have. Settle it (or stop tracking it) on the wallet\'s Send page first.</string>
+    <string name="stamps_fund_stamp_size">Stamp size</string>
+    <string name="stamps_fund_set_up_wallet">Set up a wallet first.</string>
+    <string name="stamps_fund_review">Review</string>
+    <string name="stamps_fund_quote">Quote</string>
+    <string name="stamps_fund_asking_prices">Asking the node and the pool for today\'s prices…</string>
+    <!-- A stamp's capacity and duration: "537 MB, 2 days". -->
+    <string name="stamps_size_and_duration">%1$s, %2$s</string>
+    <string name="stamps_fund_stamp_cost">Stamp cost</string>
+    <string name="stamps_fund_deposit_note">The node moves this into its new chequebook when it connects the stamp.</string>
+    <string name="stamps_fund_pool_price">Pool price</string>
+    <!-- %1$s: the pool's price in xDAI, with its unit. -->
+    <string name="stamps_fund_pool_price_value">1 xBZZ = %1$s</string>
+    <string name="stamps_fund_pool_name" formatted="false">Uniswap v3 BZZ/WXDAI, 0.3% fee</string>
+    <string name="stamps_fund_swap">Swap</string>
+    <string name="stamps_fund_swap_note">For about %1$s; at least %2$s, or it reverts (5%% slippage)</string>
+    <string name="stamps_fund_to_node">To the node</string>
+    <string name="stamps_fund_to_node_note">Gas for its chequebook and its own transactions; unused xBZZ goes to the node too</string>
+    <string name="stamps_fund_total">Total</string>
+    <string name="stamps_fund_total_note">Plus the network fee, shown in the review</string>
+    <string name="stamps_fund_paid_by">Paid by</string>
+    <!-- %1$s: the payer's balance (or … while it's read). -->
+    <string name="stamps_fund_holds">Holds %1$s</string>
+    <string name="stamps_fund_holds_not_enough">Holds %1$s — not enough</string>
+    <!-- %1$s: the chain's name. -->
+    <string name="stamps_fund_on_chain">On %1$s</string>
+    <string name="stamps_fund_what">What</string>
+    <string name="stamps_fund_node">Node</string>
+    <string name="stamps_fund_network">Network</string>
+    <string name="stamps_fund_contract">Contract</string>
+    <string name="stamps_fund_amount">Amount</string>
+    <string name="stamps_fund_network_fee">Network fee</string>
+    <string name="stamps_fund_fee_up_to">up to %1$s</string>
+    <string name="stamps_fund_nonce">Nonce</string>
+    <!-- %1$s: the fee footnote sentence. -->
+    <string name="stamps_fund_review_note">A real transaction on Gnosis Chain that can\'t be undone. %1$s If the pool can\'t give at least the xBZZ above, it reverts and only the fee is lost.</string>
+    <string name="stamps_fund_confirm_and_send">Confirm and send</string>
+    <string name="stamps_pending_superseded">Its transaction can never be mined: the paying account\'s nonce went to another transaction. There\'s no stamp, so dismiss it.</string>
+    <string name="stamps_pending_not_mined_yet">It isn\'t mined yet as far as Gnosis Chain shows. The app keeps checking its transaction and connects the stamp if it lands. Dismissing forgets the batch: a stamp that lands afterwards can\'t be connected.</string>
+    <string name="stamps_pending_maybe_mined">It may or may not have been mined. If it was, Connect adds the stamp to the node. Dismissing forgets the batch: a stamp that lands afterwards can\'t be connected.</string>
+    <string name="stamps_pending_going_out">Your wallet\'s transaction is going out; the node connects the stamp once it\'s mined.</string>
+    <string name="stamps_pending_connecting">The node is connecting it…</string>
+    <!-- %1$s: the node account's address. -->
+    <string name="stamps_pending_other_node">It was bought for another node account (%1$s), which has to be running to connect it.</string>
+    <string name="stamps_pending_owed">Mined. The node connects it to publish with it as soon as the stamp work or upload it\'s busy with ends.</string>
+    <!-- %1$s: why. -->
+    <string name="stamps_pending_connect_failed">Connecting it failed: %1$s</string>
+    <!-- %1$s: why; %2$s: what the chain shows (stamps_pending_superseded, _not_mined_yet or _maybe_mined). -->
+    <string name="stamps_pending_connect_failed_untracked">Connecting it failed: %1$s %2$s</string>
+    <!-- %1$s: what the chain shows (stamps_pending_superseded, _not_mined_yet or _maybe_mined). -->
+    <string name="stamps_pending_stopped_following">Your wallet stopped following its transaction. %1$s</string>
+    <string name="stamps_pending_mined">Mined. Connect adds it to the node to publish with it.</string>
+    <!-- %1$s: why the node can't yet. -->
+    <string name="stamps_pending_mined_blocked">Mined. Connect adds it to the node to publish with it once it can: %1$s</string>
+    <string name="stamps_pending_title">Stamp from your wallet</string>
+    <string name="stamps_pending_batch">Batch</string>
+    <string name="stamps_connect">Connect</string>
+    <string name="stamps_dismiss">Dismiss</string>
+
+    <!-- Chequebook.kt -->
+    <string name="stamps_chequebook_node_off">Turn on the Swarm node to see its chequebook.</string>
+    <string name="stamps_chequebook_need_light_mode">The chequebook needs light mode, which connects the node to Gnosis Chain. Switch it on under Publishing on the node page.</string>
+    <string name="stamps_chequebook_checking">Checking the node\'s chequebook…</string>
+    <string name="stamps_chequebook_none">The node has no chequebook yet. It sets one up with its first postage stamp.</string>
+    <string name="stamps_chequebook_checking_xbzz">Checking the node\'s xBZZ…</string>
+    <string name="stamps_chequebook_no_xbzz">The node\'s account holds no xBZZ. Send xBZZ on Gnosis Chain to the node\'s address first: a deposit moves xBZZ the node already holds, it doesn\'t swap xDAI.</string>
+    <string name="stamps_chequebook_choose_amount">Choose an amount.</string>
+    <!-- %1$s: the xBZZ the node's account holds. -->
+    <string name="stamps_chequebook_holds_only">The node\'s account holds only %1$s. Choose a smaller amount, or send xBZZ on Gnosis Chain to the node\'s address first.</string>
+    <!-- %1$s: the amount; %2$s: the chequebook's address; %3$s: the most the gas costs. -->
+    <string name="stamps_chequebook_deposit_confirm">The node moves %1$s from its account into its chequebook at %2$s, and pays up to %3$s of gas for the one transaction. The xBZZ then pays other nodes for pushing what you publish. This is a real transaction on Gnosis Chain and can\'t be undone.</string>
+
+    <!-- ChequebookScreen.kt -->
+    <string name="stamps_chequebook_title">Chequebook</string>
+    <string name="stamps_chequebook_intro">The chequebook pays other nodes for pushing what you publish into Swarm. The node\'s cheques are only as good as what it holds.</string>
+    <string name="stamps_chequebook_address">Address</string>
+    <string name="stamps_checking">Checking…</string>
+    <string name="stamps_chequebook_none_yet">None yet</string>
+    <string name="stamps_chequebook_balance">Balance</string>
+    <string name="stamps_chequebook_wallet_note">In the node\'s own account: what a deposit moves into the chequebook.</string>
+    <string name="stamps_deposit">Deposit</string>
+    <string name="stamps_chequebook_other_payment">Another payment is running. Deposit once it has finished.</string>
+    <string name="stamps_chequebook_searching">The node is searching for your stamps. Deposit once it has finished.</string>
+    <!-- %1$s: the amount. -->
+    <string name="stamps_chequebook_deposit_title">Deposit %1$s?</string>
+</resources>
