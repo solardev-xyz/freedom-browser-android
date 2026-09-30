@@ -8,6 +8,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.rpc.ChainAccessPolicy
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.RoutingContext
@@ -612,10 +613,14 @@ object X402Payments {
 
     private suspend fun readToken(rpc: WalletRpc, chain: Chain, asset: String): TokenRead = try {
         withTimeoutOrNull(READ_TIMEOUT_MS) {
-            val d = rpc.call(chain.id, JSONObject().put("to", asset).put("data", DECIMALS))
+            // Both at once: each can walk every proof tier before the quorum.
+            val (d, sym) = coroutineScope {
+                val d = async { rpc.call(chain.id, JSONObject().put("to", asset).put("data", DECIMALS)) }
+                val sym = async { rpc.call(chain.id, JSONObject().put("to", asset).put("data", SYMBOL)) }
+                d.await() to sym.await()
+            }
             val decimals = Erc20.decodeUint256(d.value)
                 ?.takeIf { it <= BigInteger.valueOf(36) }?.toInt() ?: return@withTimeoutOrNull TokenRead.Unreadable
-            val sym = rpc.call(chain.id, JSONObject().put("to", asset).put("data", SYMBOL))
             val symbol = abiSymbol(sym.value) ?: return@withTimeoutOrNull TokenRead.Unreadable
             if (!tokenReadTrusted(chain, listOf(d.trust, sym.trust))) {
                 Log.i(TAG, "unlisted token's decimals not verified (${d.trust.level.name.lowercase()}, built-in ${chain.builtIn})")
@@ -668,7 +673,13 @@ object X402Payments {
 
     private const val DECIMALS = "0x313ce567"
     private const val SYMBOL = "0x95d89b41"
-    private const val READ_TIMEOUT_MS = 8_000L
+    /**
+     * One token read's budget, sized for the router's order on a
+     * light-client chain (#329 R6-F1): each proof tier's wait for a site's
+     * choice, then the quorum's full timeout, and a second to spare.
+     */
+    internal const val READ_TIMEOUT_MS =
+        2 * ChainDataRouter.SITE_PROOF_DEADLINE_MS + ChainAccessPolicy.DEFAULT_TIMEOUT_MS + 1_000L
     private const val ACCOUNTS_WAIT_MS = 3_000L
     private const val TAG = "X402"
 }

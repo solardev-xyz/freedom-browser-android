@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.currentTime
@@ -419,6 +420,40 @@ class ChainDataRouterTest {
             .request(137, "eth_blockNumber", context = RoutingContext.forPage("https://pay.example"))
         assertEquals(ChainSource.DIRECT, page.trust.source)
         assertEquals(ChainTrust.Level.UNVERIFIED, page.trust.level)
+    }
+
+    @Test
+    fun aSitesChoiceGivesEachProofTierItsOwnCapAndFitsX402sBudget() = runTest {
+        // #329 R6-F1: an x402 offer's decimals() and symbol() on Gnosis,
+        // with the light client and the prover both hanging (a site's miss
+        // never backs them off) and every RPC slow but healthy. Each proof
+        // tier gets SITE_PROOF_DEADLINE_MS, the quorum its full timeout, and
+        // readToken's two reads still come back verified inside its budget.
+        val net = Net()
+        BuiltInChains.GNOSIS.rpcUrls.forEach { url -> net.handlers[url] = { delay(4_500); ok("0x" + "0".repeat(63) + "6") } }
+        val myotis = FakeSource { delay(60_000); ChainDataResult("0x0", proof) }
+        val colibri = FakeSource { delay(60_000); ChainDataResult("0x0", proof) }
+        val r = router(
+            net,
+            listOf(BuiltInChains.GNOSIS),
+            sources = mapOf(ChainSource.MYOTIS to myotis, ChainSource.COLIBRI to colibri),
+        )
+        val ctx = RoutingContext.forSiteChoice("https://pay.example")
+        val results = kotlinx.coroutines.withTimeoutOrNull(baby.freedom.mobile.browser.X402Payments.READ_TIMEOUT_MS) {
+            kotlinx.coroutines.coroutineScope {
+                listOf("0x313ce567", "0x95d89b41").map { data ->
+                    async { r.request(100, "eth_call", JSONArray().put(JSONObject().put("to", a).put("data", data)).put("latest"), context = ctx) }
+                }.map { it.await() }
+            }
+        }
+        assertNotNull("x402's token read ran out of its budget", results)
+        results!!.forEach {
+            assertEquals(ChainSource.QUORUM, it.trust.source)
+            assertEquals(ChainTrust.Level.VERIFIED, it.trust.level)
+        }
+        assertEquals(2 * ChainDataRouter.SITE_PROOF_DEADLINE_MS + 4_500, currentTime)
+        assertEquals(2, myotis.calls)
+        assertEquals(2, colibri.calls)
     }
 
     @Test

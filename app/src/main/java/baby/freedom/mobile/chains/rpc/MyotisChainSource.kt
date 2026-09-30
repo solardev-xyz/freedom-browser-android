@@ -2,6 +2,7 @@ package baby.freedom.mobile.chains.rpc
 
 import baby.freedom.mobile.node.MyotisLink
 import baby.freedom.swarm.MyotisReads
+import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -60,6 +61,10 @@ internal class MyotisChainSource(private val link: Link = Link.Default) : Verifi
         if (method !in MyotisReads.METHODS) throw Unanswered("the light client doesn't serve $method")
         val reply = try {
             JSONTokener(link.read(chainId, method, params.toString(), context.site)).nextValue() as? JSONObject
+        } catch (e: CancellationException) {
+            // The router ending this tier's wait, or the caller going away:
+            // not the light client's failure (#329 R6-M1).
+            throw e
         } catch (_: Exception) {
             null
         } ?: throw Unanswered("unexpected answer from the light client")

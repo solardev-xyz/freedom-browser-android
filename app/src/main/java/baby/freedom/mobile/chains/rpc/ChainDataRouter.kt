@@ -58,8 +58,10 @@ import org.json.JSONArray
  * [ChainRpcException.AllSourcesFailed] when none is left.
  *
  * A page-driven read ([RoutingContext.forPage]) gives each tier but the
- * last [INTERACTIVE_DEADLINE_MS] at most before falling through; the
- * wallet's own reads keep the chain's full timeout, so verification is
+ * last [INTERACTIVE_DEADLINE_MS] at most before falling through; a read of
+ * a site's choice ([RoutingContext.forSiteChoice]) gives each proof tier
+ * [SITE_PROOF_DEADLINE_MS] but the quorum its full timeout; the wallet's
+ * own reads keep the chain's full timeout everywhere, so verification is
  * never traded away where nobody is waiting on a frame. RPCs whose
  * transport failed in the last [QUARANTINE_MS] move to the back of the
  * pool.
@@ -159,10 +161,15 @@ class ChainDataRouter internal constructor(
             for ((index, source) in policy.readOrder.withIndex()) {
                 if (method in DIRECT_ONLY_METHODS && source != ChainSource.DIRECT) continue
                 val hasFallback = index < policy.readOrder.lastIndex
-                val waitMs = if (context.interactive && hasFallback) {
-                    minOf(policy.timeoutMs, INTERACTIVE_DEADLINE_MS)
-                } else {
-                    policy.timeoutMs
+                val waitMs = when {
+                    !hasFallback -> policy.timeoutMs
+                    context.interactive -> minOf(policy.timeoutMs, INTERACTIVE_DEADLINE_MS)
+                    // A site's miss never backs a proof tier off, so without
+                    // a cap of its own every read of a site's choice would
+                    // pay the tier's full timeout again (#329 R6-F1). The
+                    // quorum keeps its full timeout (R5-F1).
+                    context.site && source.proves -> minOf(policy.timeoutMs, SITE_PROOF_DEADLINE_MS)
+                    else -> policy.timeoutMs
                 }
                 val t0 = clock()
                 val outcome: Any? = when (source) {
@@ -556,6 +563,15 @@ class ChainDataRouter internal constructor(
 
         /** How long a page-driven read gives a tier with another behind it. */
         const val INTERACTIVE_DEADLINE_MS = 2_000L
+
+        /**
+         * How long a site's non-interactive read
+         * ([RoutingContext.forSiteChoice]) gives a proof tier with another
+         * behind it. It can't back the tier off on its own, so the cap is
+         * what bounds each read's cost while the tier is slow or
+         * unreachable; the quorum still gets the chain's full timeout.
+         */
+        const val SITE_PROOF_DEADLINE_MS = 2_000L
 
         /** How long an RPC whose transport failed waits at the back of the pool. */
         const val QUARANTINE_MS = 10L * 60 * 1000

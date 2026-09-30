@@ -39,6 +39,9 @@ enum class ChainSource(val key: String, @StringRes private val labelRes: Int) {
     /** Whether an answer from this tier carries a proof or an agreement. */
     val verifies: Boolean get() = this != DIRECT
 
+    /** The proof tiers: a light client or a prover, not RPCs agreeing. */
+    val proves: Boolean get() = this == MYOTIS || this == COLIBRI
+
     /** Tiers that can send a signed transaction. */
     val canBroadcast: Boolean get() = this == MYOTIS || this == DIRECT
 }
@@ -128,8 +131,8 @@ data class ChainAccessPolicy(
  *   Only a page-driven read ([forPage]: a dapp's `eth_call`, a `web3://`
  *   app) is; a read the wallet makes *about* a site's choice
  *   ([forSiteChoice]: an x402 offer's token contract) keeps the chain's
- *   full timeout, since it needs a verified answer, not a fast one
- *   (#329 R5-F1).
+ *   full timeout for the quorum, since it needs a verified answer, not a
+ *   fast one (#329 R5-F1); only its proof tiers' waits are capped.
  */
 class RoutingContext private constructor(
     val origin: String?,
@@ -161,8 +164,10 @@ class RoutingContext private constructor(
         /**
          * The wallet's read of something site [origin] chose (an x402
          * offer's token contract): the site's for the proof tiers' slots
-         * and back-off, but not a page's latency trade — it waits for
-         * verification as long as the wallet's own reads do.
+         * and back-off, but not a page's latency trade — the quorum gets
+         * the chain's full timeout, as for the wallet's own reads. Each
+         * proof tier gets [ChainDataRouter.SITE_PROOF_DEADLINE_MS], since
+         * a site's miss doesn't back it off (#329 R6-F1).
          */
         fun forSiteChoice(origin: String?): RoutingContext =
             normalize(origin)?.let { RoutingContext(it, interactive = false) } ?: WALLET
