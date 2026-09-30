@@ -41,7 +41,12 @@ internal sealed interface ClientCertPlan {
     /** Send nothing, and remember nothing: a private tab ([ClientCertRequest.ignore]). */
     data object SendNone : ClientCertPlan
 
-    /** The user said not to send one to this server this run ([ClientCertRequest.cancel]). */
+    /**
+     * The user just said not to send one to this server: sent none
+     * ([ClientCertRequest.ignore], which WebView doesn't remember either).
+     * Only for the requests already waiting when they said so
+     * ([ClientCertChoices.planFor]); a later one asks again.
+     */
     data object Refuse : ClientCertPlan
 
     /** The user picked [alias] for this server this run. */
@@ -56,16 +61,29 @@ internal sealed interface ClientCertPlan {
  * (#316). Nothing here is written anywhere, and *Clear cookies & site
  * data* empties it ([clear]).
  *
+ * A picked certificate holds for the rest of the run. A refusal (Deny,
+ * Back, or "no certificates" before one is installed) doesn't: it
+ * answers the requests that were already waiting on that chooser, and
+ * the next request — a reload, another tab — asks again. So installing
+ * the certificate, or taking back an accidental Deny, only needs a reload.
+ *
  * A private tab never gets an answer from here: it sends no certificate
  * and is never asked, whatever a normal tab decided for the same server.
  */
 internal class ClientCertChoices {
     private sealed interface Choice {
         data class Picked(val alias: String) : Choice
-        data object Declined : Choice
+        /** Refused; holds for requests with a [ticket] up to [upTo]. */
+        data class Declined(val upTo: Long) : Choice
     }
 
     private val choices = HashMap<String, Choice>()
+
+    /** The last [ticket] handed out. */
+    private var tickets = 0L
+
+    /** A number for a request as it arrives: later requests get larger ones. */
+    fun ticket(): Long = ++tickets
 
     /**
      * Bumped by [clear]: an answer from a chooser opened before the clear
@@ -74,11 +92,16 @@ internal class ClientCertChoices {
     var generation = 0
         private set
 
-    fun planFor(private: Boolean, host: String, port: Int): ClientCertPlan {
+    /**
+     * What to answer a request that got [ticket] on arrival. A refusal
+     * only answers requests that arrived before it was given (queued
+     * behind its chooser); by default, a request arriving now asks.
+     */
+    fun planFor(private: Boolean, host: String, port: Int, ticket: Long = Long.MAX_VALUE): ClientCertPlan {
         if (private) return ClientCertPlan.SendNone
         return when (val c = choices[key(host, port)]) {
             is Choice.Picked -> ClientCertPlan.Send(c.alias)
-            Choice.Declined -> ClientCertPlan.Refuse
+            is Choice.Declined -> if (ticket <= c.upTo) ClientCertPlan.Refuse else ClientCertPlan.Ask
             null -> ClientCertPlan.Ask
         }
     }
@@ -86,7 +109,7 @@ internal class ClientCertChoices {
     /** Remember the chooser's answer ([alias] `null`: none), if nothing was cleared since [asOf]. */
     fun answered(host: String, port: Int, alias: String?, asOf: Int) {
         if (asOf != generation) return
-        choices[key(host, port)] = if (alias == null) Choice.Declined else Choice.Picked(alias)
+        choices[key(host, port)] = if (alias == null) Choice.Declined(upTo = tickets) else Choice.Picked(alias)
     }
 
     /** The picked certificate can't be read any more (removed from the device): ask again next time. */
@@ -109,9 +132,10 @@ internal class ClientCertChoices {
  *
  * - A private tab sends none and doesn't ask.
  * - A normal tab asks with the system KeyChain chooser, which names the
- *   server (host and port). Picking a certificate sends it; dismissing
- *   the chooser sends none. The answer holds for that server for the
- *   rest of the app run ([ClientCertChoices]).
+ *   server (host and port). Picking a certificate sends it, and the pick
+ *   holds for that server for the rest of the app run
+ *   ([ClientCertChoices]). Dismissing the chooser sends none, to that
+ *   request and the ones queued behind it; the next one asks again.
  * - The chooser only opens over the page that asked: a request from a
  *   background tab, from behind a full-screen panel, while Android's
  *   permission dialog is up or while the app isn't in front waits until
@@ -134,7 +158,7 @@ object ClientCertificates {
     private val chooserLock = Mutex()
 
     private class Pending(val tabId: Long) {
-        val withdrawn = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val withdrawn = MutableStateFlow(false)
     }
 
     private val pending = mutableListOf<Pending>()
@@ -165,14 +189,18 @@ object ClientCertificates {
         val appContext = context.applicationContext
         val host = request.host
         val port = request.port
-        when (val plan = choices.planFor(tab.private, host, port)) {
+        val ticket = choices.ticket()
+        when (val plan = choices.planFor(tab.private, host, port, ticket)) {
             ClientCertPlan.SendNone -> {
                 Log.i(TAG, "private tab: no client certificate for $host:$port")
                 answer(request) { ignore() }
             }
-            ClientCertPlan.Refuse -> answer(request) { cancel() }
-            is ClientCertPlan.Send -> scope.launch { send(appContext, request, plan.alias) }
-            ClientCertPlan.Ask -> scope.launch { ask(appContext, tab.id, request, broker) }
+            ClientCertPlan.Refuse -> answer(request) { ignore() }
+            is ClientCertPlan.Send -> {
+                val asOf = choices.generation
+                scope.launch { send(appContext, request, plan.alias, asOf) }
+            }
+            ClientCertPlan.Ask -> scope.launch { ask(appContext, tab.id, ticket, request, broker) }
         }
     }
 
@@ -205,7 +233,13 @@ object ClientCertificates {
         emptyWebViewTable()
     }
 
-    private suspend fun ask(context: Context, tabId: Long, request: ClientCertRequest, broker: SitePermissionBroker) {
+    private suspend fun ask(
+        context: Context,
+        tabId: Long,
+        ticket: Long,
+        request: ClientCertRequest,
+        broker: SitePermissionBroker,
+    ) {
         val entry = Pending(tabId)
         pending += entry
         try {
@@ -214,15 +248,18 @@ object ClientCertificates {
                     answer(request) { ignore() }
                     return
                 }
+                // At or before the chooser opens: a clear after this
+                // means the answer isn't WebView's to keep either ([send]).
+                val asOf = choices.generation
                 val plan = chooseInTurn(
                     choices, chooserLock, request.host, request.port, tabId,
                     broker.onScreenTab, broker.androidDialogUp, entry.withdrawn,
+                    ticket,
                     choose?.let { open -> { open(request) } },
                 ) ?: continue
                 when (plan) {
-                    ClientCertPlan.SendNone, ClientCertPlan.Ask -> answer(request) { ignore() }
-                    ClientCertPlan.Refuse -> answer(request) { cancel() }
-                    is ClientCertPlan.Send -> send(context, request, plan.alias)
+                    ClientCertPlan.SendNone, ClientCertPlan.Ask, ClientCertPlan.Refuse -> answer(request) { ignore() }
+                    is ClientCertPlan.Send -> send(context, request, plan.alias, asOf)
                 }
                 return
             }
@@ -231,7 +268,14 @@ object ClientCertificates {
         }
     }
 
-    private suspend fun send(context: Context, request: ClientCertRequest, alias: String) {
+    /**
+     * Sends [alias]'s certificate to [request]. [asOf] is the
+     * [ClientCertChoices.generation] the pick was made under: if site
+     * data was cleared since, the certificate still answers this request,
+     * but WebView's own table is emptied after it too, so it isn't
+     * handed on silently to the next connection.
+     */
+    private suspend fun send(context: Context, request: ClientCertRequest, alias: String, asOf: Int) {
         val material: Pair<PrivateKey, Array<X509Certificate>>? = withContext(Dispatchers.IO) {
             try {
                 val key = KeyChain.getPrivateKey(context, alias)
@@ -261,12 +305,26 @@ object ClientCertificates {
         // again, proceed again and empty it again until WebView gives up
         // (`ERR_TOO_MANY_RETRIES`). Normal tabs asking again after it's
         // emptied get the same answer from [choices].
+        //
+        // The same goes for a pick made, or read, while site data was
+        // being cleared: its request gets it, but WebView must not keep it.
         tableHoldsCertificate = true
-        if (privateTabs.isNotEmpty()) {
+        if (emptiesTableAfterProceed(asOf)) {
             main.removeCallbacks(emptyTable)
             main.postDelayed(emptyTable, TABLE_EMPTY_DELAY_MS)
         }
     }
+
+    /**
+     * Whether WebView's table is emptied shortly after a `proceed` for a
+     * pick made under generation [asOf] ([send]): while a private tab is
+     * open, or when site data was cleared since the pick.
+     */
+    internal fun emptiesTableAfterProceed(asOf: Int): Boolean =
+        privateTabs.isNotEmpty() || asOf != choices.generation
+
+    /** The [ClientCertChoices.generation] answers are made under now. */
+    internal val generation: Int get() = choices.generation
 
     /**
      * Private tab [tabId] is about to be built: empty WebView's table of
@@ -295,8 +353,8 @@ object ClientCertificates {
 }
 
 /**
- * One turn at the chooser for a request from tab [tabId] to [host]:[port],
- * under [lock]. Returns what to answer, or `null` to wait for the tab to
+ * One turn at the chooser for a request from tab [tabId] to [host]:[port]
+ * (which got [ticket] on arrival), under [lock]. Returns what to answer, or `null` to wait for the tab to
  * be on screen again.
  *
  * [withdrawn] is checked again once [open] returns: the tab may have been
@@ -315,11 +373,13 @@ internal suspend fun chooseInTurn(
     onScreenTab: StateFlow<Long?>,
     androidDialogUp: StateFlow<Boolean>,
     withdrawn: StateFlow<Boolean>,
+    ticket: Long = Long.MAX_VALUE,
     open: (suspend () -> String?)?,
 ): ClientCertPlan? = lock.withLock turn@{
     if (withdrawn.value) return@turn ClientCertPlan.SendNone
-    // Answered for this server while this request queued.
-    val now = choices.planFor(false, host, port)
+    // Answered for this server while this request queued ([ticket]: when
+    // it arrived, so a refusal given since answers it too).
+    val now = choices.planFor(false, host, port, ticket)
     if (now != ClientCertPlan.Ask) return@turn now
     // Switched away while queued behind another chooser: wait again.
     if (onScreenTab.value != tabId || androidDialogUp.value) return@turn null

@@ -34,9 +34,50 @@ class ClientCertificatesTest {
         // Another port, another host: their own question.
         assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 8443))
         assertEquals(ClientCertPlan.Ask, c.planFor(false, "other.example", 443))
-        // Dismissing the chooser is an answer too: send none, don't ask again.
-        c.answered("other.example", 443, null, c.generation)
-        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "other.example", 443))
+    }
+
+    @Test
+    fun `a refusal answers the requests already waiting, and the next one asks again`() {
+        val c = ClientCertChoices()
+        val asking = c.ticket()
+        val queued = c.ticket()
+        // Deny, Back, or "no certificates" before one is installed.
+        c.answered("mtls.example", 443, null, c.generation)
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "mtls.example", 443, asking))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "mtls.example", 443, queued))
+        // A reload (or another tab) after the answer: asked again, so a
+        // certificate installed since, or an accidental Deny, isn't a dead end.
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443, c.ticket()))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443))
+        // …and picking one then holds.
+        c.answered("mtls.example", 443, "alice", c.generation)
+        assertEquals(ClientCertPlan.Send("alice"), c.planFor(false, "mtls.example", 443, queued))
+    }
+
+    @Test
+    fun `a request queued behind a refused chooser takes the refusal, a later one opens its own`() = runBlocking {
+        val c = ClientCertChoices()
+        val lock = Mutex()
+        val onScreen = MutableStateFlow<Long?>(2L)
+        val queuedTicket = c.ticket()
+        val first = chooseInTurn(
+            c, lock, "mtls.example", 443, 2L, onScreen, MutableStateFlow(false), MutableStateFlow(false),
+            c.ticket(),
+        ) { null }
+        assertEquals(ClientCertPlan.Refuse, first)
+        var opened = 0
+        val queued = chooseInTurn(
+            c, lock, "mtls.example", 443, 2L, onScreen, MutableStateFlow(false), MutableStateFlow(false),
+            queuedTicket,
+        ) { opened++; "alice" }
+        assertEquals(ClientCertPlan.Refuse, queued)
+        assertEquals(0, opened)
+        val later = chooseInTurn(
+            c, lock, "mtls.example", 443, 2L, onScreen, MutableStateFlow(false), MutableStateFlow(false),
+            c.ticket(),
+        ) { opened++; "alice" }
+        assertEquals(ClientCertPlan.Send("alice"), later)
+        assertEquals(1, opened)
     }
 
     @Test
@@ -128,6 +169,19 @@ class ClientCertificatesTest {
         // What the host's real destroy does for every tab.
         for (id in listOf(41L, 42L)) ClientCertificates.onTabClosed(id)
         assertFalse(ClientCertificates.privateTabOpen)
+    }
+
+    @Test
+    fun `a pick answered after a clear isn't kept in WebView's table`() {
+        // No private tab open: a pick made since the last clear stays in
+        // WebView's table (normal tabs reuse it).
+        val before = ClientCertificates.generation
+        assertFalse(ClientCertificates.emptiesTableAfterProceed(before))
+        // The chooser (or the key read) was still going when site data
+        // was cleared: its request is answered, then the table emptied.
+        ClientCertificates.clear()
+        assertTrue(ClientCertificates.emptiesTableAfterProceed(before))
+        assertFalse(ClientCertificates.emptiesTableAfterProceed(ClientCertificates.generation))
     }
 
     @Test
