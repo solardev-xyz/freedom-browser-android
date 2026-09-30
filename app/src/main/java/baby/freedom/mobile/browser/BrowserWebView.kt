@@ -4352,16 +4352,24 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (webOrigin(target) == null) return false
         if (!redirectCorrection.crossing(target, ::needsOtherUserAgentFor)) return false
         usersNavigation.ended()
+        // A hop of a Hard reload's load (#262): its bypass is still on
+        // (only its own commit and finish, another load or Stop end it),
+        // and the corrected load is the same navigation, so it goes past
+        // the cache too rather than ending the bypass (R2-M2).
+        val bypass = cacheBypass.active
         // Posted: not from inside the WebView's own callback, and after
         // the redirect's cancellation has ended the navigation — the
         // user agent must not change while anything is loading.
         mainHandler.post {
             val url = redirectCorrection.issue() ?: return@post
             loadingRedirectCorrection = true
+            // Unless something in between (Stop) already ended it.
+            loadingBypassingCache = bypass && cacheBypass.active
             try {
                 if (named) loadUrlNamedByUser(url) else loadUrl(url)
             } finally {
                 loadingRedirectCorrection = false
+                loadingBypassingCache = false
             }
         }
         return true
@@ -4593,6 +4601,14 @@ internal class PageWebView(context: Context) : WebView(context) {
      * stays). That memory cache is the renderer's, shared by the tabs
      * in it: pages already open keep what they loaded, and only their
      * next reuse of a resource goes to the HTTP cache instead.
+     *
+     * A #180 user-agent redirect correction of this load
+     * ([redirectCrossesUserAgent]) carries the bypass on to the corrected
+     * load. What this can't reach is a service worker: a page whose
+     * worker answers the navigation or its subresources from the worker's
+     * own Cache Storage (a cache-first PWA) still gets what the worker
+     * hands it, as WebView gives the app no way to bypass a worker for one
+     * load (a known limitation, not in scope).
      */
     fun loadBypassingCache(load: () -> Unit) {
         clearCache(false)

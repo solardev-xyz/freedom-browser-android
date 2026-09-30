@@ -123,4 +123,36 @@ class MediaBodyBufferTest {
         assertEquals("first", first.get(5, TimeUnit.SECONDS))
         assertEquals("second", buffer.load(url, fresh = false) { "x" })
     }
+
+    @Test
+    fun `a fetch older than the url's first fresh fetch can't buffer after its epoch is evicted`() {
+        val buffer = MediaBodyBuffer<String>(maxEntries = 8, maxEpochs = 2)
+        val oldStarted = CountDownLatch(1)
+        val releaseOld = CountDownLatch(1)
+        // A plain request, at the gateway before the URL was ever fetched fresh.
+        val old = pool.submit<String?> {
+            buffer.load(url, fresh = false) {
+                oldStarted.countDown()
+                releaseOld.await()
+                "stale"
+            }
+        }
+        assertTrue(oldStarted.await(5, TimeUnit.SECONDS))
+        assertEquals("fresh", buffer.load(url, fresh = true) { "fresh" })
+        // Other URLs' fresh fetches push this URL's epoch out (R2-M3).
+        buffer.load("$url?a", fresh = true) { "a" }
+        buffer.load("$url?b", fresh = true) { "b" }
+        releaseOld.countDown()
+        assertEquals("stale", old.get(5, TimeUnit.SECONDS))
+        assertEquals("fresh", buffer.load(url, fresh = false) { "x" })
+    }
+
+    @Test
+    fun `a plain fetch after an eviction still buffers`() {
+        val buffer = MediaBodyBuffer<String>(maxEntries = 8, maxEpochs = 1)
+        buffer.load("$url?a", fresh = true) { "a" }
+        buffer.load("$url?b", fresh = true) { "b" }
+        assertEquals("v1", buffer.load(url, fresh = false) { "v1" })
+        assertEquals("v1", buffer.load(url, fresh = false) { "x" })
+    }
 }

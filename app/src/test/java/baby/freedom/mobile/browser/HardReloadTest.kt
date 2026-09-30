@@ -77,6 +77,31 @@ class HardReloadTest {
     }
 
     @Test
+    fun `a user-agent redirect correction of the hard reload carries its bypass on`() {
+        // PageWebView.redirectCrossesUserAgent's sequence (R2-M2).
+        val s = Settings(mode = WebSettings.LOAD_CACHE_ELSE_NETWORK)
+        s.bypass.loadStarting(bypass = true)
+        // The first hop answers with a redirect to the other user agent's
+        // site: it is cancelled (a finish before any commit) ...
+        val carried = s.bypass.active
+        s.bypass.pageFinished()
+        // ... and the corrected load goes out, still past the cache.
+        s.bypass.loadStarting(bypass = carried && s.bypass.active)
+        assertEquals(WebSettings.LOAD_NO_CACHE, s.mode)
+        s.bypass.pageStarted()
+        assertEquals(WebSettings.LOAD_NO_CACHE, s.mode)
+        s.bypass.pageFinished()
+        assertEquals(WebSettings.LOAD_CACHE_ELSE_NETWORK, s.mode)
+
+        // Stop between the redirect and the corrected load ends it for good.
+        s.bypass.loadStarting(bypass = true)
+        val carriedAgain = s.bypass.active
+        s.bypass.stopped()
+        s.bypass.loadStarting(bypass = carriedAgain && s.bypass.active)
+        assertEquals(WebSettings.LOAD_CACHE_ELSE_NETWORK, s.mode)
+    }
+
+    @Test
     fun `only the load a hard reload scheduled bypasses the cache`() {
         val tab = BrowserState(id = 1L)
         tab.loadUrl("https://example.com/", bypassCache = true)

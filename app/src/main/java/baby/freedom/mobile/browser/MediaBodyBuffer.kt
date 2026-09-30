@@ -24,18 +24,29 @@ import java.util.concurrent.ExecutionException
  *
  * Every fetch records the URL's epoch — bumped by each fresh fetch — when
  * it starts, and buffers its body only if the epoch is unchanged when it
- * ends. Thread-safe: called on the interceptor's threads.
+ * ends and no fresh fetch started since then was forgotten ([epochs] is
+ * bounded). Thread-safe: called on the interceptor's threads.
  */
 internal class MediaBodyBuffer<B : Any>(
     maxEntries: Int = 4,
-    maxEpochs: Int = 64,
+    private val maxEpochs: Int = 64,
 ) {
     private val bodies = lru<B>(maxEntries)
 
     // The epoch of the last fresh fetch started per URL. Values never
-    // recur, so an entry evicted from here only ever makes an older fetch
-    // skip buffering, never lets it through.
-    private val epochs = lru<Long>(maxEpochs)
+    // recur. Evicting an entry would make a fetch that started before that
+    // URL's first fresh fetch (it recorded no epoch) match again (R2-M3),
+    // so the highest epoch ever evicted is kept: a fetch that recorded no
+    // epoch doesn't buffer if a fresh fetch started after it and was then
+    // evicted, whatever its URL. Skipping the buffer is always safe.
+    private var evictedUpTo = 0L
+    private val epochs = object : java.util.LinkedHashMap<String, Long>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean {
+            if (size <= maxEpochs) return false
+            if (eldest != null) evictedUpTo = maxOf(evictedUpTo, eldest.value)
+            return true
+        }
+    }
     private var nextEpoch = 0L
     private val freshFetches = HashMap<String, CompletableFuture<B?>>()
 
@@ -47,9 +58,11 @@ internal class MediaBodyBuffer<B : Any>(
      */
     fun load(url: String, fresh: Boolean, fetch: (noCache: Boolean) -> B?): B? {
         val epoch: Long?
+        val startedAt: Long
         val mine: CompletableFuture<B?>?
         val joined: CompletableFuture<B?>?
         synchronized(this) {
+            startedAt = nextEpoch
             if (fresh) {
                 bodies.remove(url)
                 epoch = ++nextEpoch
@@ -79,7 +92,11 @@ internal class MediaBodyBuffer<B : Any>(
         try {
             body = fetch(fresh || joined != null)
             if (body != null) {
-                synchronized(this) { if (epochs[url] == epoch) bodies[url] = body }
+                synchronized(this) {
+                    val current = epochs[url]
+                    val unchanged = current == epoch && (epoch != null || evictedUpTo <= startedAt)
+                    if (unchanged) bodies[url] = body
+                }
             }
         } finally {
             if (mine != null) {
