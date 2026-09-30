@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The node pages (#280): the Swarm node, the Tor client and the Myotis
+  light client, their logs, notifications and the gateway / IPFS / Tor
+  routing text they show.
+-->
+<resources>
+    <!-- browser/NodeScreen.kt -->
+    <string name="node_screen_title">Nodes</string>
+    <string name="node_swarm_node">Swarm node</string>
+    <string name="node_gateway_external">bzz:// served by an external endpoint</string>
+    <string name="node_gateway_local">Serving bzz:// via local gateway</string>
+    <string name="node_gateway_disabled">Gateway disabled</string>
+    <string name="node_details">Details</string>
+    <string name="node_mode">Mode</string>
+    <string name="node_peers">Peers</string>
+    <string name="node_client">Client</string>
+    <string name="node_identity">Identity</string>
+    <string name="node_identity_wallet">From your wallet</string>
+    <string name="node_identity_own">This device\'s own</string>
+    <string name="node_address">Address</string>
+    <string name="node_overlay">Overlay</string>
+    <string name="node_error">Error</string>
+    <string name="node_status">Status</string>
+    <string name="node_mode_light">Light</string>
+    <string name="node_mode_ultra_light">Ultra-light</string>
+    <string name="node_publishing">Publishing</string>
+    <string name="node_light_mode">Light mode</string>
+    <string name="node_chequebook">Chequebook</string>
+    <string name="node_publish">Publish</string>
+    <string name="node_set_up_publishing">Set up publishing</string>
+    <string name="node_postage_stamps">Postage stamps</string>
+    <string name="node_checking">Checking…</string>
+    <string name="node_chequebook_none">None yet (comes with the first postage stamp)</string>
+    <string name="node_mode_light_running">Connected to Gnosis Chain, so the node can publish</string>
+    <string name="node_mode_ultra_light_running">Browsing only. Light mode connects the node to Gnosis Chain so it can publish</string>
+    <string name="node_mode_light_restarting">Restarting the node in light mode…</string>
+    <string name="node_mode_ultra_light_restarting">Restarting the node in ultra-light mode…</string>
+    <string name="node_mode_light_when_on">Runs in light mode when the node is on</string>
+    <string name="node_mode_ultra_light_when_on">Runs in ultra-light mode (browsing only) when the node is on</string>
+    <string name="node_gateway">Gateway</string>
+    <string name="node_url">URL</string>
+    <string name="node_in_use">In use</string>
+    <string name="node_status_running">Running</string>
+    <string name="node_status_starting">Starting…</string>
+    <string name="node_status_stopped">Stopped</string>
+    <string name="node_light_client">Ethereum light client</string>
+    <string name="node_light_client_about">Verifies Ethereum and Gnosis peer-to-peer on this device (Myotis). Each chain runs on its own. With Ethereum off, names are checked through Colibri or your RPCs instead.</string>
+    <!-- Accessibility label of a chain's switch; %1$s is the chain (Ethereum, Gnosis). -->
+    <string name="node_run_chain">Run %1$s</string>
+    <string name="node_start_chain_at_launch">Start %1$s at launch</string>
+    <string name="node_not_syncing">Not syncing</string>
+    <string name="node_beacon_peers">Beacon peers</string>
+    <string name="node_state_peers">State peers</string>
+    <string name="node_head_block">Head block</string>
+    <string name="node_finalized_block">Finalized block</string>
+    <string name="node_not_serving">Not serving</string>
+    <string name="node_recovery">Recovery</string>
+    <string name="node_trust_checkpoint">Trust checkpoint</string>
+    <string name="node_repair_sync_data">Repair sync data</string>
+    <string name="node_off">Off</string>
+    <string name="node_chain_failed">Failed</string>
+    <string name="node_chain_paused">Paused</string>
+    <string name="node_checkpoint_too_old">Checkpoint too old</string>
+    <string name="node_synced">Synced</string>
+    <string name="node_chain_synced_not_serving">Synced, not serving yet</string>
+    <string name="node_chain_catching_up">Catching up</string>
+    <string name="node_chain_syncing">Syncing</string>
+    <!-- %1$s is node_anchor_age. -->
+    <string name="node_stale_anchor_with_age">This chain\'s checkpoint is too old to sync from safely (%1$s).</string>
+    <string name="node_stale_anchor">This chain\'s checkpoint is too old to sync from safely.</string>
+    <!-- %1$d: how many sync periods old the checkpoint is; %2$d: the limit, in sync periods. -->
+    <plurals name="node_anchor_age">
+        <item quantity="one">%1$d sync period old, the safe limit is %2$d</item>
+        <item quantity="other">%1$d sync periods old, the safe limit is %2$d</item>
+    </plurals>
+    <!-- %1$d execution-layer peers, %2$d of them able to serve at the chain head. -->
+    <string name="node_state_peers_at_head">%1$d · %2$d at head</string>
+    <string name="node_sync_paused">Sync paused</string>
+    <string name="node_updating_checkpoint">Updating checkpoint</string>
+    <!-- %1$d chains synced of %2$d (the quantity). -->
+    <plurals name="node_chains_synced">
+        <item quantity="one">%1$d of %2$d chain synced</item>
+        <item quantity="other">%1$d of %2$d chains synced</item>
+    </plurals>
+    <string name="node_syncing_ellipsis">Syncing…</string>
+    <string name="node_tor">Tor</string>
+    <string name="node_version">Version</string>
+    <string name="node_tor_bootstrap">Bootstrap</string>
+    <string name="node_tor_check">Check</string>
+    <string name="node_tor_external_proxy">External proxy</string>
+    <string name="node_tor_socks_proxy">SOCKS proxy</string>
+    <string name="node_start_orbot">Start Orbot</string>
+    <string name="node_open_orbot">Open Orbot</string>
+    <string name="node_orbot_start_note">Orbot starts in the background only with its Allow background starts option on; otherwise open it and tap Connect.</string>
+    <string name="node_tor_unsupported">This WebView can\'t route only .onion sites through Tor; update Android System WebView</string>
+    <string name="node_tor_disabled">Turn on Tor in Settings to open .onion sites</string>
+    <string name="node_tor_about_external">Opens .onion sites through the external Tor proxy (e.g. Orbot). Every other site connects directly.</string>
+    <string name="node_tor_about">Opens .onion sites over Tor (Arti). Every other site connects directly.</string>
+    <!-- %1$d is the bootstrap progress in percent. -->
+    <string name="node_tor_connecting_progress">Connecting… %1$d%%</string>
+    <string name="node_tor_connected">Connected</string>
+
+    <!-- browser/NodeLogsScreen.kt -->
+    <string name="node_logs_title">Node logs</string>
+    <!-- %1$s is the node (node_log_source_*). -->
+    <string name="node_logs_share">Share %1$s logs</string>
+    <string name="node_logs_reading">Reading…</string>
+    <string name="node_logs_empty">No log lines yet.</string>
+    <string name="node_logs_share_title">Share %1$s logs?</string>
+    <string name="node_logs_button">Logs</string>
+    <string name="node_logs_not_running">%1$s isn\'t running, so there are no logs to show. They\'re shown only while it runs, and kept in memory only, never written to storage.</string>
+    <string name="node_logs_external_tor">Tor runs in an external app (Orbot, say), set in Settings → Tor. Its logs are in that app.</string>
+    <string name="node_logs_share_warning">Logs can contain this device\'s node addresses and peer IDs, the addresses of the peers and servers the node talked to, and the IDs of Radicle repositories. The addresses and names of the pages you visited are taken out before a line is kept. Share them only with someone you trust.</string>
+    <!-- Subject of the shared logs; %1$s is the node. -->
+    <string name="node_logs_share_subject">Freedom %1$s logs</string>
+
+    <!-- node/NodeLogs.kt: the nodes on the logs page -->
+    <string name="node_log_source_swarm" translatable="false">Swarm</string>
+    <string name="node_log_source_ipfs" translatable="false">IPFS</string>
+    <string name="node_log_source_radicle" translatable="false">Radicle</string>
+    <string name="node_log_source_tor" translatable="false">Tor</string>
+    <string name="node_log_source_light_client">Light client</string>
+
+    <!-- browser/NodeIdentityNotice.kt; %1$s is the wallet's Swarm address, shortened (0x6Fac…b9C0). -->
+    <string name="node_identity_adopted_restarting">Your Swarm node now uses your wallet\'s identity (%1$s). Restarting it…</string>
+    <string name="node_identity_adopted_next_start">Your Swarm node will use your wallet\'s identity (%1$s) when it next starts.</string>
+    <string name="node_identity_dropped_restarting">Wallet removed. Your Swarm node is restarting with this device\'s own identity.</string>
+    <string name="node_identity_dropped_next_start">Wallet removed. Your Swarm node will use this device\'s own identity.</string>
+
+    <!-- browser/NodeApiGuard.kt: the 403 page a web page's request to the node's own API gets.
+         %1$s lists the API paths pages may use (/bzz, /bytes, …). -->
+    <string name="node_api_spend_refusal">Freedom doesn\'t let web pages spend the Swarm node\'s funds. Postage stamps and the chequebook are managed in the app.</string>
+    <string name="node_api_read_refusal">Freedom doesn\'t let web pages use the Swarm node\'s own API. Pages can upload and read content, send messages and check the node is up (%1$s); the node\'s wallet, stamps and addresses are shown in the app.</string>
+    <!-- node_api_read_refusal for a host name, which may resolve to the device: how to reach a Bee node on another machine instead. -->
+    <string name="node_api_read_refusal_other_node">Freedom doesn\'t let web pages use the Swarm node\'s own API. Pages can upload and read content, send messages and check the node is up (%1$s); the node\'s wallet, stamps and addresses are shown in the app. If this is a Bee node on another machine, use its IP address, or set it as the external Swarm node in Settings.</string>
+
+    <!-- browser/IpfsProgress.kt: the status line while an IPFS page loads -->
+    <string name="node_ipfs_queued">IPFS: Queued request…</string>
+    <string name="node_ipfs_started">IPFS: Starting request…</string>
+    <string name="node_ipfs_resolving_name">IPFS: Resolving IPNS name…</string>
+    <string name="node_ipfs_name_resolved">IPFS: Resolved name…</string>
+    <string name="node_ipfs_checking_cache">IPFS: Checking local cache…</string>
+    <string name="node_ipfs_cache_hit">IPFS: Loading from local cache…</string>
+    <string name="node_ipfs_cache_miss">IPFS: Looking up content…</string>
+    <string name="node_ipfs_provider_lookup">IPFS: Finding providers…</string>
+    <string name="node_ipfs_providers_found">IPFS: Connecting to providers…</string>
+    <string name="node_ipfs_provider_diversity_low">IPFS: Expanding provider search…</string>
+    <string name="node_ipfs_dht_fallback_started">IPFS: Searching the DHT…</string>
+    <string name="node_ipfs_fetching_bitswap">IPFS: Fetching from peers…</string>
+    <string name="node_ipfs_fetching_http_provider">IPFS: Fetching from verified provider…</string>
+    <string name="node_ipfs_first_byte">IPFS: Receiving content…</string>
+    <string name="node_ipfs_retrying">IPFS: Retrying slow provider…</string>
+    <string name="node_ipfs_completed">IPFS: Loaded</string>
+    <string name="node_ipfs_failed">IPFS: Load failed</string>
+    <!-- %1$s is the IPFS node's own (English) message for a phase this list doesn't know. -->
+    <string name="node_ipfs_message">IPFS: %1$s</string>
+    <string name="node_ipfs_loading_content">IPFS: Loading content…</string>
+
+    <!-- browser/TorRouting.kt -->
+    <!-- A native fetch of an onion URL with no Tor routed; shows up in e.g. a download's "Network error: …". -->
+    <string name="node_tor_refused_fetch">Tor isn\'t running: .onion addresses need Tor</string>
+    <!-- A native fetch's redirect failures; also end up in a download's "Network error: …". %1$s is the URL. -->
+    <string name="node_fetch_not_http">Not an HTTP URL: %1$s</string>
+    <string name="node_fetch_too_many_redirects">Too many redirects</string>
+    <!-- The refusal page for an onion site Freedom can't open. The descriptions are HTML
+         (&lt;code>, &lt;em>, &amp;rarr;); %1$s is the external Tor proxy (host:port). -->
+    <string name="node_tor_proxy_not_set">(not set)</string>
+    <string name="node_tor_refusal_unsupported_title">Tor needs a newer WebView</string>
+    <string name="node_tor_refusal_unsupported">This is an onion site, reachable only over Tor. This device\'s Android System WebView can\'t send just &lt;code>.onion&lt;/code> sites through Tor, so Freedom doesn\'t open them. Update Android System WebView, then try again.</string>
+    <string name="node_tor_refusal_checking_title">Checking the Tor proxy</string>
+    <string name="node_tor_refusal_checking">This is an onion site, reachable only over Tor. Freedom is still checking the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Tor); this page loads by itself once it passes. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_paused_title">Tor proxy not checked yet</string>
+    <string name="node_tor_refusal_paused">This is an onion site, reachable only over Tor. Freedom checks the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Tor) only while Freedom is on screen, and hasn\'t since it went to the background. Try again once you\'re back in Freedom. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_unreached_title">Tor can\'t reach onion sites</string>
+    <string name="node_tor_refusal_unreached">This is an onion site, reachable only over Tor. The Tor client at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Tor) answers, but couldn\'t reach an onion site when Freedom last checked: its connection may be down or slow. Freedom is checking again; try again in a moment. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_proxy_down_title">Tor proxy isn\'t reachable</string>
+    <string name="node_tor_refusal_proxy_down">This is an onion site, reachable only over Tor. Freedom sends onion sites to the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Tor), and no Tor client answers there right now. Start Orbot (or your Tor app), then try again. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_off_title">Tor is off</string>
+    <string name="node_tor_refusal_off">This is an onion site, reachable only over Tor. Turn on Tor in Settings &amp;rarr; Tor and start it, then try again. Only &lt;code>.onion&lt;/code> sites use Tor; every other site connects directly.</string>
+    <string name="node_tor_refusal_not_running_title">Tor isn\'t running</string>
+    <string name="node_tor_refusal_failed">Tor couldn\'t start, so this onion site wasn\'t opened. Try starting it again on the Nodes page.</string>
+    <string name="node_tor_refusal_not_running">This is an onion site, reachable only over Tor, and Tor isn\'t running. Start it on the Nodes page (or turn on &lt;em>Start Tor at launch&lt;/em> in Settings &amp;rarr; Tor), then try again. Freedom never opens onion sites without Tor.</string>
+
+    <!-- browser/TorProxy.kt: what the check of the external Tor proxy found; %1$s is the proxy (host:port). -->
+    <string name="node_tor_probe_tor">Tor reached a .onion site through %1$s</string>
+    <string name="node_tor_probe_not_listening">Nothing is listening on %1$s. Start Orbot (or your Tor app) and check its SOCKS port.</string>
+    <string name="node_tor_probe_not_socks">%1$s isn\'t a SOCKS5 proxy without a password</string>
+    <string name="node_tor_probe_not_tor">The proxy on %1$s isn\'t Tor: it claims to connect even to a .onion address that can\'t exist, as shadowsocks, v2ray or clash proxies do. Freedom sends onion sites only to Tor.</string>
+    <string name="node_tor_probe_no_onion_timeout">The proxy on %1$s didn\'t reach a .onion site in time. Is it Tor, and connected?</string>
+    <!-- %2$d is the proxy's SOCKS reply code. -->
+    <string name="node_tor_probe_no_onion">The proxy on %1$s couldn\'t reach a .onion site (SOCKS error %2$d). Is it Tor, and connected?</string>
+
+    <!-- node/SpendStopGate.kt: the node page's Status line while a restart waits for a payment -->
+    <string name="node_waiting_for_spend">Waiting for a payment (a postage stamp or a chequebook deposit) to finish; the node starts once it\'s done</string>
+
+    <!-- node/NodeService.kt: a stamp call's refusal, shown on the stamps pages -->
+    <string name="node_stamps_searching">The node is searching for your stamps. Try again once it\'s done.</string>
+    <string name="node_turning_off">The Swarm node is turning off</string>
+    <string name="node_not_wallet_identity">The Swarm node isn\'t running as your wallet\'s identity</string>
+    <string name="node_stamp_not_active">this stamp isn\'t the node\'s active one</string>
+    <string name="node_stamp_work_running">A stamp purchase or search is still running. Try again once it\'s done.</string>
+    <string name="node_call_failed">the Swarm node couldn\'t do that</string>
+    <!-- The node's notification text (title: node_notification_title in strings.xml). -->
+    <plurals name="node_notification_running">
+        <item quantity="one">Running — %d peer</item>
+        <item quantity="other">Running — %d peers</item>
+    </plurals>
+    <!-- %1$s is the node's own error message. -->
+    <string name="node_notification_error">Error: %1$s</string>
+    <string name="node_error_unknown">unknown</string>
+</resources>

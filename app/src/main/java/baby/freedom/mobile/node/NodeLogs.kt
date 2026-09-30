@@ -3,6 +3,9 @@ package baby.freedom.mobile.node
 import android.os.Process
 import android.os.SystemClock
 import android.util.Log
+import androidx.annotation.StringRes
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import java.io.BufferedInputStream
 import java.io.DataInputStream
 import java.io.IOException
@@ -16,13 +19,16 @@ import java.util.Locale
  * [ordinal] crosses the `:node` binder ([INodeService.getLogs]), so keep
  * the order.
  */
-enum class NodeLogSource(val title: String) {
-    Swarm("Swarm"),
-    Ipfs("IPFS"),
-    Radicle("Radicle"),
-    Tor("Tor"),
-    LightClient("Light client"),
+enum class NodeLogSource(@StringRes private val titleRes: Int) {
+    Swarm(R.string.node_log_source_swarm),
+    Ipfs(R.string.node_log_source_ipfs),
+    Radicle(R.string.node_log_source_radicle),
+    Tor(R.string.node_log_source_tor),
+    LightClient(R.string.node_log_source_light_client),
     ;
+
+    /** The node's name on the logs page. */
+    val title: String get() = Strings.get(titleRes)
 
     companion object {
         fun of(ordinal: Int): NodeLogSource? = entries.getOrNull(ordinal)

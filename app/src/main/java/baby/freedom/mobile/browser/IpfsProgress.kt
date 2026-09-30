@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -32,24 +34,24 @@ object IpfsProgress {
     const val POLL_INTERVAL_MS: Long = 300L
 
     private val PHASE_MESSAGES = mapOf(
-        "queued" to "IPFS: Queued request…",
-        "started" to "IPFS: Starting request…",
-        "resolving_name" to "IPFS: Resolving IPNS name…",
-        "name_resolved" to "IPFS: Resolved name…",
-        "checking_cache" to "IPFS: Checking local cache…",
-        "cache_hit" to "IPFS: Loading from local cache…",
-        "cache_miss" to "IPFS: Looking up content…",
-        "provider_lookup" to "IPFS: Finding providers…",
-        "providers_found" to "IPFS: Connecting to providers…",
-        "provider_diversity_low" to "IPFS: Expanding provider search…",
-        "dht_fallback_started" to "IPFS: Searching the DHT…",
-        "fetching_bitswap" to "IPFS: Fetching from peers…",
-        "fetching_http_provider" to "IPFS: Fetching from verified provider…",
-        "first_byte" to "IPFS: Receiving content…",
-        "streaming" to "IPFS: Receiving content…",
-        "retrying" to "IPFS: Retrying slow provider…",
-        "completed" to "IPFS: Loaded",
-        "failed" to "IPFS: Load failed",
+        "queued" to R.string.node_ipfs_queued,
+        "started" to R.string.node_ipfs_started,
+        "resolving_name" to R.string.node_ipfs_resolving_name,
+        "name_resolved" to R.string.node_ipfs_name_resolved,
+        "checking_cache" to R.string.node_ipfs_checking_cache,
+        "cache_hit" to R.string.node_ipfs_cache_hit,
+        "cache_miss" to R.string.node_ipfs_cache_miss,
+        "provider_lookup" to R.string.node_ipfs_provider_lookup,
+        "providers_found" to R.string.node_ipfs_providers_found,
+        "provider_diversity_low" to R.string.node_ipfs_provider_diversity_low,
+        "dht_fallback_started" to R.string.node_ipfs_dht_fallback_started,
+        "fetching_bitswap" to R.string.node_ipfs_fetching_bitswap,
+        "fetching_http_provider" to R.string.node_ipfs_fetching_http_provider,
+        "first_byte" to R.string.node_ipfs_first_byte,
+        "streaming" to R.string.node_ipfs_first_byte,
+        "retrying" to R.string.node_ipfs_retrying,
+        "completed" to R.string.node_ipfs_completed,
+        "failed" to R.string.node_ipfs_failed,
     )
 
     private val PHASE_SCORE = mapOf(
@@ -106,10 +108,10 @@ object IpfsProgress {
             }
         }
         val item = best ?: return null
-        PHASE_MESSAGES[phase(item)]?.let { return it }
+        PHASE_MESSAGES[phase(item)]?.let { return Strings.get(it) }
         val message = item.optString("message").trim()
-        if (message.isNotEmpty()) return "IPFS: $message"
-        return "IPFS: Loading content…"
+        if (message.isNotEmpty()) return Strings.get(R.string.node_ipfs_message, message)
+        return Strings.get(R.string.node_ipfs_loading_content)
     }
 
     /**
@@ -149,17 +151,19 @@ object IpfsProgress {
      * busy (a gateway still fetching ahead of an idle body) isn't
      * subtracted, and can show through (see [LoadMeter]).
      */
+    private fun phaseMessage(phase: String): String = Strings.get(PHASE_MESSAGES.getValue(phase))
+
     fun fromCounters(baseline: Counters, now: Counters, carried: Counters? = null): String {
         val d = (now - baseline).minusClamped(carried)
         return when {
             d.bitswapBlocks > 0 && d.bitswapBlocks >= d.httpProviderBlocks ->
-                PHASE_MESSAGES.getValue("fetching_bitswap")
-            d.httpProviderBlocks > 0 -> PHASE_MESSAGES.getValue("fetching_http_provider")
-            d.cacheHits > 0 -> PHASE_MESSAGES.getValue("cache_hit")
-            d.providerResults > 0 -> PHASE_MESSAGES.getValue("providers_found")
-            d.dhtLookups > 0 -> PHASE_MESSAGES.getValue("dht_fallback_started")
-            d.delegatedLookups > 0 -> PHASE_MESSAGES.getValue("provider_lookup")
-            else -> PHASE_MESSAGES.getValue("cache_miss")
+                phaseMessage("fetching_bitswap")
+            d.httpProviderBlocks > 0 -> phaseMessage("fetching_http_provider")
+            d.cacheHits > 0 -> phaseMessage("cache_hit")
+            d.providerResults > 0 -> phaseMessage("providers_found")
+            d.dhtLookups > 0 -> phaseMessage("dht_fallback_started")
+            d.delegatedLookups > 0 -> phaseMessage("provider_lookup")
+            else -> phaseMessage("cache_miss")
         }
     }
 

@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.NodeIdentitySync
 
 /**
@@ -9,18 +11,18 @@ import baby.freedom.mobile.wallet.NodeIdentitySync
  */
 internal fun nodeIdentityNotice(change: NodeIdentitySync.Change, restarting: Boolean): String = when (change) {
     is NodeIdentitySync.Change.Adopted -> {
-        val who = "your wallet's identity (${shortAddress(change.swarmAddress)})"
+        val address = shortAddress(change.swarmAddress)
         if (restarting) {
-            "Your Swarm node now uses $who. Restarting it…"
+            Strings.get(R.string.node_identity_adopted_restarting, address)
         } else {
-            "Your Swarm node will use $who when it next starts."
+            Strings.get(R.string.node_identity_adopted_next_start, address)
         }
     }
     NodeIdentitySync.Change.Dropped ->
         if (restarting) {
-            "Wallet removed. Your Swarm node is restarting with this device's own identity."
+            Strings.get(R.string.node_identity_dropped_restarting)
         } else {
-            "Wallet removed. Your Swarm node will use this device's own identity."
+            Strings.get(R.string.node_identity_dropped_next_start)
         }
 }
 

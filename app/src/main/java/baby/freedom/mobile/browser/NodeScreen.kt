@@ -37,6 +37,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.node.NodeLogSource
 import androidx.compose.ui.Alignment
@@ -59,6 +62,7 @@ import baby.freedom.swarm.TorStatus
 import android.os.SystemClock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.NumberFormat
 import java.util.Locale
 
 /**
@@ -160,7 +164,7 @@ fun NodeScreen(
     BackHandler(onBack = onDismiss)
 
     FullScreenScaffold(
-        title = "Nodes",
+        title = stringResource(R.string.node_screen_title),
         onDismiss = onDismiss,
     ) {
         LazyColumn(
@@ -220,11 +224,15 @@ private fun StatusSection(
     onToggleRunNode: (Boolean) -> Unit,
     onOpenLogs: () -> Unit,
 ) {
-    SectionCard(title = "Swarm node") {
+    SectionCard(title = stringResource(R.string.node_swarm_node)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .switchRow(checked = runNodeEnabled, onCheckedChange = onToggleRunNode, label = "Swarm node")
+                .switchRow(
+                    checked = runNodeEnabled,
+                    onCheckedChange = onToggleRunNode,
+                    label = stringResource(R.string.node_swarm_node),
+                )
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -236,9 +244,9 @@ private fun StatusSection(
                     when {
                         // Settings → Nodes (#125): bzz:// goes to the
                         // user's own node, whatever this one is doing.
-                        external -> "bzz:// served by an external endpoint"
-                        runNodeEnabled -> "Serving bzz:// via local gateway"
-                        else -> "Gateway disabled"
+                        external -> stringResource(R.string.node_gateway_external)
+                        runNodeEnabled -> stringResource(R.string.node_gateway_local)
+                        else -> stringResource(R.string.node_gateway_disabled)
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -255,36 +263,49 @@ private fun StatusSection(
 
 @Composable
 private fun DetailsSection(nodeInfo: NodeInfo) {
-    SectionCard(title = "Details") {
+    SectionCard(title = stringResource(R.string.node_details)) {
         // What the node runs as, from the node itself: the setting can be
         // ahead of it while it restarts.
         if (nodeInfo.status == NodeStatus.Running) {
-            DetailRow("Mode", swarmModeLabel(nodeInfo.lightMode))
+            DetailRow(stringResource(R.string.node_mode), swarmModeLabel(nodeInfo.lightMode))
         }
-        DetailRow("Peers", nodeInfo.connectedPeers.toString())
+        DetailRow(stringResource(R.string.node_peers), formatCount(nodeInfo.connectedPeers))
         if (nodeInfo.clientVersion.isNotBlank()) {
-            DetailRow("Client", nodeInfo.clientVersion, mono = true)
+            DetailRow(stringResource(R.string.node_client), nodeInfo.clientVersion, mono = true)
         }
         // Which account the node runs as (#77): the wallet's, derived from
         // the recovery phrase — the same as on desktop and iOS — or its own.
         if (nodeInfo.accountAddress.isNotBlank()) {
-            DetailRow("Identity", if (nodeInfo.walletIdentity) "From your wallet" else "This device's own")
-            DetailRow("Address", nodeInfo.accountAddress, mono = true, singleLine = false)
+            DetailRow(
+                stringResource(R.string.node_identity),
+                stringResource(
+                    if (nodeInfo.walletIdentity) R.string.node_identity_wallet else R.string.node_identity_own,
+                ),
+            )
+            DetailRow(stringResource(R.string.node_address), nodeInfo.accountAddress, mono = true, singleLine = false)
         }
         if (nodeInfo.overlay.isNotBlank()) {
-            DetailRow("Overlay", nodeInfo.overlay, mono = true, singleLine = false)
+            DetailRow(stringResource(R.string.node_overlay), nodeInfo.overlay, mono = true, singleLine = false)
         }
         val err = nodeInfo.errorMessage
         if (!err.isNullOrBlank()) {
             // Not always an error: a node waiting to restart after a
             // postage spend (#116) says why here, as Starting.
-            DetailRow(if (nodeInfo.status == NodeStatus.Error) "Error" else "Status", err, singleLine = false)
+            DetailRow(
+                stringResource(if (nodeInfo.status == NodeStatus.Error) R.string.node_error else R.string.node_status),
+                err,
+                singleLine = false,
+            )
         }
     }
 }
 
 /** The Swarm node's mode as desktop and iOS name it. */
-internal fun swarmModeLabel(light: Boolean): String = if (light) "Light" else "Ultra-light"
+internal fun swarmModeLabel(light: Boolean): String =
+    Strings.get(if (light) R.string.node_mode_light else R.string.node_mode_ultra_light)
+
+/** A count shown on its own (peers), in the user's locale. */
+private fun formatCount(n: Number): String = NumberFormat.getIntegerInstance().format(n)
 
 /**
  * The Swarm node's mode (#114) and the way into publish setup. The switch
@@ -307,7 +328,7 @@ private fun PublishingSection(
     // What the chequebook holds (#117): part of the node's status in light
     // mode, and where a deposit shows up. Re-read at once when a spend ends.
     val chequebook = rememberChequebookState(light, refresh = spend is StampClient.Spend.Running)
-    SectionCard(title = "Publishing") {
+    SectionCard(title = stringResource(R.string.node_publishing)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -320,7 +341,7 @@ private fun PublishingSection(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("Light mode", fontWeight = FontWeight.Medium)
+                Text(stringResource(R.string.node_light_mode), fontWeight = FontWeight.Medium)
                 Text(
                     swarmModeSubtitle(nodeInfo, lightModeWanted),
                     style = MaterialTheme.typography.bodySmall,
@@ -335,18 +356,18 @@ private fun PublishingSection(
             )
         }
         if (light) {
-            DetailRow("Chequebook", chequebookSummary(chequebook), singleLine = false)
+            DetailRow(stringResource(R.string.node_chequebook), chequebookSummary(chequebook), singleLine = false)
         }
         if (publishEntryShown(nodeInfo, publishing)) {
             Spacer(Modifier.height(8.dp))
-            Button(onClick = onOpenPublish) { Text("Publish") }
+            Button(onClick = onOpenPublish) { Text(stringResource(R.string.node_publish)) }
         }
         Spacer(Modifier.height(4.dp))
         FlowRow {
-            TextButton(onClick = onOpenSetup) { Text("Set up publishing") }
+            TextButton(onClick = onOpenSetup) { Text(stringResource(R.string.node_set_up_publishing)) }
             if (stampsEntryShown(nodeInfo, spend)) {
-                TextButton(onClick = onOpenStamps) { Text("Postage stamps") }
-                TextButton(onClick = onOpenChequebook) { Text("Chequebook") }
+                TextButton(onClick = onOpenStamps) { Text(stringResource(R.string.node_postage_stamps)) }
+                TextButton(onClick = onOpenChequebook) { Text(stringResource(R.string.node_chequebook)) }
             }
         }
     }
@@ -371,9 +392,9 @@ internal fun publishEntryShown(nodeInfo: NodeInfo, publishing: Publisher.State):
 
 /** The chequebook line of the node's status (#117): what it holds, or that there's none yet. */
 internal fun chequebookSummary(state: ChequebookState): String = when {
-    state.address == null -> "Checking…"
-    state.address.isEmpty() -> "None yet (comes with the first postage stamp)"
-    state.balancePlur == null -> "Checking…"
+    state.address == null -> Strings.get(R.string.node_checking)
+    state.address.isEmpty() -> Strings.get(R.string.node_chequebook_none)
+    state.balancePlur == null -> Strings.get(R.string.node_checking)
     else -> formatBzz(state.balancePlur)
 }
 
@@ -383,26 +404,29 @@ internal fun swarmModeSubtitle(nodeInfo: NodeInfo, lightModeWanted: Boolean?): S
     return when {
         lightModeWanted == null -> ""
         running && nodeInfo.lightMode == lightModeWanted -> if (lightModeWanted) {
-            "Connected to Gnosis Chain, so the node can publish"
+            Strings.get(R.string.node_mode_light_running)
         } else {
-            "Browsing only. Light mode connects the node to Gnosis Chain so it can publish"
+            Strings.get(R.string.node_mode_ultra_light_running)
         }
-        running || nodeInfo.status == NodeStatus.Starting ->
-            "Restarting the node in ${swarmModeLabel(lightModeWanted).lowercase()} mode…"
-        else -> if (lightModeWanted) {
-            "Runs in light mode when the node is on"
+        running || nodeInfo.status == NodeStatus.Starting -> if (lightModeWanted) {
+            Strings.get(R.string.node_mode_light_restarting)
         } else {
-            "Runs in ultra-light mode (browsing only) when the node is on"
+            Strings.get(R.string.node_mode_ultra_light_restarting)
+        }
+        else -> if (lightModeWanted) {
+            Strings.get(R.string.node_mode_light_when_on)
+        } else {
+            Strings.get(R.string.node_mode_ultra_light_when_on)
         }
     }
 }
 
 @Composable
 private fun GatewaySection(externalSwarm: String) {
-    SectionCard(title = "Gateway") {
-        DetailRow("URL", SwarmNode.GATEWAY_URL, mono = true)
+    SectionCard(title = stringResource(R.string.node_gateway)) {
+        DetailRow(stringResource(R.string.node_url), SwarmNode.GATEWAY_URL, mono = true)
         if (externalSwarm.isNotEmpty()) {
-            DetailRow("In use", externalSwarm, mono = true, singleLine = false)
+            DetailRow(stringResource(R.string.node_in_use), externalSwarm, mono = true, singleLine = false)
         }
     }
 }
@@ -415,16 +439,16 @@ internal data class NodeStatusTriple(
 
 internal fun nodeStatusTriple(status: NodeStatus): NodeStatusTriple = when (status) {
     NodeStatus.Running -> NodeStatusTriple(
-        Color(0xFF22C55E), Icons.Filled.CheckCircle, "Running",
+        Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.node_status_running),
     )
     NodeStatus.Starting -> NodeStatusTriple(
-        Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Starting…",
+        Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
     )
     NodeStatus.Stopped -> NodeStatusTriple(
-        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, "Stopped",
+        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_status_stopped),
     )
     NodeStatus.Error -> NodeStatusTriple(
-        Color(0xFFEF4444), Icons.Filled.ErrorOutline, "Error",
+        Color(0xFFEF4444), Icons.Filled.ErrorOutline, Strings.get(R.string.node_error),
     )
 }
 
@@ -446,7 +470,7 @@ private fun LightClientSection(
     val on = running.orEmpty()
     val shown = lightClientInfoFor(info, on)
     val triple = lightClientStatusTriple(shown)
-    SectionCard(title = "Ethereum light client") {
+    SectionCard(title = stringResource(R.string.node_light_client)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -458,16 +482,14 @@ private fun LightClientSection(
             Column(modifier = Modifier.weight(1f)) {
                 Text(triple.label, fontWeight = FontWeight.Medium)
                 Text(
-                    "Verifies Ethereum and Gnosis peer-to-peer on this device (Myotis). " +
-                        "Each chain runs on its own. With Ethereum off, names are checked through Colibri " +
-                        "or your RPCs instead.",
+                    stringResource(R.string.node_light_client_about),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
         val err = shown.errorMessage
-        if (!err.isNullOrBlank()) DetailRow("Error", err, singleLine = false)
+        if (!err.isNullOrBlank()) DetailRow(stringResource(R.string.node_error), err, singleLine = false)
         for (network in MyotisNetwork.entries) {
             ChainRows(
                 network = network,
@@ -513,7 +535,11 @@ private fun ChainRows(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .switchRow(checked = on, onCheckedChange = onRun, label = "Run ${network.displayName}")
+            .switchRow(
+                checked = on,
+                onCheckedChange = onRun,
+                label = stringResource(R.string.node_run_chain, network.displayName),
+            )
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -544,11 +570,14 @@ private fun ChainRows(
     ) {
         Checkbox(checked = atLaunch == true, onCheckedChange = null, enabled = atLaunch != null)
         Spacer(Modifier.width(8.dp))
-        Text("Start ${network.displayName} at launch", style = MaterialTheme.typography.bodyMedium)
+        Text(
+            stringResource(R.string.node_start_chain_at_launch, network.displayName),
+            style = MaterialTheme.typography.bodyMedium,
+        )
     }
     if (!on || chain == null || nodeStatus != MyotisStatus.Running) return
     chain.error?.let {
-        DetailRow("Error", it, singleLine = false)
+        DetailRow(stringResource(R.string.node_error), it, singleLine = false)
         return
     }
     val recovery = chain.recovery
@@ -557,17 +586,19 @@ private fun ChainRows(
         return
     }
     if (chain.staleAnchor) {
-        DetailRow("Not syncing", staleAnchorExplanation(chain), singleLine = false)
+        DetailRow(stringResource(R.string.node_not_syncing), staleAnchorExplanation(chain), singleLine = false)
         return
     }
-    DetailRow("Beacon peers", chain.peerCount.toString())
-    DetailRow("State peers", statePeersLabel(chain))
-    if (chain.headBlock > 0) DetailRow("Head block", formatBlock(chain.headBlock), mono = true)
+    DetailRow(stringResource(R.string.node_beacon_peers), formatCount(chain.peerCount))
+    DetailRow(stringResource(R.string.node_state_peers), statePeersLabel(chain))
+    if (chain.headBlock > 0) {
+        DetailRow(stringResource(R.string.node_head_block), formatBlock(chain.headBlock), mono = true)
+    }
     if (chain.finalizedBlock > 0) {
-        DetailRow("Finalized block", formatBlock(chain.finalizedBlock), mono = true)
+        DetailRow(stringResource(R.string.node_finalized_block), formatBlock(chain.finalizedBlock), mono = true)
     }
     val reason = chain.notServingReason
-    if (reason.isNotEmpty()) DetailRow("Not serving", reason, singleLine = false)
+    if (reason.isNotEmpty()) DetailRow(stringResource(R.string.node_not_serving), reason, singleLine = false)
 }
 
 /**
@@ -590,16 +621,22 @@ private fun RecoveryRows(
         }
     }
     DetailRow(
-        if (recovery.phase == MyotisRecovery.Phase.Blocked) "Not syncing" else "Recovery",
+        stringResource(
+            if (recovery.phase == MyotisRecovery.Phase.Blocked) R.string.node_not_syncing else R.string.node_recovery,
+        ),
         recovery.message(now),
         singleLine = false,
     )
-    anchorAge(chain)?.let { DetailRow("Trust checkpoint", it, singleLine = false) }
+    anchorAge(chain)?.let { DetailRow(stringResource(R.string.node_trust_checkpoint), it, singleLine = false) }
     if (recovery.canRetry) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { onRecovery(chain.chainId, false) }) { Text("Retry") }
+            OutlinedButton(onClick = { onRecovery(chain.chainId, false) }) {
+                Text(stringResource(R.string.common_retry))
+            }
             if (recovery.canRepair) {
-                OutlinedButton(onClick = { onRecovery(chain.chainId, true) }) { Text("Repair sync data") }
+                OutlinedButton(onClick = { onRecovery(chain.chainId, true) }) {
+                    Text(stringResource(R.string.node_repair_sync_data))
+                }
             }
         }
     }
@@ -610,22 +647,22 @@ private fun RecoveryRows(
  * chain — "Off" while its switch is ([on] false, #274).
  */
 internal fun myotisChainLabel(nodeStatus: MyotisStatus, chain: MyotisChainStatus?, on: Boolean): String =
-    if (!on) "Off" else when (nodeStatus) {
-        MyotisStatus.Stopped -> "Off"
-        MyotisStatus.Starting -> "Starting…"
-        MyotisStatus.Error -> if (chain?.error != null) "Failed" else "Off"
+    if (!on) Strings.get(R.string.node_off) else when (nodeStatus) {
+        MyotisStatus.Stopped -> Strings.get(R.string.node_off)
+        MyotisStatus.Starting -> Strings.get(R.string.node_status_starting)
+        MyotisStatus.Error -> Strings.get(if (chain?.error != null) R.string.node_chain_failed else R.string.node_off)
         MyotisStatus.Running -> when {
             // Just switched on beside a running chain: `:myotis` is booting it.
-            chain == null -> "Starting…"
-            chain.error != null -> "Failed"
+            chain == null -> Strings.get(R.string.node_status_starting)
+            chain.error != null -> Strings.get(R.string.node_chain_failed)
             chain.recovery != null -> chain.recovery?.label.orEmpty()
-            chain.paused -> "Paused"
-            chain.staleAnchor -> "Checkpoint too old"
-            chain.ready -> "Synced"
-            chain.synced -> "Synced, not serving yet"
-            chain.beaconState == "CATCHING_UP" -> "Catching up"
-            chain.beaconState == "SYNCING" -> "Syncing"
-            else -> "Starting…"
+            chain.paused -> Strings.get(R.string.node_chain_paused)
+            chain.staleAnchor -> Strings.get(R.string.node_checkpoint_too_old)
+            chain.ready -> Strings.get(R.string.node_synced)
+            chain.synced -> Strings.get(R.string.node_chain_synced_not_serving)
+            chain.beaconState == "CATCHING_UP" -> Strings.get(R.string.node_chain_catching_up)
+            chain.beaconState == "SYNCING" -> Strings.get(R.string.node_chain_syncing)
+            else -> Strings.get(R.string.node_status_starting)
         }
     }
 
@@ -636,24 +673,35 @@ internal fun myotisChainLabel(nodeStatus: MyotisStatus, chain: MyotisChainStatus
  * which is almost at once — the node starts one the moment it parks.
  */
 internal fun staleAnchorExplanation(chain: MyotisChainStatus): String {
-    val detail = anchorAge(chain)?.let { " ($it)" } ?: ""
+    val age = anchorAge(chain)
     // The refused anchor is the embedded one or a previously verified
     // generation's checkpoint; the status doesn't say which.
-    return "This chain's checkpoint is too old to sync from safely$detail."
+    return if (age != null) {
+        Strings.get(R.string.node_stale_anchor_with_age, age)
+    } else {
+        Strings.get(R.string.node_stale_anchor)
+    }
 }
 
 /** How old a refused anchor is against the engine's limit, or null when it isn't a stale anchor. */
 internal fun anchorAge(chain: MyotisChainStatus): String? {
     if (!chain.staleAnchor || chain.wsBoundPeriods <= 0) return null
     val age = (chain.targetPeriod - chain.currentPeriod).coerceAtLeast(0)
-    return "${plural(age, "sync period")} old, the safe limit is ${chain.wsBoundPeriods}"
+    return Strings.plural(
+        R.plurals.node_anchor_age,
+        age.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+        age,
+        chain.wsBoundPeriods,
+    )
 }
-
-private fun plural(n: Long, noun: String) = if (n == 1L) "1 $noun" else "$n ${noun}s"
 
 /** Pooled execution-layer peers, and how many of them can serve at the head. */
 internal fun statePeersLabel(chain: MyotisChainStatus): String =
-    if (chain.snapPeers > 0) "${chain.snapPeers} · ${chain.snapServingPeers} at head" else "0"
+    if (chain.snapPeers > 0) {
+        Strings.get(R.string.node_state_peers_at_head, chain.snapPeers, chain.snapServingPeers)
+    } else {
+        formatCount(0)
+    }
 
 internal fun formatBlock(number: Long): String = String.format(Locale.US, "%,d", number)
 
@@ -663,13 +711,13 @@ internal fun formatBlock(number: Long): String = String.format(Locale.US, "%,d",
  */
 internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when (info.status) {
     MyotisStatus.Stopped -> NodeStatusTriple(
-        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, "Off",
+        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_off),
     )
     MyotisStatus.Starting -> NodeStatusTriple(
-        Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Starting…",
+        Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
     )
     MyotisStatus.Error -> NodeStatusTriple(
-        Color(0xFFEF4444), Icons.Filled.ErrorOutline, "Error",
+        Color(0xFFEF4444), Icons.Filled.ErrorOutline, Strings.get(R.string.node_error),
     )
     MyotisStatus.Running -> {
         val live = info.chains.filter { it.error == null }
@@ -680,23 +728,30 @@ internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when 
         val parked = live.count { it.staleAnchor || it.recovery != null }
         when {
             live.isNotEmpty() && ready == live.size ->
-                NodeStatusTriple(Color(0xFF22C55E), Icons.Filled.CheckCircle, "Synced")
+                NodeStatusTriple(Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.node_synced))
             live.isNotEmpty() && parked == live.size -> NodeStatusTriple(
                 Color(0xFFF59E0B),
                 Icons.Filled.ErrorOutline,
                 when {
-                    live.any { it.recovery?.phase == MyotisRecovery.Phase.Blocked } -> "Sync paused"
-                    live.any { it.recovery != null } -> "Updating checkpoint"
-                    else -> "Checkpoint too old"
+                    live.any { it.recovery?.phase == MyotisRecovery.Phase.Blocked } ->
+                        Strings.get(R.string.node_sync_paused)
+                    live.any { it.recovery != null } -> Strings.get(R.string.node_updating_checkpoint)
+                    else -> Strings.get(R.string.node_checkpoint_too_old)
                 },
             )
             ready > 0 || parked > 0 -> NodeStatusTriple(
-                Color(0xFFF59E0B), Icons.Filled.HourglassTop, "$ready of ${live.size} chains synced",
+                Color(0xFFF59E0B),
+                Icons.Filled.HourglassTop,
+                Strings.plural(R.plurals.node_chains_synced, live.size, ready, live.size),
             )
             // A chain switched on that `:myotis` hasn't booted yet (its
             // previous engine still stopping): no row to sync.
-            live.isEmpty() -> NodeStatusTriple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Starting…")
-            else -> NodeStatusTriple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Syncing…")
+            live.isEmpty() -> NodeStatusTriple(
+                Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
+            )
+            else -> NodeStatusTriple(
+                Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.node_syncing_ellipsis),
+            )
         }
     }
 }
@@ -730,7 +785,7 @@ private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
         TorInfo(version = tor.info.version)
     }
     val triple = torStatusTriple(info)
-    SectionCard(title = "Tor") {
+    SectionCard(title = stringResource(R.string.node_tor)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -738,7 +793,7 @@ private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
                     checked = tor.enabled && tor.running,
                     onCheckedChange = tor.onRun,
                     enabled = tor.enabled && tor.supported,
-                    label = "Tor",
+                    label = stringResource(R.string.node_tor),
                 )
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -760,20 +815,26 @@ private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
             )
         }
         val proxy = tor.proxy
-        if (proxy == null && info.version.isNotBlank()) DetailRow("Version", "Arti ${info.version}", mono = true)
+        if (proxy == null && info.version.isNotBlank()) {
+            DetailRow(stringResource(R.string.node_version), "Arti ${info.version}", mono = true)
+        }
         if (info.status == TorStatus.Starting && info.summary.isNotBlank()) {
-            DetailRow(if (proxy == null) "Bootstrap" else "Check", info.summary, singleLine = false)
+            DetailRow(
+                stringResource(if (proxy == null) R.string.node_tor_bootstrap else R.string.node_tor_check),
+                info.summary,
+                singleLine = false,
+            )
         }
         if (proxy != null) {
-            DetailRow("External proxy", proxy.authority, mono = true)
+            DetailRow(stringResource(R.string.node_tor_external_proxy), proxy.authority, mono = true)
         } else if (info.socksPort > 0) {
-            DetailRow("SOCKS proxy", "127.0.0.1:${info.socksPort}", mono = true)
+            DetailRow(stringResource(R.string.node_tor_socks_proxy), "127.0.0.1:${info.socksPort}", mono = true)
         }
         val err = info.errorMessage
-        if (!err.isNullOrBlank()) DetailRow("Error", err, singleLine = false)
+        if (!err.isNullOrBlank()) DetailRow(stringResource(R.string.node_error), err, singleLine = false)
         if (showStartOrbot(tor, info)) {
             Text(
-                ORBOT_START_NOTE,
+                stringResource(R.string.node_orbot_start_note),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 8.dp),
@@ -782,8 +843,8 @@ private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.padding(top = 4.dp),
             ) {
-                OutlinedButton(onClick = tor.onStartOrbot) { Text("Start Orbot") }
-                TextButton(onClick = tor.onOpenOrbot) { Text("Open Orbot") }
+                OutlinedButton(onClick = tor.onStartOrbot) { Text(stringResource(R.string.node_start_orbot)) }
+                TextButton(onClick = tor.onOpenOrbot) { Text(stringResource(R.string.node_open_orbot)) }
             }
         }
         // An external client's logs are in that app, not here.
@@ -791,9 +852,8 @@ private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
     }
 }
 
-internal const val ORBOT_START_NOTE =
-    "Orbot starts in the background only with its Allow background starts option on; " +
-        "otherwise open it and tap Connect."
+internal val ORBOT_START_NOTE: String
+    get() = Strings.get(R.string.node_orbot_start_note)
 
 /**
  * Whether the Tor card offers Start Orbot (#275): an external proxy in
@@ -804,20 +864,27 @@ internal fun showStartOrbot(tor: TorControls, info: TorInfo): Boolean =
 
 /** The line under the Tor status: what it does, or why it can't be switched on. */
 internal fun torSubtitle(tor: TorControls): String = when {
-    !tor.supported -> "This WebView can't route only .onion sites through Tor; update Android System WebView"
-    !tor.enabled -> "Turn on Tor in Settings to open .onion sites"
-    tor.proxy != null ->
-        "Opens .onion sites through the external Tor proxy (e.g. Orbot). Every other site connects directly."
-    else -> "Opens .onion sites over Tor (Arti). Every other site connects directly."
+    !tor.supported -> Strings.get(R.string.node_tor_unsupported)
+    !tor.enabled -> Strings.get(R.string.node_tor_disabled)
+    tor.proxy != null -> Strings.get(R.string.node_tor_about_external)
+    else -> Strings.get(R.string.node_tor_about)
 }
 
 /** The Tor client's status line: grey off, amber bootstrapping (with its progress), green connected. */
 internal fun torStatusTriple(info: TorInfo): NodeStatusTriple = when (info.status) {
-    TorStatus.Stopped -> NodeStatusTriple(Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, "Off")
+    TorStatus.Stopped -> NodeStatusTriple(
+        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_off),
+    )
     TorStatus.Starting -> NodeStatusTriple(
         Color(0xFFF59E0B), Icons.Filled.HourglassTop,
-        if (info.progress > 0) "Connecting… ${info.progress}%" else "Starting…",
+        if (info.progress > 0) {
+            Strings.get(R.string.node_tor_connecting_progress, info.progress)
+        } else {
+            Strings.get(R.string.node_status_starting)
+        },
     )
-    TorStatus.Running -> NodeStatusTriple(Color(0xFF22C55E), Icons.Filled.CheckCircle, "Connected")
-    TorStatus.Error -> NodeStatusTriple(Color(0xFFEF4444), Icons.Filled.ErrorOutline, "Error")
+    TorStatus.Running -> NodeStatusTriple(
+        Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.node_tor_connected),
+    )
+    TorStatus.Error -> NodeStatusTriple(Color(0xFFEF4444), Icons.Filled.ErrorOutline, Strings.get(R.string.node_error))
 }

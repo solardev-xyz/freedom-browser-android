@@ -3,6 +3,8 @@ package baby.freedom.mobile.browser
 import android.util.Log
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.SwarmNode
 import java.io.ByteArrayInputStream
 
@@ -91,9 +93,9 @@ internal object NodeApiGuard {
         val segment = firstSegment(pathOf(url))
         val write = isWrite(method) && segment in CHAIN_PATHS
         val text = when {
-            write -> SPEND_REFUSAL
+            write -> Strings.get(R.string.node_api_spend_refusal)
             isLoopbackLiteral(WhatwgHost.parse(url)?.hostname) -> READ_REFUSAL
-            else -> READ_REFUSAL + OTHER_NODE_HINT
+            else -> Strings.get(R.string.node_api_read_refusal_other_node, dappPathList())
         }
         // The endpoint only: a query can carry anything.
         Log.w(TAG, "refused a page's request to the Swarm node's API: ${method.uppercase()} /${segment.orEmpty()}")
@@ -263,22 +265,10 @@ internal object NodeApiGuard {
 
     private const val TAG = "NodeApiGuard"
 
-    private const val SPEND_REFUSAL =
-        "Freedom doesn't let web pages spend the Swarm node's funds. " +
-            "Postage stamps and the chequebook are managed in the app."
-
     /** Lists every path in [DAPP_PATHS], so the text can't drift from what's allowed. */
-    internal val READ_REFUSAL =
-        "Freedom doesn't let web pages use the Swarm node's own API. " +
-            "Pages can upload and read content, send messages and check the node is up (" +
-            DAPP_PATHS.joinToString(", ") { "/$it" } + "); " +
-            "the node's wallet, stamps and addresses are shown in the app."
+    internal val READ_REFUSAL: String
+        get() = Strings.get(R.string.node_api_read_refusal, dappPathList())
 
-    /**
-     * Added for a name, which may resolve to the device: how to reach a
-     * Bee node on another machine instead.
-     */
-    private const val OTHER_NODE_HINT =
-        " If this is a Bee node on another machine, use its IP address, " +
-            "or set it as the external Swarm node in Settings."
+    /** [DAPP_PATHS] as the refusal lists them: `/bzz, /bytes, …`. */
+    private fun dappPathList(): String = DAPP_PATHS.joinToString(", ") { "/$it" }
 }
