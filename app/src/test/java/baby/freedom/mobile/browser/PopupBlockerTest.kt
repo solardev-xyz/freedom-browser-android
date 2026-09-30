@@ -148,6 +148,28 @@ class PopupBlockerTest {
     }
 
     @Test
+    fun `opening a listed entry doesn't count it again as one of the unlisted more`() {
+        // #292 R3-M1: 5 blocked, 3 listed and "and 2 more"; Open on one row.
+        val popups = BlockedPopups()
+        repeat(5) { popups.add("https://a.example", pending = false) }
+        assertEquals(2, popups.unlisted)
+        val key = popups.layoutKey
+        popups.remove(popups.entries.first())
+        assertEquals(2, popups.entries.size)
+        assertEquals(2, popups.unlisted)
+        assertEquals(5, popups.count)
+        // The row going moves what's under a finger: the guard re-arms.
+        assertTrue(key != popups.layoutKey)
+        // A new site, or a closed notice, starts the count afresh.
+        popups.add("https://b.example", pending = false)
+        assertEquals(0, popups.unlisted)
+        repeat(4) { popups.add("https://b.example", pending = false) }
+        assertEquals(2, popups.unlisted)
+        popups.clear()
+        assertEquals(0, popups.unlisted)
+    }
+
+    @Test
     fun `the popups allow is read from the session tier, and a revoke takes it away`() {
         val s = PermissionSession()
         val o = "https://a.example"

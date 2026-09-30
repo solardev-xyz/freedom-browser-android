@@ -122,7 +122,7 @@ fun BlockedPopupNotice(
                     }
                 }
             }
-            val more = popups.count - entries.size
+            val more = popups.unlisted
             if (more > 0) {
                 Text(
                     "and $more more",

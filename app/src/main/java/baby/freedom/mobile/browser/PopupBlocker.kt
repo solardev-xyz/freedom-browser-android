@@ -114,6 +114,14 @@ class BlockedPopups {
     var count by mutableStateOf(0)
         private set
 
+    /**
+     * How many were blocked past [MAX_ENTRIES] and never listed — the
+     * notice's "and N more". Not `count - entries.size`: an entry the user
+     * opened ([remove]) leaves [entries] but was listed, not unlisted.
+     */
+    var unlisted by mutableStateOf(0)
+        private set
+
     /** The user tapped "Always allow" on this notice: it says so instead. */
     var allowed by mutableStateOf(false)
         private set
@@ -144,11 +152,15 @@ class BlockedPopups {
         if (this.origin != origin) {
             entries = emptyList()
             count = 0
+            unlisted = 0
             allowed = false
         }
         this.origin = origin
         count++
-        if (entries.size >= MAX_ENTRIES) return null
+        if (entries.size >= MAX_ENTRIES) {
+            unlisted++
+            return null
+        }
         val entry = BlockedPopup(nextId++, pending = pending, unread = unread && !pending)
         entries = entries + entry
         return entry.id
@@ -162,7 +174,7 @@ class BlockedPopups {
      * changed; a growing count alone changes only text in place.
      */
     val layoutKey: Any
-        get() = entries to (count > entries.size)
+        get() = entries to (unlisted > 0)
 
     /** A probe couldn't be started for pop-up [id]: its address won't be read. */
     fun unread(document: Int, id: Long) {
@@ -197,6 +209,7 @@ class BlockedPopups {
         entries = emptyList()
         origin = null
         count = 0
+        unlisted = 0
         allowed = false
     }
 
