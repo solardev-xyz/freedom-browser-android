@@ -556,6 +556,47 @@ class SwarmFundingTest {
     }
 
     @Test
+    fun `a refused connect owes nothing once a Dismiss or a started Connect lands before it's marked owed`() {
+        val free = kotlinx.coroutines.flow.MutableStateFlow(false)
+        lateinit var f: SwarmFunding
+        // The user's tap lands between the node refusing the mined stamp's connect and it being marked owed.
+        var onRefused: (() -> Unit)? = null
+        f = SwarmFunding(
+            File(tmp.root, "funding.json"),
+            connect = {
+                if (free.value) {
+                    connects += it
+                    true
+                } else {
+                    onRefused?.also { onRefused = null }?.invoke()
+                    false
+                }
+            },
+            spends = emptyFlow(), now = { 0L }, connectFree = free,
+        )
+        f.start(emptyFlow())
+
+        // Dismissed: no record, nothing owed.
+        onRefused = { f.forget() }
+        f.noteSend(status(SendStatus.Stage.Pending))
+        f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
+        assertNull(f.pending.value)
+        assertNull(f.connectOwed.value)
+
+        // The user's Connect started (the node just came free): it isn't owed a second one.
+        onRefused = {
+            free.value = true
+            assertTrue(f.connectNow())
+        }
+        f.noteSend(status(SendStatus.Stage.Pending))
+        f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
+        assertEquals(listOf(batch), connects)
+        assertNull(f.connectOwed.value)
+        Thread.sleep(100)
+        assertEquals(1, connects.size)
+    }
+
+    @Test
     fun `an untracked call found mined while the node is busy is connected once it's free`() {
         val chain = FakeChain()
         funding().apply {

@@ -258,12 +258,27 @@ internal class SwarmFunding(
      * following, which may have been mined). False if there's none, or
      * another spend is running.
      */
-    fun connectNow(): Boolean {
-        val p = _pending.value?.takeIf { it.mined || !it.tracked } ?: return false
+    fun connectNow(): Boolean = connectAttempt() > 0
+
+    /**
+     * Each connect asked for, numbered in order: the next one's number
+     * ([connectsAsked]), and the highest number that started ([connectStarted]).
+     * Both under this object's lock.
+     */
+    private var connectsAsked = 0L
+    private var connectStarted = 0L
+
+    /** [connectNow], answering the attempt's number if it started, else minus it (0: nothing to connect). */
+    private fun connectAttempt(): Long {
+        val p = _pending.value?.takeIf { it.mined || !it.tracked } ?: return 0
+        val ticket = synchronized(this) { ++connectsAsked }
         if (!p.mined) scope.launch { checkChain() }
-        val started = connect(p.batchId)
-        if (started) _connectOwed.compareAndSet(p.batchId, null)
-        return started
+        if (!connect(p.batchId)) return -ticket
+        synchronized(this) {
+            connectStarted = maxOf(connectStarted, ticket)
+            _connectOwed.compareAndSet(p.batchId, null)
+        }
+        return ticket
     }
 
     /**
@@ -276,9 +291,15 @@ internal class SwarmFunding(
         // Owed only once refused: owed before asking, the collector that
         // retries an owed connect could see it (the node free) and start a
         // second connect of the batch next to this one's (#310).
-        if (connectNow()) return
-        _connectOwed.value = batchId
-        Log.i(TAG, "the node is busy; connecting the stamp once it's free")
+        val ticket = connectAttempt()
+        if (ticket > 0) return
+        // Checked with the write, under the lock [update] and a started connect clear it
+        // under: a Dismiss, or a Connect that started, since the refusal owes nothing (#312 R1-M1).
+        val owed = synchronized(this) {
+            (ticket < 0 && connectStarted < -ticket && _pending.value?.takeIf { it.mined }?.batchId == batchId)
+                .also { if (it) _connectOwed.value = batchId }
+        }
+        if (owed) Log.i(TAG, "the node is busy; connecting the stamp once it's free")
     }
 
     /**

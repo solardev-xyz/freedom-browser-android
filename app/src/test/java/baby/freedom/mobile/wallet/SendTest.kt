@@ -25,8 +25,10 @@ import java.io.IOException
 import java.math.BigInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -185,15 +187,20 @@ class SendTest {
      */
     private suspend fun idle(scope: CoroutineScope = this.scope) {
         val job = scope.coroutineContext.job
+        // An [ownScope]'s job never completes on its own: wait for what runs in it instead.
+        fun running(j: Job): List<Job> = j.children.flatMap { if (it in ownScopes) running(it) else listOf(it) }.toList()
         while (true) {
-            val running = job.children.toList()
+            val running = running(job)
             if (running.isEmpty()) return
             running.joinAll()
         }
     }
 
     /** A scope of its own for one sender, cancelled with [scope]: to [idle] on it alone. */
-    private fun ownScope() = CoroutineScope(SupervisorJob(scope.coroutineContext.job) + Dispatchers.Default)
+    private fun ownScope() = CoroutineScope(SupervisorJob(scope.coroutineContext.job).also { ownScopes += it } + Dispatchers.Default)
+
+    /** The jobs of every [ownScope], which [idle] looks through rather than waits on. */
+    private val ownScopes: MutableSet<Job> = java.util.Collections.synchronizedSet(mutableSetOf())
 
     /** A journal file that outlives one [WalletSender], as the app's outlives its process. */
     private fun journalFile() = java.io.File(tmp.root, "wallet/send.json")
@@ -1484,6 +1491,21 @@ class SendTest {
         idle(thirdScope)
         assertTrue(chain.sent.isEmpty())
         assertNull(third.status.value)
+    }
+
+    @Test
+    fun `idle on the whole scope waits for an own scope's work, not for the scope itself to end`() = runBlocking<Unit> {
+        val own = ownScope()
+        val gate = CompletableDeferred<Unit>()
+        var done = false
+        own.launch {
+            gate.await()
+            done = true
+        }
+        scope.launch { gate.complete(Unit) }
+        // The own scope's SupervisorJob never completes: an idle that waited on it would hang here.
+        assertNotNull(withTimeoutOrNull(5_000) { idle() })
+        assertTrue(done)
     }
 
     @Test
