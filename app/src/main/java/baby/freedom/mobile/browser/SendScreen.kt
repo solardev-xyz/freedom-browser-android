@@ -226,6 +226,20 @@ internal fun explorerTxUrl(chain: Chain, hash: String): String? =
  * runs in [WalletSender], so leaving this page doesn't stop it; coming
  * back shows where it got to.
  */
+/**
+ * The Send form's own fields — asset, recipient, amount, "all" — held
+ * apart from [SendPage] so a caller can keep them while the page is off
+ * screen: a link's page hidden behind a feature's request comes back with
+ * what the user had typed, not the link's values again (#317 R2-M1).
+ */
+internal class SendDraft {
+    var filled = false
+    var assetKey by mutableStateOf<String?>(null)
+    var recipient by mutableStateOf("")
+    var amount by mutableStateOf("")
+    var all by mutableStateOf(false)
+}
+
 @Composable
 internal fun SendPage(
     account: WalletAccount,
@@ -241,6 +255,10 @@ internal fun SendPage(
     prefill: SendPrefill? = null,
     // A send from this page has started (#317: a link's Send page was used).
     onStarted: () -> Unit = {},
+    // Where the form's fields are kept, when they must outlive the page
+    // (a link's Send page hidden while a feature's request needs the
+    // wallet home, R2-M1); the page's own otherwise.
+    draft: SendDraft? = null,
 ) {
     val context = LocalContext.current
     val sender = remember(context) { WalletSender.get(context) }
@@ -251,16 +269,22 @@ internal fun SendPage(
             .flatMap { chain -> TokenRegistry.tokens(chain).map { chain to it } }
     }
     val prefilledAsset = prefill?.let { p -> assets.firstOrNull { it.second.key == p.tokenKey }?.second }
-    var assetKey by remember { mutableStateOf(prefilledAsset?.key ?: assets.firstOrNull()?.second?.key) }
-    val asset = assets.firstOrNull { it.second.key == assetKey } ?: assets.firstOrNull()
-    var recipient by remember { mutableStateOf(prefill?.recipient.orEmpty()) }
-    // In the link's asset's own decimals, every digit kept: a request's amount isn't rounded.
-    var amount by remember {
-        mutableStateOf(
-            prefilledAsset?.let { token -> prefill.amount?.let { SendAmounts.exact(it, token.decimals) } }.orEmpty(),
-        )
+    // The form's fields live in [draft] when the caller keeps one, so the
+    // user's edits outlive this page leaving composition (R2-M1); filled in
+    // from the link only the first time.
+    val form = draft ?: remember { SendDraft() }
+    if (!form.filled) {
+        form.filled = true
+        form.assetKey = prefilledAsset?.key ?: assets.firstOrNull()?.second?.key
+        form.recipient = prefill?.recipient.orEmpty()
+        // In the link's asset's own decimals, every digit kept: a request's amount isn't rounded.
+        form.amount = prefilledAsset?.let { token -> prefill.amount?.let { SendAmounts.exact(it, token.decimals) } }.orEmpty()
     }
-    var all by remember { mutableStateOf(false) }
+    var assetKey by form::assetKey
+    val asset = assets.firstOrNull { it.second.key == assetKey } ?: assets.firstOrNull()
+    var recipient by form::recipient
+    var amount by form::amount
+    var all by form::all
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }

@@ -345,6 +345,7 @@
     <string name="send_link_chain_unsupported">It asks for a payment on the network with chain ID %1$s, and Send pays on Ethereum and Gnosis Chain only.</string>
     <!-- %1$s: a token contract address; %2$s: a network's name. -->
     <string name="send_link_token_unknown">It asks for the token %1$s on %2$s, which isn’t one Send knows.</string>
+    <string name="send_link_tab_left">The address you entered led to a payment link, but you’d left that tab by then, so Send didn’t open. Enter the address in that tab again to pay it.</string>
     <string name="send_link_paused">Payment links on this page are paused, since you turned down one of its wallet requests. Reload the page or open another to use them again.</string>
     <!-- %1$s: the site whose link it was. -->
     <string name="send_link_filled_from_site">Filled in from a payment link on %1$s. Check every field before you review.</string>

@@ -565,11 +565,14 @@ fun BrowserScreen(
         EthereumLinks.onNotice = notice
         // A link the user's own address redirected to (R1-M1): Send with
         // no page's ask behind it, as for one typed in — for the tab on
-        // screen only; one the user has since left is dropped.
+        // screen only; one the user has since left is dropped, and says
+        // so, since the address bar has already gone back (R2-M2).
         val open: (BrowserState, SendPrefill) -> Unit = { tab, prefill ->
             if (tabs.active.id == tab.id) {
                 linkSend?.closed()
                 linkSend = LinkSend(prefill, prompt = null)
+            } else {
+                notice(Strings.get(R.string.send_link_tab_left))
             }
         }
         EthereumLinks.onOpenSend = open

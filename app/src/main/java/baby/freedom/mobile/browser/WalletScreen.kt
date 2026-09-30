@@ -880,6 +880,9 @@ fun WalletScreen(
     // except while a feature's request needs the home page: `sending`,
     // which that request clears, would otherwise never bring it back (R1-M2).
     val linkSending = sendLink != null && request == null
+    // …and what the user had changed on it comes back with it: the page
+    // leaves composition while the request has the home page (R2-M1).
+    val linkDraft = remember(sendLink) { SendDraft() }
     // A link's page waits for the account and the networks (its asset is
     // looked up among them) on a spinner of its own, not the wallet home,
     // whose ✕ would read as turning the link down (R1-M3).
@@ -905,6 +908,7 @@ fun WalletScreen(
             onBack = { if (sendLink != null) onDismiss() else sending = false },
             prefill = sendLink,
             onStarted = if (sendLink != null) onSendStarted else ({}),
+            draft = if (sendLink != null) linkDraft else null,
         )
         return
     }
