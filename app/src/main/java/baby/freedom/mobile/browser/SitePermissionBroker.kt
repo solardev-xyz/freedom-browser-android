@@ -210,10 +210,14 @@ class SitePermissionBroker private constructor(
         // Only over the page that asked: a background tab's request isn't
         // counted, so the notice comes when its page is on screen and asks.
         if (!isOnScreen(tab.id)) return
+        // With no notice installed (between an Activity's teardown and its
+        // replacement's), nothing is said, so the site isn't counted as told:
+        // its next request, once one is installed, still gets the notice.
+        val notice = onProtectedMediaRefused ?: return
         val noticed = if (tab.private) privateProtectedMediaNoticed else protectedMediaNoticed
         // A non-http(s) origin (a `data:` frame, say) is noticed once for all of them.
         if (!noticed.add(origin ?: "")) return
-        onProtectedMediaRefused?.invoke()
+        notice()
     }
 
     /** `WebChromeClient.onPermissionRequestCanceled`. */
