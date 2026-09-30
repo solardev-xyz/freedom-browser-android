@@ -217,7 +217,11 @@ class BrowsingRepository internal constructor(
         }
     }
 
-    /** Remove [url]'s bookmark, whichever spelling of it was saved ([BookmarkUrls.key]). */
+    /**
+     * Remove [url]'s bookmark, whichever spelling of it was saved
+     * ([BookmarkUrls.key]) — the star's Remove, which acts on the page.
+     * The Bookmarks list removes one row by its id ([deleteBookmark]).
+     */
     fun unbookmark(url: String) {
         scope.launch {
             try {
@@ -239,6 +243,21 @@ class BrowsingRepository internal constructor(
 
     fun clearBookmarks() {
         scope.launch { db.bookmarks().clear() }
+    }
+
+    /**
+     * Remove the one bookmark [id], and only it: rows saved in another
+     * spelling of the same page before #296 stay, as the list shows them
+     * as separate bookmarks (#296 R2-F1).
+     */
+    fun deleteBookmark(id: Long) {
+        scope.launch {
+            try {
+                db.bookmarks().delete(id)
+            } catch (e: SQLiteException) {
+                Log.w(TAG, "deleteBookmark: ${e.message}")
+            }
+        }
     }
 
     fun deleteHistory(id: Long) {

@@ -203,4 +203,34 @@ class BookmarksDatabaseTest {
             db.close()
         }
     }
+
+    /**
+     * #296 R2-F1: two rows saved by older, exact-match code for one page
+     * (`vitalik.eth` and `ipfs://vitalik.eth/`) show as two bookmarks, so
+     * the list's Remove takes out only the row it was on; the star's
+     * Remove (by the page) still takes out both.
+     */
+    @Test
+    fun theListRemovesOneRowNotEverySpelling(): Unit = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val repo = BrowsingRepository(db)
+        try {
+            val first = db.bookmarks().upsert(BookmarkEntry(url = "vitalik.eth", title = "Vitalik", createdAt = 1))
+            val second = db.bookmarks().upsert(
+                BookmarkEntry(url = "ipfs://vitalik.eth/", title = "Vitalik – blog", createdAt = 2),
+            )
+            repo.deleteBookmark(first)
+            val left = withTimeout(5_000) {
+                db.bookmarks().all().first { list -> list.none { it.id == first } }
+            }
+            assertEquals(listOf(second), left.map { it.id })
+            assertEquals("Vitalik – blog", left.single().title)
+
+            db.bookmarks().upsert(BookmarkEntry(url = "vitalik.eth", title = "Vitalik", createdAt = 3))
+            repo.unbookmark("vitalik.eth")
+            withTimeout(5_000) { db.bookmarks().all().first { it.isEmpty() } }
+        } finally {
+            db.close()
+        }
+    }
 }

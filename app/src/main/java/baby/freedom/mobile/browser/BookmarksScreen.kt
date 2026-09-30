@@ -163,7 +163,7 @@ fun BookmarksScreen(
                         onClick = { onOpen(entry.url) },
                         onEdit = { editingId = entry.id },
                         onMove = { afterId -> repo.moveBookmark(entry.id, afterId) },
-                        onRemove = { repo.unbookmark(entry.url) },
+                        onRemove = { repo.deleteBookmark(entry.id) },
                     )
                 }
             }
