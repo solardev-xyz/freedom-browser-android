@@ -25,42 +25,56 @@ import java.util.Locale
  * in `one` ("0 match"), Russian puts 21 in `one` ("21 minute ago").
  *
  * Each translation names its own language in `l10n_language`; when that
- * isn't the configuration's, [resources] are the same resources set to
- * that language, so the rules (and the digits a count is written in) match
- * the words.
+ * isn't the configuration's, the form is picked from the same resources
+ * set to that language ([resources]), so the rules match the words. The
+ * count and other arguments are still formatted in the configuration's
+ * locale, exactly as a plain `getString("%d …")` line next to it is, so a
+ * Persian phone shows the same digits in both (#313 R2-M1).
  */
 object TextLocale {
     /** The language [res]'s text is in (`l10n_language`). */
     fun of(res: Resources): Locale = Locale.forLanguageTag(res.getString(R.string.l10n_language))
 
     /**
-     * [context]'s resources, or a copy set to the language their text is
-     * in when that differs from the configuration's: for plural forms.
+     * Resources to pick a plural form from: [context]'s own, or a copy set
+     * to the language their text is in when that differs from the
+     * configuration's. Only for choosing the form (`getQuantityText`);
+     * format with [context]'s locale ([plural] does).
      */
     fun resources(context: Context): Resources {
         val res = context.resources
-        val config = res.configuration
         val text = of(res)
-        val first = config.locales.takeIf { !it.isEmpty }?.get(0)
+        val first = res.configuration.locales.takeIf { !it.isEmpty }?.get(0)
         if (first != null && first.language == text.language) return res
+        // Keyed on the text's language alone (#313 R2-M2): only the text and
+        // its plural rules are read from these, and both follow the locale,
+        // so an Activity and the Application (whose configurations differ in
+        // window bounds and the like) share one copy instead of evicting
+        // each other's on every call.
         synchronized(this) {
-            cached?.let { (key, value) -> if (key == config) return value }
-            val fixed = context.createConfigurationContext(
-                Configuration(config).apply { setLocales(LocaleList(text)) },
-            ).resources
-            cached = Configuration(config) to fixed
-            return fixed
+            return byLanguage.getOrPut(text) {
+                val base = context.applicationContext ?: context
+                base.createConfigurationContext(
+                    Configuration(base.resources.configuration).apply { setLocales(LocaleList(text)) },
+                ).resources
+            }
         }
     }
 
-    /** Last configuration seen and its [resources]: one per process is all there is at a time. */
-    private var cached: Pair<Configuration, Resources>? = null
+    /** [resources] per text language: one or two languages a process ever sees. */
+    private val byLanguage = HashMap<Locale, Resources>()
 
-    /** `getQuantityString` with the rules of the text's own language. */
-    @Suppress("DevicePluralRules") // on resources set to that language
+    /**
+     * `getQuantityString` with the rules of the text's own language, its
+     * [args] formatted in [context]'s locale like any other string's.
+     */
+    @Suppress("DevicePluralRules") // the form comes from resources set to the text's language
     fun plural(context: Context, @PluralsRes id: Int, count: Int, vararg args: Any?): String {
-        val res = resources(context)
-        return if (args.isEmpty()) res.getQuantityString(id, count) else res.getQuantityString(id, count, *args)
+        val form = resources(context).getQuantityText(id, count).toString()
+        if (args.isEmpty()) return form
+        val locales = context.resources.configuration.locales
+        val locale = if (locales.isEmpty) Locale.getDefault() else locales[0]
+        return String.format(locale, form, *args)
     }
 }
 

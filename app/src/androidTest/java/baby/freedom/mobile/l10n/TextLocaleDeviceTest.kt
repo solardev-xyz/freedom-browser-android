@@ -46,8 +46,14 @@ class TextLocaleDeviceTest {
         assertEquals("0 matches", TextLocale.plural(phoneIn("fr-FR"), R.plurals.browser_find_matches, 0, 0))
         assertEquals("21 matches", TextLocale.plural(phoneIn("ru-RU"), R.plurals.browser_find_matches, 21, 21))
         assertEquals("21 minutes ago", TextLocale.plural(phoneIn("ru-RU"), R.plurals.radicle_viewer_minutes_ago, 21, 21))
-        // And the count in the English line is in English's digits.
-        assertEquals("17 matches", TextLocale.plural(phoneIn("fa-IR"), R.plurals.browser_find_matches, 17, 17))
+        // The form is English's, but the count is in the phone's digits, as
+        // a plain `getString("%d …")` line beside it is (#313 R2-M1).
+        val fa = phoneIn("fa-IR")
+        val faDigits = String.format(Locale.forLanguageTag("fa-IR"), "%d", 17)
+        assertEquals(true, faDigits != "17")
+        assertEquals("$faDigits matches", TextLocale.plural(fa, R.plurals.browser_find_matches, 17, 17))
+        // One copy per text language, whichever context asks (#313 R2-M2).
+        assertEquals(true, TextLocale.resources(fa) === TextLocale.resources(ja))
         // An English phone keeps its own resources.
         val en = phoneIn("en-GB")
         assertEquals(true, TextLocale.resources(en) === en.resources)
