@@ -34,3 +34,18 @@ internal fun String.escapeForLike(): String {
     }
     return out.toString()
 }
+
+/**
+ * A `LIKE … ESCAPE '\'` pattern matching any text that contains [text]
+ * literally: `%`, `_` and `\` are escaped rather than dropped (unlike
+ * [escapeForLike]), so a History search for `my_page` or `100%` finds
+ * exactly that and nothing looser.
+ */
+internal fun likeContains(text: String): String {
+    val out = StringBuilder(text.length + 2).append('%')
+    for (c in text) {
+        if (c == '%' || c == '_' || c == '\\') out.append('\\')
+        out.append(c)
+    }
+    return out.append('%').toString()
+}
