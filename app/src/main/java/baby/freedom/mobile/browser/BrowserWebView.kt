@@ -2761,7 +2761,12 @@ private fun buildRefreshableWebView(
             // [SweptReload.refused] leaves it alone (R1-F1).
             override fun onFormResubmission(view: WebView?, dontResend: Message?, resend: Message?) {
                 dontResend?.sendToTarget()
-                if (view is PageWebView) view.post { view.sweptReload.refused() }
+                if (view is PageWebView) {
+                    view.post { view.sweptReload.refused() }
+                    // A Hard reload's own moves on to a GET; any other
+                    // ends its bypass (#262, R4-F1).
+                    view.cacheBypass.reloadRefused()
+                }
             }
 
             // The renderer this page ran in crashed or was killed for
@@ -4601,7 +4606,20 @@ internal class PageWebView(context: Context) : WebView(context) {
             // page stale and the bypass left on with no finish to end it
             // (R3-F1). A reload loads the document again, fragment and
             // all, as the user's own when they named it.
-            CacheBypass.staysInDocument(this.url, url) -> if (namedByUser) reloadByUser() else reload()
+            CacheBypass.staysInDocument(this.url, url) -> {
+                if (namedByUser) reloadByUser() else reload()
+                // On a page reached by a form POST the reload is refused
+                // ("don't resend"), loading nothing (R4-F1): a GET of the
+                // address then, as a Hard reload of a POST page without a
+                // fragment does — minus the fragment, which would make
+                // that GET a scroll too.
+                val get = url.substringBefore('#')
+                cacheBypass.reloading(
+                    Runnable {
+                        loadBypassingCache { if (namedByUser) loadUrlNamedByUser(get) else loadUrl(get) }
+                    },
+                )
+            }
             namedByUser -> loadUrlNamedByUser(url)
             else -> loadUrl(url)
         }

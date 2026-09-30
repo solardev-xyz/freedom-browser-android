@@ -30,7 +30,14 @@ import android.webkit.WebSettings
  * The Hard reload's URL is never loaded with `loadUrl` where that would
  * be a fragment navigation of the page on screen — the same address with
  * a `#fragment` — which fetches and commits nothing (R3-F1): the page
- * reloads instead ([staysInDocument]).
+ * reloads instead ([staysInDocument]). On a page reached by a form POST
+ * that reload is refused (`onFormResubmission`, answered "don't resend",
+ * which fetches and commits nothing, R4-F1): [reloadRefused] then runs
+ * the retry [reloading] was given — a GET of the address without its
+ * fragment, the one GET of that page `loadUrl` doesn't turn into a
+ * scroll — still past the cache, like a Hard reload of a POST page with
+ * no fragment. A refused reload that isn't the Hard reload's own (the
+ * page's `location.reload()`) loads nothing either, and ends the bypass.
  *
  * [readCacheMode] / [writeCacheMode] are the WebView's setting; [post]
  * queues a task behind the WebView's callbacks already queued on the UI
@@ -57,6 +64,7 @@ internal class CacheBypass(
      * ends a bypass still on.
      */
     fun loadStarting(bypass: Boolean) {
+        retry = null
         if (!bypass) {
             restore()
             return
@@ -66,8 +74,50 @@ internal class CacheBypass(
         writeCacheMode(WebSettings.LOAD_NO_CACHE)
     }
 
-    /** The last callback was [pageStarted]: the [historyUpdated] next is that commit's own. */
+    /**
+     * The Hard reload's own `reload()` is the last load started: what to
+     * run instead if it's refused ([reloadRefused]); null otherwise.
+     */
+    private var retry: Runnable? = null
+
+    /**
+     * The Hard reload's load was a `reload()` ([staysInDocument]); [retry]
+     * is its GET should that be refused. Called right after the reload is
+     * started ([loadStarting] clears it).
+     */
+    fun reloading(retry: Runnable) {
+        if (restoreTo != null) this.retry = retry
+    }
+
+    /**
+     * WebView refused a reload (`onFormResubmission`, "don't resend"):
+     * nothing is fetched or committed. The Hard reload's own moves on to
+     * its GET; any other ends the bypass, which no load is left to end
+     * (R4-F1). Acts in a [post]ed task, out of WebView's own callback —
+     * [post], not `View.post`, which a detached background tab's WebView
+     * would hold until it's attached again.
+     */
+    fun reloadRefused() {
+        post(
+            Runnable {
+                val retry = retry
+                this.retry = null
+                if (retry != null) retry.run() else restore()
+            },
+        )
+    }
+
+    /**
+     * The last callback was [pageStarted]: the [historyUpdated] next is
+     * that commit's own — until the task [pageStarted] posts runs, behind
+     * the commit's `doUpdateVisitedHistory`, which WebView posts in the
+     * same breath. A commit whose history update never arrives doesn't
+     * leave the first fragment navigation after it taken for it (R4-M1).
+     */
     private var justStarted = false
+
+    /** Tells a [justStarted]'s posted clearing from a later commit's. */
+    private var startGeneration = 0
 
     /**
      * The URL of a same-document history step just reported, whose
@@ -82,6 +132,9 @@ internal class CacheBypass(
     /** A document committed (`onPageStarted`). */
     fun pageStarted() {
         justStarted = true
+        val generation = ++startGeneration
+        post(Runnable { if (startGeneration == generation) justStarted = false })
+        retry = null
         sameDocumentStep = null
         if (restoreTo != null) committed = true
     }
@@ -142,6 +195,7 @@ internal class CacheBypass(
         val mode = restoreTo ?: return
         restoreTo = null
         committed = false
+        retry = null
         writeCacheMode(mode)
     }
 }

@@ -67,6 +67,73 @@ class HardReloadTest {
     }
 
     @Test
+    fun `a commit with no history update of its own doesn't take a fragment navigation's for it`() {
+        // R4-M1: onPageStarted with no doUpdateVisitedHistory behind it;
+        // the loading page then sets location.hash.
+        val s = Settings()
+        s.bypass.loadStarting(bypass = true)
+        s.bypass.pageStarted()
+        s.runPosted()
+        s.bypass.historyUpdated(PAGE)
+        s.bypass.pageFinished(PAGE)
+        s.runPosted()
+        assertEquals(WebSettings.LOAD_NO_CACHE, s.mode)
+        s.bypass.pageFinished(PAGE)
+        assertEquals(WebSettings.LOAD_DEFAULT, s.mode)
+    }
+
+    @Test
+    fun `a refused hard reload moves on to its GET, past the cache`() {
+        // R4-F1: the reload of a POST result page at a #fragment address.
+        val s = Settings()
+        var gets = 0
+        s.bypass.loadStarting(bypass = true)
+        s.bypass.reloading(Runnable { gets++; s.bypass.loadStarting(bypass = true) })
+        s.bypass.reloadRefused()
+        s.runPosted()
+        assertEquals(1, gets)
+        assertEquals(WebSettings.LOAD_NO_CACHE, s.mode)
+        // Only once.
+        s.bypass.reloadRefused()
+        s.runPosted()
+        assertEquals(1, gets)
+        s.bypass.pageStarted()
+        s.bypass.historyUpdated("http://host/page")
+        s.bypass.pageFinished("http://host/page")
+        assertEquals(WebSettings.LOAD_DEFAULT, s.mode)
+    }
+
+    @Test
+    fun `a refused reload that isn't the hard reload's ends the bypass`() {
+        val s = Settings()
+        var gets = 0
+        // Another load after the hard reload's: its refusal isn't ours.
+        s.bypass.loadStarting(bypass = true)
+        s.bypass.reloading(Runnable { gets++ })
+        s.bypass.loadStarting(bypass = true)
+        s.bypass.reloadRefused()
+        s.runPosted()
+        assertEquals(0, gets)
+        assertEquals(WebSettings.LOAD_DEFAULT, s.mode)
+
+        // The hard reload's reload committed: a later refusal (the page's
+        // own location.reload()) isn't its either.
+        s.bypass.loadStarting(bypass = true)
+        s.bypass.reloading(Runnable { gets++ })
+        s.bypass.pageStarted()
+        s.bypass.reloadRefused()
+        s.runPosted()
+        assertEquals(0, gets)
+        assertEquals(WebSettings.LOAD_DEFAULT, s.mode)
+
+        // No bypass on: nothing to do.
+        s.bypass.reloading(Runnable { gets++ })
+        s.bypass.reloadRefused()
+        s.runPosted()
+        assertEquals(0, gets)
+    }
+
+    @Test
     fun `a pushState while the page loads doesn't swallow its finish`() {
         // No finish follows a pushState: the window closes behind it.
         val s = Settings()

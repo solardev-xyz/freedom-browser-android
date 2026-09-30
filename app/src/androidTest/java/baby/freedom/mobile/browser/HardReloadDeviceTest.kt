@@ -38,6 +38,9 @@ class HardReloadDeviceTest {
     private class Site {
         val hits = ConcurrentHashMap<String, AtomicInteger>()
 
+        /** Every request, as "METHOD /path". */
+        val methods = java.util.concurrent.ConcurrentLinkedQueue<String>()
+
         @Volatile
         var version = 1
         val server = MockWebServer().apply {
@@ -45,6 +48,7 @@ class HardReloadDeviceTest {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     val path = request.path ?: "/"
                     hits.getOrPut(path) { AtomicInteger() }.incrementAndGet()
+                    methods.add("${request.method} $path")
                     // Both cacheable for an hour: an ordinary reload
                     // keeps the script from the cache.
                     return when (path) {
@@ -68,6 +72,17 @@ class HardReloadDeviceTest {
                                     "s.src = '/app.js'; document.head.appendChild(s); }, 500);</script>" +
                                     "<img src=\"/slow.png\">",
                             )
+                        // Submits itself by POST to /result#sec (R4-F1).
+                        "/form" -> MockResponse()
+                            .setHeader("Content-Type", "text/html")
+                            .setBody(
+                                "<!doctype html><form method=post action=\"/result#sec\">" +
+                                    "<input name=a value=1></form><script>document.forms[0].submit()</script>",
+                            )
+                        "/result" -> MockResponse()
+                            .setHeader("Content-Type", "text/html")
+                            .setHeader("Cache-Control", "max-age=3600")
+                            .setBody("<!doctype html><title>page</title><script src=\"/app.js\"></script><p id=sec>")
                         "/slow.png" -> MockResponse()
                             .setHeadersDelay(2, TimeUnit.SECONDS)
                             .setHeader("Content-Type", "image/png")
@@ -207,6 +222,65 @@ class HardReloadDeviceTest {
             assertEquals(pageHits + 1, site.hitsOf("/page"))
             assertEquals(2, site.hitsOf("/app.js"))
             assertEquals("the bypass ends at the reload's finish", WebSettings.LOAD_DEFAULT, cacheModeOf(view))
+        } finally {
+            instrumentation.runOnMainSync {
+                view.stopLoading()
+                view.destroy()
+            }
+            site.server.shutdown()
+        }
+    }
+
+    @Test
+    fun a_hard_reload_of_a_post_result_at_a_fragment_gets_the_page_again() {
+        // R4-F1: the reload of a POST result is refused ("don't resend");
+        // the Hard reload moves on to a GET of its address, past the cache.
+        val site = Site()
+        val base = "http://127.0.0.1:${site.server.port}"
+        val page = "$base/result#sec"
+        val finishes = java.util.concurrent.LinkedBlockingQueue<String>()
+        lateinit var view: PageWebView
+        instrumentation.runOnMainSync {
+            view = PageWebView(instrumentation.targetContext)
+            view.settings.javaScriptEnabled = true
+            view.webViewClient = object : WebViewClient() {
+                override fun onPageStarted(v: WebView?, url: String?, favicon: Bitmap?) {
+                    view.cacheBypass.pageStarted()
+                }
+
+                override fun onPageFinished(v: WebView?, url: String?) {
+                    view.cacheBypass.pageFinished(url)
+                    finishes.add(url.orEmpty())
+                }
+
+                override fun doUpdateVisitedHistory(v: WebView?, url: String?, isReload: Boolean) {
+                    view.cacheBypass.historyUpdated(url)
+                }
+
+                // As the tab's client answers it.
+                override fun onFormResubmission(v: WebView?, dontResend: android.os.Message?, resend: android.os.Message?) {
+                    dontResend?.sendToTarget()
+                    view.cacheBypass.reloadRefused()
+                }
+            }
+        }
+        try {
+            instrumentation.runOnMainSync { view.loadUrl("$base/form") }
+            // The form's own finish may come first, or not at all.
+            var finish = finishes.poll(20, TimeUnit.SECONDS)
+            if (finish == "$base/form") finish = finishes.poll(20, TimeUnit.SECONDS)
+            assertEquals(page, finish)
+            assertEquals("v1", titleOf(view))
+            assertTrue(site.methods.contains("POST /result"))
+            site.version = 2
+            finishes.clear()
+            instrumentation.runOnMainSync { view.hardReload(page, namedByUser = true) }
+            assertEquals("$base/result", finishes.poll(20, TimeUnit.SECONDS))
+            assertEquals("v2", titleOf(view))
+            assertTrue(site.methods.contains("GET /result"))
+            assertEquals(1, site.methods.count { it == "POST /result" })
+            assertEquals(2, site.hitsOf("/app.js"))
+            assertEquals("the bypass ends at the GET's finish", WebSettings.LOAD_DEFAULT, cacheModeOf(view))
         } finally {
             instrumentation.runOnMainSync {
                 view.stopLoading()
