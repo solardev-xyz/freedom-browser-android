@@ -173,4 +173,32 @@ class LedgerUsbLinkTest {
         assertTrue(System.nanoTime() - started < 1_000_000_000L)
         link.close()
     }
+
+    @Test
+    fun `unplugged while Android asks for access, the wait ends at once`() = runBlocking {
+        val answered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val plugged = java.util.concurrent.atomic.AtomicBoolean(true)
+        val waiting = async(Dispatchers.Default) {
+            val started = System.nanoTime()
+            LedgerUsbLink.awaitAnswer(answered, 60_000, 50) { plugged.get() } to (System.nanoTime() - started) / 1_000_000
+        }
+        delay(200)
+        plugged.set(false)
+        val (got, ms) = waiting.await()
+        assertEquals(false, got)
+        assertTrue("took $ms ms", ms < 1_000)
+    }
+
+    @Test
+    fun `an answer to Android's prompt ends the wait, and none runs out at the deadline`() = runBlocking {
+        val answered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val waiting = async(Dispatchers.Default) { LedgerUsbLink.awaitAnswer(answered, 60_000, 50) { true } }
+        delay(120)
+        answered.complete(Unit)
+        assertEquals(true, waiting.await())
+        val started = System.nanoTime()
+        assertEquals(false, LedgerUsbLink.awaitAnswer(kotlinx.coroutines.CompletableDeferred(), 300, 50) { true })
+        val ms = (System.nanoTime() - started) / 1_000_000
+        assertTrue("took $ms ms", ms in 250..1_500)
+    }
 }

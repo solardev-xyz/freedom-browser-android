@@ -14,7 +14,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.ParcelUuid
@@ -87,11 +86,16 @@ enum class LedgerScheme(@StringRes private val labelRes: Int) {
  * after, as desktop does. Both links carry the same APDUs
  * ([LedgerEthApp]); only the framing under them differs.
  *
- * A Ledger plugged in over USB is used for every conversation while it's
- * there, whichever link its account was added over: plugging in is the
- * user picking the cable, and the address check below still refuses a
- * Ledger that doesn't hold the account. An account added over USB with
- * no Ledger plugged in fails at once, asking for it to be plugged in.
+ * Reading a Ledger's accounts talks to the Ledger that was tapped, over
+ * the link it was listed under — never to another one — so what's added
+ * is saved under the Ledger it came from. Signing goes to the Ledger that
+ * holds the account, whichever link that takes ([accountRoutes]): the
+ * Ledgers plugged in over USB first (plugging in is the user picking the
+ * cable; the one the account was added from first), then the account's
+ * own Bluetooth Ledger — or, for an account added over USB, the paired
+ * Bluetooth Ledgers of that model (a Nano X set up over a cable and later
+ * used without it). Each is asked for the account's address in turn, and
+ * one that doesn't hold it is passed over before anything is shown on it.
  *
  * While a conversation is on, [activity] says what the Ledger is waiting
  * for (connecting, pairing, unlock it, open the Ethereum app, confirm on
@@ -241,7 +245,7 @@ class Ledger internal constructor(private val context: Context) {
 
     /** [count] accounts from [start] on [device] under [scheme]: (path, address). */
     suspend fun accounts(device: LedgerDevice, scheme: LedgerScheme, start: Int, count: Int): List<Pair<String, String>> =
-        session(device.id, device.name, Strings.get(R.string.signing_ledger_purpose_read_accounts)) { app, stage ->
+        session(deviceRoutes(device), Strings.get(R.string.signing_ledger_purpose_read_accounts)) { app, stage ->
             val first = scheme.path(start)
             ready(app, first, stage)
             stage(Stage.READING)
@@ -257,7 +261,7 @@ class Ledger internal constructor(private val context: Context) {
     suspend fun signTransaction(account: WalletAccount, tx: EthTransaction, fresh: () -> Boolean = { true }): EthTransaction.Signed {
         val key = account.ledger ?: error("not a Ledger account")
         val payload = tx.signingPayload()
-        val sig = session(key.device, key.deviceName, Strings.get(R.string.signing_ledger_purpose_confirm_transaction)) { app, stage ->
+        val sig = session(routesFor(key), Strings.get(R.string.signing_ledger_purpose_confirm_transaction)) { app, stage ->
             verified(app, key, account.address, stage) { if (!fresh()) throw QuoteStaleException() }
             app.signTransaction(key.path, payload)
         }
@@ -267,7 +271,7 @@ class Ledger internal constructor(private val context: Context) {
     /** `personal_sign` of [message] on the Ledger holding [account]: `0x` + r ‖ s ‖ v. */
     suspend fun signPersonal(account: WalletAccount, message: ByteArray): String {
         val key = account.ledger ?: error("not a Ledger account")
-        val sig = session(key.device, key.deviceName, Strings.get(R.string.signing_ledger_purpose_confirm_message)) { app, stage ->
+        val sig = session(routesFor(key), Strings.get(R.string.signing_ledger_purpose_confirm_message)) { app, stage ->
             verified(app, key, account.address, stage)
             app.signPersonal(key.path, message)
         }
@@ -289,7 +293,7 @@ class Ledger internal constructor(private val context: Context) {
     suspend fun signTypedData(account: WalletAccount, prepare: () -> Pair<Eip712.TypedData, ByteArray>): String {
         val key = account.ledger ?: error("not a Ledger account")
         var digest = ByteArray(0)
-        val sig = session(key.device, key.deviceName, Strings.get(R.string.signing_ledger_purpose_sign_data)) { app, stage ->
+        val sig = session(routesFor(key), Strings.get(R.string.signing_ledger_purpose_sign_data)) { app, stage ->
             verified(app, key, account.address, stage)
             val (data, d) = prepare()
             digest = d
@@ -333,67 +337,117 @@ class Ledger internal constructor(private val context: Context) {
     }
 
     /**
-     * One conversation with the Ledger [id]: the link is opened, [block]
-     * run with it, and the link closed, whatever happens — one at a time.
-     * Cancel ([Activity.cancel]) ends it with [LedgerException.Kind.CANCELLED].
+     * The one Ledger reading accounts from [device] talks to: the device
+     * tapped, over the link it was listed under — never a Ledger plugged
+     * in meanwhile, whose accounts would be saved under [device]'s name.
      */
-    private suspend fun <T> session(
-        id: String,
-        name: String,
-        purpose: String,
-        block: suspend (LedgerEthApp, (Stage) -> Unit) -> T,
-    ): T = conversation.withLock {
-        val usb = usbFor(id)
-        if (usb == null && isUsbId(id)) throw LedgerException(LedgerException.Kind.NOT_FOUND, Strings.said(R.string.signing_ledger_usb_not_plugged_in))
-        if (usb == null) bluetoothProblem()?.takeUnless { LedgerDevLinks.handles(id) }?.let { throw it }
-        val shown = usb?.let { LedgerUsbLink.name(it) } ?: name
-        coroutineScope {
-            var stage: (Stage) -> Unit = {}
-            val cancelled = AtomicBoolean(false)
-            // Created unstarted, so Cancel exists before anything can call stage() with it.
-            val work = async(start = CoroutineStart.LAZY) {
-                val link = if (usb != null) {
-                    val manager = usbManager ?: throw LedgerUsbLink.unplugged()
-                    LedgerUsbLink.open(context, manager, usb, onPermission = { stage(Stage.USB_PERMISSION) }).also { stage(Stage.CONNECTING) }
-                } else {
-                    open(id, onPairing = { stage(Stage.PAIRING) }, onPaired = { stage(Stage.CONNECTING) })
-                }
-                try {
-                    block(LedgerEthApp(link), stage)
-                } finally {
-                    link.close()
-                }
+    private fun deviceRoutes(device: LedgerDevice): List<Route> {
+        val route = Route(device.id, device.name)
+        return when {
+            LedgerDevLinks.handles(device.id) -> listOf(route)
+            device.usb -> {
+                if (usbRoutes().none { it.id == device.id }) throw LedgerUsbLink.unplugged()
+                listOf(route)
             }
-            val cancel = {
-                cancelled.set(true)
-                work.cancel()
-            }
-            stage = { s: Stage -> _activity.value = Activity(shown, s, purpose, cancel) }
-            stage(Stage.CONNECTING)
-            work.start()
-            try {
-                work.await()
-            } catch (e: CancellationException) {
-                if (cancelled.get()) throw LedgerException(LedgerException.Kind.CANCELLED)
-                throw e
-            } catch (e: LedgerException) {
-                Log.i(TAG, "Ledger: ${e.kind}${(e.cause as? LedgerException.StatusWord)?.let { " (${it.message})" } ?: ""}")
-                throw e
-            } finally {
-                _activity.value = null
+            else -> {
+                bluetoothProblem()?.let { throw it }
+                listOf(route)
             }
         }
     }
 
+    /** The Ledgers the account at [key] may be on, in the order they're tried ([accountRoutes]). */
+    @SuppressLint("MissingPermission")
+    private fun routesFor(key: LedgerKey): List<Route> {
+        if (LedgerDevLinks.handles(key.device)) return listOf(Route(key.device, key.deviceName))
+        val problem = bluetoothProblem()
+        val bonded = if (problem != null) {
+            null
+        } else {
+            runCatching { adapter?.bondedDevices.orEmpty().filter { isLedgerName(it.name) }.map { Route(it.address, it.name ?: "Ledger") } }.getOrNull()
+        }
+        val routes = accountRoutes(key, usbRoutes(), bonded)
+        if (routes.isNotEmpty()) return routes
+        throw when {
+            !isUsbId(key.device) -> problem ?: LedgerException(LedgerException.Kind.NOT_FOUND)
+            usbOnlyModel(key.deviceName) -> LedgerException(LedgerException.Kind.NOT_FOUND, Strings.said(R.string.signing_ledger_usb_not_plugged_in))
+            else -> LedgerException(LedgerException.Kind.NOT_FOUND, Strings.said(R.string.signing_ledger_usb_or_bluetooth_not_found))
+        }
+    }
+
+    private fun usbRoutes(): List<Route> =
+        LedgerUsbLink.devices(usbManager).map { Route(USB_PREFIX + it.deviceName, LedgerUsbLink.name(it)) }
+
     /**
-     * The Ledger plugged in over USB a conversation with [id] goes to, if
-     * any: the one [id] names if it's still there, else any plugged-in
-     * Ledger. Never for a debug build's emulator link.
+     * One conversation with a Ledger, one at a time: [routes] are tried in
+     * turn ([inTurn]) — a link opened, [block] run with it, the link
+     * closed, whatever happens — and the first Ledger that can be reached
+     * and holds what's asked for is the one used. Cancel
+     * ([Activity.cancel]) ends it with [LedgerException.Kind.CANCELLED].
      */
-    private fun usbFor(id: String): UsbDevice? {
-        if (LedgerDevLinks.handles(id)) return null
-        val plugged = LedgerUsbLink.devices(usbManager)
-        return plugged.firstOrNull { USB_PREFIX + it.deviceName == id } ?: plugged.firstOrNull()
+    private suspend fun <T> session(
+        routes: List<Route>,
+        purpose: String,
+        block: suspend (LedgerEthApp, (Stage) -> Unit) -> T,
+    ): T = conversation.withLock {
+        try {
+            inTurn(routes) { route -> converse(route, purpose, block) }
+        } catch (e: LedgerException) {
+            Log.i(TAG, "Ledger: ${e.kind}${(e.cause as? LedgerException.StatusWord)?.let { " (${it.message})" } ?: ""}")
+            throw e
+        } finally {
+            _activity.value = null
+        }
+    }
+
+    /**
+     * [block] with the Ledger at [route]. A link that can't be opened, and
+     * a Ledger that doesn't hold the account ([LedgerException.Kind.WRONG_DEVICE],
+     * raised before anything is shown on it), end as [NotThisLedger], so
+     * the next route can be tried.
+     */
+    private suspend fun <T> converse(
+        route: Route,
+        purpose: String,
+        block: suspend (LedgerEthApp, (Stage) -> Unit) -> T,
+    ): T = coroutineScope {
+        var stage: (Stage) -> Unit = {}
+        val cancelled = AtomicBoolean(false)
+        // Created unstarted, so Cancel exists before anything can call stage() with it.
+        val work = async(start = CoroutineStart.LAZY) {
+            val link = try {
+                if (isUsbId(route.id)) {
+                    val manager = usbManager ?: throw LedgerUsbLink.unplugged()
+                    val usb = LedgerUsbLink.devices(manager).firstOrNull { USB_PREFIX + it.deviceName == route.id } ?: throw LedgerUsbLink.unplugged()
+                    LedgerUsbLink.open(context, manager, usb, onPermission = { stage(Stage.USB_PERMISSION) }).also { stage(Stage.CONNECTING) }
+                } else {
+                    open(route.id, onPairing = { stage(Stage.PAIRING) }, onPaired = { stage(Stage.CONNECTING) })
+                }
+            } catch (e: LedgerException) {
+                throw NotThisLedger(e)
+            }
+            try {
+                block(LedgerEthApp(link), stage)
+            } catch (e: LedgerException) {
+                if (e.kind == LedgerException.Kind.WRONG_DEVICE) throw NotThisLedger(e)
+                throw e
+            } finally {
+                link.close()
+            }
+        }
+        val cancel = {
+            cancelled.set(true)
+            work.cancel()
+        }
+        stage = { s: Stage -> _activity.value = Activity(route.name, s, purpose, cancel) }
+        stage(Stage.CONNECTING)
+        work.start()
+        try {
+            work.await()
+        } catch (e: CancellationException) {
+            if (cancelled.get()) throw LedgerException(LedgerException.Kind.CANCELLED)
+            throw e
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -414,6 +468,71 @@ class Ledger internal constructor(private val context: Context) {
         private const val PLUG_IN_LAUNCHER = "baby.freedom.mobile.LedgerPlugIn"
 
         fun isUsbId(id: String): Boolean = id.startsWith(USB_PREFIX)
+
+        /** A Ledger a conversation can go to: its id ([LedgerDevice.id]) and the name it shows. */
+        internal data class Route(val id: String, val name: String)
+
+        /** A route that couldn't be used — not reachable, or not the Ledger holding the account — with why. */
+        internal class NotThisLedger(val reason: LedgerException) : Exception(reason)
+
+        /**
+         * [attempt] on each of [routes] in turn, until one doesn't end in
+         * [NotThisLedger]; anything else (a refusal on the device, Cancel,
+         * a timeout while it's waited on) ends it there. None left, the
+         * reason given is that a Ledger reached doesn't hold the account
+         * if one said so — that's the Ledger the user has in hand — else
+         * the last route's.
+         */
+        internal suspend fun <T> inTurn(routes: List<Route>, attempt: suspend (Route) -> T): T {
+            var wrong: LedgerException? = null
+            var last = LedgerException(LedgerException.Kind.NOT_FOUND)
+            for (route in routes) {
+                try {
+                    return attempt(route)
+                } catch (e: NotThisLedger) {
+                    last = e.reason
+                    if (e.reason.kind == LedgerException.Kind.WRONG_DEVICE) wrong = e.reason
+                }
+            }
+            throw wrong ?: last
+        }
+
+        /**
+         * Where the account at [key] may be, in the order it's looked for:
+         * the Ledgers [plugged] in over USB (the one it was added from
+         * first, though its USB path changes on every replug), then over
+         * Bluetooth — its own Ledger, or, added over USB, the [bonded]
+         * Ledgers of its model that have Bluetooth. [bonded] is null when
+         * Bluetooth can't be used. Every one is checked to hold the
+         * account's address before it's asked to sign.
+         */
+        internal fun accountRoutes(key: LedgerKey, plugged: List<Route>, bonded: List<Route>?): List<Route> {
+            val usb = plugged.filter { it.id == key.device } + plugged.filter { it.id != key.device }
+            val radio = when {
+                bonded == null -> emptyList()
+                !isUsbId(key.device) -> listOf(Route(key.device, key.deviceName))
+                else -> bonded.filter { bluetoothModelMatches(key.deviceName, it.name) }
+            }
+            return usb + radio
+        }
+
+        private val USB_ONLY_MODELS = setOf("Nano S", "Nano S Plus", "Blue")
+        private val BLUETOOTH_MODELS = listOf("Nano X", "Stax", "Flex")
+
+        private fun model(usbName: String): String = usbName.removePrefix("Ledger").trim()
+
+        /** Whether the Ledger a USB account was added from ([usbName]: "Ledger Nano S Plus") has no Bluetooth. */
+        internal fun usbOnlyModel(usbName: String): Boolean = model(usbName) in USB_ONLY_MODELS
+
+        /** Whether a paired Bluetooth Ledger named [bleName] ("Nano X 1A2B") can be the one [usbName] names. */
+        internal fun bluetoothModelMatches(usbName: String, bleName: String): Boolean {
+            val m = model(usbName)
+            return when {
+                m in USB_ONLY_MODELS -> false
+                m in BLUETOOTH_MODELS -> bleName.contains(m)
+                else -> true
+            }
+        }
 
         /** How long a locked Ledger, or one on another app, is waited for. */
         const val READY_MS = 90_000L

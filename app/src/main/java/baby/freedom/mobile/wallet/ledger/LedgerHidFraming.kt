@@ -52,6 +52,7 @@ internal object LedgerHidFraming {
      * as it's read; it returns the whole answer (data and status word)
      * once the last one is in, else null. The first packet's length
      * decides where the answer ends: the zero padding after it is dropped.
+     * A length under two (no room for the status word) is a [BadPacket].
      */
     class Reader {
         private val data = ByteArrayOutputStream()
@@ -70,6 +71,8 @@ internal object LedgerHidFraming {
             if (index == 0) {
                 if (packet.size < HEADER + 2) throw BadPacket("short first packet")
                 expected = ((packet[5].toInt() and 0xff) shl 8) or (packet[6].toInt() and 0xff)
+                // Every answer ends in a two-byte status word: anything shorter isn't one.
+                if (expected < 2) throw BadPacket("answer length $expected")
                 start = HEADER + 2
             }
             data.write(packet, start, minOf(packet.size - start, expected - data.size()))

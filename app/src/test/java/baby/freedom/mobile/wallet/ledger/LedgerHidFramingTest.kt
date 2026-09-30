@@ -87,6 +87,9 @@ class LedgerHidFramingTest {
         refused("other tag", packets[0].copyOf().also { it[2] = 0x08 })
         refused("short packet", packets[0].copyOf(4))
         refused("first packet with no length", packets[0].copyOf(6))
+        // An announced length with no room for the status word: not an answer (R1-M3).
+        refused("empty answer", LedgerHidFraming.packets(ByteArray(0))[0])
+        refused("one-byte answer", LedgerHidFraming.packets(ByteArray(1))[0])
     }
 
     @Test

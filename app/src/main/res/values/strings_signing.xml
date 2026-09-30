@@ -29,6 +29,7 @@
 
     <!-- wallet/ledger/LedgerUsbLink.kt, Ledger.kt: a Ledger over USB (#319) -->
     <string name="signing_ledger_usb_not_plugged_in">Plug your Ledger into the phone with a USB cable, unlock it and try again.</string>
+    <string name="signing_ledger_usb_or_bluetooth_not_found">Plug your Ledger into the phone with a USB cable, or pair it over Bluetooth on Connect a Ledger, then unlock it and try again.</string>
     <string name="signing_ledger_usb_unplugged">The Ledger was unplugged. Plug it back in, unlock it and try again.</string>
     <string name="signing_ledger_usb_permission_refused">Freedom wasn’t given access to the Ledger over USB. Try again and allow it when Android asks.</string>
     <string name="signing_ledger_usb_cannot_talk">Couldn’t talk to the Ledger over USB. Unplug it, plug it back in and try again.</string>

@@ -144,6 +144,9 @@ internal class LedgerUsbLink(private val pipe: Pipe) : LedgerLink {
         /** How long Android's "Allow Freedom to access …?" is waited for. */
         private const val PERMISSION_MS = 60_000L
 
+        /** How often an unplug is looked for while Android's prompt is up. */
+        private const val PERMISSION_POLL_MS = 250L
+
         /** The Ledgers plugged in now: Ledger's vendor id, nothing else. */
         fun devices(manager: UsbManager?): List<UsbDevice> =
             manager?.deviceList?.values.orEmpty().filter { it.vendorId == LedgerHidFraming.VENDOR_ID }.sortedBy { it.deviceName }
@@ -187,7 +190,8 @@ internal class LedgerUsbLink(private val pipe: Pipe) : LedgerLink {
          * not from the broadcast (the pending intent is immutable, so it
          * carries nothing, and it's ours: only its arrival counts).
          * Refused, it's a [LedgerException.Kind.PERMISSION]; unplugged
-         * meanwhile, DISCONNECTED.
+         * meanwhile, DISCONNECTED — as soon as it's unplugged ([awaitAnswer]),
+         * not once the prompt is answered.
          */
         private suspend fun requestPermission(context: Context, manager: UsbManager, device: UsbDevice) {
             val action = context.packageName + ACTION_PERMISSION_SUFFIX
@@ -207,7 +211,7 @@ internal class LedgerUsbLink(private val pipe: Pipe) : LedgerLink {
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
                 )
                 manager.requestPermission(device, pending)
-                withTimeoutOrNull(PERMISSION_MS) { answered.await() }
+                awaitAnswer(answered, PERMISSION_MS, PERMISSION_POLL_MS) { attached(manager, device) }
             } finally {
                 runCatching { context.unregisterReceiver(receiver) }
             }
@@ -216,6 +220,23 @@ internal class LedgerUsbLink(private val pipe: Pipe) : LedgerLink {
                 unplugged()
             } else {
                 LedgerException(LedgerException.Kind.PERMISSION, Strings.said(R.string.signing_ledger_usb_permission_refused))
+            }
+        }
+
+        /**
+         * Waits for [answered] up to [timeoutMs], and no longer than the
+         * device stays plugged in: [attached] is checked every [pollMs]
+         * while Android's prompt is up, so an unplug ends the wait at once
+         * rather than when the user answers or the time runs out. True if
+         * the answer came.
+         */
+        internal suspend fun awaitAnswer(answered: CompletableDeferred<Unit>, timeoutMs: Long, pollMs: Long, attached: () -> Boolean): Boolean {
+            val deadline = now() + timeoutMs
+            while (true) {
+                val left = deadline - now()
+                if (left <= 0) return false
+                if (withTimeoutOrNull(minOf(pollMs, left)) { answered.await() } != null) return true
+                if (!attached()) return false
             }
         }
 
