@@ -415,8 +415,10 @@ class ChainDataRouterTest {
     ) : VerifiedChainSource {
         var calls = 0
         override fun isAvailable(chainId: Long) = available
-        override suspend fun request(chainId: Long, method: String, params: JSONArray): ChainDataResult {
+        val rpcsSeen = CopyOnWriteArrayList<List<String>>()
+        override suspend fun request(chainId: Long, method: String, params: JSONArray, rpcs: List<String>): ChainDataResult {
             calls++
+            rpcsSeen += rpcs
             return answer()
         }
     }
@@ -449,6 +451,70 @@ class ChainDataRouterTest {
         assertEquals(ChainSource.QUORUM, r.trust.source)
         assertEquals(0, unsynced.calls)
         assertEquals(1, failing.calls)
+    }
+
+    @Test
+    fun proofTiersAreAskedMyotisThenColibriThenTheQuorum() = runTest {
+        val net = Net()
+        BuiltInChains.GNOSIS.rpcUrls.forEach { url -> net.handlers[url] = { ok("0x5") } }
+        val order = CopyOnWriteArrayList<String>()
+        val colibriProof = proof.copy(source = ChainSource.COLIBRI, agreed = listOf("gnosis.colibri-proof.tech"))
+        // Myotis synced: it answers, and Colibri is never asked.
+        val myotis = FakeSource { order += "myotis"; ChainDataResult("0x77", proof) }
+        val colibri = FakeSource { order += "colibri"; ChainDataResult("0x78", colibriProof) }
+        val sources = mapOf(ChainSource.MYOTIS to myotis, ChainSource.COLIBRI to colibri)
+        val first = router(net, listOf(BuiltInChains.GNOSIS), sources = sources).request(100, "eth_getBalance")
+        assertEquals(ChainSource.MYOTIS, first.trust.source)
+        assertEquals(listOf("myotis"), order.toList())
+        assertTrue(net.calls.isEmpty())
+
+        // Myotis can't answer (a receipt it hasn't seen, busy): Colibri does.
+        order.clear()
+        val noAnswer = FakeSource { order += "myotis"; throw MyotisChainSource.Unanswered("not seen") }
+        val second = router(net, listOf(BuiltInChains.GNOSIS), sources = sources + (ChainSource.MYOTIS to noAnswer))
+            .request(100, "eth_getTransactionReceipt")
+        assertEquals(ChainSource.COLIBRI, second.trust.source)
+        assertEquals(listOf("myotis", "colibri"), order.toList())
+        assertTrue(net.calls.isEmpty())
+
+        // Myotis parked on a stale anchor (not available) and Colibri's
+        // proof failing: the quorum answers.
+        order.clear()
+        val parked = FakeSource(available = false) { order += "myotis"; ChainDataResult("0x0", proof) }
+        val badProof = FakeSource { order += "colibri"; throw IOException("proof failed verification") }
+        val third = router(net, listOf(BuiltInChains.GNOSIS), sources = mapOf(ChainSource.MYOTIS to parked, ChainSource.COLIBRI to badProof))
+            .request(100, "eth_getBalance")
+        assertEquals(ChainSource.QUORUM, third.trust.source)
+        assertEquals(listOf("colibri"), order.toList())
+    }
+
+    @Test
+    fun aProofSourceIsGivenTheChainsPoolUsersRpcsFirst() = runTest {
+        val net = Net()
+        val colibri = FakeSource { ChainDataResult("0x1", proof.copy(source = ChainSource.COLIBRI)) }
+        router(
+            net, listOf(chain(id = 100, rpcs = listOf(a, b), user = listOf(mine))),
+            sources = mapOf(ChainSource.COLIBRI to colibri),
+        ).request(100, "eth_getBalance")
+        assertEquals(listOf(listOf(mine, a, b)), colibri.rpcsSeen.toList())
+    }
+
+    @Test
+    fun aBroadcastSkipsProofSourcesThatCantBroadcast() = runTest {
+        // A read-only light client is "not available" to a broadcast, never
+        // a source that may have taken the transaction: the RPC's refusal
+        // is still the whole answer.
+        val net = Net()
+        net.handlers[a] = { err(-32000, "insufficient funds for gas * price + value") }
+        val readOnly = FakeSource { ChainDataResult("0x1", proof) }
+        try {
+            router(net, listOf(chain(id = 100, rpcs = listOf(a))), sources = mapOf(ChainSource.MYOTIS to readOnly))
+                .broadcast(100, rawTx)
+            fail()
+        } catch (e: ChainRpcException.Rpc) {
+            assertTrue(e.insufficientFunds)
+        }
+        assertEquals(0, readOnly.calls)
     }
 
     @Test
@@ -622,8 +688,9 @@ class ChainDataRouterTest {
         BuiltInChains.ETHEREUM.rpcUrls.forEach { url -> net.handlers[url] = { ok(txHash) } }
         val myotis = object : VerifiedChainSource {
             override fun isAvailable(chainId: Long) = true
-            override suspend fun request(chainId: Long, method: String, params: JSONArray): ChainDataResult =
+            override suspend fun request(chainId: Long, method: String, params: JSONArray, rpcs: List<String>): ChainDataResult =
                 throw IOException()
+            override val canBroadcast = true
             override suspend fun broadcast(chainId: Long, rawTransaction: String): String =
                 throw ChainRpcException.BroadcastUncertain("devp2p")
         }

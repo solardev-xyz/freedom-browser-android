@@ -10,6 +10,7 @@ import android.util.Log
 import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisNetwork
 import baby.freedom.swarm.MyotisNode
+import baby.freedom.swarm.MyotisReads
 import baby.freedom.swarm.MyotisStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -134,12 +135,52 @@ class MyotisService : Service() {
                 reply(result, if (json.length <= MAX_RESULT_CHARS) json else TOO_LARGE_JSON)
             }
         }
+
+        override fun read(chainId: Long, method: String?, paramsJson: String?, result: IMyotisCallResult?) {
+            result ?: return
+            val node = node
+            val network = MyotisNetwork.forChain(chainId)
+            val params = paramsJson?.let { runCatching { org.json.JSONArray(it) }.getOrNull() }
+            if (node == null || network == null || method == null || params == null) {
+                reply(result, MyotisNode.NOT_READY_JSON)
+                return
+            }
+            // The router's reads have slots of their own, so a wallet or
+            // Swarm-node burst can't take name resolution's; one that runs
+            // the EVM also takes a lookup slot, since the engine runs at
+            // most eight EVM executions at once whoever asks. No slot: the
+            // router moves on to its next tier at once.
+            if (routerReadsInFlight.incrementAndGet() > ROUTER_READ_SLOTS) {
+                routerReadsInFlight.decrementAndGet()
+                reply(result, BUSY_JSON)
+                return
+            }
+            val evm = MyotisReads.executesEvm(method)
+            if (evm && lookupsInFlight.incrementAndGet() > MAX_CALLS_IN_FLIGHT - PROBE_SLOTS) {
+                lookupsInFlight.decrementAndGet()
+                routerReadsInFlight.decrementAndGet()
+                reply(result, BUSY_JSON)
+                return
+            }
+            reads.launch {
+                val json = try {
+                    node.read(network, method, params)
+                } catch (t: Throwable) {
+                    """{"status":"unavailable","reason":${JSONObject.quote(t.message ?: t.javaClass.simpleName)}}"""
+                } finally {
+                    if (evm) lookupsInFlight.decrementAndGet()
+                    routerReadsInFlight.decrementAndGet()
+                }
+                reply(result, if (json.length <= MAX_RESULT_CHARS) json else TOO_LARGE_JSON)
+            }
+        }
     }
 
-    /** Where [IMyotisService.ethCall]s run: each blocks for as long as the engine takes. */
+    /** Where [IMyotisService.ethCall]s and [IMyotisService.read]s run: each blocks for as long as the engine takes. */
     private val reads = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lookupsInFlight = AtomicInteger()
     private val probesInFlight = AtomicInteger()
+    private val routerReadsInFlight = AtomicInteger()
 
     private fun reply(result: IMyotisCallResult, json: String) {
         // The caller may be gone (its process died); nothing to tell it.
@@ -221,6 +262,9 @@ class MyotisService : Service() {
         private const val STOP_TIMEOUT_MS = 10_000L
         private const val MAX_CALLS_IN_FLIGHT = 8
         private const val PROBE_SLOTS = 1
+
+        /** The chain-data router's reads at once (#329), both chains together. */
+        private const val ROUTER_READ_SLOTS = 4
         private const val MAX_RESULT_CHARS = 64 * 1024
         private const val BUSY_JSON = """{"status":"unavailable","reason":"busy","busy":true}"""
         private const val TOO_LARGE_JSON = """{"error":"result too large"}"""

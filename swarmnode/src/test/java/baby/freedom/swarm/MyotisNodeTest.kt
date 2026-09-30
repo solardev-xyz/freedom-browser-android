@@ -67,6 +67,10 @@ class MyotisNodeTest {
             calls += "ethCall $handle $to $data $block"
             return """{"status":"ok","resultHex":"0x01","blockNumber":7,"verified":false}"""
         }
+        override fun requestAccount(handle: Long, address: String, block: String): String {
+            calls += "account $handle $address $block"
+            return """{"exists":true,"nonce":5,"balanceWei":"1000","blockNumber":7,"verifyMethod":"headerChain","failReason":null}"""
+        }
     }
 
     /** A checkpoint source that never answers: these tests are about parking, not recovery. */
@@ -659,6 +663,25 @@ class MyotisNodeTest {
         idle(node)
         assertEquals(MyotisNode.NOT_READY_JSON, node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01"))
         assertEquals(2, engine.calls.count { it.startsWith("ethCall") })
+    }
+
+    @Test
+    fun `a router read reaches the engine on a ready chain and never on a parked one`() {
+        val engine = FakeEngine()
+        engine.status[1L] = readyJson
+        engine.status[2L] = """{"running":true,"beaconState":"STALE_ANCHOR","snapServingPeers":1,"elReaderAvailable":true,"currentPeriod":3692,"targetPeriod":3701,"wsBoundPeriods":3}"""
+        val node = node(engine)
+        val address = "0x" + "ab".repeat(20)
+        val params = org.json.JSONArray().put(address).put("latest")
+        node.start()
+        idle(node)
+        val mainnet = org.json.JSONObject(node.read(MyotisNetwork.Mainnet, "eth_getTransactionCount", params))
+        assertEquals("0x5", mainnet.get("result"))
+        assertEquals(7L, mainnet.getLong("blockNumber"))
+        assertTrue("account 1 $address latest" in engine.calls)
+        // Gnosis is parked on its stale anchor: no read reaches its engine.
+        assertEquals(MyotisNode.NOT_READY_JSON, node.read(MyotisNetwork.Gnosis, "eth_getTransactionCount", params))
+        assertFalse(engine.calls.any { it.startsWith("account 2") })
     }
 
     // ---- Per-chain switches (#274).

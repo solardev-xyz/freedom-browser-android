@@ -6,14 +6,18 @@ import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisNetwork
 import baby.freedom.swarm.MyotisStatus
 import java.util.WeakHashMap
+import kotlin.coroutines.resume
+import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Name resolution's line to the Myotis light client in the `:myotis`
- * process (#101): [EnsLightClient] over [IMyotisService.ethCall].
+ * This process's line to the Myotis light client in the `:myotis`
+ * process: name resolution's [EnsLightClient] over
+ * [IMyotisService.ethCall] (#101), and the chain-data router's reads over
+ * [IMyotisService.read] ([read], #329).
  *
  * Every `MainActivity` instance owns its own binding and reports it here
  * under its own key — the service when it connects ([connected]), every
@@ -26,7 +30,11 @@ import java.util.concurrent.atomic.AtomicReference
  * screen's "serving" state uses. With Ethereum switched off and only
  * Gnosis running (#274) that is never, so the resolver goes straight to
  * its next tier, as with the light client off. Each time that flips (or a different
- * binding takes over) there's a new [readyGeneration].
+ * binding takes over) there's a new [readyGeneration]. The router's reads
+ * go by each chain's own readiness instead ([isReady]).
+ *
+ * In the `:node` process the Swarm node's binding reports here the same
+ * way ([MyotisReadBinding]), so its Gnosis reads reach the light client too.
  */
 object MyotisLink : EnsLightClient {
     private val bindings = MyotisBindings<IMyotisService> { info ->
@@ -40,6 +48,48 @@ object MyotisLink : EnsLightClient {
     fun disconnected(owner: Any) = bindings.disconnected(owner)
 
     override fun readyGeneration(): Long? = bindings.generation
+
+    /**
+     * Whether chain [chainId] is [baby.freedom.swarm.MyotisChainStatus.ready]
+     * in the state the binding reads go to last published: synced, a
+     * state peer at the head, not parked on a stale anchor, not
+     * recovering, not paused in the background.
+     */
+    fun isReady(chainId: Long): Boolean = chainId in bindings.readyChains
+
+    /**
+     * One of the chain-data router's reads ([IMyotisService.read]): the
+     * service's `MyotisReads` reply, or an `unavailable` one when there's
+     * no binding or `:myotis` dies before answering. Cancellable at once:
+     * the service still answers a read it started, into nothing.
+     */
+    suspend fun read(chainId: Long, method: String, paramsJson: String): String {
+        val service = bindings.service ?: return UNAVAILABLE_JSON
+        val binder = service.asBinder()
+        return suspendCancellableCoroutine { cont ->
+            val done = AtomicBoolean(false)
+            lateinit var death: IBinder.DeathRecipient
+            fun finish(json: String) {
+                if (!done.compareAndSet(false, true)) return
+                runCatching { binder.unlinkToDeath(death, 0) }
+                if (cont.isActive) cont.resume(json)
+            }
+            death = IBinder.DeathRecipient { finish(UNREACHABLE_JSON) }
+            cont.invokeOnCancellation { runCatching { binder.unlinkToDeath(death, 0) } }
+            try {
+                binder.linkToDeath(death, 0)
+                service.read(chainId, method, paramsJson, object : IMyotisCallResult.Stub() {
+                    override fun onResult(json: String?) = finish(json ?: UNAVAILABLE_JSON)
+                })
+            } catch (e: Exception) {
+                // DeadObjectException (`:myotis` exited) and friends.
+                finish(UNREACHABLE_JSON)
+            }
+        }
+    }
+
+    private const val UNAVAILABLE_JSON = """{"status":"unavailable","reason":"light client not connected","notReady":true}"""
+    private const val UNREACHABLE_JSON = """{"status":"unavailable","reason":"light client unreachable"}"""
 
     override fun ethCall(
         to: String,
@@ -143,6 +193,11 @@ internal class MyotisBindings<S : Any>(private val ready: (MyotisInfo) -> Boolea
     var generation: Long? = null
         private set
 
+    /** The chains ready in the state [service]'s binding last published. */
+    @Volatile
+    var readyChains: Set<Long> = emptySet()
+        private set
+
     fun connected(owner: Any, service: S) = synchronized(lock) {
         byOwner[owner] = Binding(service, ++seq)
         refresh()
@@ -171,5 +226,7 @@ internal class MyotisBindings<S : Any>(private val ready: (MyotisInfo) -> Boolea
         }
         current = pick
         service = pick?.service
+        readyChains = pick?.info?.takeIf { it.status == MyotisStatus.Running }?.chains
+            ?.filter { it.ready }?.mapTo(HashSet()) { it.chainId }.orEmpty()
     }
 }

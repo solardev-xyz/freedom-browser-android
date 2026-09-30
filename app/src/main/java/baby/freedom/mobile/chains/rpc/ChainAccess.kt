@@ -11,10 +11,10 @@ import baby.freedom.mobile.l10n.Strings
  * `ChainSource` raw value.
  */
 enum class ChainSource(val key: String, @StringRes private val labelRes: Int) {
-    /** Embedded P2P light client (Ethereum, Gnosis). Not wired on Android yet (#72). */
+    /** Embedded P2P light client (Ethereum, Gnosis), when the user runs it for that chain ([baby.freedom.mobile.chains.rpc.MyotisChainSource]). */
     MYOTIS("myotis", R.string.names_source_myotis),
 
-    /** Remote prover with a sync-committee proof (Ethereum, Gnosis). Not wired on Android yet. */
+    /** Remote prover with a sync-committee proof checked on the device (Ethereum, Gnosis; [baby.freedom.mobile.chains.rpc.ColibriChainSource]). */
     COLIBRI("colibri", R.string.names_source_colibri),
 
     /** [ChainAccessPolicy.quorumM] of the first [ChainAccessPolicy.quorumK] RPCs return the same bytes. */
@@ -175,23 +175,33 @@ data class ChainDataResult(
 )
 
 /**
- * A light client or prover the router can ask ([ChainSource.MYOTIS],
- * [ChainSource.COLIBRI]). Neither exists on Android yet; the router skips
- * a tier with no source registered, so a policy naming one still reads.
- * Admission (how many calls a source takes at once) is the source's own
- * business — the router only bounds how long it waits.
+ * A light client or prover the router can ask ([ChainSource.MYOTIS]:
+ * [MyotisChainSource], [ChainSource.COLIBRI]: [ColibriChainSource], #329).
+ * The router skips a tier with no source registered, or one that isn't
+ * [isAvailable], so a policy naming one still reads. Admission (how many
+ * calls a source takes at once) is the source's own business — the
+ * router only bounds how long it waits.
  */
 interface VerifiedChainSource {
-    /** Whether the source can answer for [chainId] right now (synced, reachable). */
+    /** Whether the source can answer for [chainId] right now (synced, reachable). Cheap: the chain page asks it while drawing. */
     fun isAvailable(chainId: Long): Boolean
 
     /**
-     * Answer [method] with the trust the source mints. Throw
-     * [ChainRpcException.Rpc] with `deterministic` set for an answer
-     * that is itself an error (a revert); anything else thrown means
-     * "couldn't answer", and the walk moves on.
+     * Answer [method] with the trust the source mints. [rpcs] is the
+     * chain's RPC pool in the router's order, for a source that fetches
+     * the state it proves from them. Throw [ChainRpcException.Rpc] with
+     * `deterministic` set for an answer that is itself an error (a
+     * revert); anything else thrown means "couldn't answer", and the walk
+     * moves on.
      */
-    suspend fun request(chainId: Long, method: String, params: org.json.JSONArray): ChainDataResult
+    suspend fun request(chainId: Long, method: String, params: org.json.JSONArray, rpcs: List<String>): ChainDataResult
+
+    /**
+     * Whether [broadcast] is implemented. The router asks a source that
+     * can't only on reads: its broadcast tier counts as not available,
+     * never as "may have sent it".
+     */
+    val canBroadcast: Boolean get() = false
 
     /**
      * Send a signed transaction; its hash. Throw

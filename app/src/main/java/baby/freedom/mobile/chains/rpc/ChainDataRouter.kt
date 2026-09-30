@@ -1,15 +1,19 @@
 package baby.freedom.mobile.chains.rpc
 
+import android.app.Application
 import android.content.Context
 import android.util.Log
 import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.RpcUrls
 import baby.freedom.mobile.data.ChainStore
+import baby.freedom.mobile.ens.EnsColibri
 import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.swarm.ColibriNative
+import java.io.File
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
@@ -30,9 +34,12 @@ import org.json.JSONArray
  * single RPC — and the first tier with an answer wins, labelled with how
  * it was checked ([ChainTrust]):
  *
- * - **Myotis / Colibri** ([VerifiedChainSource]): a proof. No source is
- *   wired on Android yet (the light client is #72), so these tiers are
- *   skipped and a read on Ethereum or Gnosis starts at the quorum.
+ * - **Myotis / Colibri** ([VerifiedChainSource], #329): a proof — the
+ *   embedded light client ([MyotisChainSource]) when the user runs it for
+ *   the chain and it's ready, then corpus.core's Colibri prover
+ *   ([ColibriChainSource]). Each answers only what it can prove (a
+ *   `pending` nonce, say, or a receipt it hasn't seen, moves on), and a
+ *   tier that isn't available is skipped.
  * - **Quorum** ([QuorumRun]): the chain's first K RPCs from different
  *   providers ([quorumMembers]) are asked the same bytes at once; M
  *   identical answers are verified. Needs M providers. The user's own
@@ -58,10 +65,11 @@ import org.json.JSONArray
  * transport failed in the last [QUARANTINE_MS] move to the back of the
  * pool.
  *
- * Not ported yet, along with the sources they serve: desktop's per-route
- * cooldowns and the light-client / prover admission queues, which only
- * matter once Myotis or Colibri is wired and a page drives reads (the
- * dapp bridge, `web3://` apps). ENS resolution keeps its own resolver
+ * Not ported yet: desktop's per-route cooldowns and its light-client
+ * admission queue — here each proof source admits a few reads at once and
+ * turns the rest away at once, so they move on to the next tier rather
+ * than wait. Broadcasts don't go through the proof tiers yet (neither
+ * source broadcasts, [VerifiedChainSource.canBroadcast]). ENS resolution keeps its own resolver
  * ([baby.freedom.mobile.ens.EnsResolver]), as on iOS.
  */
 class ChainDataRouter internal constructor(
@@ -149,7 +157,7 @@ class ChainDataRouter internal constructor(
                 val t0 = clock()
                 val outcome: Any? = when (source) {
                     ChainSource.MYOTIS, ChainSource.COLIBRI ->
-                        verified(source, chain, method, normalized, waitMs, keeper)
+                        verified(source, chain, pool, method, normalized, waitMs, keeper)
                             .let { o -> if (agreeOn != null && o is ChainDataResult) o.copy(result = agreeOn(o.result)) else o }
                     ChainSource.QUORUM -> {
                         val members = quorumMembers(pool, policy.quorumK)
@@ -248,7 +256,7 @@ class ChainDataRouter internal constructor(
         for (source in policy.broadcastOrder) {
             when (source) {
                 ChainSource.MYOTIS, ChainSource.COLIBRI -> {
-                    val s = verifiedSources[source]?.takeIf { it.isAvailable(chain.id) }
+                    val s = verifiedSources[source]?.takeIf { it.canBroadcast && it.isAvailable(chain.id) }
                     if (s == null) {
                         failures += "${source.key}: not available"
                         continue
@@ -327,6 +335,7 @@ class ChainDataRouter internal constructor(
     private suspend fun verified(
         source: ChainSource,
         chain: Chain,
+        pool: List<String>,
         method: String,
         params: JSONArray,
         waitMs: Long,
@@ -336,7 +345,7 @@ class ChainDataRouter internal constructor(
             reason.also { keeper.note(ChainFailure(null, it, null, timeout)) }
         val s = verifiedSources[source]?.takeIf { it.isAvailable(chain.id) } ?: return failed("not available")
         return try {
-            withTimeoutOrNull(waitMs) { s.request(chain.id, method, params) }
+            withTimeoutOrNull(waitMs) { s.request(chain.id, method, params, pool) }
                 ?: failed("no answer within ${waitMs}ms", timeout = true)
         } catch (e: CancellationException) {
             // The source's own cancellation, not ours: no answer.
@@ -624,8 +633,34 @@ class ChainDataRouter internal constructor(
             instance ?: synchronized(this) {
                 instance ?: run {
                     val store = ChainStore.get(context)
-                    ChainDataRouter(chains = { store.chains.first() }, transport = PinnedHttpTransport())
+                    ChainDataRouter(
+                        chains = { store.chains.first() },
+                        transport = PinnedHttpTransport(),
+                        verifiedSources = verifiedSources(context),
+                    )
                 }.also { instance = it }
             }
+
+        /**
+         * The proof tiers (#329): the light client through this process's
+         * binding to `:myotis` ([baby.freedom.mobile.node.MyotisLink]) and
+         * the Colibri verifier. Colibri keeps its sync-committee state in
+         * `colibri` in the app's own process — the directory name
+         * resolution uses, since the verifier is set up once per process —
+         * and in `colibri-<process>` elsewhere (the Swarm node's `:node`),
+         * so two processes never write one directory.
+         */
+        internal fun verifiedSources(context: Context): Map<ChainSource, VerifiedChainSource> {
+            val app = context.applicationContext
+            val suffix = Application.getProcessName().substringAfter(':', "")
+            val statesDir = File(app.filesDir, if (suffix.isEmpty()) "colibri" else "colibri-$suffix")
+            return mapOf(
+                ChainSource.MYOTIS to MyotisChainSource(),
+                ChainSource.COLIBRI to ColibriChainSource(
+                    EnsColibri(EnsColibri.NativeEngine { statesDir }),
+                    present = { ColibriNative.available || !ColibriNative.initFailed },
+                ),
+            )
+        }
     }
 }

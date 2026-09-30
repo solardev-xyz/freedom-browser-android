@@ -259,7 +259,7 @@
     <string name="wallet_accounts_locked_finding">Finding your accounts…</string>
     <string name="wallet_accounts_balances_title">Balances</string>
     <string name="wallet_accounts_balances_reading">Reading from the chains…</string>
-    <string name="wallet_accounts_balances_source">Read through each chain’s RPCs</string>
+    <string name="wallet_accounts_balances_source">Read through each chain’s light client, Colibri proofs or RPCs; each amount says which</string>
     <string name="wallet_accounts_refresh">Refresh</string>
 
     <!-- WalletBackupUi.kt -->

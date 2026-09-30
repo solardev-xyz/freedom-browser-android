@@ -115,6 +115,7 @@ class NodeService : Service() {
      * receipts) until it ends, and the process exits after either way.
      */
     private lateinit var chainBridge: AntChainBridge
+    private val myotisReads = MyotisReadBinding(this)
     private var ipfsNode: IpfsNode? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -639,8 +640,15 @@ class NodeService : Service() {
         vaultStore = KeystoreVaultStore(this)
         // Before the node starts: ant's first chain reads come at its
         // gateway's start.
+        // Its light-client tier reads through this process's own
+        // binding to `:myotis`, which never starts the light client.
+        myotisReads.bind()
         chainBridge = AntChainBridge(
-            ChainDataRouter(chains = { listOf(gnosisForReads()) }, transport = PinnedHttpTransport()),
+            ChainDataRouter(
+                chains = { listOf(gnosisForReads()) },
+                transport = PinnedHttpTransport(),
+                verifiedSources = ChainDataRouter.verifiedSources(this),
+            ),
         )
         AntChainTransport.install(chainBridge::serve, chainBridge::cancelInFlight)
         swarmNode = SwarmNode(
@@ -782,6 +790,7 @@ class NodeService : Service() {
 
     override fun onDestroy() {
         unregisterNetworkCallback()
+        myotisReads.unbind()
         callbacks.kill()
         swarmObserver?.cancel()
         ipfsObserver?.cancel()
