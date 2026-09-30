@@ -42,8 +42,11 @@ class SwarmFundingTest {
     private val connects: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
     private val payer = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
 
+    /** The node's spend, idle: as the funding reads it, a [StateFlow][kotlinx.coroutines.flow.StateFlow]. */
+    private fun idle() = kotlinx.coroutines.flow.MutableStateFlow<StampClient.Spend>(StampClient.Spend.Idle)
+
     private fun funding(file: File = File(tmp.root, "funding.json")) =
-        SwarmFunding(file, connect = { connects += it; true }, spends = emptyFlow())
+        SwarmFunding(file, connect = { connects += it; true }, spends = idle())
 
     private fun status(stage: SendStatus.Stage, l: SwarmFundLabel? = label): SendStatus {
         val gnosis = BuiltInChains.GNOSIS
@@ -223,7 +226,7 @@ class SwarmFundingTest {
             untrack()
         }
         return SwarmFunding(
-            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = emptyFlow(), chain = chain,
+            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = idle(), chain = chain,
             confirmAfterMs = 30_000, now = now,
         )
     }
@@ -419,7 +422,7 @@ class SwarmFundingTest {
     fun `an untracked call is looked up less and less often, and not at all once it can never be mined`() {
         val chain = FakeChain()
         val f = SwarmFunding(
-            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = emptyFlow(), chain = chain,
+            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = idle(), chain = chain,
             checkEveryMs = 10, checkAtMostEveryMs = 60_000, confirmAfterMs = 10,
         )
         val started = System.nanoTime()
@@ -453,7 +456,7 @@ class SwarmFundingTest {
     fun `lookups stopped by a superseded verdict start again when a Connect's read withdraws it`() {
         val chain = FakeChain()
         val f = SwarmFunding(
-            File(tmp.root, "funding.json"), connect = { connects += it; false }, spends = emptyFlow(), chain = chain,
+            File(tmp.root, "funding.json"), connect = { connects += it; false }, spends = idle(), chain = chain,
             checkEveryMs = 10, checkAtMostEveryMs = 40, confirmAfterMs = 10,
         )
         chain.minedCount = BigInteger.TWO
@@ -488,7 +491,7 @@ class SwarmFundingTest {
     @Test
     fun `once the wallet stops following the call, it's looked up on chain until it's mined`() {
         val chain = FakeChain()
-        val f = SwarmFunding(File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = emptyFlow(), chain = chain, checkEveryMs = 20)
+        val f = SwarmFunding(File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = idle(), chain = chain, checkEveryMs = 20)
         f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
         awaitPending(f) { it?.tracked == false }
         val until = System.currentTimeMillis() + 5_000
@@ -508,7 +511,7 @@ class SwarmFundingTest {
     private fun busyFunding(free: kotlinx.coroutines.flow.MutableStateFlow<Boolean>, chain: FakeChain? = null) =
         SwarmFunding(
             File(tmp.root, "funding.json"), connect = { if (free.value) { connects += it; true } else false },
-            spends = emptyFlow(), chain = chain, confirmAfterMs = 30_000, now = { 0L }, connectFree = free,
+            spends = idle(), chain = chain, confirmAfterMs = 30_000, now = { 0L }, connectFree = free,
         )
 
     @Test
@@ -553,6 +556,132 @@ class SwarmFundingTest {
         free.value = true
         Thread.sleep(100)
         assertTrue(connects.isEmpty())
+    }
+
+    @Test
+    fun `a refused connect owes nothing once a Dismiss or a started Connect lands before it's marked owed`() {
+        val free = kotlinx.coroutines.flow.MutableStateFlow(false)
+        lateinit var f: SwarmFunding
+        // The user's tap lands between the node refusing the mined stamp's connect and it being marked owed.
+        var onRefused: (() -> Unit)? = null
+        f = SwarmFunding(
+            File(tmp.root, "funding.json"),
+            connect = {
+                if (free.value) {
+                    connects += it
+                    true
+                } else {
+                    onRefused?.also { onRefused = null }?.invoke()
+                    false
+                }
+            },
+            spends = idle(), now = { 0L }, connectFree = free,
+        )
+        f.start(emptyFlow())
+
+        // Dismissed: no record, nothing owed.
+        onRefused = { f.forget() }
+        f.noteSend(status(SendStatus.Stage.Pending))
+        f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
+        assertNull(f.pending.value)
+        assertNull(f.connectOwed.value)
+
+        // The user's Connect started (the node just came free): it isn't owed a second one.
+        onRefused = {
+            free.value = true
+            assertTrue(f.connectNow())
+        }
+        f.noteSend(status(SendStatus.Stage.Pending))
+        f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
+        assertEquals(listOf(batch), connects)
+        assertNull(f.connectOwed.value)
+        Thread.sleep(100)
+        assertEquals(1, connects.size)
+    }
+
+    @Test
+    fun `an untracked call found mined while its own earlier Connect still runs owes no second connect`() {
+        val chain = FakeChain()
+        funding().apply {
+            noteSend(status(SendStatus.Stage.Unconfirmed))
+            untrack()
+        }
+        val free = kotlinx.coroutines.flow.MutableStateFlow(true)
+        val spends = kotlinx.coroutines.flow.MutableStateFlow<StampClient.Spend>(StampClient.Spend.Idle)
+        // As StampClient does: a started connect holds the node until it ends.
+        val f = SwarmFunding(
+            File(tmp.root, "funding.json"),
+            connect = {
+                if (free.value) {
+                    connects += it
+                    free.value = false
+                    spends.value = StampClient.Spend.Running(StampClient.Kind.Connect, it)
+                    true
+                } else {
+                    false
+                }
+            },
+            spends = spends, chain = chain, confirmAfterMs = 30_000, now = { 0L }, connectFree = free,
+        )
+        f.start(emptyFlow())
+        // The user's Connect starts (ticket 1); the chain then shows the call mined, and the
+        // app's own connect (ticket 2) is refused because ticket 1 runs: nothing is owed.
+        assertTrue(f.connectNow())
+        chain.receipt = receipt("0x1")
+        chain.minedCount = BigInteger.TWO
+        runBlocking { f.checkChain() }
+        assertTrue(f.pending.value!!.mined)
+        assertNull(f.connectOwed.value)
+        // The first connect fails: the card's Connect is offered, no automatic retry.
+        spends.value = StampClient.Spend.Failed(StampClient.Kind.Connect, batch, "batch not found")
+        free.value = true
+        Thread.sleep(100)
+        assertEquals(listOf(batch), connects)
+        assertNull(f.connectOwed.value)
+
+        // Control: with that connect ended, a later record of the batch mined while
+        // the node is busy with other work is owed its connect as before.
+        f.forget()
+        free.value = false
+        f.noteSend(status(SendStatus.Stage.Pending))
+        f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
+        assertEquals(batch, f.connectOwed.value)
+    }
+
+    @Test
+    fun `a connect that ended before the spends collector saw it doesn't stop a later refused one being owed`() {
+        val free = kotlinx.coroutines.flow.MutableStateFlow(true)
+        val spends = idle()
+        // As StampClient does when the service is unbound: Running, then Failed at once, and the
+        // UI acknowledges it to Idle — all before the funding's collector could read any of it.
+        val f = SwarmFunding(
+            File(tmp.root, "funding.json"),
+            connect = {
+                if (free.value) {
+                    connects += it
+                    spends.value = StampClient.Spend.Running(StampClient.Kind.Connect, it)
+                    spends.value = StampClient.Spend.Failed(StampClient.Kind.Connect, it, "node not bound")
+                    spends.value = StampClient.Spend.Idle
+                    true
+                } else {
+                    false
+                }
+            },
+            spends = spends, now = { 0L }, connectFree = free,
+        )
+        f.start(emptyFlow())
+        f.noteSend(status(SendStatus.Stage.Pending))
+        f.noteSend(status(SendStatus.Stage.Unconfirmed))
+        f.untrack()
+        assertTrue(f.connectNow())
+        // Mined while other work holds the node: that connect is over, so this one is owed.
+        free.value = false
+        f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
+        assertTrue(f.pending.value!!.mined)
+        assertEquals(batch, f.connectOwed.value)
+        free.value = true
+        awaitConnects(2)
+        assertEquals(listOf(batch, batch), connects)
     }
 
     @Test

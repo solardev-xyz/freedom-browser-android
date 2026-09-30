@@ -1,6 +1,7 @@
 package baby.freedom.mobile.ens
 
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -37,6 +38,9 @@ class EnsLightClientResolveTest {
         val calls: MutableList<Pair<String, String>> = Collections.synchronizedList(mutableListOf())
         val probes: MutableList<Long> = Collections.synchronizedList(mutableListOf())
         @Volatile var lastTimeoutMs = 0L
+
+        /** Probe calls that have returned to the resolver (answered, or timed out). */
+        val probesOver = java.util.concurrent.atomic.AtomicInteger()
         override fun readyGeneration(): Long? = generation
         override fun ethCall(
             to: String,
@@ -61,6 +65,8 @@ class EnsLightClientResolveTest {
                     task.get(timeoutMs, TimeUnit.MILLISECONDS)
                 } catch (e: TimeoutException) {
                     EnsLightClient.Call.Unavailable("no answer within ${timeoutMs}ms", timedOut = true)
+                } finally {
+                    probesOver.incrementAndGet()
                 }
             }
             calls += to to data
@@ -488,12 +494,17 @@ class EnsLightClientResolveTest {
 
     @Test
     fun `a re-check of a name just missed doesn't wait for the probe`() {
-        // R1-F1: a struggling engine — the probe takes ~2 s. The name's
-        // re-check gets no light-client allowance, so it mustn't wait for
-        // the probe either: the RPC answer comes straight away.
+        // R1-F1: a struggling engine — the probe hangs until the test lets
+        // it go. The name's re-check gets no light-client allowance, so it
+        // mustn't wait for the probe either: the RPC answer comes while
+        // the probe is still in the engine. (A lookup that waited would
+        // only return once the probe had — answered or timed out.)
+        val probeSent = CountDownLatch(1)
+        val probeHeld = CountDownLatch(1)
         val client = FakeLightClient { _, data ->
             if (data == EnsResolver.PROBE_CALL_DATA) {
-                Thread.sleep(2_000)
+                probeSent.countDown()
+                probeHeld.await()
                 lightClientOk
             } else {
                 EnsLightClient.parse("""{"error":"state unavailable"}""")
@@ -503,15 +514,19 @@ class EnsLightClientResolveTest {
         val r = resolver(client, http)
         val settings = EnsResolver.Settings(listOf(rpc))
 
-        runBlocking { r.resolveContenthash("vitalik.eth") }
-        assertEquals(1, client.probes.size)
-        assertEquals(0L, r.lightClientWaitFor(settings, "vitalik.eth"))
-        val started = System.currentTimeMillis()
-        val again = runBlocking { r.resolveContenthash("vitalik.eth") } as EnsResult.Ok
-        val took = System.currentTimeMillis() - started
-        assertFalse(again.trust.lightClient)
-        assertTrue("took ${took}ms", took < 1_000)
-        assertEquals(1, client.calls.size)
+        try {
+            runBlocking { r.resolveContenthash("vitalik.eth") }
+            // The probe is started off the lookup, which doesn't wait for it to be sent.
+            assertTrue(probeSent.await(30, TimeUnit.SECONDS))
+            assertEquals(1, client.probes.size)
+            assertEquals(0L, r.lightClientWaitFor(settings, "vitalik.eth"))
+            val again = runBlocking { r.resolveContenthash("vitalik.eth") } as EnsResult.Ok
+            assertEquals("the re-check waited for the probe", 0, client.probesOver.get())
+            assertFalse(again.trust.lightClient)
+            assertEquals(1, client.calls.size)
+        } finally {
+            probeHeld.countDown()
+        }
     }
 
     @Test
@@ -619,12 +634,13 @@ class EnsLightClientResolveTest {
 
         runBlocking { r.resolveContenthash("vitalik.eth") }
         assertEquals(1, client.calls.size)
-        // The miss was checked against a call no name has a say in.
-        assertEquals(1, client.probes.size)
         // A different name straight after: RPC only, no light-client wait.
         val second = runBlocking { r.resolveContenthash("nick.eth") } as EnsResult.Ok
         assertFalse(second.trust.lightClient)
         assertEquals(1, client.calls.size)
+        // The miss was checked against a call no name has a say in: sent
+        // off the first lookup, and waited out by the second.
+        assertEquals(1, client.probes.size)
         assertEquals(2, http.urls.size)
         // Once the back-off has passed it's asked again.
         Thread.sleep(400)

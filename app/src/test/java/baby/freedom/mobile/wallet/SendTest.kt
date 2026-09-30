@@ -25,11 +25,15 @@ import java.io.IOException
 import java.math.BigInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -173,6 +177,30 @@ class SendTest {
         failure?.let { throw it }
         assertEquals(1L, held.count)
     }
+
+    /**
+     * Until nothing launched in [scope] is still running — a sender's
+     * journal writes, sweeps and broadcasts all done — so a test checks
+     * what it left, not what it had got to after some wait. Only for a
+     * scope whose senders follow no receipt (that loop runs until the
+     * clock moves).
+     */
+    private suspend fun idle(scope: CoroutineScope = this.scope) {
+        val job = scope.coroutineContext.job
+        // An [ownScope]'s job never completes on its own: wait for what runs in it instead.
+        fun running(j: Job): List<Job> = j.children.flatMap { if (it in ownScopes) running(it) else listOf(it) }.toList()
+        while (true) {
+            val running = running(job)
+            if (running.isEmpty()) return
+            running.joinAll()
+        }
+    }
+
+    /** A scope of its own for one sender, cancelled with [scope]: to [idle] on it alone. */
+    private fun ownScope() = CoroutineScope(SupervisorJob(scope.coroutineContext.job).also { ownScopes += it } + Dispatchers.Default)
+
+    /** The jobs of every [ownScope], which [idle] looks through rather than waits on. */
+    private val ownScopes: MutableSet<Job> = java.util.Collections.synchronizedSet(mutableSetOf())
 
     /** A journal file that outlives one [WalletSender], as the app's outlives its process. */
     private fun journalFile() = java.io.File(tmp.root, "wallet/send.json")
@@ -1022,7 +1050,7 @@ class SendTest {
         assertTrue(signing.await(5, java.util.concurrent.TimeUnit.SECONDS))
         s.discard()
         gate.countDown()
-        Thread.sleep(200)
+        idle()
         assertNull(s.status.value)
         assertEquals(sentBefore, chain.sent.size)
     }
@@ -1358,14 +1386,13 @@ class SendTest {
         // Not mined yet: the next launch keeps it.
         chain.mined = 7
         sender(chain, journal = FileSendJournal(journalFile()))
-        Thread.sleep(300)
+        idle()
         assertTrue(journalFile().exists())
 
         // Mined: the next launch drops it, and with it the account's address and the hash.
         chain.mined = 8
         sender(chain, journal = FileSendJournal(journalFile()))
-        val deadline = System.currentTimeMillis() + 5_000
-        while (journalFile().exists() && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        idle()
         assertFalse(journalFile().exists())
     }
 
@@ -1422,8 +1449,9 @@ class SendTest {
             }
         }
         lateinit var s: WalletSender
+        val second = ownScope()
         returnsWhileHeld(gate) {
-            s = WalletSender(chain.rpc(), scope, clock = { clock.get() }, pollMs = 10, confirmTimeoutMs = CONFIRM_TIMEOUT_MS, journal = slow)
+            s = WalletSender(chain.rpc(), second, clock = { clock.get() }, pollMs = 10, confirmTimeoutMs = CONFIRM_TIMEOUT_MS, journal = slow)
             // Not read back yet: nothing is signed meanwhile, and a discard (the wallet deleted) waits for it.
             assertNull(s.status.value)
             assertEquals(WalletSender.Submit.BUSY, s.submit(first.status.value!!.quote, signer()))
@@ -1434,6 +1462,8 @@ class SendTest {
         // The discard applied to what was read back: the send is given up on and replaced.
         assertNull(s.status.value)
         assertEquals(failed.hash, s.prepare(request()).replaces)
+        // Its own writes of that discard are done before the journal is set up for the next one.
+        idle(second)
 
         // Written off the calling thread: Try again, Keep waiting and Stop tracking return at once.
         val stuck = java.util.concurrent.CountDownLatch(1)
@@ -1446,7 +1476,8 @@ class SendTest {
             override fun load(): SendJournal.State? = file.load()
         }
         FileSendJournal(journalFile()).save(SendJournal.State(saved, emptyMap()))
-        val third = WalletSender(chain.rpc(), scope, clock = { clock.get() }, pollMs = 10, confirmTimeoutMs = CONFIRM_TIMEOUT_MS, journal = blocking)
+        val thirdScope = ownScope()
+        val third = WalletSender(chain.rpc(), thirdScope, clock = { clock.get() }, pollMs = 10, confirmTimeoutMs = CONFIRM_TIMEOUT_MS, journal = blocking)
         third.awaitRestored()
         assertEquals(failed, third.status.value)
         returnsWhileHeld(stuck) {
@@ -1457,9 +1488,24 @@ class SendTest {
         assertNull(third.status.value)
         stuck.countDown()
         // The Stop tracking landed while Try again's write was held up: those bytes never go out.
-        delay(300)
+        idle(thirdScope)
         assertTrue(chain.sent.isEmpty())
         assertNull(third.status.value)
+    }
+
+    @Test
+    fun `idle on the whole scope waits for an own scope's work, not for the scope itself to end`() = runBlocking<Unit> {
+        val own = ownScope()
+        val gate = CompletableDeferred<Unit>()
+        var done = false
+        own.launch {
+            gate.await()
+            done = true
+        }
+        scope.launch { gate.complete(Unit) }
+        // The own scope's SupervisorJob never completes: an idle that waited on it would hang here.
+        assertNotNull(withTimeoutOrNull(5_000) { idle() })
+        assertTrue(done)
     }
 
     @Test

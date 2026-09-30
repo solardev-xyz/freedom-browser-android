@@ -42,7 +42,7 @@ import org.json.JSONObject
 internal class SwarmFunding(
     private val file: File,
     private val connect: (String) -> Boolean = StampClient::connect,
-    private val spends: Flow<StampClient.Spend> = StampClient.spend,
+    private val spends: StateFlow<StampClient.Spend> = StampClient.spend,
     private val chain: ChainReader? = null,
     private val checkEveryMs: Long = CHECK_EVERY_MS,
     private val checkAtMostEveryMs: Long = CHECK_AT_MOST_EVERY_MS,
@@ -102,8 +102,9 @@ internal class SwarmFunding(
      * (another spend, a stamp search, or a publish uploading). Retried as
      * soon as [connectFree] allows, and cleared once a connect for it
      * starts or the record goes. A mined record not owed one (a connect
-     * that ran and failed, or one left by an earlier process) waits for
-     * the card's Connect (#225 R1-F1).
+     * that ran and failed, one refused while a connect of its own batch
+     * still ran, or one left by an earlier process) waits for the card's
+     * Connect (#225 R1-F1, #312 R2-M1).
      */
     private val _connectOwed = MutableStateFlow<String?>(null)
     val connectOwed: StateFlow<String?> = _connectOwed.asStateFlow()
@@ -258,12 +259,42 @@ internal class SwarmFunding(
      * following, which may have been mined). False if there's none, or
      * another spend is running.
      */
-    fun connectNow(): Boolean {
-        val p = _pending.value?.takeIf { it.mined || !it.tracked } ?: return false
+    fun connectNow(): Boolean = connectAttempt() > 0
+
+    /**
+     * Each connect asked for, numbered in order: the next one's number
+     * ([connectsAsked]), and the highest number that started ([connectStarted]).
+     * Both under this object's lock.
+     */
+    private var connectsAsked = 0L
+    private var connectStarted = 0L
+
+    /**
+     * Whether a connect of [batchId] is running or has just connected it,
+     * by the node's spend as it stands now: a connect of the batch refused
+     * because of it owes nothing — it connects the batch, or fails and
+     * leaves the card's Connect — whatever order the two were asked in
+     * (#312 R2-M1). Read from [spends]' current value, not tracked by a
+     * collector that may never see that connect's states (#312 R3-M1):
+     * [StampClient.connect] sets Running before it answers true.
+     */
+    private fun connectOfBatchUnderway(batchId: String): Boolean = when (val s = spends.value) {
+        is StampClient.Spend.Running -> s.kind == StampClient.Kind.Connect && s.batchId == batchId
+        is StampClient.Spend.Done -> s.kind == StampClient.Kind.Connect && s.batchId == batchId
+        else -> false
+    }
+
+    /** [connectNow], answering the attempt's number if it started, else minus it (0: nothing to connect). */
+    private fun connectAttempt(): Long {
+        val p = _pending.value?.takeIf { it.mined || !it.tracked } ?: return 0
+        val ticket = synchronized(this) { ++connectsAsked }
         if (!p.mined) scope.launch { checkChain() }
-        val started = connect(p.batchId)
-        if (started) _connectOwed.compareAndSet(p.batchId, null)
-        return started
+        if (!connect(p.batchId)) return -ticket
+        synchronized(this) {
+            connectStarted = maxOf(connectStarted, ticket)
+            _connectOwed.compareAndSet(p.batchId, null)
+        }
+        return ticket
     }
 
     /**
@@ -273,8 +304,22 @@ internal class SwarmFunding(
      */
     private fun connectMined() {
         val batchId = _pending.value?.takeIf { it.mined }?.batchId ?: return
-        _connectOwed.value = batchId
-        if (!connectNow()) Log.i(TAG, "the node is busy; connecting the stamp once it's free")
+        // Owed only once refused: owed before asking, the collector that
+        // retries an owed connect could see it (the node free) and start a
+        // second connect of the batch next to this one's (#310).
+        val ticket = connectAttempt()
+        if (ticket > 0) return
+        // Checked with the write, under the lock [update] and a started connect clear it
+        // under: a Dismiss, or a Connect that started, since the refusal owes nothing (#312 R1-M1);
+        // nor does one refused because a connect of this batch, asked for earlier, still runs (#312 R2-M1, R3-M1).
+        val owed = synchronized(this) {
+            (
+                ticket < 0 && connectStarted < -ticket && !connectOfBatchUnderway(batchId) &&
+                    _pending.value?.takeIf { it.mined }?.batchId == batchId
+                )
+                .also { if (it) _connectOwed.value = batchId }
+        }
+        if (owed) Log.i(TAG, "the node is busy; connecting the stamp once it's free")
     }
 
     /**

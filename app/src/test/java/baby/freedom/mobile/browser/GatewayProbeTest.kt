@@ -15,6 +15,7 @@ import org.junit.Test
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
@@ -98,18 +99,24 @@ class GatewayProbeTest {
 
     @Test
     fun `returns Unreachable when server is down`() = runBlocking {
-        val deadPort = server.port
-        server.stop()
-        val outcome = GatewayProbe().probe(
-            headUrl = "http://127.0.0.1:$deadPort/bzz/abc",
-            delaysMs = longArrayOf(0L),
-            attemptTimeoutMs = 1_000L,
-            overallTimeoutMs = 2_000L,
-            // Disable the ECONNREFUSED grace window — the server is
-            // gone and never coming back, so we want the probe to
-            // report that on the very first attempt.
-            unreachableGraceMs = 0L,
-        )
+        // A port bound but never listening: a connect is refused, and
+        // nothing else on the machine can start a server on it meanwhile
+        // (a port just freed by stopping [server] can be).
+        val dead = Socket().apply { bind(InetSocketAddress("127.0.0.1", 0)) }
+        val outcome = try {
+            GatewayProbe().probe(
+                headUrl = "http://127.0.0.1:${dead.localPort}/bzz/abc",
+                delaysMs = longArrayOf(0L),
+                attemptTimeoutMs = 1_000L,
+                overallTimeoutMs = 2_000L,
+                // Disable the ECONNREFUSED grace window — the server is
+                // gone and never coming back, so we want the probe to
+                // report that on the very first attempt.
+                unreachableGraceMs = 0L,
+            )
+        } finally {
+            dead.close()
+        }
         assertTrue(
             "expected Unreachable, got $outcome",
             outcome is GatewayProbe.Outcome.Unreachable,
