@@ -55,9 +55,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import java.text.DateFormat
@@ -69,10 +72,9 @@ import kotlinx.coroutines.withContext
 
 /** Why nothing can be published now, or null when it can: uploads go to the embedded light node. */
 internal fun publishPageBlockedReason(node: NodeInfo): String? = when {
-    node.status == NodeStatus.Starting -> "The Swarm node is starting…"
-    node.status != NodeStatus.Running -> "Turn on the Swarm node to publish."
-    !node.lightMode -> "Publishing needs light mode, which connects the node to Gnosis Chain. " +
-        "Switch it on under Publishing on the node page."
+    node.status == NodeStatus.Starting -> Strings.get(R.string.publish_blocked_node_starting)
+    node.status != NodeStatus.Running -> Strings.get(R.string.publish_blocked_node_off)
+    !node.lightMode -> Strings.get(R.string.publish_blocked_needs_light_mode)
     else -> null
 }
 
@@ -85,11 +87,9 @@ internal fun publishPageBlockedReason(node: NodeInfo): String? = when {
  */
 internal fun noStampText(batches: List<PostageBatch>, stampBytes: Long): String? = when {
     selectPublishBatch(batches, maxOf(stampBytes, MIN_PUBLISH_STAMP_BYTES)) != null -> null
-    batches.none { it.usable } -> "Publishing needs a usable postage stamp, and the node has none yet. " +
-        "Buy one, or find the ones this account already owns, under Postage stamps."
-    stampBytes <= 0 -> "The node's usable postage stamps are full or expired. Buy another one under Postage stamps."
-    else -> "None of the node's usable stamps has room for ${formatStampBytes(stampBytes)} " +
-        "(with a margin). Buy a bigger one under Postage stamps."
+    batches.none { it.usable } -> Strings.get(R.string.publish_no_stamp_none)
+    stampBytes <= 0 -> Strings.get(R.string.publish_no_stamp_full)
+    else -> Strings.get(R.string.publish_no_stamp_room, formatStampBytes(stampBytes))
 }
 
 /** The least any publish stamps: one chunk of content and one of manifest. */
@@ -113,9 +113,10 @@ private val PublishTextSaver = Saver<MutableState<String>, String>(
 
 /** One history row's status line. */
 internal fun publishStatusText(r: PublishRecord): String = when (r.status) {
-    PublishStatus.Uploading -> "Uploading…"
-    PublishStatus.Completed -> "Published"
-    PublishStatus.Failed -> "Failed: ${r.error ?: "the upload failed"}"
+    PublishStatus.Uploading -> Strings.get(R.string.publish_status_uploading)
+    PublishStatus.Completed -> Strings.get(R.string.publish_status_published)
+    PublishStatus.Failed -> r.error?.let { Strings.get(R.string.publish_status_failed, it) }
+        ?: Strings.get(R.string.publish_status_failed_unknown)
 }
 
 /**
@@ -160,6 +161,7 @@ internal fun PublishScreen(
     var reading by remember { mutableStateOf(false) }
     var problem by remember { mutableStateOf<String?>(null) }
     var clearing by remember { mutableStateOf(false) }
+    val unreadable = stringResource(R.string.publish_error_source_unreadable)
 
     fun prepare(source: PublishSource) {
         problem = null
@@ -171,7 +173,7 @@ internal fun PublishScreen(
                 problem = e.message
                 releaseGrant(context, source)
             } catch (e: Exception) {
-                problem = "What you picked couldn't be read"
+                problem = unreadable
                 releaseGrant(context, source)
             } finally {
                 reading = false
@@ -197,7 +199,7 @@ internal fun PublishScreen(
     val running = publishing is Publisher.State.Running
     val canStart = blocked == null && !running && !reading
 
-    FullScreenScaffold(title = "Publish", onDismiss = onDismiss) {
+    FullScreenScaffold(title = stringResource(R.string.publish_title), onDismiss = onDismiss) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -215,43 +217,39 @@ internal fun PublishScreen(
                 Publisher.State.Idle -> Unit
             }
             item("publish") {
-                SectionCard(title = "Publish on Swarm") {
-                    Muted(
-                        "Upload a file, a folder or some text to the Swarm network. Anyone with its " +
-                            "bzz:// link can open it, for as long as its postage stamp is paid for; it " +
-                            "can't be taken back. A folder with an index.html opens as a website.",
-                    )
+                SectionCard(title = stringResource(R.string.publish_on_swarm_title)) {
+                    Muted(stringResource(R.string.publish_intro))
                     when {
                         blocked != null -> {
                             Spacer(Modifier.height(8.dp))
                             Muted(blocked)
-                            TextButton(onClick = onOpenSetup) { Text("Set up publishing") }
+                            TextButton(onClick = onOpenSetup) { Text(stringResource(R.string.publish_set_up)) }
                         }
                         batches == null -> {
                             Spacer(Modifier.height(8.dp))
-                            Muted("Reading the node's postage stamps…")
+                            Muted(stringResource(R.string.publish_reading_stamps))
                         }
                         else -> noStampText(batches.orEmpty(), 0L)?.let {
                             Spacer(Modifier.height(8.dp))
                             Muted(it)
-                            TextButton(onClick = onOpenStamps) { Text("Postage stamps") }
+                            TextButton(onClick = onOpenStamps) { Text(stringResource(R.string.publish_postage_stamps)) }
                         }
                     }
                     Spacer(Modifier.height(8.dp))
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilledTonalButton(onClick = { pickFile.launch(arrayOf("*/*")) }, enabled = canStart) {
-                            IconLabel(Icons.AutoMirrored.Filled.InsertDriveFile, "File")
+                            IconLabel(Icons.AutoMirrored.Filled.InsertDriveFile, stringResource(R.string.publish_pick_file))
                         }
                         FilledTonalButton(onClick = { pickFolder.launch(null) }, enabled = canStart) {
-                            IconLabel(Icons.Filled.Folder, "Folder")
+                            IconLabel(Icons.Filled.Folder, stringResource(R.string.publish_pick_folder))
                         }
                         FilledTonalButton(onClick = { writingText = true }, enabled = canStart && !writingText) {
-                            IconLabel(Icons.AutoMirrored.Filled.Notes, "Text")
+                            IconLabel(Icons.AutoMirrored.Filled.Notes, stringResource(R.string.publish_pick_text))
                         }
                     }
                     if (reading) {
                         Spacer(Modifier.height(4.dp))
-                        Muted("Reading what you picked…")
+                        Muted(stringResource(R.string.publish_reading_source))
                     }
                     problem?.let {
                         Spacer(Modifier.height(4.dp))
@@ -262,16 +260,16 @@ internal fun PublishScreen(
                         OutlinedTextField(
                             value = text,
                             onValueChange = { text = it },
-                            placeholder = { Text("Text to publish") },
+                            placeholder = { Text(stringResource(R.string.publish_text_placeholder)) },
                             modifier = Modifier.fillMaxWidth().heightIn(min = 140.dp),
                         )
                         Row {
                             Button(
                                 onClick = { prepare(PublishSource.Text(text)) },
                                 enabled = canStart && text.isNotEmpty(),
-                            ) { Text("Publish text") }
+                            ) { Text(stringResource(R.string.publish_text_button)) }
                             Spacer(Modifier.width(8.dp))
-                            TextButton(onClick = { writingText = false }) { Text("Cancel") }
+                            TextButton(onClick = { writingText = false }) { Text(stringResource(R.string.common_cancel)) }
                         }
                     }
                 }
@@ -279,17 +277,17 @@ internal fun PublishScreen(
             item("history-title") {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        "Recent publishes",
+                        stringResource(R.string.publish_history_title),
                         style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.weight(1f),
                     )
                     if (records.any { it.status != PublishStatus.Uploading }) {
-                        TextButton(onClick = { clearing = true }) { Text("Clear all") }
+                        TextButton(onClick = { clearing = true }) { Text(stringResource(R.string.publish_clear_all)) }
                     }
                 }
             }
             if (records.isEmpty()) {
-                item("history-empty") { Muted("Nothing published yet.") }
+                item("history-empty") { Muted(stringResource(R.string.publish_history_empty)) }
             } else {
                 items(records, key = { it.id }) { r ->
                     HistoryCard(r, onOpenUrl = onOpenUrl, onRemove = {
@@ -308,7 +306,7 @@ internal fun PublishScreen(
                 plan = null
                 releaseGrant(context, p.source)
             },
-            title = { Text("Publish ${p.name}?") },
+            title = { Text(stringResource(R.string.publish_confirm_title, p.name)) },
             text = {
                 Text(confirmText(p, batch, batches.orEmpty()) + (publishWaitNote(running, stampWork)?.let { "\n\n$it" } ?: ""))
             },
@@ -327,54 +325,48 @@ internal fun PublishScreen(
                             }
                         }
                     },
-                ) { Text("Publish") }
+                ) { Text(stringResource(R.string.publish_confirm_button)) }
             },
             dismissButton = {
                 TextButton(onClick = {
                     plan = null
                     releaseGrant(context, p.source)
-                }) { Text("Cancel") }
+                }) { Text(stringResource(R.string.common_cancel)) }
             },
         )
     }
     if (clearing) {
         AlertDialog(
             onDismissRequest = { clearing = false },
-            title = { Text("Clear the publish history?") },
+            title = { Text(stringResource(R.string.publish_clear_title)) },
             text = {
-                Text(
-                    "This only forgets the list on this device. What was published stays on Swarm, " +
-                        "and its links keep working while its stamp is paid for.",
-                )
+                Text(stringResource(R.string.publish_clear_body))
             },
             confirmButton = {
                 TextButton(onClick = {
                     clearing = false
                     history.clear()
                     Publisher.forgetRemoved(history.records.value)
-                }) { Text("Clear") }
+                }) { Text(stringResource(R.string.publish_clear_button)) }
             },
-            dismissButton = { TextButton(onClick = { clearing = false }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { clearing = false }) { Text(stringResource(R.string.common_cancel)) } },
         )
     }
 }
 
 /** Why Publish waits: a stamp buy or search may restart the gateway the upload goes through. */
-internal const val STAMP_WORK_RUNNING_NOTE =
-    "The node is buying or searching for stamps, which can restart it. Publish once that has finished."
+internal val STAMP_WORK_RUNNING_NOTE: String get() = Strings.get(R.string.publish_stamp_work_note)
 
 /** What a running publish is doing: uploading, or held back for the node's stamp work. */
 internal fun runningText(p: Publisher.State.Running): String =
     if (p.waitingForNode) {
-        "Waiting for the node to finish buying or searching for stamps, which can restart it. " +
-            "The upload starts once that has finished. You can leave this page meanwhile."
+        Strings.get(R.string.publish_running_waiting)
     } else {
-        "The node splits it into chunks, stamps each one and pushes them to the network. " +
-            "The link comes once every chunk is accepted. You can leave this page meanwhile."
+        Strings.get(R.string.publish_running_uploading)
     }
 
 /** Why Publish waits: there's one upload at a time. */
-internal const val ANOTHER_PUBLISH_NOTE = "Another publish is uploading. Publish this once it's done."
+internal val ANOTHER_PUBLISH_NOTE: String get() = Strings.get(R.string.publish_another_running_note)
 
 /**
  * Why the confirmation's Publish is off, or null when it isn't for either
@@ -390,21 +382,28 @@ internal fun publishWaitNote(running: Boolean, stampWork: Boolean): String? = wh
 /** The confirmation's body: what goes out, with which stamp, and that it's public. */
 internal fun confirmText(p: PublishPlan, batch: PostageBatch?, batches: List<PostageBatch>): String {
     val what = when (p.kind) {
-        PublishKind.Folder -> "${p.files.size} ${if (p.files.size == 1) "file" else "files"}, " +
-            (p.bytes?.let(::formatStampBytes) ?: "size unknown") +
-            (if (indexDocumentFor(p.files.map { it.path }) != null) ", opening at its index.html" else ", with no index.html")
-        else -> p.bytes?.let(::formatStampBytes) ?: "Size unknown"
+        PublishKind.Folder -> Strings.plural(
+            if (indexDocumentFor(p.files.map { it.path }) != null) R.plurals.publish_confirm_folder_index else R.plurals.publish_confirm_folder_no_index,
+            p.files.size,
+            p.files.size,
+            p.bytes?.let(::formatStampBytes) ?: Strings.get(R.string.publish_confirm_folder_size_unknown),
+        )
+        else -> p.bytes?.let(::formatStampBytes) ?: Strings.get(R.string.publish_confirm_size_unknown)
     }
     val stamp = batch?.let {
-        "It's stamped with ${shortBatchId(it.id)} (${Math.round(it.usedFraction * 100)}% used, " +
-            "${it.ttlSeconds?.let(::formatStampTtl)?.lowercase() ?: "time left unknown"})."
+        Strings.get(
+            R.string.publish_confirm_stamp,
+            shortBatchId(it.id),
+            Math.round(it.usedFraction * 100),
+            it.ttlSeconds?.let(::formatStampTtl)?.lowercase() ?: Strings.get(R.string.publish_confirm_ttl_unknown),
+        )
     } ?: (noStampText(batches, p.stampBytes) ?: "")
-    return "$what. $stamp Anyone with the link can read it, and it can't be deleted from Swarm."
+    return Strings.get(R.string.publish_confirm_body, what, stamp)
 }
 
 @Composable
 private fun RunningCard(p: Publisher.State.Running) {
-    SectionCard(title = "Publishing") {
+    SectionCard(title = stringResource(R.string.publish_running_title)) {
         Row(verticalAlignment = Alignment.Top) {
             CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(12.dp))
@@ -418,7 +417,9 @@ private fun RunningCard(p: Publisher.State.Running) {
 
 @Composable
 private fun OutcomeCard(r: PublishRecord, onOpenUrl: (String) -> Unit, onDone: () -> Unit) {
-    SectionCard(title = if (r.status == PublishStatus.Completed) "Published" else "Didn't publish") {
+    SectionCard(
+        title = stringResource(if (r.status == PublishStatus.Completed) R.string.publish_outcome_published else R.string.publish_outcome_failed),
+    ) {
         Row(verticalAlignment = Alignment.Top) {
             if (r.status == PublishStatus.Completed) {
                 Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = Color(0xFF22C55E), modifier = Modifier.size(20.dp))
@@ -431,7 +432,7 @@ private fun OutcomeCard(r: PublishRecord, onOpenUrl: (String) -> Unit, onDone: (
                 r.bzzUrl?.let { LinkText(it) } ?: Muted(publishStatusText(r))
             }
         }
-        LinkActions(r, onOpenUrl, extra = { TextButton(onClick = onDone) { Text("Done") } })
+        LinkActions(r, onOpenUrl, extra = { TextButton(onClick = onDone) { Text(stringResource(R.string.common_done)) } })
     }
 }
 
@@ -464,14 +465,14 @@ private fun HistoryCard(r: PublishRecord, onOpenUrl: (String) -> Unit, onRemove:
             listOfNotNull(
                 DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(r.startedAt)),
                 r.bytes?.let(::formatStampBytes),
-                r.batchId?.let { "stamp ${shortBatchId(it)}" },
+                r.batchId?.let { stringResource(R.string.publish_history_stamp, shortBatchId(it)) },
             ).joinToString(" · "),
         )
         r.bzzUrl?.let { LinkText(it) }
         LinkActions(
             r, onOpenUrl,
             extra = {
-                if (r.status != PublishStatus.Uploading) TextButton(onClick = onRemove) { Text("Remove") }
+                if (r.status != PublishStatus.Uploading) TextButton(onClick = onRemove) { Text(stringResource(R.string.common_remove)) }
             },
         )
     }
@@ -491,9 +492,9 @@ private fun LinkActions(r: PublishRecord, onOpenUrl: (String) -> Unit, extra: @C
     val context = LocalContext.current
     FlowRow {
         r.bzzUrl?.let { url ->
-            TextButton(onClick = { onOpenUrl(url) }) { Text("Open") }
-            TextButton(onClick = { copyUrlToClipboard(context, url) }) { Text("Copy link") }
-            TextButton(onClick = { shareUrl(context, url, r.name) }) { Text("Share") }
+            TextButton(onClick = { onOpenUrl(url) }) { Text(stringResource(R.string.common_open)) }
+            TextButton(onClick = { copyUrlToClipboard(context, url) }) { Text(stringResource(R.string.publish_copy_link)) }
+            TextButton(onClick = { shareUrl(context, url, r.name) }) { Text(stringResource(R.string.common_share)) }
         }
         extra()
     }

@@ -2,7 +2,9 @@ package baby.freedom.mobile.wallet
 
 import android.content.Context
 import android.util.Log
+import baby.freedom.mobile.R
 import baby.freedom.mobile.ens.Keccak256
+import baby.freedom.mobile.l10n.Strings
 import java.io.File
 import java.io.IOException
 import org.json.JSONException
@@ -49,11 +51,12 @@ data class PublisherIdentity(
         get() = if (mode == Mode.APP_SCOPED) appScopedPath(publisherKeyIndex!!) else NodeIdentity.SWARM_PATH
 
     /** "App-scoped" / "Ant wallet": what kind of key it is, under its label. */
-    val kind: String get() = if (mode == Mode.APP_SCOPED) "App-scoped" else "Ant wallet"
+    val kind: String
+        get() = Strings.get(if (mode == Mode.APP_SCOPED) R.string.publish_identity_kind_app_scoped else R.string.publish_identity_kind_ant_wallet)
 
     companion object {
         const val ANT_WALLET_ID = "bee-wallet"
-        const val ANT_WALLET_LABEL = "Ant wallet identity"
+        val ANT_WALLET_LABEL: String get() = Strings.get(R.string.publish_identity_ant_wallet_label)
         const val APP_SCOPED_PATH = "m/44'/73406'/{index}'/0/0"
 
         /** Longest label, in UTF-8 bytes — desktop's limit. */
@@ -62,7 +65,7 @@ data class PublisherIdentity(
         fun appScopedPath(index: Int): String = "m/44'/73406'/$index'/0/0"
 
         /** Desktop's fallback name for an app-scoped identity with no label of its own. */
-        fun defaultAppScopedLabel(index: Int) = "App-scoped identity ${index + 1}"
+        fun defaultAppScopedLabel(index: Int) = Strings.get(R.string.publish_identity_default_label, index + 1)
 
         /** The node account as a choice, before any site has picked it. */
         fun antWallet(createdAt: Long = 0) = PublisherIdentity(Mode.ANT_WALLET, null, ANT_WALLET_LABEL, createdAt)
@@ -75,11 +78,11 @@ data class PublisherIdentity(
         fun checkLabel(raw: String): Result<String> {
             val label = raw.trim()
             return when {
-                label.isEmpty() -> Result.failure(IllegalArgumentException("Enter a name for this identity."))
+                label.isEmpty() -> Result.failure(IllegalArgumentException(Strings.get(R.string.publish_identity_label_empty)))
                 label.toByteArray(Charsets.UTF_8).size > MAX_LABEL_BYTES ->
-                    Result.failure(IllegalArgumentException("Keep the name to $MAX_LABEL_BYTES bytes or fewer."))
+                    Result.failure(IllegalArgumentException(Strings.get(R.string.publish_identity_label_too_long, MAX_LABEL_BYTES)))
                 label.codePoints().anyMatch(::isRefusedInLabel) ->
-                    Result.failure(IllegalArgumentException("The name can’t contain line breaks or control characters."))
+                    Result.failure(IllegalArgumentException(Strings.get(R.string.publish_identity_label_control_chars)))
                 else -> Result.success(label)
             }
         }
@@ -187,12 +190,12 @@ class PublisherIdentityStore internal constructor(
      */
     fun activate(origin: String, identityId: String): SitePublisher = synchronized(lock) {
         val data = loadForWrite()
-        val site = data.sites[origin] ?: throw IllegalArgumentException("no publisher identities for this site")
+        val site = data.sites[origin] ?: throw IllegalArgumentException(Strings.get(R.string.publish_identity_error_no_site))
         if (site.activeId == identityId) return site
         val identities = when {
             site.identities.any { it.id == identityId } -> site.identities
             identityId == PublisherIdentity.ANT_WALLET_ID -> site.identities + PublisherIdentity.antWallet(clock())
-            else -> throw IllegalArgumentException("not one of this site's identities")
+            else -> throw IllegalArgumentException(Strings.get(R.string.publish_identity_error_not_this_site))
         }
         val updated = site.copy(activeId = identityId, identities = identities)
         save(Data(data.nextIndex, data.sites + (origin to updated)))

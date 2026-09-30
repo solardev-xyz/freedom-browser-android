@@ -8,6 +8,8 @@ import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.util.Log
 import android.webkit.MimeTypeMap
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.SwarmNode
 import java.io.File
 import java.io.FileOutputStream
@@ -62,7 +64,7 @@ internal data class PublishRecord(
 }
 
 /** What a history record interrupted by the app's end says (desktop's sweep of orphaned rows). */
-internal const val PUBLISH_INTERRUPTED = "Interrupted: Freedom was closed before the upload finished"
+internal val PUBLISH_INTERRUPTED: String get() = Strings.get(R.string.publish_error_interrupted)
 
 /** The history file's JSON. A record that can't be read back is dropped; the others still hold. */
 internal object PublishHistoryCodec {
@@ -422,7 +424,7 @@ internal fun listFolder(resolver: ContentResolver, treeUri: Uri): List<FolderFil
     val out = mutableListOf<FolderFile>()
     var total = 0L
     fun walk(documentId: String, prefix: String, depth: Int) {
-        if (depth > MAX_FOLDER_DEPTH) throw PublishException("The folder is nested too deep to publish")
+        if (depth > MAX_FOLDER_DEPTH) throw PublishException(Strings.get(R.string.publish_error_folder_too_deep))
         val children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, documentId)
         val cursor = resolver.query(
             children,
@@ -433,7 +435,7 @@ internal fun listFolder(resolver: ContentResolver, treeUri: Uri): List<FolderFil
                 DocumentsContract.Document.COLUMN_SIZE,
             ),
             null, null, null,
-        ) ?: throw PublishException("The folder couldn't be read")
+        ) ?: throw PublishException(Strings.get(R.string.publish_error_folder_unreadable))
         val dirs = mutableListOf<Pair<String, String>>()
         cursor.use { c ->
             while (c.moveToNext()) {
@@ -447,12 +449,12 @@ internal fun listFolder(resolver: ContentResolver, treeUri: Uri): List<FolderFil
                         val doc = DocumentsContract.buildDocumentUriUsingTree(treeUri, id)
                         resolver.openInputStream(doc)?.use {
                             measureCapped(it, MAX_PUBLISH_BYTES - total, folderTooBig())
-                        } ?: throw PublishException("$prefix$name couldn't be read")
+                        } ?: throw PublishException(Strings.get(R.string.publish_error_path_unreadable, "$prefix$name"))
                     } else {
                         c.getLong(3)
                     }
                     total += size
-                    if (out.size >= MAX_PUBLISH_FILES) throw PublishException("The folder has more than $MAX_PUBLISH_FILES files")
+                    if (out.size >= MAX_PUBLISH_FILES) throw PublishException(Strings.get(R.string.publish_error_folder_too_many_files, MAX_PUBLISH_FILES))
                     if (total > MAX_PUBLISH_BYTES) throw PublishException(folderTooBig())
                     out += FolderFile("$prefix$name", id, size)
                 }
@@ -461,15 +463,15 @@ internal fun listFolder(resolver: ContentResolver, treeUri: Uri): List<FolderFil
         dirs.forEach { (id, path) -> walk(id, path, depth + 1) }
     }
     walk(DocumentsContract.getTreeDocumentId(treeUri), "", 0)
-    if (out.isEmpty()) throw PublishException("The folder has no files")
+    if (out.isEmpty()) throw PublishException(Strings.get(R.string.publish_error_folder_empty))
     return out.sortedBy { it.path }
 }
 
 private fun folderTooBig() =
-    "The folder is bigger than ${formatStampBytes(MAX_PUBLISH_BYTES)}, the most one publish can upload"
+    Strings.get(R.string.publish_error_folder_too_big, formatStampBytes(MAX_PUBLISH_BYTES))
 
 private fun fileTooBig() =
-    "The file is bigger than ${formatStampBytes(MAX_PUBLISH_BYTES)}, the most one publish can upload"
+    Strings.get(R.string.publish_error_file_too_big, formatStampBytes(MAX_PUBLISH_BYTES))
 
 /** The folder's own name, for the history. */
 internal fun folderName(resolver: ContentResolver, treeUri: Uri): String {
@@ -478,7 +480,7 @@ internal fun folderName(resolver: ContentResolver, treeUri: Uri): String {
         resolver.query(doc, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { c ->
             if (c.moveToFirst()) c.getString(0) else null
         }
-    }.getOrNull()?.takeIf { it.isNotBlank() } ?: "Folder"
+    }.getOrNull()?.takeIf { it.isNotBlank() } ?: Strings.get(R.string.publish_folder_default_name)
 }
 
 /** A picked file's name and size (null when the provider doesn't say). */
@@ -545,7 +547,7 @@ internal class TarWriter(private val out: RandomAccessFile, private val maxBytes
         if (out.filePointer + extra > maxBytes) throw PublishException(tooBig())
     }
 
-    private fun tooBig() = "It's bigger than ${formatStampBytes(MAX_PUBLISH_BYTES)}, the most one publish can upload"
+    private fun tooBig() = Strings.get(R.string.publish_error_too_big, formatStampBytes(MAX_PUBLISH_BYTES))
 
     private fun pad(size: Long) {
         val rest = padded(size) - size
@@ -641,15 +643,19 @@ internal fun publishAnswer(code: Int, body: String?): Result<String> {
     val o = runCatching { JSONObject(body ?: "") }.getOrNull()
     if (code in 200..299) {
         val ref = o?.optString("reference")?.lowercase()
-        return if (ref != null && isSwarmReference(ref)) Result.success(ref) else Result.failure(PublishException("The node's answer had no reference"))
+        return if (ref != null && isSwarmReference(ref)) Result.success(ref) else Result.failure(PublishException(Strings.get(R.string.publish_error_no_reference)))
     }
     val message = o?.optString("message")?.takeIf { it.isNotBlank() } ?: body?.take(200)?.takeIf { it.isNotBlank() }
     val text = when {
-        code == 413 -> "It's too big for one upload" + (message?.let { " ($it)" } ?: "")
+        code == 413 -> message?.let { Strings.get(R.string.publish_error_http_too_big_detail, it) }
+            ?: Strings.get(R.string.publish_error_http_too_big)
         code == 422 || message?.contains("not usable") == true ->
-            "The postage stamp can't be used for this: ${message ?: "HTTP $code"}"
-        code == 503 -> "The node can't upload right now" + (message?.let { ": $it" } ?: "")
-        else -> message?.let { "The node refused the upload: $it" } ?: "The node refused the upload (HTTP $code)"
+            message?.let { Strings.get(R.string.publish_error_http_stamp_unusable, it) }
+                ?: Strings.get(R.string.publish_error_http_stamp_unusable_code, code)
+        code == 503 -> message?.let { Strings.get(R.string.publish_error_http_unavailable_detail, it) }
+            ?: Strings.get(R.string.publish_error_http_unavailable)
+        else -> message?.let { Strings.get(R.string.publish_error_http_refused_detail, it) }
+            ?: Strings.get(R.string.publish_error_http_refused_code, code)
     }
     return Result.failure(PublishException(text))
 }
@@ -679,12 +685,12 @@ internal fun uploadToGateway(
         try {
             conn.outputStream.use { out -> body().use { it.copyTo(out, 64 * 1024) } }
         } catch (e: IOException) {
-            throw PublishException("Couldn't hand the upload to the Swarm node")
+            throw PublishException(Strings.get(R.string.publish_error_send_failed))
         }
         val code = try {
             conn.responseCode
         } catch (e: java.net.SocketTimeoutException) {
-            throw PublishException("The Swarm node didn't finish the upload in time")
+            throw PublishException(Strings.get(R.string.publish_error_timeout))
         }
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
         val text = stream?.use { it.readBytesCapped(64 * 1024) }?.toString(Charsets.UTF_8)
@@ -733,9 +739,9 @@ internal data class PublishPlan(
 internal fun planPublish(resolver: ContentResolver, source: PublishSource): PublishPlan = when (source) {
     is PublishSource.Text -> {
         val size = source.text.toByteArray(Charsets.UTF_8).size.toLong()
-        if (size == 0L) throw PublishException("There's no text to publish")
-        if (size > MAX_PUBLISH_BYTES) throw PublishException("The text is bigger than ${formatStampBytes(MAX_PUBLISH_BYTES)}")
-        PublishPlan(source, PublishKind.Text, "Text", size, publishStampEstimate(listOf(size)))
+        if (size == 0L) throw PublishException(Strings.get(R.string.publish_error_no_text))
+        if (size > MAX_PUBLISH_BYTES) throw PublishException(Strings.get(R.string.publish_error_text_too_big, formatStampBytes(MAX_PUBLISH_BYTES)))
+        PublishPlan(source, PublishKind.Text, Strings.get(R.string.publish_text_name), size, publishStampEstimate(listOf(size)))
     }
     is PublishSource.OneFile -> {
         val (name, provided) = fileInfo(resolver, source.uri)
@@ -744,7 +750,7 @@ internal fun planPublish(resolver: ContentResolver, source: PublishSource): Publ
         // the stamp is picked (and confirmed) for its real size.
         val size = provided ?: (
             resolver.openInputStream(source.uri)?.use { measureCapped(it, tooBig = fileTooBig()) }
-                ?: throw PublishException("The file couldn't be read")
+                ?: throw PublishException(Strings.get(R.string.publish_error_file_unreadable))
             )
         PublishPlan(source, PublishKind.File, name, size, publishStampEstimate(listOf(size)))
     }
@@ -800,10 +806,10 @@ internal object Publisher {
                 val (reference, bytes) = run(app, plan, batch, releaseSource::invoke) { waitingForNode(record.id, it) }
                 history.completed(record.id, reference, batchId, bytes)
             } catch (e: PublishException) {
-                history.failed(record.id, e.message ?: "The upload failed")
+                history.failed(record.id, e.message ?: Strings.get(R.string.publish_error_upload_failed))
             } catch (t: Throwable) {
                 Log.w(TAG, "publish failed: ${t.javaClass.simpleName}")
-                history.failed(record.id, "The upload failed")
+                history.failed(record.id, Strings.get(R.string.publish_error_upload_failed))
             } finally {
                 releaseSource()
                 // Its record removed from the history meanwhile (Remove or
@@ -889,7 +895,7 @@ internal object Publisher {
                     PublishRequest(PublishKind.Text, batchId, TEXT_FILE_NAME, "text/plain; charset=utf-8", null)
                 }
                 is PublishSource.OneFile -> {
-                    val input = resolver.openInputStream(s.uri) ?: throw PublishException("The file couldn't be read")
+                    val input = resolver.openInputStream(s.uri) ?: throw PublishException(Strings.get(R.string.publish_error_file_unreadable))
                     input.use { copyCapped(it, staged) }
                     published = staged.length()
                     sizes += published
@@ -900,7 +906,7 @@ internal object Publisher {
                         val tar = TarWriter(raf, MAX_PUBLISH_BYTES)
                         plan.files.forEach { f ->
                             val uri = DocumentsContract.buildDocumentUriUsingTree(s.treeUri, f.documentId)
-                            val input = resolver.openInputStream(uri) ?: throw PublishException("${f.path} couldn't be read")
+                            val input = resolver.openInputStream(uri) ?: throw PublishException(Strings.get(R.string.publish_error_path_unreadable, f.path))
                             val n = input.use { tar.add(f.path, it) }
                             sizes += n
                             published += n
@@ -917,8 +923,7 @@ internal object Publisher {
             publishStampEstimate(sizes).let { need ->
                 if (!batchHasRoom(batch, need)) {
                     throw PublishException(
-                        "It turned out bigger than the stamp ${shortBatchId(batchId)} has room for " +
-                            "(${formatStampBytes(need)}, with a margin). Buy a bigger one under Postage stamps.",
+                        Strings.get(R.string.publish_error_stamp_too_small, shortBatchId(batchId), formatStampBytes(need)),
                     )
                 }
             }
@@ -931,11 +936,13 @@ internal object Publisher {
             val reference = uploadToGateway(SwarmNode.GATEWAY_URL, request, { staged.inputStream() }, staged.length())
             return reference to published
         } catch (e: SecurityException) {
-            throw PublishException("Freedom may no longer read what you picked; pick it again")
+            throw PublishException(Strings.get(R.string.publish_error_permission_lost))
         } catch (e: java.io.FileNotFoundException) {
-            throw PublishException("What you picked couldn't be read")
+            throw PublishException(Strings.get(R.string.publish_error_source_unreadable))
         } catch (e: IOException) {
-            throw PublishException(if (e is java.net.ConnectException) "The Swarm node isn't running" else "The upload failed: couldn't reach the Swarm node")
+            throw PublishException(
+                Strings.get(if (e is java.net.ConnectException) R.string.publish_error_node_not_running else R.string.publish_error_node_unreachable),
+            )
         } finally {
             staged.delete()
         }
