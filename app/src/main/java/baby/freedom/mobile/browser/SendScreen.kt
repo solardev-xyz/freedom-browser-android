@@ -76,7 +76,10 @@ import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 
 internal const val SEND_TITLE = "Send"
@@ -200,6 +203,10 @@ internal fun SendPage(
     // The user's explicit OK for an answer only one server gave (#277);
     // any change to the name, the chain or the answer takes it back.
     var unverifiedAccepted by remember { mutableStateOf(false) }
+    // The Confirm job while it looks the name up again before signing
+    // (#277): leaving the review cancels it, so an abandoned quote is
+    // never signed once the answer lands.
+    var recheck by remember { mutableStateOf<Job?>(null) }
 
     // A name in the field is looked up for the selected asset's chain
     // (#277). Here, at the page's top, not inside the list's item: an
@@ -258,6 +265,16 @@ internal fun SendPage(
         }
     }
 
+    // Back to the form from the review: whatever the Confirm was still
+    // checking is dropped with the quote it was checking.
+    fun leaveReview() {
+        recheck?.cancel()
+        recheck = null
+        quote = null
+        notice = null
+        error = null
+    }
+
     val back = {
         val current = status
         when {
@@ -268,11 +285,7 @@ internal fun SendPage(
                 if (!current.unresolved) sender.acknowledge()
                 onBack()
             }
-            quote != null -> {
-                quote = null
-                notice = null
-                error = null
-            }
+            quote != null -> leaveReview()
             else -> onBack()
         }
     }
@@ -315,11 +328,7 @@ internal fun SendPage(
                         busy = busy,
                         notice = notice,
                         error = error,
-                        onEdit = {
-                            quote = null
-                            notice = null
-                            error = null
-                        },
+                        onEdit = ::leaveReview,
                         onConfirm = {
                             // Priced too long ago to trust its fee: price it again and let the user look.
                             val reprice = {
@@ -345,17 +354,32 @@ internal fun SendPage(
                                         q.request.toName?.let { name ->
                                             val chainId = q.request.chain.id
                                             notice = "Looking up $name again before signing…"
+                                            // Back/✕/Edit during the lookup cancels this job (leaveReview).
+                                            recheck = coroutineContext.job
                                             val after = try {
                                                 Gateways.ensResolver.resolveAddress(name, chainId, fresh = true)
                                             } catch (e: CancellationException) {
                                                 throw e
                                             } catch (e: Exception) {
                                                 EnsAddressResult.Error(name, "RESOLUTION_ERROR", e.message ?: e.javaClass.simpleName, retryable = true)
+                                            } finally {
+                                                if (recheck === coroutineContext.job) recheck = null
                                             }
-                                            val accepted = unverifiedAccepted && nameAnswer != null && nameAnswer.name == name &&
-                                                nameAnswer.address.equals(q.request.to, ignoreCase = true)
-                                            Recipients.recheck(name, q.request.to, after, accepted)?.let { problem ->
-                                                // Back to the form, showing what the name says now.
+                                            // Main thread throughout: nothing can cancel it past here, and
+                                            // a review left without cancelling (none should be) isn't sent.
+                                            coroutineContext.ensureActive()
+                                            if (quote !== q) return@launch
+                                            // The acceptance travels with the request, so a Review
+                                            // again from a reopened page still has it.
+                                            Recipients.recheck(name, q.request.to, after, q.request.toNameAccepted)?.let { problem ->
+                                                // Back to the form, showing what the name says now —
+                                                // with the name in it, even on a reopened page.
+                                                if (typedName != name) {
+                                                    assets.firstOrNull { it.second.key == q.request.token.key }?.let { assetKey = it.second.key }
+                                                    recipient = name
+                                                    if (amount.isBlank()) amount = SendAmounts.exact(q.request.amount, q.request.token.decimals)
+                                                    all = false
+                                                }
                                                 lookup = NameLookup(name, chainId, after)
                                                 unverifiedAccepted = false
                                                 quote = null
@@ -507,7 +531,14 @@ internal fun SendPage(
                                 enabled = !busy && chain != null && token != null && to != null && raw != null,
                                 onClick = {
                                     if (chain != null && token != null && to != null && raw != null) {
-                                        prepare(SendRequest(chain, token, account, to, raw, toName = typedName), all)
+                                        prepare(
+                                            SendRequest(
+                                                chain, token, account, to, raw,
+                                                toName = typedName,
+                                                toNameAccepted = typedName != null && nameAnswer?.trust?.verified == false && unverifiedAccepted,
+                                            ),
+                                            all,
+                                        )
                                     }
                                 },
                                 modifier = Modifier.fillMaxWidth(),

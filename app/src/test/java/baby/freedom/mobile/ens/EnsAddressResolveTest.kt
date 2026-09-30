@@ -165,6 +165,19 @@ class EnsAddressResolveTest {
     }
 
     @Test
+    fun `a chain id past ENSIP-11's range has no address, and nobody is asked`() {
+        val servers = Servers(urls(3)) { _, _ -> error("nothing should be asked") }
+
+        for (chainId in listOf(0x80000000L, 0x1_0000_0000L, 0L, -1L)) {
+            val result = resolve(servers, servers.urls, "Alice.eth", chainId)
+            require(result is EnsAddressResult.NoAddress) { "got $result" }
+            assertEquals("CHAIN_ID_UNSUPPORTED", result.reason)
+            assertEquals("alice.eth", result.name)
+        }
+        assertTrue(servers.asked.isEmpty())
+    }
+
+    @Test
     fun `a DNS name goes through the Universal Resolver like any ENS name`() {
         val servers = Servers(urls(3), answering { encoded(it, alice) })
 

@@ -14,8 +14,9 @@ sealed class EnsAddressResult {
     /**
      * Nothing to send to. [reason]: `NO_RESOLVER` (the name isn't set
      * up), `NO_ADDRESS` (no address for this chain), `CHAIN_UNSUPPORTED`
-     * (a `.wei`/`.gwei` name off Ethereum) or `UNSUPPORTED_SYSTEM` (a
-     * `.tez` name). [trust] is how far a looked-up absence was checked;
+     * (a `.wei`/`.gwei` name off Ethereum), `CHAIN_ID_UNSUPPORTED` (a
+     * chain id of 2^31 or more, which has no ENSIP-11 coin type) or
+     * `UNSUPPORTED_SYSTEM` (a `.tez` name). [trust] is how far a looked-up absence was checked;
      * `null` when nothing was looked up.
      */
     data class NoAddress(override val name: String, val reason: String, val trust: EnsTrust?) : EnsAddressResult()

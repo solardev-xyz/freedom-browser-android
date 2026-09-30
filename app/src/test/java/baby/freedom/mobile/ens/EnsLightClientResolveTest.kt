@@ -444,6 +444,30 @@ class EnsLightClientResolveTest {
     }
 
     @Test
+    fun `a light-client miss of a name's address doesn't skip it for the name's contenthash (#277)`() {
+        // The engine fails the Send page's `addr` read, but not the page's `contenthash`.
+        val client = FakeLightClient { _, data ->
+            if (data.contains("3b3b57de")) EnsLightClient.Call.Unavailable("all 3 snap peer(s) failed")
+            else lightClientOk
+        }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+        val settings = EnsResolver.Settings(listOf(rpc))
+
+        runBlocking { r.resolveAddress("alice.eth", 1) }
+        assertEquals(1, client.calls.size)
+        // A navigation's re-check still gets the light client's share (and
+        // the probe's, while that runs) — not the 0 a missed name gets —
+        // and the page's lookup asks it.
+        assertTrue(r.lightClientWaitFor(settings, "alice.eth") >= EnsResolver.LIGHT_CLIENT_DEADLINE_MS)
+        assertTrue((runBlocking { r.resolveContenthash("alice.eth") } as EnsResult.Ok).trust.lightClient)
+        assertEquals(2, client.calls.size)
+        // The address itself is remembered as missed: the next Send lookup goes to RPC.
+        runBlocking { r.resolveAddress("alice.eth", 1, fresh = true) }
+        assertEquals(2, client.calls.size)
+    }
+
+    @Test
     fun `a momentary refusal isn't remembered against the name`() {
         // `busy` and a closed read gate say nothing about the name.
         var answer: EnsLightClient.Call = EnsLightClient.Call.Unavailable("busy", busy = true)

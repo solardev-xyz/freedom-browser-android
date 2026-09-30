@@ -106,8 +106,13 @@ object Recipients {
         if (t.isEmpty()) return Parsed.Invalid(if (names) "Enter an address or a name to send to" else "Enter the address to send to")
         if (!EthTransaction.ADDRESS.matches(t)) {
             if (names && looksLikeName(t)) {
-                val name = (if (t.all { it.code < 0x80 }) t.lowercase() else EnsNormalize.normalizeOrNull(t))
-                    ?: return Parsed.Invalid("Not a valid name: it breaks the ENS naming rules (ENSIP-15)")
+                // The resolver's own normalization, so a name refused here is
+                // exactly one it would refuse (`a_b.eth`), said up front.
+                val name = try {
+                    EnsNormalize.fastNormalize(t)
+                } catch (_: EnsNormalize.InvalidNameException) {
+                    null
+                } ?: return Parsed.Invalid("Not a valid name: it breaks the ENS naming rules (ENSIP-15)")
                 if (NameSystem.forName(name) == NameSystem.TEZOS) {
                     return Parsed.Invalid("Tezos Domains names don’t name Ethereum accounts: enter an address or an ENS, .wei or .gwei name")
                 }
@@ -165,6 +170,8 @@ object Recipients {
             "NO_ADDRESS" -> "${result.name} has no address for $chainName. Only an address its owner set for this network is safe to send to."
             "CHAIN_UNSUPPORTED" -> "${NameSystem.forName(result.name).label} names hold an Ethereum address only, not one for " +
                 "$chainName: funds sent there could be lost. Send an Ethereum asset to it, or enter an address."
+            "CHAIN_ID_UNSUPPORTED" -> "Names can’t hold an address for $chainName: its chain id is past the range ENS " +
+                "address records cover (ENSIP-11). Enter an address instead."
             else -> "${result.name} doesn’t name an Ethereum account."
         }
         is EnsAddressResult.Conflict -> if (result.subject == EnsResult.Conflict.Subject.RECORD) {
@@ -268,6 +275,14 @@ data class SendRequest(
      * signed and journalled.
      */
     val toName: String? = null,
+    /**
+     * The user said, for [toName], to send to [to] though only one
+     * server vouched for it (#277). Carried with the request — and
+     * journalled — so a Review again, even from a reopened page, re-checks
+     * against the acceptance actually given: an answer still that one
+     * server's, for this same [to], still counts as accepted.
+     */
+    val toNameAccepted: Boolean = false,
 ) {
     init {
         require(token.chainId == chain.id) { "the token is on another chain" }

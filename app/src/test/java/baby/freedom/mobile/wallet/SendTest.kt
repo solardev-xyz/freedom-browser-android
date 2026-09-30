@@ -242,7 +242,14 @@ class SendTest {
         assertEquals(Recipients.Parsed.Name("gregskril.com"), Recipients.parse(" gregskril.com ", xdai, names = true))
         assertEquals(Recipients.Parsed.Ok(to), Recipients.parse(to, xdai, names = true))
         assertEquals(Recipients.Parsed.Name("0x1234.eth"), Recipients.parse("0x1234.eth", xdai, names = true))
-        for (bad in listOf("alice", "alice..eth", ".eth", "alice.eth/x", "https://alice.eth", "a b.eth", "alice.tez")) {
+        // The resolver's own normalization: pre-ENSIP-15 ASCII names it
+        // takes as-is are names here too; ASCII ENSIP-15 refuses is refused
+        // up front, not left to fail at lookup.
+        assertEquals(Recipients.Parsed.Name("xn--2i8h.eth"), Recipients.parse("xn--2i8h.eth", xdai, names = true))
+        assertEquals(Recipients.Parsed.Name("ab--c.eth"), Recipients.parse("AB--c.eth", xdai, names = true))
+        val underscore = Recipients.parse("a_b.eth", xdai, names = true)
+        assertTrue("$underscore", underscore is Recipients.Parsed.Invalid && underscore.reason.contains("ENSIP-15"))
+        for (bad in listOf("alice", "alice..eth", ".eth", "alice.eth/x", "https://alice.eth", "a b.eth", "alice.tez", "a_b.eth", "a!b.eth")) {
             assertTrue(bad, Recipients.parse(bad, xdai, names = true) is Recipients.Parsed.Invalid)
         }
         // Elsewhere (a Safe's send) an address only, as before.
@@ -288,6 +295,11 @@ class SendTest {
             Recipients.lookupProblem(EnsAddressResult.NoAddress("alice.wei", "CHAIN_UNSUPPORTED", null), "Gnosis")!!
                 .startsWith("WNS names hold an Ethereum address only"),
         )
+        // A chain id ENSIP-11 has no coin type for: nothing to retry.
+        assertTrue(
+            Recipients.lookupProblem(EnsAddressResult.NoAddress("alice.eth", "CHAIN_ID_UNSUPPORTED", null), "Big chain")!!
+                .startsWith("Names can’t hold an address for Big chain"),
+        )
         val conflict = EnsAddressResult.Conflict(
             "alice.eth", EnsResult.Conflict.Subject.RECORD,
             listOf(EnsResult.Conflict.Group("0xa1", listOf("rpc1.test")), EnsResult.Conflict.Group("0xb0", listOf("rpc2.test"))),
@@ -304,13 +316,15 @@ class SendTest {
         val chain = FakeChain()
         val s = sender(chain, journal = FileSendJournal(journalFile()))
         chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
-        val quote = s.prepare(request().copy(toName = "alice.eth"))
+        val quote = s.prepare(request().copy(toName = "alice.eth", toNameAccepted = true))
         assertEquals(to, quote.tx.to)
         s.submit(quote, signer())
         s.awaitStage { it == SendStatus.Stage.Pending }
         assertTrue(journalFile().readText().contains("\"toName\":\"alice.eth\""))
         val restored = sender(chain, journal = FileSendJournal(journalFile())).status.value!!.quote.request
         assertEquals("alice.eth", restored.toName)
+        // The acceptance of a one-server answer travels too, for a Review again from a reopened page.
+        assertTrue(restored.toNameAccepted)
         assertEquals(to, restored.to)
     }
 

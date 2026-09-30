@@ -244,6 +244,11 @@ class EnsResolver internal constructor(
      */
     private class NameMiss(val at: Long, val awaitingProbe: Long?)
 
+    /**
+     * Keyed by the record read ([Record.cacheKey]): the bare name for a
+     * page's `contenthash`, `addr:<coin>:<name>` for a send's address
+     * (#277) — one record's miss doesn't skip the light client for another.
+     */
     private val lightClientNameMisses = ConcurrentHashMap<String, NameMiss>()
 
     private fun lightClientMissedName(name: String, now: Long): Boolean {
@@ -630,7 +635,13 @@ class EnsResolver internal constructor(
      * Cancellation-honest, as [resolveContenthash].
      */
     suspend fun resolveAddress(rawName: String, chainId: Long, fresh: Boolean = false): EnsAddressResult {
-        require(chainId in 1 until 0x80000000L) { "chain id out of ENSIP-11's range" }
+        // ENSIP-11 coin types exist only for chain ids below 2^31: a
+        // larger one has no record to ask for — nothing to send to, not
+        // a failure to try again (#277).
+        if (chainId !in 1 until 0x80000000L) {
+            val normalized = runCatching { EnsNormalize.fastNormalize(rawName.trim()) }.getOrDefault(rawName.trim())
+            return EnsAddressResult.NoAddress(normalized, "CHAIN_ID_UNSUPPORTED", trust = null)
+        }
         val coinType = if (chainId == 1L) ETH_COIN_TYPE else 0x80000000L + chainId
         val result = resolve(rawName, Record.Address(coinType), fresh)
         coroutineContext.ensureActive()
@@ -703,7 +714,7 @@ class EnsResolver internal constructor(
         // [lightClientWaitFor] allowing it nothing, doesn't wait for a
         // probe either: a re-check of it has only the RPC/Colibri share.
         val missedName = generation != null && config.endpoints.isNotEmpty() &&
-            lightClientMissedName(normalized, clock())
+            lightClientMissedName(record.cacheKey(normalized), clock())
         // A probe still judging an earlier miss is waited for (it's
         // bounded by [LIGHT_CLIENT_PROBE_TIMEOUT_MS]), so a struggling light
         // client costs this lookup no more than that before it's skipped.
@@ -957,7 +968,9 @@ class EnsResolver internal constructor(
                 client.readyGeneration() != generation
             // Remembered before the probe starts, so the probe's verdict
             // always finds it (see [settleLightClientMisses]).
-            if (!momentary) rememberLightClientMiss(name, awaitingProbe = if (suspect) generation else null)
+            // Keyed by the record too: a Send lookup's miss of a name's
+            // `addr` says nothing of its `contenthash` a page needs (#277).
+            if (!momentary) rememberLightClientMiss(record.cacheKey(name), awaitingProbe = if (suspect) generation else null)
             if (suspect) probeLightClient(client, generation)
             return null
         }
