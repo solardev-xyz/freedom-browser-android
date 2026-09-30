@@ -1577,7 +1577,7 @@ internal fun SafeCoSignPage(
                             ReviewRow(
                                 "Safe nonce",
                                 tx.nonce.toString(),
-                                detail = nonce?.let { n ->
+                                detail = safeNonceShown(selfCall, snapshot, nonce)?.let { n ->
                                     when {
                                         n > tx.nonce -> "The Safe is already past this nonce: this transaction can never execute."
                                         n < tx.nonce -> "The Safe’s next nonce is $n: earlier transactions must execute first."
@@ -1720,6 +1720,11 @@ internal fun safeSelfCallCleared(call: SafeSelfCall?, acknowledged: Boolean): Bo
  * kind of list; null until read): it refuses to enable no address (GS101) or
  * an enabled module (GS102), and to disable one that isn't enabled or with the
  * wrong `prevModule` (GS103), and itself as its fallback handler (GS400).
+ * On the page, [owners] and [modules] come only from a snapshot that
+ * [safeStateApplies] to, and that never holds a module (an enabled module can
+ * change the list with no nonce), so of these the page only ever shows "isn't
+ * enabled"; GS102 and a wrong `prevModule` need a non-empty list and stay
+ * here for a caller that has one it can trust.
  *
  * A guard that doesn't currently declare itself one ([guardSupported] false;
  * the Safe would refuse it, GS300) gets a note too, but never a "would fail":
@@ -1811,13 +1816,14 @@ internal fun safeSelfCallThreshold(call: SafeSelfCall, owners: List<String>?, sa
  * (GS013), so the nonce is only used up if the balance covers [value] at
  * execution. [balance] is one read taken when the page opened, from an RPC
  * whose answer may be untrusted, and the Safe can be drained before
- * execution, so even a covering balance only hedges, never promises.
+ * execution, so even a covering balance only hedges, never promises. A short
+ * one only hedges too: anyone can send the Safe native currency first.
  */
 internal fun safeCancelDetail(nonce: BigInteger, value: BigInteger, balance: BigInteger?, amount: String): String = when {
     value.signum() == 0 ->
         "A call from the Safe to itself with no data. It only uses up Safe nonce $nonce, so no other transaction with that nonce can execute."
     balance != null && balance < value ->
-        "A call from the Safe to itself with no data, sending $amount — more than the Safe now holds. It would fail, and Safe nonce $nonce would stay open for another transaction."
+        "A call from the Safe to itself with no data, sending $amount — more than the Safe held when it was read. Unless it holds that much when it executes it fails, and Safe nonce $nonce stays open for another transaction. Anyone can send the Safe funds before then, so don’t count on it failing either."
     balance != null ->
         "A call from the Safe to itself with no data: the $amount it sends comes straight back. The Safe holds that much now, so it uses up Safe nonce $nonce and no other transaction with that nonce can execute, as long as the Safe still holds that much when it executes. If not, it fails and the nonce stays open."
     else ->
@@ -1839,6 +1845,15 @@ internal fun safeCancelDetail(nonce: BigInteger, value: BigInteger, balance: Big
  */
 internal fun safeStateApplies(call: SafeSelfCall, snapshot: SafeChain.Snapshot?, txNonce: BigInteger): Boolean =
     snapshot != null && snapshot.nonce == txNonce && (!call.readsOwnersOrModules || snapshot.modules?.isEmpty() == true)
+
+/**
+ * The Safe's next nonce the *Safe nonce* row goes by. For a self-call it's
+ * [snapshot]'s once read, so the row agrees with [safeSelfCallQueuedNote]:
+ * the separate [nonce] read may come from a later block or another node.
+ * Otherwise (and until the snapshot is read) [nonce].
+ */
+internal fun safeNonceShown(call: SafeSelfCall?, snapshot: SafeChain.Snapshot?, nonce: BigInteger?): BigInteger? =
+    if (call != null && snapshot != null) snapshot.nonce else nonce
 
 /** Whether the Safe's checks on this call go by its owners or its modules: owner, threshold and module calls. */
 private val SafeSelfCall.readsOwnersOrModules: Boolean

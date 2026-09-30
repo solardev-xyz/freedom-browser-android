@@ -184,8 +184,11 @@ class SafeSelfCallTest {
         )
         // More than it holds: execTransaction reverts (GS013) and the nonce stays open.
         val short = safeCancelDetail(n, ten, BigInteger.ONE, "10 wei")
-        assertTrue(short, short.contains("more than the Safe now holds") && short.contains("nonce 7 would stay open"))
+        assertTrue(short, short.contains("more than the Safe held when it was read") && short.contains("nonce 7 stays open"))
         assertFalse(short, short.contains("only uses up"))
+        // …unless someone tops it up first, so it's a hedge, not a promise (R3-M2).
+        assertTrue(short, short.contains("Unless it holds that much when it executes") && short.contains("don’t count on it failing"))
+        assertFalse(short, short.contains("would fail"))
         // Enough now: one untrusted read, and the Safe can be drained before execution, so still hedged.
         val enough = safeCancelDetail(n, ten, ten, "10 wei")
         assertTrue(enough, enough.contains("uses up Safe nonce 7") && enough.contains("as long as the Safe still holds that much when it executes"))
@@ -193,6 +196,18 @@ class SafeSelfCallTest {
         // Unread: hedged, not a claim either way.
         val unread = safeCancelDetail(n, ten, null, "10 wei")
         assertTrue(unread, unread.contains("only if the Safe holds that much") && !unread.contains("It only uses up"))
+    }
+
+    @Test
+    fun `the Safe nonce row goes by the snapshot's nonce for a self-call`() {
+        // R3-M1: the row and the queued note read the same nonce, so they can't contradict each other.
+        val snap = SafeChain.Snapshot(1, BigInteger.valueOf(7), listOf(owner), emptyList(), null)
+        val later = BigInteger.valueOf(8)
+        assertEquals(BigInteger.valueOf(7), safeNonceShown(SafeSelfCall.ChangeThreshold(BigInteger.ONE), snap, later))
+        // Until the snapshot is read, and for any other transaction, the separate read.
+        assertEquals(later, safeNonceShown(SafeSelfCall.ChangeThreshold(BigInteger.ONE), null, later))
+        assertEquals(later, safeNonceShown(null, snap, later))
+        assertNull(safeNonceShown(null, null, null))
     }
 
     @Test
@@ -343,6 +358,10 @@ class SafeSelfCallTest {
         assertFalse(safeStateApplies(readdX, at(listOf(module)), n))
         // A list that couldn't be read (more than a page) is no better than one with modules.
         assertFalse(safeStateApplies(readdX, at(null), n))
+        // R3-M3: so the page never passes a non-empty list on, and GS102 / a wrong prevModule never show there.
+        val enableAgain = SafeSelfCall.EnableModule(module)
+        assertNull(safeSelfCallFailure(enableAgain, null, safe, at(listOf(module)).takeIf { safeStateApplies(enableAgain, it, n) }?.modules))
+        assertTrue(safeSelfCallQueuedNote(enableAgain, at(listOf(module)), n)!!.contains("has a module enabled"))
         val note = safeSelfCallQueuedNote(readdX, at(listOf(module)), n)!!
         assertTrue(note.contains("a module enabled"))
         assertTrue(note.contains("no Safe nonce"))
