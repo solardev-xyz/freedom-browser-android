@@ -72,8 +72,9 @@ fun BlockedPopupNotice(
 ) {
     val entries = popups.entries
     // Re-armed whenever the rows or buttons move ([BlockedPopups.layoutKey]):
-    // a new entry, an address arriving, the "and N more" line — not for
-    // a count ticking up, so a page blocking in a loop can't keep it
+    // a new entry, an address arriving, the "and N more" line, the
+    // title's count gaining a digit (it may wrap) — not for a count
+    // ticking up otherwise, so a page blocking in a loop can't keep it
     // disarmed.
     val tap = rememberArmedTapGuard(popups.layoutKey)
     val origin = popups.origin

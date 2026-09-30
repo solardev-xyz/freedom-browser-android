@@ -201,12 +201,16 @@ class BlockedPopups {
     /**
      * Everything that moves the notice's rows and buttons: its entries as
      * shown (an address arriving adds lines and an Open button) and
-     * whether the "and N more" line is up. The notice's tap guard is
-     * keyed by it, so it re-arms whenever what's under a finger may have
-     * changed; a growing count alone changes only text in place.
+     * whether the "and N more" line is up, and how many digits the
+     * title's count has: a count gaining one (9 → 10) can wrap the title
+     * at a large font scale and push every row down a line (#292
+     * R1-M1). The notice's tap guard is keyed by it, so it re-arms
+     * whenever what's under a finger may have changed; a count ticking
+     * up within its digits changes only text in place, so a page
+     * blocking in a loop re-arms it only at 10, 100, 1000…
      */
     val layoutKey: Any
-        get() = entries to (unlisted > 0)
+        get() = Triple(entries, unlisted > 0, count.toString().length)
 
     /** A probe couldn't be started for pop-up [id]: its address won't be read. */
     fun unread(document: Int, id: Long) {
@@ -300,6 +304,29 @@ internal object PopupProbe {
         private: Boolean,
         resultMsg: Message,
         onResult: (url: String?, bound: Boolean, posted: Boolean) -> Unit,
+    ): Boolean = start(context, private, resultMsg, TIMEOUT_MS, onResult)
+
+    /**
+     * Hand [resultMsg]'s window to a probe that is dropped as soon as
+     * Chromium has bound it, its address unread: a window refused
+     * outright, after `onCreateWindow` already answered true (its verdict
+     * is deferred, #292 R1-F1). Chromium holds a window it was told the
+     * app would take until some WebView takes it, and refuses every later
+     * window of the tab meanwhile; this takes it, fetching and running
+     * nothing, like a probe.
+     */
+    fun discard(context: Context, private: Boolean, resultMsg: Message) {
+        if (!start(context, private, resultMsg, timeoutMs = 0L) { _, _, _ -> }) {
+            Log.w(TAG, "refused window not taken; this tab's next window may be refused too")
+        }
+    }
+
+    private fun start(
+        context: Context,
+        private: Boolean,
+        resultMsg: Message,
+        timeoutMs: Long,
+        onResult: (url: String?, bound: Boolean, posted: Boolean) -> Unit,
     ): Boolean {
         val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
         val probe = try {
@@ -364,7 +391,7 @@ internal object PopupProbe {
             main.postAtTime(
                 { finish(null, bound = runCatching { probe.url }.getOrNull() != null) },
                 probe,
-                android.os.SystemClock.uptimeMillis() + TIMEOUT_MS,
+                android.os.SystemClock.uptimeMillis() + timeoutMs,
             )
             true
         } catch (e: Exception) {

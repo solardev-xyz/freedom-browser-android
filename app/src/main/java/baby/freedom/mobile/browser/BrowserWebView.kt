@@ -1003,7 +1003,10 @@ fun BrowserWebViewHost(
                 // Null: the notice is full and it is only counted — no
                 // address to read for it.
                 val id = popups.add(origin, pending = probing, unread = !probing)
-                if (!probing || id == null) return@buildRefreshableWebView false
+                if (!probing || id == null) {
+                    PopupProbe.discard(context, tab.private, resultMsg)
+                    return@buildRefreshableWebView
+                }
                 popups.liveProbes++
                 val started = PopupProbe.start(context, tab.private, resultMsg) { url, bound, posted ->
                     popups.liveProbes--
@@ -1013,7 +1016,6 @@ fun BrowserWebViewHost(
                     popups.liveProbes--
                     popups.unread(document, id)
                 }
-                started
             },
             // Handed to Chromium by `onCreateWindow`, which needs it
             // never to have navigated. Not a popup rebuilt after a
@@ -1502,7 +1504,8 @@ private fun buildRefreshableWebView(
     onCreateWindow: (isUserGesture: Boolean) -> WebView,
     onCloseWindow: () -> Unit,
     popupsAllowed: (origin: String?) -> Boolean = { false },
-    onPopupBlocked: (origin: String?, resultMsg: Message) -> Boolean = { _, _ -> false },
+    /** A window [popupsAllowed] refused; it must hand [resultMsg] on (a probe, or [PopupProbe.discard]). */
+    onPopupBlocked: (origin: String?, resultMsg: Message) -> Unit = { _, resultMsg -> PopupProbe.discard(context, private = false, resultMsg) },
     isPopup: Boolean = false,
     popupOpener: () -> Pair<BrowserState, WebView>? = { null },
     onContextMenuPress: () -> PageContextMenuPin? = { null },
@@ -1528,6 +1531,12 @@ private fun buildRefreshableWebView(
     // The ENS roots this tab's documents were served from, so their
     // subresources don't follow another tab's newer answer (#99).
     val ensPins = EnsDocumentPins()
+
+    // A no-gesture window's verdict, one main-loop turn after
+    // `onCreateWindow` (#292 R1-F1): a plain (not asynchronous) handler on
+    // the main looper, so it runs in queue order with the `onPageStarted`
+    // WebView posted there before it.
+    val deferredPopups = Handler(Looper.getMainLooper())
 
     // Is the document on screen the interceptor's in-place refusal of an
     // ENS name? Kept out of history like any other error page (#99).
@@ -4013,18 +4022,46 @@ private fun buildRefreshableWebView(
                 resultMsg: Message?,
             ): Boolean {
                 val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                if (isUserGesture) {
+                    transport.webView = onCreateWindow(true)
+                    resultMsg.sendToTarget()
+                    return true
+                }
                 // The pop-up blocker (#261): without the user's gesture a
                 // window opens only on a site allowed pop-ups. Judged by
                 // the committed page's origin — a frame's window counts
-                // as its page's, as on desktop.
-                if (!isUserGesture) {
+                // as its page's, as on desktop — and filed under its
+                // document.
+                //
+                // Not judged here, but one main-loop turn later (#292
+                // R1-F1, R1-F2): a new document's early script (inline,
+                // `setTimeout(0)`, `load`) opens its window before this
+                // tab has heard the document committed. Chromium posts
+                // `onPageStarted` to the main looper at the commit, and
+                // calls this directly afterwards, so the commit's
+                // callback is already queued ahead of this post: by the
+                // time it runs, [committedPageUrl] names the document the
+                // window came from, and [BlockedPopups.document] is
+                // that document's, not the one it replaced. A window from
+                // the outgoing document, sent before the commit, is
+                // still judged ahead of it, in queue order.
+                //
+                // Having returned true, the window must be handed to
+                // some WebView, or Chromium keeps it pending and refuses
+                // every later window of this tab: one that is neither
+                // opened nor probed goes to a probe that is dropped at
+                // once ([PopupProbe.discard]).
+                deferredPopups.post {
+                    val opener = view
+                    if (opener == null || opener.isDestroyed) return@post
                     val origin = permissionOriginKey(committedPageUrl)
-                    if (!popupOpens(isUserGesture = false, siteAllowed = popupsAllowed(origin))) {
-                        return onPopupBlocked(origin, resultMsg)
+                    if (popupOpens(isUserGesture = false, siteAllowed = popupsAllowed(origin))) {
+                        transport.webView = onCreateWindow(false)
+                        resultMsg.sendToTarget()
+                    } else {
+                        onPopupBlocked(origin, resultMsg)
                     }
                 }
-                transport.webView = onCreateWindow(isUserGesture)
-                resultMsg.sendToTarget()
                 return true
             }
 

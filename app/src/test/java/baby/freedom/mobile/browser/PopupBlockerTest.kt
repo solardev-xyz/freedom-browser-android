@@ -75,11 +75,22 @@ class PopupBlockerTest {
         keys += popups.layoutKey // "and 1 more" appears
         // An address arriving, a new row, the "more" line: each re-arms.
         assertEquals(keys.size, keys.toSet().size)
-        // A loop past that only changes the count: the guard can arm.
+        // A loop past that only changes the count: the guard can arm…
         val full = popups.layoutKey
-        repeat(50) { popups.add("https://a.example", pending = false, unread = true) }
+        repeat(5) { popups.add("https://a.example", pending = false, unread = true) }
+        assertEquals(9, popups.count)
         assertEquals(full, popups.layoutKey)
-        assertEquals(54, popups.count)
+        // …except when the title's count gains a digit, which can wrap
+        // the title and move the rows (#292 R1-M1)…
+        popups.add("https://a.example", pending = false, unread = true)
+        val tens = popups.layoutKey
+        assertTrue(full != tens)
+        // …and then not again until the next one.
+        repeat(89) { popups.add("https://a.example", pending = false, unread = true) }
+        assertEquals(99, popups.count)
+        assertEquals(tens, popups.layoutKey)
+        popups.add("https://a.example", pending = false, unread = true)
+        assertTrue(tens != popups.layoutKey)
     }
 
     @Test
