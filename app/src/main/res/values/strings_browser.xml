@@ -35,6 +35,8 @@
     <!-- PageContextMenu.kt: the long-press sheet -->
     <string name="browser_menu_image">Image</string>
     <string name="browser_menu_open_in_new_tab">Open in new tab</string>
+    <!-- A bookmark's or history entry's menu (#321) -->
+    <string name="browser_menu_open_in_private_tab">Open in private tab</string>
     <string name="browser_menu_copy_link_address">Copy link address</string>
     <string name="browser_menu_share_link">Share link</string>
     <string name="browser_menu_open_image_in_new_tab">Open image in new tab</string>
@@ -196,6 +198,18 @@
     <string name="browser_tabs_new_private">Private</string>
     <string name="browser_tabs_reopen">Reopen</string>
     <string name="browser_tabs_close_switcher">Close tab switcher</string>
+    <!-- TalkBack's name for the switcher's ⋮ menu button. -->
+    <string name="browser_tabs_menu">More tab options</string>
+    <string name="browser_tabs_close_all">Close all tabs</string>
+    <string name="browser_tabs_close_private">Close private tabs</string>
+    <!-- A tab card's menu (long-press) and accessibility action: close every tab but this one. -->
+    <string name="browser_tabs_close_others">Close other tabs</string>
+    <!-- Snackbar after Close all tabs / Close other tabs. -->
+    <plurals name="browser_tabs_closed">
+        <item quantity="one">%d tab closed</item>
+        <item quantity="other">%d tabs closed</item>
+    </plurals>
+    <string name="browser_tabs_undo">Undo</string>
     <string name="browser_tabs_move_earlier">Move tab earlier</string>
     <string name="browser_tabs_move_to_start">Move tab to start</string>
     <string name="browser_tabs_move_later">Move tab later</string>

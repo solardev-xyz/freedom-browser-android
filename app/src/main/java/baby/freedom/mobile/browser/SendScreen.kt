@@ -45,6 +45,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
@@ -53,6 +54,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
+import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
@@ -177,6 +179,41 @@ private data class NameLookup(val name: String, val chainId: Long, val result: E
 /** How long the recipient field must stay still before a name in it is looked up. */
 private const val NAME_LOOKUP_DEBOUNCE_MS = 400L
 
+/**
+ * Where the form's values came from, when a payment link filled it in
+ * (#317): the site whose link it was, in full (never shortened — its tail
+ * is what a spoof hides), and a network the link didn't name.
+ */
+@Composable
+private fun SendLinkNote(prefill: SendPrefill) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.testTag("send-link-note")) {
+        Text(
+            prefill.origin?.let { stringResource(R.string.send_link_filled_from_site, permissionOriginDisplay(it)) }
+                ?: stringResource(R.string.send_link_filled),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        prefill.chainGuess?.let { guess ->
+            Text(
+                when (guess) {
+                    ChainGuess.ETHEREUM_DEFAULT -> stringResource(R.string.send_link_chain_assumed)
+                    ChainGuess.ONLY_CHAIN_WITH_TOKEN -> stringResource(
+                        R.string.send_link_chain_from_token,
+                        prefillChainName(prefill),
+                    )
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** The network [prefill]'s asset is on, by name (its chain ID when Freedom has no name for it). */
+internal fun prefillChainName(prefill: SendPrefill): String {
+    val id = prefill.tokenKey.substringBefore(':')
+    return BuiltInChains.ALL.firstOrNull { it.id.toString() == id }?.name ?: id
+}
+
 /** The block explorer's page for [hash], or null when the chain has no explorer. */
 internal fun explorerTxUrl(chain: Chain, hash: String): String? =
     chain.explorerUrl?.trimEnd('/')?.let { "$it/tx/$hash" }
@@ -189,6 +226,20 @@ internal fun explorerTxUrl(chain: Chain, hash: String): String? =
  * runs in [WalletSender], so leaving this page doesn't stop it; coming
  * back shows where it got to.
  */
+/**
+ * The Send form's own fields — asset, recipient, amount, "all" — held
+ * apart from [SendPage] so a caller can keep them while the page is off
+ * screen: a link's page hidden behind a feature's request comes back with
+ * what the user had typed, not the link's values again (#317 R2-M1).
+ */
+internal class SendDraft {
+    var filled = false
+    var assetKey by mutableStateOf<String?>(null)
+    var recipient by mutableStateOf("")
+    var amount by mutableStateOf("")
+    var all by mutableStateOf(false)
+}
+
 @Composable
 internal fun SendPage(
     account: WalletAccount,
@@ -199,6 +250,15 @@ internal fun SendPage(
     phraseBackedUp: Boolean,
     onOpenUrl: (String) -> Unit,
     onBack: () -> Unit,
+    // A payment link's asset, recipient and amount (#317): only what the
+    // form starts with, every field still the user's to change.
+    prefill: SendPrefill? = null,
+    // A send from this page has started (#317: a link's Send page was used).
+    onStarted: () -> Unit = {},
+    // Where the form's fields are kept, when they must outlive the page
+    // (a link's Send page hidden while a feature's request needs the
+    // wallet home, R2-M1); the page's own otherwise.
+    draft: SendDraft? = null,
 ) {
     val context = LocalContext.current
     val sender = remember(context) { WalletSender.get(context) }
@@ -208,11 +268,23 @@ internal fun SendPage(
         TokenRegistry.WALLET_CHAIN_IDS.mapNotNull { id -> chains.firstOrNull { it.id == id } }
             .flatMap { chain -> TokenRegistry.tokens(chain).map { chain to it } }
     }
-    var assetKey by remember { mutableStateOf(assets.firstOrNull()?.second?.key) }
+    val prefilledAsset = prefill?.let { p -> assets.firstOrNull { it.second.key == p.tokenKey }?.second }
+    // The form's fields live in [draft] when the caller keeps one, so the
+    // user's edits outlive this page leaving composition (R2-M1); filled in
+    // from the link only the first time.
+    val form = draft ?: remember { SendDraft() }
+    if (!form.filled) {
+        form.filled = true
+        form.assetKey = prefilledAsset?.key ?: assets.firstOrNull()?.second?.key
+        form.recipient = prefill?.recipient.orEmpty()
+        // In the link's asset's own decimals, every digit kept: a request's amount isn't rounded.
+        form.amount = prefilledAsset?.let { token -> prefill.amount?.let { SendAmounts.exact(it, token.decimals) } }.orEmpty()
+    }
+    var assetKey by form::assetKey
     val asset = assets.firstOrNull { it.second.key == assetKey } ?: assets.firstOrNull()
-    var recipient by remember { mutableStateOf("") }
-    var amount by remember { mutableStateOf("") }
-    var all by remember { mutableStateOf(false) }
+    var recipient by form::recipient
+    var amount by form::amount
+    var all by form::all
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -433,6 +505,7 @@ internal fun SendPage(
                                             WalletSender.Submit.STARTED -> {
                                                 quote = null
                                                 notice = null
+                                                onStarted()
                                             }
                                             WalletSender.Submit.BUSY -> error = Strings.get(R.string.send_busy)
                                             WalletSender.Submit.STALE -> stale = true
@@ -451,6 +524,9 @@ internal fun SendPage(
                     )
                 }
                 else -> {
+                    if (prefill != null) {
+                        item("link") { SendLinkNote(prefill) }
+                    }
                     item("from") {
                         SectionCard(title = stringResource(R.string.send_label_from)) {
                             Text(account.name, fontWeight = FontWeight.Medium)

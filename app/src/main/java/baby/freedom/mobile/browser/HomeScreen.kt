@@ -30,6 +30,9 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -58,6 +61,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -96,6 +100,9 @@ import baby.freedom.mobile.ui.isLight
  *    submits the bookmark URL through the browser's standard submit
  *    pipeline (so `bzz://` / `ens://` still take the probe-gated path).
  *  - Recent pages: vertical list of the 8 most-recent distinct URLs.
+ *    A long-press on a tile or a recent page (or its TalkBack actions)
+ *    opens it in a new or a private tab behind this one instead
+ *    ([onOpenInNewTab], with whether the tab is private; #321).
  *  - Explore: the curated dweb sites ([EXPLORE_CURATED], iOS's list),
  *    always shown, so a first launch has something to tap.
  *
@@ -105,6 +112,7 @@ import baby.freedom.mobile.ui.isLight
 internal fun HomeScreen(
     repo: BrowsingRepository,
     onOpen: (String) -> Unit,
+    onOpenInNewTab: (url: String, private: Boolean) -> Unit,
     nodeInfo: NodeInfo,
     runNodeEnabled: Boolean,
     onOpenNode: () -> Unit,
@@ -234,7 +242,7 @@ internal fun HomeScreen(
                     modifier = Modifier.padding(horizontal = 24.dp),
                 )
                 Spacer(Modifier.height(12.dp))
-                BookmarkTiles(bookmarks = bookmarks, repo = repo, onOpen = onOpen)
+                BookmarkTiles(bookmarks = bookmarks, repo = repo, onOpen = onOpen, onOpenInNewTab = onOpenInNewTab)
             }
 
             if (recent.isNotEmpty()) {
@@ -244,7 +252,7 @@ internal fun HomeScreen(
                     modifier = Modifier.padding(horizontal = 24.dp),
                 )
                 Spacer(Modifier.height(8.dp))
-                RecentList(entries = recent, onOpen = onOpen)
+                RecentList(entries = recent, onOpen = onOpen, onOpenInNewTab = onOpenInNewTab)
             }
 
             Spacer(Modifier.height(if (bookmarks.isEmpty() && recent.isEmpty()) firstGap else 16.dp))
@@ -526,6 +534,7 @@ private fun BookmarkTiles(
     bookmarks: List<BookmarkEntry>,
     repo: BrowsingRepository,
     onOpen: (String) -> Unit,
+    onOpenInNewTab: (url: String, private: Boolean) -> Unit,
 ) {
     LazyRow(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -533,7 +542,13 @@ private fun BookmarkTiles(
         modifier = Modifier.fillMaxWidth(),
     ) {
         items(items = bookmarks, key = { it.id }) { entry ->
-            BookmarkTile(entry = entry, repo = repo, onClick = { onOpen(entry.url) })
+            BookmarkTile(
+                entry = entry,
+                repo = repo,
+                onClick = { onOpen(entry.url) },
+                // Home is a non-private tab's page: a private tab has its own.
+                openActions = entryOpenActions(fromPrivate = false) { private -> onOpenInNewTab(entry.url, private) },
+            )
         }
     }
 }
@@ -543,33 +558,46 @@ private fun BookmarkTile(
     entry: BookmarkEntry,
     repo: BrowsingRepository,
     onClick: () -> Unit,
+    openActions: List<Pair<String, () -> Unit>>,
 ) {
     val label = entry.title.ifBlank { entry.url }
     val favicon = rememberFavicon(repo = repo, url = entry.url)
+    var menuOpen by remember { mutableStateOf(false) }
 
-    Column(
-        modifier = Modifier
-            .width(84.dp)
-            .clip(MaterialTheme.shapes.medium)
-            .clickable(onClick = onClick)
-            .padding(vertical = 4.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        if (favicon != null) {
-            FaviconTile(favicon = favicon)
-        } else {
-            LetterTile(entry = entry)
+    // The long-press menu drops from the tile.
+    Box {
+        Column(
+            modifier = Modifier
+                .width(84.dp)
+                .clip(MaterialTheme.shapes.medium)
+                .combinedClickable(
+                    onLongClickLabel = stringResource(R.string.library_entry_options),
+                    onLongClick = { menuOpen = true },
+                    onClick = onClick,
+                )
+                .semantics { customActions = openActions.asAccessibilityActions() }
+                .padding(vertical = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            if (favicon != null) {
+                FaviconTile(favicon = favicon)
+            } else {
+                LetterTile(entry = entry)
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            EntryOpenMenuItems(openActions, onClose = { menuOpen = false })
+        }
     }
 }
 
@@ -640,6 +668,7 @@ private fun rememberFavicon(repo: BrowsingRepository, url: String): ImageBitmap?
 private fun RecentList(
     entries: List<HistoryEntry>,
     onOpen: (String) -> Unit,
+    onOpenInNewTab: (url: String, private: Boolean) -> Unit,
 ) {
     // `RecentList` sits inside the home page's own vertical scroll, so a
     // nested LazyColumn would fight it for gestures. The list is capped
@@ -650,12 +679,23 @@ private fun RecentList(
             .fillMaxWidth()
             .padding(horizontal = 16.dp),
     ) {
-        for (entry in entries) {
-            PageRow(
-                title = entry.title.ifBlank { entry.url },
-                subtitle = entry.url,
-                onClick = { onOpen(entry.url) },
-            )
+        for (entry in entries) key(entry.id) {
+            // Home is a non-private tab's page: a private tab has its own.
+            val openActions = entryOpenActions(fromPrivate = false) { private -> onOpenInNewTab(entry.url, private) }
+            var menuOpen by remember { mutableStateOf(false) }
+            Box {
+                PageRow(
+                    title = entry.title.ifBlank { entry.url },
+                    subtitle = entry.url,
+                    onClick = { onOpen(entry.url) },
+                    onLongClick = { menuOpen = true },
+                    onLongClickLabel = stringResource(R.string.library_entry_options),
+                    modifier = Modifier.semantics { customActions = openActions.asAccessibilityActions() },
+                )
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    EntryOpenMenuItems(openActions, onClose = { menuOpen = false })
+                }
+            }
         }
     }
 }
