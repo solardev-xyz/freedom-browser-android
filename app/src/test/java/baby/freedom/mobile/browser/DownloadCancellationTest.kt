@@ -77,7 +77,7 @@ class DownloadCancellationTest {
         c.register(6, job)
         val body = Closeable()
         c.track(6, job, body)
-        c.release(6)
+        c.release(6, job)
         c.cancel(6)
         assertEquals(0, body.closes)
     }
@@ -174,5 +174,42 @@ class DownloadCancellationTest {
         c.forget(15)
         assertTrue(c.register(15, Job()))
         assertEquals(null, c.stopOf(15))
+    }
+
+    @Test
+    fun `a cancel tapped just before a resume still stops the resumed run`() {
+        // Cancel's mark lands (no job registered: the row is paused),
+        // then Resume forgets the last run's marks and registers: the
+        // cancel must survive that and refuse the new job.
+        val c = DownloadCancellation()
+        c.cancel(16)
+        c.forgetPause(16)
+        assertFalse(c.register(16, Job()))
+        assertEquals(DownloadStop.CANCEL, c.stopOf(16))
+    }
+
+    @Test
+    fun `forgetPause drops a pause mark`() {
+        val c = DownloadCancellation()
+        c.cancel(17, DownloadStop.PAUSE)
+        c.forgetPause(17)
+        assertTrue(c.register(17, Job()))
+    }
+
+    @Test
+    fun `the last run's release doesn't drop the resumed run's connection`() {
+        // A Resume landed between the old run's PAUSED write and its
+        // finally: the new run's socket must stay closable.
+        val c = DownloadCancellation()
+        val old = Job()
+        c.register(18, old)
+        c.track(18, old, Closeable())
+        val new = Job()
+        c.register(18, new)
+        val conn = Closeable()
+        c.track(18, new, conn)
+        c.release(18, old)
+        c.cancel(18)
+        assertEquals(1, conn.closes)
     }
 }

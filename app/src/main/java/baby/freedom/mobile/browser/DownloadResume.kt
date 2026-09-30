@@ -8,17 +8,29 @@ package baby.freedom.mobile.browser
  */
 
 /**
- * The value a resume sends as `If-Range`: the response's `ETag` if it
- * is a strong one, else its `Last-Modified`. A weak ETag (`W/"…"`) can't
- * be used — RFC 9110 has a server ignore the range for one — so it falls
- * back to the date. Null when there's neither: a resume then can't tell
- * whether the file changed, and starts over.
+ * The value a resume sends as `If-Range`, per RFC 9110 §13.1.5: the
+ * response's `ETag` if it is a strong one; with no ETag at all, its
+ * `Last-Modified` — but only when that date is a strong validator
+ * (§8.8.2.2: at least a second older than the response's [date], so a
+ * file rewritten within the same second can't carry the same date).
+ * A weak ETag (`W/"…"`) is no use, and rules the date out too (a client
+ * that has an entity tag must not send a date). Null otherwise: a resume
+ * then can't tell whether the file changed, and starts over.
  */
-internal fun downloadValidator(etag: String?, lastModified: String?): String? {
+internal fun downloadValidator(etag: String?, lastModified: String?, date: String?): String? {
     val tag = etag?.trim()?.takeIf { it.isNotEmpty() }
-    if (tag != null && !tag.startsWith("W/", ignoreCase = true)) return tag
-    return lastModified?.trim()?.takeIf { it.isNotEmpty() }
+    if (tag != null) return tag.takeUnless { it.startsWith("W/", ignoreCase = true) }
+    val modified = lastModified?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val modifiedAt = parseHttpDate(modified) ?: return null
+    val sentAt = parseHttpDate(date) ?: return null
+    return modified.takeIf { sentAt - modifiedAt >= 1 }
 }
+
+/** An IMF-fixdate (`Tue, 29 Sep 2026 10:00:00 GMT`) in epoch seconds; null if it isn't one. */
+internal fun parseHttpDate(value: String?): Long? = runCatching {
+    java.time.ZonedDateTime.parse(value!!.trim(), java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
+        .toEpochSecond()
+}.getOrNull()
 
 /**
  * Does a response let a download resume where it stopped? Only with an
@@ -61,15 +73,16 @@ internal sealed class ResumeAnswer {
     data class Continue(val total: Long) : ResumeAnswer()
 
     /**
-     * A whole body (200): the server ignored the range, or the file
-     * changed (If-Range failed). Write it from byte 0; [restarted] when
+     * A whole body (a 200, or a 206 of the whole file): the server
+     * ignored the range, or the file changed (If-Range failed). Write it from byte 0; [restarted] when
      * a resume was asked for, so the row says it started over.
      */
     data class FromStart(val restarted: Boolean) : ResumeAnswer()
 
     /**
      * A partial answer the download can't use (a 416, or a 206 for some
-     * other range): ask again for the whole file.
+     * other range or one that stops short of the end): ask again for
+     * the whole file.
      */
     object AskWhole : ResumeAnswer()
 }
@@ -78,15 +91,24 @@ internal sealed class ResumeAnswer {
  * Judge a 2xx / 416 answer to a request that asked for byte [offset]
  * on (0: the whole file). [contentRange] and [contentLength] are the
  * response's headers.
+ *
+ * A 206 is only taken when it runs to the end of the file: from
+ * [offset] to the last byte (or to an unknown end, a `*` length) on a resume,
+ * and the whole file (`bytes 0-(N-1)/N`) to a plain request — which some
+ * servers answer with a 206. A range that stops short (a server capping
+ * its range answers) would end the body early and pause the download
+ * again after every chunk, so it asks for the whole file instead.
  */
 internal fun resumeAnswer(status: Int, offset: Long, contentRange: String?, contentLength: Long): ResumeAnswer =
-    when {
-        status == 206 && offset > 0 -> {
+    when (status) {
+        206 -> {
             val range = parseContentRange(contentRange)
-            if (range == null || range.first != offset) {
-                ResumeAnswer.AskWhole
-            } else {
-                ResumeAnswer.Continue(
+            val toTheEnd = range != null && (range.total < 0 || range.last == range.total - 1)
+            when {
+                range == null || range.first != offset || !toTheEnd -> ResumeAnswer.AskWhole
+                // The whole file, as a 206: the same as a 200.
+                offset == 0L -> if (range.total >= 0) ResumeAnswer.FromStart(restarted = false) else ResumeAnswer.AskWhole
+                else -> ResumeAnswer.Continue(
                     when {
                         range.total >= 0 -> range.total
                         contentLength >= 0 -> offset + contentLength
@@ -95,9 +117,7 @@ internal fun resumeAnswer(status: Int, offset: Long, contentRange: String?, cont
                 )
             }
         }
-        // Nothing was asked for: a 206 is a server gone odd.
-        status == 206 -> ResumeAnswer.AskWhole
-        status == 416 -> ResumeAnswer.AskWhole
+        416 -> ResumeAnswer.AskWhole
         else -> ResumeAnswer.FromStart(restarted = offset > 0)
     }
 

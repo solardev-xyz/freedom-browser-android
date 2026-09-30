@@ -11,24 +11,49 @@ import org.junit.Test
 /** Pause and resume for downloads (#265): the pure half. */
 class DownloadResumeTest {
 
+    private val date = "Tue, 29 Sep 2026 10:00:05 GMT"
+
     @Test
     fun `a strong ETag is the validator`() {
-        assertEquals("\"abc\"", downloadValidator("\"abc\"", "Tue, 29 Sep 2026 10:00:00 GMT"))
+        assertEquals("\"abc\"", downloadValidator("\"abc\"", "Tue, 29 Sep 2026 10:00:00 GMT", date))
+        assertEquals("\"abc\"", downloadValidator("\"abc\"", null, null))
     }
 
     @Test
-    fun `a weak ETag falls back to Last-Modified`() {
+    fun `with no ETag, a Last-Modified a second or more before Date is the validator`() {
         assertEquals(
             "Tue, 29 Sep 2026 10:00:00 GMT",
-            downloadValidator("W/\"abc\"", "Tue, 29 Sep 2026 10:00:00 GMT"),
+            downloadValidator(null, "Tue, 29 Sep 2026 10:00:00 GMT", date),
         )
-        assertNull(downloadValidator("w/\"abc\"", null))
+        assertEquals(
+            "Tue, 29 Sep 2026 10:00:04 GMT",
+            downloadValidator(null, "Tue, 29 Sep 2026 10:00:04 GMT", date),
+        )
+    }
+
+    @Test
+    fun `a Last-Modified within the second of Date, or with no Date, is weak`() {
+        // RFC 9110 8.8.2.2: rewritten in that same second, the file could
+        // carry the same date, so it can't guard a range.
+        assertNull(downloadValidator(null, date, date))
+        assertNull(downloadValidator(null, "Tue, 29 Sep 2026 10:00:09 GMT", date))
+        assertNull(downloadValidator(null, "Tue, 29 Sep 2026 10:00:00 GMT", null))
+        assertNull(downloadValidator(null, "Tue, 29 Sep 2026 10:00:00 GMT", "yesterday"))
+        assertNull(downloadValidator(null, "Tuesday, 29-Sep-26 10:00:00 GMT", date))
+    }
+
+    @Test
+    fun `a weak ETag is no validator, and rules out the date`() {
+        // RFC 9110 13.1.5: never a weak tag, and never a date when the
+        // client has an entity tag.
+        assertNull(downloadValidator("W/\"abc\"", "Tue, 29 Sep 2026 10:00:00 GMT", date))
+        assertNull(downloadValidator("w/\"abc\"", null, date))
     }
 
     @Test
     fun `no validator without either header`() {
-        assertNull(downloadValidator(null, null))
-        assertNull(downloadValidator(" ", ""))
+        assertNull(downloadValidator(null, null, date))
+        assertNull(downloadValidator(" ", "", date))
     }
 
     @Test
@@ -80,6 +105,20 @@ class DownloadResumeTest {
         assertEquals(ResumeAnswer.AskWhole, resumeAnswer(416, 100, "bytes */1000", 0))
         // Nothing asked for, part sent.
         assertEquals(ResumeAnswer.AskWhole, resumeAnswer(206, 0, "bytes 0-9/1000", 10))
+    }
+
+    @Test
+    fun `a 206 that stops short of the end asks for the whole file`() {
+        // A server capping its range answers: taking the chunk would end
+        // the body early and pause again after every one.
+        assertEquals(ResumeAnswer.AskWhole, resumeAnswer(206, 100, "bytes 100-199/1000", 100))
+    }
+
+    @Test
+    fun `a 206 of the whole file to a plain request is taken as a 200`() {
+        assertEquals(ResumeAnswer.FromStart(restarted = false), resumeAnswer(206, 0, "bytes 0-999/1000", 1000))
+        // With no complete length it can't be told whole.
+        assertEquals(ResumeAnswer.AskWhole, resumeAnswer(206, 0, "bytes 0-999/*", 1000))
     }
 
     @Test

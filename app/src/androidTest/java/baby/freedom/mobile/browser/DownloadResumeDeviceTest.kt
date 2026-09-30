@@ -60,6 +60,12 @@ class DownloadResumeDeviceTest {
         private val ranges: Boolean,
         private val dropFirst: Boolean = false,
         private val slow: Boolean = false,
+        /** A status to answer the nth (1-based) request with instead, if any. */
+        private val failWith: (Int) -> Int? = { null },
+        /** Answer a plain request with a 206 of the whole file. */
+        private val wholeAs206: Boolean = false,
+        /** Cap a range answer at this many bytes (a 206 that stops short). */
+        private val rangeCap: Int? = null,
     ) : Dispatcher() {
         val requests = CopyOnWriteArrayList<RecordedRequest>()
 
@@ -73,11 +79,17 @@ class DownloadResumeDeviceTest {
                 .setHeader("Content-Type", "application/octet-stream")
             tag()?.let { response.setHeader("ETag", it) }
             if (ranges) response.setHeader("Accept-Ranges", "bytes")
+            failWith(requests.size)?.let { return response.setResponseCode(it).setBody("nope") }
             if (ranges && range != null && (ifRange == null || ifRange == tag())) {
                 val from = range.removePrefix("bytes=").substringBefore('-').toInt()
+                val until = rangeCap?.let { minOf(bytes.size, from + it) } ?: bytes.size
                 response.setResponseCode(206)
-                    .setHeader("Content-Range", "bytes $from-${bytes.size - 1}/${bytes.size}")
-                    .setBody(Buffer().write(bytes, from, bytes.size - from))
+                    .setHeader("Content-Range", "bytes $from-${until - 1}/${bytes.size}")
+                    .setBody(Buffer().write(bytes, from, until - from))
+            } else if (wholeAs206) {
+                response.setResponseCode(206)
+                    .setHeader("Content-Range", "bytes 0-${bytes.size - 1}/${bytes.size}")
+                    .setBody(Buffer().write(bytes))
             } else {
                 response.setResponseCode(200).setBody(Buffer().write(bytes))
             }
@@ -231,6 +243,80 @@ class DownloadResumeDeviceTest {
             manager.discardUnfinished()
             await(name) { it.status == DownloadStatus.CANCELLED }
             assertFalse(partialOf(paused.id).exists())
+        }
+    }
+
+    @Test
+    fun aResumeThatCantReachTheServerStaysPaused() {
+        MockWebServer().use { server ->
+            // Cut off half-way, then a 503 for the resume, then fine.
+            val files = FileServer({ body }, { etag }, ranges = true, dropFirst = true, failWith = { if (it == 2) 503 else null })
+            server.dispatcher = files
+            server.start()
+            val name = "unreachable-${System.nanoTime()}.bin"
+            startAndAccept(server.url("/f.bin").toString(), name)
+            val paused = await(name) { it.status == DownloadStatus.PAUSED }
+            val kept = partialOf(paused.id).length()
+
+            manager.resume(paused.id)
+            val still = await(name) { it.status == DownloadStatus.PAUSED && it.note == "Server error 503" }
+            assertEquals(kept, partialOf(still.id).length())
+            assertEquals(kept, still.receivedBytes)
+            assertEquals("Paused: server error 503", downloadStatusLine(still, null, "t").substringBefore(" ·"))
+
+            manager.resume(paused.id)
+            val done = await(name) { it.status == DownloadStatus.COMPLETED }
+            assertEquals("bytes=$kept-", files.requests.last().getHeader("Range"))
+            assertArrayEquals(body, savedBytes(done))
+        }
+    }
+
+    @Test
+    fun aCancelRightAfterResumeCancels() {
+        MockWebServer().use { server ->
+            server.dispatcher = FileServer({ body }, { etag }, ranges = true, dropFirst = true)
+            server.start()
+            val name = "resumecancel-${System.nanoTime()}.bin"
+            startAndAccept(server.url("/f.bin").toString(), name)
+            val paused = await(name) { it.status == DownloadStatus.PAUSED }
+
+            manager.resume(paused.id)
+            manager.cancel(paused.id)
+            val over = await(name) { it.status != DownloadStatus.PAUSED && it.status != DownloadStatus.RUNNING }
+            assertEquals(DownloadStatus.CANCELLED, over.status)
+            assertNull(over.contentUri)
+            assertFalse(partialOf(over.id).exists())
+        }
+    }
+
+    @Test
+    fun aServerThatAlwaysAnswers206WithTheWholeFileCompletes() {
+        MockWebServer().use { server ->
+            server.dispatcher = FileServer({ body }, { etag }, ranges = true, wholeAs206 = true)
+            server.start()
+            val name = "always206-${System.nanoTime()}.bin"
+            startAndAccept(server.url("/f.bin").toString(), name)
+            val done = await(name) { it.status == DownloadStatus.COMPLETED || it.status == DownloadStatus.FAILED }
+            assertEquals(null, done.error)
+            assertArrayEquals(body, savedBytes(done))
+        }
+    }
+
+    @Test
+    fun aRangeAnswerThatStopsShortFetchesTheWholeFileInstead() {
+        MockWebServer().use { server ->
+            val files = FileServer({ body }, { etag }, ranges = true, dropFirst = true, rangeCap = 64 * 1024)
+            server.dispatcher = files
+            server.start()
+            val name = "capped-${System.nanoTime()}.bin"
+            startAndAccept(server.url("/f.bin").toString(), name)
+            val paused = await(name) { it.status == DownloadStatus.PAUSED }
+
+            manager.resume(paused.id)
+            val done = await(name) { it.status == DownloadStatus.COMPLETED }
+            // The capped 206 was put aside, and the file asked for whole.
+            assertNull(files.requests.last().getHeader("Range"))
+            assertArrayEquals(body, savedBytes(done))
         }
     }
 }

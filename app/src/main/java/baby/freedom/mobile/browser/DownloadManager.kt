@@ -460,9 +460,11 @@ class DownloadManager private constructor(context: Context) {
                 }
                 val target = classifyDownloadUrl(row.sourceUrl, Gateways::isLocalGateway, Gateways::toDisplay)
                 daoFor(id).update(row.copy(status = DownloadStatus.RUNNING))
-                // A stop aimed at its last run (a second Pause tap that
-                // landed after it had paused) must not stop this one.
-                cancellation.forget(id)
+                // A pause aimed at its last run (a second Pause tap that
+                // landed after it had paused) must not stop this one; a
+                // Cancel tapped just before (its mark set, its locked
+                // follow-up still waiting) must.
+                cancellation.forgetPause(id)
                 launchJob(id, resuming = true) {
                     run(
                         id = id,
@@ -681,6 +683,8 @@ class DownloadManager private constructor(context: Context) {
         var published = false
         // Still fetching (false once every byte is in the partial file).
         var fetching = true
+        // The catch has written the row and let go of what this run held.
+        var settled = false
         // Everything that can block on the network is tracked as soon as
         // it exists — each connection before connect(), then the body —
         // so [cancel] can close it (see [DownloadCancellation]).
@@ -753,61 +757,100 @@ class DownloadManager private constructor(context: Context) {
                 Log.w(LOG_TAG, "download $id: after publishing", t)
                 return
             }
-            // [cancel] closes the socket under a blocked read, so a
-            // stopped download usually surfaces as an IOException, not
-            // a CancellationException — the job's state is the truth.
-            val stopped = t is CancellationException || !currentCoroutineContext().isActive
-            val stop = if (stopped) cancellation.stopOf(id) ?: DownloadStop.CANCEL else null
-            // A network failure part-way through a download its server
-            // can resume pauses it rather than failing it (#265).
-            val connectionLost = fetching && !stopped && t is IOException && t !is DownloadFailure &&
-                entry.resumable && partial.length() > 0
-            val pause = stop == DownloadStop.PAUSE || connectionLost
-            if (!stopped) Log.w(LOG_TAG, "download $id ${if (pause) "paused" else "failed"}", t)
-            val reason = when {
-                stopped || pause -> null
-                t is DownloadFailure -> t.message ?: "Download failed"
-                t is IOException -> t.message?.takeIf { it.isNotBlank() }?.let { "Network error: $it" }
-                    ?: "Network error"
-                else -> "Download failed"
+            // Settled under [transitions]: a Cancel reads the row there,
+            // so it either finds it still RUNNING — and its mark, set
+            // before, is seen here — or finds the state written here. And
+            // a Resume, which needs a PAUSED row, can't start the next run
+            // before this one has let go of its connection and progress.
+            val reason = withContext(NonCancellable) {
+                transitions.withLock { settleFailure(id, entry, t, job, resuming, fetching, partial, pending) }
             }
-            withContext(NonCancellable) {
-                pending?.let { deleteQuietly(it.toString()) }
-                val received = _progress.value[id]?.received ?: entry.receivedBytes
-                if (pause) {
-                    // Without a validator a resume starts over anyway:
-                    // don't hold on to bytes it can't use. (A file whose
-                    // bytes are all in is only saved on resume, so it stays.)
-                    if (entry.validator == null && fetching) partial.delete()
-                    dao.update(
-                        entry.copy(
-                            status = DownloadStatus.PAUSED,
-                            contentUri = null,
-                            receivedBytes = if (partial.exists()) partial.length() else received,
-                            note = if (connectionLost) DOWNLOAD_CONNECTION_LOST_NOTE else null,
-                            error = null,
-                        ),
-                    )
-                } else {
-                    partial.delete()
-                    dao.update(
-                        entry.copy(
-                            status = if (stopped) DownloadStatus.CANCELLED else DownloadStatus.FAILED,
-                            contentUri = null,
-                            receivedBytes = received,
-                            error = reason,
-                            note = null,
-                            finishedAt = System.currentTimeMillis(),
-                        ),
-                    )
-                }
-            }
+            settled = true
             if (reason != null) _events.tryEmit(DownloadEvent.Failed(id, entry.fileName, reason))
             if (t is CancellationException) throw t
         } finally {
-            cancellation.release(id)
-            _progress.update { it - id }
+            if (!settled) {
+                cancellation.release(id, job)
+                _progress.update { it - id }
+            }
         }
+    }
+
+    /**
+     * Write the row of [id]'s run that ended in [t] before publishing:
+     * CANCELLED, PAUSED or FAILED. Called under [transitions]. Returns
+     * the failure reason to announce, if it failed.
+     */
+    private suspend fun settleFailure(
+        id: Long,
+        entry: DownloadEntry,
+        t: Throwable,
+        job: Job?,
+        resuming: Boolean,
+        fetching: Boolean,
+        partial: File,
+        pending: Uri?,
+    ): String? {
+        val dao = daoFor(id)
+        // [cancel] closes the socket under a blocked read, so a stopped
+        // download usually surfaces as an IOException, not a
+        // CancellationException — the job's state (and a stop mark set
+        // since the failure) is the truth.
+        val mark = cancellation.stopOf(id)
+        val stopped = t is CancellationException || job?.isActive == false || mark != null
+        val stop = if (stopped) mark ?: DownloadStop.CANCEL else null
+        // A network failure part-way through a download its server can
+        // resume pauses it rather than failing it (#265) — and so does
+        // any failure to reach the file (a stopped node, a 503) of a run
+        // the user resumed: its partial file is theirs to go on with.
+        val unreachable = t is DownloadFailure && t.retriable || t is IOException && t !is DownloadFailure
+        val lost = fetching && !stopped && unreachable &&
+            (entry.resumable || resuming) && entry.validator != null && partial.length() > 0
+        val pause = stop == DownloadStop.PAUSE || lost
+        if (!stopped) Log.w(LOG_TAG, "download $id ${if (pause) "paused" else "failed"}", t)
+        val reason = when {
+            stopped || pause -> null
+            t is DownloadFailure -> t.message ?: "Download failed"
+            t is IOException -> t.message?.takeIf { it.isNotBlank() }?.let { "Network error: $it" }
+                ?: "Network error"
+            else -> "Download failed"
+        }
+        pending?.let { deleteQuietly(it.toString()) }
+        val received = _progress.value[id]?.received ?: entry.receivedBytes
+        cancellation.release(id, job)
+        _progress.update { it - id }
+        if (pause) {
+            // Without a validator a resume starts over anyway: don't hold
+            // on to bytes it can't use. (A file whose bytes are all in is
+            // only saved on resume, so it stays.)
+            if (entry.validator == null && fetching) partial.delete()
+            dao.update(
+                entry.copy(
+                    status = DownloadStatus.PAUSED,
+                    contentUri = null,
+                    receivedBytes = if (partial.exists()) partial.length() else received,
+                    note = when {
+                        !lost -> null
+                        t is DownloadFailure -> t.message
+                        else -> DOWNLOAD_CONNECTION_LOST_NOTE
+                    },
+                    error = null,
+                ),
+            )
+        } else {
+            partial.delete()
+            dao.update(
+                entry.copy(
+                    status = if (stopped) DownloadStatus.CANCELLED else DownloadStatus.FAILED,
+                    contentUri = null,
+                    receivedBytes = received,
+                    error = reason,
+                    note = null,
+                    finishedAt = System.currentTimeMillis(),
+                ),
+            )
+        }
+        return reason
     }
 
     /**
@@ -858,7 +901,7 @@ class DownloadManager private constructor(context: Context) {
                 // A whole response carries the validator a later resume
                 // checks against, and — on a first run — names the file.
                 // A resumed row keeps the name it has been listed under.
-                val validator = downloadValidator(src.etag, src.lastModified)
+                val validator = downloadValidator(src.etag, src.lastModified, src.date)
                 if (!resuming) {
                     val mime = src.mimeType ?: entry.mimeType
                     entry = entry.copy(
@@ -919,6 +962,8 @@ class DownloadManager private constructor(context: Context) {
         val acceptRanges: String? = null,
         val etag: String? = null,
         val lastModified: String? = null,
+        /** The response's `Date`, which tells whether [lastModified] is a strong validator. */
+        val date: String? = null,
         private val onClose: () -> Unit = {},
     ) : AutoCloseable {
         override fun close() {
@@ -927,8 +972,13 @@ class DownloadManager private constructor(context: Context) {
         }
     }
 
-    /** A failure with a message fit for the downloads list as-is. */
-    private class DownloadFailure(message: String) : IOException(message)
+    /**
+     * A failure with a message fit for the downloads list as-is.
+     * [retriable]: the file couldn't be reached right now (a stopped
+     * node, an error status) — a resumed download it hits stays paused,
+     * its partial file kept, rather than failing.
+     */
+    private class DownloadFailure(message: String, val retriable: Boolean = false) : IOException(message)
 
     private suspend fun openBody(
         target: DownloadTarget,
@@ -955,6 +1005,7 @@ class DownloadManager private constructor(context: Context) {
                 ?: throw DownloadFailure(
                     if (target.root is ContentRoot.Ens) "Couldn't resolve ${target.root.name}"
                     else "Node not running",
+                    retriable = true,
                 )
             // Name the file after the dweb path, not the gateway URL
             // (whose last segment for a bare root would be the hash).
@@ -999,7 +1050,7 @@ class DownloadManager private constructor(context: Context) {
                     rangeHeaders.forEach { (k, v) -> setRequestProperty(k, v) }
                 }
             } catch (_: java.net.ConnectException) {
-                throw DownloadFailure("Node not running")
+                throw DownloadFailure("Node not running", retriable = true)
             } catch (e: IOException) {
                 currentCoroutineContext().ensureActive()
                 Log.i(LOG_TAG, "dweb download attempt failed: $gatewayUrl", e)
@@ -1019,6 +1070,7 @@ class DownloadManager private constructor(context: Context) {
                 404 -> "Content not found"
                 else -> "Gateway error $lastStatus"
             },
+            retriable = true,
         )
     }
 
@@ -1076,7 +1128,7 @@ class DownloadManager private constructor(context: Context) {
             if (status == 416 && rangeHeaders.isNotEmpty()) return bodyOf(conn, current)
             if (status !in 200..299) {
                 conn.disconnect()
-                throw DownloadFailure("Server error $status")
+                throw DownloadFailure("Server error $status", retriable = true)
             }
             return bodyOf(conn, current)
         }
@@ -1097,6 +1149,7 @@ class DownloadManager private constructor(context: Context) {
             acceptRanges = conn.getHeaderField("Accept-Ranges"),
             etag = conn.getHeaderField("ETag"),
             lastModified = conn.getHeaderField("Last-Modified"),
+            date = conn.getHeaderField("Date"),
             onClose = { conn.disconnect() },
         )
     }
@@ -1141,7 +1194,13 @@ class DownloadManager private constructor(context: Context) {
                 currentCoroutineContext().ensureActive()
                 val n = input.read(buffer)
                 if (n < 0) break
-                sink.write(buffer, 0, n)
+                // A failed write is the device's, not the connection's:
+                // it must not pass for a lost connection (and pause).
+                try {
+                    sink.write(buffer, 0, n)
+                } catch (e: IOException) {
+                    throw DownloadFailure(if (isNoSpace(e)) "Not enough storage" else "Couldn't write the download")
+                }
                 received += n
                 if (received >= nextStorageCheck) {
                     nextStorageCheck = received + STORAGE_CHECK_EVERY_BYTES
@@ -1175,6 +1234,13 @@ class DownloadManager private constructor(context: Context) {
                 }
             }
         }
+    }
+
+    /** Did [e] come from a full disk (ENOSPC / EDQUOT)? */
+    private fun isNoSpace(e: IOException): Boolean {
+        val errno = (e.cause as? android.system.ErrnoException)?.errno
+        return errno == android.system.OsConstants.ENOSPC || errno == android.system.OsConstants.EDQUOT ||
+            e.message?.contains("ENOSPC") == true || e.message?.contains("No space left") == true
     }
 
     private fun deleteQuietly(uri: String) {
