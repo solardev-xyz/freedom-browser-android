@@ -394,9 +394,27 @@ class NodeLogsTest {
         assertEquals(listOf("three"), ring.snapshot())
     }
 
+    /** Runs [body] with stand-in clocks: wall-clock and monotonic ms, both movable. */
+    private class Clocks(var wall: Long, var elapsed: Long)
+
+    private fun withClocks(wall: Long, elapsed: Long, body: (Clocks) -> Unit) {
+        val c = Clocks(wall, elapsed)
+        val (oldWall, oldElapsed) = NodeLogs.wallMs to NodeLogs.elapsedMs
+        NodeLogs.wallMs = { c.wall }
+        NodeLogs.elapsedMs = { c.elapsed }
+        try {
+            body(c)
+        } finally {
+            NodeLogs.clear()
+            NodeLogs.wallMs = oldWall
+            NodeLogs.elapsedMs = oldElapsed
+        }
+    }
+
     @Test
-    fun `clear forgets every node's lines, and a line read before it isn't kept after`() {
-        NodeLogs.clear(nowMs = 0L) // long settled
+    fun `clear forgets every node's lines, and a line read before it isn't kept after`() = withClocks(10_000_000L, 1_000L) { c ->
+        NodeLogs.clear()
+        c.wall += NodeLogs.SETTLE_MS; c.elapsed += NodeLogs.SETTLE_MS // long settled
         val before = NodeLogs.generation()
         assertTrue(NodeLogs.keep(before, NodeLogSource.Ipfs, "ipfs line"))
         assertTrue(NodeLogs.keep(before, NodeLogSource.Tor, "tor line"))
@@ -408,25 +426,56 @@ class NodeLogsTest {
         assertEquals("", NodeLogs.text(NodeLogSource.Ipfs))
         // Started over, it keeps what comes after the settle window.
         val after = NodeLogs.generation()
-        val later = System.currentTimeMillis() + NodeLogs.SETTLE_MS
-        assertTrue(NodeLogs.keep(after, NodeLogSource.Ipfs, "after name=\"docs.ipfs.tech\"", atMs = later))
+        c.wall += NodeLogs.SETTLE_MS; c.elapsed += NodeLogs.SETTLE_MS
+        assertTrue(NodeLogs.keep(after, NodeLogSource.Ipfs, "after name=\"docs.ipfs.tech\"", atMs = c.wall))
         assertEquals("after name=<redacted>", NodeLogs.text(NodeLogSource.Ipfs))
-        NodeLogs.clear()
     }
 
     @Test
-    fun `lines logged just after a clear aren't kept, and the reader goes on`() {
+    fun `lines logged just after a clear aren't kept, and the reader goes on`() = withClocks(5_000_000L, 70_000L) { c ->
         // A closed private tab's request still in flight logs for a few seconds after the clear (R1-M1).
-        val at = 5_000_000L
-        NodeLogs.clear(nowMs = at)
+        val at = c.wall
+        NodeLogs.clear()
         val gen = NodeLogs.generation()
         // Dropped, but true: not a clear under the reader, so it doesn't start logcat over.
+        c.wall += 2_000; c.elapsed += 2_000
         assertTrue(NodeLogs.keep(gen, NodeLogSource.Ipfs, "request_start", atMs = at + 2_000))
+        c.wall = at + NodeLogs.SETTLE_MS; c.elapsed = 70_000L + NodeLogs.SETTLE_MS
+        // Read once the window is over, but logged inside it.
         assertTrue(NodeLogs.keep(gen, NodeLogSource.Swarm, "fetch chunk", atMs = at + NodeLogs.SETTLE_MS - 1))
         for (s in NodeLogSource.entries) assertEquals("", NodeLogs.text(s))
         assertTrue(NodeLogs.keep(gen, NodeLogSource.Ipfs, "settled", atMs = at + NodeLogs.SETTLE_MS))
         assertEquals("settled", NodeLogs.text(NodeLogSource.Ipfs))
+    }
+
+    @Test
+    fun `a clock set back after a clear doesn't stretch the settle window`() = withClocks(5_000_000L, 70_000L) { c ->
+        // NTP (or the user) sets the clock back an hour right after the clear (R2-M1).
+        val hour = 3_600_000L
         NodeLogs.clear()
+        val gen = NodeLogs.generation()
+        c.wall -= hour
+        c.wall += 5_000; c.elapsed += 5_000
+        assertTrue(NodeLogs.keep(gen, NodeLogSource.Ipfs, "in the window", atMs = c.wall))
+        assertEquals("", NodeLogs.text(NodeLogSource.Ipfs))
+        // SETTLE_MS on, by the monotonic clock: kept, though its stamp is an hour before the clear's.
+        c.wall += NodeLogs.SETTLE_MS; c.elapsed += NodeLogs.SETTLE_MS
+        assertTrue(NodeLogs.keep(gen, NodeLogSource.Ipfs, "settled", atMs = c.wall))
+        assertEquals("settled", NodeLogs.text(NodeLogSource.Ipfs))
+        // logcat restarts from the clear by today's clock, not an hour ahead of every new entry.
+        assertEquals(5_000_000L - hour, NodeLogs.clearedAtWallMs())
+        val now = NodeLogs.formatSince(c.wall)
+        assertEquals(now, NodeLogs.startFrom(now, NodeLogs.clearedAtWallMs()))
+    }
+
+    @Test
+    fun `a clock set forward after a clear doesn't cut the settle window short`() = withClocks(5_000_000L, 70_000L) { c ->
+        NodeLogs.clear()
+        val gen = NodeLogs.generation()
+        c.wall += 3_600_000L
+        c.wall += 5_000; c.elapsed += 5_000
+        assertTrue(NodeLogs.keep(gen, NodeLogSource.Ipfs, "in the window", atMs = c.wall))
+        assertEquals("", NodeLogs.text(NodeLogSource.Ipfs))
     }
 
     @Test

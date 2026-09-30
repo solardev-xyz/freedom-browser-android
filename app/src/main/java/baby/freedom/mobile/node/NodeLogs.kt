@@ -510,11 +510,21 @@ object NodeLogs {
     /** Bumped by [clear]: a line read under an older one was logged before the clear. */
     private var generation = 0
 
-    /** Wall-clock ms of the last [clear]: where the reader picks logcat up again. */
-    private var clearedAtMs = 0L
+    /**
+     * [elapsedMs] of the last [clear] (null: none yet): where the reader
+     * picks logcat up again. Monotonic, not wall-clock: a clock set back
+     * after a clear must not move the restart point, or the end of the
+     * settle window, by the size of the step (R2-M1).
+     */
+    private var clearedAtElapsed: Long? = null
 
-    /** Lines logged before this (wall-clock ms) aren't kept: [SETTLE_MS] after the last [clear]. */
-    private var quietUntilMs = 0L
+    /** The wall clock; tests stand in their own. */
+    @Volatile
+    internal var wallMs: () -> Long = System::currentTimeMillis
+
+    /** The monotonic clock ([SystemClock.elapsedRealtime]); tests stand in their own. */
+    @Volatile
+    internal var elapsedMs: () -> Long = SystemClock::elapsedRealtime
 
     @Volatile
     private var reader: Thread? = null
@@ -559,11 +569,10 @@ object NodeLogs {
      * requests the cleared pages still had in flight log then too, and a
      * line can't be told apart by page (R1-M1).
      */
-    fun clear(nowMs: Long = System.currentTimeMillis()) {
+    fun clear() {
         synchronized(lock) {
             generation++
-            clearedAtMs = nowMs
-            quietUntilMs = nowMs + SETTLE_MS
+            clearedAtElapsed = elapsedMs()
             rings.values.forEach { it.clear() }
         }
         logcat?.destroy()
@@ -575,13 +584,23 @@ object NodeLogs {
     /**
      * Keep [line] in [source]'s ring, scrubbed, unless a [clear] has come
      * since [gen] was read: then false, and the reader starts over.
-     * A line logged ([atMs]) within [SETTLE_MS] of the last clear is
-     * dropped, and the reader goes on.
+     * A line logged ([atMs], wall-clock; 0: unknown, taken as now) or
+     * read within [SETTLE_MS] of the last clear is dropped, and the
+     * reader goes on. The window is on the monotonic clock: the line's
+     * wall-clock stamp is moved onto it by how far the two clocks stand
+     * apart now, so a wall clock stepped back (or forward) since the
+     * clear neither stretches nor shortens it (R2-M1).
      */
-    internal fun keep(gen: Int, source: NodeLogSource, line: String, kind: String = "", atMs: Long = System.currentTimeMillis()): Boolean {
+    internal fun keep(gen: Int, source: NodeLogSource, line: String, kind: String = "", atMs: Long = 0): Boolean {
         synchronized(lock) {
             if (gen != generation) return false
-            if (atMs < quietUntilMs) return true
+            val cleared = clearedAtElapsed
+            if (cleared != null) {
+                val nowElapsed = elapsedMs()
+                val atElapsed = if (atMs == 0L) nowElapsed else atMs - (wallMs() - nowElapsed)
+                val quietUntil = cleared + SETTLE_MS
+                if (nowElapsed < quietUntil || atElapsed < quietUntil) return true
+            }
         }
         val scrubbed = LogScrub.scrub(line)
         synchronized(lock) {
@@ -603,7 +622,7 @@ object NodeLogs {
             // Never from before the latest clear: one that came while the
             // reader slept after logcat went away would otherwise be undone
             // by the restart re-reading what was cleared (R5-M1).
-            val (gen, clearedAt) = synchronized(lock) { generation to clearedAtMs }
+            val (gen, clearedAt) = synchronized(lock) { generation to clearedAtWallMs() }
             from = startFrom(from, clearedAt)
             var proc: java.lang.Process? = null
             try {
@@ -632,9 +651,19 @@ object NodeLogs {
             // Cleared: pick up from the clear (the loop's top), at once.
             if (generation() != gen) continue
             // logcat went away (rare): pick up from now, not from the start again.
-            from = formatSince(System.currentTimeMillis())
+            from = formatSince(wallMs())
             Thread.sleep(RESTART_DELAY_MS)
         }
+    }
+
+    /**
+     * The last [clear] as a wall-clock time by today's clock (0: none):
+     * its monotonic time moved by how far the clocks stand apart now,
+     * so a clock set back since the clear moves it back too (R2-M1).
+     */
+    internal fun clearedAtWallMs(): Long = synchronized(lock) {
+        val cleared = clearedAtElapsed ?: return 0L
+        cleared + (wallMs() - elapsedMs())
     }
 
     /** Where logcat starts: [from], or the latest clear if that came after it. */
