@@ -455,6 +455,19 @@ class BrowserState(val id: Long, val private: Boolean = false) {
             }
         }
 
+        /**
+         * The same, with the saved back/forward list dropped: the tab
+         * comes back on its address alone, as a WebView whose history was
+         * cleared (Clear cookies & site data) would.
+         */
+        fun withoutHistory(): PendingRestore = PendingRestore(
+            webViewState = null,
+            fallbackUrl = fallbackUrl,
+            resubmitUrl = resubmitUrl,
+            submit = submit,
+            overPage = overPage,
+        )
+
         companion object {
             /**
              * What to rebuild a tab from, given its committed [url], its
@@ -533,6 +546,36 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     }
 
     internal var pendingRestore: PendingRestore? = null
+
+    /**
+     * The renderer process this tab's page ran in went away (#260) — it
+     * crashed, or Android killed it for memory — and took the tab's
+     * WebView with it. The tab keeps its address, title and a
+     * [pendingRestore] saved from the dead WebView; the host builds a
+     * new WebView from that only once this is cleared ([recoverRenderer]).
+     * Null while the tab has a working WebView (or is about to get one).
+     */
+    var rendererGone: RendererGone? by mutableStateOf<RendererGone?>(null)
+        internal set
+
+    /**
+     * Why a tab lost its renderer ([rendererGone]). [crashed]: the page
+     * crashed it (`RenderProcessGoneDetail.didCrash()`), rather than the
+     * system killing it to free memory. [reloadWhenShown]: the tab wasn't
+     * on screen when it happened, so it loads its page again by itself
+     * the next time it is; the tab on screen shows what happened, with
+     * Reload, instead.
+     */
+    class RendererGone(val crashed: Boolean, val reloadWhenShown: Boolean)
+
+    /**
+     * Put this tab back on a working renderer: its host builds a new
+     * WebView from [pendingRestore] and loads the page again, with its
+     * back/forward history. No-op for a tab that didn't lose its renderer.
+     */
+    fun recoverRenderer() {
+        rendererGone = null
+    }
 
     /**
      * An address to put back once the WebView's blank home entry has

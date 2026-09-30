@@ -92,6 +92,10 @@ object PrivateProfile {
         return profile
     }
 
+    /** A private session is live: some private tab has been put on its profile since it started. */
+    @MainThread
+    fun isLive(): Boolean = current != null
+
     /**
      * The private session's cookie jar, for requests the app makes on a
      * private tab's behalf (downloads, image saves) and for

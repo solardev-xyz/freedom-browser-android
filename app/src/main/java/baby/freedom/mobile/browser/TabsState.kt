@@ -492,21 +492,51 @@ class TabsState(
     fun parkForRelaunch(saveState: (BrowserState) -> Bundle?) {
         exitFullscreen()
         pageContextMenu = null
-        for (tab in tabs) {
-            // Reopened, and the host never got to build its WebView:
-            // what it was to be rebuilt from still stands.
-            if (tab.pendingRestore == null) {
-                val (url, address) = tab.restorableAddress()
-                tab.pendingRestore = BrowserState.PendingRestore.of(
-                    url = url,
-                    address = address,
-                    loadStopped = tab.loadAborted,
-                    webViewState = saveState(tab),
-                    inFlight = tab.uncommittedLoad(),
-                )
-            }
-            tab.webViewLost()
+        for (tab in tabs) parkTab(tab, saveState)
+    }
+
+    /**
+     * [tab]'s WebView is about to be destroyed while the tab lives on:
+     * record what to rebuild it from ([BrowserState.pendingRestore]) —
+     * the WebView's own saved state ([saveState]), its address and its
+     * Stop latch — and drop what only mirrored the WebView. Shared by an
+     * Activity relaunch ([parkForRelaunch]) and a tab whose renderer went
+     * away ([rendererGone], #260).
+     */
+    private fun parkTab(tab: BrowserState, saveState: (BrowserState) -> Bundle?) {
+        // Reopened, and the host never got to build its WebView:
+        // what it was to be rebuilt from still stands.
+        if (tab.pendingRestore == null) {
+            val (url, address) = tab.restorableAddress()
+            tab.pendingRestore = BrowserState.PendingRestore.of(
+                url = url,
+                address = address,
+                loadStopped = tab.loadAborted,
+                webViewState = saveState(tab),
+                inFlight = tab.uncommittedLoad(),
+            )
         }
+        tab.webViewLost()
+    }
+
+    /**
+     * The renderer process [tab]'s page ran in went away (#260) and the
+     * host is about to destroy the tab's WebView. The tab stays, parked
+     * like one across a relaunch ([parkTab]), and shows why
+     * ([BrowserState.rendererGone]) until it gets a new WebView — at once
+     * when it's next shown if it isn't on screen now, else when the user
+     * asks (Reload, or any navigation of theirs). Fullscreen and the page
+     * context menu go if they were this tab's — fullscreen without a word
+     * to the page, which is gone.
+     */
+    fun rendererGone(tab: BrowserState, crashed: Boolean, saveState: (BrowserState) -> Bundle?) {
+        if (fullscreen?.tabId == tab.id) fullscreen = null
+        if (pageContextMenu?.tabId == tab.id) pageContextMenu = null
+        parkTab(tab, saveState)
+        tab.rendererGone = BrowserState.RendererGone(
+            crashed = crashed,
+            reloadWhenShown = tab !== active,
+        )
     }
 
     /**

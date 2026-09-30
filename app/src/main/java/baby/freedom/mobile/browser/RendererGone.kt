@@ -1,0 +1,91 @@
+package baby.freedom.mobile.browser
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Memory
+import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+
+/**
+ * What the tab on screen shows in place of its page after the renderer
+ * process the page ran in went away (#260, [BrowserState.rendererGone]):
+ * whether the page crashed it or Android closed it to free memory, and
+ * Reload, which brings the page back — with its back/forward history —
+ * in a new renderer. Opaque, like the home overlay: there is no WebView
+ * under it any more.
+ */
+@Composable
+fun RendererGoneScreen(
+    gone: BrowserState.RendererGone,
+    onReload: () -> Unit,
+    modifier: Modifier = Modifier,
+    bottomContentPadding: Dp = 0.dp,
+) {
+    Column(
+        modifier = modifier
+            .background(MaterialTheme.colorScheme.background)
+            .verticalScroll(rememberScrollState())
+            .padding(PaddingValues(start = 32.dp, end = 32.dp, top = 32.dp, bottom = 32.dp + bottomContentPadding)),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Spacer(Modifier.height(96.dp))
+        Icon(
+            imageVector = if (gone.crashed) Icons.Outlined.ErrorOutline else Icons.Outlined.Memory,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(48.dp),
+        )
+        Spacer(Modifier.height(16.dp))
+        Text(
+            text = rendererGoneTitle(gone),
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.onBackground,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = rendererGoneBody(gone),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(24.dp))
+        Button(onClick = onReload) {
+            Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.size(8.dp))
+            Text("Reload")
+        }
+    }
+}
+
+/** The headline for [gone]: crashed, or closed to free memory. */
+internal fun rendererGoneTitle(gone: BrowserState.RendererGone): String =
+    if (gone.crashed) "This page crashed" else "This page was closed to free memory"
+
+/** What happened, and what Reload does. */
+internal fun rendererGoneBody(gone: BrowserState.RendererGone): String =
+    if (gone.crashed) {
+        "Something went wrong while showing it. Your other tabs are fine. Reload to open it again."
+    } else {
+        "Android needed the memory it was using. Your other tabs are fine. Reload to open it again."
+    }
