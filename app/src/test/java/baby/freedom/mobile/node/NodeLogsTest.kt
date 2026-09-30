@@ -276,20 +276,48 @@ class NodeLogsTest {
     }
 
     @Test
+    fun `a decoded path with spaces is taken out whole`() {
+        // Opening ipfs://<cid>/alan%20r5%20secret%20diary.html: freedom-ipfs logs the decoded path (R5-F1).
+        val cid = "QmT5NvUtoM5nWFfrQdVrFtvGfKFmG7AHE8P34isapyhCxX"
+        val lines = listOf(
+            """INFO gateway_request{request_id=4 path=/ipfs/$cid/alan r5 secret diary.html range=}: """ +
+                """freedom_ipfs_gateway: phase="request_start" unixfs_path=/alan r5 secret diary.html method=GET""",
+            """INFO gateway_request{path=/ipfs/$cid/alan r5 secret diary.html}: freedom_ipfs_gateway: served""",
+            """INFO x: phase="resolve" resolved_target=/ipfs/$cid/alan r5 secret diary.html""",
+            """INFO x: phase="resolve" resolved_target=/ipfs/$cid/alan r5 secret diary.html  status=200""",
+        )
+        for (l in lines) {
+            val out = LogScrub.scrub(l)
+            assertFalse(out, "diary" in out)
+            assertFalse(out, "secret" in out)
+        }
+        assertEquals(
+            """INFO gateway_request{request_id=4 path=<redacted> range=}: freedom_ipfs_gateway: """ +
+                """phase="request_start" unixfs_path=<redacted> method=GET""",
+            LogScrub.scrub(lines[0]),
+        )
+        assertEquals(
+            """INFO gateway_request{path=<redacted>}: freedom_ipfs_gateway: served""",
+            LogScrub.scrub(lines[1]),
+        )
+        assertTrue(LogScrub.scrub(lines[3]).endsWith("status=200"))
+    }
+
+    @Test
     fun `a field key after a digit is still taken out`() {
-        assertEquals("v2path=<redacted> ok", LogScrub.scrub("v2path=/ipfs/secret ok"))
+        assertEquals("v2path=<redacted> ok=1", LogScrub.scrub("v2path=/ipfs/secret ok=1"))
     }
 
     /**
      * The scrubber before R3-M1 made it cheaper, verbatim but for R4-F1's
-     * bare field value (to the next space, not the first comma): the fast
+     * bare field value (to the next field, not the first comma or space, R5-F1): the fast
      * one must take out everything it did (R3-M1 only skips a regex where
      * it can't match).
      */
     private object ReferenceScrub {
         const val R = "<redacted>"
         val FIELD = Regex(
-            """\b([A-Za-z_]*(?:path|paths|cid|cids|name|names|target|targets|url|uri|href|referer|referrer|host|hostname|domain|dnslink|etag|reference))=("(?:[^"\\]|\\.)*"|\[[^\]]*]|\S*?(?=\}+:|\}*(?:\s|$)))""",
+            """\b([A-Za-z_]*(?:path|paths|cid|cids|name|names|target|targets|url|uri|href|referer|referrer|host|hostname|domain|dnslink|etag|reference))=("(?:[^"\\]|\\.)*"|\[[^\]]*]|.*?(?=\}+:|\}*$|\}*\s+[A-Za-z_][\w.]*=))""",
         )
         val NAME_ERROR = Regex(
             """(?i)(dnslink record not found for|invalid dnslink record:|invalid ipns name:|invalid ipns record:|http resolver:)\s*.*?(?=\s+[A-Za-z_]+=|"|$)""",
@@ -385,6 +413,17 @@ class NodeLogsTest {
     }
 
     // ---- LogcatLine ----
+
+    @Test
+    fun `logcat never restarts from before the latest clear`() {
+        // logcat went away at 1000.250; the user cleared at 1003.007 while the reader slept (R5-M1).
+        assertEquals("1003.007", NodeLogs.startFrom("1000.250", 1_003_007L))
+        // A clear before the restart point leaves it be; no clear yet (0) too.
+        assertEquals("1000.250", NodeLogs.startFrom("1000.250", 999_000L))
+        assertEquals("1000.250", NodeLogs.startFrom("1000.250", 0L))
+        assertEquals(1_000_050L, NodeLogs.parseSince(NodeLogs.formatSince(1_000_050L)))
+        assertEquals("1000.050", NodeLogs.formatSince(1_000_050L))
+    }
 
     @Test
     fun `a threadtime line parses, colours and tracing's timestamp dropped`() {

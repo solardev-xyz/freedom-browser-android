@@ -160,17 +160,21 @@ object LogScrub {
      * later version adds is covered, not just the ones named here.
      * `etag` holds a file's CID and path. A quoted value runs to its
      * closing quote, past any `\"` inside it. A bare value runs to the
-     * next whitespace, not to a `,`: a page's path may hold commas
-     * (`/ipfs/<cid>/a,b.html`, R4-F1) and tracing separates fields with
-     * spaces. Only the `}` closing a span (`path=/ipfs/x}:`, or at the end
-     * of the line) is left out of it — a `}` in a URL path is always
-     * percent-encoded.
+     * next field (` key=`), the `}:` closing its span, or the end of the
+     * line — not to a `,` or a space: a page's path may hold commas
+     * (`/ipfs/<cid>/a,b.html`, R4-F1), and freedom-ipfs logs the
+     * percent-decoded request path unquoted, so `alan%20secret.html` is
+     * `path=/ipfs/<cid>/alan secret.html` (R5-F1). Only the `}` closing a
+     * span is left out of it. Where a line's free text follows a field
+     * rather than another field, that text goes too: more is taken out,
+     * never less. (A decoded file name that itself holds ` key=` still
+     * reads as the next field there; nothing tells the two apart.)
      */
     private val FIELD_KEY_ENDS = listOf(
         "path", "paths", "cid", "cids", "name", "names", "target", "targets", "url", "uri", "href",
         "referer", "referrer", "host", "hostname", "domain", "dnslink", "etag", "reference",
     )
-    private val FIELD_VALUE = Regex(""""(?:[^"\\]|\\.)*"|\[[^\]]*]|\S*?(?=\}+:|\}*(?:\s|$))""").toPattern()
+    private val FIELD_VALUE = Regex(""""(?:[^"\\]|\\.)*"|\[[^\]]*]|.*?(?=\}+:|\}*$|\}*\s+[A-Za-z_][\w.]*=)""").toPattern()
 
     /**
      * A DNSLink / IPNS name inside free text — freedom-ipfs's resolver
@@ -459,7 +463,7 @@ object NodeLogs {
         // Only what this process logged: logcat's buffer can still hold an
         // earlier process's lines under the same (reused) PID.
         val sinceMs = System.currentTimeMillis() - (SystemClock.elapsedRealtime() - Process.getStartElapsedRealtime())
-        val since = String.format(Locale.US, "%d.%03d", sinceMs / 1000, sinceMs % 1000)
+        val since = formatSince(sinceMs)
         val thread = Thread({ follow(pid, since, processName, route) }, "node-logs")
         thread.isDaemon = true
         reader = thread
@@ -509,7 +513,11 @@ object NodeLogs {
     private fun follow(pid: Int, since: String, processName: String, route: (String, String) -> NodeLogSource?) {
         var from = since
         while (!stopped) {
-            val gen = generation()
+            // Never from before the latest clear: one that came while the
+            // reader slept after logcat went away would otherwise be undone
+            // by the restart re-reading what was cleared (R5-M1).
+            val (gen, clearedAt) = synchronized(lock) { generation to clearedAtMs }
+            from = startFrom(from, clearedAt)
             var proc: java.lang.Process? = null
             try {
                 proc = ProcessBuilder("logcat", "-v", "threadtime", "--pid=$pid", "-T", from)
@@ -533,16 +541,24 @@ object NodeLogs {
                 proc?.destroy()
             }
             if (stopped) break
-            val clearedAt = synchronized(lock) { if (generation != gen) clearedAtMs else null }
-            if (clearedAt != null) {
-                // Cleared: pick up from the clear, at once — nothing before it.
-                from = String.format(Locale.US, "%d.%03d", clearedAt / 1000, clearedAt % 1000)
-                continue
-            }
+            // Cleared: pick up from the clear (the loop's top), at once.
+            if (generation() != gen) continue
             // logcat went away (rare): pick up from now, not from the start again.
-            val now = System.currentTimeMillis()
-            from = String.format(Locale.US, "%d.%03d", now / 1000, now % 1000)
+            from = formatSince(System.currentTimeMillis())
             Thread.sleep(RESTART_DELAY_MS)
         }
+    }
+
+    /** Where logcat starts: [from], or the latest clear if that came after it. */
+    internal fun startFrom(from: String, clearedAtMs: Long): String =
+        if (clearedAtMs > parseSince(from)) formatSince(clearedAtMs) else from
+
+    /** logcat's `-T` time, `<seconds>.<millis>`, for a wall-clock [ms]. */
+    internal fun formatSince(ms: Long): String = String.format(Locale.US, "%d.%03d", ms / 1000, ms % 1000)
+
+    /** The wall-clock millis of a [formatSince] time. */
+    internal fun parseSince(since: String): Long {
+        val dot = since.indexOf('.')
+        return since.substring(0, dot).toLong() * 1000 + since.substring(dot + 1).toLong()
     }
 }
