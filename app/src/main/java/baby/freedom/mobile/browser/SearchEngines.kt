@@ -1,5 +1,8 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
+
 /**
  * Address-bar search providers — the same set, ids and templates as the
  * desktop browser's `src/renderer/lib/search-utils.js`, plus one custom
@@ -107,7 +110,7 @@ object SearchEngines {
     /** Settings-row label for what [id] resolves to (see [effectiveId]). */
     fun labelFor(id: String?, customTemplate: String?): String =
         when (val effective = effectiveId(id, customTemplate)) {
-            CUSTOM_ID -> "Custom"
+            CUSTOM_ID -> Strings.get(R.string.settings_search_engine_custom)
             else -> BUILT_IN.first { it.id == effective }.label
         }
 
@@ -123,8 +126,8 @@ object SearchEngines {
         BUILT_IN.firstOrNull { it.template == template }?.let { return it.label }
         fun hostWith(probe: String) = WhatwgHost.parse(template.replace(PLACEHOLDER, probe))?.hostname
         val host = hostWith("a")
-        if (host == null || host != hostWith("b")) return "Custom"
-        return host.removePrefix("www.").takeIf { it.isNotEmpty() } ?: "Custom"
+        if (host == null || host != hostWith("b")) return Strings.get(R.string.settings_search_engine_custom)
+        return host.removePrefix("www.").takeIf { it.isNotEmpty() } ?: Strings.get(R.string.settings_search_engine_custom)
     }
 
     /** Results URL for [query] (already trimmed, non-empty) on [template]. */

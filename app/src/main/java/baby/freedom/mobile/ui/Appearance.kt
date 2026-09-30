@@ -3,6 +3,9 @@ package baby.freedom.mobile.ui
 import android.app.UiModeManager
 import android.content.Context
 import android.os.Build
+import androidx.annotation.StringRes
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 
 /**
  * Settings → Appearance → Theme (#269): follow the system's light/dark
@@ -28,11 +31,14 @@ import android.os.Build
  * Android 11 has no per-app night mode: there the Compose chrome
  * follows the choice ([isDark]) and pages keep following the system.
  */
-enum class Appearance(val key: String, val label: String) {
-    System("system", "System default"),
-    Light("light", "Light"),
-    Dark("dark", "Dark"),
+enum class Appearance(val key: String, @StringRes val labelRes: Int) {
+    System("system", R.string.settings_appearance_system),
+    Light("light", R.string.settings_appearance_light),
+    Dark("dark", R.string.settings_appearance_dark),
     ;
+
+    /** The choice's name, as Settings lists it. */
+    val label: String get() = Strings.get(labelRes)
 
     /** Whether to paint dark, given what the configuration says ([systemDark]). */
     fun isDark(systemDark: Boolean): Boolean = when (this) {

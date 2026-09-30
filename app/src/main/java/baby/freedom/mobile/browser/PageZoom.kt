@@ -2,7 +2,11 @@ package baby.freedom.mobile.browser
 
 import android.content.Context
 import androidx.compose.runtime.mutableStateMapOf
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.SiteZoomStore
+import baby.freedom.mobile.l10n.Strings
+import java.text.DecimalFormatSymbols
+import java.text.NumberFormat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
@@ -49,7 +53,8 @@ object PageZoomLevels {
         (level * fontScale).roundToInt().coerceAtLeast(1)
 
     /** How a level is written in the UI, e.g. "90%". */
-    fun label(level: Int): String = "$level%"
+    fun label(level: Int): String =
+        Strings.get(R.string.settings_zoom_level, NumberFormat.getIntegerInstance().format(level))
 
     /**
      * Strings at least as wide as any [label] in [MIN]..[MAX], whatever
@@ -59,8 +64,14 @@ object PageZoomLevels {
      * (a proportional font's digits needn't all be the same width, hence
      * all ten rather than a guess at the widest).
      */
-    val widthProbes: List<String> =
-        ('0'..'9').map { d -> d.toString().repeat(MAX.toString().length) + "%" }
+    val widthProbes: List<String>
+        get() {
+            // The locale's own digits, as [label] writes them.
+            val zero = DecimalFormatSymbols.getInstance().zeroDigit
+            return (0..9).map { d ->
+                Strings.get(R.string.settings_zoom_level, (zero + d).toString().repeat(MAX.toString().length))
+            }
+        }
 }
 
 /**

@@ -4,6 +4,9 @@ import android.view.KeyEvent
 import android.view.KeyboardShortcutGroup
 import android.view.KeyboardShortcutInfo
 import android.view.View
+import androidx.annotation.StringRes
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 
 /**
  * The browser's hardware-keyboard shortcuts (#270): tablets, Chromebooks,
@@ -29,32 +32,42 @@ import android.view.View
  * field's, not the shortcut's.
  */
 enum class Shortcut(
-    val label: String,
+    @StringRes private val labelRes: Int,
     val group: Group,
     val reserved: Boolean = false,
     val repeats: Boolean = false,
     val caretKey: Boolean = false,
 ) {
-    NewTab("New tab", Group.Tabs, reserved = true),
-    NewPrivateTab("New private tab", Group.Tabs, reserved = true),
-    CloseTab("Close tab", Group.Tabs, reserved = true),
-    ReopenClosedTab("Reopen closed tab", Group.Tabs, reserved = true),
-    NextTab("Next tab", Group.Tabs, reserved = true, repeats = true),
-    PreviousTab("Previous tab", Group.Tabs, reserved = true, repeats = true),
-    FocusAddressBar("Focus address bar", Group.Page, reserved = true),
-    Reload("Reload", Group.Page),
-    HardReload("Hard reload", Group.Page),
-    FindInPage("Find in page", Group.Page),
-    ZoomIn("Zoom in", Group.Page, repeats = true),
-    ZoomOut("Zoom out", Group.Page, repeats = true),
-    ZoomReset("Reset zoom", Group.Page),
-    Back("Back", Group.Navigation, caretKey = true),
-    Forward("Forward", Group.Navigation, caretKey = true),
-    History("History", Group.Navigation),
-    Downloads("Downloads", Group.Navigation),
+    NewTab(R.string.settings_shortcut_new_tab, Group.Tabs, reserved = true),
+    NewPrivateTab(R.string.settings_shortcut_new_private_tab, Group.Tabs, reserved = true),
+    CloseTab(R.string.settings_shortcut_close_tab, Group.Tabs, reserved = true),
+    ReopenClosedTab(R.string.settings_shortcut_reopen_closed_tab, Group.Tabs, reserved = true),
+    NextTab(R.string.settings_shortcut_next_tab, Group.Tabs, reserved = true, repeats = true),
+    PreviousTab(R.string.settings_shortcut_previous_tab, Group.Tabs, reserved = true, repeats = true),
+    FocusAddressBar(R.string.settings_shortcut_focus_address_bar, Group.Page, reserved = true),
+    Reload(R.string.settings_shortcut_reload, Group.Page),
+    HardReload(R.string.settings_shortcut_hard_reload, Group.Page),
+    FindInPage(R.string.settings_shortcut_find_in_page, Group.Page),
+    ZoomIn(R.string.settings_shortcut_zoom_in, Group.Page, repeats = true),
+    ZoomOut(R.string.settings_shortcut_zoom_out, Group.Page, repeats = true),
+    ZoomReset(R.string.settings_shortcut_zoom_reset, Group.Page),
+    Back(R.string.settings_shortcut_back, Group.Navigation, caretKey = true),
+    Forward(R.string.settings_shortcut_forward, Group.Navigation, caretKey = true),
+    History(R.string.settings_shortcut_history, Group.Navigation),
+    Downloads(R.string.settings_shortcut_downloads, Group.Navigation),
     ;
 
-    enum class Group(val label: String) { Tabs("Tabs"), Page("Page"), Navigation("Navigation") }
+    /** The shortcut's name in the system's keyboard-shortcut helper. */
+    val label: String get() = Strings.get(labelRes)
+
+    enum class Group(@StringRes private val labelRes: Int) {
+        Tabs(R.string.settings_shortcut_group_tabs),
+        Page(R.string.settings_shortcut_group_page),
+        Navigation(R.string.settings_shortcut_group_navigation),
+        ;
+
+        val label: String get() = Strings.get(labelRes)
+    }
 }
 
 /**

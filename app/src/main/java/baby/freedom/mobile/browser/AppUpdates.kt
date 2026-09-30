@@ -2,7 +2,9 @@ package baby.freedom.mobile.browser
 
 import android.content.Context
 import android.util.Log
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.l10n.Strings
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -112,7 +114,7 @@ internal sealed interface UpdateCheckOutcome {
  */
 internal fun compareRelease(installed: ReleaseVersion?, latest: LatestRelease): UpdateCheckOutcome =
     when {
-        installed == null -> UpdateCheckOutcome.Failed("this build's version isn't a release number")
+        installed == null -> UpdateCheckOutcome.Failed(Strings.get(R.string.settings_updates_error_not_release))
         latest.version > installed -> UpdateCheckOutcome.Available(latest)
         else -> UpdateCheckOutcome.UpToDate(latest)
     }
@@ -165,21 +167,21 @@ internal fun MutableStateFlow<AppUpdateState>.claimCheck(): Boolean {
  * Sideloads report the system package installer, a file manager, a
  * browser, or nothing (adb).
  */
-internal val STORE_INSTALLERS: Map<String, String> = mapOf(
-    "com.android.vending" to "Google Play",
-    "org.fdroid.fdroid" to "F-Droid",
-    "org.fdroid.fdroid.privileged" to "F-Droid",
-    "org.fdroid.basic" to "F-Droid",
-    "com.aurora.store" to "Aurora Store",
-    "app.accrescent.client" to "Accrescent",
-    "com.amazon.venezia" to "the Amazon Appstore",
-    "com.sec.android.app.samsungapps" to "Galaxy Store",
-    "com.huawei.appmarket" to "AppGallery",
-    "com.xiaomi.market" to "GetApps",
+internal val STORE_INSTALLERS: Map<String, Int> = mapOf(
+    "com.android.vending" to R.string.settings_store_google_play,
+    "org.fdroid.fdroid" to R.string.settings_store_fdroid,
+    "org.fdroid.fdroid.privileged" to R.string.settings_store_fdroid,
+    "org.fdroid.basic" to R.string.settings_store_fdroid,
+    "com.aurora.store" to R.string.settings_store_aurora,
+    "app.accrescent.client" to R.string.settings_store_accrescent,
+    "com.amazon.venezia" to R.string.settings_store_amazon,
+    "com.sec.android.app.samsungapps" to R.string.settings_store_galaxy,
+    "com.huawei.appmarket" to R.string.settings_store_appgallery,
+    "com.xiaomi.market" to R.string.settings_store_getapps,
 )
 
 /** The store [installer] names, or `null` when it isn't one ([STORE_INSTALLERS]). */
-internal fun storeFor(installer: String?): String? = installer?.let { STORE_INSTALLERS[it] }
+internal fun storeFor(installer: String?): String? = installer?.let { STORE_INSTALLERS[it] }?.let { Strings.get(it) }
 
 /** What Settings and the home notice read. */
 internal data class AppUpdateState(
@@ -375,7 +377,7 @@ internal object AppUpdates {
                 is Fetched.Body -> {
                     val latest = parseLatestRelease(body.text)
                     if (latest == null) {
-                        UpdateCheckOutcome.Failed("GitHub's answer didn't name a release")
+                        UpdateCheckOutcome.Failed(Strings.get(R.string.settings_updates_error_no_release))
                     } else {
                         _state.update { it.copy(latest = latest) }
                         save()
@@ -463,7 +465,7 @@ internal sealed interface Fetched {
 }
 
 /** [Fetched.Error]'s reason when the deadline, and only the deadline, ended the request. */
-internal const val FETCH_TIMED_OUT = "GitHub took too long to answer"
+internal val FETCH_TIMED_OUT: String get() = Strings.get(R.string.settings_updates_error_timed_out)
 
 /**
  * GET the connection [open] builds (not yet connected) and read its
@@ -485,8 +487,8 @@ internal suspend fun fetchLatestRelease(timeoutMs: Long, open: () -> HttpURLConn
                 val code = conn.responseCode
                 if (code != HttpURLConnection.HTTP_OK) {
                     return@withHardDeadline Fetched.Error(
-                        if (code == 403 || code == 429) "GitHub is limiting requests; try again later"
-                        else "GitHub answered HTTP $code",
+                        if (code == 403 || code == 429) Strings.get(R.string.settings_updates_error_rate_limited)
+                        else Strings.get(R.string.settings_updates_error_http, code.toString()),
                     )
                 }
                 val bytes = conn.inputStream.use { input ->
@@ -505,10 +507,10 @@ internal suspend fun fetchLatestRelease(timeoutMs: Long, open: () -> HttpURLConn
                 conn.disconnect()
             }
         } catch (e: IOException) {
-            Fetched.Error("couldn't reach GitHub")
+            Fetched.Error(Strings.get(R.string.settings_updates_error_unreachable))
         } catch (e: Throwable) {
             Log.w(TAG, "update check request failed", e)
-            Fetched.Error("the request failed (${e.javaClass.simpleName})")
+            Fetched.Error(Strings.get(R.string.settings_updates_error_request, e.javaClass.simpleName))
         }
     } ?: Fetched.Error(FETCH_TIMED_OUT)
 
