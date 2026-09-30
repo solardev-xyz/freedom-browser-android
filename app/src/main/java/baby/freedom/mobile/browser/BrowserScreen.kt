@@ -1245,6 +1245,18 @@ fun BrowserScreen(
         target.loadUrl(url, namedByUser = namedByUser)
     }
 
+    // The bar's Reload and the Reload on a tab whose renderer went away
+    // (#260). That tab has no WebView: it's rebuilt from what it was
+    // parked with, which loads its page again with its history.
+    val reloadPage: () -> Unit = {
+        if (state.rendererGone != null) {
+            state.recoverRenderer()
+        } else {
+            val url = state.reloadUrl()
+            if (url.isNotBlank()) submit(state, url)
+        }
+    }
+
     // "New private tab" (#86), from the menu and the tab switcher —
     // null, so neither offers it, where the WebView can't run private
     // tabs (no multi-profile support).
@@ -1693,6 +1705,18 @@ fun BrowserScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
+            // The tab's renderer went away (#260) while it was on
+            // screen: why, and Reload. (One on the home surface is
+            // rebuilt at once, behind the home overlay.)
+            val rendererGone = state.rendererGone
+            if (rendererGone != null && !isHomeTab) {
+                RendererGoneScreen(
+                    gone = rendererGone,
+                    onReload = reloadPage,
+                    bottomContentPadding = capsuleOverlap,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         }
 
         // The strip of reserved mode (#66) and of a reveal (#65):
@@ -1849,10 +1873,7 @@ fun BrowserScreen(
                     onOpenHistory = { showHistory = true },
                     onOpenBookmarks = { showBookmarks = true },
                     onOpenDownloads = { showDownloads = true },
-                    onReload = {
-                        val url = state.reloadUrl()
-                        if (url.isNotBlank()) submit(state, url)
-                    },
+                    onReload = reloadPage,
                     // Stop covers both halves of a load: the WebView's
                     // own fetch, and the indeterminate phase in front of
                     // it (ENS resolve / gateway warm-up) that runs on a
