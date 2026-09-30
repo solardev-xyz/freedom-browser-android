@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -59,6 +60,10 @@ internal fun PageRow(
     // button next to an unlabelled switch (#279). The trailing [Switch]
     // takes `onCheckedChange = null`; the row's tap flips it via [onClick].
     checked: Boolean? = null,
+    // A long-press (#321: a history entry's open-in-new-tab menu), named
+    // for TalkBack by [onLongClickLabel].
+    onLongClick: (() -> Unit)? = null,
+    onLongClickLabel: String? = null,
     trailing: (@Composable RowScope.() -> Unit)? = null,
 ) {
     val alpha = if (enabled) 1f else 0.45f
@@ -83,6 +88,13 @@ internal fun PageRow(
                         enabled = enabled,
                         role = Role.Switch,
                         onValueChange = { onClick() },
+                    )
+                } else if (onLongClick != null) {
+                    it.combinedClickable(
+                        enabled = enabled,
+                        onLongClickLabel = onLongClickLabel,
+                        onLongClick = onLongClick,
+                        onClick = onClick,
                     )
                 } else {
                     it.clickable(enabled = enabled, onClick = onClick)

@@ -12,6 +12,12 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.Density
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import baby.freedom.mobile.data.HistoryEntry
@@ -26,7 +32,8 @@ import java.time.ZoneId
 
 /**
  * The History page's day headers (#263) are headings for TalkBack, and
- * a header still reads whole at 200% font scale.
+ * a header still reads whole at 200% font scale; an entry's long-press
+ * and TalkBack actions open it in a new or a private tab (#321).
  */
 @RunWith(AndroidJUnit4::class)
 class HistoryListTest {
@@ -44,7 +51,10 @@ class HistoryListTest {
         visitedAt = date.atTime(12, 0).atZone(zone).toInstant().toEpochMilli(),
     )
 
-    private fun show(fontScale: Float) {
+    /** Every open-in-new-tab request, as (url, private). */
+    private val opened = mutableListOf<Pair<String, Boolean>>()
+
+    private fun show(fontScale: Float, fromPrivate: Boolean = false) {
         val days = historyDays(
             listOf(entry(1, today), entry(2, today.minusDays(1)), entry(3, today.minusDays(3))),
             today,
@@ -57,7 +67,9 @@ class HistoryListTest {
                     HistoryList(
                         days = days,
                         timeFormat = DateFormat.getTimeInstance(DateFormat.SHORT),
-                        onOpen = {},
+                        fromPrivate = fromPrivate,
+                        onOpen = { error("opened in the current tab: $it") },
+                        onOpenInNewTab = { url, private -> opened += url to private },
                         onRemove = {},
                     )
                 }
@@ -106,5 +118,41 @@ class HistoryListTest {
             "header box ${box.height} shorter than its text ${layout.size.height}",
             box.height >= layout.size.height,
         )
+    }
+
+    /** The accessibility actions on [title]'s row, by label. */
+    private fun actions(title: String) = rule.onNode(hasText(title) and hasClickAction())
+        .fetchSemanticsNode().config[SemanticsActions.CustomActions].associateBy { it.label }
+
+    @Test
+    fun longPressOffersNewAndPrivateTab() {
+        show(fontScale = 1f)
+        rule.onNodeWithText("Open in new tab").assertDoesNotExist()
+        rule.onNode(hasText("Page 1") and hasClickAction()).performTouchInput { longClick(center) }
+        rule.onNodeWithText("Open in private tab").assertIsDisplayed()
+        rule.onNodeWithText("Open in new tab").performClick()
+        rule.onNodeWithText("Open in private tab").assertDoesNotExist()
+        rule.onNode(hasText("Page 2") and hasClickAction()).performTouchInput { longClick(center) }
+        rule.onNodeWithText("Open in private tab").performClick()
+        assertEquals(listOf("https://example.com/1" to false, "https://example.com/2" to true), opened)
+    }
+
+    @Test
+    fun talkBackActions() {
+        show(fontScale = 1f)
+        assertEquals(setOf("Open in new tab", "Open in private tab"), actions("Page 3").keys)
+        rule.runOnUiThread { actions("Page 3").getValue("Open in private tab").action() }
+        rule.runOnUiThread { actions("Page 3").getValue("Open in new tab").action() }
+        assertEquals(listOf("https://example.com/3" to true, "https://example.com/3" to false), opened)
+    }
+
+    @Test
+    fun fromAPrivateTabNewTabIsPrivate() {
+        show(fontScale = 1f, fromPrivate = true)
+        assertEquals(setOf("Open in new tab"), actions("Page 1").keys)
+        rule.onNode(hasText("Page 1") and hasClickAction()).performTouchInput { longClick(center) }
+        rule.onNodeWithText("Open in private tab").assertDoesNotExist()
+        rule.onNodeWithText("Open in new tab").performClick()
+        assertEquals(listOf("https://example.com/1" to true), opened)
     }
 }
