@@ -3,7 +3,9 @@ package baby.freedom.mobile.browser
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
@@ -13,6 +15,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.unit.Density
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import baby.freedom.mobile.data.HistoryEntry
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -77,8 +80,31 @@ class HistoryListTest {
         show(fontScale = 2f)
         val label = historyDayLabel(today.minusDays(3), today, java.util.Locale.getDefault())
         val node = rule.onNodeWithText(label).fetchSemanticsNode()
-        val layout = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
-        node.config[androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult].action!!(layout)
-        assertTrue("header clipped: $label", !layout.single().hasVisualOverflow)
+        val results = mutableListOf<TextLayoutResult>()
+        node.config[SemanticsActions.GetTextLayoutResult].action!!(results)
+        val layout = results.single()
+        val text = layout.layoutInput.text.text
+        assertEquals("header text", label, text)
+        // The header wraps rather than cuts, so overflow alone proves
+        // nothing: check every character is laid out, no line was
+        // ellipsised, and each line break falls between words.
+        assertTrue("header height overflow: $label", !layout.didOverflowHeight)
+        assertEquals("last laid-out char", text.length, layout.getLineEnd(layout.lineCount - 1))
+        for (line in 0 until layout.lineCount) {
+            assertTrue("line $line ellipsised: $label", !layout.isLineEllipsized(line))
+        }
+        for (line in 0 until layout.lineCount - 1) {
+            val end = layout.getLineEnd(line)
+            assertTrue(
+                "line $line of \"$label\" breaks mid-word at $end",
+                text[end - 1].isWhitespace() || text[end].isWhitespace() || !text[end - 1].isLetterOrDigit(),
+            )
+        }
+        // And the header's own box is tall enough for every line.
+        val box = node.boundsInRoot
+        assertTrue(
+            "header box ${box.height} shorter than its text ${layout.size.height}",
+            box.height >= layout.size.height,
+        )
     }
 }

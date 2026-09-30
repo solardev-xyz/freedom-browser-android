@@ -1,5 +1,9 @@
 package baby.freedom.mobile.browser
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -44,6 +48,7 @@ import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -51,9 +56,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.HistoryEntry
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withTimeoutOrNull
 import java.text.DateFormat
 import java.time.Duration
 import java.time.LocalDate
@@ -90,20 +100,13 @@ fun HistoryScreen(
         val q = query.trim()
         repo.searchHistory(q).collect { value = q to it }
     }
-    val today by produceState(LocalDate.now()) {
-        // Roll Today/Yesterday over at midnight while the page is open.
-        while (true) {
-            val zone = ZoneId.systemDefault()
-            val now = ZonedDateTime.now(zone)
-            val next = now.toLocalDate().plusDays(1).atStartOfDay(zone)
-            delay(Duration.between(now, next).toMillis().coerceAtLeast(1_000))
-            value = LocalDate.now()
-        }
+    val calendar = rememberCalendarDay()
+    val days = remember(results, calendar) {
+        historyDays(results?.second.orEmpty(), calendar.date, calendar.zone)
     }
-    val days = remember(results, today) {
-        historyDays(results?.second.orEmpty(), today, ZoneId.systemDefault())
-    }
-    val timeFormat = remember { DateFormat.getTimeInstance(DateFormat.SHORT) }
+    // DateFormat captures the default time zone when it's built, so a
+    // zone change needs a fresh one for the rows' times to follow.
+    val timeFormat = remember(calendar.zone) { DateFormat.getTimeInstance(DateFormat.SHORT) }
 
     FullScreenScaffold(
         title = "History",
@@ -112,7 +115,7 @@ fun HistoryScreen(
         when {
             // Nothing read yet: draw nothing rather than a wrong state.
             hasHistory == null -> Unit
-            hasHistory == false && query.isEmpty() -> EmptyState(
+            hasHistory == false && query.isBlank() -> EmptyState(
                 icon = Icons.Outlined.History,
                 title = "No history yet",
                 hint = "Pages you visit will show up here.",
@@ -138,6 +141,63 @@ fun HistoryScreen(
             }
         }
     }
+}
+
+/** The local calendar day and the zone it was read in. */
+internal data class CalendarDay(val date: LocalDate, val zone: ZoneId) {
+    companion object {
+        fun now(): CalendarDay {
+            val zone = ZoneId.systemDefault()
+            return CalendarDay(LocalDate.now(zone), zone)
+        }
+    }
+}
+
+/**
+ * Today's date and zone, kept current while the page is open so the
+ * Today/Yesterday headers never go stale. A midnight timer alone isn't
+ * enough: `delay` on the main thread counts awake time only, so it
+ * runs late after the phone sleeps, and it knows nothing of a clock or
+ * zone change. So the day is also re-read every time the page resumes
+ * and on the system's date, time and time-zone change broadcasts.
+ */
+@Composable
+private fun rememberCalendarDay(): CalendarDay {
+    val context = LocalContext.current.applicationContext
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val day by produceState(CalendarDay.now(), context, lifecycle) {
+        val recheck = Channel<Unit>(Channel.CONFLATED)
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                recheck.trySend(Unit)
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_DATE_CHANGED)
+            addAction(Intent.ACTION_TIME_CHANGED)
+            addAction(Intent.ACTION_TIMEZONE_CHANGED)
+        }
+        // Protected system broadcasts sent by system_server, which
+        // reaches a not-exported receiver.
+        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) recheck.trySend(Unit)
+        }
+        lifecycle.addObserver(observer)
+        try {
+            while (true) {
+                val now = ZonedDateTime.now(ZoneId.systemDefault())
+                value = CalendarDay(now.toLocalDate(), now.zone)
+                val next = now.toLocalDate().plusDays(1).atStartOfDay(now.zone)
+                val wait = Duration.between(now, next).toMillis().coerceAtLeast(1_000)
+                withTimeoutOrNull(wait) { recheck.receive() }
+            }
+        } finally {
+            lifecycle.removeObserver(observer)
+            context.unregisterReceiver(receiver)
+        }
+    }
+    return day
 }
 
 @Composable
