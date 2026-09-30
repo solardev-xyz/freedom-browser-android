@@ -2,12 +2,15 @@ package baby.freedom.mobile.browser
 
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
+import baby.freedom.mobile.node.INodeService
+import java.lang.reflect.Proxy
 import java.math.BigInteger
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -257,5 +260,64 @@ class StampsTest {
     private companion object {
         const val ACCOUNT_A = "0x1111111111111111111111111111111111111aAa"
         const val ACCOUNT_B = "0x2222222222222222222222222222222222222bBb"
+    }
+
+    private fun fakeBinder(): INodeService = Proxy.newProxyInstance(
+        INodeService::class.java.classLoader,
+        arrayOf(INodeService::class.java),
+    ) { proxy, method, args ->
+        when (method.name) {
+            "equals" -> proxy === args?.get(0)
+            "hashCode" -> System.identityHashCode(proxy)
+            "toString" -> "fakeBinder"
+            else -> null
+        }
+    } as INodeService
+
+    @Test
+    fun `detach resets the process-wide node state to Stopped`() {
+        val before = StampClient.node.value
+        val b = fakeBinder()
+        try {
+            StampClient.attach(b)
+            StampClient.publish(b, NodeInfo(status = NodeStatus.Running))
+            assertEquals(NodeStatus.Running, StampClient.node.value.status)
+            StampClient.detach(b)
+            assertEquals(NodeInfo(), StampClient.node.value)
+            assertNull(StampClient.service)
+        } finally {
+            StampClient.service = null
+            StampClient.node.value = before
+        }
+    }
+
+    @Test
+    fun `an older binding's late detach or report leaves the current binding alone`() {
+        val before = StampClient.node.value
+        val old = fakeBinder()
+        val current = fakeBinder()
+        try {
+            // A late report from a binding that already detached is dropped (R6-M2).
+            StampClient.attach(old)
+            StampClient.detach(old)
+            StampClient.publish(old, NodeInfo(status = NodeStatus.Running))
+            assertEquals(NodeInfo(), StampClient.node.value)
+            StampClient.publish(null, NodeInfo(status = NodeStatus.Running))
+            assertEquals(NodeInfo(), StampClient.node.value)
+
+            // A newer Activity bound; the old one's delayed onDestroy doesn't wipe it (R6-M1).
+            val running = NodeInfo(status = NodeStatus.Running)
+            StampClient.attach(current)
+            StampClient.publish(current, running)
+            StampClient.detach(old)
+            StampClient.detach(null)
+            assertSame(current, StampClient.service)
+            assertEquals(running, StampClient.node.value)
+            StampClient.publish(old, NodeInfo(status = NodeStatus.Stopped))
+            assertEquals(running, StampClient.node.value)
+        } finally {
+            StampClient.service = null
+            StampClient.node.value = before
+        }
     }
 }

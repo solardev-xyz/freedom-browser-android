@@ -107,7 +107,8 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 class MainActivity : ComponentActivity() {
 
-    private val infoFlow = MutableStateFlow(NodeInfo())
+    // Shared with the Fund node page's Ledger ready check (#291 R4-M1).
+    private val infoFlow = StampClient.node
     private val ipfsInfoFlow = MutableStateFlow(IpfsInfo())
     // Shared with the `rad://` browser and `window.radicle` (#124).
     private val radicleInfoFlow = RadicleClient.state
@@ -158,7 +159,7 @@ class MainActivity : ComponentActivity() {
 
     private val callback = object : INodeCallback.Stub() {
         override fun onStateChanged(info: NodeInfo?) {
-            if (info != null) infoFlow.value = info
+            if (info != null) StampClient.publish(binder, info)
         }
 
         override fun onIpfsStateChanged(info: IpfsInfo?) {
@@ -267,9 +268,9 @@ class MainActivity : ComponentActivity() {
             val b = INodeService.Stub.asInterface(service) ?: return
             binder = b
             RadicleClient.service = b
-            StampClient.service = b
+            StampClient.attach(b)
             runCatching { b.registerCallback(callback) }
-            runCatching { b.state?.let { infoFlow.value = it } }
+            runCatching { b.state?.let { StampClient.publish(b, it) } }
             runCatching {
                 b.ipfsState?.let {
                     ipfsInfoFlow.value = it
@@ -297,10 +298,9 @@ class MainActivity : ComponentActivity() {
         override fun onServiceDisconnected(name: ComponentName?) {
             // `:node` died unexpectedly. A clean toggle-off goes through
             // [setRunNodeEnabled] instead, which sets Stopped explicitly.
+            StampClient.detach(binder)
             binder = null
             RadicleClient.service = null
-            StampClient.service = null
-            infoFlow.value = NodeInfo()
             ipfsInfoFlow.value = IpfsInfo()
             radicleInfoFlow.value = RadicleInfo()
             Gateways.setIpfsBase("")
@@ -937,7 +937,6 @@ class MainActivity : ComponentActivity() {
         } else {
             NodeService.stop(this)
         }
-        infoFlow.value = NodeInfo()
         ipfsInfoFlow.value = IpfsInfo()
         radicleInfoFlow.value = RadicleInfo()
         Gateways.setIpfsBase("")
@@ -947,9 +946,14 @@ class MainActivity : ComponentActivity() {
         if (!bound) return
         runCatching { binder?.unregisterCallback(callback) }
         runCatching { unbindService(connection) }
+        // Unbound, the callback no longer moves the process-wide node
+        // state, so it goes back to Stopped rather than stay at the last
+        // report for the next Activity to start from (#291 R5-M1) — keyed
+        // to this instance's own binder, and before [binder] is cleared so
+        // a late report from it is dropped too (#291 R6-M1, R6-M2).
+        StampClient.detach(binder)
         binder = null
         RadicleClient.service = null
-        StampClient.service = null
         bound = false
     }
 }
