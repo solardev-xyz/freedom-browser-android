@@ -104,6 +104,8 @@ class Vault internal constructor(
     private val clock: () -> Long = SystemClock::elapsedRealtime,
     private val io: CoroutineDispatcher = Dispatchers.IO,
     private val compute: CoroutineDispatcher = Dispatchers.Default,
+    /** The BIP-39 seed of a phrase ([Mnemonic.seed]); tests watch what becomes of each one. */
+    private val seedOf: (Mnemonic) -> ByteArray = { it.seed() },
 ) {
     /** Non-secret facts about the stored vault, for the wallet page. */
     data class Info(
@@ -211,9 +213,8 @@ class Vault internal constructor(
                 cloudBackup = restored,
                 cloudBackupOffered = restored,
             )
-            val derived = withContext(compute) { mnemonic.seed() }
             withContext(io) { store.write(record) }
-            open(derived, record)
+            deriveAndOpen(mnemonic, record)
         } catch (t: Throwable) {
             // Nothing half-made stays behind: no key without a file, no file without a key.
             withContext(NonCancellable + io) { store.wipe() }
@@ -226,8 +227,7 @@ class Vault internal constructor(
         if (_state.value is State.Unlocked) return@withLock
         val record = storedRecord()
         val mnemonic = openMnemonic(record, auth, VaultAuthPurpose.UNLOCK)
-        val derived = withContext(compute) { mnemonic.seed() }
-        open(derived, record)
+        deriveAndOpen(mnemonic, record)
     }
 
     /**
@@ -462,6 +462,24 @@ class Vault internal constructor(
             synchronized(lock) {
                 if (policy.expired(clock())) lock() else reschedule()
             }
+        }
+    }
+
+    /**
+     * Derives [mnemonic]'s seed off the main thread and opens the vault
+     * with it. The seed is either handed to [open] or zeroed: a caller
+     * cancelled while it was being derived (the wallet page closed
+     * mid-unlock) makes `withContext` throw on its way back and drop the
+     * finished seed, which would otherwise stay on the heap unzeroed.
+     */
+    private suspend fun deriveAndOpen(mnemonic: Mnemonic, record: VaultRecord) {
+        var derived: ByteArray? = null
+        try {
+            withContext(compute) { derived = seedOf(mnemonic) }
+            open(checkNotNull(derived), record)
+            derived = null
+        } finally {
+            derived?.fill(0)
         }
     }
 

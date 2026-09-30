@@ -79,7 +79,16 @@ class VaultTest {
     private val store = FakeStore()
     private val auth = FakeAuth()
 
-    private fun vault() = Vault(store, scope, clock = { now }, io = Dispatchers.Unconfined, compute = Dispatchers.Unconfined)
+    /** Every seed the vault derived, to check none is left unzeroed on a failure path. */
+    private val derivedSeeds = mutableListOf<ByteArray>()
+
+    /** Runs as each seed is derived, after it's made (e.g. to cancel the caller then). */
+    private var onDerive: () -> Unit = {}
+
+    private fun vault() = Vault(
+        store, scope, clock = { now }, io = Dispatchers.Unconfined, compute = Dispatchers.Unconfined,
+        seedOf = { m -> m.seed().also { derivedSeeds += it; onDerive() } },
+    )
 
     private val phrase = Mnemonic.parse(
         "void come effort suffer camp survey warrior heavy shoot primary clutch crush " +
@@ -514,5 +523,50 @@ class VaultTest {
         assertArrayEquals(byteArrayOf(4, 5), back.ciphertext)
         assertNull(VaultRecord.decode(r.encode().replace("\"version\":1", "\"version\":2")))
         assertNull(VaultRecord.decode("not json"))
+    }
+
+    // ---- The seed never outlives a failed open (audit, key custody) ----
+
+    @Test
+    fun `a seed derived for a create whose write fails is zeroed`() = runBlocking {
+        val v = vault()
+        store.onWrite = { throw java.io.IOException("disk full") }
+        try {
+            v.create(phrase, auth, imported = true)
+            fail("the write failed")
+        } catch (_: java.io.IOException) {
+        }
+        assertEquals(Vault.State.Empty, v.state.value)
+        assertTrue(derivedSeeds.all { s -> s.all { it.toInt() == 0 } })
+    }
+
+    @Test
+    fun `a seed derived for an unlock whose caller went away is zeroed, and the vault stays locked`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = true)
+        v.lock()
+        derivedSeeds.clear()
+        lateinit var caller: Job
+        // The caller (the wallet page's scope) is cancelled while the seed is being derived:
+        // withContext then throws on its way back and drops the finished seed.
+        onDerive = { caller.cancel() }
+        caller = launch { v.unlock(auth) }
+        caller.join()
+        assertTrue(caller.isCancelled)
+        assertTrue(v.state.value is Vault.State.Locked)
+        assertEquals(1, derivedSeeds.size)
+        assertTrue(derivedSeeds.single().all { it.toInt() == 0 })
+    }
+
+    @Test
+    fun `a create whose caller went away while its seed was derived leaves nothing behind`() = runBlocking {
+        val v = vault()
+        lateinit var caller: Job
+        onDerive = { caller.cancel() }
+        caller = launch { v.create(phrase, auth, imported = true) }
+        caller.join()
+        assertEquals(Vault.State.Empty, v.state.value)
+        assertNull(store.record)
+        assertTrue(derivedSeeds.all { s -> s.all { it.toInt() == 0 } })
     }
 }
