@@ -9,6 +9,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.longClick
@@ -167,6 +168,52 @@ class BookmarksScreenTest {
         assertEquals(listOf("https://A.example/" to false), opened)
         // The order is untouched.
         assertEquals(listOf("A", "B"), titles())
+    }
+
+    /**
+     * A long press whose finger jitters without passing touch slop, on a
+     * row at the bottom edge where a drag would start the edge
+     * auto-scroll: the row doesn't move, the list doesn't scroll, the
+     * order isn't saved, and lifting opens that row's menu (#330 R1-F1).
+     */
+    @Test
+    fun stillLongPressOnAnEdgeRowNeitherScrollsNorReorders() {
+        val all = (1..40).map { "R%02d".format(it) }
+        runBlocking { for (t in all.reversed()) repo.bookmark("https://$t.example/", t).await() }
+        assertEquals(all, titles())
+        showOpening(private = false)
+        val bottom = rule.onRoot().fetchSemanticsNode().boundsInRoot.bottom
+        // The lowest row whose centre is on screen: its bottom is inside the edge zone.
+        val edge = all.mapNotNull { t ->
+            rule.onAllNodes(hasText(t) and hasClickAction()).fetchSemanticsNodes()
+                .singleOrNull()?.let { t to it.boundsInRoot }
+        }.filter { (_, b) -> b.center.y < bottom - 4f }.maxBy { (_, b) -> b.center.y }.first
+        val firstShown = all.first { t ->
+            rule.onAllNodes(hasText(t) and hasClickAction()).fetchSemanticsNodes().isNotEmpty()
+        }
+        rule.onNode(hasText(edge) and hasClickAction()).performTouchInput {
+            down(center)
+            advanceEventTime(viewConfiguration.longPressTimeoutMillis + 100)
+            // Jitter that stays under slop, held long enough for an edge
+            // auto-scroll to carry the row through the list.
+            val step = viewConfiguration.touchSlop / 4f
+            repeat(3) {
+                moveBy(Offset(0f, step))
+                advanceEventTime(100)
+            }
+            repeat(20) {
+                moveBy(Offset(0f, -step / 4f))
+                moveBy(Offset(0f, step / 4f))
+                advanceEventTime(100)
+            }
+            up()
+        }
+        rule.waitForIdle()
+        rule.onNodeWithText(OPEN_NEW).performClick()
+        assertEquals(listOf("https://$edge.example/" to false), opened)
+        assertEquals(all, titles())
+        // The list stayed where it was.
+        rule.onNode(hasText(firstShown) and hasClickAction()).assertExists()
     }
 
     @Test
