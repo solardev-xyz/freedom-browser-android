@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         FaviconEntry::class,
         DownloadEntry::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -108,7 +108,18 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        internal val MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+        /**
+         * v5 -> v6: a download can be saved where the user picked (#322),
+         * *Ask where to save each file*. Additive; existing rows read as
+         * saved to Download/Freedom, which they were.
+         */
+        internal val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `saveTo` TEXT")
+            }
+        }
+
+        internal val MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
 
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {

@@ -117,4 +117,17 @@ class SettingsSearchTest {
             searchKeywords(baby.freedom.mobile.R.string.settings_theme_keywords).toList(),
         )
     }
+
+    @Test
+    fun `ask where to save is found by its words and by save as`() {
+        // #322: its title, what it does either way, the private-tab note, and "save as".
+        for (on in listOf(false, true)) {
+            val rows = downloadSettingsRows(on)
+            for (q in listOf("ask where", "save as", "folder", "private tabs", "Download/Freedom")) {
+                assertEquals("$on/$q", setOf("ask-where"), visibleSettingsRows(q, "Downloads", rows))
+            }
+            assertEquals(setOf("ask-where"), visibleSettingsRows("downloads", "Downloads", rows))
+            assertEquals(emptySet<Any>(), visibleSettingsRows("bookmarks", "Downloads", rows))
+        }
+    }
 }

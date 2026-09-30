@@ -24,6 +24,7 @@
     <string name="settings_section_adblock">Ad blocking</string>
     <string name="settings_section_browsing">Browsing data</string>
     <string name="settings_section_permissions">Site permissions</string>
+    <string name="settings_section_downloads">Downloads</string>
     <string name="settings_section_nodes">Nodes</string>
     <string name="settings_section_tor">Tor</string>
     <string name="settings_section_about">About</string>
@@ -302,4 +303,11 @@
 
     <!-- PageZoom.kt. %1$s: the level, already formatted as a number. -->
     <string name="settings_zoom_level">%1$s%%</string>
+
+    <!-- Settings → Downloads (#322) -->
+    <string name="settings_downloads_ask_where">Ask where to save each file</string>
+    <string name="settings_downloads_ask_where_subtitle_off">Downloads are saved to Download/Freedom</string>
+    <string name="settings_downloads_ask_where_subtitle_on">Choose a name and folder for each download when you confirm it</string>
+    <string name="settings_downloads_ask_where_private">Private tabs always save to Download/Freedom.</string>
+    <string name="settings_downloads_ask_where_keywords">save as, folder, location, download folder</string>
 </resources>

@@ -82,7 +82,7 @@ class BookmarksDatabaseTest {
             close()
         }
 
-        // Opening it with the app's migrations runs v3 -> v4 -> v5, and
+        // Opening it with the app's migrations runs v3 -> v4 -> v5 -> v6, and
         // Room checks the migrated tables against the entities (columns,
         // types, defaults, indices) before anything reads them — a
         // mismatch throws here.
@@ -94,7 +94,7 @@ class BookmarksDatabaseTest {
                 val positions = buildMap { while (c.moveToNext()) put(c.getLong(0), c.getLong(1)) }
                 assertEquals(mapOf(2L to 0L, 4L to 1L, 3L to 2L, 1L to 3L), positions)
             }
-            assertEquals(5, db.openHelper.readableDatabase.version)
+            assertEquals(6, db.openHelper.readableDatabase.version)
             runBlocking {
                 val all = db.bookmarks().all().first()
                 assertEquals(listOf(2L, 4L, 3L, 1L), all.map { it.id })
@@ -131,7 +131,7 @@ class BookmarksDatabaseTest {
             .addMigrations(*AppDatabase.MIGRATIONS)
             .build()
         try {
-            assertEquals(5, db.openHelper.readableDatabase.version)
+            assertEquals(6, db.openHelper.readableDatabase.version)
             runBlocking {
                 val d = db.downloads().get(7)!!
                 assertEquals("a.zip", d.fileName)
@@ -140,7 +140,46 @@ class BookmarksDatabaseTest {
                 assertFalse(d.resumable)
                 assertNull(d.note)
                 assertNull(d.userAgent)
+                assertNull(d.saveTo)
                 assertEquals(listOf("vitalik.eth"), db.bookmarks().all().first().map { it.url })
+            }
+        } finally {
+            db.close()
+            context.deleteDatabase(name)
+        }
+    }
+
+    /**
+     * v5 -> v6 (#322) adds where a download is saved; a paused download
+     * keeps its resume state and reads as saved to Download/Freedom.
+     */
+    @Test
+    fun migrationFromFiveAddsTheSaveTarget() {
+        val name = "migration-5-6.db"
+        context.deleteDatabase(name)
+        createDatabase(name, 5).apply {
+            execSQL(
+                "INSERT INTO downloads (id, fileName, displayUrl, sourceUrl, mimeType, contentUri, status, " +
+                    "totalBytes, receivedBytes, error, startedAt, finishedAt, refererOrigin, validator, resumable, " +
+                    "note, userAgent) VALUES " +
+                    "(9, 'b.iso', 'https://d.example/b.iso', 'https://d.example/b.iso', 'application/octet-stream', " +
+                    "NULL, 'paused', 100, 40, NULL, 50, NULL, NULL, '\"e1\"', 1, NULL, 'UA')",
+            )
+            close()
+        }
+        val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(*AppDatabase.MIGRATIONS)
+            .build()
+        try {
+            assertEquals(6, db.openHelper.readableDatabase.version)
+            runBlocking {
+                val d = db.downloads().get(9)!!
+                assertEquals("paused", d.status)
+                assertEquals(40L, d.receivedBytes)
+                assertEquals("\"e1\"", d.validator)
+                assertTrue(d.resumable)
+                assertEquals("UA", d.userAgent)
+                assertNull(d.saveTo)
             }
         } finally {
             db.close()

@@ -99,7 +99,7 @@ fun HistoryScreen(
     BackHandler(onBack = onDismiss)
     // Registered after the dismiss handler so it wins while there's a
     // query: Back clears the search first, as on the Settings page.
-    var query by rememberSaveable(saver = HistoryQuerySaver) { mutableStateOf("") }
+    var query by rememberSaveable(saver = LibraryQuerySaver) { mutableStateOf("") }
     BackHandler(enabled = query.isNotEmpty()) { query = "" }
 
     val hasHistory by remember { repo.hasHistory }.collectAsState(initial = null)
@@ -131,7 +131,11 @@ fun HistoryScreen(
                 hint = stringResource(R.string.library_history_empty_hint),
             )
             else -> Column(modifier = Modifier.fillMaxSize()) {
-                HistorySearchField(query = query, onQueryChange = { query = it })
+                LibrarySearchField(
+                    query = query,
+                    onQueryChange = { query = it },
+                    placeholder = stringResource(R.string.library_history_search_placeholder),
+                )
                 if (showsNoMatches(results, query)) {
                     EmptyState(
                         icon = Icons.Filled.SearchOff,
@@ -252,16 +256,18 @@ internal fun HistoryList(
     }
 }
 
+/** The search field pinned under History's and Downloads' titles (#263, #322). */
 @Composable
-private fun HistorySearchField(
+internal fun LibrarySearchField(
     query: String,
     onQueryChange: (String) -> Unit,
+    placeholder: String,
 ) {
     val focusManager = LocalFocusManager.current
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
-        placeholder = { Text(stringResource(R.string.library_history_search_placeholder)) },
+        placeholder = { Text(placeholder) },
         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
         trailingIcon = if (query.isNotEmpty()) {
             {
@@ -285,7 +291,7 @@ private fun HistorySearchField(
  * a longer paste is dropped on process death rather than risking a
  * bundle past the binder limit.
  */
-private val HistoryQuerySaver = Saver<MutableState<String>, String>(
+internal val LibraryQuerySaver = Saver<MutableState<String>, String>(
     save = { it.value.takeIf { q -> q.length <= 1024 } },
     restore = { mutableStateOf(it) },
 )

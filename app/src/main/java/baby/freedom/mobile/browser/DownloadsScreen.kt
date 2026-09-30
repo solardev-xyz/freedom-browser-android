@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -20,6 +21,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.InsertDriveFile
@@ -37,10 +39,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -48,11 +52,24 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.data.DownloadEntry
 import baby.freedom.mobile.data.DownloadStatus
+import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.l10n.pluralText
 import kotlinx.coroutines.delay
 import java.text.DateFormat
 import java.util.Date
+
+/**
+ * Whether [entry] matches the Downloads search [query] (#322): its file
+ * name or where it came from (the address the list shows) contains it,
+ * ignoring case — desktop's `freedom://downloads` filter. A blank query
+ * matches everything.
+ */
+internal fun downloadMatches(entry: DownloadEntry, query: String): Boolean {
+    val q = query.trim()
+    return q.isEmpty() || entry.fileName.contains(q, ignoreCase = true) ||
+        entry.displayUrl.contains(q, ignoreCase = true)
+}
 
 /**
  * Download history (#79): every download, newest first, with live
@@ -61,6 +78,11 @@ import java.util.Date
  * only forgets the entry — the file stays in Downloads. A running
  * download that can be paused has Pause, and a paused one Resume
  * (#265); × on either cancels it and deletes its partial file.
+ *
+ * A search field under the title filters the list by file name and
+ * source address (#322), with History's no-match state; Back clears it
+ * first. With *Ask where to save each file* on, Retry opens the Save as
+ * picker the way the download prompt does.
  */
 @Composable
 fun DownloadsScreen(
@@ -69,8 +91,36 @@ fun DownloadsScreen(
     onOpen: (DownloadEntry) -> Unit,
 ) {
     BackHandler(onBack = onDismiss)
+    // Registered after the dismiss handler so it wins while there's a
+    // query: Back clears the search first, as on History.
+    var query by rememberSaveable(saver = LibraryQuerySaver) { mutableStateOf("") }
+    BackHandler(enabled = query.isNotEmpty()) { query = "" }
 
+    val context = LocalContext.current
+    val askWhereToSave by remember(context) { NodeSettings.get(context).askWhereToSave }
+        .collectAsState(initial = false)
+    // The row a Retry is picking a location for, by id: in saved state,
+    // so an activity rebuilt while the picker is up still retries it.
+    var retrying by rememberSaveable { mutableStateOf<Long?>(null) }
     val entries by remember { downloads.downloads }.collectAsState(initial = emptyList())
+    val saveAsPicker = rememberLauncherForActivityResult(SaveAsContract()) { uri ->
+        val id = retrying ?: return@rememberLauncherForActivityResult
+        retrying = null
+        if (uri == null) return@rememberLauncherForActivityResult
+        val entry = entries.firstOrNull { it.id == id }
+        if (entry != null) downloads.retry(entry, uri) else downloads.abandonSaveTo(uri)
+    }
+    val retry = { entry: DownloadEntry ->
+        val picking = asksWhereToSave(askWhereToSave, private = entry.id < 0) && try {
+            saveAsPicker.launch(SaveAsRequest(entry.fileName, entry.mimeType))
+            retrying = entry.id
+            true
+        } catch (_: android.content.ActivityNotFoundException) {
+            false
+        }
+        if (!picking) downloads.retry(entry)
+    }
+    val shown = remember(entries, query) { entries.filter { downloadMatches(it, query) } }
     val progress by downloads.progress.collectAsState()
     val dateFormat = remember {
         DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
@@ -80,19 +130,30 @@ fun DownloadsScreen(
         title = stringResource(R.string.library_downloads_title),
         onDismiss = onDismiss,
     ) {
-        if (entries.isEmpty()) {
+        if (entries.isEmpty() && query.isBlank()) {
             EmptyState(
                 icon = Icons.Outlined.Download,
                 title = stringResource(R.string.library_downloads_empty_title),
                 hint = stringResource(R.string.library_downloads_empty_hint),
             )
-        } else {
-            LazyColumn(
+        } else Column(modifier = Modifier.fillMaxSize()) {
+            LibrarySearchField(
+                query = query,
+                onQueryChange = { query = it },
+                placeholder = stringResource(R.string.library_downloads_search_placeholder),
+            )
+            if (shown.isEmpty()) {
+                EmptyState(
+                    icon = Icons.Filled.SearchOff,
+                    title = stringResource(R.string.library_downloads_no_matches_title),
+                    hint = stringResource(R.string.library_downloads_no_matches_hint),
+                )
+            } else LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                items(items = entries, key = { it.id }) { entry ->
+                items(items = shown, key = { it.id }) { entry ->
                     DownloadRow(
                         entry = entry,
                         live = progress[entry.id],
@@ -102,7 +163,7 @@ fun DownloadsScreen(
                         onPause = { downloads.pause(entry.id) },
                         onResume = { downloads.resume(entry.id) },
                         onCancel = { downloads.cancel(entry.id) },
-                        onRetry = { downloads.retry(entry) },
+                        onRetry = { retry(entry) },
                         onRemove = { downloads.remove(entry.id) },
                     )
                 }
@@ -127,7 +188,10 @@ internal fun downloadStatusLine(entry: DownloadEntry, live: DownloadProgress?, t
             val total = live?.total?.takeIf { it > 0 } ?: entry.totalBytes.takeIf { it > 0 }
             val line = when {
                 live == null -> Strings.get(R.string.library_download_status_starting)
-                live.saving -> Strings.get(R.string.library_download_status_saving)
+                live.saving -> Strings.get(
+                    if (entry.saveTo != null) R.string.library_download_status_saving_picked
+                    else R.string.library_download_status_saving,
+                )
                 else -> downloadBytesLine(received, total)
             }
             // "Restarted from the beginning: …" after a resume that

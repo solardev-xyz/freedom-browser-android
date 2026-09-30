@@ -717,7 +717,21 @@ class NodeSettings private constructor(
         store.edit { it[Keys.CHECK_FOR_UPDATES] = enabled }
     }
 
+    /**
+     * *Ask where to save each file* (#322): confirming a download opens
+     * the system's *Save as* picker instead of saving to Download/Freedom.
+     * Off by default, like desktop's.
+     */
+    val askWhereToSave: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.ASK_WHERE_TO_SAVE] ?: false
+    }
+
+    suspend fun setAskWhereToSave(enabled: Boolean) {
+        store.edit { it[Keys.ASK_WHERE_TO_SAVE] = enabled }
+    }
+
     private object Keys {
+        val ASK_WHERE_TO_SAVE = booleanPreferencesKey("ask_where_to_save")
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SWARM_NODE_MODE = stringPreferencesKey("swarm_node_mode")
         /** Both chains' start at launch before #274; see [myotisStartOnLaunch]. */
