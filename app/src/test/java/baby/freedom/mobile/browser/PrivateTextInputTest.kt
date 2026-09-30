@@ -53,4 +53,52 @@ class PrivateTextInputTest {
         assertTrue(pastes.words.isEmpty())
         assertFalse(pastes.clipIsPaste)
     }
+
+    @Test
+    fun `a commit dropped by a close inside a batch leaves no paste (R5-F1)`() {
+        val phrase = List(12) { "abandon" }.joinToString(" ")
+        val all = TextFieldValue(phrase, TextRange(0, phrase.length))
+        val end = TextFieldValue(phrase, TextRange(phrase.length))
+        val pastes = PastedPhrases()
+        val reports = CommitReports(pastes::committing)
+        reports.beginBatch()
+        // Recorded in the batch, answered true, never applied: the connection closes first.
+        assertTrue(reports.commit(phrase) { true })
+        reports.closed()
+        pastes.edit(all, end)
+        assertTrue(pastes.words.isEmpty())
+        assertFalse(pastes.clipIsPaste)
+    }
+
+    @Test
+    fun `a batch that ends keeps its commit, and a later close takes nothing back`() {
+        val heard = mutableListOf<CharSequence?>()
+        val reports = CommitReports { heard += it }
+        reports.beginBatch()
+        reports.beginBatch()
+        assertTrue(reports.commit("abandon ability") { true })
+        reports.endBatch()
+        reports.endBatch()
+        reports.closed()
+        assertEquals(listOf<CharSequence?>("abandon ability"), heard)
+        // Nested, closed before the outer end: taken back.
+        heard.clear()
+        reports.beginBatch()
+        reports.beginBatch()
+        reports.commit("abandon ability") { true }
+        reports.endBatch()
+        reports.closed()
+        assertEquals(listOf<CharSequence?>("abandon ability", null), heard)
+        // Outside any batch: applied at once, a close takes nothing back.
+        heard.clear()
+        reports.commit("abandon ability") { true }
+        reports.closed()
+        assertEquals(listOf<CharSequence?>("abandon ability"), heard)
+        // Refused inside a batch: taken back at once, and only once.
+        heard.clear()
+        reports.beginBatch()
+        assertFalse(reports.commit("abandon ability") { false })
+        reports.closed()
+        assertEquals(listOf<CharSequence?>("abandon ability", null), heard)
+    }
 }
