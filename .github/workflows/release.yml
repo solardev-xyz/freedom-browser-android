@@ -31,7 +31,8 @@
 # `colibri`, and so does a twice-weekly schedule, which also keeps the
 # entries from being evicted (GitHub drops caches unused for 7 days). A
 # release that still misses (evicted, or tagged within minutes of the
-# bump) just builds from source, in about 25 min instead of about 10.
+# bump) just builds from source: about 25 min instead of about 8 (measured
+# on the #309 dry runs; the old single-job workflow took about 40).
 # There's no Rust build cache (Swatinem/rust-cache) any more: its ~1 GB
 # target dir per ABI, saved on a tag's own ref, could never be restored by
 # a later tag, and it would crowd the finished libraries out of the
