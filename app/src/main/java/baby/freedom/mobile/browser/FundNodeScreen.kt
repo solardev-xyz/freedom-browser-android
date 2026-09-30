@@ -27,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -108,6 +109,18 @@ internal fun fundReviewRows(quote: SendQuote, plan: SwarmFunder.Plan, days: Long
         request.dapp.swarm == SwarmFundLabel(plan.node, plan.batchId, plan.depth, days)
     return if (matches) FundReviewRows(fundNodeSummary(plan, days), plan.node) else null
 }
+
+/**
+ * Why an open review's Confirm is held, or null: funding is [blocked] now,
+ * or the running node's funding address ([running]) is no longer the node
+ * the review pays ([reviewNode]). Read at render, at the tap, and again once
+ * the wallet is unlocked, since the node can change while the prompt is up.
+ */
+internal fun fundReviewHeld(blocked: String?, running: String?, reviewNode: String): String? =
+    blocked ?: if (running?.equals(reviewNode, ignoreCase = true) != true) FUND_REVIEW_NODE_CHANGED else null
+
+internal const val FUND_REVIEW_NODE_CHANGED =
+    "The node is no longer running as the account this review pays. Cancel and review again."
 
 /** An open review: the [quote] and the [plan] and [days] it was built from, kept together (#242). */
 private class FundReviewing(val plan: SwarmFunder.Plan, val days: Long, val quote: SendQuote)
@@ -301,19 +314,17 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                 r != null && rows != null -> item("review") {
                     val q = r.quote
                     // The node the review pays is no longer the one running, or funding it is blocked now.
-                    val changed = blocked ?: if (node?.equals(rows.node, ignoreCase = true) != true) {
-                        "The node is no longer running as the account this review pays. Cancel and review again."
-                    } else {
-                        null
-                    }
+                    val changed = fundReviewHeld(blocked, node, rows.node)
+                    // The live answer, for the tap's coroutine to read again after the unlock prompt.
+                    val changedNow by rememberUpdatedState(changed)
                     FundReview(
                         quote = q,
                         summary = rows.summary,
                         node = rows.node,
                         busy = busy,
                         notice = notice,
-                        error = error ?: changed,
-                        confirmable = changed == null,
+                        held = changed,
+                        error = error,
                         onCancel = {
                             reviewing = null
                             notice = null
@@ -332,6 +343,8 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                             scope.launch {
                                 try {
                                     if (!q.request.from.isLedger && !vault.unlockedNow()) vault.unlock(auth)
+                                    // The node may have restarted (or funding been blocked) while the prompt was up.
+                                    if (changedNow != null) return@launch
                                     when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from) { !sender.isStale(q) })) {
                                         WalletSender.Submit.STARTED -> {
                                             reviewing = null
@@ -449,14 +462,17 @@ private fun FundReview(
     node: String,
     busy: Boolean,
     notice: String?,
+    held: String?,
     error: String?,
-    confirmable: Boolean,
     onCancel: () -> Unit,
     onConfirm: () -> Unit,
 ) {
     val request = quote.request
     val chain = request.chain
-    val tap = rememberArmedTapGuard(quote, PromptTapGuard.SPEND_PROTECTION_MS)
+    val confirmable = held == null
+    // Armed afresh whenever Confirm comes back from being held, not only for a new quote:
+    // the review stays up through a node change, so re-enabling must not land under a tapping finger.
+    val tap = rememberArmedTapGuard(quote to confirmable, PromptTapGuard.SPEND_PROTECTION_MS)
     val guard = tap.guard
     val armed = tap.armed
     Column {
@@ -479,6 +495,8 @@ private fun FundReview(
         }
         Spacer(Modifier.height(12.dp))
         notice?.let { MutedText(it) }
+        // Why Confirm is disabled first, then any earlier failure: neither hides the other.
+        held?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         ObscuredTapNotice(tap)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {

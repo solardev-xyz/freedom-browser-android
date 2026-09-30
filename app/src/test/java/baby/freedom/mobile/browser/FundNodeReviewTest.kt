@@ -58,17 +58,29 @@ class FundNodeReviewTest {
     fun `a plan priced again during the review never labels the quote being signed`() {
         val signed = plan()
         val q = quoteFor(signed)
+        // The quote is still described by the plan it was built from.
+        assertEquals(fundNodeSummary(signed, days), fundReviewRows(q, signed, days)?.summary)
         // Pricing ran again (the stamps-blocked key flipped): a new per-chunk price and pool price, same batch nonce.
         val repriced = plan(perChunk = amount.multiply(BigInteger.TWO), price = sqrt.shiftRight(1))
         assertNotEquals(fundNodeSummary(signed, days), fundNodeSummary(repriced, days))
-        assertNotEquals(fundNodeSummary(repriced, days), fundReviewRows(q, repriced, days)?.summary)
+        assertNull(fundReviewRows(q, repriced, days))
         // The node restarted as another identity.
-        assertNotEquals(otherNode, fundReviewRows(q, plan(n = otherNode), days)?.node)
+        assertNull(fundReviewRows(q, plan(n = otherNode), days))
         // The duration changed behind the review.
-        assertNotEquals(fundNodeSummary(signed, 30), fundReviewRows(q, signed, 30)?.summary)
+        assertNull(fundReviewRows(q, signed, 30))
         // Only the deposit changed (the node set up its chequebook meanwhile).
-        val noDeposit = plan(dep = BigInteger.ZERO)
-        assertNotEquals(fundNodeSummary(noDeposit, days), fundReviewRows(q, noDeposit, days)?.summary)
+        assertNull(fundReviewRows(q, plan(dep = BigInteger.ZERO), days))
+    }
+
+    @Test
+    fun `Confirm is held while the node isn't the one the review pays, or funding is blocked`() {
+        assertNull(fundReviewHeld(null, node, node))
+        assertNull(fundReviewHeld(null, node.lowercase(), node))
+        assertEquals(FUND_REVIEW_NODE_CHANGED, fundReviewHeld(null, otherNode, node))
+        // The node stopped: no funding address at all.
+        assertEquals(FUND_REVIEW_NODE_CHANGED, fundReviewHeld(null, null, node))
+        assertEquals("blocked", fundReviewHeld("blocked", node, node))
+        assertEquals("blocked", fundReviewHeld("blocked", otherNode, node))
     }
 
     @Test
