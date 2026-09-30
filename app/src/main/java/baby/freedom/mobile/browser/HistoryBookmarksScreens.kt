@@ -49,6 +49,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -59,6 +60,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.HistoryEntry
 import kotlinx.coroutines.channels.Channel
@@ -108,7 +110,7 @@ fun HistoryScreen(
     val timeFormat = remember(calendar.zone) { DateFormat.getTimeInstance(DateFormat.SHORT) }
 
     FullScreenScaffold(
-        title = "History",
+        title = stringResource(R.string.library_history_title),
         onDismiss = onDismiss,
     ) {
         when {
@@ -116,17 +118,16 @@ fun HistoryScreen(
             hasHistory == null -> Unit
             hasHistory == false && query.isBlank() -> EmptyState(
                 icon = Icons.Outlined.History,
-                title = "No history yet",
-                hint = "Pages you visit will show up here.",
+                title = stringResource(R.string.library_history_empty_title),
+                hint = stringResource(R.string.library_history_empty_hint),
             )
             else -> Column(modifier = Modifier.fillMaxSize()) {
                 HistorySearchField(query = query, onQueryChange = { query = it })
                 if (showsNoMatches(results, query)) {
                     EmptyState(
                         icon = Icons.Filled.SearchOff,
-                        title = "No matches",
-                        hint = "Nothing in your history matches that. " +
-                            "Search looks at page titles and addresses.",
+                        title = stringResource(R.string.library_history_no_matches_title),
+                        hint = stringResource(R.string.library_history_no_matches_hint),
                     )
                 } else {
                     HistoryList(
@@ -246,12 +247,12 @@ private fun HistorySearchField(
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
-        placeholder = { Text("Search history") },
+        placeholder = { Text(stringResource(R.string.library_history_search_placeholder)) },
         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
         trailingIcon = if (query.isNotEmpty()) {
             {
                 IconButton(onClick = { onQueryChange("") }) {
-                    Icon(Icons.Filled.Close, contentDescription = "Clear search")
+                    Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.library_history_clear_search))
                 }
             }
         } else null,
@@ -296,7 +297,7 @@ private fun EntryRow(
             ) {
                 Icon(
                     Icons.Filled.Close,
-                    contentDescription = "Remove",
+                    contentDescription = stringResource(R.string.common_remove),
                     modifier = Modifier.size(18.dp),
                 )
             }

@@ -1,5 +1,8 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
+
 /**
  * Pure (Android-free) half of pause and resume for downloads (#265):
  * what a response says about resuming later, what a resume request
@@ -125,13 +128,13 @@ internal fun resumeAnswer(status: Int, offset: Long, contentRange: String?, cont
     }
 
 /** The note a resume that had to start over leaves on its row. */
-internal const val DOWNLOAD_RESTARTED_NOTE = "Restarted from the beginning: the server couldn't resume it"
+internal val DOWNLOAD_RESTARTED_NOTE: String get() = Strings.get(R.string.library_download_note_restarted)
 
 /** The note on a download a lost connection paused. */
-internal const val DOWNLOAD_CONNECTION_LOST_NOTE = "Connection lost"
+internal val DOWNLOAD_CONNECTION_LOST_NOTE: String get() = Strings.get(R.string.library_download_note_connection_lost)
 
 /** The note on a download the app's process died under. */
-internal const val DOWNLOAD_INTERRUPTED_NOTE = "Interrupted"
+internal val DOWNLOAD_INTERRUPTED_NOTE: String get() = Strings.get(R.string.library_download_note_interrupted)
 
 /**
  * Can a running download be paused? A web one always can — a server
