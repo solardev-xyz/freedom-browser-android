@@ -1252,13 +1252,7 @@ class WalletSender internal constructor(
      * can't cover this on top of value and gas ("insufficient funds for
      * gas * price + value"), so Max and the balance check must count it.
      */
-    private suspend fun l1Fee(tx: EthTransaction): BigInteger {
-        if (tx.chainId !in OP_STACK_CHAINS) return BigInteger.ZERO
-        val call = JSONObject().put("to", GAS_PRICE_ORACLE).put("data", getL1FeeData(tx.signingPayload()))
-        val fee = Erc20.decodeUint256(rpc.call(tx.chainId, call).value)
-            ?: throw SendException(Strings.said(R.string.send_read_nonsense))
-        return fee.shiftLeft(1)
-    }
+    private suspend fun l1Fee(tx: EthTransaction): BigInteger = l1Fee(rpc, tx)
 
     /** [quote] priced afresh, as it was asked for: Max stays Max. */
     suspend fun reprice(quote: SendQuote): SendQuote = prepare(quote.request, quote.all)
@@ -1772,6 +1766,19 @@ class WalletSender internal constructor(
 
         /** The OP Stack's `GasPriceOracle` predeploy. */
         internal const val GAS_PRICE_ORACLE = "0x420000000000000000000000000000000000000F"
+
+        /**
+         * [WalletSender.l1Fee] through [rpc]: shared with what shows a
+         * price before [WalletSender.prepare] runs (a Safe's activation,
+         * [SafeChain.activation]), so both reserve the same.
+         */
+        internal suspend fun l1Fee(rpc: WalletRpc, tx: EthTransaction): BigInteger {
+            if (tx.chainId !in OP_STACK_CHAINS) return BigInteger.ZERO
+            val call = JSONObject().put("to", GAS_PRICE_ORACLE).put("data", getL1FeeData(tx.signingPayload()))
+            val fee = Erc20.decodeUint256(rpc.call(tx.chainId, call).value)
+                ?: throw SendException(Strings.said(R.string.send_read_nonsense))
+            return fee.shiftLeft(1)
+        }
 
         /** `getL1Fee(bytes)`'s selector. */
         internal const val GET_L1_FEE = "0x49948e0e"

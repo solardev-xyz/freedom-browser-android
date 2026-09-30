@@ -816,6 +816,44 @@ class SendTest {
     }
 
     @Test
+    fun `on Base, a Safe's activation card counts the L1 fee Activate's prepare reserves (R2-M1)`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val l1 = BigInteger.valueOf(400_000_000_000L)
+        val oracle = mutableListOf<String>()
+        chain.on["eth_call"] = { req ->
+            val call = req.getJSONArray("params").getJSONObject(0)
+            assertEquals(WalletSender.GAS_PRICE_ORACLE, call.getString("to"))
+            synchronized(oracle) { oracle += call.getString("data") }
+            "\"result\":\"0x" + l1.toString(16).padStart(64, '0') + "\""
+        }
+        val owners = listOf(from.address, to)
+        val safe = SafeAccount(SafeProtocol.predictAddress(owners, 1, "7"), "", owners, 1, "7", base.id, false, 0)
+        val card = SafeChain(chain.rpc()).activation(safe, from.address)
+        val s = sender(chain)
+        val data = SafeProtocol.deploymentData(safe.owners, safe.threshold, safe.saltNonce)
+        suspend fun activate() =
+            s.prepare(SendRequest(base, TokenRegistry.native(base), from, SafeProtocol.FACTORY, BigInteger.ZERO, DappCall(null, data, null, null)))
+        chain.balance = card.maxFee - BigInteger.ONE
+        val short = SafeChain(chain.rpc()).activation(safe, from.address)
+        assertTrue(short.needsFunds)
+        assertEquals(BigInteger.ONE, short.shortfall)
+        assertMessage("Not enough ETH for the network fee") { activate() }
+        // Topped up by exactly the card's shortfall: the card says ready, and Activate prices it.
+        chain.balance += short.shortfall
+        assertFalse(SafeChain(chain.rpc()).activation(safe, from.address).needsFunds)
+        val quote = activate()
+        // Both priced the same transaction, so both reserve the same.
+        assertEquals(quote.maxFee, card.maxFee)
+        assertEquals(l1.shiftLeft(1), quote.l1Fee)
+        assertEquals(1, synchronized(oracle) { oracle.distinct().size })
+        // On a chain with no L1 fee the card asks no oracle.
+        val calls = oracle.size
+        val gnosisSafe = safe.copy(chainId = gnosis.id)
+        SafeChain(chain.rpc()).activation(gnosisSafe, from.address)
+        assertEquals(calls, oracle.size)
+    }
+
+    @Test
     fun `on Base, Max and the balance check count the L1 data fee the chain also takes`() = runBlocking<Unit> {
         val chain = FakeChain()
         val l1 = BigInteger.valueOf(400_000_000_000L)
