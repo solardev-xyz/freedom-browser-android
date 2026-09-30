@@ -76,7 +76,7 @@ for abi in "${ABIS[@]}"; do
     check_arch "$so" "$abi"
     grep -q 'SONAME.*libfreedom_mobile_ffi\.so' <<<"$("$READELF" -d "$so")" || fail "$so has no SONAME"
     has_exports "$so" \
-      ant_init ant_start_gateway freedom_ipfs_node_new_with_data_dir \
+      ant_init ant_start_gateway ant_set_gateway_cors freedom_ipfs_node_new_with_data_dir \
       freedom_ipfs_node_start_gateway_online freedom_mobile_init_logging \
       freedom_tor_start freedom_tor_stop freedom_tor_status_json \
       freedom_tor_version freedom_tor_string_free
