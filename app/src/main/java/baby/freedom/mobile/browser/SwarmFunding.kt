@@ -273,8 +273,12 @@ internal class SwarmFunding(
      */
     private fun connectMined() {
         val batchId = _pending.value?.takeIf { it.mined }?.batchId ?: return
+        // Owed only once refused: owed before asking, the collector that
+        // retries an owed connect could see it (the node free) and start a
+        // second connect of the batch next to this one's (#310).
+        if (connectNow()) return
         _connectOwed.value = batchId
-        if (!connectNow()) Log.i(TAG, "the node is busy; connecting the stamp once it's free")
+        Log.i(TAG, "the node is busy; connecting the stamp once it's free")
     }
 
     /**
