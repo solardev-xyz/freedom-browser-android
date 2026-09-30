@@ -21,9 +21,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 
 /**
  * What the tab on screen shows in place of its page after the renderer
@@ -73,7 +76,7 @@ fun RendererGoneScreen(
         Button(onClick = onReload) {
             Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.size(8.dp))
-            Text("Reload")
+            Text(stringResource(R.string.errorpage_renderer_gone_reload))
         }
     }
 }
@@ -86,7 +89,9 @@ fun RendererGoneScreen(
  * page actually brought the process down (R3-M1).
  */
 internal fun rendererGoneTitle(gone: BrowserState.RendererGone): String =
-    if (gone.crashed) "This page closed after a crash" else "This page was closed to free memory"
+    Strings.get(
+        if (gone.crashed) R.string.errorpage_renderer_gone_crashed_title else R.string.errorpage_renderer_gone_memory_title,
+    )
 
 /**
  * What happened, and what Reload does. Doesn't claim the other tabs are
@@ -94,13 +99,9 @@ internal fun rendererGoneTitle(gone: BrowserState.RendererGone): String =
  * (R3-M1).
  */
 internal fun rendererGoneBody(gone: BrowserState.RendererGone): String =
-    if (gone.crashed) {
-        "The process that shows web pages crashed, maybe because of a page in another tab. " +
-            "Other tabs that closed with it reload when you switch to them. Reload to open this page again."
-    } else {
-        "Android needed the memory the browser's pages were using. " +
-            "Other tabs that closed with it reload when you switch to them. Reload to open this page again."
-    }
+    Strings.get(
+        if (gone.crashed) R.string.errorpage_renderer_gone_crashed_body else R.string.errorpage_renderer_gone_memory_body,
+    )
 
 /**
  * Whether the chrome's Back / Forward ([pending], [HISTORY_BACK_JS] /

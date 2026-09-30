@@ -10,7 +10,7 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src http://127.0.0.1:*;"
     />
-    <title>Content Unavailable</title>
+    <title></title>
     <style>
       html,
       body {
@@ -135,19 +135,43 @@
   </head>
   <body>
     <div class="container">
-      <h1 id="title">Content Unavailable</h1>
-      <p id="description">
-        This content could not be retrieved from the decentralized network. The address may be
-        invalid, the content may no longer exist, or no peers are serving it.
-      </p>
+      <h1 id="title"></h1>
+      <p id="description"></p>
       <div id="details" class="error-details"></div>
       <div class="buttons">
-        <button id="continue-btn" hidden>Continue once</button>
-        <button id="retry-btn">Try Again</button>
+        <button id="continue-btn" hidden></button>
+        <button id="retry-btn"></button>
       </div>
     </div>
 
     <script>
+      // The page's text, in the app's language (#280): the app serves
+      // this file itself and puts its string table here
+      // (ErrorPage.stringsJson). Keys are the `errorpage_` resources'
+      // names without that prefix.
+      const S = /*@ERROR_STRINGS@*/{};
+
+      // The string [key] with its `%1$s`-style arguments filled in.
+      function fmt(key, ...args) {
+        return (S[key] || '').replace(/%(\d+)\$s|%%/g, (m, n) => (n ? String(args[n - 1]) : '%'));
+      }
+
+      // [fmt] as a list of text pieces and [args] as they are (a node
+      // stays a node), for `append`: nothing becomes HTML.
+      function fmtNodes(key, ...args) {
+        const text = S[key] || '';
+        const out = [];
+        const re = /%(\d+)\$s|%%/g;
+        let last = 0;
+        let m;
+        while ((m = re.exec(text))) {
+          out.push(text.slice(last, m.index), m[1] ? args[m[1] - 1] : '%');
+          last = re.lastIndex;
+        }
+        out.push(text.slice(last));
+        return out;
+      }
+
       const NODES_ICON =
         '<svg class="nodes-icon" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><style>.net-line{stroke:currentColor;stroke-width:8;stroke-linecap:round}.net-node{fill:none;stroke:currentColor;stroke-width:8}</style><line x1="44.5" y1="33.5" x2="25.5" y2="66.5" class="net-line"/><line x1="55.5" y1="33.5" x2="74.5" y2="66.5" class="net-line"/><line x1="31" y1="76" x2="69" y2="76" class="net-line"/><circle cx="50" cy="24" r="11" class="net-node"/><circle cx="20" cy="76" r="11" class="net-node"/><circle cx="80" cy="76" r="11" class="net-node"/></svg>';
 
@@ -206,6 +230,11 @@
       const detailsEl = document.getElementById('details');
       const descriptionEl = document.getElementById('description');
       const titleEl = document.getElementById('title');
+      document.title = fmt('page_default_title');
+      titleEl.textContent = fmt('page_default_title');
+      descriptionEl.textContent = fmt('page_default_description');
+      document.getElementById('continue-btn').textContent = fmt('page_continue_once');
+      document.getElementById('retry-btn').textContent = fmt('page_try_again');
       const nameLabel = nameSystemLabel(url);
       // Whose RPC servers answer for it: Tezos Domains isn't on Ethereum.
       const chainLabel = nameLabel === 'Tezos Domains' ? 'Tezos' : 'Ethereum';
@@ -225,166 +254,123 @@
         else if (url) parts.push(url);
 
         if (error === 'ens_not_found') {
-          titleEl.textContent = 'No content for this ' + nameLabel + ' name';
+          titleEl.textContent = fmt('ens_not_found_title', nameLabel);
           // ENS goes through a per-name resolver; WNS/GNS store records
           // straight on their registry, so there the other cause is the
           // name not being registered. Tezos Domains publishes a website
           // record rather than a contenthash, and names expire.
-          const otherCause =
-            nameLabel === 'ENS' ? 'the name has no resolver' : "the name isn't registered";
           descriptionEl.innerHTML =
             nameLabel === 'Tezos Domains'
-              ? "This Tezos Domains name doesn't point at a website. The owner may not have set a " +
-                "<code>web:content_url</code> record, the name isn't registered, or it has expired."
-              : "This " + nameLabel + " name doesn't point at any content yet. The owner may not have set a " +
-                '<code>contenthash</code> record, or ' + otherCause + '.';
+              ? fmt('page_ens_not_found_tezos')
+              : nameLabel === 'ENS'
+                ? fmt('page_ens_not_found_no_resolver', nameLabel)
+                : fmt('page_ens_not_found_unregistered', nameLabel);
         } else if (error === 'ens_wrong_protocol') {
           // #97: a typed scheme is an assertion, never silently switched.
-          titleEl.textContent = 'Name lives on a different network';
+          titleEl.textContent = fmt('ens_wrong_protocol_title');
           const asserted = schemeOf(url);
           if (resolved && asserted && NETWORKS[resolved] && NETWORKS[asserted]) {
-            descriptionEl.textContent =
-              'This ' + nameLabel + ' name resolves to ' + NETWORKS[resolved] + ' content, not ' +
-              NETWORKS[asserted] + '. The ' + asserted + ':// you typed asks for ' +
-              NETWORKS[asserted] + ' only, so Freedom did not switch networks for you.';
-            retryLabel = 'Open on ' + NETWORKS[resolved];
+            descriptionEl.textContent = fmt(
+              'page_wrong_protocol_networks',
+              nameLabel,
+              NETWORKS[resolved],
+              NETWORKS[asserted],
+              asserted
+            );
+            retryLabel = fmt('page_open_on_network', NETWORKS[resolved]);
           } else {
             descriptionEl.innerHTML =
-              'This ' + nameLabel + ' name resolves to content on a different network than the ' +
-              'scheme you typed asks for. Try the name on its own &mdash; the browser ' +
-              'will follow wherever its ' +
-              (nameLabel === 'Tezos Domains' ? 'website record' : '<code>contenthash</code>') +
-              ' points.';
+              nameLabel === 'Tezos Domains'
+                ? fmt('page_wrong_protocol_website_record', nameLabel)
+                : fmt('page_wrong_protocol_contenthash', nameLabel);
           }
         } else if (error === 'ens_unsupported_codec') {
-          titleEl.textContent = 'Unsupported content format';
-          descriptionEl.innerHTML =
-            'This ' + nameLabel + ' name resolves to a content format Freedom Browser cannot load yet on mobile.';
+          titleEl.textContent = fmt('unsupported_format_title');
+          descriptionEl.innerHTML = fmt('page_unsupported_codec', nameLabel);
         } else if (error === 'ens_invalid_name') {
-          titleEl.textContent = 'Not a valid ' + nameLabel + ' name';
-          descriptionEl.innerHTML =
-            'This name breaks the ENSIP-15 naming rules ' +
-            '(a disallowed character, mixed scripts, a lookalike, &hellip;), so Freedom Browser ' +
-            "won't look it up &mdash; other " + nameLabel + ' apps refuse it too, and it could be ' +
-            'mistaken for a different name. Check the spelling.';
+          titleEl.textContent = fmt('ens_invalid_name_title', nameLabel);
+          descriptionEl.innerHTML = fmt('ens_invalid_name_description', nameLabel);
         } else if (error === 'ens_name_too_long') {
-          titleEl.textContent = nameLabel + ' name too long';
-          descriptionEl.innerHTML =
-            'A label of this name is longer than the 255 bytes an ' + nameLabel + ' lookup can ' +
-            'carry, so Freedom Browser can\'t ask a resolver about it. Check the address.';
+          titleEl.textContent = fmt('ens_name_too_long_title', nameLabel);
+          descriptionEl.innerHTML = fmt('ens_name_too_long_description', nameLabel);
         } else if (error === 'ens_unverified') {
           // #96: only one RPC server's word for where the name leads.
           document.body.classList.add('warn');
-          titleEl.textContent = 'Not cross-checked';
-          descriptionEl.innerHTML =
-            'Only one ' + chainLabel + ' RPC server answered for this ' + nameLabel + ' name, so ' +
-            "Freedom couldn't check its answer against another server. The address " +
-            'below may be right, but a single misbehaving server could have picked it.';
+          titleEl.textContent = fmt('not_cross_checked_title');
+          descriptionEl.innerHTML = fmt('page_ens_unverified', chainLabel, nameLabel);
         } else if (error === 'ens_conflict') {
           // #96: the servers asked gave different answers.
-          titleEl.textContent = 'RPC servers disagreed';
-          descriptionEl.innerHTML =
-            'The ' + chainLabel + ' RPC servers Freedom asked gave different answers for this ' +
-            nameLabel + ' name. At least one of them is wrong &mdash; or lying &mdash; so ' +
-            'nothing was loaded. Try again in a moment.';
+          titleEl.textContent = fmt('rpc_disagreed_title');
+          descriptionEl.innerHTML = fmt('page_ens_conflict', chainLabel, nameLabel);
         } else if (error === 'ens_lookup_failed') {
-          titleEl.textContent = nameLabel + ' lookup failed';
+          titleEl.textContent = fmt('lookup_failed_title', nameLabel);
           if (detail === 'CCIP_DISABLED') {
-            descriptionEl.innerHTML =
-              'This name is resolved through an off-chain gateway (CCIP-Read), which is ' +
-              'turned off in Settings &rarr; Name resolution.';
+            descriptionEl.innerHTML = fmt('ccip_disabled_description');
           } else if (nameLabel === 'Tezos Domains') {
-            descriptionEl.innerHTML =
-              "Couldn't reach a Tezos RPC endpoint to resolve this name. Check your " +
-              'connection and try again.';
+            descriptionEl.innerHTML = fmt('tezos_rpc_unreachable_description');
           } else {
-            descriptionEl.innerHTML =
-              "Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your " +
-              'connection, or the endpoints in Settings &rarr; RPC providers, and try again.';
+            descriptionEl.innerHTML = fmt('ethereum_rpc_unreachable_description');
           }
         } else if (error === 'web3_unverified') {
           // #123: an onchain app's code only one RPC server returned.
           document.body.classList.add('warn');
-          titleEl.textContent = 'Not cross-checked';
-          descriptionEl.innerHTML =
-            "Only one RPC server returned this onchain app's code, so Freedom couldn't " +
-            'check it against another server. It may be the real app, but a single ' +
-            'misbehaving server could have changed it. Continue only if you trust that ' +
-            'server with this app.';
+          titleEl.textContent = fmt('not_cross_checked_title');
+          descriptionEl.innerHTML = fmt('page_web3_unverified');
         } else if (error === 'web3_conflict') {
-          titleEl.textContent = 'RPC servers disagreed';
-          descriptionEl.innerHTML =
-            "The RPC servers Freedom asked returned different code for this onchain app. " +
-            'At least one of them is wrong &mdash; or lying &mdash; so nothing was run. ' +
-            'Try again in a moment.';
+          titleEl.textContent = fmt('rpc_disagreed_title');
+          descriptionEl.innerHTML = fmt('page_web3_conflict');
         } else if (error === 'web3_unknown_chain') {
-          titleEl.textContent = 'Unknown chain';
-          descriptionEl.innerHTML =
-            "This app lives on a chain that isn't in your chain list, so Freedom doesn't " +
-            'know which RPC servers to ask. Add the chain in Settings, then try again.';
+          titleEl.textContent = fmt('page_web3_unknown_chain_title');
+          descriptionEl.innerHTML = fmt('page_web3_unknown_chain');
         } else if (error === 'web3_not_an_app') {
-          titleEl.textContent = 'Not an onchain app';
-          descriptionEl.innerHTML =
-            "The contract didn't return an ERC-8244 <code>html()</code> document on this " +
-            'chain. Check the address and the chain ID.';
+          titleEl.textContent = fmt('page_web3_not_an_app_title');
+          descriptionEl.innerHTML = fmt('page_web3_not_an_app');
         } else if (error === 'web3_too_large') {
-          titleEl.textContent = 'App too large';
-          descriptionEl.innerHTML = "The app's document is larger than Freedom loads.";
+          titleEl.textContent = fmt('page_web3_too_large_title');
+          descriptionEl.innerHTML = fmt('page_web3_too_large');
         } else if (error === 'web3_invalid') {
-          titleEl.textContent = 'Not a web3:// app address';
-          descriptionEl.innerHTML =
-            'Freedom loads web3:// apps by contract address: ' +
-            '<code>web3://0x&hellip;[:chainId]/</code>. Names are not supported yet.';
+          titleEl.textContent = fmt('page_web3_invalid_title');
+          descriptionEl.innerHTML = fmt('page_web3_invalid');
         } else if (error === 'web3_lookup_failed') {
-          titleEl.textContent = "Couldn't read the app";
-          descriptionEl.innerHTML =
-            "Couldn't get an answer from the chain's RPC servers. Check your connection " +
-            'and try again.';
+          titleEl.textContent = fmt('page_web3_lookup_failed_title');
+          descriptionEl.innerHTML = fmt('page_web3_lookup_failed');
         } else if (error && error.indexOf('cert_') === 0) {
           // #259: an https site whose certificate failed. Always refused
           // (no proceed-anyway); the host is the page's word, so it goes
           // in as text, never as HTML.
-          const CERT_REASONS = {
-            cert_expired: 'has expired',
-            cert_not_yet_valid:
-              "isn't valid yet. If your device's date and time are wrong, correct them and try again",
-            cert_date_invalid: 'has invalid dates',
-            cert_wrong_host: 'was issued for a different site',
-            cert_untrusted: "wasn't issued by an authority this device trusts",
+          const CERT_DESCRIPTIONS = {
+            cert_expired: (b) => fmtNodes('cert_description_expired', b),
+            cert_not_yet_valid: (b) => fmtNodes('cert_description_not_yet_valid', b),
+            cert_date_invalid: (b) => fmtNodes('cert_description_date_invalid', b),
+            cert_wrong_host: (b) => fmtNodes('cert_description_wrong_host', b),
+            cert_untrusted: (b) => fmtNodes('cert_description_untrusted', b),
           };
+          const describe =
+            CERT_DESCRIPTIONS[error] || ((b) => fmtNodes('cert_description_invalid', b));
           const host =
             (url || '').replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split(/[\/?#]/)[0] || url || '';
-          titleEl.textContent = "Connection isn't secure";
+          titleEl.textContent = fmt('cert_title');
           descriptionEl.textContent = '';
           descriptionEl.append(
-            "Freedom didn't load ",
-            Object.assign(document.createElement('b'), { textContent: host }),
-            ' because its security certificate ' + (CERT_REASONS[error] || 'is not valid') + '. ' +
-              'Someone could be impersonating the site or intercepting the connection, or ' +
-              'the site is misconfigured.'
+            ...describe(Object.assign(document.createElement('b'), { textContent: host })),
+            ' ' + fmt('cert_description_risk')
           );
-          document.title = "Connection isn't secure";
+          document.title = fmt('cert_title');
           if (detail) parts.push('');
         } else if (error === 'swarm_content_not_found') {
-          titleEl.textContent = 'Content not ready yet';
-          descriptionEl.innerHTML =
-            "Couldn't find this content on the Swarm network yet. The node is " +
-            'still connecting to peers &mdash; try again in a moment.';
+          titleEl.textContent = fmt('page_swarm_not_ready_title');
+          descriptionEl.innerHTML = fmt('page_swarm_not_ready');
           if (protocolUrl) {
             parts.push('');
-            parts.push('Swarm content not found (timeout)');
+            parts.push(fmt('page_swarm_not_found_detail'));
           }
         } else if (error && error.indexOf('ERR_CONNECTION_REFUSED') !== -1) {
           if (protocol === 'swarm') {
             const status = await checkSwarmStatus();
             if (!status.running) {
-              descriptionEl.innerHTML =
-                'The Swarm node is not running. Open the Nodes panel ' +
-                NODES_ICON +
-                ' from the menu to start it.';
+              descriptionEl.innerHTML = fmt('page_swarm_node_stopped', NODES_ICON);
             } else {
-              descriptionEl.innerHTML =
-                "Couldn't reach the Swarm gateway. Check that the node is running and try again.";
+              descriptionEl.innerHTML = fmt('page_swarm_gateway_unreachable');
             }
           }
           parts.push('');
@@ -398,7 +384,7 @@
           parts.push(detail);
         }
 
-        detailsEl.textContent = parts.join('\n') || 'Unknown error';
+        detailsEl.textContent = parts.join('\n') || fmt('page_unknown_error');
         if (retryLabel) document.getElementById('retry-btn').textContent = retryLabel;
       }
 

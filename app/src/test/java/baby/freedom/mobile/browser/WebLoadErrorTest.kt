@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Locale
 
 class WebLoadErrorTest {
 
@@ -69,10 +70,19 @@ class WebLoadErrorTest {
     fun `an expired certificate reported as bad dates reads as expired`() {
         val f = facts(SSL_DATE_INVALID, after = 1_428_796_800_000L) // 12 Apr 2015
         assertEquals("cert_expired", certErrorCode(f, now))
-        assertEquals(
-            "Expired on 12 Apr 2015\n\nIssued to: *.badssl.com\nIssued by: Some CA",
-            certErrorDetail(f, "expired.badssl.com", now),
-        )
+        // The date is in the user's locale's style (#280).
+        val locale = Locale.getDefault()
+        try {
+            Locale.setDefault(Locale.UK)
+            assertEquals(
+                "Expired on 12 Apr 2015\n\nIssued to: *.badssl.com\nIssued by: Some CA",
+                certErrorDetail(f, "expired.badssl.com", now),
+            )
+            Locale.setDefault(Locale.US)
+            assertTrue(certErrorDetail(f, "expired.badssl.com", now).startsWith("Expired on Apr 12, 2015\n"))
+        } finally {
+            Locale.setDefault(locale)
+        }
     }
 
     @Test
