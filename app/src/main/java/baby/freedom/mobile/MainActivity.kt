@@ -968,9 +968,11 @@ class MainActivity : ComponentActivity() {
      *    after the last check), so trying an onion site again soon finds
      *    it routed once it passes (R3-F1); a page can't cut a back-off
      *    short (R4-M2, [TorProxy.afterNudge]). "Can't reach an onion" is
-     *    only a timeout or one of Tor's own onion errors
-     *    ([TorProxy.unreachedByTor]): a plain SOCKS5 error at once is a
-     *    plain proxy that took the port (R4-M1).
+     *    a timeout or one of Tor's own onion errors
+     *    ([TorProxy.unreachedByTor]), or any SOCKS error within
+     *    [TorProxy.FAST_RETRY_WINDOW_MS] of a pass — Orbot's Tor has no
+     *    ExtendedErrors and answers a plain `04` (R5-F1); from a proxy
+     *    never confirmed, a plain error is a plain proxy (R4-M1).
      *
      * While the Activity is stopped nothing checks, so `.onion` isn't
      * routed to the proxy meanwhile (fail closed: a proxy that dies in

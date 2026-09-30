@@ -414,7 +414,9 @@ object TorProxy {
      *
      *  - Tor: confirmed, checked again in [RECHECK_MS].
      *  - The canary refused as Tor does but no probe onion reached — timed
-     *    out, or a Tor onion-service error ([unreachedByTor]) — for a
+     *    out or any SOCKS error, for a proxy that passed within
+     *    [FAST_RETRY_WINDOW_MS]; else only a timeout or one of Tor's own
+     *    extended onion errors ([unreachedByTor]) — for a
      *    confirmed proxy: once, it stays routed and is checked again in
      *    [RETRY_MS] — one slow circuit on a flaky link isn't "gone" (R3-F1).
      *    A second such check in a row, and it's refused. Anything else — no
@@ -432,11 +434,16 @@ object TorProxy {
         if (result == Probe.Tor) {
             return Next(Watch(confirmed = true, confirmedAtMs = nowMs), RECHECK_MS)
         }
-        val unreached = canary == Probe.Tor && unreachedByTor(result)
+        val recent = watch.confirmedAtMs?.let { nowMs - it in 0 until FAST_RETRY_WINDOW_MS } == true
+        // Any SOCKS error counts for a proxy that passed within the window:
+        // Orbot never enables ExtendedErrors, so a Tor that can't fetch an
+        // onion descriptor answers a plain `04` (or `01`, `06`), like a
+        // plain proxy would (R5-F1).
+        val unreached = canary == Probe.Tor && result is Probe.NoOnion &&
+            (unreachedByTor(result) || recent)
         if (unreached && watch.confirmed && !watch.graceUsed) {
             return Next(watch.copy(graceUsed = true, unreached = true), RETRY_MS)
         }
-        val recent = watch.confirmedAtMs?.let { nowMs - it in 0 until FAST_RETRY_WINDOW_MS } == true
         if (unreached && recent) {
             return Next(
                 watch.copy(confirmed = false, graceUsed = false, unreached = true, backoffMs = RETRY_MS),
@@ -461,15 +468,20 @@ object TorProxy {
      * can't do onion at all: no reply within the deadline (a circuit that
      * didn't build in time), or one of Tor's own onion-service errors
      * (`0xF0`–`0xF7` with ExtendedErrors), which no other SOCKS5 proxy
-     * sends. A plain SOCKS5 error (1–8) at once is what a plain proxy
-     * that took the port answers — it can't look the name up — so that is
-     * no grace, no "Tor answers" copy and no fast re-checks (R4-M1). A Tor
-     * without ExtendedErrors that fails an onion quickly with a plain code
-     * is treated the same way: refused at once and backed off, until a
-     * check passes.
+     * sends (an undefined `0xF8`–`0xFF` is no Tor reply, R5-M1). A plain
+     * SOCKS5 error (1–8) is what a plain proxy answers — it can't look the
+     * name up — but also what Tor without ExtendedErrors answers (Orbot
+     * never turns them on: `04` once no HSDir has the descriptor). So for
+     * a proxy never confirmed, or not within [FAST_RETRY_WINDOW_MS], a
+     * plain code is no grace, no "Tor answers" copy and no fast re-checks
+     * (R4-M1); for one that passed within the window, [afterCheck] reads
+     * it as Tor that can't get through (R5-F1) — a plain proxy that took
+     * the port in the 20 s between checks gets onion for at most one
+     * [RETRY_MS] grace check more, the price of not unrouting Orbot on
+     * every flaky descriptor fetch.
      */
     internal fun unreachedByTor(result: Probe): Boolean =
-        result is Probe.NoOnion && (result.code < 0 || result.code in 0xF0..0xFF)
+        result is Probe.NoOnion && (result.code < 0 || result.code in 0xF0..0xF7)
 
     /**
      * A nudge to check sooner arrived at the loop in state [watch]: the

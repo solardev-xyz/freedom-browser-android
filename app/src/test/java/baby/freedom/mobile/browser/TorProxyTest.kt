@@ -323,26 +323,75 @@ class TorProxyTest {
     }
 
     @Test
-    fun `a plain SOCKS5 error to the probe onions is no Tor that can't get through`() {
-        // R4-M1: a plain SOCKS5 proxy that took the port refuses the canary
-        // and the probe onions at once with a plain error (it can't look the
-        // names up) — refused on the first check, no grace, no "Tor answers"
-        // copy, no fast re-checks: backs off like any proxy that isn't Tor.
+    fun `a plain SOCKS5 error from a proxy never confirmed is no Tor that can't get through`() {
+        // R4-M1: a plain SOCKS5 proxy refuses the canary and the probe
+        // onions at once with a plain error (it can't look the names up) —
+        // no "Tor answers" copy, no fast re-checks: backs off like any proxy
+        // that isn't Tor.
         val tor = TorProxy.Probe.Tor
-        val confirmed = TorProxy.afterCheck(TorProxy.Watch(), tor, tor, nowMs = 0).watch
         (1..8).forEach { code ->
             val plain = TorProxy.Probe.NoOnion(code)
             assertFalse(TorProxy.unreachedByTor(plain))
-            val next = TorProxy.afterCheck(confirmed, tor, plain, nowMs = 20_000)
+            val next = TorProxy.afterCheck(TorProxy.Watch(), tor, plain, nowMs = 20_000)
             assertFalse("$code", next.watch.confirmed)
             assertFalse("$code", next.watch.unreached)
             assertEquals(10_000L, next.waitMs)
             assertEquals(20_000L, TorProxy.afterCheck(next.watch, tor, plain, nowMs = 30_000).waitMs)
         }
-        // A timeout, or Tor's own onion-service errors (ExtendedErrors), are.
+        // A timeout, or Tor's own onion-service errors (ExtendedErrors,
+        // 0xF0-0xF7 only: R5-M1), are.
         assertTrue(TorProxy.unreachedByTor(TorProxy.Probe.NoOnion(-1)))
         (0xF0..0xF7).forEach { assertTrue(TorProxy.unreachedByTor(TorProxy.Probe.NoOnion(it))) }
-        assertTrue(TorProxy.afterCheck(confirmed, tor, TorProxy.Probe.NoOnion(0xF0), 20_000).watch.confirmed)
+        (0xF8..0xFF).forEach { assertFalse("$it", TorProxy.unreachedByTor(TorProxy.Probe.NoOnion(it))) }
+        (0xF0..0xF7).forEach {
+            val next = TorProxy.afterCheck(TorProxy.Watch(), tor, TorProxy.Probe.NoOnion(it), 0)
+            assertTrue(next.watch.unreached)
+        }
+        (0xF8..0xFF).forEach {
+            val next = TorProxy.afterCheck(TorProxy.Watch(), tor, TorProxy.Probe.NoOnion(it), 0)
+            assertFalse("$it", next.watch.unreached)
+            assertEquals(10_000L, next.waitMs)
+        }
+    }
+
+    @Test
+    fun `a confirmed Orbot answering a plain SOCKS error keeps its grace and fast re-checks`() {
+        // R5-F1: Orbot never enables ExtendedErrors, so a Tor whose
+        // descriptor fetch fails answers `05 04` (or 01/06). Within the
+        // window of its last pass that is Tor that can't get through: one
+        // grace check, then refused but re-checked every RECHECK_MS with no
+        // back-off, the "Tor answers" copy, and page nudges still honoured.
+        val tor = TorProxy.Probe.Tor
+        for (code in listOf(1, 4, 6)) {
+            val plain = TorProxy.Probe.NoOnion(code)
+            var next = TorProxy.afterCheck(TorProxy.Watch(), tor, tor, nowMs = 0)
+            next = TorProxy.afterCheck(next.watch, tor, plain, nowMs = 20_000)
+            assertTrue("$code", next.watch.confirmed)
+            assertTrue("$code", next.watch.unreached)
+            assertEquals(TorProxy.RETRY_MS, next.waitMs)
+            next = TorProxy.afterCheck(next.watch, tor, plain, nowMs = 25_000)
+            assertFalse("$code", next.watch.confirmed)
+            assertTrue("$code", next.watch.unreached)
+            assertEquals(TorProxy.RECHECK_MS, next.waitMs)
+            assertEquals(next.watch, TorProxy.afterNudge(next.watch, byUser = false))
+            // Still within the window: no back-off.
+            next = TorProxy.afterCheck(next.watch, tor, plain, nowMs = 45_000)
+            assertEquals(TorProxy.RECHECK_MS, next.waitMs)
+            assertTrue(next.watch.unreached)
+            // Past it, a plain error backs off like any proxy that isn't Tor.
+            next = TorProxy.afterCheck(next.watch, tor, plain, nowMs = TorProxy.FAST_RETRY_WINDOW_MS)
+            assertFalse("$code", next.watch.unreached)
+            assertEquals(10_000L, next.waitMs)
+            assertNull(TorProxy.afterNudge(next.watch, byUser = false))
+            // And passing again routes it.
+            next = TorProxy.afterCheck(next.watch, tor, tor, nowMs = TorProxy.FAST_RETRY_WINDOW_MS + 10_000)
+            assertTrue(next.watch.confirmed)
+        }
+        // A canary that isn't refused as Tor does still gets nothing.
+        val confirmed = TorProxy.afterCheck(TorProxy.Watch(), tor, tor, 0).watch
+        val next = TorProxy.afterCheck(confirmed, TorProxy.Probe.NoOnion(4), TorProxy.Probe.NoOnion(4), 20_000)
+        assertFalse(next.watch.confirmed)
+        assertFalse(next.watch.unreached)
     }
 
     @Test
