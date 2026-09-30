@@ -643,4 +643,130 @@ class ChainDataRouterTest {
         } catch (_: ChainRpcException.InvalidResponse) {
         }
     }
+
+    // ---- ranked failures (rankError, #273) ----
+
+    /** A walk whose quorum fails with a's query-size refusal and two node errors, d left for direct. */
+    private fun Net.rangeCapped() {
+        handlers[a] = { err(-32005, "query exceeds max block range 50000") }
+        handlers[b] = { err(-32603, "internal error") }
+        handlers[c] = { err(-32603, "internal error") }
+        handlers[d] = { ok(JSONArray()) }
+    }
+
+    private val requestRank: (ChainFailure) -> Int = { f ->
+        when {
+            f.timeout -> ChainDataRouter.ErrorRank.TIMEOUT
+            "max block range" in f.message -> ChainDataRouter.ErrorRank.REQUEST
+            "limit" in f.message -> ChainDataRouter.ErrorRank.HINT
+            else -> ChainDataRouter.ErrorRank.ENDPOINT
+        }
+    }
+
+    @Test
+    fun aRequestRankedFailureEndsTheWalkAndIsKept() = runTest {
+        val net = Net().apply { rangeCapped() }
+        try {
+            router(net, listOf(chain())).request(137, "eth_getLogs", JSONArray().put(JSONObject()), rankError = requestRank)
+            fail()
+        } catch (e: ChainRpcException.AllSourcesFailed) {
+            assertEquals(ChainFailure(-32005, "query exceeds max block range 50000", null, timeout = false), e.kept)
+        }
+        assertEquals("the direct tier never asks d", 0, net.count(d))
+    }
+
+    @Test
+    fun aMembersAnswerBeatsARequestRankedFailure() = runTest {
+        val net = Net().apply { rangeCapped() }
+        net.handlers[c] = { ok(JSONArray()) }
+        val r = router(net, listOf(chain())).request(137, "eth_getLogs", JSONArray().put(JSONObject()), rankError = requestRank)
+        assertEquals("[]", r.result.toString())
+        assertEquals(ChainSource.DIRECT, r.trust.source)
+        assertEquals(ChainTrust.Level.UNVERIFIED, r.trust.level)
+        assertEquals("reused, not asked again, and d never asked", listOf(1, 0), listOf(net.count(c), net.count(d)))
+    }
+
+    @Test
+    fun aMemberStillInFlightIsWaitedForAfterARequestRankedFailure() = runTest {
+        val net = Net().apply { rangeCapped() }
+        net.handlers[c] = { delay(1_000); ok(JSONArray()) }
+        val r = router(net, listOf(chain())).request(137, "eth_getLogs", JSONArray().put(JSONObject()), rankError = requestRank)
+        assertEquals("[]", r.result.toString())
+        assertEquals(ChainSource.DIRECT, r.trust.source)
+        assertEquals(0, net.count(d))
+    }
+
+    @Test
+    fun aMemberThatFailsAfterTheWaitLeavesTheRequestRankedFailure() = runTest {
+        val net = Net().apply { rangeCapped() }
+        net.handlers[c] = { delay(1_000); throw IOException("reset") }
+        try {
+            router(net, listOf(chain())).request(137, "eth_getLogs", JSONArray().put(JSONObject()), rankError = requestRank)
+            fail()
+        } catch (e: ChainRpcException.AllSourcesFailed) {
+            assertEquals("query exceeds max block range 50000", e.kept?.message)
+        }
+        assertEquals("the direct tier still asks no one new", 0, net.count(d))
+    }
+
+    @Test
+    fun withoutRankErrorNothingIsKeptOrEndsEarly() = runTest {
+        val net = Net().apply { rangeCapped() }
+        val r = router(net, listOf(chain())).request(137, "eth_getLogs", JSONArray().put(JSONObject()))
+        assertEquals("[]", r.result.toString())
+        assertEquals(ChainSource.DIRECT, r.trust.source)
+        assertEquals(1, net.count(d))
+    }
+
+    @Test
+    fun aHintIsKeptButLaterSourcesAreStillAsked() = runTest {
+        val net = Net()
+        net.handlers[a] = { err(-32005, "limit exceeded") }
+        net.handlers[b] = { err(-32005, "internal error") }
+        net.handlers[c] = { throw IOException("refused") }
+        net.handlers[d] = { err(-32601, "method not found") }
+        try {
+            router(net, listOf(chain())).request(137, "eth_getLogs", JSONArray().put(JSONObject()), rankError = requestRank)
+            fail()
+        } catch (e: ChainRpcException.AllSourcesFailed) {
+            assertEquals("a later endpoint-dependent failure never displaces it", "limit exceeded", e.kept?.message)
+        }
+        assertEquals(1, net.count(d))
+    }
+
+    @Test
+    fun onlyEndpointFailuresKeepNothing() = runTest {
+        val net = Net()
+        for (u in listOf(a, b, c, d)) net.handlers[u] = { err(-32603, "internal error") }
+        try {
+            router(net, listOf(chain())).request(137, "eth_getLogs", JSONArray().put(JSONObject()), rankError = requestRank)
+            fail()
+        } catch (e: ChainRpcException.AllSourcesFailed) {
+            assertNull(e.kept)
+        }
+    }
+
+    @Test
+    fun theKeeperKeepsTheHighestRankAndTheLatestTimeout() {
+        val keeper = ChainDataRouter.ErrorKeeper(requestRank)
+        val t1 = ChainFailure(null, "first", null, timeout = true)
+        val t2 = ChainFailure(null, "second", null, timeout = true)
+        keeper.note(ChainFailure(-32603, "internal error", null, timeout = false))
+        assertNull("endpoint-dependent is never reported", keeper.error)
+        keeper.note(ChainFailure(-32005, "limit exceeded", null, timeout = false))
+        keeper.note(t1)
+        assertEquals(t1, keeper.error)
+        keeper.note(ChainFailure(-32005, "limit exceeded", null, timeout = false))
+        assertEquals("a lower rank never replaces it", t1, keeper.error)
+        keeper.note(t2)
+        assertEquals("timeout by timeout, the later one ended the request", t2, keeper.error)
+        assertFalse(keeper.final)
+        val cap = ChainFailure(-32005, "query exceeds max block range 10", null, timeout = false)
+        keeper.note(cap)
+        assertEquals(cap, keeper.error)
+        assertTrue(keeper.final)
+        val throwing = ChainDataRouter.ErrorKeeper { error("boom") }
+        throwing.note(t1)
+        assertNull("a ranking that throws ranks the failure endpoint-dependent", throwing.error)
+    }
 }

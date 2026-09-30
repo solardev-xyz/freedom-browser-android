@@ -94,6 +94,29 @@ class ChainDataRouter internal constructor(
      * an answer the caller needs, so fields providers shape differently
      * (an empty `reward` present or absent, extra blob fields) don't cost
      * an agreement on the part that matters. It must not throw.
+     *
+     * [rankError], when given, is shown every way a source fails on the
+     * walk ([ChainFailure]: each quorum member's error or transport
+     * failure, each direct RPC's, a light client's) and ranks it
+     * ([ErrorRank]) — desktop's `rankError` / `createErrorKeeper`, which
+     * the Swarm node's log scans use ([baby.freedom.mobile.node.AntChainBridge]).
+     * The walk keeps the highest-ranked failure seen (a later one replaces
+     * it only by ranking strictly higher, or, timeout by timeout, as the
+     * attempt that actually ended the request) and reports it as
+     * [ChainRpcException.AllSourcesFailed.kept] when every source fails.
+     * A failure ranked [ErrorRank.REQUEST] — one that depends on the query,
+     * not the endpoint — ends the walk as soon as the tier that saw it has
+     * failed: no later tier or RPC is asked, with one exception, desktop's:
+     * a quorum member's answer the direct tier reuses without a new request
+     * still wins — an answer beats any error. Unlike desktop, that includes
+     * a member still in flight when the others' refusals failed the quorum:
+     * the direct tier waits for it (within its endpoint timeout) instead of
+     * handing back the refusal. On Gnosis's shipped RPCs a wide log scan
+     * gets a fast refusal from two and an answer, a second later, from the
+     * third; without the wait the Swarm node's scan halves, succeeds,
+     * doubles and is refused again, window after window, for many minutes.
+     * Every other rank falls through
+     * like any failure. Without [rankError] nothing is kept or ends early.
      */
     suspend fun request(
         chainId: Long,
@@ -101,6 +124,7 @@ class ChainDataRouter internal constructor(
         params: JSONArray = JSONArray(),
         context: RoutingContext = RoutingContext.WALLET,
         agreeOn: ((Any?) -> Any?)? = null,
+        rankError: ((ChainFailure) -> Int)? = null,
     ): ChainDataResult {
         if (method !in READ_METHODS) throw ChainRpcException.UnsupportedMethod(method)
         val chain = chain(chainId)
@@ -111,6 +135,7 @@ class ChainDataRouter internal constructor(
         val failures = mutableListOf<String>()
         var nodeError: ChainRpcException.Rpc? = null
         var quorum: QuorumRun? = null
+        val keeper = ErrorKeeper(rankError)
         val started = clock()
         try {
             for ((index, source) in policy.readOrder.withIndex()) {
@@ -124,7 +149,7 @@ class ChainDataRouter internal constructor(
                 val t0 = clock()
                 val outcome: Any? = when (source) {
                     ChainSource.MYOTIS, ChainSource.COLIBRI ->
-                        verified(source, chain, method, normalized, waitMs)
+                        verified(source, chain, method, normalized, waitMs, keeper)
                             .let { o -> if (agreeOn != null && o is ChainDataResult) o.copy(result = agreeOn(o.result)) else o }
                     ChainSource.QUORUM -> {
                         val members = quorumMembers(pool, policy.quorumK)
@@ -147,13 +172,20 @@ class ChainDataRouter internal constructor(
                                 is QuorumRun.Verdict.Agreed -> quorumResult(v, run, policy)
                                 is QuorumRun.Verdict.Failed -> {
                                     v.nodeError?.let { nodeError = it }
+                                    if (rankError != null) {
+                                        run.failures().forEach(keeper::note)
+                                        // Members cut off by the quorum's wait.
+                                        if (v.timedOut && run.pending() > 0) {
+                                            keeper.note(ChainFailure(null, "no answer within ${waitMs}ms", null, timeout = true))
+                                        }
+                                    }
                                     if (!keepLegs) run.cancel()
                                     v.reason
                                 }
                             }
                         }
                     }
-                    ChainSource.DIRECT -> direct(chain, pool, body, policy, quorum, agreeOn) { nodeError = it }
+                    ChainSource.DIRECT -> direct(chain, pool, body, policy, quorum, agreeOn, keeper) { nodeError = it }
                 }
                 if (outcome is ChainDataResult) {
                     Log.i(TAG, "[chain-data] $method chain=$chainId via ${source.key} ${clock() - t0}ms " +
@@ -163,11 +195,20 @@ class ChainDataRouter internal constructor(
                 val reason = outcome as? String ?: "no answer"
                 Log.i(TAG, "[chain-data] $method chain=$chainId ${source.key} failed after ${clock() - t0}ms: $reason")
                 failures += "${source.key}: $reason"
+                // A member's answer the direct tier reuses without a new
+                // request beats any error, a final one included — so is one
+                // still in flight, bounded by its own endpoint timeout.
+                val reusable = source == ChainSource.QUORUM && policy.readOrder.getOrNull(index + 1) == ChainSource.DIRECT &&
+                    quorum?.let { it.hasAnswer() || it.pending() > 0 } == true
+                if (keeper.final && !reusable) {
+                    Log.i(TAG, "[chain-data] $method chain=$chainId: a source refused the query itself; not asking further")
+                    break
+                }
             }
         } finally {
             quorum?.cancel()
         }
-        throw ChainRpcException.AllSourcesFailed(failures, nodeError)
+        throw ChainRpcException.AllSourcesFailed(failures, nodeError, kept = keeper.error)
     }
 
     /**
@@ -286,19 +327,24 @@ class ChainDataRouter internal constructor(
         method: String,
         params: JSONArray,
         waitMs: Long,
+        keeper: ErrorKeeper,
     ): Any? {
-        val s = verifiedSources[source]?.takeIf { it.isAvailable(chain.id) } ?: return "not available"
+        fun failed(reason: String, timeout: Boolean = false): String =
+            reason.also { keeper.note(ChainFailure(null, it, null, timeout)) }
+        val s = verifiedSources[source]?.takeIf { it.isAvailable(chain.id) } ?: return failed("not available")
         return try {
-            withTimeoutOrNull(waitMs) { s.request(chain.id, method, params) } ?: "no answer within ${waitMs}ms"
+            withTimeoutOrNull(waitMs) { s.request(chain.id, method, params) }
+                ?: failed("no answer within ${waitMs}ms", timeout = true)
         } catch (e: CancellationException) {
             // The source's own cancellation, not ours: no answer.
             currentCoroutineContext().ensureActive()
-            "cancelled"
+            failed("cancelled")
         } catch (e: ChainRpcException.Rpc) {
             if (e.deterministic) throw e
+            keeper.note(ChainFailure.of(e))
             e.message
         } catch (e: Exception) {
-            e.message ?: e.javaClass.simpleName
+            failed(e.message ?: e.javaClass.simpleName)
         }
     }
 
@@ -328,6 +374,7 @@ class ChainDataRouter internal constructor(
         policy: ChainAccessPolicy,
         quorum: QuorumRun?,
         agreeOn: ((Any?) -> Any?)?,
+        keeper: ErrorKeeper,
         onNodeError: (ChainRpcException.Rpc) -> Unit,
     ): Any {
         quorum?.directCandidate()?.let { c ->
@@ -351,6 +398,8 @@ class ChainDataRouter internal constructor(
         }
         val asked = quorum?.asked().orEmpty()
         var last: String? = null
+        // A failure about the query itself: no other RPC would answer it.
+        if (keeper.final) return "a source refused the query itself"
         for (url in pool) {
             if (url in asked) continue
             when (val leg = call(url, body, policy.timeoutMs, agreeOn)) {
@@ -358,10 +407,15 @@ class ChainDataRouter internal constructor(
                 is Leg.Deterministic -> throw leg.error
                 is Leg.NodeError -> {
                     onNodeError(leg.error)
+                    keeper.note(ChainFailure.of(leg.error))
                     last = "${hostOf(url)}: ${leg.error.message}"
                 }
-                is Leg.Failed -> last = "${hostOf(url)}: ${leg.reason}"
+                is Leg.Failed -> {
+                    keeper.note(ChainFailure(null, "${hostOf(url)}: ${leg.reason}", null, leg.timeout))
+                    last = "${hostOf(url)}: ${leg.reason}"
+                }
             }
+            if (keeper.final) break
         }
         return last ?: if (asked.isNotEmpty()) "every RPC was asked by the quorum" else "no RPC endpoints"
     }
@@ -412,6 +466,49 @@ class ChainDataRouter internal constructor(
                 Leg.Failed(env.reason, timeout = false)
             }
         }
+    }
+
+    /**
+     * How useful a failure is to a caller that ranks them
+     * ([request]'s `rankError`), lowest first — desktop's `ERROR_RANK`.
+     */
+    object ErrorRank {
+        /** Depends on the endpoint (a throttle, method not found, a transport failure); the caller can't act on it. */
+        const val ENDPOINT = 0
+
+        /** Might be about the query, might be about the endpoint: kept, but later sources are still asked. */
+        const val HINT = 1
+
+        /** The attempt ran out of time; another source or a smaller query may answer. */
+        const val TIMEOUT = 2
+
+        /** About the query itself (its size): every source would say the same, so the walk ends. */
+        const val REQUEST = 3
+    }
+
+    /** The best failure one [request] has seen so far, by its caller's ranking. */
+    internal class ErrorKeeper(private val rank: ((ChainFailure) -> Int)?) {
+        private var kept: ChainFailure? = null
+        private var keptRank = -1
+
+        fun note(failure: ChainFailure) {
+            val rank = rank ?: return
+            val r = try {
+                rank(failure)
+            } catch (_: Exception) {
+                ErrorRank.ENDPOINT
+            }
+            if (r > keptRank || (r == keptRank && r == ErrorRank.TIMEOUT)) {
+                kept = failure
+                keptRank = r
+            }
+        }
+
+        /** A failure about the query itself has been seen: asking on is pointless. */
+        val final: Boolean get() = keptRank >= ErrorRank.REQUEST
+
+        /** The kept failure, when it's one the caller can act on. */
+        val error: ChainFailure? get() = kept.takeIf { keptRank > ErrorRank.ENDPOINT }
     }
 
     companion object {

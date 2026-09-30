@@ -20,10 +20,15 @@ import android.system.OsConstants
 import android.system.StructPollfd
 import android.util.Log
 import baby.freedom.mobile.R
+import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.chains.rpc.PinnedHttpTransport
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.wallet.KeystoreVaultStore
 import baby.freedom.mobile.wallet.NodeIdentityStore
+import baby.freedom.swarm.AntChainTransport
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsNode
 import baby.freedom.swarm.NodeInfo
@@ -78,6 +83,27 @@ class NodeService : Service() {
     /** The mode the launch now booting read, handed to [SwarmNode.Config.mode] right after its identity. */
     @Volatile
     private var launchMode: SwarmNode.Mode = SwarmNode.Mode.ULTRA_LIGHT
+
+    /**
+     * The Gnosis chain the Swarm node reads through the chain-data router
+     * (#273), as the UI last relayed it with [INodeService.setSwarmMode] —
+     * its RPCs and the user's; null until it has, when [storedGnosis] (read
+     * here) stands in. Can carry API keys: never logged.
+     */
+    @Volatile
+    private var relayedGnosis: Chain? = null
+
+    @Volatile
+    private var storedGnosis: Chain? = null
+
+    /**
+     * Answers ant's Gnosis reads (#273) through a router of this process's
+     * own over [gnosisForReads], installed as [AntChainTransport]'s reader
+     * for the life of the process: it's never taken down, since a postage
+     * spend still running after [onDestroy] reads the chain (nonces,
+     * receipts) until it ends, and the process exits after either way.
+     */
+    private lateinit var chainBridge: AntChainBridge
     private var ipfsNode: IpfsNode? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -182,8 +208,17 @@ class NodeService : Service() {
             scope.launch(Dispatchers.IO) { restartSwarmIfStale("node identity changed") }
         }
 
-        override fun setSwarmMode(light: Boolean, gnosisRpc: String?) {
+        override fun setSwarmMode(light: Boolean, gnosisRpc: String?, gnosisUserRpcs: List<String>?, gnosisRpcs: List<String>?) {
             val mode = if (light) SwarmNode.Mode.light(gnosisRpc.orEmpty()) else SwarmNode.Mode.ULTRA_LIGHT
+            // Read by the next chain request at once: no restart needed.
+            relayedGnosis = gnosisChainFor(
+                listOf(
+                    BuiltInChains.GNOSIS.copy(
+                        rpcUrls = gnosisRpcs.orEmpty().take(Chain.MAX_RPC_URLS),
+                        userRpcUrls = gnosisUserRpcs.orEmpty().take(Chain.MAX_USER_RPC_URLS),
+                    ),
+                ),
+            )
             if (doomed) return
             scope.launch(Dispatchers.IO) {
                 relayedMode = mode
@@ -445,14 +480,25 @@ class NodeService : Service() {
      */
     private fun swarmMode(): SwarmNode.Mode = relayedMode ?: try {
         runBlocking {
-            swarmModeFor(
-                NodeSettings.get(this@NodeService).swarmLightMode.first(),
-                ChainStore.get(this@NodeService).chains.first(),
-            )
+            val chains = ChainStore.get(this@NodeService).chains.first()
+            storedGnosis = gnosisChainFor(chains)
+            swarmModeFor(NodeSettings.get(this@NodeService).swarmLightMode.first(), chains)
         }
     } catch (e: Exception) {
         Log.w(TAG, "reading the swarm mode failed (${e.javaClass.simpleName}); ultra-light")
         SwarmNode.Mode.ULTRA_LIGHT
+    }
+
+    /**
+     * The Gnosis chain for the Swarm node's reads (#273): the UI's latest
+     * relay, or — before this process has heard one — the chains store,
+     * read here as [swarmMode] does; the shipped chain if that fails.
+     */
+    private suspend fun gnosisForReads(): Chain = relayedGnosis ?: storedGnosis ?: try {
+        gnosisChainFor(ChainStore.get(this).chains.first()).also { storedGnosis = it }
+    } catch (e: Exception) {
+        Log.w(TAG, "reading the Gnosis RPCs failed (${e.javaClass.simpleName}); the shipped ones")
+        BuiltInChains.GNOSIS
     }
 
     /**
@@ -548,6 +594,12 @@ class NodeService : Service() {
 
         identityStore = NodeIdentityStore.get(this)
         vaultStore = KeystoreVaultStore(this)
+        // Before the node starts: ant's first chain reads come at its
+        // gateway's start.
+        chainBridge = AntChainBridge(
+            ChainDataRouter(chains = { listOf(gnosisForReads()) }, transport = PinnedHttpTransport()),
+        )
+        AntChainTransport.install(chainBridge::serve)
         swarmNode = SwarmNode(
             SwarmNode.Config(
                 dataDir = filesDir.absolutePath,

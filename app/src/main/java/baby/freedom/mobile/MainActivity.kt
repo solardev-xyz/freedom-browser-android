@@ -48,6 +48,7 @@ import baby.freedom.mobile.browser.TorControls
 import baby.freedom.mobile.browser.TorRouting
 import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.statusBarIconsDark
+import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.data.RadicleGrantStore
@@ -59,6 +60,7 @@ import baby.freedom.mobile.node.INodeService
 import baby.freedom.mobile.node.MyotisLink
 import baby.freedom.mobile.node.MyotisService
 import baby.freedom.mobile.node.NodeService
+import baby.freedom.mobile.node.gnosisChainFor
 import baby.freedom.mobile.node.swarmModeFor
 import baby.freedom.mobile.node.ITorCallback
 import baby.freedom.mobile.node.ITorService
@@ -147,14 +149,15 @@ class MainActivity : ComponentActivity() {
 
     /**
      * The Swarm node's mode (#114) from the light-mode setting and the
-     * Gnosis RPCs, relayed to `:node` on every bind and every change; null
-     * until first read. Main thread only.
+     * Gnosis RPCs, with the Gnosis chain its reads go through (#273),
+     * relayed to `:node` on every bind and every change; null until first
+     * read. Main thread only.
      */
-    private var swarmMode: SwarmNode.Mode? = null
+    private var swarmMode: Pair<SwarmNode.Mode, Chain>? = null
 
-    private fun relaySwarmMode(b: INodeService?, mode: SwarmNode.Mode?) {
-        mode ?: return
-        runCatching { b?.setSwarmMode(mode.light, mode.gnosisRpc) }
+    private fun relaySwarmMode(b: INodeService?, mode: Pair<SwarmNode.Mode, Chain>?) {
+        val (m, gnosis) = mode ?: return
+        runCatching { b?.setSwarmMode(m.light, m.gnosisRpc, gnosis.userRpcUrls, gnosis.rpcUrls) }
     }
 
     private val callback = object : INodeCallback.Stub() {
@@ -386,7 +389,9 @@ class MainActivity : ComponentActivity() {
         // The Swarm node's mode (#114) follows its setting and the Gnosis
         // RPCs live: `:node` restarts the node when it changes.
         lifecycleScope.launch {
-            combine(settings.swarmLightMode, ChainStore.get(this@MainActivity).chains, ::swarmModeFor)
+            combine(settings.swarmLightMode, ChainStore.get(this@MainActivity).chains) { light, chains ->
+                swarmModeFor(light, chains) to gnosisChainFor(chains)
+            }
                 .distinctUntilChanged()
                 .collect { mode ->
                     swarmMode = mode

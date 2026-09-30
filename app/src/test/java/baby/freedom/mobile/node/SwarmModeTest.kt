@@ -30,6 +30,18 @@ class SwarmModeTest {
     }
 
     @Test
+    fun `the node's reads get Gnosis's whole pool, the user's RPCs included`() {
+        val mine = BuiltInChains.GNOSIS.copy(userRpcUrls = listOf("https://my.gnosis.example/k"))
+        assertEquals(mine, gnosisChainFor(BuiltInChains.ALL.map { if (it.id == 100L) mine else it }))
+        // No Gnosis, or a Gnosis with no RPC at all: the shipped one stands in.
+        assertEquals(BuiltInChains.GNOSIS, gnosisChainFor(emptyList()))
+        assertEquals(BuiltInChains.GNOSIS.rpcUrls, gnosisChainFor(listOf(BuiltInChains.GNOSIS.copy(rpcUrls = emptyList()))).rpcUrls)
+        // Only the user's own: kept as they are.
+        val onlyMine = BuiltInChains.GNOSIS.copy(rpcUrls = emptyList(), userRpcUrls = listOf("https://my.gnosis.example/k"))
+        assertEquals(onlyMine, gnosisChainFor(listOf(onlyMine)))
+    }
+
+    @Test
     fun `the boot key changes with the identity and the mode, not the address's case`() {
         val light = SwarmNode.Mode.light("https://rpc.example")
         val key = swarmBootKey("0xAbC", light)
