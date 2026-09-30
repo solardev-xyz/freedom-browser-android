@@ -127,6 +127,33 @@ android {
         }
     }
 
+    // `./gradlew :app:lintDebug` is the gate for localisation (#280), not
+    // a general lint run: it checks only the issues below and fails the
+    // build on any of them. Full lint also reports some existing errors
+    // and ~150 warnings that have nothing to do with #280 (RestrictedApi,
+    // WrongConstant, RequiresFeature, UseKtx, …); a gate that is red for
+    // unrelated reasons stops being a gate. This one takes ~15 s of
+    // analysis and is green once the strings are migrated. Pass
+    // `-Plint.checkAll` for the full report (it fails on those errors).
+    //   HardcodedUiText: our own check (:lint-checks), user-visible string
+    //     literals in Kotlin; see docs/localisation.md § The lint check.
+    //   HardcodedText: the same for XML layouts and menus (a warning by
+    //     default, made an error here).
+    //   MissingTranslation / ExtraTranslation (an error and a fatal error
+    //     by default): a values-<lang> folder that lacks a string, or has
+    //     one values/ doesn't.
+    lint {
+        if (!project.hasProperty("lint.checkAll")) {
+            checkOnly += setOf("HardcodedUiText", "HardcodedText", "MissingTranslation", "ExtraTranslation")
+        }
+        error += setOf("HardcodedUiText", "HardcodedText")
+        abortOnError = true
+        // Test code isn't UI: its literals are fixtures. And :swarmnode
+        // has no UI text of its own.
+        ignoreTestSources = true
+        checkDependencies = false
+    }
+
     packaging {
         resources.excludes += setOf(
             "META-INF/INDEX.LIST",
@@ -181,6 +208,8 @@ kotlin {
 
 dependencies {
     implementation(project(":swarmnode"))
+    // HardcodedUiText (#280), run by `:app:lintDebug`.
+    lintChecks(project(":lint-checks"))
 
     val composeBom = platform("androidx.compose:compose-bom:2026.03.01")
     implementation(composeBom)

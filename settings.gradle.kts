@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 rootProject.name = "freedom-browser-android"
 include(":app")
 include(":swarmnode")
+include(":lint-checks")
