@@ -473,12 +473,16 @@ private fun HttpURLConnection.applySwarmRequestHeaders() {
  * hop-by-hop / origin-tied headers, optionally dropping `Range`
  * (when the caller wants to fetch the full body), forcing
  * `Accept-Encoding: identity`, and stamping the Swarm-* retrieval
- * hints the gateway honors.
+ * hints the gateway honors. [noCache]: a Hard reload's fetch (#262) —
+ * any HTTP cache in front of the content (an external gateway's, a
+ * proxy's) is asked for a fresh answer, as Chromium asks a server on a
+ * hard reload.
  */
 private fun HttpURLConnection.forwardProxiedHeaders(
     req: WebResourceRequest,
     stripRange: Boolean = false,
     crossOrigin: Boolean = false,
+    noCache: Boolean = false,
 ) {
     req.requestHeaders?.forEach { (k, v) ->
         val lk = k.lowercase()
@@ -493,6 +497,10 @@ private fun HttpURLConnection.forwardProxiedHeaders(
     // decompress the body out from under us and mismatch the
     // upstream Content-Length we forward to the WebView.
     setRequestProperty("Accept-Encoding", "identity")
+    if (noCache) {
+        setRequestProperty("Cache-Control", "no-cache")
+        setRequestProperty("Pragma", "no-cache")
+    }
     applySwarmRequestHeaders()
 }
 
@@ -980,10 +988,45 @@ fun BrowserWebViewHost(
             // The popup's first navigation is Chromium's own, already
             // under way in its WebView: a load of its own for the IPFS
             // phase line (#94), like a link the WebView follows.
-            onCreateWindow = {
-                attach(tabs.adoptPopup(opener = tab).also { it.beginLoad(inWebView = true) })
+            //
+            // A window opened with no gesture (a site allowed pop-ups,
+            // #261) is a timer's, not the user's: it takes the screen
+            // only while its opener's page is what's on screen, and
+            // otherwise opens behind, so a background tab can't switch
+            // the tab under the user (#292 R1-M3).
+            onCreateWindow = { isUserGesture ->
+                val activate = isUserGesture || sitePermissions.isOnScreen(tab.id)
+                attach(tabs.adoptPopup(opener = tab, activate = activate).also { it.beginLoad(inWebView = true) })
             },
             onCloseWindow = { tabs.closePopup(tab) },
+            popupsAllowed = { origin -> sitePermissions.popupsAllowed(tab, origin) },
+            // A window the pop-up blocker refused (#261): shown on the
+            // tab's notice at once, its address read by a throwaway probe
+            // WebView ([PopupProbe]) — at most a few at a time per tab;
+            // past that it is refused outright, its address unknown.
+            onPopupBlocked = { origin, resultMsg ->
+                val popups = tab.blockedPopups
+                val document = popups.document
+                val probing = popups.liveProbes < BlockedPopups.MAX_LIVE_PROBES
+                // Null: the notice is full and it is only counted — no
+                // address to read for it.
+                val id = popups.add(origin, pending = probing, unread = !probing)
+                if (!probing || id == null) {
+                    PopupProbe.discard(resultMsg)
+                    return@buildRefreshableWebView
+                }
+                popups.liveProbes++
+                val started = PopupProbe.start(context, tab.private, resultMsg) { url, bound, posted ->
+                    popups.liveProbes--
+                    if (bound) popups.resolve(document, id, url, posted) else popups.unread(document, id)
+                }
+                // Not started: the window is already dropped (see
+                // [PopupProbe.start]); only the row is left to settle.
+                if (!started) {
+                    popups.liveProbes--
+                    popups.unread(document, id)
+                }
+            },
             // Handed to Chromium by `onCreateWindow`, which needs it
             // never to have navigated. Not a popup rebuilt after a
             // relaunch (#183): its first navigation is the restore, not
@@ -1191,11 +1234,17 @@ fun BrowserWebViewHost(
                             // Then its redirects may end in an app link
                             // (#173) — this load's, no other's.
                             val namedByUser = tab.takeUserNamedLoad(pending) && wv is PageWebView
+                            // A Hard reload's (#262): this load, and its
+                            // document's requests, skip the caches.
+                            val bypassCache = tab.takeBypassCacheLoad(pending) && wv is PageWebView
                             val load = {
                                 // From here the WebView is on this load, not
                                 // the one it was showing (#94).
                                 tab.handLoadToWebView()
-                                if (namedByUser) {
+                                if (bypassCache) {
+                                    tab.bypassCacheForHandedLoad()
+                                    (wv as PageWebView).hardReload(pending, namedByUser)
+                                } else if (namedByUser) {
                                     (wv as PageWebView).loadUrlNamedByUser(pending)
                                 } else {
                                     wv.loadUrl(pending)
@@ -1470,8 +1519,12 @@ private fun buildRefreshableWebView(
     onRecoverNodes: () -> Unit = {},
     restoring: Boolean = false,
     fileChooser: FileChooser? = null,
-    onCreateWindow: () -> WebView,
+    /** A new tab for a page window; [isUserGesture] as Chromium reported it. */
+    onCreateWindow: (isUserGesture: Boolean) -> WebView,
     onCloseWindow: () -> Unit,
+    popupsAllowed: (origin: String?) -> Boolean = { false },
+    /** A window [popupsAllowed] refused; it must hand [resultMsg] on (a probe, or [PopupProbe.discard]). */
+    onPopupBlocked: (origin: String?, resultMsg: Message) -> Unit = { _, resultMsg -> PopupProbe.discard(resultMsg) },
     isPopup: Boolean = false,
     popupOpener: () -> Pair<BrowserState, WebView>? = { null },
     onContextMenuPress: () -> PageContextMenuPin? = { null },
@@ -1497,6 +1550,12 @@ private fun buildRefreshableWebView(
     // The ENS roots this tab's documents were served from, so their
     // subresources don't follow another tab's newer answer (#99).
     val ensPins = EnsDocumentPins()
+
+    // A no-gesture window's verdict, one main-loop turn after
+    // `onCreateWindow` (#292 R1-F1): a plain (not asynchronous) handler on
+    // the main looper, so it runs in queue order with the `onPageStarted`
+    // WebView posted there before it.
+    val deferredPopups = Handler(Looper.getMainLooper())
 
     // Is the document on screen the interceptor's in-place refusal of an
     // ENS name? Kept out of history like any other error page (#99).
@@ -1942,11 +2001,15 @@ private fun buildRefreshableWebView(
             // `target=_blank` links and `window.open()` get a real
             // window — a new tab, see `onCreateWindow` below — instead
             // of silently replacing the page that asked (#82).
-            // `javaScriptCanOpenWindowsAutomatically` stays at its
-            // default `false`, which is Chromium's popup blocker: a
-            // window only opens from a user gesture (a tap on the link
-            // or button), never from a script on its own.
             setSupportMultipleWindows(true)
+            // Chromium's own pop-up blocker (this at its default `false`)
+            // refuses a window opened without a user gesture silently.
+            // The app's blocker does it instead (#261, [popupOpens]):
+            // every window reaches `onCreateWindow` with Chromium's
+            // `isUserGesture`, and one without it opens only on a site
+            // the user allowed pop-ups — otherwise it is blocked and
+            // named in a notice the user can open it from.
+            javaScriptCanOpenWindowsAutomatically = true
         }
 
         this.onSearchSelection = onSearchSelection
@@ -2665,6 +2728,10 @@ private fun buildRefreshableWebView(
                 // load's, whatever the answer's headers suggested.
                 state.mainFrameKeptPage()
                 adblockPage.kept()
+                // Nor does a Hard reload that became a file: its cache
+                // bypass ends here, or it spills into the page's next
+                // navigation and its subresources (#262, R5-M1).
+                (this as? PageWebView)?.cacheBypass?.stopped()
                 // A 402 that became a file never commits (#218 R2-M2).
                 X402Payments.onNavigationSuperseded(state)
             }
@@ -2750,7 +2817,12 @@ private fun buildRefreshableWebView(
             // [SweptReload.refused] leaves it alone (R1-F1).
             override fun onFormResubmission(view: WebView?, dontResend: Message?, resend: Message?) {
                 dontResend?.sendToTarget()
-                if (view is PageWebView) view.post { view.sweptReload.refused() }
+                if (view is PageWebView) {
+                    view.post { view.sweptReload.refused() }
+                    // A Hard reload's own moves on to a GET; any other
+                    // ends its bypass (#262, R4-F1).
+                    view.cacheBypass.reloadRefused()
+                }
             }
 
             // The renderer this page ran in crashed or was killed for
@@ -2775,6 +2847,9 @@ private fun buildRefreshableWebView(
                 certRefusal.committed(url)
                 mainFrameChain.committed()
                 (view as? PageWebView)?.historyStepCommitted()
+                // A Hard reload's load committed: its finish ends the
+                // cache bypass (#262).
+                (view as? PageWebView)?.cacheBypass?.pageStarted()
                 // Ad blocking judges requests against it from here on
                 // (a page back from the back/forward cache made none).
                 url?.let(adblockPage::committed)
@@ -2799,6 +2874,8 @@ private fun buildRefreshableWebView(
                     )
                 }
                 state.documentCommitted()
+                // The previous document's blocked pop-ups go with it (#261).
+                state.blockedPopups.startDocument()
                 // A load the tab had in flight over the restored page
                 // before its WebView was rebuilt (#183 R1-F2) goes back
                 // in flight over it now, at its reload's commit —
@@ -3031,6 +3108,9 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                // A Hard reload's page has loaded: the cache is used
+                // again from here (#262, [CacheBypass]).
+                (view as? PageWebView)?.cacheBypass?.pageFinished(url)
                 showFailedLoadPage(view, url)
                 // A certificate error's cancelled navigation ends here,
                 // committing nothing: without a page of our own the
@@ -3261,6 +3341,9 @@ private fun buildRefreshableWebView(
             // and this doesn't install it (see [requestBottomUiProbe]).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 committedPageUrl = url
+                // A fragment navigation's finish, right behind this, isn't a
+                // Hard-reloaded document's end (#262 R3-M1).
+                (view as? PageWebView)?.cacheBypass?.historyUpdated(url)
                 // Posted after `onPageStarted` for a new document, alone
                 // for a same-document step: either way the user's
                 // navigation is over, and a same-document one (the
@@ -3376,6 +3459,9 @@ private fun buildRefreshableWebView(
                         pendingNavigationUrls.clear()
                         state.mainFrameKeptPage()
                         adblockPage.kept()
+                        // A Hard reload handed to another app commits
+                        // nothing either: its cache bypass ends (R5-M1).
+                        (view as? PageWebView)?.cacheBypass?.stopped()
                     }
                     val input = gesture
                     val latch = askingView?.userGestures
@@ -3607,6 +3693,10 @@ private fun buildRefreshableWebView(
                 } else try {
                     interceptVirtualRequest(
                         request, ensPins, view, state::assertedProtocolFor, state.onchain,
+                        // A Hard-reloaded document's gateway fetches skip
+                        // the interceptor's caches — this tab's, this
+                        // document's only (#262).
+                        freshFetch = { target -> state.takeFreshFetch(generation, target) },
                     ) { served ->
                         noteMainFrameContentLoad(view, state, generation, served)
                     }
@@ -3966,9 +4056,9 @@ private fun buildRefreshableWebView(
             // tab's WebView goes back to Chromium through the transport,
             // and Chromium loads the popup's URL into it itself — as a
             // real popup, so `window.opener` works and an OAuth-style
-            // flow can post its result back to this page. Only gesture-
-            // initiated requests get here at all: see
-            // `setSupportMultipleWindows` above.
+            // flow can post its result back to this page. A window with
+            // no user gesture gets here too, and is judged by the pop-up
+            // blocker below (#261).
             override fun onCreateWindow(
                 view: WebView?,
                 isDialog: Boolean,
@@ -3976,8 +4066,47 @@ private fun buildRefreshableWebView(
                 resultMsg: Message?,
             ): Boolean {
                 val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
-                transport.webView = onCreateWindow()
-                resultMsg.sendToTarget()
+                if (isUserGesture) {
+                    transport.webView = onCreateWindow(true)
+                    resultMsg.sendToTarget()
+                    return true
+                }
+                // The pop-up blocker (#261): without the user's gesture a
+                // window opens only on a site allowed pop-ups. Judged by
+                // the committed page's origin — a frame's window counts
+                // as its page's, as on desktop — and filed under its
+                // document.
+                //
+                // Not judged here, but one main-loop turn later (#292
+                // R1-F1, R1-F2): a new document's early script (inline,
+                // `setTimeout(0)`, `load`) opens its window before this
+                // tab has heard the document committed. Chromium posts
+                // `onPageStarted` to the main looper at the commit, and
+                // calls this directly afterwards, so the commit's
+                // callback is already queued ahead of this post: by the
+                // time it runs, [committedPageUrl] names the document the
+                // window came from, and [BlockedPopups.document] is
+                // that document's, not the one it replaced. A window from
+                // the outgoing document, sent before the commit, is
+                // still judged ahead of it, in queue order.
+                //
+                // Having returned true, the window must be handed to
+                // some WebView, or Chromium keeps it pending and refuses
+                // every later window of this tab: one that is neither
+                // opened nor probed — refused outright, or a probe that
+                // couldn't be set up — is handed back with no WebView,
+                // which Chromium takes as "declined" ([PopupProbe.discard]).
+                deferredPopups.post {
+                    val opener = view
+                    if (opener == null || opener.isDestroyed) return@post
+                    val origin = permissionOriginKey(committedPageUrl)
+                    if (popupOpens(isUserGesture = false, siteAllowed = popupsAllowed(origin))) {
+                        transport.webView = onCreateWindow(false)
+                        resultMsg.sendToTarget()
+                    } else {
+                        onPopupBlocked(origin, resultMsg)
+                    }
+                }
                 return true
             }
 
@@ -4326,16 +4455,24 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (webOrigin(target) == null) return false
         if (!redirectCorrection.crossing(target, ::needsOtherUserAgentFor)) return false
         usersNavigation.ended()
+        // A hop of a Hard reload's load (#262): its bypass is still on
+        // (only its own commit and finish, another load or Stop end it),
+        // and the corrected load is the same navigation, so it goes past
+        // the cache too rather than ending the bypass (R2-M2).
+        val bypass = cacheBypass.active
         // Posted: not from inside the WebView's own callback, and after
         // the redirect's cancellation has ended the navigation — the
         // user agent must not change while anything is loading.
         mainHandler.post {
             val url = redirectCorrection.issue() ?: return@post
             loadingRedirectCorrection = true
+            // Unless something in between (Stop) already ended it.
+            loadingBypassingCache = bypass && cacheBypass.active
             try {
                 if (named) loadUrlNamedByUser(url) else loadUrl(url)
             } finally {
                 loadingRedirectCorrection = false
+                loadingBypassingCache = false
             }
         }
         return true
@@ -4539,6 +4676,88 @@ internal class PageWebView(context: Context) : WebView(context) {
     // Set only for the duration of a redirect correction's own load ([redirectCrossesUserAgent]).
     private var loadingRedirectCorrection = false
 
+    // Set only for the duration of [loadBypassingCache]'s own load.
+    private var loadingBypassingCache = false
+
+    /**
+     * The Hard reload's cache bypass (#262): on from the load
+     * [loadBypassingCache] starts until that load has finished, or
+     * anything else the app loads here, or Stop. The tab's client reports
+     * this WebView's commits and finishes to it.
+     */
+    val cacheBypass = CacheBypass(
+        readCacheMode = { settings.cacheMode },
+        writeCacheMode = { settings.cacheMode = it },
+        // Not `View.post`: a background tab's WebView may be detached,
+        // and that would hold the task until it's attached again.
+        post = { mainHandler.post(it) },
+    )
+
+    /**
+     * The Hard reload of [url] (#262), past the caches
+     * ([loadBypassingCache]): its `loadUrl`, as the address the user named
+     * if [namedByUser] — or, where that would only move to a `#fragment`
+     * of the page on screen, a reload of that page.
+     */
+    fun hardReload(url: String, namedByUser: Boolean) = loadBypassingCache {
+        when {
+            // The address on screen with a `#fragment`: `loadUrl` would
+            // only scroll to it, fetching and committing nothing — the
+            // page stale and the bypass left on with no finish to end it
+            // (R3-F1). A reload loads the document again, fragment and
+            // all, as the user's own when they named it.
+            CacheBypass.staysInDocument(this.url, url) -> {
+                if (namedByUser) reloadByUser() else reload()
+                // On a page reached by a form POST the reload is refused
+                // ("don't resend"), loading nothing (R4-F1): a GET of the
+                // address then, as a Hard reload of a POST page without a
+                // fragment does — minus the fragment, which would make
+                // that GET a scroll too.
+                val get = url.substringBefore('#')
+                cacheBypass.reloading(
+                    Runnable {
+                        loadBypassingCache { if (namedByUser) loadUrlNamedByUser(get) else loadUrl(get) }
+                    },
+                )
+            }
+            namedByUser -> loadUrlNamedByUser(url)
+            else -> loadUrl(url)
+        }
+    }
+
+    /**
+     * Runs [load] — the app's load of a Hard reload's URL ([hardReload]) — with the
+     * HTTP cache bypassed for it and its document's subresources
+     * ([cacheBypass]).
+     *
+     * The renderer's in-memory resource cache goes first: a still-fresh
+     * script or stylesheet the page on screen already loaded is otherwise
+     * reused from there by the new document without any request, cache
+     * mode or not (seen on the device, [HardReloadDeviceTest]). WebView
+     * has no per-page way to skip it — no `reloadIgnoringCache()` — so
+     * it is cleared (`clearCache(false)`: memory only, the disk cache
+     * stays). That memory cache is the renderer's, shared by the tabs
+     * in it: pages already open keep what they loaded, and only their
+     * next reuse of a resource goes to the HTTP cache instead.
+     *
+     * A #180 user-agent redirect correction of this load
+     * ([redirectCrossesUserAgent]) carries the bypass on to the corrected
+     * load. What this can't reach is a service worker: a page whose
+     * worker answers the navigation or its subresources from the worker's
+     * own Cache Storage (a cache-first PWA) still gets what the worker
+     * hands it, as WebView gives the app no way to bypass a worker for one
+     * load (a known limitation, not in scope).
+     */
+    fun loadBypassingCache(load: () -> Unit) {
+        clearCache(false)
+        loadingBypassingCache = true
+        try {
+            load()
+        } finally {
+            loadingBypassingCache = false
+        }
+    }
+
     private fun browserInitiatedLoad(url: String? = null) {
         // This load, not a held put-back, is what the tab is on now.
         // Null only while WebView's own constructor runs.
@@ -4547,6 +4766,17 @@ internal class PageWebView(context: Context) : WebView(context) {
         // Any load but a sweep's own step supersedes its reload: a later
         // resubmission prompt is that load's, not the sweep's (R1-F1).
         sweptReload.navigationStarted()
+        // A Hard reload's load bypasses the cache; any other ends that
+        // bypass — but not a `javascript:` URL, which loads nothing,
+        // unless it's a history step (#262).
+        val loadsNothing = url != null && url.startsWith("javascript:", ignoreCase = true) &&
+            url != HISTORY_BACK_JS && url != HISTORY_FORWARD_JS
+        @Suppress("SENSELESS_COMPARISON")
+        if (cacheBypass != null && !loadsNothing) {
+            // Its reload too, where the address is the page's own with a
+            // `#fragment` ([hardReload]).
+            cacheBypass.loadStarting(bypass = loadingBypassingCache)
+        }
         val usersStep = if (url == null) reloadingByUser else url == HISTORY_BACK_JS || url == HISTORY_FORWARD_JS
         onBrowserInitiatedLoad(url, url != null && loadingNamedByUser, usersStep, url != null && loadingRedirectCorrection)
     }
@@ -4578,6 +4808,9 @@ internal class PageWebView(context: Context) : WebView(context) {
     override fun stopLoading() {
         onStopLoading?.invoke()
         super.stopLoading()
+        // Null only while WebView's own constructor runs.
+        @Suppress("SENSELESS_COMPARISON")
+        if (cacheBypass != null) cacheBypass.stopped()
         // Null only while WebView's own constructor runs.
         @Suppress("SENSELESS_COMPARISON")
         if (putBackHold != null) putBackHold.dropped()
@@ -5290,6 +5523,7 @@ internal fun interceptVirtualRequest(
     tab: Any? = null,
     assertedProtocol: (name: String) -> String? = { null },
     onchain: OnchainAppTab? = null,
+    freshFetch: (target: String) -> Boolean = { false },
     onMainFrameRoot: (ContentRoot?) -> Unit = {},
 ): WebResourceResponse? {
     val req = request ?: return null
@@ -5311,7 +5545,7 @@ internal fun interceptVirtualRequest(
     val response = RadApi.intercept(req, url)
         ?: interceptOnchainAppRequest(req, url, onchain)
         ?: siteDataCleanupFor(req, url, tab)
-        ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, onMainFrameRoot)
+        ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, onMainFrameRoot)
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
     ) {
@@ -5424,6 +5658,7 @@ private fun interceptVirtualRequestFor(
     ensPins: EnsDocumentPins?,
     incoming: EnsDocumentPins.Page?,
     assertedProtocol: (name: String) -> String?,
+    freshFetch: (target: String) -> Boolean,
     onMainFrameRoot: (ContentRoot?) -> Unit,
 ): WebResourceResponse? {
     val uri = req.url ?: return null
@@ -5544,10 +5779,14 @@ private fun interceptVirtualRequestFor(
             }
         }
 
+        // The first request of a Hard-reloaded document for this URL
+        // (#262): not from the media buffer, and not from the gateway's
+        // own cache either.
+        val fresh = freshFetch(target)
         val response = if (isMediaLikeUrl(target)) {
-            fetchMediaWithRangeSupport(req, target)
+            fetchMediaWithRangeSupport(req, target, fresh)
         } else {
-            fetchWithRetry(req, target, url)
+            fetchWithRetry(req, target, url, fresh)
         }
         // Fetched from a gateway a sweep switched away from meanwhile:
         // the origin was already wiped, so this must not land there.
@@ -5625,26 +5864,28 @@ internal fun sweptOrigins(
     return onScreen.intersect(swept)
 }
 
-// In-process LRU of fully-buffered media bodies keyed by bzz URL, so
-// successive Range requests for the same file don't re-fetch from the
-// gateway.
+// Fully-buffered media bodies keyed by gateway URL, so successive Range
+// requests for the same file don't re-fetch it (see [MediaBodyBuffer]).
 private data class MediaBody(val bytes: ByteArray, val mime: String)
 
-private const val MEDIA_CACHE_MAX_ENTRIES = 4
-private val mediaBodyCache: MutableMap<String, MediaBody> =
-    object : java.util.LinkedHashMap<String, MediaBody>(8, 0.75f, true) {
-        override fun removeEldestEntry(
-            eldest: MutableMap.MutableEntry<String, MediaBody>?,
-        ): Boolean = size > MEDIA_CACHE_MAX_ENTRIES
-    }
+private val mediaBodies = MediaBodyBuffer<MediaBody>()
 
 private fun loadMediaBody(
     req: WebResourceRequest,
     targetUrl: String,
+    fresh: Boolean,
+): MediaBody? =
+    // [fresh]: a Hard reload's (#262) — the buffered body may be the very
+    // stale answer being reloaded past. The buffer drops it, and until this
+    // fetch ends, other requests for the URL wait for it instead of
+    // fetching (possibly stale) bodies of their own.
+    mediaBodies.load(targetUrl, fresh) { noCache -> fetchMediaBody(req, targetUrl, noCache) }
+
+private fun fetchMediaBody(
+    req: WebResourceRequest,
+    targetUrl: String,
+    noCache: Boolean,
 ): MediaBody? {
-    synchronized(mediaBodyCache) {
-        mediaBodyCache[targetUrl]?.let { return it }
-    }
     // Retry transient chunk-retrieval failures the same way non-media
     // subresources do. Range is stripped on outgoing fetches because
     // we always want the full body to feed the in-memory cache.
@@ -5657,7 +5898,7 @@ private fun loadMediaBody(
                 return null
             }
         }
-        val attempt = tryLoadMediaBody(req, targetUrl)
+        val attempt = tryLoadMediaBody(req, targetUrl, noCache)
         when (attempt) {
             is MediaLoadResult.Ok -> return attempt.body
             MediaLoadResult.Fatal -> return null
@@ -5682,6 +5923,7 @@ private sealed class MediaLoadResult {
 private fun tryLoadMediaBody(
     req: WebResourceRequest,
     targetUrl: String,
+    noCache: Boolean,
 ): MediaLoadResult {
     val target = try {
         URL(targetUrl)
@@ -5695,7 +5937,12 @@ private fun tryLoadMediaBody(
             requestMethod = "GET"
             connectTimeout = 5_000
             readTimeout = 60_000
-            forwardProxiedHeaders(req, stripRange = true, crossOrigin = !TorRouting.sameOrigin(hop, target))
+            forwardProxiedHeaders(
+                req,
+                stripRange = true,
+                crossOrigin = !TorRouting.sameOrigin(hop, target),
+                noCache = noCache,
+            )
         }
         val status = conn.responseCode
         if (status in TRANSIENT_STATUSES) {
@@ -5714,10 +5961,8 @@ private fun tryLoadMediaBody(
             ?.ifBlank { null }
             ?: mimeTypeFromUrl(targetUrl)
             ?: "application/octet-stream"
-        val body = MediaBody(bytes, mime)
-        synchronized(mediaBodyCache) { mediaBodyCache[targetUrl] = body }
-        Log.i(LOG_TAG, "media cached: $targetUrl bytes=${bytes.size} mime=$mime")
-        MediaLoadResult.Ok(body)
+        Log.i(LOG_TAG, "media fetched: $targetUrl bytes=${bytes.size} mime=$mime")
+        MediaLoadResult.Ok(MediaBody(bytes, mime))
     } catch (t: TorRouting.RefusedException) {
         Log.w(LOG_TAG, "media fetch open failed: $targetUrl", t)
         MediaLoadResult.Fatal
@@ -5757,8 +6002,9 @@ private val RANGE_REGEX = Regex("""^bytes=(\d+)?-(\d+)?$""")
 private fun fetchMediaWithRangeSupport(
     req: WebResourceRequest,
     targetUrl: String,
+    fresh: Boolean = false,
 ): WebResourceResponse? {
-    val body = loadMediaBody(req, targetUrl) ?: return null
+    val body = loadMediaBody(req, targetUrl, fresh) ?: return null
     val total = body.bytes.size
     val rangeHeader = req.requestHeaders?.entries
         ?.firstOrNull { it.key.equals("Range", ignoreCase = true) }
@@ -5830,6 +6076,7 @@ private fun fetchWithRetry(
     req: WebResourceRequest,
     targetUrl: String,
     originalUrl: String,
+    fresh: Boolean = false,
 ): WebResourceResponse? {
     var lastResponse: WebResourceResponse? = null
     for ((index, delayMs) in ESCAPE_RETRY_DELAYS_MS.withIndex()) {
@@ -5842,7 +6089,7 @@ private fun fetchWithRetry(
             }
         }
 
-        when (val attempt = fetchOnce(req, targetUrl)) {
+        when (val attempt = fetchOnce(req, targetUrl, fresh)) {
             is FetchAttempt.Response -> {
                 if (!attempt.transient) return attempt.response
                 lastResponse = attempt.response
@@ -5859,10 +6106,11 @@ private fun fetchWithRetry(
     return lastResponse
 }
 
-/** Single network attempt against [targetUrl]. */
+/** Single network attempt against [targetUrl]; [fresh]: past any cache in front of it (#262). */
 private fun fetchOnce(
     req: WebResourceRequest,
     targetUrl: String,
+    fresh: Boolean = false,
 ): FetchAttempt {
     return try {
         val target = URL(targetUrl)
@@ -5871,7 +6119,7 @@ private fun fetchOnce(
             requestMethod = if (req.method == "HEAD") "HEAD" else "GET"
             connectTimeout = 5_000
             readTimeout = 10_000
-            forwardProxiedHeaders(req, crossOrigin = !TorRouting.sameOrigin(hop, target))
+            forwardProxiedHeaders(req, crossOrigin = !TorRouting.sameOrigin(hop, target), noCache = fresh)
         }
         val status = conn.responseCode
         val reason = conn.responseMessage?.ifBlank { null } ?: "OK"

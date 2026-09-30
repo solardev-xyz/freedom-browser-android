@@ -1,12 +1,20 @@
 package baby.freedom.mobile.data
 
 import android.content.Context
+import android.database.sqlite.SQLiteException
+import android.util.Log
+import androidx.room.withTransaction
+import baby.freedom.mobile.browser.BookmarkUrls
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
@@ -19,13 +27,13 @@ import kotlinx.coroutines.launch
  * Lifetime: process-scoped; there is one [BrowsingRepository] for the app
  * (held by the [AppDatabase] companion via [get]).
  */
-class BrowsingRepository private constructor(
+class BrowsingRepository internal constructor(
     private val db: AppDatabase,
 ) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     init {
-        // One-time cleanup for installs that predate [shouldRecord]
+        // One-time cleanup for installs that predate [isRecordable]
         // rejecting `about:*` — earlier builds wrote `about:blank`
         // rows when the home sentinel flipped, and those still linger
         // in Room. Drop them so the home page's Recent list stays
@@ -79,7 +87,7 @@ class BrowsingRepository private constructor(
      * evaluations to show up in the user's history.
      */
     fun recordVisit(url: String, title: String) {
-        if (!shouldRecord(url)) return
+        if (!isRecordable(url)) return
         scope.launch {
             db.history().insert(
                 HistoryEntry(
@@ -91,7 +99,29 @@ class BrowsingRepository private constructor(
         }
     }
 
-    fun isBookmarked(url: String): Flow<Boolean> = db.bookmarks().isBookmarked(url)
+    /**
+     * Whether [url] is bookmarked, under any spelling of it
+     * ([BookmarkUrls.key]): an edited bookmark saved as `x.eth` still
+     * fills the star on the page shown as `ipfs://x.eth/` (#296 R1-F1).
+     */
+    fun isBookmarked(url: String): Flow<Boolean> {
+        // Worked out in the flow, on Dispatchers.Default: [BookmarkUrls.key]
+        // runs ENSIP-15 normalisation for a non-ASCII name, and this is
+        // called from composition each time the page's address changes
+        // (#296 R3-M2).
+        val key by lazy { BookmarkUrls.key(url) }
+        return bookmarks
+            .map { list -> list.any { BookmarkUrls.key(it.url) == key } }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+    }
+
+    /** The bookmark that is [url] under any spelling of it ([BookmarkUrls.key]). */
+    private suspend fun bookmarkFor(url: String, except: Long? = null): BookmarkEntry? {
+        db.bookmarks().byUrl(url)?.takeIf { it.id != except }?.let { return it }
+        val key = BookmarkUrls.key(url)
+        return db.bookmarks().allOnce().firstOrNull { it.id != except && BookmarkUrls.key(it.url) == key }
+    }
 
     /**
      * Address-bar auto-complete suggestions.
@@ -125,22 +155,113 @@ class BrowsingRepository private constructor(
         }
     }
 
-    /** Add (or replace) the bookmark for [url]. */
-    fun bookmark(url: String, title: String) {
-        if (!shouldRecord(url)) return
-        scope.launch {
-            db.bookmarks().upsert(
-                BookmarkEntry(
-                    url = url,
-                    title = title,
-                    createdAt = System.currentTimeMillis(),
-                ),
-            )
+    /**
+     * Bookmark [url] under [title], above every other bookmark. Completes
+     * with the bookmark — an existing bookmark for [url] is kept as it is
+     * (its name and place) and given with [Bookmarked.added] false — or
+     * null for an address that isn't bookmarked ([isRecordable]). The
+     * write runs in the repository's scope, so a caller that stops
+     * waiting (the screen that asked went away) doesn't stop it.
+     */
+    fun bookmark(url: String, title: String): Deferred<Bookmarked?> = scope.async {
+        if (!isRecordable(url)) return@async null
+        try {
+            db.withTransaction {
+                bookmarkFor(url)?.let { Bookmarked(it.id, added = false) }
+                    ?: Bookmarked(
+                        db.bookmarks().upsert(
+                            BookmarkEntry(
+                                url = url,
+                                title = title,
+                                createdAt = System.currentTimeMillis(),
+                                position = db.bookmarks().minPosition() - 1,
+                            ),
+                        ),
+                        added = true,
+                    )
+            }
+        } catch (e: SQLiteException) {
+            Log.w(TAG, "bookmark: ${e.message}")
+            null
         }
     }
 
+    /** The bookmark with [id], or null if there's none (any more). */
+    suspend fun bookmarkById(id: Long): BookmarkEntry? = db.bookmarks().byId(id)
+
+    /**
+     * Rename bookmark [id] and/or change its address (#264). [url] must
+     * already be what the address bar would load for the typed text
+     * (`bookmarkAddress` in the browser package) and [isRecordable], or
+     * the bookmark's own address unchanged. Moving it onto a page another
+     * bookmark has is refused rather than merged; an edit that keeps it
+     * on its own page ([BookmarkUrls.key] unchanged) isn't, even when an
+     * older row already shares that page — rows saved under two spellings
+     * before #264 stay separate bookmarks, each can still be renamed
+     * (#296 R6-F1). In the repository's scope like [bookmark], so closing
+     * the dialog mid-save can't lose it.
+     */
+    fun editBookmark(id: Long, title: String, url: String): Deferred<BookmarkEditResult> = scope.async {
+        try {
+            db.withTransaction {
+                val current = db.bookmarks().byId(id) ?: return@withTransaction BookmarkEditResult.Gone
+                val samePage = current.url == url || BookmarkUrls.key(current.url) == BookmarkUrls.key(url)
+                val other = if (samePage) null else bookmarkFor(url, except = id)
+                when {
+                    other != null ->
+                        BookmarkEditResult.Duplicate(other.title, other.url)
+                    db.bookmarks().update(id, url, title) == 0 -> BookmarkEditResult.Gone
+                    else -> BookmarkEditResult.Saved
+                }
+            }
+        } catch (e: SQLiteException) {
+            Log.w(TAG, "editBookmark: ${e.message}")
+            BookmarkEditResult.Failed
+        }
+    }
+
+    /**
+     * Put bookmark [id] right after [afterId] in the user's order, or
+     * first for a null [afterId] (#264, see [movedAfter]), and renumber
+     * them all 0, 1, 2… Completes with whether the stored order was
+     * written: false for a move that goes nowhere (or whose bookmark is
+     * gone) and for a failed write, when Room sends no new list — so a
+     * list showing the move ahead of the save knows to show the stored
+     * order again (#296 R1-M2).
+     */
+    fun moveBookmark(id: Long, afterId: Long?): Deferred<Boolean> = scope.async {
+        try {
+            db.withTransaction {
+                val order = movedAfter(db.bookmarks().orderedIds(), id, afterId) ?: return@withTransaction false
+                order.forEachIndexed { index, bookmark ->
+                    db.bookmarks().setPosition(bookmark, index.toLong())
+                }
+                true
+            }
+        } catch (e: SQLiteException) {
+            Log.w(TAG, "moveBookmark: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Remove [url]'s bookmark, whichever spelling of it was saved
+     * ([BookmarkUrls.key]) — the star's Remove, which acts on the page.
+     * The Bookmarks list removes one row by its id ([deleteBookmark]).
+     */
     fun unbookmark(url: String) {
-        scope.launch { db.bookmarks().deleteByUrl(url) }
+        scope.launch {
+            try {
+                db.withTransaction {
+                    val key = BookmarkUrls.key(url)
+                    db.bookmarks().allOnce()
+                        .filter { it.url == url || BookmarkUrls.key(it.url) == key }
+                        .forEach { db.bookmarks().delete(it.id) }
+                }
+            } catch (e: SQLiteException) {
+                Log.w(TAG, "unbookmark: ${e.message}")
+            }
+        }
     }
 
     fun clearHistory() {
@@ -149,6 +270,21 @@ class BrowsingRepository private constructor(
 
     fun clearBookmarks() {
         scope.launch { db.bookmarks().clear() }
+    }
+
+    /**
+     * Remove the one bookmark [id], and only it: rows saved in another
+     * spelling of the same page before #296 stay, as the list shows them
+     * as separate bookmarks (#296 R2-F1).
+     */
+    fun deleteBookmark(id: Long) {
+        scope.launch {
+            try {
+                db.bookmarks().delete(id)
+            } catch (e: SQLiteException) {
+                Log.w(TAG, "deleteBookmark: ${e.message}")
+            }
+        }
     }
 
     fun deleteHistory(id: Long) {
@@ -190,16 +326,24 @@ class BrowsingRepository private constructor(
         scope.launch { db.favicons().clear() }
     }
 
-    private fun shouldRecord(url: String): Boolean {
-        if (url.isBlank()) return false
-        val lower = url.lowercase()
-        return !lower.startsWith("about:") &&
-            !lower.startsWith("data:") &&
-            !lower.startsWith("javascript:") &&
-            !lower.startsWith("blob:")
-    }
-
     companion object {
+        private const val TAG = "BrowsingRepository"
+
+        /**
+         * Whether [url] is a page history and bookmarks keep: not blank,
+         * `about:*`, `data:*`, `javascript:*` or `blob:*` — internal
+         * bookkeeping, script, or bytes that only live in one page.
+         */
+        fun isRecordable(url: String): Boolean {
+            if (url.isBlank()) return false
+            val lower = url.trim().lowercase()
+            return !lower.startsWith("about:") &&
+                !lower.startsWith("data:") &&
+                !lower.startsWith("javascript:") &&
+                !lower.startsWith("blob:")
+        }
+
+
         @Volatile private var instance: BrowsingRepository? = null
 
         fun get(context: Context): BrowsingRepository =

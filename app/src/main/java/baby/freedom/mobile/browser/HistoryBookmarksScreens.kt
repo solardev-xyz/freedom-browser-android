@@ -25,7 +25,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SearchOff
-import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -275,51 +274,6 @@ private val HistoryQuerySaver = Saver<MutableState<String>, String>(
     save = { it.value.takeIf { q -> q.length <= 1024 } },
     restore = { mutableStateOf(it) },
 )
-
-/**
- * Full-screen list of saved bookmarks. Tapping a row calls [onOpen]
- * with the canonical URL; the host closes the screen and submits the
- * URL into the active tab.
- */
-@Composable
-fun BookmarksScreen(
-    repo: BrowsingRepository,
-    onDismiss: () -> Unit,
-    onOpen: (String) -> Unit,
-) {
-    BackHandler(onBack = onDismiss)
-
-    val entries by remember { repo.bookmarks }.collectAsState(initial = emptyList())
-
-    FullScreenScaffold(
-        title = "Bookmarks",
-        onDismiss = onDismiss,
-    ) {
-        if (entries.isEmpty()) {
-            EmptyState(
-                icon = Icons.Outlined.BookmarkBorder,
-                title = "No bookmarks yet",
-                hint = "Tap the star in the menu while on a page to save it.",
-            )
-        } else {
-            LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                items(items = entries, key = { it.id }) { entry ->
-                    EntryRow(
-                        title = entry.title.ifBlank { entry.url },
-                        subtitle = entry.url,
-                        timestamp = null,
-                        onClick = { onOpen(entry.url) },
-                        onRemove = { repo.unbookmark(entry.url) },
-                    )
-                }
-            }
-        }
-    }
-}
 
 @Composable
 private fun EntryRow(

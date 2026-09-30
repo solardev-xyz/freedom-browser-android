@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.WebAsset
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Contrast
@@ -1633,6 +1634,7 @@ private fun SitePermissionsSection(
                         SitePermission.CAMERA -> Icons.Filled.Videocam
                         SitePermission.MICROPHONE -> Icons.Filled.Mic
                         SitePermission.LOCATION -> Icons.Filled.LocationOn
+                        SitePermission.POPUPS -> Icons.Filled.WebAsset
                         is ExternalScheme -> Icons.AutoMirrored.Filled.OpenInNew
                     },
                     contentDescription = null,

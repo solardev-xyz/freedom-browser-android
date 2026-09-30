@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         DownloadEntry::class,
     ],
     version = 5,
-    exportSchema = false,
+    exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun history(): HistoryDao
@@ -73,27 +73,42 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
-         * v3 -> v4: pause and resume for downloads (#265) — the If-Range
-         * validator, whether the server serves ranges, and a note.
-         * Additive; existing rows read as not resumable.
+         * v3 -> v4: bookmarks get a `position` (#264), the order the user
+         * arranges them in. Numbered from the order they were listed in
+         * until now — newest first — so nobody's list reshuffles on
+         * upgrade.
          */
-        private val MIGRATION_3_4 = object : Migration(3, 4) {
+        internal val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `validator` TEXT")
-                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `resumable` INTEGER NOT NULL DEFAULT 0")
-                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `note` TEXT")
+                db.execSQL(
+                    "ALTER TABLE `bookmarks` ADD COLUMN `position` INTEGER NOT NULL DEFAULT 0",
+                )
+                db.execSQL(
+                    "UPDATE `bookmarks` SET `position` = (" +
+                        "SELECT COUNT(*) FROM `bookmarks` AS `b` " +
+                        "WHERE `b`.`createdAt` > `bookmarks`.`createdAt` " +
+                        "OR (`b`.`createdAt` = `bookmarks`.`createdAt` AND `b`.`id` > `bookmarks`.`id`))",
+                )
             }
         }
 
         /**
-         * v4 -> v5: the User-Agent a download's first request sent, which
-         * a resume or retry sends again (#265, #180). Null on older rows.
+         * v4 -> v5: pause and resume for downloads (#265) — the If-Range
+         * validator, whether the server serves ranges, a note, and the
+         * User-Agent the first request sent, which a resume or retry
+         * sends again (#180). Additive; existing rows read as not
+         * resumable, with no note and no recorded User-Agent.
          */
-        private val MIGRATION_4_5 = object : Migration(4, 5) {
+        internal val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `validator` TEXT")
+                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `resumable` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `note` TEXT")
                 db.execSQL("ALTER TABLE `downloads` ADD COLUMN `userAgent` TEXT")
             }
         }
+
+        internal val MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
 
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {
@@ -102,7 +117,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "freedom.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(*MIGRATIONS)
                     .build()
                     .also { instance = it }
             }

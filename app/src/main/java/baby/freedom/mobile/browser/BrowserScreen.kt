@@ -488,6 +488,14 @@ fun BrowserScreen(
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
+    // The bookmark the "Bookmark added" snackbar's Edit opened (#264),
+    // and whether it was added from a private tab.
+    var editBookmark by rememberSaveable { mutableStateOf<Long?>(null) }
+    var editBookmarkPrivate by rememberSaveable { mutableStateOf(false) }
+    // Whether the Bookmarks list was opened from a private tab, fixed at
+    // that moment, so its Edit dialog keeps the keyboard from learning
+    // what's typed there (#296 R1-M1).
+    var bookmarksPrivate by rememberSaveable { mutableStateOf(false) }
     var showDownloads by rememberSaveable { mutableStateOf(false) }
     var addressFocused by remember { mutableStateOf(false) }
     // Suggestions should only appear once the user has actively changed
@@ -604,7 +612,8 @@ fun BrowserScreen(
     // (#86) — and so does a private download's notice (it names the
     // file) until it has left the screen.
     PrivateScreenGuard(privateOnScreen || downloadNotices.privateShowing)
-    val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
+    val isBookmarked by remember(repo, state.url) { repo.isBookmarked(state.url) }
+        .collectAsState(initial = false)
 
     // IPFS load progress (#94): while the active tab is busy on content
     // the IPFS node serves, poll the node's retrieval-progress snapshot
@@ -741,6 +750,7 @@ fun BrowserScreen(
         displayUrl: String,
         loadUri: String = contentUri,
         namedByUser: Boolean = false,
+        bypassCache: Boolean = false,
     ) {
         val generation = target.loadGeneration
         val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
@@ -823,7 +833,12 @@ fun BrowserScreen(
         }
         when (outcome) {
             GatewayProbe.Outcome.Ok ->
-                target.loadUrl(loadUri, displayPrefix = displayPrefix, namedByUser = namedByUser)
+                target.loadUrl(
+                    loadUri,
+                    displayPrefix = displayPrefix,
+                    namedByUser = namedByUser,
+                    bypassCache = bypassCache,
+                )
             GatewayProbe.Outcome.Aborted -> { /* superseded by a later submit */ }
             is GatewayProbe.Outcome.Unreachable -> showError("ERR_CONNECTION_REFUSED")
             GatewayProbe.Outcome.NotFound, is GatewayProbe.Outcome.Other -> {
@@ -852,6 +867,7 @@ fun BrowserScreen(
         source: SubmitSource,
         approvedUri: String?,
         namedByUser: Boolean,
+        bypassCache: Boolean = false,
     ) {
         target.clearEnsOverride()
         target.ipfsLoad = false
@@ -912,7 +928,7 @@ fun BrowserScreen(
                             doc.trusted || approved || approvals.contains(doc) -> {
                                 approvals.add(doc)
                                 target.onchain.handOff(doc)
-                                target.loadUrl(app.virtualUrl(tail), namedByUser = namedByUser)
+                                target.loadUrl(app.virtualUrl(tail), namedByUser = namedByUser, bypassCache = bypassCache)
                             }
                             else -> {
                                 target.onchain.offer(doc)
@@ -942,6 +958,10 @@ fun BrowserScreen(
         // An unverified ENS answer the user chose to load (#96): let
         // through if the resolver still gives exactly this one.
         approvedUri: String? = null,
+        // The user's Hard reload (#262): the load this submit schedules
+        // goes out with the caches bypassed. Handed to that load's own
+        // `loadUrl`, like [namedByUser] — never an error page's.
+        bypassCache: Boolean = false,
     ) {
         // "Continue once" on the tab's not-cross-checked warning (#96):
         // the one navigation it was shown for, again, with its answer
@@ -1143,7 +1163,7 @@ fun BrowserScreen(
                                 target.clearEnsOverride()
                                 target.addressBarText =
                                     pendingAddressBarText(target.addressBarText, web, source)
-                                target.loadUrl(web)
+                                target.loadUrl(web, bypassCache = bypassCache)
                             } else if (result.protocol == "bzz" ||
                                 result.protocol == "ipfs" ||
                                 result.protocol == "ipns"
@@ -1160,6 +1180,7 @@ fun BrowserScreen(
                                     // to the name across content updates.
                                     loadUri = "ens://$name$suffix",
                                     namedByUser = namedByUser,
+                                    bypassCache = bypassCache,
                                 )
                             } else {
                                 ensError(
@@ -1214,7 +1235,7 @@ fun BrowserScreen(
         // chain here, gated on how it was read, and handed to the
         // interceptor with the navigation.
         if (OnchainAppRef.isWeb3Scheme(canonical)) {
-            submitOnchainApp(target, canonical, source, approvedUri, namedByUser)
+            submitOnchainApp(target, canonical, source, approvedUri, namedByUser, bypassCache)
             return
         }
 
@@ -1253,6 +1274,7 @@ fun BrowserScreen(
                         displayPrefix = null,
                         displayUrl = contentUri,
                         namedByUser = namedByUser,
+                        bypassCache = bypassCache,
                     )
                 } finally {
                     target.resolving = false
@@ -1263,7 +1285,7 @@ fun BrowserScreen(
             return
         }
 
-        target.loadUrl(url, namedByUser = namedByUser)
+        target.loadUrl(url, namedByUser = namedByUser, bypassCache = bypassCache)
     }
 
     // The bar's Reload and the Reload on a tab whose renderer went away
@@ -1275,6 +1297,18 @@ fun BrowserScreen(
         } else {
             val url = state.reloadUrl()
             if (url.isNotBlank()) submit(state, url)
+        }
+    }
+
+    // The menu's Hard reload (#262): the same reload, with the HTTP cache
+    // bypassed for its load and that load's subresources, and — on a
+    // dweb page — the interceptor's own caches skipped for its document.
+    // A tab whose renderer went away has nothing cached in a page to
+    // bypass: its menu row is disabled ([BrowserState.hasPageToActOn]).
+    val hardReloadPage: () -> Unit = {
+        if (state.rendererGone == null) {
+            val url = state.reloadUrl()
+            if (url.isNotBlank()) submit(state, url, bypassCache = true)
         }
     }
 
@@ -1905,8 +1939,30 @@ fun BrowserScreen(
                     onToggleBookmark = {
                         val url = state.url
                         if (url.isBlank()) return@BottomToolbar
-                        if (isBookmarked) repo.unbookmark(url)
-                        else repo.bookmark(url, state.title)
+                        if (isBookmarked) {
+                            repo.unbookmark(url)
+                        } else {
+                            // Saved under the page's title; the snackbar
+                            // offers to name it (#264).
+                            val added = repo.bookmark(url, state.title)
+                            val private = state.private
+                            scope.launch {
+                                val saved = added.await() ?: return@launch
+                                val id = saved.id
+                                // The star can still show the last page's
+                                // state for a moment; a page that turns out
+                                // to be bookmarked already isn't "added".
+                                val result = snackbarHostState.showSnackbar(
+                                    if (saved.added) "Bookmark added" else "Already bookmarked",
+                                    actionLabel = "Edit",
+                                    duration = SnackbarDuration.Short,
+                                )
+                                if (result == SnackbarResult.ActionPerformed) {
+                                    editBookmark = id
+                                    editBookmarkPrivate = private
+                                }
+                            }
+                        }
                     },
                     // Step one of the two-step tap: a tap on the compact
                     // capsule restores the resting bar and stops there.
@@ -1922,9 +1978,13 @@ fun BrowserScreen(
                     onOpenNode = { showNode = true },
                     onOpenTabs = { showTabSwitcher = true },
                     onOpenHistory = { showHistory = true },
-                    onOpenBookmarks = { showBookmarks = true },
+                    onOpenBookmarks = {
+                        bookmarksPrivate = state.private
+                        showBookmarks = true
+                    },
                     onOpenDownloads = { showDownloads = true },
                     onReload = reloadPage,
+                    onHardReload = hardReloadPage,
                     // Stop covers both halves of a load: the WebView's
                     // own fetch, and the indeterminate phase in front of
                     // it (ENS resolve / gateway warm-up) that runs on a
@@ -2022,8 +2082,54 @@ fun BrowserScreen(
                 modifier = Modifier.onSizeChanged { ipfsLineHeightPx = it.height },
             )
         }
-        val snackbarLift = if (ipfsLine != null) {
+        val ipfsLift = if (ipfsLine != null) {
             with(density) { ipfsLineHeightPx.toDp() } + IpfsStatusGap * 2
+        } else {
+            0.dp
+        }
+
+        // The pop-up blocker's notice (#261): the active tab's blocked
+        // pop-ups, above the IPFS line when that is up. Only over the
+        // page — not while the address bar is open, nor under a panel.
+        val blockedPopups = state.blockedPopups
+        val popupNoticeShown = blockedPopups.entries.isNotEmpty() && !addressFocused && !overlayShown
+        var popupNoticeHeightPx by remember { mutableIntStateOf(0) }
+        val popupNoticeTopInsets = WindowInsets.systemBars
+            .union(WindowInsets.displayCutout)
+            .only(WindowInsetsSides.Top)
+        if (popupNoticeShown) {
+            BlockedPopupNotice(
+                popups = blockedPopups,
+                private = state.private,
+                displayUrl = { displayFor(it, state) },
+                onOpen = { entry, url ->
+                    blockedPopups.remove(entry)
+                    tabs.requestOpenInNewTab?.invoke(url, false, state.private)
+                },
+                onAlwaysAllow = { origin ->
+                    sitePermissions.allowPopups(state, origin)
+                    blockedPopups.markAllowed()
+                },
+                onClose = { blockedPopups.clear() },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(chromeInsets)
+                    // Its height is capped to what's left under the status
+                    // bar; past that its rows scroll (#292 R5-F1).
+                    .windowInsetsPadding(popupNoticeTopInsets)
+                    .padding(
+                        start = CapsuleSideMargin,
+                        end = CapsuleSideMargin,
+                        top = CapsuleBottomMargin,
+                        bottom = capsuleSlot + CapsuleBottomMargin + IpfsStatusGap + ipfsLift,
+                    )
+                    .widthIn(max = CHROME_MAX_WIDTH)
+                    .fillMaxWidth()
+                    .onSizeChanged { popupNoticeHeightPx = it.height },
+            )
+        }
+        val snackbarLift = ipfsLift + if (popupNoticeShown) {
+            with(density) { popupNoticeHeightPx.toDp() } + IpfsStatusGap * 2
         } else {
             0.dp
         }
@@ -2133,9 +2239,20 @@ fun BrowserScreen(
         )
     }
 
+    // The "Bookmark added" snackbar's Edit (#264), over the page.
+    editBookmark?.let { id ->
+        BookmarkEditDialog(
+            repo = repo,
+            id = id,
+            private = editBookmarkPrivate,
+            onDismiss = { editBookmark = null },
+        )
+    }
+
     if (showBookmarks) {
         BookmarksScreen(
             repo = repo,
+            private = bookmarksPrivate,
             onDismiss = { showBookmarks = false },
             onOpen = { url ->
                 showBookmarks = false
