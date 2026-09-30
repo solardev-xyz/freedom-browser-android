@@ -353,6 +353,49 @@ object SafeProtocol {
     /** `getOwners()` call data. */
     val OWNERS_CALL: String = "0x" + selector("getOwners()").toHex()
 
+    /** The most modules [MODULES_CALL] reads in one page; a Safe with more reads as "not known". */
+    const val MAX_MODULES = 64
+
+    /** `getModulesPaginated(0x…01, 64)` call data: the Safe's enabled modules from the start of their list. */
+    val MODULES_CALL: String = "0x" + (
+        selector("getModulesPaginated(address,uint256)") +
+            ByteArray(31) + byteArrayOf(1) + ByteArray(31) + byteArrayOf(MAX_MODULES.toByte())
+        ).toHex()
+
+    /**
+     * The `Guard` interface id a v1.4.1 Safe's `setGuard` asks a new guard
+     * for (GS300): `checkTransaction(…) ^ checkAfterExecution(bytes32,bool)`.
+     */
+    val GUARD_INTERFACE_ID: ByteArray = selector(
+        "checkTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes,address)",
+    ).zip(selector("checkAfterExecution(bytes32,bool)")) { a, b -> (a.toInt() xor b.toInt()).toByte() }.toByteArray()
+
+    /** `supportsInterface(GUARD_INTERFACE_ID)` call data. */
+    val SUPPORTS_GUARD_CALL: String = "0x" + (selector("supportsInterface(bytes4)") + GUARD_INTERFACE_ID + ByteArray(28)).toHex()
+
+    /**
+     * A `getModulesPaginated` return value `(address[] array, address next)`:
+     * the whole module list (EIP-55, in the Safe's linked-list order), or null
+     * if [hex] isn't one or the page doesn't reach the list's end (`next` isn't
+     * the sentinel `0x…01`).
+     */
+    fun decodeModules(hex: String): List<String>? = runCatching {
+        val b = hex.removePrefix("0x").hexBytes()
+        if (b.size < 96) return null
+        val next = b.copyOfRange(32, 64)
+        if (next.copyOfRange(0, 31).any { it.toInt() != 0 } || next[31].toInt() != 1) return null
+        // The array's own encoding is an `address[]` at its offset: reuse that decoder on a re-based copy.
+        val offset = BigInteger(1, b.copyOfRange(0, 32))
+        if (offset != BigInteger.valueOf(64)) return null
+        decodeAddresses("0x" + (Abi.uint(BigInteger.valueOf(32)) + b.copyOfRange(64, b.size)).toHex())
+    }.getOrNull()
+
+    /** An ABI `bool` as a Safe compiled with abicoder v1 reads it: true for any non-zero first word, null if shorter than a word. */
+    fun decodeBool(hex: String): Boolean? = runCatching {
+        val b = hex.removePrefix("0x").hexBytes()
+        if (b.size < 32) null else b.copyOfRange(0, 32).any { it.toInt() != 0 }
+    }.getOrNull()
+
     /** `getThreshold()` call data. */
     val THRESHOLD_CALL: String = "0x" + selector("getThreshold()").toHex()
 
