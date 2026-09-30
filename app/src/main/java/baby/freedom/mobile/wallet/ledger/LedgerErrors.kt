@@ -32,6 +32,15 @@ class LedgerException(val kind: Kind, message: String = kind.message, cause: Thr
         ;
 
         val message: String get() = Strings.get(messageRes)
+
+        /**
+         * Whether [message] already ends by saying nothing went out
+         * ("… Nothing was signed."), so a sender doesn't add its own
+         * "Nothing was sent." after it. By kind, not by reading the
+         * text, which is in the app's language (#280).
+         */
+        val saysNothingSent: Boolean
+            get() = this == TIMEOUT || this == CANCELLED || this == MISMATCH || this == INVALID_DATA
     }
 
     companion object {

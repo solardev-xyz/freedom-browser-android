@@ -963,7 +963,7 @@ private fun SafeProposePage(
                             },
                             enabled = !busy,
                             singleLine = true,
-                            placeholder = { Text("0x…") },
+                            placeholder = { Text(stringResource(R.string.safe_address_placeholder)) },
                             textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                             keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = KeyboardType.Ascii),
                             modifier = Modifier.fillMaxWidth(),

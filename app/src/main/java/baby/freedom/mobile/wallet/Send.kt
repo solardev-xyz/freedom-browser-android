@@ -1324,7 +1324,7 @@ class WalletSender internal constructor(
                 // The Ledger's own words: rejected, locked, disconnected, timed out… (#142)
                 val said = e.message.orEmpty()
                 val rejected = e.kind == LedgerException.Kind.REJECTED || e.kind == LedgerException.Kind.CANCELLED
-                fail(quote, if (said.contains("Nothing was")) said else Strings.get(R.string.send_ledger_failed, said), false, rejected)
+                fail(quote, if (e.kind.saysNothingSent && said == e.kind.message) said else Strings.get(R.string.send_ledger_failed, said), false, rejected)
             }
             else -> {
                 Log.w(TAG, "signing failed: ${e.javaClass.simpleName}")

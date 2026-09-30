@@ -331,7 +331,7 @@ private fun LedgerAccountsStep(
                         Column(Modifier.weight(1f)) {
                             AddressText(address, MaterialTheme.typography.bodyMedium, MaterialTheme.colorScheme.onSurface)
                             Text(
-                                if (added) stringResource(R.string.signing_ledger_path_already_added, path) else "m/$path",
+                                if (added) stringResource(R.string.signing_ledger_path_already_added, path) else stringResource(R.string.signing_ledger_path, path),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

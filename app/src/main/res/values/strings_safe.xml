@@ -359,4 +359,5 @@
     <string name="safe_request_message_not_text">This message request isn’t for a signed text</string>
     <string name="safe_request_message_no_text">This message request doesn’t include the words to sign, only a hash. Freedom doesn’t sign those: the hash could approve anything.</string>
     <string name="safe_request_message_mismatch">This message request’s text doesn’t match what would be signed</string>
+    <string name="safe_address_placeholder" translatable="false">0x…</string>
 </resources>

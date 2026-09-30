@@ -274,4 +274,5 @@
     <!-- Something the site wrote, quoted as is -->
     <string name="signing_x402_quoted">“%1$s”</string>
     <string name="signing_x402_none">(none)</string>
+    <string name="signing_ledger_path" translatable="false">m/%1$s</string>
 </resources>
