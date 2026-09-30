@@ -54,16 +54,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.Eip712
@@ -94,8 +98,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
-internal const val SAFE_ACCOUNTS_TITLE = "Safe accounts"
-
 /**
  * A shared request longer than this many bytes ([qrBytes], UTF-8) makes a
  * QR code too dense for a phone camera: Copy only. Bytes, not characters,
@@ -105,25 +107,27 @@ internal const val SAFE_QR_MAX = 1_800
 
 /** Who [address] is, among a Safe's owners: one of this wallet's accounts by name, or another device's. */
 internal fun safeOwnerName(address: String, accounts: List<WalletAccount>): String =
-    accounts.firstOrNull { it.address.equals(address, ignoreCase = true) }?.name ?: "Another device"
+    accounts.firstOrNull { it.address.equals(address, ignoreCase = true) }?.name ?: Strings.get(R.string.safe_owner_another_device)
 
 /** "2 of 3 owners" — how many must sign, of how many. */
-internal fun safePolicy(safe: SafeAccount): String = "${safe.threshold} of ${safe.owners.size} owners must sign"
+internal fun safePolicy(safe: SafeAccount): String =
+    Strings.plural(R.plurals.safe_policy, safe.owners.size, safe.threshold, safe.owners.size)
 
 /** What a pending item is, for its row and heading: the payment, or the message's words. */
 internal fun safePendingTitle(p: SafePending): String = when (p.kind) {
-    SafePending.Kind.TX -> p.payment?.let { "Send ${SendAmounts.exact(it.amount, it.decimals)} ${it.symbol}" } ?: "Transaction"
-    SafePending.Kind.MESSAGE -> "Message: “${p.text.orEmpty()}”"
+    SafePending.Kind.TX -> p.payment?.let { Strings.get(R.string.safe_pending_title_send, SendAmounts.exact(it.amount, it.decimals), it.symbol) }
+        ?: Strings.get(R.string.safe_pending_title_tx)
+    SafePending.Kind.MESSAGE -> Strings.get(R.string.safe_pending_title_message, p.text.orEmpty())
 }
 
 /** Where a pending item stands, with its signature count. */
 internal fun safePendingState(p: SafePending): String {
-    val count = "${p.collected} of ${p.threshold} signatures"
+    val count = Strings.plural(R.plurals.safe_signature_count, p.threshold, p.collected, p.threshold)
     return when {
-        p.kind == SafePending.Kind.TX && p.superseded -> "$count · can no longer execute"
-        p.kind == SafePending.Kind.TX && p.execHash != null -> "$count · executing"
-        p.kind == SafePending.Kind.TX && p.ready -> "$count · ready to execute"
-        p.ready -> "$count · signed"
+        p.kind == SafePending.Kind.TX && p.superseded -> Strings.get(R.string.safe_pending_state_superseded, count)
+        p.kind == SafePending.Kind.TX && p.execHash != null -> Strings.get(R.string.safe_pending_state_executing, count)
+        p.kind == SafePending.Kind.TX && p.ready -> Strings.get(R.string.safe_pending_state_ready, count)
+        p.ready -> Strings.get(R.string.safe_pending_state_signed, count)
         else -> count
     }
 }
@@ -131,11 +135,11 @@ internal fun safePendingState(p: SafePending): String {
 /** The Safe's row on the wallet page: policy, and whether it's active or what waits. */
 internal fun safeRowSubtitle(safe: SafeAccount, pending: List<SafePending>): String {
     val parts = mutableListOf(safePolicy(safe))
-    if (!safe.deployed) parts += "not active yet"
+    if (!safe.deployed) parts += Strings.get(R.string.safe_row_not_active)
     val tx = pending.count { it.kind == SafePending.Kind.TX }
     val messages = pending.count { it.kind == SafePending.Kind.MESSAGE }
-    if (tx > 0) parts += "$tx transaction waiting"
-    if (messages > 0) parts += if (messages == 1) "1 message waiting" else "$messages messages waiting"
+    if (tx > 0) parts += Strings.plural(R.plurals.safe_row_transactions_waiting, tx, tx)
+    if (messages > 0) parts += Strings.plural(R.plurals.safe_row_messages_waiting, messages, messages)
     return parts.joinToString(" · ")
 }
 
@@ -153,7 +157,7 @@ internal fun safeErrorMessage(e: Throwable, action: String, phraseBackedUp: Bool
 /** The wallet page's list of Safe accounts (#141), and the way to create one. */
 @Composable
 internal fun SafeAccountsSection(state: SafeState?, enabled: Boolean, onOpen: (String) -> Unit, onCreate: () -> Unit) {
-    SectionCard(title = SAFE_ACCOUNTS_TITLE) {
+    SectionCard(title = stringResource(R.string.safe_accounts_title)) {
         state?.safes?.forEach { safe ->
             PageRow(
                 title = safe.name,
@@ -166,8 +170,8 @@ internal fun SafeAccountsSection(state: SafeState?, enabled: Boolean, onOpen: (S
             )
         }
         PageRow(
-            title = "Create a Safe account",
-            subtitle = "Held by 2 or 3 owners on Gnosis: this phone’s accounts, and accounts on other devices",
+            title = stringResource(R.string.safe_create_title),
+            subtitle = stringResource(R.string.safe_create_row_subtitle),
             style = PageRowStyle.Inset,
             leadingIcon = Icons.Filled.Add,
             enabled = enabled && state != null,
@@ -204,7 +208,7 @@ internal fun SafeCreatePage(accounts: List<WalletAccount>, onCreated: (SafeAccou
     fun addOther(text: String) {
         when (val code = ScannedCode.parse(text)) {
             is ScannedCode.Address -> when {
-                owners.any { it.equals(code.address, ignoreCase = true) } -> error = "That account is already an owner."
+                owners.any { it.equals(code.address, ignoreCase = true) } -> error = Strings.get(R.string.safe_create_already_owner)
                 accounts.any { it.address.equals(code.address, ignoreCase = true) } -> {
                     local = local + accounts.first { it.address.equals(code.address, ignoreCase = true) }.address
                     otherInput = ""
@@ -216,22 +220,22 @@ internal fun SafeCreatePage(accounts: List<WalletAccount>, onCreated: (SafeAccou
                 }
             }
             is ScannedCode.Unrecognized -> error = code.reason
-            else -> error = "That isn’t an account’s address."
+            else -> error = Strings.get(R.string.safe_create_not_an_address)
         }
     }
 
     BackHandler(onBack = onBack)
-    FullScreenScaffold(title = "Create a Safe account", onDismiss = onBack) {
+    FullScreenScaffold(title = stringResource(R.string.safe_create_title), onDismiss = onBack) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
             item("preset") {
-                SectionCard(title = "Who must sign") {
+                SectionCard(title = stringResource(R.string.safe_create_who_must_sign)) {
                     for ((t, title, detail) in listOf(
-                        Triple(1, "1 of 2 owners", "Either owner can move funds alone; the other is a backup if one key is lost."),
-                        Triple(2, "2 of 3 owners", "Any two must sign. One lost key, or one stolen, can’t lose the funds."),
+                        Triple(1, pluralStringResource(R.plurals.safe_create_preset, 2, 1, 2), stringResource(R.string.safe_create_preset_1of2_detail)),
+                        Triple(2, pluralStringResource(R.plurals.safe_create_preset, 3, 2, 3), stringResource(R.string.safe_create_preset_2of3_detail)),
                     )) {
                         Row(
                             verticalAlignment = Alignment.Top,
@@ -256,14 +260,14 @@ internal fun SafeCreatePage(accounts: List<WalletAccount>, onCreated: (SafeAccou
                         }
                     }
                     Text(
-                        "2 of 2 isn’t offered: losing either key would lock the funds for good.",
+                        stringResource(R.string.safe_create_no_2of2),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
             item("local") {
-                SectionCard(title = "Owners from this wallet") {
+                SectionCard(title = stringResource(R.string.safe_create_local_owners)) {
                     accounts.forEach { account ->
                         val checked = local.any { it.equals(account.address, ignoreCase = true) }
                         Row(
@@ -284,14 +288,14 @@ internal fun SafeCreatePage(accounts: List<WalletAccount>, onCreated: (SafeAccou
                         }
                     }
                     Text(
-                        "At least one is needed: it signs here, and pays the network fee to activate the Safe and to execute its transactions.",
+                        stringResource(R.string.safe_create_local_hint),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
             item("others") {
-                SectionCard(title = "Owners on other devices") {
+                SectionCard(title = stringResource(R.string.safe_create_other_owners)) {
                     others.forEach { address ->
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                             AddressText(
@@ -300,7 +304,7 @@ internal fun SafeCreatePage(accounts: List<WalletAccount>, onCreated: (SafeAccou
                                 color = MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier.weight(1f),
                             )
-                            TextButton(onClick = { others = others - address }, enabled = !busy) { Text("Remove") }
+                            TextButton(onClick = { others = others - address }, enabled = !busy) { Text(stringResource(R.string.common_remove)) }
                         }
                     }
                     if (owners.size < needed) {
@@ -312,15 +316,15 @@ internal fun SafeCreatePage(accounts: List<WalletAccount>, onCreated: (SafeAccou
                             },
                             enabled = !busy,
                             singleLine = true,
-                            placeholder = { Text("0x… address of the other device’s account") },
+                            placeholder = { Text(stringResource(R.string.safe_create_other_placeholder)) },
                             textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                             keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = KeyboardType.Ascii),
                             modifier = Modifier.fillMaxWidth(),
                         )
                         if (otherParsed is ScannedCode.Unrecognized) FieldText(otherParsed.reason, error = true)
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                            TextButton(onClick = { scanningOther = !scanningOther }, enabled = !busy) { Text(if (scanningOther) "Stop scanning" else "Scan") }
-                            TextButton(onClick = { addOther(otherInput) }, enabled = !busy && otherParsed is ScannedCode.Address) { Text("Add") }
+                            TextButton(onClick = { scanningOther = !scanningOther }, enabled = !busy) { Text(stringResource(if (scanningOther) R.string.safe_stop_scanning else R.string.safe_scan)) }
+                            TextButton(onClick = { addOther(otherInput) }, enabled = !busy && otherParsed is ScannedCode.Address) { Text(stringResource(R.string.common_add)) }
                         }
                         if (scanningOther) {
                             QrScanner(
@@ -336,20 +340,20 @@ internal fun SafeCreatePage(accounts: List<WalletAccount>, onCreated: (SafeAccou
                         }
                     }
                     Text(
-                        "An account on desktop Freedom or another phone: they co-sign the Safe’s transactions by signing the request this phone shares.",
+                        stringResource(R.string.safe_create_other_hint),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
             item("name") {
-                SectionCard(title = "Name") {
+                SectionCard(title = stringResource(R.string.safe_create_name)) {
                     OutlinedTextField(
                         value = name,
                         onValueChange = { name = it.take(SafeAccounts.MAX_NAME) },
                         enabled = !busy,
                         singleLine = true,
-                        placeholder = { Text("Safe ${((SafeAccounts.get(context).state.value?.safes?.size) ?: 0) + 1}") },
+                        placeholder = { Text(stringResource(R.string.safe_default_name, ((SafeAccounts.get(context).state.value?.safes?.size) ?: 0) + 1)) },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -357,8 +361,7 @@ internal fun SafeCreatePage(accounts: List<WalletAccount>, onCreated: (SafeAccou
             item("create") {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Creating it is free and needs no network: its address is worked out now from these owners, and can take funds at once. " +
-                            "It’s activated on Gnosis when you’re ready, for a small network fee.",
+                        stringResource(R.string.safe_create_footnote),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -373,7 +376,7 @@ internal fun SafeCreatePage(accounts: List<WalletAccount>, onCreated: (SafeAccou
                                 } catch (e: CancellationException) {
                                     throw e
                                 } catch (e: Exception) {
-                                    error = safeErrorMessage(e, "create the Safe", phraseBackedUp = true)
+                                    error = safeErrorMessage(e, Strings.get(R.string.safe_action_create), phraseBackedUp = true)
                                 } finally {
                                     busy = false
                                 }
@@ -381,7 +384,15 @@ internal fun SafeCreatePage(accounts: List<WalletAccount>, onCreated: (SafeAccou
                         },
                         enabled = !busy && owners.size == needed && local.isNotEmpty(),
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text(if (owners.size == needed) "Create" else "Choose ${needed - owners.size} more owner${if (needed - owners.size == 1) "" else "s"}") }
+                    ) {
+                        Text(
+                            if (owners.size == needed) {
+                                stringResource(R.string.safe_create_button)
+                            } else {
+                                pluralStringResource(R.plurals.safe_create_choose_more, needed - owners.size, needed - owners.size)
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -449,7 +460,7 @@ internal fun SafePage(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            checkError = safeErrorMessage(e, "read the Safe", phraseBackedUp)
+            checkError = safeErrorMessage(e, Strings.get(R.string.safe_action_read), phraseBackedUp)
         } finally {
             checking = false
         }
@@ -484,7 +495,7 @@ internal fun SafePage(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                error = safeErrorMessage(e, "price the activation", phraseBackedUp)
+                error = safeErrorMessage(e, Strings.get(R.string.safe_action_price_activation), phraseBackedUp)
             } finally {
                 busy = false
             }
@@ -507,27 +518,32 @@ internal fun SafePage(
             modifier = Modifier.fillMaxSize(),
         ) {
             item("account") {
-                SectionCard(title = "Safe account") {
+                SectionCard(title = stringResource(R.string.safe_account_section)) {
                     SelectionContainer {
                         AddressText(safe.address, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
                     }
                     Text(
-                        "${safePolicy(safe)} · Safe v${SafeProtocol.VERSION} on ${chain?.name ?: "chain ${safe.chainId}"}",
+                        stringResource(
+                            R.string.safe_account_summary,
+                            safePolicy(safe),
+                            SafeProtocol.VERSION,
+                            chain?.name ?: stringResource(R.string.safe_chain_fallback, safe.chainId.toString()),
+                        ),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     if (showQr) {
                         Spacer(Modifier.height(8.dp))
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            QrCodeImage(safe.address, "QR code of the Safe’s address", Modifier.widthIn(max = 280.dp).fillMaxWidth())
+                            QrCodeImage(safe.address, stringResource(R.string.safe_qr_address_description), Modifier.widthIn(max = 280.dp).fillMaxWidth())
                         }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        TextButton(onClick = { showQr = !showQr }) { Text(if (showQr) "Hide QR code" else "Show QR code") }
-                        TextButton(onClick = { copyToClipboard(context, safe.address) }) { Text("Copy address") }
+                        TextButton(onClick = { showQr = !showQr }) { Text(stringResource(if (showQr) R.string.safe_hide_qr else R.string.safe_show_qr)) }
+                        TextButton(onClick = { copyToClipboard(context, safe.address) }) { Text(stringResource(R.string.common_copy_address)) }
                     }
                     Spacer(Modifier.height(4.dp))
-                    Text("Owners", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(stringResource(R.string.safe_owners_label), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     safe.owners.forEach { owner ->
                         Column(Modifier.padding(vertical = 2.dp)) {
                             Text(safeOwnerName(owner, accounts), style = MaterialTheme.typography.bodyMedium)
@@ -553,7 +569,7 @@ internal fun SafePage(
                 q != null -> item("review") {
                     SafeCallReview(
                         quote = q,
-                        what = "Activates this Safe: deploys it through the canonical Safe factory with its owners and threshold.",
+                        what = stringResource(R.string.safe_activation_what),
                         busy = busy,
                         notice = notice,
                         error = error,
@@ -566,8 +582,8 @@ internal fun SafePage(
                             confirmSafeCall(context, q, sender, vault, auth, scope,
                                 setBusy = { busy = it },
                                 onStarted = { quote = null; notice = null },
-                                onError = { error = safeErrorMessage(it, "unlock the wallet", phraseBackedUp) },
-                                onStale = { prepareActivation(); notice = "The fee estimate was over a minute old, so it’s been priced again. Check it and confirm." },
+                                onError = { error = safeErrorMessage(it, Strings.get(R.string.safe_action_unlock), phraseBackedUp) },
+                                onStale = { prepareActivation(); notice = Strings.get(R.string.safe_fee_stale_notice) },
                             )
                         },
                     )
@@ -589,32 +605,32 @@ internal fun SafePage(
                 }
             }
             if (safe.deployed) item("holdings") {
-                SectionCard(title = "Holds") {
+                SectionCard(title = stringResource(R.string.safe_holds)) {
                     val c = chain
                     when {
-                        c == null -> Text("Gnosis isn’t set up in Settings → Chains.", style = MaterialTheme.typography.bodyMedium)
+                        c == null -> Text(stringResource(R.string.safe_gnosis_not_set_up), style = MaterialTheme.typography.bodyMedium)
                         holdings == null && checkError != null -> FieldText(checkError!!, error = true)
-                        holdings == null -> Text("Reading…", style = MaterialTheme.typography.bodyMedium)
+                        holdings == null -> Text(stringResource(R.string.safe_reading), style = MaterialTheme.typography.bodyMedium)
                         else -> holdings!!.forEach { (token, raw) ->
                             // Every digit: a Safe funded with a few wei must not read as "<0.00000001".
                             ReviewRow(token.symbol, "${exactAmount(raw, token.decimals)} ${token.symbol}", mono = true)
                         }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        TextButton(onClick = { refreshTick++ }, enabled = !checking) { Text(if (checking) "Reading…" else "Refresh") }
+                        TextButton(onClick = { refreshTick++ }, enabled = !checking) { Text(stringResource(if (checking) R.string.safe_reading else R.string.safe_refresh)) }
                     }
                 }
             }
             item("pending") {
-                SectionCard(title = "Waiting for signatures") {
+                SectionCard(title = stringResource(R.string.safe_waiting_title)) {
                     if (pending.isEmpty()) {
-                        Text("Nothing is waiting.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(stringResource(R.string.safe_nothing_waiting), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     pending.sortedBy { it.createdAt }.forEach { p ->
                         PageRow(
                             title = safePendingTitle(p),
                             subtitle = safePendingState(p),
-                            thirdLine = p.payment?.let { "to ${it.recipient}" },
+                            thirdLine = p.payment?.let { stringResource(R.string.safe_pending_to, it.recipient) },
                             style = PageRowStyle.Inset,
                             leadingIcon = Icons.Filled.Draw,
                             onClick = { openId = p.id },
@@ -623,22 +639,22 @@ internal fun SafePage(
                 }
             }
             item("propose") {
-                SectionCard(title = "Start") {
+                SectionCard(title = stringResource(R.string.safe_start)) {
                     val hasTx = pending.any { it.kind == SafePending.Kind.TX }
                     PageRow(
-                        title = "Propose a transaction",
+                        title = stringResource(R.string.safe_propose_tx),
                         subtitle = when {
-                            !safe.deployed -> "Once the Safe is active"
-                            hasTx -> "One at a time: execute or discard the one waiting first"
-                            else -> "Send xDAI or a token from the Safe, once enough owners sign"
+                            !safe.deployed -> stringResource(R.string.safe_propose_once_active)
+                            hasTx -> stringResource(R.string.safe_propose_tx_one_at_a_time)
+                            else -> stringResource(R.string.safe_propose_tx_subtitle)
                         },
                         style = PageRowStyle.Inset,
                         enabled = safe.deployed && !hasTx && chain != null,
                         onClick = { proposing = SafePending.Kind.TX },
                     )
                     PageRow(
-                        title = "Propose a message",
-                        subtitle = if (safe.deployed) "A text the Safe signs (EIP-1271), once enough owners sign" else "Once the Safe is active",
+                        title = stringResource(R.string.safe_propose_message),
+                        subtitle = stringResource(if (safe.deployed) R.string.safe_propose_message_subtitle else R.string.safe_propose_once_active),
                         style = PageRowStyle.Inset,
                         enabled = safe.deployed,
                         onClick = { proposing = SafePending.Kind.MESSAGE },
@@ -647,7 +663,7 @@ internal fun SafePage(
             }
             item("remove") {
                 TextButton(onClick = { confirmRemove = true }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Remove from this phone…", color = MaterialTheme.colorScheme.error)
+                    Text(stringResource(R.string.safe_remove_button), color = MaterialTheme.colorScheme.error)
                 }
             }
         }
@@ -655,21 +671,17 @@ internal fun SafePage(
     if (confirmRemove) {
         AlertDialog(
             onDismissRequest = { confirmRemove = false },
-            title = { Text("Remove ${safe.name} from this phone?") },
+            title = { Text(stringResource(R.string.safe_remove_title, safe.name)) },
             text = {
-                Text(
-                    "The Safe and its funds stay on chain, and its owners can still use it elsewhere. This phone forgets it, " +
-                        "and anything waiting for signatures here. It can’t be added back from its address alone: its owners and " +
-                        "salt are only kept here.",
-                )
+                Text(stringResource(R.string.safe_remove_body))
             },
             confirmButton = {
                 TextButton(onClick = {
                     confirmRemove = false
                     scope.launch { runCatching { safes.remove(safe.address) } }
-                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+                }) { Text(stringResource(R.string.common_remove), color = MaterialTheme.colorScheme.error) }
             },
-            dismissButton = { TextButton(onClick = { confirmRemove = false }) { Text("Keep it") } },
+            dismissButton = { TextButton(onClick = { confirmRemove = false }) { Text(stringResource(R.string.safe_keep_it)) } },
         )
     }
 }
@@ -690,25 +702,30 @@ private fun SafeActivationSection(
     onActivate: () -> Unit,
 ) {
     val amber = if (MaterialTheme.colorScheme.isLight) Color(0xFFB45309) else Color(0xFFF59E0B)
-    SectionCard(title = "Not active yet") {
+    SectionCard(title = stringResource(R.string.safe_not_active_title)) {
         when {
-            chain == null -> Text("Gnosis isn’t set up in Settings → Chains, so this Safe can’t be activated.", style = MaterialTheme.typography.bodyMedium)
-            executor == null -> Text("None of its owners is an account in this wallet, so nothing here can pay to activate it.", style = MaterialTheme.typography.bodyMedium)
+            chain == null -> Text(stringResource(R.string.safe_activation_no_chain), style = MaterialTheme.typography.bodyMedium)
+            executor == null -> Text(stringResource(R.string.safe_activation_no_executor), style = MaterialTheme.typography.bodyMedium)
             activation == null && checkError != null -> FieldText(checkError, error = true)
             activation == null -> Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Pricing the activation…", style = MaterialTheme.typography.bodyMedium)
+                Text(stringResource(R.string.safe_activation_pricing), style = MaterialTheme.typography.bodyMedium)
             }
             activation.needsFunds -> {
                 Row(verticalAlignment = Alignment.Top) {
                     Icon(Icons.Filled.ErrorOutline, contentDescription = null, tint = amber, modifier = Modifier.size(22.dp))
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("Needs funds", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+                        Text(stringResource(R.string.safe_activation_needs_funds_title), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
                         Text(
-                            "Activating costs up to ${feeText(activation.maxFee, chain)}, paid by ${executor.name}, which holds " +
-                                "${feeText(activation.balance, chain)}. Send it at least ${feeText(activation.shortfall, chain)}:",
+                            stringResource(
+                                R.string.safe_activation_needs_funds,
+                                feeText(activation.maxFee, chain),
+                                executor.name,
+                                feeText(activation.balance, chain),
+                                feeText(activation.shortfall, chain),
+                            ),
                             style = MaterialTheme.typography.bodyMedium,
                         )
                     }
@@ -716,27 +733,31 @@ private fun SafeActivationSection(
                 Spacer(Modifier.height(4.dp))
                 SelectionContainer { AddressText(executor.address, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface) }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = { onCopy(executor.address) }) { Text("Copy ${executor.name}’s address") }
-                    TextButton(onClick = onRefresh, enabled = !checking) { Text(if (checking) "Checking…" else "Check again") }
+                    TextButton(onClick = { onCopy(executor.address) }) { Text(stringResource(R.string.safe_copy_account_address, executor.name)) }
+                    TextButton(onClick = onRefresh, enabled = !checking) { Text(stringResource(if (checking) R.string.safe_checking else R.string.safe_check_again)) }
                 }
             }
             else -> {
                 Text(
-                    "Activating deploys it on ${chain.name}: up to ${feeText(activation.maxFee, chain)}, paid by ${executor.name} " +
-                        "(holds ${feeText(activation.balance, chain)}).",
+                    stringResource(
+                        R.string.safe_activation_ready,
+                        chain.name,
+                        feeText(activation.maxFee, chain),
+                        executor.name,
+                        feeText(activation.balance, chain),
+                    ),
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(Modifier.height(8.dp))
                 error?.let { FieldText(it, error = true) }
                 Button(onClick = onActivate, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                    if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Activate on ${chain.name}")
+                    if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text(stringResource(R.string.safe_activate_on, chain.name))
                 }
             }
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            "Its address can take funds already, before it’s active: they’re there once it is. " +
-                "Transactions and messages can be proposed once it’s active.",
+            stringResource(R.string.safe_activation_footnote),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -764,13 +785,18 @@ private fun SafeCallReview(
     val tap = rememberArmedTapGuard(quote, PromptTapGuard.SPEND_PROTECTION_MS)
     val guard = tap.guard
     val armed = tap.armed
-    SectionCard(title = "Review") {
-        ReviewRow("What", what)
-        ReviewRow("Network", chain.name)
-        ReviewRow("Paid by", request.from.name, address = request.from.address)
-        ReviewRow("Contract", null, address = request.to)
-        ReviewRow("Network fee", "up to ${feeText(quote.tx.maxFee, chain)}", mono = true, detail = feeDetail(quote.tx))
-        ReviewRow("Nonce", quote.tx.nonce.toString(), detail = nonceDetail(quote))
+    SectionCard(title = stringResource(R.string.safe_review)) {
+        ReviewRow(stringResource(R.string.safe_review_what), what)
+        ReviewRow(stringResource(R.string.safe_label_network), chain.name)
+        ReviewRow(stringResource(R.string.safe_review_paid_by), request.from.name, address = request.from.address)
+        ReviewRow(stringResource(R.string.safe_review_contract), null, address = request.to)
+        ReviewRow(
+            stringResource(R.string.safe_review_network_fee),
+            stringResource(R.string.safe_review_fee_up_to, feeText(quote.tx.maxFee, chain)),
+            mono = true,
+            detail = feeDetail(quote.tx),
+        )
+        ReviewRow(stringResource(R.string.safe_review_nonce), quote.tx.nonce.toString(), detail = nonceDetail(quote))
         Spacer(Modifier.height(4.dp))
         Text(
             feeFootnote(quote.tx),
@@ -783,9 +809,9 @@ private fun SafeCallReview(
     error?.let { FieldText(it, error = true) }
     ObscuredTapNotice(tap)
     SheetButtonRow {
-        OutlinedButton(onClick = onCancel, enabled = !busy) { Text("Cancel") }
+        OutlinedButton(onClick = onCancel, enabled = !busy) { Text(stringResource(R.string.common_cancel)) }
         Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy, modifier = Modifier.protectedPress(tap)) {
-            if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Confirm and send")
+            if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text(stringResource(R.string.safe_confirm_and_send))
         }
     }
 }
@@ -815,7 +841,7 @@ private fun confirmSafeCall(
             if (!q.request.from.isLedger && !vault.unlockedNow()) vault.unlock(auth)
             when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from) { !sender.isStale(q) })) {
                 WalletSender.Submit.STARTED -> onStarted()
-                WalletSender.Submit.BUSY -> onError(SafeException("Another send is still going out, or may have. Settle it (or stop tracking it) on the Send page first."))
+                WalletSender.Submit.BUSY -> onError(SafeException(Strings.get(R.string.safe_send_busy)))
                 WalletSender.Submit.STALE -> stale = true
             }
         } catch (e: CancellationException) {
@@ -864,14 +890,14 @@ private fun SafeProposePage(
             var proposed: SafePending? = null
             try {
                 proposed = if (kind == SafePending.Kind.TX) {
-                    val c = chain ?: throw SafeException("Gnosis isn’t set up in Settings → Chains.")
+                    val c = chain ?: throw SafeException(Strings.get(R.string.safe_gnosis_not_set_up))
                     val t = token ?: return@launch
                     val to = (parsedRecipient as? Recipients.Parsed.Ok)?.address ?: return@launch
                     val value = parsedAmount ?: return@launch
                     val held = if (t.address == null) chainReads.balance(c.id, safe.address) else chainReads.tokenBalance(c.id, t.address, safe.address)
                     if (held < value) {
                         throw SafeException(
-                            "The Safe holds ${SendAmounts.exact(held, t.decimals)} ${t.symbol}. Fund it first: send ${t.symbol} to ${safe.address}.",
+                            Strings.get(R.string.safe_propose_insufficient, SendAmounts.exact(held, t.decimals), t.symbol, safe.address),
                         )
                     }
                     val nonce = chainReads.nonce(c.id, safe.address)
@@ -890,7 +916,7 @@ private fun SafeProposePage(
                 throw e
             } catch (e: Exception) {
                 // Proposed but not signed here (the unlock was cancelled): it waits on the board all the same.
-                if (proposed != null) onProposed(proposed) else error = safeErrorMessage(e, "propose it", phraseBackedUp)
+                if (proposed != null) onProposed(proposed) else error = safeErrorMessage(e, Strings.get(R.string.safe_action_propose), phraseBackedUp)
             } finally {
                 busy = false
             }
@@ -898,21 +924,21 @@ private fun SafeProposePage(
     }
 
     BackHandler(onBack = onBack)
-    FullScreenScaffold(title = if (kind == SafePending.Kind.TX) "Propose a transaction" else "Propose a message", onDismiss = onBack) {
+    FullScreenScaffold(title = stringResource(if (kind == SafePending.Kind.TX) R.string.safe_propose_tx else R.string.safe_propose_message), onDismiss = onBack) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
             item("from") {
-                SectionCard(title = "From") {
+                SectionCard(title = stringResource(R.string.safe_label_from)) {
                     Text(safe.name, fontWeight = FontWeight.Medium)
                     AddressText(safe.address, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             if (kind == SafePending.Kind.TX) {
                 item("asset") {
-                    SectionCard(title = "Asset") {
+                    SectionCard(title = stringResource(R.string.safe_propose_asset)) {
                         tokens.forEach { t ->
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -928,7 +954,7 @@ private fun SafeProposePage(
                     }
                 }
                 item("to") {
-                    SectionCard(title = "To") {
+                    SectionCard(title = stringResource(R.string.safe_label_to)) {
                         OutlinedTextField(
                             value = recipient,
                             onValueChange = {
@@ -944,12 +970,12 @@ private fun SafeProposePage(
                         )
                         if (recipient.isNotEmpty() && parsedRecipient is Recipients.Parsed.Invalid) FieldText(parsedRecipient.reason, error = true)
                         if (parsedRecipient is Recipients.Parsed.Ok && parsedRecipient.address.equals(safe.address, ignoreCase = true)) {
-                            FieldText("That’s the Safe itself.", error = false)
+                            FieldText(stringResource(R.string.safe_recipient_is_safe), error = false)
                         }
                     }
                 }
                 item("amount") {
-                    SectionCard(title = "Amount") {
+                    SectionCard(title = stringResource(R.string.safe_label_amount)) {
                         OutlinedTextField(
                             value = amount,
                             onValueChange = {
@@ -963,13 +989,13 @@ private fun SafeProposePage(
                             modifier = Modifier.fillMaxWidth(),
                         )
                         if (amount.isNotEmpty() && parsedAmount == null) {
-                            FieldText("Not an amount of ${token?.symbol}: at most ${token?.decimals} digits after the point.", error = true)
+                            FieldText(stringResource(R.string.safe_amount_invalid, token?.symbol.toString(), token?.decimals ?: 0), error = true)
                         }
                     }
                 }
             } else {
                 item("message") {
-                    SectionCard(title = "Message") {
+                    SectionCard(title = stringResource(R.string.safe_label_message)) {
                         OutlinedTextField(
                             value = text,
                             onValueChange = {
@@ -981,7 +1007,7 @@ private fun SafeProposePage(
                             modifier = Modifier.fillMaxWidth(),
                         )
                         FieldText(
-                            "Signed as personal_sign text by the Safe (EIP-1271): an app checks it with the Safe’s isValidSignature.",
+                            stringResource(R.string.safe_message_hint),
                             error = false,
                         )
                     }
@@ -990,15 +1016,15 @@ private fun SafeProposePage(
             item("go") {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     val local = safe.owners.mapNotNull { o -> accounts.firstOrNull { it.address.equals(o, ignoreCase = true) } }
+                    val names = local.map { it.name }.reduceOrNull { a, b -> Strings.get(R.string.safe_names_and, a, b) }.orEmpty()
                     FieldText(
-                        "Proposing it signs it here with ${local.joinToString(" and ") { it.name }}" +
-                            (if (safe.threshold > local.size) ", then it waits for other owners’ signatures." else "."),
+                        stringResource(if (safe.threshold > local.size) R.string.safe_propose_signs_here_then_waits else R.string.safe_propose_signs_here, names),
                         error = false,
                     )
                     error?.let { FieldText(it, error = true) }
                     val ready = if (kind == SafePending.Kind.TX) parsedRecipient is Recipients.Parsed.Ok && parsedAmount != null else text.isNotEmpty()
                     Button(onClick = ::propose, enabled = !busy && ready, modifier = Modifier.fillMaxWidth()) {
-                        if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Propose and sign")
+                        if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text(stringResource(R.string.safe_propose_and_sign))
                     }
                 }
             }
@@ -1088,7 +1114,7 @@ private fun SafeRequestPage(
 
     /** The Safe's nonce guard (desktop's): false, and the entry marked, if this transaction can no longer execute. */
     suspend fun stillExecutable(): Boolean {
-        val c = chain ?: throw SafeException("Gnosis isn’t set up in Settings → Chains.")
+        val c = chain ?: throw SafeException(Strings.get(R.string.safe_gnosis_not_set_up))
         val onChain = chainReads.nonce(c.id, safe.address)
         val mine = p.safeTx().nonce
         if (onChain > mine) {
@@ -1096,11 +1122,11 @@ private fun SafeRequestPage(
                 SafeMovedOn.EXECUTED -> safes.discard(p.id)
                 SafeMovedOn.SUPERSEDED -> safes.markSuperseded(p.id)
                 SafeMovedOn.UNKNOWN ->
-                    throw SafeException("The Safe has moved on; this transaction’s execution isn’t confirmed yet. Try again in a moment.")
+                    throw SafeException(Strings.get(R.string.safe_moved_on_unconfirmed))
             }
             return false
         }
-        if (onChain < mine) throw SafeException("An earlier transaction of this Safe (nonce $onChain) hasn’t executed yet.")
+        if (onChain < mine) throw SafeException(Strings.get(R.string.safe_earlier_pending, onChain.toString()))
         return true
     }
 
@@ -1125,9 +1151,9 @@ private fun SafeRequestPage(
         if (sender.status.value?.hash != exec) runCatching { safes.clearExecution(p.id, exec, abandoned = true) }
     }
 
-    fun prepareExecution() = act("price the execution") {
-        val c = chain ?: throw SafeException("Gnosis isn’t set up in Settings → Chains.")
-        val from = SafeChain.executor(safe, accounts) ?: throw SafeException("None of the Safe’s owners is an account in this wallet to pay for the execution.")
+    fun prepareExecution() = act(Strings.get(R.string.safe_action_price_execution)) {
+        val c = chain ?: throw SafeException(Strings.get(R.string.safe_gnosis_not_set_up))
+        val from = SafeChain.executor(safe, accounts) ?: throw SafeException(Strings.get(R.string.safe_no_executor_for_execution))
         if (!stillExecutable()) return@act
         val data = SafeProtocol.execTransactionData(p.safeTx(), p.signatures)
         quote = sender.prepare(
@@ -1139,7 +1165,7 @@ private fun SafeRequestPage(
         if (quote != null) quote = null else onBack()
     }
     BackHandler(onBack = back)
-    FullScreenScaffold(title = if (p.kind == SafePending.Kind.TX) "Safe transaction" else "Safe message", onDismiss = back) {
+    FullScreenScaffold(title = stringResource(if (p.kind == SafePending.Kind.TX) R.string.safe_request_title_tx else R.string.safe_request_title_message), onDismiss = back) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -1147,29 +1173,29 @@ private fun SafeRequestPage(
         ) {
             item("what") {
                 SectionCard(title = safePendingTitle(p)) {
-                    ReviewRow("From", safe.name, address = safe.address)
+                    ReviewRow(stringResource(R.string.safe_label_from), safe.name, address = safe.address)
                     if (p.kind == SafePending.Kind.TX) {
                         val tx = remember(p.id) { p.safeTx() }
                         p.payment?.let { pay ->
-                            ReviewRow("To", null, address = pay.recipient)
-                            ReviewRow("Amount", "${SendAmounts.exact(pay.amount, pay.decimals)} ${pay.symbol}", mono = true, address = pay.token)
+                            ReviewRow(stringResource(R.string.safe_label_to), null, address = pay.recipient)
+                            ReviewRow(stringResource(R.string.safe_label_amount), "${SendAmounts.exact(pay.amount, pay.decimals)} ${pay.symbol}", mono = true, address = pay.token)
                         }
-                        ReviewRow("Safe nonce", tx.nonce.toString())
-                        ReviewRow("SafeTx hash", p.id, mono = true)
+                        ReviewRow(stringResource(R.string.safe_label_safe_nonce), tx.nonce.toString())
+                        ReviewRow(stringResource(R.string.safe_label_safetx_hash), p.id, mono = true)
                     } else {
-                        ReviewRow("Text", p.text.orEmpty())
-                        ReviewRow("SafeMessage hash", p.id, mono = true)
+                        ReviewRow(stringResource(R.string.safe_label_text), p.text.orEmpty())
+                        ReviewRow(stringResource(R.string.safe_label_safemessage_hash), p.id, mono = true)
                     }
                     if (p.superseded) {
                         FieldText(
-                            "The Safe’s nonce has moved past this transaction — it was executed elsewhere, or another took its place — so it can never execute. Discard it.",
+                            stringResource(R.string.safe_superseded_note),
                             error = true,
                         )
                     }
                 }
             }
             item("owners") {
-                SectionCard(title = "${p.collected} of ${p.threshold} signatures") {
+                SectionCard(title = pluralStringResource(R.plurals.safe_signature_count, p.threshold, p.collected, p.threshold)) {
                     ObscuredTapNotice(tap)
                     safe.owners.forEach { owner ->
                         val signed = p.hasSigned(owner)
@@ -1177,7 +1203,7 @@ private fun SafeRequestPage(
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                             Icon(
                                 if (signed) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked,
-                                contentDescription = if (signed) "Signed" else "Not signed",
+                                contentDescription = stringResource(if (signed) R.string.safe_signed else R.string.safe_not_signed),
                                 tint = if (signed) (if (MaterialTheme.colorScheme.isLight) Color(0xFF15803D) else Color(0xFF22C55E)) else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(22.dp),
                             )
@@ -1187,10 +1213,10 @@ private fun SafeRequestPage(
                                 AddressText(owner, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Text(
                                     when {
-                                        signed -> "Signed"
-                                        p.ready -> "Not needed: enough owners have signed"
-                                        mine != null -> if (mine.isLedger) "Signs on its Ledger" else "Signs on this phone"
-                                        else -> "Waiting: share the request below"
+                                        signed -> stringResource(R.string.safe_signed)
+                                        p.ready -> stringResource(R.string.safe_owner_not_needed)
+                                        mine != null -> stringResource(if (mine.isLedger) R.string.safe_owner_signs_on_ledger else R.string.safe_owner_signs_here)
+                                        else -> stringResource(R.string.safe_owner_waiting)
                                     },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1202,14 +1228,14 @@ private fun SafeRequestPage(
                                 TextButton(
                                     onClick = {
                                         if (!tap.guard.accepts()) return@TextButton
-                                        act("sign") {
+                                        act(Strings.get(R.string.safe_action_sign)) {
                                             if (!mine.isLedger && !vault.unlockedNow()) vault.unlock(auth)
                                             safes.signWith(p.id, mine)
                                         }
                                     },
                                     enabled = tap.armed && !busy,
                                     modifier = Modifier.protectedPress(tap),
-                                ) { Text("Sign") }
+                                ) { Text(stringResource(R.string.safe_sign)) }
                             }
                         }
                     }
@@ -1221,7 +1247,7 @@ private fun SafeRequestPage(
                 q != null -> item("review") {
                     SafeCallReview(
                         quote = q,
-                        what = "Executes the Safe’s transaction with its owners’ ${p.collected} signatures: ${safePendingTitle(p)}.",
+                        what = pluralStringResource(R.plurals.safe_execute_what, p.collected, p.collected, safePendingTitle(p)),
                         busy = busy,
                         notice = notice,
                         error = error,
@@ -1230,8 +1256,8 @@ private fun SafeRequestPage(
                             confirmSafeCall(context, q, sender, vault, auth, scope,
                                 setBusy = { busy = it },
                                 onStarted = { quote = null; notice = null },
-                                onError = { error = safeErrorMessage(it, "unlock the wallet", phraseBackedUp) },
-                                onStale = { prepareExecution(); notice = "The fee estimate was over a minute old, so it’s been priced again. Check it and confirm." },
+                                onError = { error = safeErrorMessage(it, Strings.get(R.string.safe_action_unlock), phraseBackedUp) },
+                                onStale = { prepareExecution(); notice = Strings.get(R.string.safe_fee_stale_notice) },
                             )
                         },
                     )
@@ -1251,50 +1277,49 @@ private fun SafeRequestPage(
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         error?.let { FieldText(it, error = true) }
                         Button(onClick = { prepareExecution() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                            if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Execute")
+                            if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text(stringResource(R.string.safe_execute))
                         }
                         FieldText(
-                            "Paid by ${SafeChain.executor(safe, accounts)?.name ?: "an owner account in this wallet"}: the network fee comes from that account, the payment from the Safe.",
+                            SafeChain.executor(safe, accounts)?.name?.let { stringResource(R.string.safe_execute_paid_by, it) }
+                                ?: stringResource(R.string.safe_execute_paid_by_any),
                             error = false,
                         )
                     }
                 }
             }
             if (p.kind == SafePending.Kind.MESSAGE && p.ready) item("signature") {
-                SectionCard(title = "The Safe’s signature") {
+                SectionCard(title = stringResource(R.string.safe_signature_title)) {
                     SelectionContainer { Text(p.combinedSignature(), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
                     FieldText(
-                        "The owners’ signatures, sorted and joined (EIP-1271). An app verifies it by calling isValidSignature on the Safe with the message’s hash.",
+                        stringResource(R.string.safe_signature_hint),
                         error = false,
                     )
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        TextButton(onClick = { copyToClipboard(context, p.combinedSignature()) }) { Text("Copy signature") }
+                        TextButton(onClick = { copyToClipboard(context, p.combinedSignature()) }) { Text(stringResource(R.string.safe_copy_signature)) }
                     }
                 }
             }
             if (!p.ready && !p.superseded) {
                 item("share") {
-                    SectionCard(title = "Ask another owner to sign") {
+                    SectionCard(title = stringResource(R.string.safe_share_title)) {
                         if (qrBytes(share) <= SAFE_QR_MAX) {
                             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                QrCodeImage(share, "QR code of the signing request", Modifier.widthIn(max = 320.dp).fillMaxWidth())
+                                QrCodeImage(share, stringResource(R.string.safe_qr_request_description), Modifier.widthIn(max = 320.dp).fillMaxWidth())
                             }
                             Spacer(Modifier.height(8.dp))
                         }
                         Text(
-                            "On another phone with Freedom: Wallet → Scan QR code, then sign with its owner account. " +
-                                "It’s the typed data desktop Freedom signs for its Safes (eth_signTypedData_v4), so any wallet that signs typed data can sign it." +
-                                (if (qrBytes(share) > SAFE_QR_MAX) " It’s too long for a QR code: copy it instead." else ""),
+                            stringResource(if (qrBytes(share) > SAFE_QR_MAX) R.string.safe_share_hint_too_long else R.string.safe_share_hint),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                            TextButton(onClick = { copyToClipboard(context, share) }) { Text("Copy request") }
+                            TextButton(onClick = { copyToClipboard(context, share) }) { Text(stringResource(R.string.safe_copy_request)) }
                         }
                     }
                 }
                 item("add") {
-                    SectionCard(title = "Add a signature") {
+                    SectionCard(title = stringResource(R.string.safe_add_signature_title)) {
                         OutlinedTextField(
                             value = pasted,
                             onValueChange = {
@@ -1303,24 +1328,24 @@ private fun SafeRequestPage(
                             },
                             enabled = !busy,
                             singleLine = true,
-                            placeholder = { Text("0x… signature from another owner") },
+                            placeholder = { Text(stringResource(R.string.safe_signature_placeholder)) },
                             textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                             keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = KeyboardType.Ascii),
                             modifier = Modifier.fillMaxWidth(),
                         )
                         if (quote == null) error?.let { FieldText(it, error = true) }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                            TextButton(onClick = { scanning = !scanning }, enabled = !busy) { Text(if (scanning) "Stop scanning" else "Scan") }
+                            TextButton(onClick = { scanning = !scanning }, enabled = !busy) { Text(stringResource(if (scanning) R.string.safe_stop_scanning else R.string.safe_scan)) }
                             TextButton(
                                 onClick = {
                                     val sig = pasted
-                                    act("add the signature") {
+                                    act(Strings.get(R.string.safe_action_add_signature)) {
                                         safes.addSignature(p.id, sig)
                                         pasted = ""
                                     }
                                 },
                                 enabled = !busy && pasted.isNotBlank(),
-                            ) { Text("Add") }
+                            ) { Text(stringResource(R.string.common_add)) }
                         }
                         if (scanning) {
                             QrScanner(
@@ -1334,13 +1359,13 @@ private fun SafeRequestPage(
                                 modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)),
                             )
                         }
-                        FieldText("It’s checked before it counts: it must be an owner’s signature of exactly this request.", error = false)
+                        FieldText(stringResource(R.string.safe_signature_checked_hint), error = false)
                     }
                 }
             }
             item("discard") {
                 TextButton(onClick = { confirmDiscard = true }, enabled = !busy && p.execHash == null, modifier = Modifier.fillMaxWidth()) {
-                    Text("Discard…", color = MaterialTheme.colorScheme.error)
+                    Text(stringResource(R.string.safe_discard_button), color = MaterialTheme.colorScheme.error)
                 }
             }
         }
@@ -1360,20 +1385,20 @@ private fun SafeRequestPage(
     if (confirmDiscard) {
         AlertDialog(
             onDismissRequest = { confirmDiscard = false },
-            title = { Text("Discard this ${if (p.kind == SafePending.Kind.TX) "transaction" else "message"}?") },
+            title = { Text(stringResource(if (p.kind == SafePending.Kind.TX) R.string.safe_discard_title_tx else R.string.safe_discard_title_message)) },
             text = {
                 Text(safeDiscardText(p, liveAbandoned))
             },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDiscard = false
-                    act("discard it") {
+                    act(Strings.get(R.string.safe_action_discard)) {
                         safes.discard(p.id)
                         onBack()
                     }
-                }) { Text("Discard", color = MaterialTheme.colorScheme.error) }
+                }) { Text(stringResource(R.string.safe_discard), color = MaterialTheme.colorScheme.error) }
             },
-            dismissButton = { TextButton(onClick = { confirmDiscard = false }) { Text("Keep it") } },
+            dismissButton = { TextButton(onClick = { confirmDiscard = false }) { Text(stringResource(R.string.safe_keep_it)) } },
         )
     }
 }
@@ -1413,19 +1438,11 @@ internal fun safeAbandonedSpent(nonce: BigInteger, minedCount: BigInteger?): Boo
  * executions that can still be mined (all of them unless told otherwise).
  */
 internal fun safeDiscardText(p: SafePending, live: List<SafePending.AbandonedExec> = p.abandonedExecs): String = buildString {
-    append("The signatures collected here are thrown away. A signature already given to another device stays valid there ")
-    append(if (p.kind == SafePending.Kind.TX) "until the Safe executes another transaction with this nonce." else "for this exact message.")
+    append(Strings.get(if (p.kind == SafePending.Kind.TX) R.string.safe_discard_body_tx else R.string.safe_discard_body_message))
     if (p.kind == SafePending.Kind.TX && live.isNotEmpty()) {
         val hashes = live.joinToString(", ") { "${it.hash.take(10)}…" }
-        append(
-            if (live.size == 1) {
-                "\n\nThe execution you stopped tracking ($hashes) can still be mined and make this payment: " +
-                    "discarding doesn’t stop it. The next send from the account that paid for it reuses its nonce and replaces it."
-            } else {
-                "\n\nThe executions you stopped tracking ($hashes) can still be mined, and any one of them makes this payment: " +
-                    "discarding doesn’t stop them. Sends from the account that paid for them reuse their nonces and replace them."
-            },
-        )
+        append("\n\n")
+        append(Strings.plural(R.plurals.safe_discard_abandoned, live.size, hashes))
     }
 }
 
@@ -1492,7 +1509,7 @@ internal fun SafeCoSignPage(
         readsDone = false
         try {
             if (!chainReads.deployed(c.id, r.safe)) {
-                readError = "This Safe isn’t active on ${c.name}, so who owns it can’t be checked. Freedom only co-signs for active Safes."
+                readError = Strings.get(R.string.safe_cosign_not_active, c.name)
                 return@LaunchedEffect
             }
             owners = chainReads.owners(c.id, r.safe)
@@ -1500,7 +1517,7 @@ internal fun SafeCoSignPage(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            readError = safeErrorMessage(e, "read the Safe", phraseBackedUp)
+            readError = safeErrorMessage(e, Strings.get(R.string.safe_action_read), phraseBackedUp)
             readsDone = true
             return@LaunchedEffect
         }
@@ -1527,7 +1544,7 @@ internal fun SafeCoSignPage(
     }
 
     BackHandler(onBack = onBack)
-    FullScreenScaffold(title = "Co-sign for a Safe", onDismiss = onBack) {
+    FullScreenScaffold(title = stringResource(R.string.safe_cosign_title), onDismiss = onBack) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -1535,17 +1552,21 @@ internal fun SafeCoSignPage(
         ) {
             if (request == null) {
                 item("bad") {
-                    SectionCard(title = "Can’t use this request") {
-                        Text(parsed.exceptionOrNull()?.message ?: "This isn’t a Safe signing request.", style = MaterialTheme.typography.bodyMedium)
+                    SectionCard(title = stringResource(R.string.safe_cosign_cant_use)) {
+                        Text(parsed.exceptionOrNull()?.message ?: stringResource(R.string.safe_cosign_not_a_request), style = MaterialTheme.typography.bodyMedium)
                     }
                 }
                 return@LazyColumn
             }
             item("what") {
-                SectionCard(title = if (request is SafeProtocol.Request.Tx) "Transaction" else "Message") {
+                SectionCard(title = stringResource(if (request is SafeProtocol.Request.Tx) R.string.safe_label_transaction else R.string.safe_label_message)) {
                     if (selfCall.needsAcknowledgement) SafeSelfCallWarning(selfCall!!)
-                    ReviewRow("Safe", null, address = request.safe)
-                    ReviewRow("Network", chain?.name ?: "Chain ID ${request.chainId}", detail = if (chain == null) "Not one of your networks." else null)
+                    ReviewRow(stringResource(R.string.safe_label_safe), null, address = request.safe)
+                    ReviewRow(
+                        stringResource(R.string.safe_label_network),
+                        chain?.name ?: stringResource(R.string.safe_chain_id_fallback, request.chainId.toString()),
+                        detail = if (chain == null) stringResource(R.string.safe_cosign_not_your_network) else null,
+                    )
                     when (request) {
                         is SafeProtocol.Request.Tx -> {
                             val tx = request.tx
@@ -1567,63 +1588,69 @@ internal fun SafeCoSignPage(
                                     queuedNote = safeSelfCallQueuedNote(selfCall, snapshot, tx.nonce),
                                 )
                             } else if (transfer != null) {
-                                ReviewRow("Sends", "${SendAmounts.exact(transfer.second, token.decimals)} ${token.symbol}", mono = true, address = token.address)
-                                ReviewRow("To", null, address = transfer.first)
+                                ReviewRow(stringResource(R.string.safe_label_sends), "${SendAmounts.exact(transfer.second, token.decimals)} ${token.symbol}", mono = true, address = token.address)
+                                ReviewRow(stringResource(R.string.safe_label_to), null, address = transfer.first)
                                 // Everything signed is shown: a token transfer that also carries native currency says so.
                                 if (tx.value.signum() != 0) {
                                     ReviewRow(
-                                        "Also sends",
-                                        chain?.let { "${SendAmounts.exact(tx.value, it.decimals)} ${it.symbol}" } ?: "${tx.value} base units",
+                                        stringResource(R.string.safe_label_also_sends),
+                                        chain?.let { "${SendAmounts.exact(tx.value, it.decimals)} ${it.symbol}" } ?: stringResource(R.string.safe_base_units, tx.value.toString()),
                                         mono = true,
-                                        detail = "Native currency to the token contract, on top of the transfer.",
+                                        detail = stringResource(R.string.safe_also_sends_detail),
                                     )
                                 }
                             } else {
-                                ReviewRow("To", null, address = tx.to)
+                                ReviewRow(stringResource(R.string.safe_label_to), null, address = tx.to)
                                 ReviewRow(
-                                    "Amount",
-                                    chain?.let { "${SendAmounts.exact(tx.value, it.decimals)} ${it.symbol}" } ?: "${tx.value} base units",
+                                    stringResource(R.string.safe_label_amount),
+                                    chain?.let { "${SendAmounts.exact(tx.value, it.decimals)} ${it.symbol}" } ?: stringResource(R.string.safe_base_units, tx.value.toString()),
                                     mono = true,
                                 )
-                                if (tx.data.isNotEmpty()) HexRow("Data", "0x" + tx.data.toHex(), selector = true, detail = "A contract call: check what it does before signing.")
+                                if (tx.data.isNotEmpty()) {
+                                    HexRow(stringResource(R.string.safe_label_data), "0x" + tx.data.toHex(), selector = true, detail = stringResource(R.string.safe_contract_call_detail))
+                                }
                             }
+                            val shownNonce = safeNonceShown(selfCall, snapshot, nonce)
                             ReviewRow(
-                                "Safe nonce",
+                                stringResource(R.string.safe_label_safe_nonce),
                                 tx.nonce.toString(),
-                                detail = safeNonceShown(selfCall, snapshot, nonce)?.let { n ->
-                                    when {
-                                        n > tx.nonce -> "The Safe is already past this nonce: this transaction can never execute."
-                                        n < tx.nonce -> "The Safe’s next nonce is $n: earlier transactions must execute first."
-                                        else -> "The Safe’s next transaction."
-                                    }
+                                detail = when {
+                                    shownNonce == null -> null
+                                    shownNonce > tx.nonce -> stringResource(R.string.safe_nonce_past)
+                                    shownNonce < tx.nonce -> stringResource(R.string.safe_nonce_ahead, shownNonce.toString())
+                                    else -> stringResource(R.string.safe_nonce_next)
                                 },
                             )
                         }
-                        is SafeProtocol.Request.Message -> ReviewRow("Text", request.text)
+                        is SafeProtocol.Request.Message -> ReviewRow(stringResource(R.string.safe_label_text), request.text)
                     }
-                    ReviewRow(if (request is SafeProtocol.Request.Tx) "SafeTx hash" else "SafeMessage hash", "0x" + request.hash.toHex(), mono = true)
+                    ReviewRow(
+                        stringResource(if (request is SafeProtocol.Request.Tx) R.string.safe_label_safetx_hash else R.string.safe_label_safemessage_hash),
+                        "0x" + request.hash.toHex(),
+                        mono = true,
+                    )
                 }
             }
             item("sign") {
-                SectionCard(title = "Sign") {
+                SectionCard(title = stringResource(R.string.safe_sign_section_title)) {
                     val s = signature
                     when (stage) {
                         SafeCoSignStage.SIGNED -> if (s != null) {
-                            Text("Signed with ${s.first.name}. Show this to the owner collecting signatures, or copy it to them:", style = MaterialTheme.typography.bodyMedium)
+                            Text(stringResource(R.string.safe_cosign_signed, s.first.name), style = MaterialTheme.typography.bodyMedium)
                             Spacer(Modifier.height(8.dp))
                             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                QrCodeImage(s.second, "QR code of the signature", Modifier.widthIn(max = 280.dp).fillMaxWidth())
+                                QrCodeImage(s.second, stringResource(R.string.safe_qr_signature_description), Modifier.widthIn(max = 280.dp).fillMaxWidth())
                             }
                             SelectionContainer { Text(s.second, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                                TextButton(onClick = { copyToClipboard(context, s.second) }) { Text("Copy signature") }
+                                TextButton(onClick = { copyToClipboard(context, s.second) }) { Text(stringResource(R.string.safe_copy_signature)) }
                             }
                         }
-                        SafeCoSignStage.NO_CHAIN -> Text("Freedom co-signs Safes on your networks only.", style = MaterialTheme.typography.bodyMedium)
+                        SafeCoSignStage.NO_CHAIN -> Text(stringResource(R.string.safe_cosign_no_chain), style = MaterialTheme.typography.bodyMedium)
                         SafeCoSignStage.READ_FAILED -> FieldText(readError.orEmpty(), error = true)
-                        SafeCoSignStage.CHECKING -> Text("Checking the Safe’s owners…", style = MaterialTheme.typography.bodyMedium)
-                        SafeCoSignStage.NOT_OWNER -> Text("None of this wallet’s accounts owns this Safe, so it can’t sign for it.", style = MaterialTheme.typography.bodyMedium)
-                        SafeCoSignStage.OUTDATED -> Text("This transaction can no longer execute, so there’s nothing to sign.", style = MaterialTheme.typography.bodyMedium)
+                        SafeCoSignStage.CHECKING -> Text(stringResource(R.string.safe_cosign_checking), style = MaterialTheme.typography.bodyMedium)
+                        SafeCoSignStage.NOT_OWNER -> Text(stringResource(R.string.safe_cosign_not_owner), style = MaterialTheme.typography.bodyMedium)
+                        SafeCoSignStage.OUTDATED -> Text(stringResource(R.string.safe_cosign_outdated), style = MaterialTheme.typography.bodyMedium)
                         SafeCoSignStage.SIGN -> {
                             error?.let { FieldText(it, error = true) }
                             ObscuredTapNotice(tap)
@@ -1640,7 +1667,7 @@ internal fun SafeCoSignPage(
                                 ) {
                                     Checkbox(checked = selfCallAcknowledged, onCheckedChange = null, enabled = armed && !busy)
                                     Spacer(Modifier.width(8.dp))
-                                    Text("I understand this changes the Safe itself, and I trust it", style = MaterialTheme.typography.bodyMedium)
+                                    Text(stringResource(R.string.safe_self_call_acknowledge), style = MaterialTheme.typography.bodyMedium)
                                 }
                             }
                             mine.forEach { account ->
@@ -1657,7 +1684,7 @@ internal fun SafeCoSignPage(
                                             } catch (e: CancellationException) {
                                                 throw e
                                             } catch (e: Exception) {
-                                                error = safeErrorMessage(e, "sign", phraseBackedUp)
+                                                error = safeErrorMessage(e, Strings.get(R.string.safe_action_sign), phraseBackedUp)
                                             } finally {
                                                 busy = false
                                             }
@@ -1665,7 +1692,7 @@ internal fun SafeCoSignPage(
                                     },
                                     enabled = armed && !busy && selfCallCleared,
                                     modifier = Modifier.fillMaxWidth().protectedPress(tap),
-                                ) { Text("Sign with ${account.name}") }
+                                ) { Text(stringResource(R.string.safe_sign_with, account.name)) }
                             }
                         }
                     }
@@ -1714,7 +1741,7 @@ private fun SafeSelfCallWarning(call: SafeSelfCall) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.ErrorOutline, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("This changes the Safe itself", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.safe_self_call_warning_title), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             }
             Spacer(Modifier.height(4.dp))
             Text(safeSelfCallRisk(call), style = MaterialTheme.typography.bodyMedium)
@@ -1723,20 +1750,20 @@ private fun SafeSelfCallWarning(call: SafeSelfCall) {
 }
 
 /** Why [call] matters, for the warning. */
-internal fun safeSelfCallRisk(call: SafeSelfCall): String = when (call) {
-    is SafeSelfCall.AddOwner ->
-        "It adds a new owner, who can then sign for this Safe. Together with the threshold it sets, that can give someone else control of everything in it."
-    is SafeSelfCall.RemoveOwner -> "It removes an owner, who can then no longer sign for this Safe, and sets how many owners must sign."
-    is SafeSelfCall.SwapOwner -> "It replaces an owner with another address, which can then sign for this Safe in its place."
-    is SafeSelfCall.ChangeThreshold -> "It changes how many owners must sign a transaction. Too low, and fewer owners — maybe one — can move everything in the Safe."
-    is SafeSelfCall.EnableModule -> "It adds a module. A module can move anything in the Safe with no owner signatures at all."
-    is SafeSelfCall.DisableModule -> "It removes a module from the Safe."
-    is SafeSelfCall.SetGuard -> "It sets the Safe’s transaction guard. A guard checks every transaction the Safe executes, and a bad one can block them all for good."
-    is SafeSelfCall.SetFallbackHandler ->
-        "It sets the Safe’s fallback handler, which answers calls the Safe itself doesn’t know — including whether a signature is valid for it. A bad one can approve messages no owner signed."
-    SafeSelfCall.Unknown -> "It calls one of the Safe’s own functions that Freedom can’t read. It may change who controls the Safe."
-    SafeSelfCall.Cancel -> "It does nothing but use up its nonce."
-}
+internal fun safeSelfCallRisk(call: SafeSelfCall): String = Strings.get(
+    when (call) {
+        is SafeSelfCall.AddOwner -> R.string.safe_risk_add_owner
+        is SafeSelfCall.RemoveOwner -> R.string.safe_risk_remove_owner
+        is SafeSelfCall.SwapOwner -> R.string.safe_risk_swap_owner
+        is SafeSelfCall.ChangeThreshold -> R.string.safe_risk_change_threshold
+        is SafeSelfCall.EnableModule -> R.string.safe_risk_enable_module
+        is SafeSelfCall.DisableModule -> R.string.safe_risk_disable_module
+        is SafeSelfCall.SetGuard -> R.string.safe_risk_set_guard
+        is SafeSelfCall.SetFallbackHandler -> R.string.safe_risk_set_fallback_handler
+        SafeSelfCall.Unknown -> R.string.safe_risk_unknown
+        SafeSelfCall.Cancel -> R.string.safe_risk_cancel
+    },
+)
 
 /** Whether [this] needs the "I understand" acknowledgement before it can be signed: any self-call but a cancellation. */
 internal val SafeSelfCall?.needsAcknowledgement: Boolean get() = this != null && !harmless
@@ -1780,8 +1807,7 @@ internal fun safeSelfCallCleared(call: SafeSelfCall?, acknowledged: Boolean): Bo
  * The note for a Safe set as its own fallback handler: a v1.4 Safe refuses it
  * (GS400), but v1.3.0 and older install it, so it can't promise a failure.
  */
-internal const val SAFE_SELF_HANDLER_NOTE =
-    "The fallback handler is this Safe itself. A Safe from v1.4 on refuses that, but an older one accepts it and loses its fallback handler: it can then no longer confirm signed messages (EIP-1271) or receive NFTs sent with a safe transfer. Don’t count on this failing."
+internal val SAFE_SELF_HANDLER_NOTE: String get() = Strings.get(R.string.safe_self_handler_note)
 
 internal fun safeSelfCallFailure(
     call: SafeSelfCall,
@@ -1798,36 +1824,39 @@ internal fun safeSelfCallFailure(
     fun noAddress(address: String) = address.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true) ||
         address.equals(SAFE_OWNERS_SENTINEL, ignoreCase = true)
     fun added(owners: List<String>, address: String) = when {
-        address.equals(safe, ignoreCase = true) -> "The new owner is this Safe itself, which can’t own itself: this transaction would fail."
-        noAddress(address) -> "The new owner is no address: this transaction would fail."
-        has(owners, address) -> "The new owner already owns this Safe: this transaction would fail."
+        address.equals(safe, ignoreCase = true) -> Strings.get(R.string.safe_fail_new_owner_is_safe)
+        noAddress(address) -> Strings.get(R.string.safe_fail_new_owner_no_address)
+        has(owners, address) -> Strings.get(R.string.safe_fail_new_owner_already_owns)
         else -> null
     }
-    fun removed(owners: List<String>, prev: String, address: String, what: String) = when {
-        !has(owners, address) -> "The $what owner doesn’t own this Safe: this transaction would fail."
-        !prev.equals(prevIn(owners, address), ignoreCase = true) -> "It names the wrong owner before the $what one in the Safe’s owner list: this transaction would fail."
+    // [replaced]: the owner is swapped out rather than removed.
+    fun removed(owners: List<String>, prev: String, address: String, replaced: Boolean) = when {
+        !has(owners, address) ->
+            Strings.get(if (replaced) R.string.safe_fail_replaced_not_owner else R.string.safe_fail_removed_not_owner)
+        !prev.equals(prevIn(owners, address), ignoreCase = true) ->
+            Strings.get(if (replaced) R.string.safe_fail_replaced_wrong_prev else R.string.safe_fail_removed_wrong_prev)
         else -> null
     }
     return when (call) {
         is SafeSelfCall.AddOwner -> owners?.let { added(it, call.owner) }
-        is SafeSelfCall.RemoveOwner -> owners?.let { removed(it, call.prev, call.owner, "removed") }
-        is SafeSelfCall.SwapOwner -> owners?.let { removed(it, call.prev, call.old, "replaced") ?: added(it, call.new) }
+        is SafeSelfCall.RemoveOwner -> owners?.let { removed(it, call.prev, call.owner, replaced = false) }
+        is SafeSelfCall.SwapOwner -> owners?.let { removed(it, call.prev, call.old, replaced = true) ?: added(it, call.new) }
         is SafeSelfCall.EnableModule -> when {
-            noAddress(call.module) -> "The module is no address: this transaction would fail."
-            modules != null && has(modules, call.module) -> "This module is already enabled on the Safe: this transaction would fail."
+            noAddress(call.module) -> Strings.get(R.string.safe_fail_module_no_address)
+            modules != null && has(modules, call.module) -> Strings.get(R.string.safe_fail_module_already_enabled)
             else -> null
         }
         is SafeSelfCall.DisableModule -> when {
-            noAddress(call.module) -> "The module is no address: this transaction would fail."
+            noAddress(call.module) -> Strings.get(R.string.safe_fail_module_no_address)
             modules == null -> null
-            !has(modules, call.module) -> "This module isn’t enabled on the Safe: this transaction would fail."
+            !has(modules, call.module) -> Strings.get(R.string.safe_fail_module_not_enabled)
             !call.prev.equals(prevIn(modules, call.module), ignoreCase = true) ->
-                "It names the wrong module before this one in the Safe’s module list: this transaction would fail."
+                Strings.get(R.string.safe_fail_module_wrong_prev)
             else -> null
         }
         is SafeSelfCall.SetGuard ->
             if (!call.guard.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true) && guardSupported == false) {
-                "This address doesn’t answer as a transaction guard right now, which a Safe from v1.4 on refuses; an older Safe doesn’t check. Its code can change before this executes too, so don’t count on this failing: a guard can block every later transaction from this Safe, including one that removes it."
+                Strings.get(R.string.safe_fail_guard_unsupported)
             } else {
                 null
             }
@@ -1852,9 +1881,9 @@ internal fun safeSelfCallThreshold(call: SafeSelfCall, owners: List<String>?, sa
     }
     safeSelfCallFailure(call, owners, safe)?.let { return it }
     return when {
-        t.signum() == 0 || t > BigInteger.valueOf(n.toLong()) -> "Not possible with $n owners: this transaction would fail."
-        t == BigInteger.ONE && n > 1 -> "Any one of $n owners alone can then move everything in the Safe."
-        else -> "$t of $n owners must then sign."
+        t.signum() == 0 || t > BigInteger.valueOf(n.toLong()) -> Strings.plural(R.plurals.safe_threshold_impossible, n, n)
+        t == BigInteger.ONE && n > 1 -> Strings.plural(R.plurals.safe_threshold_any_one, n, n)
+        else -> Strings.plural(R.plurals.safe_threshold_must_sign, n, t, n)
     }
 }
 
@@ -1870,14 +1899,10 @@ internal fun safeSelfCallThreshold(call: SafeSelfCall, owners: List<String>?, sa
  * one only hedges too: anyone can send the Safe native currency first.
  */
 internal fun safeCancelDetail(nonce: BigInteger, value: BigInteger, balance: BigInteger?, amount: String): String = when {
-    value.signum() == 0 ->
-        "A call from the Safe to itself with no data. It only uses up Safe nonce $nonce, so no other transaction with that nonce can execute."
-    balance != null && balance < value ->
-        "A call from the Safe to itself with no data, sending $amount — more than the Safe held when it was read. Unless it holds that much when it executes it fails, and Safe nonce $nonce stays open for another transaction. Anyone can send the Safe funds before then, so don’t count on it failing either."
-    balance != null ->
-        "A call from the Safe to itself with no data: the $amount it sends comes straight back. The Safe holds that much now, so it uses up Safe nonce $nonce and no other transaction with that nonce can execute, as long as the Safe still holds that much when it executes. If not, it fails and the nonce stays open."
-    else ->
-        "A call from the Safe to itself with no data, sending $amount straight back to it. It uses up Safe nonce $nonce only if the Safe holds that much when it executes; otherwise it fails and the nonce stays open."
+    value.signum() == 0 -> Strings.get(R.string.safe_cancel_detail_no_value, nonce.toString())
+    balance != null && balance < value -> Strings.get(R.string.safe_cancel_detail_short, nonce.toString(), amount)
+    balance != null -> Strings.get(R.string.safe_cancel_detail_covered, nonce.toString(), amount)
+    else -> Strings.get(R.string.safe_cancel_detail_unread, nonce.toString(), amount)
 }
 
 /**
@@ -1927,23 +1952,27 @@ private val SafeSelfCall.readsOwnersOrModules: Boolean
  */
 internal fun safeSelfCallQueuedNote(call: SafeSelfCall, snapshot: SafeChain.Snapshot?, txNonce: BigInteger): String? {
     if (snapshot == null || snapshot.nonce > txNonce) return null
-    val (what, count) = when (call) {
-        is SafeSelfCall.AddOwner, is SafeSelfCall.RemoveOwner, is SafeSelfCall.SwapOwner, is SafeSelfCall.ChangeThreshold ->
-            "owners" to "failing, or on how many owners it leaves"
-        is SafeSelfCall.EnableModule, is SafeSelfCall.DisableModule -> "modules" to "failing"
+    // Whether it's checked against the owners (owner and threshold calls) or the modules.
+    val owners = when (call) {
+        is SafeSelfCall.AddOwner, is SafeSelfCall.RemoveOwner, is SafeSelfCall.SwapOwner, is SafeSelfCall.ChangeThreshold -> true
+        is SafeSelfCall.EnableModule, is SafeSelfCall.DisableModule -> false
         else -> return null
     }
-    val why = when {
-        snapshot.nonce < txNonce ->
-            "When the Safe was read its next nonce was ${snapshot.nonce}. Transactions before Safe nonce $txNonce execute first and can change the Safe’s $what"
+    return when {
+        snapshot.nonce < txNonce -> Strings.get(
+            if (owners) R.string.safe_queued_owners_behind else R.string.safe_queued_modules_behind,
+            snapshot.nonce.toString(),
+            txNonce.toString(),
+        )
         snapshot.modules == null ->
-            "This Safe’s modules couldn’t all be read, and an enabled module can change the Safe’s $what at any time, with no owner signatures and no Safe nonce"
-        snapshot.modules.isNotEmpty() ->
-            "This Safe has ${if (snapshot.modules.size == 1) "a module" else "${snapshot.modules.size} modules"} enabled, and a module can change the Safe’s $what at any time, with no owner signatures and no Safe nonce"
-        else -> return null
+            Strings.get(if (owners) R.string.safe_queued_owners_modules_unread else R.string.safe_queued_modules_modules_unread)
+        snapshot.modules.isNotEmpty() -> Strings.plural(
+            if (owners) R.plurals.safe_queued_owners_has_modules else R.plurals.safe_queued_modules_has_modules,
+            snapshot.modules.size,
+            snapshot.modules.size,
+        )
+        else -> null
     }
-    val judge = if (snapshot.nonce < txNonce) " Judge what it does once those have executed." else ""
-    return "$why, so this isn’t checked against the $what it has now: don’t count on it $count.$judge"
 }
 
 /** The head of a Safe's owner (and module) linked list: the `prevOwner` of its first owner, the `prevModule` of its first module. */
@@ -1951,7 +1980,9 @@ internal const val SAFE_OWNERS_SENTINEL = "0x00000000000000000000000000000000000
 
 /** [address] named as one of this wallet's own [accounts] ("Account 1 (this phone)"), or null for anyone else's. */
 internal fun safeOwnAccountLabel(address: String, accounts: List<WalletAccount>): String? =
-    accounts.firstOrNull { it.address.equals(address, ignoreCase = true) }?.let { "${it.name} (${if (it.isLedger) "on its Ledger" else "this phone"})" }
+    accounts.firstOrNull { it.address.equals(address, ignoreCase = true) }?.let {
+        Strings.get(if (it.isLedger) R.string.safe_own_account_ledger else R.string.safe_own_account_phone, it.name)
+    }
 
 /** The decoded rows of a SafeTx from the Safe to itself; [owners] (on chain, if read) to count the threshold against. */
 @Composable
@@ -1970,60 +2001,73 @@ private fun SafeSelfCallRows(
     // A call queued behind earlier ones says instead that those can change what it's checked against.
     val fails = listOfNotNull(safeSelfCallFailure(call, owners, tx.to, modules, guardSupported), queuedNote)
         .joinToString("\n\n").ifEmpty { null }
-    val amount = chain?.let { "${SendAmounts.exact(tx.value, it.decimals)} ${it.symbol}" } ?: "${tx.value} base units"
-    fun none(address: String) = if (address.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true)) "None" else null
+    val amount = chain?.let { "${SendAmounts.exact(tx.value, it.decimals)} ${it.symbol}" } ?: stringResource(R.string.safe_base_units, tx.value.toString())
+    val noneText = stringResource(R.string.safe_none)
+    fun none(address: String) = if (address.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true)) noneText else null
     // A removed owner that is this wallet's own account is named, so signing yourself out can't pass as a bare address.
     @Composable
     fun Removed(address: String) {
         val own = safeOwnAccountLabel(address, accounts)
-        ReviewRow("Removed owner", own, address = address, detail = own?.let { "One of this wallet’s accounts: it can then no longer sign for this Safe." })
+        val ownDetail = stringResource(R.string.safe_removed_own_account_detail)
+        ReviewRow(stringResource(R.string.safe_label_removed_owner), own, address = address, detail = own?.let { ownDetail })
     }
     when (call) {
         SafeSelfCall.Cancel -> {
-            ReviewRow("Does", "Nothing: cancels", detail = safeCancelDetail(tx.nonce, tx.value, safeBalance, amount))
+            ReviewRow(stringResource(R.string.safe_label_does), stringResource(R.string.safe_does_cancel), detail = safeCancelDetail(tx.nonce, tx.value, safeBalance, amount))
         }
         is SafeSelfCall.AddOwner -> {
-            ReviewRow("Changes", "Adds an owner", detail = queuedNote)
-            ReviewRow("New owner", safeOwnAccountLabel(call.owner, accounts), address = call.owner)
-            ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners, tx.to))
+            ReviewRow(stringResource(R.string.safe_label_changes), stringResource(R.string.safe_changes_add_owner), detail = queuedNote)
+            ReviewRow(stringResource(R.string.safe_label_new_owner), safeOwnAccountLabel(call.owner, accounts), address = call.owner)
+            ReviewRow(stringResource(R.string.safe_label_threshold), call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners, tx.to))
         }
         is SafeSelfCall.RemoveOwner -> {
-            ReviewRow("Changes", "Removes an owner", detail = queuedNote)
+            ReviewRow(stringResource(R.string.safe_label_changes), stringResource(R.string.safe_changes_remove_owner), detail = queuedNote)
             Removed(call.owner)
-            ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners, tx.to))
+            ReviewRow(stringResource(R.string.safe_label_threshold), call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners, tx.to))
         }
         is SafeSelfCall.SwapOwner -> {
             // No threshold row to carry it: whether the Safe would refuse it goes on this one.
-            ReviewRow("Changes", "Replaces an owner", detail = fails)
+            ReviewRow(stringResource(R.string.safe_label_changes), stringResource(R.string.safe_changes_swap_owner), detail = fails)
             Removed(call.old)
-            ReviewRow("New owner", safeOwnAccountLabel(call.new, accounts), address = call.new)
+            ReviewRow(stringResource(R.string.safe_label_new_owner), safeOwnAccountLabel(call.new, accounts), address = call.new)
         }
         is SafeSelfCall.ChangeThreshold -> {
-            ReviewRow("Changes", "The threshold", detail = queuedNote)
-            ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners, tx.to))
+            ReviewRow(stringResource(R.string.safe_label_changes), stringResource(R.string.safe_changes_threshold), detail = queuedNote)
+            ReviewRow(stringResource(R.string.safe_label_threshold), call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners, tx.to))
         }
         is SafeSelfCall.EnableModule -> {
-            ReviewRow("Changes", "Adds a module", detail = fails)
-            ReviewRow("Module", null, address = call.module)
+            ReviewRow(stringResource(R.string.safe_label_changes), stringResource(R.string.safe_changes_enable_module), detail = fails)
+            ReviewRow(stringResource(R.string.safe_label_module), null, address = call.module)
         }
         is SafeSelfCall.DisableModule -> {
-            ReviewRow("Changes", "Removes a module", detail = fails)
-            ReviewRow("Module", null, address = call.module)
+            ReviewRow(stringResource(R.string.safe_label_changes), stringResource(R.string.safe_changes_disable_module), detail = fails)
+            ReviewRow(stringResource(R.string.safe_label_module), null, address = call.module)
         }
         is SafeSelfCall.SetGuard -> {
-            ReviewRow("Changes", "The transaction guard", detail = fails)
-            ReviewRow("Guard", none(call.guard), address = call.guard.takeIf { none(it) == null })
+            ReviewRow(stringResource(R.string.safe_label_changes), stringResource(R.string.safe_changes_guard), detail = fails)
+            ReviewRow(stringResource(R.string.safe_label_guard), none(call.guard), address = call.guard.takeIf { none(it) == null })
         }
         is SafeSelfCall.SetFallbackHandler -> {
-            ReviewRow("Changes", "The fallback handler", detail = fails)
-            ReviewRow("Fallback handler", none(call.handler), address = call.handler.takeIf { none(it) == null })
+            ReviewRow(stringResource(R.string.safe_label_changes), stringResource(R.string.safe_changes_fallback_handler), detail = fails)
+            ReviewRow(stringResource(R.string.safe_label_fallback_handler), none(call.handler), address = call.handler.takeIf { none(it) == null })
         }
-        SafeSelfCall.Unknown -> ReviewRow("Changes", "Unknown", detail = "A call to this Safe’s own functions that Freedom can’t read.")
+        SafeSelfCall.Unknown -> ReviewRow(
+            stringResource(R.string.safe_label_changes),
+            stringResource(R.string.safe_changes_unknown),
+            detail = stringResource(R.string.safe_unknown_detail),
+        )
     }
-    ReviewRow("To", null, address = tx.to, detail = "This Safe itself.")
-    ReviewRow("Amount", amount, mono = true)
+    ReviewRow(stringResource(R.string.safe_label_to), null, address = tx.to, detail = stringResource(R.string.safe_to_self_detail))
+    ReviewRow(stringResource(R.string.safe_label_amount), amount, mono = true)
     // Everything signed is shown: the raw call data under what was read from it.
-    if (tx.data.isNotEmpty()) HexRow("Data", "0x" + tx.data.toHex(), selector = true, detail = if (call == SafeSelfCall.Unknown) "Check what it does before signing." else "The call data decoded above.")
+    if (tx.data.isNotEmpty()) {
+        HexRow(
+            stringResource(R.string.safe_label_data),
+            "0x" + tx.data.toHex(),
+            selector = true,
+            detail = stringResource(if (call == SafeSelfCall.Unknown) R.string.safe_data_check_detail else R.string.safe_data_decoded_detail),
+        )
+    }
 }
 
 /** `transfer(to, amount)` call data → (to, amount), or null for anything else. */
