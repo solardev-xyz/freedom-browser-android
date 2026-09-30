@@ -179,7 +179,11 @@ internal class EnsColibri(
                                     if (request.optString("type") == "prover") hostOf(answer.url)?.let(provers::add)
                                 }
                                 is Served.Failed -> {
-                                    unserved = true
+                                    // A server that answered with its own
+                                    // refusal (a prover that can't prove the
+                                    // head block yet) was reached: this read
+                                    // failed, not the network.
+                                    if (!answer.answered) unserved = true
                                     engine.setError(req, answer.error, 0)
                                 }
                             }
@@ -211,7 +215,8 @@ internal class EnsColibri(
 
     private sealed class Served {
         class Ok(val body: ByteArray, val index: Int, val url: String) : Served()
-        class Failed(val error: String) : Served()
+        /** [answered]: a server was reached and refused this request itself ([refusal]). */
+        class Failed(val error: String, val answered: Boolean) : Served()
     }
 
     /**
@@ -229,6 +234,7 @@ internal class EnsColibri(
         val ssz = request.optString("encoding") == "ssz"
         val ttl = request.optLong("ttl", 0)
         var lastError = "no server for ${request.optString("type")} requests"
+        var answered = false
         for ((index, server) in servers.withIndex()) {
             if (index < 63 && exclude and (1L shl index) != 0L) continue
             val url = if (path.isNotEmpty()) server.removeSuffix("/") + "/" + path.removePrefix("/") else server
@@ -240,19 +246,38 @@ internal class EnsColibri(
             try {
                 val reply = fetch(method, url, headers, payload?.toString()?.toByteArray())
                 if (reply.code in 200..299) return Served.Ok(reply.body, index, url)
-                lastError = "HTTP ${reply.code} from ${hostOf(url)}"
+                val refused = refusal(reply)
+                if (refused != null) answered = true
+                lastError = "HTTP ${reply.code} from ${hostOf(url)}" +
+                    refused?.let { ": " + redact(it.take(200), url, server) }.orEmpty()
             } catch (e: IOException) {
                 // An exception's message can quote the URL, and a keyed
                 // endpoint's URL carries the user's API key (#169): this
                 // text goes to logcat and back into the core's own error.
-                val message = listOf(url, server).fold(e.message.orEmpty()) { text, u ->
-                    text.replace(u, EnsRpcConfig.redact(u))
-                }
-                lastError = "${hostOf(url)}: $message"
+                lastError = "${hostOf(url)}: ${redact(e.message.orEmpty(), url, server)}"
             }
         }
         Log.i(TAG, "colibri ${request.optString("type")} request failed: $lastError")
-        return Served.Failed(lastError)
+        return Served.Failed(lastError, answered)
+    }
+
+    private fun redact(text: String, vararg urls: String) =
+        urls.fold(text) { t, u -> t.replace(u, EnsRpcConfig.redact(u)) }
+
+    /**
+     * The server's own error for [reply] when it refused the request
+     * itself — a 4xx or a 500 with a JSON `{"error": …}` body, the way a
+     * prover says it can't prove a block it doesn't have yet (HTTP 500
+     * "The Block after N … can not be found in the execution layer!") —
+     * or `null` when the reply says the server couldn't be reached or
+     * couldn't serve at all: a 502/503/504 (a gateway or an unconfigured
+     * or overloaded backend, which answer JSON errors too), a 408 or 429,
+     * or a body that isn't the server's own error.
+     */
+    internal fun refusal(reply: Http.Reply): String? {
+        if (reply.code !in 400..500 || reply.code == 408 || reply.code == 429) return null
+        val body = runCatching { JSONObject(reply.body.toString(Charsets.UTF_8)) }.getOrNull() ?: return null
+        return (body.opt("error") as? String)?.takeIf { it.isNotBlank() }
     }
 
     /** The servers for [request]'s type, the way corpus.core's own Kotlin binding picks them. */
@@ -443,6 +468,7 @@ internal class EnsColibri(
         val GNOSIS_PROVERS = listOf(
             "https://gnosis.colibri-proof.tech",
             "https://gnosis1.colibri-proof.tech",
+            "https://gnosis.colimind.com",
         )
         val GNOSIS_CHECKPOINTZ = listOf("https://checkpoint.gnosischain.com")
         val GNOSIS_BEACON_APIS = listOf(

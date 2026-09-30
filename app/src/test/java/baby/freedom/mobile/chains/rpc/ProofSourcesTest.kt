@@ -279,6 +279,33 @@ class ProofSourcesTest {
     }
 
     @Test
+    fun `a prover that can't prove the head block yet fails that read, not the chain`() = runTest {
+        // Live Gnosis provers answer a read of a block they don't have yet
+        // (a receipt in the head block, Send's blockExists(head + 14)) with
+        // HTTP 500 and their own error: this read falls to the quorum, but
+        // the wallet's other reads still get proofs.
+        val v = Roundtrip(JSONObject().put("status", "error").put("error", "prover: block not found"))
+        val source = ColibriChainSource(
+            EnsColibri(v, http = { _, _, _, _, _ ->
+                EnsColibri.Http.Reply(
+                    500,
+                    """{"error":"The Block after 0x2a1b3c can not be found in the execution layer!"}""".toByteArray(),
+                )
+            }),
+            present = { true },
+        )
+        try {
+            source.request(100, "eth_getBalance", balance, emptyList())
+            fail()
+        } catch (e: EnsColibri.Failure) {
+            assertFalse(e.unreachable)
+        }
+        assertEquals(null, source.gap(100))
+        assertEquals(null, source.backoffRemainingMs(100))
+        assertTrue(source.isAvailable(100))
+    }
+
+    @Test
     fun `an unreachable prover is skipped for a while, then asked again`() = runTest {
         val now = AtomicLong(1_000_000)
         val v = Roundtrip(JSONObject().put("status", "error").put("error", "all provers failed"))
