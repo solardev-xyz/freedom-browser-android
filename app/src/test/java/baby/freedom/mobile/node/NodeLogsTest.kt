@@ -494,14 +494,18 @@ class NodeLogsTest {
 
     /**
      * What logd sends for `logcat -T [startMs]` (LogReader.cpp,
-     * LogReaderThread.cpp): from the first entry stamped after it, every
-     * later one in the order they were logged, but those stamped at or
-     * before it.
+     * LogReaderThread.cpp). Of the entries already in the buffer when the
+     * reader attaches ([buffered], in the order they were logged): from the
+     * first one stamped after [startMs], every later one but those stamped at
+     * or before it. Then every entry logged once the reader is attached
+     * ([live]), whatever its stamp: the start time only picks where the
+     * buffer is read from (checked on emulator-5556, API 36: `logcat -T`
+     * an hour ahead still got live writes).
      */
-    private fun logdReplay(stamps: List<Long>, startMs: Long): List<Long> {
-        val first = stamps.indexOfFirst { it > startMs }
-        if (first < 0) return emptyList()
-        return stamps.drop(first).filter { it > startMs }
+    private fun logdReplay(buffered: List<Long>, startMs: Long, live: List<Long> = emptyList()): List<Long> {
+        val first = buffered.indexOfFirst { it > startMs }
+        val replay = if (first < 0) emptyList() else buffered.drop(first).filter { it > startMs }
+        return replay + live
     }
 
     @Test
@@ -515,14 +519,21 @@ class NodeLogsTest {
         // 30 s on, the clock is set back an hour, then logcat goes away and restarts.
         c.wall += 30_000; c.elapsed += 30_000
         c.wall -= hour
-        val after = listOf(c.wall - 2_000, c.wall - 1_000, c.wall + 1_000) // logged since the step
+        // Logged during the restart delay, so already in the buffer when logcat is back.
+        val gap = listOf(c.wall - 2_000, c.wall - 1_000, c.wall + 1_000)
         val from = NodeLogs.restartFrom(clearAt - 200_000L, seen, NodeLogs.clearedAtWallMs())
-        val replayed = logdReplay(before + after, from)
+        // Logged once logcat is back, still stamped an hour below the restart point.
+        val live = listOf(c.wall + NodeLogs.SETTLE_MS)
+        val replayed = logdReplay(before + gap, from, live)
         // Not one line from before the clear comes back.
         assertTrue(replayed.none { it in before })
+        // What a clock set back costs: the lines logged during the restart delay, stamped below the floor.
+        assertTrue(replayed.none { it in gap })
+        // A line logged once logcat is back comes live despite its stamp.
+        assertEquals(live, replayed)
         // Before this fix, "now" by today's clock: logd would send every one of them again.
-        assertEquals(before, logdReplay(before + after, c.wall).filter { it in before })
-        // A line logged once logcat is back comes live, and past the settle window it's kept.
+        assertEquals(before, logdReplay(before + gap, c.wall).filter { it in before })
+        // Past the settle window, that live line is kept.
         c.wall += NodeLogs.SETTLE_MS; c.elapsed += NodeLogs.SETTLE_MS
         assertTrue(NodeLogs.keep(NodeLogs.generation(), NodeLogSource.Swarm, "live", atMs = c.wall))
         assertEquals("live", NodeLogs.text(NodeLogSource.Swarm))
