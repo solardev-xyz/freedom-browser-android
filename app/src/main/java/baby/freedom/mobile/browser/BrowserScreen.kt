@@ -562,6 +562,7 @@ fun BrowserScreen(
 
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
+    ClientCertificateBridge()
     // Why a payment link didn't open Send (#317) — a private tab, no
     // wallet, a link Send can't pay — instead of an error page.
     DisposableEffect(snackbarHostState) {
