@@ -10,6 +10,12 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.view.KeyEvent
+import android.view.KeyboardShortcutGroup
+import android.view.Menu
+import android.view.View
+import android.view.inputmethod.InputMethodManager
+import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.viewModels
@@ -33,6 +39,10 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import baby.freedom.mobile.browser.BrowserScreen
 import baby.freedom.mobile.browser.IncomingLinks
+import baby.freedom.mobile.browser.KeyboardShortcutRouter
+import baby.freedom.mobile.browser.PageKeyEvents
+import baby.freedom.mobile.browser.PrivateProfile
+import baby.freedom.mobile.browser.keyboardShortcutGroups
 import baby.freedom.mobile.browser.EthereumProviders
 import baby.freedom.mobile.browser.X402Payments
 import baby.freedom.mobile.browser.Gateways
@@ -118,7 +128,14 @@ import kotlinx.coroutines.withTimeoutOrNull
  * the way through so `ipfs://` / `ens→ipfs` navigation works even
  * when the user has never opened the advanced settings panel.
  */
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(), PageKeyEvents {
+
+    /**
+     * Hardware-keyboard shortcuts (#270): [dispatchKeyEvent] and the
+     * pages' unhandled keys ([onUnhandledPageKey]) go through it to the
+     * browser screen, which installs itself as its target.
+     */
+    private val shortcuts = KeyboardShortcutRouter()
 
     // Shared with the Fund node page's Ledger ready check (#291 R4-M1).
     private val infoFlow = StampClient.node
@@ -703,6 +720,7 @@ class MainActivity : ComponentActivity() {
                         ipfsCounters = ::ipfsCounters,
                         onStatusBarTint = { statusBarTint = it },
                         onPanelShown = { panelShown = it },
+                        shortcuts = shortcuts,
                     )
                 }
             }
@@ -808,6 +826,56 @@ class MainActivity : ComponentActivity() {
         runCatching { myotisBinder?.onAppForeground() }
         // A daily update check that fell due while the phone slept (#272).
         AppUpdates.onAppForeground()
+    }
+
+    // A reserved shortcut anywhere, and any shortcut unless a page's text
+    // field has focus, before the focused view sees the key; that field
+    // gets the rest first ([KeyboardShortcutRouter]). The browser's own
+    // fields (address bar, find bar) keep Alt+←/→ as caret keys.
+    //
+    // A page in HTML5 fullscreen has its focus in the fullscreen view,
+    // not in its WebView, and is still the page (#307 R3-F1). That view
+    // answers `onCheckIsTextEditor()` false even with a field focused
+    // (and so does the WebView behind it), so there the page is editing
+    // when the focused view in it holds a live input connection: the IME
+    // is served by it and accepting text — true with a page field focused, by a tap
+    // or from script, and false on the page body, on a focused link or
+    // once the field is blurred (API 36 emulator).
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val focus = currentFocus
+        val fullscreen = shortcuts.fullscreenPage
+        val page = focus.enclosingPage(fullscreen)
+        val pageEditing = when {
+            page == null -> false
+            page === fullscreen -> getSystemService(InputMethodManager::class.java)
+                ?.let { it.isActive(focus) && it.isAcceptingText } == true
+            else -> page.onCheckIsTextEditor()
+        }
+        val fieldEditing = page == null && focus?.onCheckIsTextEditor() == true
+        if (shortcuts.beforeViews(event, pageEditing, fieldEditing)) return true
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun onUnhandledPageKey(event: KeyEvent): Boolean = shortcuts.unhandledInPage(event)
+
+    // Listed by the system's keyboard-shortcut helper (Meta+/).
+    override fun onProvideKeyboardShortcuts(
+        data: MutableList<KeyboardShortcutGroup>,
+        menu: Menu?,
+        deviceId: Int,
+    ) {
+        super.onProvideKeyboardShortcuts(data, menu, deviceId)
+        data.addAll(keyboardShortcutGroups(privateTabs = PrivateProfile.isSupported()))
+    }
+
+    /** The page view (a WebView, or [fullscreen]) this view is, or is inside; null if none. */
+    private fun View?.enclosingPage(fullscreen: View?): View? {
+        var v: View? = this
+        while (v != null) {
+            if (v is WebView || (fullscreen != null && v === fullscreen)) return v
+            v = v.parent as? View
+        }
+        return null
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
