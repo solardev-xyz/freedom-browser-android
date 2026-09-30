@@ -33,6 +33,7 @@ import android.view.ViewGroup
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityNodeProvider
 import android.view.animation.DecelerateInterpolator
+import android.webkit.ClientCertRequest
 import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
 import android.webkit.GeolocationPermissions
@@ -972,6 +973,9 @@ fun BrowserWebViewHost(
 
     fun attach(tab: BrowserState): WebView {
         webViews[tab.id]?.let { return it }
+        // Before the WebView exists, so its first connection can't be
+        // handed a client certificate a normal tab picked (#316).
+        if (tab.private) ClientCertificates.onPrivateTab(tab.id)
         val (layout, wv) = buildRefreshableWebView(
             context = context,
             state = tab,
@@ -1151,6 +1155,7 @@ fun BrowserWebViewHost(
             // Take down any permission prompt the tab still had up;
             // its request is denied along with the page.
             sitePermissions.onTabClosed(id)
+            ClientCertificates.onTabClosed(id)
             RadicleProviders.onTabClosed(id)
             EthereumProviders.onTabClosed(id)
             SwarmProviders.onTabClosed(id)
@@ -1415,6 +1420,8 @@ fun BrowserWebViewHost(
             pageZoom.clearAll()
             // …and so are the sites asked for as desktop sites (#180).
             desktopSites.clearAll()
+            // …and so are the client certificates picked this run (#316).
+            ClientCertificates.clear()
             // Unfinished downloads keep partial files in app storage
             // (#265): they stop, and those files go.
             DownloadManager.get(context).discardUnfinished()
@@ -3822,6 +3829,13 @@ private fun buildRefreshableWebView(
                 )
                 state.clearEnsOverride()
                 view?.loadUrl(page)
+            }
+
+            // A site asks for a TLS client certificate (#316): the user
+            // picks one in a normal tab; a private tab sends none.
+            override fun onReceivedClientCertRequest(view: WebView?, request: ClientCertRequest?) {
+                request ?: return
+                ClientCertificates.onRequest(context, state, request, sitePermissions)
             }
 
             // A certificate error (#259). Always refused — there is no

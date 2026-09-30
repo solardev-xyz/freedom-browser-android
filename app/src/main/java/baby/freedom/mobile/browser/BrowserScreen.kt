@@ -552,6 +552,7 @@ fun BrowserScreen(
 
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
+    ClientCertificateBridge()
     // Any full-screen panel over the browser (they're all opaque).
     val overlayShown = showSettings || showNode || showRadicle || showLogs != null || showWallet || walletRequest != null ||
         showTabSwitcher ||

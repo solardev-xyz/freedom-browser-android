@@ -167,7 +167,7 @@
     <string name="settings_clear_site_data">Clear cookies &amp; site data</string>
     <string name="settings_clear_site_data_subtitle">Cookies, DOM storage, cache, form data, zoom levels, and desktop sites</string>
     <string name="settings_clear_site_data_title">Clear cookies and site data?</string>
-    <string name="settings_clear_site_data_message">Signs you out of most sites and wipes cached page data, cookies, form autofill, remembered page zoom levels and desktop-site choices from every open tab, and the nodes\' recent logs. Unfinished downloads are cancelled.</string>
+    <string name="settings_clear_site_data_message">Signs you out of most sites and wipes cached page data, cookies, form autofill, remembered page zoom levels and desktop-site choices from every open tab, the client certificates picked for sites this session, and the nodes\' recent logs. Unfinished downloads are cancelled.</string>
     <string name="settings_clear_site_data_confirm">Clear site data</string>
     <string name="settings_nothing_to_clear">Nothing to clear</string>
     <plurals name="settings_history_visits">
