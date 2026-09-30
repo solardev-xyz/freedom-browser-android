@@ -487,6 +487,14 @@ fun BrowserScreen(
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
+    // The bookmark the "Bookmark added" snackbar's Edit opened (#264),
+    // and whether it was added from a private tab.
+    var editBookmark by rememberSaveable { mutableStateOf<Long?>(null) }
+    var editBookmarkPrivate by rememberSaveable { mutableStateOf(false) }
+    // Whether the Bookmarks list was opened from a private tab, fixed at
+    // that moment, so its Edit dialog keeps the keyboard from learning
+    // what's typed there (#296 R1-M1).
+    var bookmarksPrivate by rememberSaveable { mutableStateOf(false) }
     var showDownloads by rememberSaveable { mutableStateOf(false) }
     var addressFocused by remember { mutableStateOf(false) }
     // Suggestions should only appear once the user has actively changed
@@ -603,7 +611,8 @@ fun BrowserScreen(
     // (#86) — and so does a private download's notice (it names the
     // file) until it has left the screen.
     PrivateScreenGuard(privateOnScreen || downloadNotices.privateShowing)
-    val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
+    val isBookmarked by remember(repo, state.url) { repo.isBookmarked(state.url) }
+        .collectAsState(initial = false)
 
     // IPFS load progress (#94): while the active tab is busy on content
     // the IPFS node serves, poll the node's retrieval-progress snapshot
@@ -1929,8 +1938,30 @@ fun BrowserScreen(
                     onToggleBookmark = {
                         val url = state.url
                         if (url.isBlank()) return@BottomToolbar
-                        if (isBookmarked) repo.unbookmark(url)
-                        else repo.bookmark(url, state.title)
+                        if (isBookmarked) {
+                            repo.unbookmark(url)
+                        } else {
+                            // Saved under the page's title; the snackbar
+                            // offers to name it (#264).
+                            val added = repo.bookmark(url, state.title)
+                            val private = state.private
+                            scope.launch {
+                                val saved = added.await() ?: return@launch
+                                val id = saved.id
+                                // The star can still show the last page's
+                                // state for a moment; a page that turns out
+                                // to be bookmarked already isn't "added".
+                                val result = snackbarHostState.showSnackbar(
+                                    if (saved.added) "Bookmark added" else "Already bookmarked",
+                                    actionLabel = "Edit",
+                                    duration = SnackbarDuration.Short,
+                                )
+                                if (result == SnackbarResult.ActionPerformed) {
+                                    editBookmark = id
+                                    editBookmarkPrivate = private
+                                }
+                            }
+                        }
                     },
                     // Step one of the two-step tap: a tap on the compact
                     // capsule restores the resting bar and stops there.
@@ -1946,7 +1977,10 @@ fun BrowserScreen(
                     onOpenNode = { showNode = true },
                     onOpenTabs = { showTabSwitcher = true },
                     onOpenHistory = { showHistory = true },
-                    onOpenBookmarks = { showBookmarks = true },
+                    onOpenBookmarks = {
+                        bookmarksPrivate = state.private
+                        showBookmarks = true
+                    },
                     onOpenDownloads = { showDownloads = true },
                     onReload = reloadPage,
                     onHardReload = hardReloadPage,
@@ -2204,9 +2238,20 @@ fun BrowserScreen(
         )
     }
 
+    // The "Bookmark added" snackbar's Edit (#264), over the page.
+    editBookmark?.let { id ->
+        BookmarkEditDialog(
+            repo = repo,
+            id = id,
+            private = editBookmarkPrivate,
+            onDismiss = { editBookmark = null },
+        )
+    }
+
     if (showBookmarks) {
         BookmarksScreen(
             repo = repo,
+            private = bookmarksPrivate,
             onDismiss = { showBookmarks = false },
             onOpen = { url ->
                 showBookmarks = false

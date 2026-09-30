@@ -4,6 +4,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
+    id("androidx.room")
 }
 
 android {
@@ -140,6 +141,15 @@ android {
             "lib/mips64/**",
         )
     }
+}
+
+// Room writes each database version's schema here (checked in), and
+// hands the directory to the instrumented tests as assets, which build a
+// database at an old version from it to test a migration (#264). Not
+// room-testing's MigrationTestHelper: it needs a newer
+// kotlinx-serialization than the app ships, and fails at runtime with it.
+room {
+    schemaDirectory("$projectDir/schemas")
 }
 
 // AGP 9 applies the Kotlin plugin itself, so the compiler options live

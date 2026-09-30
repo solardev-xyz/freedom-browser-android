@@ -155,7 +155,8 @@ internal object WhatwgHost {
 
     private fun Char.isAsciiLetter() = this in 'a'..'z' || this in 'A'..'Z'
 
-    private fun host(raw: String): String? {
+    /** The WHATWG-serialised host for [raw] (an authority's host part), or null where `new URL` would throw. */
+    internal fun host(raw: String): String? {
         if (raw.startsWith("[")) {
             if (!raw.endsWith("]")) return null
             return ipv6(raw.substring(1, raw.length - 1))?.let { "[${serialiseIpv6(it)}]" }
