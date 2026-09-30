@@ -450,6 +450,8 @@ fun BrowserScreen(
     ipfsCounters: () -> LongArray? = { null },
     onStatusBarTint: (Int?) -> Unit = {},
     onPanelShown: (Boolean) -> Unit = {},
+    /** Hardware-keyboard shortcuts (#270): this screen is their target while composed. */
+    shortcuts: KeyboardShortcutRouter? = null,
 ) {
     // Outside composition, so the tabs survive an Activity relaunch
     // (#183, see [TabsSession]).
@@ -498,6 +500,12 @@ fun BrowserScreen(
     var bookmarksPrivate by rememberSaveable { mutableStateOf(false) }
     var showDownloads by rememberSaveable { mutableStateOf(false) }
     var addressFocused by remember { mutableStateOf(false) }
+    // Ctrl+L (#270): the address field takes focus once it's composed.
+    var addressFocusRequested by remember { mutableStateOf(false) }
+    // …and a keyboard already up for a page's own field when it did is
+    // that page's, not one opened for the address bar: it doesn't count
+    // as seen until it has gone down once (see [imeDismissalEndsEditing]).
+    var pageKeyboardHandoff by remember { mutableStateOf(false) }
     // Suggestions should only appear once the user has actively changed
     // the address-bar text. Tapping the pill (which select-alls the
     // current URL) must NOT flash a dropdown — the user just wants to
@@ -737,6 +745,15 @@ fun BrowserScreen(
         }
     }
     BackHandler(enabled = backHandledFor(state.canGoBack, state.isHome), onBack = goBack)
+
+    // The bar's Forward and Alt+→ (#270). The bar only shows it with
+    // somewhere to go ([navControlsFor]); the key checks the same flag.
+    val goForward: () -> Unit = {
+        if (state.canGoForward) {
+            state.beginLoad()
+            state.loadUrl(HISTORY_FORWARD_JS)
+        }
+    }
 
     // Find in page (#83). The bar stands in for the capsule while the
     // active tab's session is open — never on the home surface, which has
@@ -1350,6 +1367,85 @@ fun BrowserScreen(
         null
     }
 
+    // The bar's New tab, and Ctrl+T (#270).
+    val openNewTab: () -> Unit = {
+        val fresh = tabs.newTab()
+        submit(fresh, tabs.homepageUrl)
+    }
+
+    // The menu's zoom row, and Ctrl+=/−/0 (#270). Same rule as Find in
+    // page: nothing to zoom on the home surface — nor on a document that
+    // isn't a site (an error page), which has no zoomSite.
+    val zoomableSite = state.zoomSite?.takeIf { state.url.isNotBlank() }
+    val zoomPage: (ZoomAction) -> Unit = { action ->
+        zoomableSite?.let { pageZoom.apply(it, action, state.private) }
+    }
+
+    // Hardware-keyboard shortcuts (#270), each doing what its button or
+    // menu row does, under the same conditions. Not while a full-screen
+    // panel is up: its own fields and buttons get the keys, and nothing
+    // changes behind it.
+    val onShortcut = ShortcutTarget { shortcut, repeat ->
+        if (overlayShown) return@ShortcutTarget false
+        if (repeat && !shortcut.repeats) return@ShortcutTarget true
+        // Ctrl+L, and a new tab the user will type an address into.
+        val requestAddressFocus = {
+            pageKeyboardHandoff = true
+            addressFocusRequested = true
+        }
+        when (shortcut) {
+            Shortcut.NewTab -> {
+                openNewTab()
+                requestAddressFocus()
+            }
+            Shortcut.NewPrivateTab -> newPrivateTab?.let {
+                it()
+                requestAddressFocus()
+            }
+            Shortcut.CloseTab -> {
+                focusManager.clearFocus()
+                tabs.closeTab(tabs.activeIndex)
+            }
+            Shortcut.ReopenClosedTab -> {
+                focusManager.clearFocus()
+                tabs.reopenClosedTab()
+            }
+            Shortcut.NextTab, Shortcut.PreviousTab -> if (tabs.tabs.size > 1) {
+                val step = if (shortcut == Shortcut.NextTab) 1 else -1
+                focusManager.clearFocus()
+                tabs.switchTo(Math.floorMod(tabs.activeIndex + step, tabs.tabs.size))
+            }
+            Shortcut.FocusAddressBar -> {
+                if (findOpen) closeFind()
+                state.capsuleCollapse.expand()
+                requestAddressFocus()
+            }
+            Shortcut.Reload -> reloadPage()
+            Shortcut.HardReload -> if (state.hasPageToActOn) hardReloadPage()
+            Shortcut.FindInPage -> if (state.hasPageToActOn) state.find.show()
+            Shortcut.ZoomIn -> zoomPage(ZoomAction.In)
+            Shortcut.ZoomOut -> zoomPage(ZoomAction.Out)
+            Shortcut.ZoomReset -> zoomPage(ZoomAction.Reset)
+            Shortcut.Back -> goBack()
+            Shortcut.Forward -> goForward()
+            Shortcut.History -> {
+                focusManager.clearFocus()
+                showHistory = true
+            }
+            Shortcut.Downloads -> {
+                focusManager.clearFocus()
+                showDownloads = true
+            }
+        }
+        true
+    }
+    val currentOnShortcut by rememberUpdatedState(onShortcut)
+    DisposableEffect(shortcuts) {
+        val target = ShortcutTarget { shortcut, repeat -> currentOnShortcut.onShortcut(shortcut, repeat) }
+        shortcuts?.target = target
+        onDispose { if (shortcuts?.target === target) shortcuts.target = null }
+    }
+
     // Wire the WebView layer's "route this URL through submit" hook up
     // to this screen's [submit] function. The callback lives on
     // [TabsState] so BrowserWebView (which is composed under us) can
@@ -1540,7 +1636,8 @@ fun BrowserScreen(
         ) {
             focusManager.clearFocus()
         }
-        keyboardSeenWhileEditing = addressFocused && keyboardVisible
+        keyboardSeenWhileEditing = addressFocused && keyboardVisible && !pageKeyboardHandoff
+        if (!keyboardVisible) pageKeyboardHandoff = false
     }
 
     // The capsule's geometry is driven by exactly two 0→1 fractions,
@@ -1957,10 +2054,7 @@ fun BrowserScreen(
                         }
                     },
                     onBack = goBack,
-                    onForward = {
-                        state.beginLoad()
-                        state.loadUrl(HISTORY_FORWARD_JS)
-                    },
+                    onForward = goForward,
                     onHome = {
                         submit(state, tabs.homepageUrl)
                     },
@@ -2033,19 +2127,14 @@ fun BrowserScreen(
                             pending = state.addressBarText,
                         )
                     },
-                    onNewTab = {
-                        val fresh = tabs.newTab()
-                        submit(fresh, tabs.homepageUrl)
-                    },
+                    onNewTab = openNewTab,
                     onNewPrivateTab = newPrivateTab,
                     onFindInPage = { state.find.show() },
                     // Same rule as Find in page: nothing to zoom on the
                     // home surface — nor on a document that isn't a
                     // site (an error page), which has no zoomSite.
-                    zoomLevel = state.zoomSite
-                        ?.takeIf { state.url.isNotBlank() }
-                        ?.let { pageZoom.levelFor(it, state.private) },
-                    onZoom = { action -> state.zoomSite?.let { pageZoom.apply(it, action, state.private) } },
+                    zoomLevel = zoomableSite?.let { pageZoom.levelFor(it, state.private) },
+                    onZoom = zoomPage,
                     // Request desktop site (#180): per site, like zoom,
                     // but never for a dweb page (no key). Toggling asks
                     // for the page again, as Reload does, and the load
@@ -2081,6 +2170,8 @@ fun BrowserScreen(
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),
+                    addressFocusRequested = addressFocusRequested,
+                    onAddressFocusRequestHandled = { addressFocusRequested = false },
                 )
                 }
                 }
@@ -2279,10 +2370,7 @@ fun BrowserScreen(
         TabSwitcherScreen(
             tabs = tabs,
             onDismiss = { showTabSwitcher = false },
-            onNewTab = {
-                val fresh = tabs.newTab()
-                submit(fresh, tabs.homepageUrl)
-            },
+            onNewTab = openNewTab,
             onNewPrivateTab = newPrivateTab,
         )
     }

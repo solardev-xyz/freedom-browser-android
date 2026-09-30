@@ -9,6 +9,11 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.view.KeyEvent
+import android.view.KeyboardShortcutGroup
+import android.view.Menu
+import android.view.View
+import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.viewModels
@@ -30,6 +35,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import baby.freedom.mobile.browser.BrowserScreen
 import baby.freedom.mobile.browser.IncomingLinks
+import baby.freedom.mobile.browser.KeyboardShortcutRouter
+import baby.freedom.mobile.browser.PageKeyEvents
+import baby.freedom.mobile.browser.PrivateProfile
+import baby.freedom.mobile.browser.keyboardShortcutGroups
 import baby.freedom.mobile.browser.EthereumProviders
 import baby.freedom.mobile.browser.X402Payments
 import baby.freedom.mobile.browser.Gateways
@@ -106,7 +115,14 @@ import kotlinx.coroutines.withTimeoutOrNull
  * the way through so `ipfs://` / `ens→ipfs` navigation works even
  * when the user has never opened the advanced settings panel.
  */
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(), PageKeyEvents {
+
+    /**
+     * Hardware-keyboard shortcuts (#270): [dispatchKeyEvent] and the
+     * pages' unhandled keys ([onUnhandledPageKey]) go through it to the
+     * browser screen, which installs itself as its target.
+     */
+    private val shortcuts = KeyboardShortcutRouter()
 
     // Shared with the Fund node page's Ledger ready check (#291 R4-M1).
     private val infoFlow = StampClient.node
@@ -612,6 +628,7 @@ class MainActivity : ComponentActivity() {
                         ipfsCounters = ::ipfsCounters,
                         onStatusBarTint = { statusBarTint = it },
                         onPanelShown = { panelShown = it },
+                        shortcuts = shortcuts,
                     )
                 }
             }
@@ -715,6 +732,36 @@ class MainActivity : ComponentActivity() {
         }
         runCatching { binder?.onAppForeground() }
         runCatching { myotisBinder?.onAppForeground() }
+    }
+
+    // A reserved shortcut anywhere, and any shortcut unless a page's text
+    // field has focus, before the focused view sees the key; that field
+    // gets the rest first ([KeyboardShortcutRouter]).
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val pageEditing = currentFocus.enclosingWebView()?.onCheckIsTextEditor() == true
+        if (shortcuts.beforeViews(event, pageEditing)) return true
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun onUnhandledPageKey(event: KeyEvent): Boolean = shortcuts.unhandledInPage(event)
+
+    // Listed by the system's keyboard-shortcut helper (Meta+/).
+    override fun onProvideKeyboardShortcuts(
+        data: MutableList<KeyboardShortcutGroup>,
+        menu: Menu?,
+        deviceId: Int,
+    ) {
+        super.onProvideKeyboardShortcuts(data, menu, deviceId)
+        data.addAll(keyboardShortcutGroups(privateTabs = PrivateProfile.isSupported()))
+    }
+
+    private fun View?.enclosingWebView(): WebView? {
+        var v: View? = this
+        while (v != null) {
+            if (v is WebView) return v
+            v = v.parent as? View
+        }
+        return null
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
