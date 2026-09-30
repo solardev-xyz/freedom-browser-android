@@ -287,13 +287,37 @@ internal object PopupProbe {
     const val TIMEOUT_MS = 5_000L
 
     /**
+     * Drop [resultMsg]'s window: one refused outright, or one no probe
+     * could be set up for, after `onCreateWindow` already answered true
+     * (its verdict is deferred, #292 R1-F1). Chromium holds a window it
+     * was told the app would take until the transport comes back, and
+     * refuses every later window of the tab meanwhile. The transport
+     * sent back with no WebView in it is the platform's own way to
+     * decline: Chromium destroys the pending window then and there
+     * (`AwContents.supplyContentsForPopup(null)`). Nothing is built for
+     * it, so — unlike a probe — nothing can fail to be (#292 R2-M1).
+     */
+    fun discard(resultMsg: Message) {
+        val transport = resultMsg.obj as? WebView.WebViewTransport ?: return
+        try {
+            transport.webView = null
+            resultMsg.sendToTarget()
+        } catch (e: Exception) {
+            // Already sent (a probe got as far as handing itself over
+            // before failing): Chromium has had its answer.
+            Log.w(TAG, "refused window not handed back", e)
+        }
+    }
+
+    /**
      * Hand [resultMsg]'s transport a probe and report the window's
      * address (or null) to [onResult], once, on the main thread, with
      * `bound` false when Chromium never gave the probe the window at
      * all (logged as "Popup WebView bind failed: no pending content"
      * when a page opens windows in a burst) — its address then simply
      * wasn't read, which isn't the same as a blank window. False
-     * if the probe couldn't be set up — the window is then refused.
+     * if the probe couldn't be set up — the window is then dropped
+     * ([discard]), so Chromium isn't left holding it (#292 R2-M1).
      * [private]: the opener is a private tab, whose windows Chromium
      * creates on the private profile; the probe has to be on it too.
      * `posted`: the address is a form's, submitted with a method other
@@ -304,29 +328,6 @@ internal object PopupProbe {
         private: Boolean,
         resultMsg: Message,
         onResult: (url: String?, bound: Boolean, posted: Boolean) -> Unit,
-    ): Boolean = start(context, private, resultMsg, TIMEOUT_MS, onResult)
-
-    /**
-     * Hand [resultMsg]'s window to a probe that is dropped as soon as
-     * Chromium has bound it, its address unread: a window refused
-     * outright, after `onCreateWindow` already answered true (its verdict
-     * is deferred, #292 R1-F1). Chromium holds a window it was told the
-     * app would take until some WebView takes it, and refuses every later
-     * window of the tab meanwhile; this takes it, fetching and running
-     * nothing, like a probe.
-     */
-    fun discard(context: Context, private: Boolean, resultMsg: Message) {
-        if (!start(context, private, resultMsg, timeoutMs = 0L) { _, _, _ -> }) {
-            Log.w(TAG, "refused window not taken; this tab's next window may be refused too")
-        }
-    }
-
-    private fun start(
-        context: Context,
-        private: Boolean,
-        resultMsg: Message,
-        timeoutMs: Long,
-        onResult: (url: String?, bound: Boolean, posted: Boolean) -> Unit,
     ): Boolean {
         val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
         val probe = try {
@@ -335,6 +336,7 @@ internal object PopupProbe {
             }
         } catch (e: Exception) {
             Log.w(TAG, "probe not created", e)
+            discard(resultMsg)
             return false
         }
         val main = Handler(Looper.getMainLooper())
@@ -391,12 +393,13 @@ internal object PopupProbe {
             main.postAtTime(
                 { finish(null, bound = runCatching { probe.url }.getOrNull() != null) },
                 probe,
-                android.os.SystemClock.uptimeMillis() + timeoutMs,
+                android.os.SystemClock.uptimeMillis() + TIMEOUT_MS,
             )
             true
         } catch (e: Exception) {
             Log.w(TAG, "probe not handed to Chromium", e)
             runCatching { probe.destroy() }
+            discard(resultMsg)
             false
         }
     }

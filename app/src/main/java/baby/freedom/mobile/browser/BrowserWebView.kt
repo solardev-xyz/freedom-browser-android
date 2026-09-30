@@ -1004,7 +1004,7 @@ fun BrowserWebViewHost(
                 // address to read for it.
                 val id = popups.add(origin, pending = probing, unread = !probing)
                 if (!probing || id == null) {
-                    PopupProbe.discard(context, tab.private, resultMsg)
+                    PopupProbe.discard(resultMsg)
                     return@buildRefreshableWebView
                 }
                 popups.liveProbes++
@@ -1012,6 +1012,8 @@ fun BrowserWebViewHost(
                     popups.liveProbes--
                     if (bound) popups.resolve(document, id, url, posted) else popups.unread(document, id)
                 }
+                // Not started: the window is already dropped (see
+                // [PopupProbe.start]); only the row is left to settle.
                 if (!started) {
                     popups.liveProbes--
                     popups.unread(document, id)
@@ -1505,7 +1507,7 @@ private fun buildRefreshableWebView(
     onCloseWindow: () -> Unit,
     popupsAllowed: (origin: String?) -> Boolean = { false },
     /** A window [popupsAllowed] refused; it must hand [resultMsg] on (a probe, or [PopupProbe.discard]). */
-    onPopupBlocked: (origin: String?, resultMsg: Message) -> Unit = { _, resultMsg -> PopupProbe.discard(context, private = false, resultMsg) },
+    onPopupBlocked: (origin: String?, resultMsg: Message) -> Unit = { _, resultMsg -> PopupProbe.discard(resultMsg) },
     isPopup: Boolean = false,
     popupOpener: () -> Pair<BrowserState, WebView>? = { null },
     onContextMenuPress: () -> PageContextMenuPin? = { null },
@@ -4049,8 +4051,9 @@ private fun buildRefreshableWebView(
                 // Having returned true, the window must be handed to
                 // some WebView, or Chromium keeps it pending and refuses
                 // every later window of this tab: one that is neither
-                // opened nor probed goes to a probe that is dropped at
-                // once ([PopupProbe.discard]).
+                // opened nor probed — refused outright, or a probe that
+                // couldn't be set up — is handed back with no WebView,
+                // which Chromium takes as "declined" ([PopupProbe.discard]).
                 deferredPopups.post {
                     val opener = view
                     if (opener == null || opener.isDestroyed) return@post
