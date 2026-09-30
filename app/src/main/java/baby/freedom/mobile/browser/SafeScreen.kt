@@ -1626,7 +1626,7 @@ internal fun SafeCoSignPage(
                                 },
                             )
                         }
-                        is SafeProtocol.Request.Message -> ReviewRow(stringResource(R.string.safe_label_text), request.text)
+                        is SafeProtocol.Request.Message -> ReviewRow(stringResource(R.string.safe_label_text), request.shownText)
                     }
                     ReviewRow(
                         stringResource(if (request is SafeProtocol.Request.Tx) R.string.safe_label_safetx_hash else R.string.safe_label_safemessage_hash),

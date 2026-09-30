@@ -330,9 +330,10 @@ class OpenLvSession internal constructor(
 
     private suspend fun personalSign(sid: Int, params: JSONArray): OpenLvResponse {
         val raw = params.opt(0) as? String ?: return invalid("Expected [message, address].")
-        val account = accountFor(params.opt(1)) ?: return notThisWallet(params.opt(1))
         val message = if (HEX.matches(raw)) raw.hexToBytes() else raw.toByteArray(Charsets.UTF_8)
         if (message.size > MAX_MESSAGE) return invalid("The message is too long.")
+        // Last, after everything else is checked ([accountFor]).
+        val account = accountFor(params.opt(1)) ?: return notThisWallet(params.opt(1))
         return when (ask(sid, Request.PersonalSign(account, message, MessageSigning.readableText(message)))) {
             Decision.Reject -> REJECTED
             is Decision.Approve -> signed { keys.signPersonal(account, message) }
@@ -340,17 +341,19 @@ class OpenLvSession internal constructor(
     }
 
     private suspend fun signTypedData(sid: Int, params: JSONArray): OpenLvResponse {
-        val account = accountFor(params.opt(0)) ?: return notThisWallet(params.opt(0))
         // Off the main thread: the payload is the peer's, up to Eip712.MAX_JSON of it.
-        val (typed, digest, lines, ledgerHashes) = try {
+        val (typed, digest, lines) = try {
             withContext(Dispatchers.Default) {
                 val td = Eip712.parseStrict(params.opt(1))
-                // What the peer can make a Ledger show only as hashes, the sheet says so (#239).
-                Parsed(td, Eip712.digest(td), Eip712.lines(td), if (account.isLedger) LedgerApdus.blindHashes(td) else null)
+                Triple(td, Eip712.digest(td), Eip712.lines(td))
             }
         } catch (e: Eip712.Invalid) {
             return invalid(e.english)
         }
+        // Last, after the payload is checked ([accountFor]).
+        val account = accountFor(params.opt(0)) ?: return notThisWallet(params.opt(0))
+        // What the peer can make a Ledger show only as hashes, the sheet says so (#239).
+        val ledgerHashes = if (account.isLedger) withContext(Dispatchers.Default) { LedgerApdus.blindHashes(typed) } else null
         val domainChain = typed.chainId
         val chain = domainChain?.takeIf { it.bitLength() < 63 }?.toLong()?.let { id -> chains().firstOrNull { it.id == id } }
         val request = Request.TypedData(account, typed.primaryType, lines.first, lines.second, domainChain, chain, ledgerHashes)
@@ -360,16 +363,8 @@ class OpenLvSession internal constructor(
         }
     }
 
-    private data class Parsed(
-        val data: Eip712.TypedData,
-        val digest: ByteArray,
-        val lines: Pair<List<Eip712.Line>, List<Eip712.Line>>,
-        val ledgerHashes: LedgerTypedDataHashes?,
-    )
-
     private suspend fun sendTransaction(sid: Int, params: JSONArray): OpenLvResponse {
         val tx = params.opt(0) as? JSONObject ?: return invalid("Expected [transaction].")
-        val account = accountFor(tx.opt("from")) ?: return notThisWallet(tx.opt("from"))
         val asked = if (tx.has("chainId")) quantity(tx.opt("chainId"))?.takeIf { it.bitLength() < 63 }?.toLong() ?: return invalid("Not a chain ID.") else chainId
         if (asked != chainId) {
             return invalid("The transaction is for chain $asked, but this session is on chain $chainId. Switch first.")
@@ -388,6 +383,8 @@ class OpenLvSession internal constructor(
             }
             else -> return invalid("The data isn’t hex.")
         }
+        // Last, after everything else is checked ([accountFor]).
+        val account = accountFor(tx.opt("from")) ?: return notThisWallet(tx.opt("from"))
         val request = SendRequest(
             chain = chain,
             token = TokenRegistry.native(chain),
@@ -456,6 +453,15 @@ class OpenLvSession internal constructor(
     }
 
     /** The wallet's account at [address] (any case), or null. */
+    /**
+     * The wallet account [address] names, or null. Each signing request looks
+     * it up only once everything else in it has checked out: an unknown
+     * address is refused at once (4100) and a known one brings up a sheet, so
+     * a request malformed in some other way must be refused alike for both —
+     * else a peer could learn, with no sheet ever showing, whether any
+     * address it likes is one of this wallet's (Ledger accounts too), none of
+     * which it was ever given.
+     */
     private fun accountFor(address: Any?): WalletAccount? {
         val a = (address as? String)?.trim() ?: return null
         return keys.accounts()?.accounts?.firstOrNull { it.address.equals(a, ignoreCase = true) }

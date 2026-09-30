@@ -528,6 +528,25 @@ class OpenLvSessionTest {
     }
 
     @Test
+    fun `a malformed request is refused alike for an address of the wallet and one that isn't`() {
+        val (s, engine) = session()
+        s.startOnScope()
+        val stranger = "0x0000000000000000000000000000000000000001"
+        val tooLong = "0x" + "00".repeat(OpenLvSession.MAX_MESSAGE + 1)
+        var id = 0
+        for (from in listOf(account0.address, account1.address, stranger)) {
+            // Only the account differs between the three: no answer may tell them apart.
+            s.onRequest(1, ++id, "eth_sendTransaction", JSONArray().put(JSONObject().put("from", from).put("to", "bad")))
+            assertEquals(from, OpenLvSession.INVALID_PARAMS, error(engine.next()))
+            s.onRequest(1, ++id, "eth_signTypedData_v4", JSONArray().put(from).put("{\"types\":{}}"))
+            assertEquals(from, OpenLvSession.INVALID_PARAMS, error(engine.next()))
+            s.onRequest(1, ++id, "personal_sign", JSONArray().put(tooLong).put(from))
+            assertEquals(from, OpenLvSession.INVALID_PARAMS, error(engine.next()))
+        }
+        assertNull(s.approval.value)
+    }
+
+    @Test
     fun `call data over the cap is refused before it's priced or shown`() {
         val (s, engine) = session()
         s.startOnScope()
