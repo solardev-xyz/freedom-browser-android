@@ -63,4 +63,19 @@ class HistoryDaysTest {
         assertEquals("%100\\%%", likeContains("100%"))
         assertEquals("%a\\\\b%", likeContains("a\\b"))
     }
+
+    @Test
+    fun `No matches shows only while the field still holds a search`() {
+        val none = "foo" to emptyList<HistoryEntry>()
+        assertEquals(true, showsNoMatches(none, "foo"))
+        // A new search in flight keeps the previous No matches up.
+        assertEquals(true, showsNoMatches(none, "foob"))
+        // Cleared with ×/Back: the stale empty answer for "foo" must not
+        // show over the blank field before the unfiltered list arrives.
+        assertEquals(false, showsNoMatches(none, ""))
+        assertEquals(false, showsNoMatches(none, "   "))
+        assertEquals(false, showsNoMatches("" to emptyList(), ""))
+        assertEquals(false, showsNoMatches(null, "foo"))
+        assertEquals(false, showsNoMatches("foo" to listOf(at(2026, 9, 30, 9, id = 1)), "foo"))
+    }
 }

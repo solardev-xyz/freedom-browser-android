@@ -122,8 +122,7 @@ fun HistoryScreen(
             )
             else -> Column(modifier = Modifier.fillMaxSize()) {
                 HistorySearchField(query = query, onQueryChange = { query = it })
-                val answered = results
-                if (answered != null && answered.second.isEmpty() && answered.first.isNotEmpty()) {
+                if (showsNoMatches(results, query)) {
                     EmptyState(
                         icon = Icons.Filled.SearchOff,
                         title = "No matches",

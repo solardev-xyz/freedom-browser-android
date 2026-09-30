@@ -60,3 +60,16 @@ internal fun historyDayLabel(date: LocalDate, today: LocalDate, locale: Locale):
         today.minusDays(1) -> "Yesterday"
         else -> DateTimeFormatter.ofLocalizedDate(FormatStyle.FULL).withLocale(locale).format(date)
     }
+
+/**
+ * Whether the History page shows "No matches": the latest answer
+ * ([answered], tagged with the trimmed query it answers) is an empty
+ * search, and the field still holds a search ([query] non-blank). While
+ * a new non-blank query is in flight the previous "No matches" stays up,
+ * so typing doesn't flash between states; but once the field is cleared
+ * a stale empty answer for the old query must not show over the blank
+ * field while the unfiltered list loads.
+ */
+internal fun showsNoMatches(answered: Pair<String, List<HistoryEntry>>?, query: String): Boolean =
+    answered != null && answered.first.isNotEmpty() && answered.second.isEmpty() &&
+        query.isNotBlank()
