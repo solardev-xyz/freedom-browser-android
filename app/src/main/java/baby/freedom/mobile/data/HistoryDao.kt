@@ -25,6 +25,26 @@ interface HistoryDao {
     )
     fun search(q: String, limit: Int): Flow<List<HistoryEntry>>
 
+    /**
+     * The History page's search (#263): every visit whose title or
+     * stored URL contains [pattern], newest first. [pattern] is a full
+     * `LIKE` pattern built by [likeContains] — `%`, `_` and `\` in the
+     * user's text are escaped with `\`, so they match themselves. The
+     * URL column holds the display form (`bzz://…`, `name.eth/…`,
+     * `https://…`), so that's what a query matches. SQLite's `LIKE` is
+     * case-insensitive for ASCII letters only.
+     */
+    @Query(
+        "SELECT * FROM history WHERE url LIKE :pattern ESCAPE '\\' " +
+            "OR title LIKE :pattern ESCAPE '\\' " +
+            "ORDER BY visitedAt DESC LIMIT :limit",
+    )
+    fun matching(pattern: String, limit: Int = 500): Flow<List<HistoryEntry>>
+
+    /** Whether there's any history at all, whatever a search shows. */
+    @Query("SELECT EXISTS(SELECT 1 FROM history)")
+    fun any(): Flow<Boolean>
+
     @Query("DELETE FROM history WHERE id = :id")
     suspend fun delete(id: Long)
 
