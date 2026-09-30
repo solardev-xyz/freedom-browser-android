@@ -96,7 +96,9 @@ fun BlockedPopupNotice(
             for (entry in entries) {
                 val url = entry.url?.takeUnless { it == ABOUT_BLANK }
                 val shown = url?.let(displayUrl)
-                val openable = shown != null && isOpenableInTab(shown)
+                // A form's address opened as a plain GET would be a
+                // different request than the page made: named only.
+                val openable = shown != null && !entry.posted && isOpenableInTab(shown)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         blockedPopupLabel(entry, shown),

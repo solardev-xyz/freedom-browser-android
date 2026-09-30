@@ -108,6 +108,27 @@ class PopupBlockerTest {
     }
 
     @Test
+    fun `a form posted into a blocked window is named with its address, not called blank`() {
+        // #292 R2-M1: a scripted `<form target=_blank method=post>`.
+        val popups = BlockedPopups()
+        val doc = popups.document
+        val form = popups.add("https://a.example", pending = true)!!
+        popups.resolve(doc, form, "https://pay.example/checkout", posted = true)
+        val entry = popups.entries.single { it.id == form }
+        assertTrue(entry.posted)
+        assertEquals("https://pay.example/checkout", entry.url)
+        assertEquals(
+            "A form sent to pay.example/checkout (its data can't be sent again from here)",
+            blockedPopupLabel(entry, shown = "pay.example/checkout"),
+        )
+        // A GET navigation stays a plain, openable address.
+        val link = popups.add("https://a.example", pending = true)!!
+        popups.resolve(doc, link, "https://b.example/")
+        assertFalse(popups.entries.single { it.id == link }.posted)
+        assertEquals("b.example", blockedPopupLabel(popups.entries.single { it.id == link }, shown = "b.example"))
+    }
+
+    @Test
     fun `opening the last entry takes the notice down, and a new document resets always-allow`() {
         val popups = BlockedPopups()
         val first = popups.add("https://a.example", pending = false)

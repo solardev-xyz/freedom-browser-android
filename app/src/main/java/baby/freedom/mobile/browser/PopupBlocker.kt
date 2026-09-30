@@ -67,11 +67,19 @@ data class BlockedPopup(
      * well have had one.
      */
     val unread: Boolean = false,
+    /**
+     * Its first navigation was a form submission ([url] is the form's
+     * action, sent with `POST`): the address is known, but opening it
+     * would be a plain `GET` without the form's data — a different
+     * request than the page made — so it is named, not offered to open.
+     */
+    val posted: Boolean = false,
 )
 
 /** What the notice says for [entry], whose address shows as [shown] (null: none to show). */
 internal fun blockedPopupLabel(entry: BlockedPopup, shown: String?): String = when {
     entry.pending -> "Reading its address…"
+    shown != null && entry.posted -> "A form sent to $shown (its data can't be sent again from here)"
     shown != null -> shown
     entry.unread -> "Its address wasn't read (too many pop-ups at once)"
     else -> "A blank window (no address to open)"
@@ -164,12 +172,13 @@ class BlockedPopups {
 
     /**
      * Pop-up [id] of document [document] was going to [url] (null: no
-     * address). Nothing happens if the tab has moved on to another
+     * address); [posted]: as a form submission ([BlockedPopup.posted]).
+     * Nothing happens if the tab has moved on to another
      * document since, or the entry already left the notice.
      */
-    fun resolve(document: Int, id: Long, url: String?) {
+    fun resolve(document: Int, id: Long, url: String?, posted: Boolean = false) {
         if (document != this.document) return
-        entries = entries.map { if (it.id == id) it.copy(url = url, pending = false) else it }
+        entries = entries.map { if (it.id == id) it.copy(url = url, pending = false, posted = posted) else it }
     }
 
     /** The user opened [entry]: it leaves the notice, the notice goes once empty. */
@@ -214,6 +223,13 @@ class BlockedPopups {
  * The timeout covers `w = window.open(); …; w.location = url`, which
  * navigates only later; a window that is written into instead
  * (`document.write`) never navigates and reports a null address.
+ *
+ * A form submitted into the window (`<form target=_blank method=post>`)
+ * is a navigation WebView never shows `shouldOverrideUrlLoading` (it
+ * doesn't for a POST), and the empty answer it gets never commits, so
+ * `onPageStarted` doesn't fire either: its address is read from the
+ * main-frame request itself in `shouldInterceptRequest`, and reported
+ * as `posted`.
  */
 internal object PopupProbe {
     private const val TAG = "PopupProbe"
@@ -231,12 +247,14 @@ internal object PopupProbe {
      * if the probe couldn't be set up — the window is then refused.
      * [private]: the opener is a private tab, whose windows Chromium
      * creates on the private profile; the probe has to be on it too.
+     * `posted`: the address is a form's, submitted with a method other
+     * than `GET` ([BlockedPopup.posted]).
      */
     fun start(
         context: Context,
         private: Boolean,
         resultMsg: Message,
-        onResult: (url: String?, bound: Boolean) -> Unit,
+        onResult: (url: String?, bound: Boolean, posted: Boolean) -> Unit,
     ): Boolean {
         val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
         val probe = try {
@@ -249,13 +267,13 @@ internal object PopupProbe {
         }
         val main = Handler(Looper.getMainLooper())
         var done = false
-        fun finish(url: String?, bound: Boolean = true) {
+        fun finish(url: String?, bound: Boolean = true, posted: Boolean = false) {
             if (done) return
             done = true
             main.removeCallbacksAndMessages(probe)
             // Not from inside the probe's own callback.
             main.post { runCatching { probe.destroy() } }
-            onResult(url, bound)
+            onResult(url, bound, posted)
         }
         probe.settings.apply {
             javaScriptEnabled = false
@@ -269,8 +287,19 @@ internal object PopupProbe {
                 return true
             }
 
-            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse =
-                WebResourceResponse("text/plain", "utf-8", 204, "No Content", emptyMap(), ByteArrayInputStream(ByteArray(0)))
+            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse {
+                // A POST navigation (a form submitted into the window)
+                // reaches only here. Off the main thread: handed over
+                // to it, where `finish` runs; a GET navigation already
+                // finished from shouldOverrideUrlLoading, before its
+                // request was made, so this is a no-op for it.
+                val url = request?.url?.toString()
+                if (request?.isForMainFrame == true && url != null && url != ABOUT_BLANK) {
+                    val posted = !request.method.equals("GET", ignoreCase = true)
+                    main.post { finish(url, posted = posted) }
+                }
+                return WebResourceResponse("text/plain", "utf-8", 204, "No Content", emptyMap(), ByteArrayInputStream(ByteArray(0)))
+            }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 // A navigation that skipped shouldOverrideUrlLoading

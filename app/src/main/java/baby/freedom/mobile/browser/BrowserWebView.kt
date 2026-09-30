@@ -966,9 +966,9 @@ fun BrowserWebViewHost(
                 val id = popups.add(origin, pending = probing, unread = !probing)
                 if (!probing || id == null) return@buildRefreshableWebView false
                 popups.liveProbes++
-                val started = PopupProbe.start(context, tab.private, resultMsg) { url, bound ->
+                val started = PopupProbe.start(context, tab.private, resultMsg) { url, bound, posted ->
                     popups.liveProbes--
-                    if (bound) popups.resolve(document, id, url) else popups.unread(document, id)
+                    if (bound) popups.resolve(document, id, url, posted) else popups.unread(document, id)
                 }
                 if (!started) {
                     popups.liveProbes--
