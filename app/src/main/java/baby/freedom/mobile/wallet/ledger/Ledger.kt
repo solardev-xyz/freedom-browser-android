@@ -8,8 +8,14 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.ParcelUuid
 import android.util.Log
@@ -46,13 +52,19 @@ import kotlinx.coroutines.sync.withLock
 /**
  * Where a Ledger account's key lives (#142): its path in the device's
  * format (`44'/60'/0'/0/0`) and the Ledger it was added from — its
- * Bluetooth address ([device]) and the name it showed ([deviceName]).
- * Public data only; the key never leaves the Ledger.
+ * Bluetooth address, or `usb:…` for one added over USB (#319) ([device]),
+ * and the name it showed ([deviceName]). Public data only; the key never
+ * leaves the Ledger.
  */
 data class LedgerKey(val path: String, val device: String, val deviceName: String)
 
-/** A Ledger the phone can see or has paired with, offered on the Connect Ledger page. */
-data class LedgerDevice(val id: String, val name: String, val paired: Boolean)
+/**
+ * A Ledger the phone can see, has paired with, or has plugged in
+ * ([usb], #319), offered on the Connect Ledger page.
+ */
+data class LedgerDevice(val id: String, val name: String, val paired: Boolean) {
+    val usb: Boolean get() = Ledger.isUsbId(id)
+}
 
 /** How accounts are laid out on a Ledger: desktop's `PATH_SCHEMES`. */
 enum class LedgerScheme(@StringRes private val labelRes: Int) {
@@ -69,9 +81,17 @@ enum class LedgerScheme(@StringRes private val labelRes: Int) {
 }
 
 /**
- * The phone's Ledger (#142): finds Bluetooth Ledgers, reads their
- * Ethereum accounts, and signs on them — one device conversation at a
- * time, the link opened for it and closed after, as desktop does.
+ * The phone's Ledger (#142): finds Bluetooth Ledgers and Ledgers plugged
+ * in over USB (#319), reads their Ethereum accounts, and signs on them —
+ * one device conversation at a time, the link opened for it and closed
+ * after, as desktop does. Both links carry the same APDUs
+ * ([LedgerEthApp]); only the framing under them differs.
+ *
+ * A Ledger plugged in over USB is used for every conversation while it's
+ * there, whichever link its account was added over: plugging in is the
+ * user picking the cable, and the address check below still refuses a
+ * Ledger that doesn't hold the account. An account added over USB with
+ * no Ledger plugged in fails at once, asking for it to be plugged in.
  *
  * While a conversation is on, [activity] says what the Ledger is waiting
  * for (connecting, pairing, unlock it, open the Ethereum app, confirm on
@@ -92,7 +112,7 @@ class Ledger internal constructor(private val context: Context) {
     /** What the Ledger is waiting for, while a conversation is on. */
     data class Activity(val deviceName: String, val stage: Stage, val purpose: String, val cancel: () -> Unit)
 
-    enum class Stage { CONNECTING, PAIRING, UNLOCK, OPEN_APP, READING, CONFIRM }
+    enum class Stage { CONNECTING, PAIRING, USB_PERMISSION, UNLOCK, OPEN_APP, READING, CONFIRM }
 
     private val _activity = MutableStateFlow<Activity?>(null)
     val activity: StateFlow<Activity?> = _activity.asStateFlow()
@@ -101,6 +121,9 @@ class Ledger internal constructor(private val context: Context) {
 
     private val adapter: BluetoothAdapter?
         get() = context.getSystemService(BluetoothManager::class.java)?.adapter
+
+    private val usbManager: UsbManager?
+        get() = context.getSystemService(UsbManager::class.java)
 
     /** The Android permissions reaching a Ledger needs on this version. */
     fun permissions(): Array<String> = if (Build.VERSION.SDK_INT >= 31) {
@@ -119,6 +142,55 @@ class Ledger internal constructor(private val context: Context) {
     fun hasDevLinks(): Boolean = LedgerDevLinks.devices(context).isNotEmpty()
 
     fun hasBle(): Boolean = context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)
+
+    /** Whether the phone can take a Ledger on its USB port (USB host / OTG). */
+    fun hasUsbHost(): Boolean = context.packageManager.hasSystemFeature(PackageManager.FEATURE_USB_HOST)
+
+    /**
+     * The Ledgers plugged in over USB (#319), updated as they're plugged
+     * in and out. Listing them needs no permission; Android asks for
+     * access to one only when it's first talked to.
+     *
+     * The attach/detach broadcasts only prompt a re-read of
+     * [UsbManager.getDeviceList] — the list is never taken from them — so
+     * the receiver can be exported without trusting whoever sends one.
+     */
+    fun usbDevices(): Flow<List<LedgerDevice>> = callbackFlow {
+        val read = { trySend(LedgerUsbLink.devices(usbManager).map { LedgerDevice(USB_PREFIX + it.deviceName, LedgerUsbLink.name(it), paired = true) }) }
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) {
+                read()
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
+        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
+        read()
+        awaitClose { runCatching { context.unregisterReceiver(receiver) } }
+    }
+
+    private val plugInLauncher: ComponentName
+        get() = ComponentName(context.packageName, PLUG_IN_LAUNCHER)
+
+    /**
+     * Whether plugging in a Ledger opens Freedom (#319): off unless the
+     * user turns it on. On, Android offers to open Freedom when a Ledger
+     * is plugged in — and, with "always", gives it access to that Ledger
+     * without asking each time. Off, nothing happens on plug-in; access
+     * is asked when the Ledger is first talked to.
+     */
+    var openOnPlugIn: Boolean
+        get() = context.packageManager.getComponentEnabledSetting(plugInLauncher) ==
+            PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+        set(on) {
+            context.packageManager.setComponentEnabledSetting(
+                plugInLauncher,
+                if (on) PackageManager.COMPONENT_ENABLED_STATE_ENABLED else PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+                PackageManager.DONT_KILL_APP,
+            )
+        }
 
     /** Why Bluetooth can't be used now, or null if it can. */
     private fun bluetoothProblem(): LedgerException? = when {
@@ -271,13 +343,21 @@ class Ledger internal constructor(private val context: Context) {
         purpose: String,
         block: suspend (LedgerEthApp, (Stage) -> Unit) -> T,
     ): T = conversation.withLock {
-        bluetoothProblem()?.takeUnless { LedgerDevLinks.handles(id) }?.let { throw it }
+        val usb = usbFor(id)
+        if (usb == null && isUsbId(id)) throw LedgerException(LedgerException.Kind.NOT_FOUND, Strings.said(R.string.signing_ledger_usb_not_plugged_in))
+        if (usb == null) bluetoothProblem()?.takeUnless { LedgerDevLinks.handles(id) }?.let { throw it }
+        val shown = usb?.let { LedgerUsbLink.name(it) } ?: name
         coroutineScope {
             var stage: (Stage) -> Unit = {}
             val cancelled = AtomicBoolean(false)
             // Created unstarted, so Cancel exists before anything can call stage() with it.
             val work = async(start = CoroutineStart.LAZY) {
-                val link = open(id, onPairing = { stage(Stage.PAIRING) }, onPaired = { stage(Stage.CONNECTING) })
+                val link = if (usb != null) {
+                    val manager = usbManager ?: throw LedgerUsbLink.unplugged()
+                    LedgerUsbLink.open(context, manager, usb, onPermission = { stage(Stage.USB_PERMISSION) }).also { stage(Stage.CONNECTING) }
+                } else {
+                    open(id, onPairing = { stage(Stage.PAIRING) }, onPaired = { stage(Stage.CONNECTING) })
+                }
                 try {
                     block(LedgerEthApp(link), stage)
                 } finally {
@@ -288,7 +368,7 @@ class Ledger internal constructor(private val context: Context) {
                 cancelled.set(true)
                 work.cancel()
             }
-            stage = { s: Stage -> _activity.value = Activity(name, s, purpose, cancel) }
+            stage = { s: Stage -> _activity.value = Activity(shown, s, purpose, cancel) }
             stage(Stage.CONNECTING)
             work.start()
             try {
@@ -305,6 +385,17 @@ class Ledger internal constructor(private val context: Context) {
         }
     }
 
+    /**
+     * The Ledger plugged in over USB a conversation with [id] goes to, if
+     * any: the one [id] names if it's still there, else any plugged-in
+     * Ledger. Never for a debug build's emulator link.
+     */
+    private fun usbFor(id: String): UsbDevice? {
+        if (LedgerDevLinks.handles(id)) return null
+        val plugged = LedgerUsbLink.devices(usbManager)
+        return plugged.firstOrNull { USB_PREFIX + it.deviceName == id } ?: plugged.firstOrNull()
+    }
+
     @SuppressLint("MissingPermission")
     private suspend fun open(id: String, onPairing: () -> Unit, onPaired: () -> Unit): LedgerLink {
         LedgerDevLinks.open(context, id)?.let { return it }
@@ -315,6 +406,14 @@ class Ledger internal constructor(private val context: Context) {
 
     companion object {
         private const val TAG = "Ledger"
+
+        /** A USB Ledger's id: this and its USB device path, which only tells two plugged in at once apart. */
+        private const val USB_PREFIX = "usb:"
+
+        /** The activity-alias [openOnPlugIn] turns on: MainActivity, started by a Ledger's plug-in. */
+        private const val PLUG_IN_LAUNCHER = "baby.freedom.mobile.LedgerPlugIn"
+
+        fun isUsbId(id: String): Boolean = id.startsWith(USB_PREFIX)
 
         /** How long a locked Ledger, or one on another app, is waited for. */
         const val READY_MS = 90_000L

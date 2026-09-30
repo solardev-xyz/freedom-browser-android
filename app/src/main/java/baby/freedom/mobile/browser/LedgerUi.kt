@@ -34,6 +34,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -78,13 +79,14 @@ private const val ACCOUNTS_PER_PAGE = 5
 private const val SCAN_MS = 30_000L
 
 /**
- * Connect a Ledger (#142), from the wallet's account card: Bluetooth and
- * its permission first (Nearby devices, or location before Android 12),
- * then the Ledgers in reach — paired ones and ones advertising — then
- * that Ledger's Ethereum accounts, five at a time, under Ledger Live's
- * layout or the legacy one, as on desktop. The one picked joins the
- * account list and becomes the active account; the key stays on the
- * Ledger. While the Ledger is being talked to, [LedgerActivityDialog]
+ * Connect a Ledger (#142), from the wallet's account card: Ledgers
+ * plugged in over USB (#319) first, where the phone has USB host, then
+ * Bluetooth and its permission (Nearby devices, or location before
+ * Android 12) and the Ledgers in reach — paired ones and ones
+ * advertising — then that Ledger's Ethereum accounts, five at a time,
+ * under Ledger Live's layout or the legacy one, as on desktop. The one
+ * picked joins the account list and becomes the active account; the
+ * key stays on the Ledger. While the Ledger is being talked to, [LedgerActivityDialog]
  * says what it's waiting for ("Unlock your Ledger", "Open the Ethereum
  * app"), with Cancel.
  */
@@ -116,7 +118,7 @@ internal fun LedgerConnectPage(accounts: List<WalletAccount>, onAdded: () -> Uni
     }
 }
 
-/** Bluetooth, its permission, and the Ledgers in reach. */
+/** Ledgers plugged in over USB; Bluetooth, its permission, and the Ledgers in reach. */
 @Composable
 private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
     val context = LocalContext.current
@@ -139,6 +141,10 @@ private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
     var scanning by remember { mutableStateOf(false) }
     var scanTick by remember { mutableIntStateOf(0) }
     val devLinks = remember { ledger.hasDevLinks() }
+    val usbHost = remember { ledger.hasUsbHost() }
+    val usbFlow = remember { ledger.usbDevices() }
+    val usbDevices by usbFlow.collectAsState(emptyList())
+    var openOnPlugIn by remember { mutableStateOf(ledger.openOnPlugIn) }
     LaunchedEffect(granted, bluetoothOn, scanTick) {
         scanning = true
         try {
@@ -165,6 +171,34 @@ private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+        if (usbHost || usbDevices.isNotEmpty()) item("usb") {
+            SectionCard(title = stringResource(R.string.signing_ledger_usb)) {
+                if (usbDevices.isEmpty()) {
+                    Text(stringResource(R.string.signing_ledger_usb_none), style = MaterialTheme.typography.bodyMedium)
+                }
+                usbDevices.forEach { d ->
+                    PageRow(
+                        title = d.name,
+                        subtitle = stringResource(R.string.signing_ledger_device_usb),
+                        style = PageRowStyle.Inset,
+                        leadingIcon = Icons.Filled.Usb,
+                        onClick = { onPick(d) },
+                        modifier = Modifier.testTag("ledger-usb-device"),
+                    )
+                }
+                PageRow(
+                    title = stringResource(R.string.signing_ledger_open_on_plug_in),
+                    subtitle = stringResource(R.string.signing_ledger_open_on_plug_in_detail),
+                    style = PageRowStyle.Inset,
+                    checked = openOnPlugIn,
+                    onClick = {
+                        ledger.openOnPlugIn = !openOnPlugIn
+                        openOnPlugIn = ledger.openOnPlugIn
+                    },
+                    modifier = Modifier.testTag("ledger-open-on-plug-in"),
+                ) { Switch(checked = openOnPlugIn, onCheckedChange = null) }
             }
         }
         when {
@@ -443,6 +477,7 @@ fun LedgerActivityDialog() {
 internal fun ledgerActivityText(a: Ledger.Activity): Pair<String, String> = when (a.stage) {
     Ledger.Stage.CONNECTING -> Strings.get(R.string.signing_ledger_stage_connecting) to Strings.get(R.string.signing_ledger_stage_connecting_detail)
     Ledger.Stage.PAIRING -> Strings.get(R.string.signing_ledger_stage_pairing) to Strings.get(R.string.signing_ledger_stage_pairing_detail)
+    Ledger.Stage.USB_PERMISSION -> Strings.get(R.string.signing_ledger_stage_usb_permission) to Strings.get(R.string.signing_ledger_stage_usb_permission_detail)
     Ledger.Stage.UNLOCK -> Strings.get(R.string.signing_ledger_stage_unlock) to Strings.get(R.string.signing_ledger_stage_unlock_detail)
     Ledger.Stage.OPEN_APP -> Strings.get(R.string.signing_ledger_stage_open_app) to Strings.get(R.string.signing_ledger_stage_open_app_detail)
     Ledger.Stage.READING -> Strings.get(R.string.signing_ledger_stage_reading) to Strings.get(R.string.signing_ledger_stage_reading_detail)

@@ -64,6 +64,7 @@ class LedgerUiTest {
         assertEquals("Unlock your Ledger", text(Ledger.Stage.UNLOCK))
         assertEquals("Open the Ethereum app", text(Ledger.Stage.OPEN_APP))
         assertEquals("Pair with your Ledger", text(Ledger.Stage.PAIRING))
+        assertEquals("Allow USB access", text(Ledger.Stage.USB_PERMISSION))
         assertEquals("Confirm the message on your Ledger", text(Ledger.Stage.CONFIRM))
     }
 }
