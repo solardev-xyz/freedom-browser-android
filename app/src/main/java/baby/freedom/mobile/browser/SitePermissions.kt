@@ -258,6 +258,7 @@ class PermissionSession(private val embargoes: Boolean = true) {
     private val embargoed = HashSet<Key>()
     private val dismissals = HashMap<Key, Int>()
     private val removals = HashMap<Key, Int>()
+    private val storeRemovals = HashMap<Key, Int>()
 
     /** Bumped on every change; observe it to re-read [entries]. */
     val version = kotlinx.coroutines.flow.MutableStateFlow(0)
@@ -272,7 +273,14 @@ class PermissionSession(private val embargoes: Boolean = true) {
         val k = Key(origin, permission)
         dismissals.remove(k)
         embargoed.remove(k)
-        if (remembered) decisions.remove(k) else decisions[k] = decision
+        if (remembered) {
+            decisions.remove(k)
+            // The store now holds this decision, written after any
+            // removal still being waited on: it's what counts.
+            storeRemovals.remove(k)
+        } else {
+            decisions[k] = decision
+        }
         version.value++
     }
 
@@ -317,6 +325,52 @@ class PermissionSession(private val embargoes: Boolean = true) {
     @Synchronized
     fun removalCount(origin: String, permissions: Collection<SiteCapability>): Int =
         permissions.distinct().sumOf { removals[Key(origin, it)] ?: 0 }
+
+    /**
+     * The remembered decision for the pair is being removed from the
+     * store ([revoke]'s other half, which lands later). Until
+     * [removedFromStore], [withoutStoreRemovals] hides it: a request
+     * that reads the store in between must not be allowed by what the
+     * user has just removed.
+     */
+    @Synchronized
+    fun removingFromStore(origin: String, permission: SiteCapability) {
+        val k = Key(origin, permission)
+        storeRemovals[k] = (storeRemovals[k] ?: 0) + 1
+    }
+
+    /** The store write [removingFromStore] waited on is done (or failed). */
+    @Synchronized
+    fun removedFromStore(origin: String, permission: SiteCapability) {
+        val k = Key(origin, permission)
+        val n = (storeRemovals[k] ?: return) - 1
+        if (n > 0) storeRemovals[k] = n else storeRemovals.remove(k)
+    }
+
+    /**
+     * [read] (of the store, for [origin]) minus what's being removed
+     * from it ([removingFromStore]) — as of before the read as well as
+     * after: a read that started before the removal landed can return
+     * the old value even if the removal is done by the time it returns.
+     */
+    suspend fun <V> readWithoutStoreRemovals(
+        origin: String,
+        read: suspend () -> Map<SiteCapability, V>,
+    ): Map<SiteCapability, V> {
+        val before = beingRemovedFromStore(origin)
+        val stored = read()
+        val hidden = before + beingRemovedFromStore(origin)
+        return if (hidden.isEmpty()) stored else stored.filterKeys { it !in hidden }
+    }
+
+    @Synchronized
+    private fun beingRemovedFromStore(origin: String): Set<SiteCapability> =
+        storeRemovals.keys.filter { it.origin == origin }.mapTo(HashSet()) { it.permission }
+
+    /** Whether [permission]'s remembered decision for [origin] is being removed from the store. */
+    @Synchronized
+    fun beingRemovedFromStore(origin: String, permission: SiteCapability): Boolean =
+        Key(origin, permission) in storeRemovals
 
     @Synchronized
     fun entries(): List<SitePermissionEntry> = decisions.map { (k, d) ->

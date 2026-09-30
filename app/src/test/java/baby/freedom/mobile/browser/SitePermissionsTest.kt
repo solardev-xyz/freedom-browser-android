@@ -668,6 +668,45 @@ class SitePermissionsTest {
     }
 
     @Test
+    fun `a remembered Allow being removed from the store isn't read from it meanwhile`() = runBlocking {
+        val tier = PermissionSession()
+        val site = "https://a.example"
+        val asked = listOf<SiteCapability>(SitePermission.CAMERA)
+        // The store still holds the Allow: its removal hasn't landed yet.
+        val store = mapOf<SiteCapability, PermissionDecision>(
+            SitePermission.CAMERA to PermissionDecision.ALLOW,
+            SitePermission.LOCATION to PermissionDecision.ALLOW,
+        )
+        tier.revoke(site, SitePermission.CAMERA)
+        tier.removingFromStore(site, SitePermission.CAMERA)
+        val stored = tier.readWithoutStoreRemovals(site) { store }
+        // A request made now is asked, not granted by the stale Allow…
+        assertTrue(planFor(site, asked, stored, tier) is PermissionPlan.Ask)
+        // …and nothing else is hidden: not another permission, not another site.
+        assertEquals(PermissionDecision.ALLOW, stored[SitePermission.LOCATION])
+        assertEquals(store, tier.readWithoutStoreRemovals("https://b.example") { store })
+
+        // A read that started before the removal landed is still masked,
+        // even though the removal is done by the time it returns.
+        val raced = tier.readWithoutStoreRemovals(site) {
+            tier.removedFromStore(site, SitePermission.CAMERA)
+            store
+        }
+        assertNull(raced[SitePermission.CAMERA])
+        // Once it's done, the store's own answer counts again (the
+        // removal failed, say: the Allow is still remembered, as Settings says).
+        assertEquals(store, tier.readWithoutStoreRemovals(site) { store })
+
+        // Allowed and remembered again meanwhile: that store write came
+        // after the removal, so the store holds the new answer.
+        tier.removingFromStore(site, SitePermission.CAMERA)
+        tier.record(site, SitePermission.CAMERA, PermissionDecision.ALLOW, remembered = true)
+        assertEquals(store, tier.readWithoutStoreRemovals(site) { store })
+        tier.removedFromStore(site, SitePermission.CAMERA)
+        assertEquals(store, tier.readWithoutStoreRemovals(site) { store })
+    }
+
+    @Test
     fun `a frame's grant and the page's are kept apart`() {
         val page = "https://page.example"
         val frame = "https://frame.example"

@@ -490,7 +490,8 @@ class SitePermissionBroker private constructor(
         return when (sessionFor(tab).decisionFor(origin, SitePermission.POPUPS)) {
             PermissionDecision.ALLOW -> true
             PermissionDecision.DENY -> false
-            null -> !tab.private && origin in storedPopupAllows
+            null -> !tab.private && origin in storedPopupAllows &&
+                !session.beingRemovedFromStore(origin, SitePermission.POPUPS)
         }
     }
 
@@ -547,7 +548,18 @@ class SitePermissionBroker private constructor(
         // Off at once, not only once the store's next read lands.
         if (entry.permission == SitePermission.POPUPS) storedPopupAllows = storedPopupAllows - entry.origin
         noteRemoved(entry, private = false)
-        scope.launch { store.remove(entry.origin, entry.permission.key) }
+        // Until the store write lands, what it's removing is hidden from
+        // every read of the store: a request arriving meanwhile would
+        // otherwise read the old Allow after the removal count was
+        // bumped, and be granted what the user just removed.
+        session.removingFromStore(entry.origin, entry.permission)
+        scope.launch {
+            try {
+                store.remove(entry.origin, entry.permission.key)
+            } finally {
+                session.removedFromStore(entry.origin, entry.permission)
+            }
+        }
     }
 
     // ---------------------------------------------------------------
@@ -640,7 +652,7 @@ class SitePermissionBroker private constructor(
 
     /** What's remembered for [origin], as [tab] sees it: nothing, in a private tab. */
     private suspend fun storedDecisionsFor(tab: BrowserState, origin: String): Map<SiteCapability, PermissionDecision> =
-        if (tab.private) emptyMap() else storedDecisions(origin)
+        if (tab.private) emptyMap() else session.readWithoutStoreRemovals(origin) { storedDecisions(origin) }
 
     private suspend fun storedDecisions(origin: String): Map<SiteCapability, PermissionDecision> =
         store.decisionsFor(origin).mapNotNull { (k, v) ->
