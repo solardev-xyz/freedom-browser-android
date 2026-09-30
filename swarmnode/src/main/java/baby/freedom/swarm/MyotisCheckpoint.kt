@@ -1,5 +1,6 @@
 package baby.freedom.swarm
 
+import androidx.annotation.StringRes
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -25,44 +26,44 @@ import org.json.JSONObject
  */
 
 /** Why an attempt to obtain or use a checkpoint failed. [code] matches desktop / iOS. */
-enum class MyotisCheckpointError(val code: String, val message: String) {
+enum class MyotisCheckpointError(val code: String, @StringRes private val messageRes: Int) {
     /** Not enough checkpoint sources could confirm a recent checkpoint. */
-    QuorumUnavailable(
-        "CHECKPOINT_QUORUM_UNAVAILABLE",
-        "Not enough checkpoint sources could confirm a recent checkpoint.",
-    ),
+    QuorumUnavailable("CHECKPOINT_QUORUM_UNAVAILABLE", R.string.swarmnode_checkpoint_quorum_unavailable),
 
     /** Checkpoint sources disagree — terminal, never retried automatically. */
-    QuorumConflict("CHECKPOINT_QUORUM_CONFLICT", "Checkpoint sources disagree. Sync is paused."),
+    QuorumConflict("CHECKPOINT_QUORUM_CONFLICT", R.string.swarmnode_checkpoint_quorum_conflict),
 
     /** A service couldn't complete (transport, malformed body, deadline). Retryable. */
-    Unavailable("CHECKPOINT_UNAVAILABLE", "The checkpoint services couldn't be reached."),
+    Unavailable("CHECKPOINT_UNAVAILABLE", R.string.swarmnode_checkpoint_unavailable),
 
     /** The checkpoint evidence didn't pass verification. */
-    Mismatch("CHECKPOINT_MISMATCH", "The checkpoint evidence didn't pass verification."),
+    Mismatch("CHECKPOINT_MISMATCH", R.string.swarmnode_checkpoint_mismatch),
 
     /**
      * The engine's own verified finalized root contradicted the agreed
      * checkpoint — at runtime, or recorded on the generation and refused
      * at load. The evidence passed; the chain disagreed with it.
      */
-    AnchorMismatch("CHECKPOINT_ANCHOR_MISMATCH", "The synced chain didn't match the agreed checkpoint."),
+    AnchorMismatch("CHECKPOINT_ANCHOR_MISMATCH", R.string.swarmnode_checkpoint_anchor_mismatch),
 
     /** The checkpoint is too old (over an hour). Retryable: the next attempt asks for a fresher one. */
-    Stale("CHECKPOINT_STALE", "The checkpoint is too old."),
+    Stale("CHECKPOINT_STALE", R.string.swarmnode_checkpoint_stale),
 
     /** The finalized checkpoint moved during verification. Retryable. */
-    Race("CHECKPOINT_RACE", "The finalized checkpoint changed during verification."),
+    Race("CHECKPOINT_RACE", R.string.swarmnode_checkpoint_race),
 
     /** Checkpoint time disagrees with this device's clock. */
-    Clock("CHECKPOINT_CLOCK", "The checkpoint time doesn't agree with this device's clock. Check the date and time."),
+    Clock("CHECKPOINT_CLOCK", R.string.swarmnode_checkpoint_clock),
 
     /** Saved sync state is inconsistent (pointer, generation record, engine marker). */
-    Storage("CHECKPOINT_STORAGE", "The saved sync data is inconsistent. Repair it to start fresh."),
+    Storage("CHECKPOINT_STORAGE", R.string.swarmnode_checkpoint_storage),
 
     /** The filesystem refused (full, read-only, permissions). */
-    StorageIO("CHECKPOINT_STORAGE_IO", "Freedom couldn't write its sync data. Check free space."),
+    StorageIO("CHECKPOINT_STORAGE_IO", R.string.swarmnode_checkpoint_storage_io),
     ;
+
+    /** What the node page says about it. */
+    val message: String get() = SwarmStrings.get(messageRes)
 
     /** Desktop's automatic-retry set; everything else stops and asks the user. */
     val retryable: Boolean

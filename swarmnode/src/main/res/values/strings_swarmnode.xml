@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The :swarmnode library's user-visible text (#280): what its nodes report
+  for the app's node, Tor, Radicle and postage pages. Read through
+  baby.freedom.swarm.SwarmStrings. Brand and network names (Swarm, Tor,
+  xBZZ, Gnosis, SOCKS) stay as they are.
+-->
+<resources>
+    <!-- MyotisCheckpoint.kt: why getting or using a light-client checkpoint failed; shown on the node page's chain row -->
+    <string name="swarmnode_checkpoint_quorum_unavailable">Not enough checkpoint sources could confirm a recent checkpoint.</string>
+    <string name="swarmnode_checkpoint_quorum_conflict">Checkpoint sources disagree. Sync is paused.</string>
+    <string name="swarmnode_checkpoint_unavailable">The checkpoint services couldn\'t be reached.</string>
+    <string name="swarmnode_checkpoint_mismatch">The checkpoint evidence didn\'t pass verification.</string>
+    <string name="swarmnode_checkpoint_anchor_mismatch">The synced chain didn\'t match the agreed checkpoint.</string>
+    <string name="swarmnode_checkpoint_stale">The checkpoint is too old.</string>
+    <string name="swarmnode_checkpoint_race">The finalized checkpoint changed during verification.</string>
+    <string name="swarmnode_checkpoint_clock">The checkpoint time doesn\'t agree with this device\'s clock. Check the date and time.</string>
+    <string name="swarmnode_checkpoint_storage">The saved sync data is inconsistent. Repair it to start fresh.</string>
+    <string name="swarmnode_checkpoint_storage_io">Freedom couldn\'t write its sync data. Check free space.</string>
+
+    <!-- MyotisRecovery.kt: a chain's checkpoint recovery on the node page -->
+    <string name="swarmnode_recovery_startup">The light client couldn\'t start.</string>
+    <string name="swarmnode_recovery_stalled">Sync hasn\'t finished in a while.</string>
+    <!-- The chain row's one-line state -->
+    <string name="swarmnode_recovery_label_stalled">Syncing slowly</string>
+    <string name="swarmnode_recovery_label_paused">Sync paused</string>
+    <string name="swarmnode_recovery_label_updating">Updating checkpoint</string>
+    <string name="swarmnode_recovery_checking">This chain\'s checkpoint is too old to sync from. Asking checkpoint services for a fresh one…</string>
+    <string name="swarmnode_recovery_checking_anchor_mismatch">The synced chain didn\'t match the agreed checkpoint. Asking checkpoint services for a fresh one…</string>
+    <string name="swarmnode_recovery_restarting">Restarting the light client…</string>
+    <string name="swarmnode_recovery_restarting_from_checkpoint">Fresh checkpoint agreed. Syncing from it…</string>
+    <!-- %1$s: why it's waiting (one of the sentences above); %2$d: seconds until the next attempt -->
+    <string name="swarmnode_recovery_waiting">%1$s Trying again in %2$ds.</string>
+
+    <!-- MyotisChainStatus.kt: why a synced chain can't answer reads yet; several are joined with commas -->
+    <string name="swarmnode_not_serving_no_state_peer">no state peer</string>
+    <string name="swarmnode_not_serving_no_state_peer_at_head">no state peer at the head</string>
+    <string name="swarmnode_not_serving_reader_down">execution reader down</string>
+    <string name="swarmnode_not_serving_hunting">looking for peers at the head</string>
+
+    <!-- MyotisNode.kt: why the light client or one chain's engine didn't start -->
+    <!-- %1$d: the engine's ABI version; %2$d: the one this app was built for -->
+    <string name="swarmnode_myotis_abi_mismatch">Light client engine ABI %1$d, this app expects %2$d</string>
+    <!-- %1$s: a folder path -->
+    <string name="swarmnode_myotis_cant_create">Can\'t create %1$s</string>
+    <string name="swarmnode_myotis_engine_didnt_start">Engine didn\'t start</string>
+    <string name="swarmnode_myotis_unsupported_network">Network not supported by this engine</string>
+    <string name="swarmnode_myotis_anchor_mismatch">Saved sync data doesn\'t match the engine\'s checkpoint</string>
+    <!-- %1$d: the engine's error code -->
+    <string name="swarmnode_myotis_create_failed">Engine couldn\'t be created (%1$d)</string>
+
+    <!-- TorNode.kt: the built-in Tor client's error line -->
+    <string name="swarmnode_tor_unavailable">This build of Freedom has no Tor client</string>
+    <string name="swarmnode_tor_no_status">No status</string>
+    <string name="swarmnode_tor_unknown_state">Unknown state</string>
+    <string name="swarmnode_tor_no_socks_port">No SOCKS port</string>
+
+    <!-- RadicleNode.kt: the Radicle node's error and the seed line under a fetch -->
+    <string name="swarmnode_radicle_start_failed">start failed</string>
+    <string name="swarmnode_radicle_unreadable_start">unreadable start response</string>
+    <string name="swarmnode_radicle_unreadable_fetch">unreadable fetch response</string>
+    <string name="swarmnode_radicle_invalid_rid">Not a valid repository ID</string>
+    <string name="swarmnode_radicle_stale_fetch">An earlier fetch of this repository is still winding down. Try again in a moment.</string>
+    <plurals name="swarmnode_radicle_candidate_seeds">
+        <item quantity="one">%1$d candidate seed</item>
+        <item quantity="other">%1$d candidate seeds</item>
+    </plurals>
+    <!-- %1$s: the node ID the repository is fetched from -->
+    <string name="swarmnode_radicle_fetching_from">from %1$s</string>
+
+    <!-- SwarmNode.kt: why a stamp or chequebook action failed; shown after "The deposit failed: " and the like -->
+    <string name="swarmnode_gateway_reload_failed">The gateway didn\'t come back after the node set up its chequebook</string>
+    <string name="swarmnode_not_running">the Swarm node isn\'t running</string>
+    <string name="swarmnode_not_light">the Swarm node isn\'t in light mode</string>
+    <string name="swarmnode_no_account">the node has no account</string>
+    <string name="swarmnode_stamp_not_active">this stamp isn\'t the node\'s active one</string>
+    <string name="swarmnode_stamp_no_depth">the node reported no depth for this stamp</string>
+    <string name="swarmnode_chequebook_unknown">the node couldn\'t say which chequebook it has</string>
+    <string name="swarmnode_chequebook_none">the node has no chequebook yet</string>
+    <string name="swarmnode_chequebook_other">the node\'s chequebook isn\'t the one you confirmed</string>
+    <string name="swarmnode_balance_unreadable">the node couldn\'t read its xBZZ balance</string>
+    <!-- %1$s: an xBZZ amount, in its fixed format -->
+    <string name="swarmnode_balance_short">the node holds only %1$s xBZZ</string>
+    <string name="swarmnode_deposit_earlier_pending">an earlier deposit may still be on its way; check the chequebook\'s balance, and deposit again in a few minutes if it hasn\'t grown</string>
+    <!-- How a deposit that may have gone out after all starts its error. -->
+    <string name="swarmnode_deposit_maybe_sent">it may already have been sent</string>
+    <!--
+      %1$s: swarmnode_deposit_maybe_sent, and keep it first: the app tells
+      this outcome from a failure by that start. %2$s: the node's reason.
+    -->
+    <string name="swarmnode_deposit_maybe_sent_detail">%1$s (%2$s). Check the chequebook\'s balance before depositing again</string>
+    <string name="swarmnode_gateway_no_answer">the node\'s gateway didn\'t answer</string>
+    <!-- %1$d: the HTTP status code -->
+    <string name="swarmnode_deposit_failed_http">the deposit failed (HTTP %1$d)</string>
+    <!-- Replaces the Gnosis RPC address (which can carry an API key) in an error -->
+    <string name="swarmnode_gnosis_rpc">the Gnosis RPC</string>
+</resources>

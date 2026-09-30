@@ -62,8 +62,8 @@ enum class MyotisRecoveryReason(val code: String) {
             Storage -> MyotisCheckpointError.Storage.message
             StorageIO -> MyotisCheckpointError.StorageIO.message
             Stale -> MyotisCheckpointError.Stale.message
-            Startup -> "The light client couldn't start."
-            Stalled -> "Sync hasn't finished in a while."
+            Startup -> SwarmStrings.get(R.string.swarmnode_recovery_startup)
+            Stalled -> SwarmStrings.get(R.string.swarmnode_recovery_stalled)
         }
 
     companion object {
@@ -130,24 +130,29 @@ data class MyotisRecovery(
     /** The chain row's one-line state. */
     val label: String
         get() = when (phase) {
-            Phase.Blocked -> if (reason == MyotisRecoveryReason.Stalled) "Syncing slowly" else "Sync paused"
-            else -> "Updating checkpoint"
+            Phase.Blocked -> SwarmStrings.get(
+                if (reason == MyotisRecoveryReason.Stalled) R.string.swarmnode_recovery_label_stalled
+                else R.string.swarmnode_recovery_label_paused,
+            )
+            else -> SwarmStrings.get(R.string.swarmnode_recovery_label_updating)
         }
 
     /** The chain row's explanation; [nowElapsed] on the same clock as [nextRetryAt]. */
     fun message(nowElapsed: Long): String = when (phase) {
         Phase.Checking ->
-            if (reason == MyotisRecoveryReason.AnchorMismatch) {
-                "${MyotisCheckpointError.AnchorMismatch.message} Asking checkpoint services for a fresh one…"
-            } else {
-                "This chain's checkpoint is too old to sync from. Asking checkpoint services for a fresh one…"
-            }
+            SwarmStrings.get(
+                if (reason == MyotisRecoveryReason.AnchorMismatch) R.string.swarmnode_recovery_checking_anchor_mismatch
+                else R.string.swarmnode_recovery_checking,
+            )
         Phase.Restarting ->
-            if (mode == Mode.Restart) "Restarting the light client…" else "Fresh checkpoint agreed. Syncing from it…"
+            SwarmStrings.get(
+                if (mode == Mode.Restart) R.string.swarmnode_recovery_restarting
+                else R.string.swarmnode_recovery_restarting_from_checkpoint,
+            )
         Phase.Waiting -> {
             val why = (reason ?: MyotisRecoveryReason.Unavailable).explanation
             val seconds = ((nextRetryAt ?: nowElapsed) - nowElapsed).coerceAtLeast(0).let { (it + 999) / 1000 }
-            "$why Trying again in ${seconds}s."
+            SwarmStrings.get(R.string.swarmnode_recovery_waiting, why, seconds)
         }
         Phase.Blocked -> (reason ?: MyotisRecoveryReason.Unavailable).explanation
     }

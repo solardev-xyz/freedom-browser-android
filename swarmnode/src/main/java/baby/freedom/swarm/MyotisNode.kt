@@ -512,7 +512,7 @@ class MyotisNode internal constructor(
         if (abi != engine.expectedAbi) {
             publish(
                 MyotisStatus.Error,
-                "Light client engine ABI $abi, this app expects ${engine.expectedAbi}",
+                SwarmStrings.get(R.string.swarmnode_myotis_abi_mismatch, abi, engine.expectedAbi),
             )
             return
         }
@@ -664,7 +664,7 @@ class MyotisNode internal constructor(
     private fun boot(network: MyotisNetwork, generation: MyotisGeneration): Boot {
         val dir = generation.directory
         if (!dir.isDirectory && !dir.mkdirs()) {
-            return Boot.Failed(MyotisRecoveryReason.StorageIO, "Can't create ${dir.path}")
+            return Boot.Failed(MyotisRecoveryReason.StorageIO, SwarmStrings.get(R.string.swarmnode_myotis_cant_create, dir.path))
         }
         val checkpoint = generation.checkpoint
         val handle = if (generation.origin == MyotisGeneration.Origin.Verified && checkpoint != null) {
@@ -680,7 +680,7 @@ class MyotisNode internal constructor(
         if (!engine.start(handle)) {
             engine.stop(handle)
             Log.w(TAG, "${network.engineName}: start refused")
-            return Boot.Failed(MyotisRecoveryReason.Startup, "Engine didn't start")
+            return Boot.Failed(MyotisRecoveryReason.Startup, SwarmStrings.get(R.string.swarmnode_myotis_engine_didnt_start))
         }
         // The engine default (32 blocks) suits a desktop; a phone
         // serves the protocol minimum and keeps its data budget for
@@ -1078,9 +1078,9 @@ class MyotisNode internal constructor(
     }
 
     private fun createError(code: Long): String = when (code) {
-        MyotisNative.UNSUPPORTED_NETWORK -> "Network not supported by this engine"
-        MyotisNative.ANCHOR_MISMATCH -> "Saved sync data doesn't match the engine's checkpoint"
-        else -> "Engine couldn't be created ($code)"
+        MyotisNative.UNSUPPORTED_NETWORK -> SwarmStrings.get(R.string.swarmnode_myotis_unsupported_network)
+        MyotisNative.ANCHOR_MISMATCH -> SwarmStrings.get(R.string.swarmnode_myotis_anchor_mismatch)
+        else -> SwarmStrings.get(R.string.swarmnode_myotis_create_failed, code)
     }
 
     internal object NativeEngine : Engine {

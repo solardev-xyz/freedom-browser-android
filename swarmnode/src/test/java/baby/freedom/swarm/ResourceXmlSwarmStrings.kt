@@ -1,7 +1,5 @@
-package baby.freedom.mobile.l10n
+package baby.freedom.swarm
 
-import baby.freedom.mobile.R
-import baby.freedom.swarm.SwarmStringSource
 import org.w3c.dom.Element
 import org.w3c.dom.Node
 import java.io.File
@@ -9,34 +7,21 @@ import java.util.Locale
 import javax.xml.parsers.DocumentBuilderFactory
 
 /**
- * [Strings] for JVM unit tests (#280): there is no `Context` off-device,
- * so this reads the English `src/main/res/values/strings*.xml` the app
- * ships and resolves ids through the generated `R` class. Registered in
- * `META-INF/services`, so [Strings] finds it on its own and a test
- * asserts the same text a user sees.
- *
- * [ResourceXmlSwarmStrings] does the same for the `:swarmnode` library's
- * strings, which the library reads through `SwarmStrings`.
- *
- * Handles what the app's string files use: aapt's escapes (`\'`, `\"`,
- * `\n`, `\t`, `\\`, `\@`, `\?`, `\uXXXX`), double-quoted spans, whitespace
- * collapsing, `<xliff:g>` wrappers, `%1$s`-style formatting, and English
- * plural rules (`one` for exactly 1).
+ * [SwarmStrings] for this module's JVM unit tests (#280): reads the
+ * English `src/main/res/values/strings_swarmnode.xml` and resolves ids
+ * through the generated `R` class, so a test asserts the text a user
+ * sees. Registered in `META-INF/services`. The same parsing as the app's
+ * test `ResourceXmlStrings` (aapt escapes, double-quoted spans,
+ * whitespace collapsing, `<xliff:g>`, English plural rules).
  */
-class ResourceXmlStrings internal constructor(
-    rClass: String,
-    /** Candidate `values/` folders (relative to the module or the project); the first that exists is read. */
-    dirs: List<String>,
-) : StringSource {
-    constructor() : this(R::class.java.name, listOf("src/main/res/values", "app/src/main/res/values"))
-
+class ResourceXmlSwarmStrings : SwarmStringSource {
     private val strings = HashMap<String, String>()
     private val plurals = HashMap<String, Map<String, String>>()
-    private val stringNames: Map<Int, String> = idNames(rClass, "string")
-    private val pluralNames: Map<Int, String> = idNames(rClass, "plurals")
+    private val stringNames = R.string::class.java.fields.associate { it.getInt(null) to it.name }
+    private val pluralNames = R.plurals::class.java.fields.associate { it.getInt(null) to it.name }
 
     init {
-        val dir = dirs.map(::File).first { it.isDirectory }
+        val dir = listOf(File("src/main/res/values"), File("swarmnode/src/main/res/values")).first { it.isDirectory }
         dir.listFiles { f -> f.name.endsWith(".xml") }!!.sorted().forEach { load(it) }
     }
 
@@ -54,19 +39,18 @@ class ResourceXmlStrings internal constructor(
     }
 
     private fun load(file: File) {
-        val doc = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
-            .newDocumentBuilder().parse(file)
-        val root = doc.documentElement
+        val root = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
+            .newDocumentBuilder().parse(file).documentElement
         for (i in 0 until root.childNodes.length) {
             val e = root.childNodes.item(i) as? Element ?: continue
             val name = e.getAttribute("name")
             when (e.tagName) {
-                "string" -> strings[name] = decode(e)
+                "string" -> strings[name] = unescape(rawText(e))
                 "plurals" -> {
                     val forms = HashMap<String, String>()
                     for (j in 0 until e.childNodes.length) {
                         val item = e.childNodes.item(j) as? Element ?: continue
-                        forms[item.getAttribute("quantity")] = decode(item)
+                        forms[item.getAttribute("quantity")] = unescape(rawText(item))
                     }
                     plurals[name] = forms
                 }
@@ -74,9 +58,6 @@ class ResourceXmlStrings internal constructor(
         }
     }
 
-    private fun decode(e: Element): String = unescape(rawText(e))
-
-    /** The element's text with markup (`<xliff:g>`, `<b>`) dropped but its content kept. */
     private fun rawText(n: Node): String = buildString {
         for (i in 0 until n.childNodes.length) {
             val c = n.childNodes.item(i)
@@ -90,15 +71,14 @@ class ResourceXmlStrings internal constructor(
     private fun unescape(s: String): String {
         val out = StringBuilder()
         var quoted = false
-        var i = 0
         var pendingSpace = false
+        var i = 0
         while (i < s.length) {
             val c = s[i]
             when {
                 c == '\\' && i + 1 < s.length -> {
                     if (pendingSpace) { out.append(' '); pendingSpace = false }
-                    val n = s[i + 1]
-                    when (n) {
+                    when (val n = s[i + 1]) {
                         'n' -> out.append('\n')
                         't' -> out.append('\t')
                         'u' -> { out.append(s.substring(i + 2, i + 6).toInt(16).toChar()); i += 4 }
@@ -118,25 +98,4 @@ class ResourceXmlStrings internal constructor(
         }
         return out.toString()
     }
-
-    // By name, so this compiles before the app has any plurals.
-    private fun idNames(rClass: String, type: String): Map<Int, String> =
-        runCatching { Class.forName("$rClass\$$type") }.getOrNull()
-            ?.fields?.associate { it.getInt(null) to it.name }
-            .orEmpty()
-}
-
-/**
- * The `:swarmnode` library's [SwarmStringSource] for the app's JVM tests:
- * its `strings_swarmnode.xml`, resolved through its own `R` class (the
- * app's R doesn't carry a library's ids). Registered in `META-INF/services`.
- */
-class ResourceXmlSwarmStrings : SwarmStringSource {
-    private val xml = ResourceXmlStrings(
-        baby.freedom.swarm.R::class.java.name,
-        listOf("../swarmnode/src/main/res/values", "swarmnode/src/main/res/values"),
-    )
-
-    override fun string(id: Int, vararg args: Any?): String = xml.string(id, *args)
-    override fun plural(id: Int, count: Int, vararg args: Any?): String = xml.plural(id, count, *args)
 }
