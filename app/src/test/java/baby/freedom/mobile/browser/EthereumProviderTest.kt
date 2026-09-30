@@ -115,7 +115,7 @@ class EthereumProviderTest {
         override fun busy() = busy
         override suspend fun prepare(request: SendRequest): SendQuote {
             prepareFailure?.let { throw it }
-            prepareError?.let { throw SendException(it) }
+            prepareError?.let { throw SendException.ofEnglish(it) }
             prepared += request
             val (to, value, data) = request.call()
             val tx = EthTransaction(

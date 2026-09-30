@@ -103,7 +103,8 @@ internal fun seedLine(seed: RadicleSeed): String {
         RadicleNode.PHASE_FAILED -> Strings.get(R.string.radicle_seed_phase_failed)
         else -> seed.phase
     }
-    return if (seed.detail.isEmpty()) phase else Strings.get(R.string.radicle_seed_line_detail, phase, seed.detail)
+    val detail = seed.shown
+    return if (detail.isEmpty()) phase else Strings.get(R.string.radicle_seed_line_detail, phase, detail)
 }
 
 /**

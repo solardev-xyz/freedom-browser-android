@@ -42,6 +42,7 @@ import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.data.ChainStore
+import baby.freedom.mobile.l10n.Said
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.DappCall
@@ -212,8 +213,6 @@ internal fun chainReadTrusted(trust: ChainTrust): Boolean = when (trust.level) {
     ChainTrust.Level.UNVERIFIED -> false
 }
 
-internal val POOL_PRICE_UNVERIFIED: String get() = Strings.get(R.string.stamps_pool_price_unverified)
-
 /** The pool's price, as xDAI per xBZZ to 6 significant digits. */
 internal fun formatSpotPrice(sqrtPriceX96: BigInteger): String =
     SwarmFunder.spotXdaiPerBzz(sqrtPriceX96).round(java.math.MathContext(6, RoundingMode.HALF_UP)).stripTrailingZeros()
@@ -274,15 +273,15 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                 StampClient.call("quote", JSONObject().put("depth", depth).put("days", days))
             }
             val q = when (a) {
-                is StampClient.Answer.Ok -> stampQuoteFrom(a.json) ?: throw SendException(Strings.get(R.string.stamps_price_unreadable))
-                is StampClient.Answer.Failed -> throw SendException(a.message)
+                is StampClient.Answer.Ok -> stampQuoteFrom(a.json) ?: throw SendException(Strings.said(R.string.stamps_price_unreadable))
+                is StampClient.Answer.Failed -> throw SendException(Said.of(a.message))
             }
             val slot0 = rpc.call(SwarmFunder.CHAIN_ID, JSONObject().put("to", SwarmFunder.POOL).put("data", SwarmFunder.SLOT0_DATA))
             if (!chainReadTrusted(slot0.trust)) {
                 Log.i(TAG, "pool price not verified (${slot0.trust.level.name.lowercase()}, ${slot0.trust.dissented.size} dissented)")
-                throw SendException(POOL_PRICE_UNVERIFIED)
+                throw SendException(Strings.said(R.string.stamps_pool_price_unverified))
             }
-            val sqrt = SwarmFunder.sqrtPriceFrom(slot0.value) ?: throw SendException(Strings.get(R.string.stamps_pool_price_unreadable))
+            val sqrt = SwarmFunder.sqrtPriceFrom(slot0.value) ?: throw SendException(Strings.said(R.string.stamps_pool_price_unreadable))
             Priced.Ready(q, sqrt)
         } catch (e: CancellationException) {
             throw e

@@ -407,7 +407,7 @@ class RadicleNode internal constructor(
         val rid = normalizeRid(input)
         if (rid == null) {
             _state.update {
-                it.copy(seed = RadicleSeed(input.trim(), PHASE_FAILED, SwarmStrings.get(R.string.swarmnode_radicle_invalid_rid), active = false))
+                it.copy(seed = RadicleSeed.ofKey(input.trim(), PHASE_FAILED, RadicleSeed.DETAIL_INVALID_RID, active = false))
             }
             return
         }
@@ -418,7 +418,7 @@ class RadicleNode internal constructor(
             if (current != null && current.epoch == nodeEpoch.get() && !current.dismissed) return
             if (liveFetches.any { it.rid == rid }) {
                 _state.update {
-                    it.copy(seed = RadicleSeed(rid, PHASE_FAILED, STALE_FETCH_DETAIL, active = false))
+                    it.copy(seed = RadicleSeed.ofKey(rid, PHASE_FAILED, RadicleSeed.DETAIL_STALE_FETCH, active = false))
                 }
                 return
             }
@@ -447,7 +447,7 @@ class RadicleNode internal constructor(
                         ops.cloneRepoWithProgress(rid, SEED_TIMEOUT_MS) { event ->
                             val parsed = json(event) ?: return@cloneRepoWithProgress
                             run.fetching = parsed.optString("phase") == PHASE_FETCHING
-                            val progress = RadicleSeed(rid, parsed.optString("phase"), progressDetail(parsed))
+                            val progress = progressLine(rid, parsed)
                             _state.update { if (gen == generation.get() && !run.dismissed) it.copy(seed = progress) else it }
                         },
                     )
@@ -459,7 +459,7 @@ class RadicleNode internal constructor(
                 run.fetchOver = true
                 seedRun.compareAndSet(run, null)
                 val settled = when {
-                    result == null -> RadicleSeed(rid, PHASE_FAILED, SwarmStrings.get(R.string.swarmnode_radicle_unreadable_fetch), active = false)
+                    result == null -> RadicleSeed.ofKey(rid, PHASE_FAILED, RadicleSeed.DETAIL_UNREADABLE_FETCH, active = false)
                     result.optBoolean("ok") -> RadicleSeed(rid, PHASE_DONE, active = false)
                     result.optBoolean("cancelled") -> RadicleSeed(rid, PHASE_CANCELLED, active = false)
                     else -> RadicleSeed(rid, PHASE_FAILED, result.optString("error"), active = false)
@@ -660,7 +660,8 @@ class RadicleNode internal constructor(
         internal const val CANCEL_RETRY_MS = 50L
         internal const val PENDING_UNSEED_FILE = "pending-unseed"
         internal const val POLL_INTERVAL_MS = 5_000L
-        internal val STALE_FETCH_DETAIL: String get() = SwarmStrings.get(R.string.swarmnode_radicle_stale_fetch)
+        /** What a page is told when [seed] refuses a RID an earlier fetch still winds down (English, see [RadicleSeed.detail]). */
+        internal val STALE_FETCH_DETAIL: String get() = SwarmStrings.english(R.string.swarmnode_radicle_stale_fetch)
 
         const val PHASE_RESOLVING = "resolving"
         const val PHASE_FETCHING = "fetching"
@@ -710,13 +711,20 @@ class RadicleNode internal constructor(
             }
         }
 
-        /** The part of a progress event worth a line under the phase. */
-        internal fun progressDetail(event: JSONObject): String = when (event.optString("phase")) {
-            "resolving" -> event.optInt("candidates").let { SwarmStrings.plural(R.plurals.swarmnode_radicle_candidate_seeds, it, it) }
-            "connecting" -> "${event.optString("addr")} (${event.optInt("index")}/${event.optInt("total")})"
-            "fetching" -> SwarmStrings.get(R.string.swarmnode_radicle_fetching_from, event.optString("nid"))
-            "peer-failed", "failed" -> event.optString("reason")
-            else -> ""
+        /**
+         * The seed line for a progress event: its phase, and the part worth
+         * a line under it — English in [RadicleSeed.detail] (pages get it),
+         * localised by [RadicleSeed.shown] for the node page.
+         */
+        internal fun progressLine(rid: String, event: JSONObject): RadicleSeed {
+            val phase = event.optString("phase")
+            return when (phase) {
+                "resolving" -> RadicleSeed.ofKey(rid, phase, RadicleSeed.DETAIL_CANDIDATES, event.optInt("candidates").toString())
+                "connecting" -> RadicleSeed(rid, phase, "${event.optString("addr")} (${event.optInt("index")}/${event.optInt("total")})")
+                "fetching" -> RadicleSeed.ofKey(rid, phase, RadicleSeed.DETAIL_FETCHING_FROM, event.optString("nid"))
+                "peer-failed", "failed" -> RadicleSeed(rid, phase, event.optString("reason"))
+                else -> RadicleSeed(rid, phase)
+            }
         }
 
         private fun json(raw: String): JSONObject? = runCatching { JSONObject(raw) }.getOrNull()

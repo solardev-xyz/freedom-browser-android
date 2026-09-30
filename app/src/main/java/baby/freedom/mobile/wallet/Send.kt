@@ -45,8 +45,18 @@ import org.json.JSONObject
  * in the app language) and what to tell a site or a peer that asked for
  * it ([english]: developer-facing, never the user's language, #280).
  */
-class SendException(message: String, cause: Throwable? = null, val english: String = message) : Exception(message, cause) {
+class SendException private constructor(message: String, cause: Throwable?, val english: String) : Exception(message, cause) {
     constructor(said: Said, cause: Throwable? = null) : this(said.text, cause, said.english)
+
+    companion object {
+        /**
+         * One whose [message] is already English (a literal, a node's own
+         * words): the same text for the user and the page. There is no
+         * plain `String` constructor, so an app-language text can't reach
+         * a page by default (#280): pass a [Said] for one.
+         */
+        fun ofEnglish(text: String, cause: Throwable? = null) = SendException(text, cause, text)
+    }
 }
 
 /** Typed amounts: `1.5` of a token with [decimals] decimals → base units. */
@@ -822,27 +832,15 @@ data class SendStatus(val quote: SendQuote, val stage: Stage, val hash: String? 
             val stale: Boolean = false,
             val rejected: Boolean = false,
             val droppedSigned: Boolean = false,
-        ) : Stage {
             /**
              * [message] in English, for the site or peer waiting on this
              * send (#280); null once read back from the journal, where
-             * nobody waits on it any more. Not part of equality: the same
-             * failure, whichever language it's also written in.
+             * nobody waits on it any more. Part of equality, so a live
+             * failure published over an equal restored one (null here)
+             * still replaces it and the page hears the English reason.
              */
-            var english: String? = null
-                private set
-
-            constructor(
-                message: String,
-                mayHaveGone: Boolean,
-                stale: Boolean = false,
-                rejected: Boolean = false,
-                droppedSigned: Boolean = false,
-                english: String?,
-            ) : this(message, mayHaveGone, stale, rejected, droppedSigned) {
-                this.english = english
-            }
-        }
+            val english: String? = null,
+        ) : Stage
 
         data object Pending : Stage
         data class Confirmed(val block: Long, val feePaid: BigInteger?) : Stage
@@ -1370,7 +1368,7 @@ class WalletSender internal constructor(
          * It didn't go out — or, with [mayHaveGone], can't be told (the wallet page offers Try again).
          * [english]: [message] for the peer that asked (#280).
          */
-        data class Failed(val message: String, val mayHaveGone: Boolean, val english: String = message) : Broadcast {
+        data class Failed(val message: String, val mayHaveGone: Boolean, val english: String) : Broadcast {
             constructor(said: Said, mayHaveGone: Boolean) : this(said.text, mayHaveGone, said.english)
         }
 

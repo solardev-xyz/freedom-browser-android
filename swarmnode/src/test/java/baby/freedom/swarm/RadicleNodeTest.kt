@@ -772,10 +772,46 @@ class RadicleNodeTest {
 
     @Test
     fun progressDetails() {
-        fun detail(json: String) = RadicleNode.progressDetail(JSONObject(json))
-        assertEquals("2 candidate seeds", detail("""{"phase":"resolving","candidates":2}"""))
-        assertEquals("from z6MkA", detail("""{"phase":"fetching","nid":"z6MkA","index":1,"total":1}"""))
-        assertEquals("timed out", detail("""{"phase":"peer-failed","reason":"timed out"}"""))
-        assertEquals("", detail("""{"phase":"done"}"""))
+        fun line(json: String) = RadicleNode.progressLine("rad:za", JSONObject(json))
+        assertEquals("2 candidate seeds", line("""{"phase":"resolving","candidates":2}""").detail)
+        assertEquals("1 candidate seed", line("""{"phase":"resolving","candidates":1}""").shown)
+        assertEquals("from z6MkA", line("""{"phase":"fetching","nid":"z6MkA","index":1,"total":1}""").detail)
+        assertEquals("a (1/3)", line("""{"phase":"connecting","addr":"a","index":1,"total":3}""").shown)
+        assertEquals("timed out", line("""{"phase":"peer-failed","reason":"timed out"}""").detail)
+        assertEquals("", line("""{"phase":"done"}""").detail)
+    }
+
+    /** Pages get [RadicleSeed.detail] (#280): English whatever the app language; the node page gets [RadicleSeed.shown]. */
+    @Test
+    fun seedDetailStaysEnglishForPages() {
+        val english = ResourceXmlSwarmStrings()
+        SwarmStrings.useForTest(object : SwarmStringSource {
+            override fun string(id: Int, vararg args: Any?) = "[de] " + english.string(id, *args)
+            override fun plural(id: Int, count: Int, vararg args: Any?) = "[de] " + english.plural(id, count, *args)
+            override fun english(id: Int, vararg args: Any?) = english.string(id, *args)
+            override fun englishPlural(id: Int, count: Int, vararg args: Any?) = english.plural(id, count, *args)
+        })
+        try {
+            val resolving = RadicleNode.progressLine("rad:za", JSONObject("""{"phase":"resolving","candidates":3}"""))
+            assertEquals("3 candidate seeds", resolving.detail)
+            assertEquals("[de] 3 candidate seeds", resolving.shown)
+            val fetching = RadicleNode.progressLine("rad:za", JSONObject("""{"phase":"fetching","nid":"z6MkA"}"""))
+            assertEquals("from z6MkA", fetching.detail)
+            assertEquals("[de] from z6MkA", fetching.shown)
+            val stale = RadicleSeed.ofKey("rad:za", "failed", RadicleSeed.DETAIL_STALE_FETCH, active = false)
+            assertEquals(RadicleNode.STALE_FETCH_DETAIL, stale.detail)
+            assertTrue(!stale.detail.startsWith("[de]") && stale.shown.startsWith("[de]"))
+            for (key in listOf(RadicleSeed.DETAIL_INVALID_RID, RadicleSeed.DETAIL_UNREADABLE_FETCH)) {
+                val seed = RadicleSeed.ofKey("rad:za", "failed", key, active = false)
+                assertTrue(seed.detail.isNotEmpty() && !seed.detail.startsWith("[de]"))
+                assertEquals("[de] " + seed.detail, seed.shown)
+            }
+            // The native library's own words are the same on both sides.
+            val failed = RadicleNode.progressLine("rad:za", JSONObject("""{"phase":"failed","reason":"no seeds found"}"""))
+            assertEquals("no seeds found", failed.detail)
+            assertEquals("no seeds found", failed.shown)
+        } finally {
+            SwarmStrings.useForTest(null)
+        }
     }
 }

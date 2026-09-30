@@ -214,6 +214,10 @@ class SendTest {
      * Unconfirmed, the test is waiting for a receipt wait to run out: [clock]
      * is moved past it, and again, until the send gets there.
      */
+    /** [this] as the journal gives it back: a failure's English isn't kept (nobody waits on it after a restart). */
+    private fun SendStatus?.journalled(): SendStatus? =
+        this?.let { st -> (st.stage as? SendStatus.Stage.Failed)?.let { st.copy(stage = it.copy(english = null)) } ?: st }
+
     private suspend fun WalletSender.awaitStage(predicate: (SendStatus.Stage) -> Boolean): SendStatus =
         withTimeout(5_000) {
             suspend fun reached() = status.first { it != null && predicate(it.stage) }!!
@@ -1172,7 +1176,7 @@ class SendTest {
         val restored = again.status.value?.quote?.request?.dapp!!
         assertEquals("a9059cbb00", restored.data.toHex())
         assertEquals(null, restored.origin)
-        assertEquals(s.status.value, again.status.value)
+        assertEquals(s.status.value.journalled(), again.status.value)
     }
 
     @Test
@@ -1191,7 +1195,7 @@ class SendTest {
 
         // The process dies; the next one finds it as it was, and signs nothing beside it.
         val again = sender(chain, journal = FileSendJournal(journalFile()))
-        assertEquals(failed, again.status.value)
+        assertEquals(failed.journalled(), again.status.value)
         chain.on.remove("eth_getTransactionReceipt")
         assertEquals(WalletSender.Submit.BUSY, again.submit(again.prepare(request()), signer()))
         chain.on.clear()
@@ -1479,7 +1483,7 @@ class SendTest {
         val thirdScope = ownScope()
         val third = WalletSender(chain.rpc(), thirdScope, clock = { clock.get() }, pollMs = 10, confirmTimeoutMs = CONFIRM_TIMEOUT_MS, journal = blocking)
         third.awaitRestored()
-        assertEquals(failed, third.status.value)
+        assertEquals(failed.journalled(), third.status.value)
         returnsWhileHeld(stuck) {
             third.retry()
             third.discard()
@@ -2040,6 +2044,30 @@ class SendTest {
         } catch (e: SendException) {
             assertTrue(e.message, e.message!!.startsWith(start))
         }
+    }
+
+    /**
+     * A failure read back from the journal (no English) and the same failure
+     * published live (with it) aren't equal (#313 R2-M2), so a [MutableStateFlow]
+     * holding the restored one takes the live one and the page hears its reason.
+     */
+    @Test
+    fun `a failed stage's English is part of its equality`() {
+        val restored = SendStatus.Stage.Failed("Nicht gesendet", mayHaveGone = false)
+        val live = SendStatus.Stage.Failed("Nicht gesendet", mayHaveGone = false, english = "Not sent: out of gas")
+        assertFalse(restored == live)
+        val flow = kotlinx.coroutines.flow.MutableStateFlow<SendStatus.Stage>(restored)
+        flow.value = live
+        assertEquals("Not sent: out of gas", (flow.value as SendStatus.Stage.Failed).english)
+        assertEquals("Not sent: out of gas", live.copy(mayHaveGone = true).english)
+    }
+
+    @Test
+    fun `a send exception from a raw text says it's English`() {
+        val e = SendException.ofEnglish("insufficient funds")
+        assertEquals("insufficient funds", e.message)
+        assertEquals("insufficient funds", e.english)
+        assertEquals("typed data isn't a JSON object", Eip712.Invalid.ofEnglish("typed data isn't a JSON object").english)
     }
 }
 

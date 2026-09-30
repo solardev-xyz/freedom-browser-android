@@ -76,7 +76,16 @@ app's files.
   peer). Never forward `.message` of a `SendException`, `LedgerException`
   or `Eip712.Invalid` to a page; use its `english`/`said.english`. Otherwise
   every connected site learns the user's language. `PseudoLanguage` in the
-  JVM tests shows a build where the two differ.
+  JVM tests shows a build where the two differ. `SendException` and
+  `Eip712.Invalid` have no plain-`String` constructor: pass a `Said`, or
+  `ofEnglish("…")` for text that is already English (a literal, a node's
+  own words).
+- **`:swarmnode` text a page also gets**: a Radicle seed line
+  (`RadicleSeed`) reaches pages through `window.radicle`'s
+  `radicle_seed`/`seedStatus`. Its `detail` is English
+  (`SwarmStrings.english`) or the native library's own words, and pages
+  get that; its `detailKey`/`detailArg` let the node page show `shown`,
+  resolved in the app language when drawn.
 - **Text held in state or a cache** (a last-check failure, a store name, a
   cached trust answer): keep a `Text.res(R.string.x, …)` or a stable key,
   and resolve it when shown. A string resolved once stays in the old

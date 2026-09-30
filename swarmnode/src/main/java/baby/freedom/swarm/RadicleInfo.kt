@@ -30,11 +30,54 @@ data class RadicleSeed(
      * `failed`, `cancelled`.
      */
     val phase: String,
-    /** Human-readable detail for the phase (a peer, a failure reason), or `""`. */
+    /**
+     * Detail for the phase (a peer, a failure reason), or `""`, in
+     * English or as the native library gave it: this is what pages get
+     * from `window.radicle` (#280), so it never follows the app
+     * language. The node page shows [shown] instead.
+     */
     val detail: String = "",
     /** False once the fetch has settled, whichever way. */
     val active: Boolean = true,
-) : Parcelable
+    /**
+     * Which of this module's own texts [detail] is ([DETAIL_CANDIDATES]
+     * and the rest), or `""` when it's the native library's own words;
+     * [shown] resolves it in the app language from this and [detailArg].
+     */
+    val detailKey: String = "",
+    /** [detailKey]'s argument: a candidate count or a node ID. */
+    val detailArg: String = "",
+) : Parcelable {
+    /** [detail] for the user, in the app language as it is now. */
+    val shown: String get() = detailText(detailKey, detailArg, english = false) ?: detail
+
+    companion object {
+        const val DETAIL_CANDIDATES = "candidates"
+        const val DETAIL_FETCHING_FROM = "fetching_from"
+        const val DETAIL_INVALID_RID = "invalid_rid"
+        const val DETAIL_STALE_FETCH = "stale_fetch"
+        const val DETAIL_UNREADABLE_FETCH = "unreadable_fetch"
+
+        /** A line for a failure or progress this module words itself: [detail] English, [shown] localised. */
+        internal fun ofKey(rid: String, phase: String, key: String, arg: String = "", active: Boolean = true) =
+            RadicleSeed(rid, phase, detailText(key, arg, english = true).orEmpty(), active, key, arg)
+
+        internal fun detailText(key: String, arg: String, english: Boolean): String? {
+            fun get(id: Int, vararg args: Any?) = if (english) SwarmStrings.english(id, *args) else SwarmStrings.get(id, *args)
+            return when (key) {
+                DETAIL_CANDIDATES -> (arg.toIntOrNull() ?: 0).let {
+                    if (english) SwarmStrings.englishPlural(R.plurals.swarmnode_radicle_candidate_seeds, it, it)
+                    else SwarmStrings.plural(R.plurals.swarmnode_radicle_candidate_seeds, it, it)
+                }
+                DETAIL_FETCHING_FROM -> get(R.string.swarmnode_radicle_fetching_from, arg)
+                DETAIL_INVALID_RID -> get(R.string.swarmnode_radicle_invalid_rid)
+                DETAIL_STALE_FETCH -> get(R.string.swarmnode_radicle_stale_fetch)
+                DETAIL_UNREADABLE_FETCH -> get(R.string.swarmnode_radicle_unreadable_fetch)
+                else -> null
+            }
+        }
+    }
+}
 
 /**
  * Snapshot of the embedded Radicle node, marshalled across the UI ↔
