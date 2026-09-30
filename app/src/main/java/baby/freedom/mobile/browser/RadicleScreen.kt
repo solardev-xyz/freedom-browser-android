@@ -119,6 +119,8 @@ fun RadicleScreen(
     radicle: RadicleControls,
     runNodeEnabled: Boolean,
     onDismiss: () -> Unit,
+    /** Open the node logs page (#276) at Radicle's. */
+    onOpenLogs: () -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     val info = radicle.info
@@ -137,6 +139,7 @@ fun RadicleScreen(
                     enabled = radicle.enabled,
                     runNodeEnabled = runNodeEnabled,
                     onToggle = radicle.onToggle,
+                    onOpenLogs = onOpenLogs,
                 )
             }
             if (radicle.enabled && info.status == RadicleStatus.Running) {
@@ -158,6 +161,7 @@ private fun RadicleStatusSection(
     enabled: Boolean,
     runNodeEnabled: Boolean,
     onToggle: (Boolean) -> Unit,
+    onOpenLogs: () -> Unit,
 ) {
     val (color, icon, label) = when {
         !enabled -> Triple(Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, "Off")
@@ -201,8 +205,9 @@ private fun RadicleStatusSection(
         }
         // A failed start isn't retried behind the user's back; this asks
         // `:node` to boot again (as the next bind would).
-        if (enabled && runNodeEnabled && info.status == RadicleStatus.Error) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            LogsButton(onOpenLogs)
+            if (enabled && runNodeEnabled && info.status == RadicleStatus.Error) {
                 TextButton(onClick = { onToggle(true) }) { Text("Retry") }
             }
         }

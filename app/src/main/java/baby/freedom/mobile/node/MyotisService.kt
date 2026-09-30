@@ -1,5 +1,6 @@
 package baby.freedom.mobile.node
 
+import android.app.Application
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ApplicationInfo
@@ -63,6 +64,8 @@ class MyotisService : Service() {
             cb ?: return
             callbacks.unregister(cb)
         }
+
+        override fun getLogs(): String = NodeLogs.text(NodeLogSource.LightClient)
 
         override fun onAppForeground() {
             node?.enterForeground()
@@ -140,6 +143,7 @@ class MyotisService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        NodeLogs.start(Application.getProcessName()) { _, _ -> NodeLogSource.LightClient }
         if (exiting) {
             Log.i(TAG, "created while the previous engines are still stopping; waiting for the process exit")
             return

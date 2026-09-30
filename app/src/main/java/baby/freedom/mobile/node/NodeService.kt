@@ -3,6 +3,7 @@ package baby.freedom.mobile.node
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.Application
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -133,6 +134,9 @@ class NodeService : Service() {
         override fun getIpfsProgress(): String? = ipfsNode?.progressSnapshotJson()
 
         override fun getIpfsCounters(): LongArray? = ipfsNode?.diagnostics()
+
+        override fun getLogs(source: Int): String =
+            NodeLogSource.of(source)?.let { NodeLogs.text(it) }.orEmpty()
 
         override fun registerCallback(cb: INodeCallback?) {
             cb ?: return
@@ -544,6 +548,7 @@ class NodeService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        NodeLogs.start(Application.getProcessName(), ::nodeProcessSource)
         createChannel()
 
         identityStore = NodeIdentityStore.get(this)

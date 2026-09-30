@@ -158,6 +158,8 @@ fun SettingsScreen(
     radicle: RadicleControls = RadicleControls(),
     onOpenRadicle: () -> Unit = {},
     onOpenWallet: () -> Unit = {},
+    /** Open the node logs page (#276) at the IPFS node's. */
+    onOpenIpfsLogs: () -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     // Settings search (#93). Registered after the dismiss handler so it
@@ -476,6 +478,7 @@ fun SettingsScreen(
                         settings = settings,
                         ipfsInfo = ipfsInfo,
                         onIpfsToggle = onIpfsToggle,
+                        onOpenLogs = onOpenIpfsLogs,
                     )
                 }
                 if (nothingMatches) item("no-match") {
@@ -1829,6 +1832,7 @@ private fun IpfsSection(
     settings: NodeSettings,
     ipfsInfo: IpfsInfo,
     onIpfsToggle: (Boolean) -> Unit,
+    onOpenLogs: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val routingMode by settings.ipfsRoutingMode
@@ -1876,6 +1880,7 @@ private fun IpfsSection(
                 Spacer(Modifier.height(8.dp))
                 DetailRow("Error", err, singleLine = false)
             }
+            LogsButton(onOpenLogs)
         }
 
         if ("routing" in visible) {

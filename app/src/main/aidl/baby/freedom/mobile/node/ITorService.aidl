@@ -13,4 +13,7 @@ interface ITorService {
     TorInfo getState();
     void registerCallback(ITorCallback cb);
     void unregisterCallback(ITorCallback cb);
+
+    /** The Tor client's recent log lines (#276), like INodeService.getLogs. */
+    String getLogs();
 }

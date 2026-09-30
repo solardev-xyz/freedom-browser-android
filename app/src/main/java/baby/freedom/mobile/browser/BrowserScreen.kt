@@ -83,6 +83,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.node.NodeLogSource
 import baby.freedom.mobile.wallet.NodeIdentitySync
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.ens.EnsInput
@@ -450,6 +451,8 @@ fun BrowserScreen(
     ipfsCounters: () -> LongArray? = { null },
     onStatusBarTint: (Int?) -> Unit = {},
     onPanelShown: (Boolean) -> Unit = {},
+    /** A node's recent log lines (#276), or null while its process isn't running. Blocking. */
+    readNodeLogs: (NodeLogSource) -> String? = { null },
 ) {
     // Outside composition, so the tabs survive an Activity relaunch
     // (#183, see [TabsSession]).
@@ -480,6 +483,8 @@ fun BrowserScreen(
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showNode by rememberSaveable { mutableStateOf(false) }
     var showRadicle by rememberSaveable { mutableStateOf(false) }
+    // The node logs page (#276), at this node's; over whichever node card opened it.
+    var showLogs by rememberSaveable { mutableStateOf<NodeLogSource?>(null) }
     var showWallet by rememberSaveable { mutableStateOf(false) }
     // A feature asking for an identity (#75: created lazily, never forced)
     // opens the wallet page over whatever is up; see [Vault.requireUnlocked].
@@ -515,7 +520,7 @@ fun BrowserScreen(
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
     // Any full-screen panel over the browser (they're all opaque).
-    val overlayShown = showSettings || showNode || showRadicle || showWallet || walletRequest != null ||
+    val overlayShown = showSettings || showNode || showRadicle || showLogs != null || showWallet || walletRequest != null ||
         showTabSwitcher ||
         showHistory || showBookmarks || showDownloads
     val downloads = remember(context) { DownloadManager.get(context) }
@@ -2169,6 +2174,7 @@ fun BrowserScreen(
                 tabs.clearWebViewData?.invoke()
             },
             onDismiss = { showSettings = false },
+            onOpenIpfsLogs = { showLogs = NodeLogSource.Ipfs },
         )
     }
 
@@ -2197,6 +2203,7 @@ fun BrowserScreen(
                 tabs.requestOpenInNewTab?.invoke(url, false, false)
             },
             onDismiss = { showNode = false },
+            onOpenLogs = { showLogs = it },
         )
     }
 
@@ -2213,7 +2220,13 @@ fun BrowserScreen(
             ),
             runNodeEnabled = runNodeEnabled,
             onDismiss = { showRadicle = false },
+            onOpenLogs = { showLogs = NodeLogSource.Radicle },
         )
+    }
+
+    // Over the node card that opened it; Back returns there.
+    showLogs?.let { source ->
+        NodeLogsScreen(initial = source, read = readNodeLogs, onDismiss = { showLogs = null })
     }
 
     if (showTabSwitcher) {

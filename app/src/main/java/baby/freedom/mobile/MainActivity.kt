@@ -56,6 +56,7 @@ import baby.freedom.mobile.node.IMyotisCallback
 import baby.freedom.mobile.node.IMyotisService
 import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
+import baby.freedom.mobile.node.NodeLogSource
 import baby.freedom.mobile.node.MyotisLink
 import baby.freedom.mobile.node.MyotisService
 import baby.freedom.mobile.node.NodeService
@@ -587,6 +588,7 @@ class MainActivity : ComponentActivity() {
                         ipfsCounters = ::ipfsCounters,
                         onStatusBarTint = { statusBarTint = it },
                         onPanelShown = { panelShown = it },
+                        readNodeLogs = ::readNodeLogs,
                     )
                 }
             }
@@ -752,6 +754,18 @@ class MainActivity : ComponentActivity() {
      */
     private fun ipfsProgressSnapshot(): String? =
         runCatching { binder?.ipfsProgress }.getOrNull()
+
+    /**
+     * A node's recent log lines (#276) from the process it runs in, or null
+     * while that process isn't bound (the node is off). Blocking binder call.
+     */
+    private fun readNodeLogs(source: NodeLogSource): String? = runCatching {
+        when (source) {
+            NodeLogSource.Swarm, NodeLogSource.Ipfs, NodeLogSource.Radicle -> binder?.getLogs(source.ordinal)
+            NodeLogSource.Tor -> torBinder?.logs
+            NodeLogSource.LightClient -> myotisBinder?.logs
+        }
+    }.getOrNull()
 
     /** The IPFS node's retrieval / routing counters, same terms as above. */
     private fun ipfsCounters(): LongArray? =
