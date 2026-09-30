@@ -354,13 +354,13 @@ internal fun SendPage(
         else -> null
     }
 
-    fun prepare(request: SendRequest, sendAll: Boolean, then: (SendQuote) -> Unit = { quote = it }) {
+    fun price(then: (SendQuote) -> Unit, priced: suspend () -> SendQuote) {
         if (busy) return
         busy = true
         error = null
         scope.launch {
             try {
-                then(sender.prepare(request, sendAll))
+                then(priced())
             } catch (e: SendException) {
                 error = e.message
             } catch (e: CancellationException) {
@@ -372,6 +372,12 @@ internal fun SendPage(
             }
         }
     }
+
+    fun prepare(request: SendRequest, sendAll: Boolean, then: (SendQuote) -> Unit = { quote = it }) =
+        price(then) { sender.prepare(request, sendAll) }
+
+    /** [q] priced again as it was asked for: a Max send stays Max, less the new fee. */
+    fun reprice(q: SendQuote, then: (SendQuote) -> Unit = { quote = it }) = price(then) { sender.reprice(q) }
 
     // Back to the form from the review: whatever the Confirm was still
     // checking is dropped with the quote it was checking.
@@ -419,9 +425,9 @@ internal fun SendPage(
                             onBack()
                         },
                         onReviewAgain = {
-                            val request = current.quote.request
+                            val old = current.quote
                             sender.acknowledge()
-                            prepare(request, sendAll = false)
+                            reprice(old)
                         },
                         onDone = back,
                     )
@@ -440,7 +446,7 @@ internal fun SendPage(
                         onConfirm = {
                             // Priced too long ago to trust its fee: price it again and let the user look.
                             val reprice = {
-                                prepare(q.request, sendAll = false) { fresh ->
+                                reprice(q) { fresh ->
                                     quote = fresh
                                     notice = Strings.get(R.string.send_repriced_notice)
                                 }
@@ -621,6 +627,10 @@ internal fun SendPage(
                             }
                             if (token != null) {
                                 when {
+                                    SendAmounts.ambiguous(amount) -> FieldNote(
+                                        stringResource(R.string.send_amount_ambiguous, amount, amount.replace(',', '.'), amount.replace(",", "")),
+                                        error = true,
+                                    )
                                     amount.isNotEmpty() && parsedAmount == null -> FieldNote(
                                         pluralText(R.plurals.send_amount_invalid, token.decimals, token.decimals),
                                         error = true,

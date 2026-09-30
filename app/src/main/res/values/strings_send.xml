@@ -61,6 +61,8 @@
         <item quantity="one">Enter a positive amount with at most %1$s decimal</item>
         <item quantity="other">Enter a positive amount with at most %1$s decimals</item>
     </plurals>
+    <!-- %1$s: what the user typed, e.g. 1,234; %2$s: it with a decimal point (1.234); %3$s: without the comma (1234). -->
+    <string name="send_amount_ambiguous">%1$s could be %2$s or %3$s: write it with a point, or without the comma</string>
     <string name="send_all_note">All of it, less the network fee: the review shows the exact amount</string>
     <!-- %1$s: the balance, fixed format; %2$s: the token's symbol. -->
     <string name="send_balance_note">Balance %1$s %2$s</string>

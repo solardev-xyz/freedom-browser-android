@@ -65,9 +65,11 @@ object SendAmounts {
      * [input] in base units, or null when it isn't a plain positive
      * decimal with at most [decimals] digits after the point. Either `.`
      * or `,` is the decimal point (a keyboard's decimal key types the
-     * locale's); no grouping, no sign, no exponent.
+     * locale's); no grouping, no sign, no exponent. [ambiguous] input is
+     * refused too.
      */
     fun parse(input: String, decimals: Int): BigInteger? {
+        if (ambiguous(input)) return null
         val t = input.trim().replace(',', '.')
         if (!AMOUNT.matches(t)) return null
         val whole = t.substringBefore('.').ifEmpty { "0" }
@@ -88,6 +90,17 @@ object SendAmounts {
 
     /** Digits, at most one point, at least one digit. */
     private val AMOUNT = Regex("^(\\d+\\.?\\d*|\\.\\d+)$")
+
+    /**
+     * Whether [input] reads as both a decimal comma and a thousands
+     * separator: `1,234` is 1.234 on a German keyboard, but it's also how
+     * the balance just below the field writes 1234 ([TokenAmounts.format]).
+     * Taken as either, some user sends 1000 times more or less than they
+     * meant, so it's neither: the field asks for a point or no comma.
+     */
+    fun ambiguous(input: String): Boolean = GROUPED.matches(input.trim())
+
+    private val GROUPED = Regex("^[1-9]\\d{0,2},\\d{3}$")
 }
 
 /** The recipient field. */
@@ -372,6 +385,13 @@ data class SendQuote(
      * rather than signed beside it.
      */
     val sendsBefore: Long = 0,
+    /**
+     * Priced as Max ([WalletSender.prepare]'s `all`): [WalletSender.reprice]
+     * prices it as Max again, so a native send whose fee rose meanwhile
+     * is the balance less the new fee, not the old amount plus it (more
+     * than the account holds).
+     */
+    val all: Boolean = false,
 ) {
     /** For a native send, the amount plus the most the fee can be; null for a token (two currencies). */
     val nativeTotal: BigInteger? get() = if (request.token.isNative) request.amount + tx.maxFee else null
@@ -1199,7 +1219,7 @@ class WalletSender internal constructor(
                 val what = if (token.isNative && tx.value.signum() > 0) R.string.send_not_enough_for_amount_and_fee else R.string.send_not_enough_for_fee
                 throw SendException(Strings.said(what, symbol, fee, has))
             }
-            SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash, sendsBefore)
+            SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash, sendsBefore, all)
         }
     } catch (e: CancellationException) {
         throw e
@@ -1208,6 +1228,9 @@ class WalletSender internal constructor(
     } catch (e: ChainRpcException) {
         throw SendException(readFailureSaid(e), e)
     }
+
+    /** [quote] priced afresh, as it was asked for: Max stays Max. */
+    suspend fun reprice(quote: SendQuote): SendQuote = prepare(quote.request, quote.all)
 
     /** Whether [quote] is too old to sign as is (its fees may no longer get it mined). */
     fun isStale(quote: SendQuote): Boolean = clock() - quote.preparedAt !in 0 until QUOTE_TTL_MS
@@ -1714,7 +1737,9 @@ class WalletSender internal constructor(
             val block = receipt.optString("blockNumber").hexOrNull()?.toLong() ?: return null
             val gasUsed = receipt.optString("gasUsed").hexOrNull()
             val price = receipt.optString("effectiveGasPrice").hexOrNull()
-            val fee = if (gasUsed != null && price != null) gasUsed * price else null
+            // An OP Stack rollup (Base) also charges for posting the transaction to L1, as its own receipt field.
+            val l1Fee = receipt.optString("l1Fee").hexOrNull() ?: BigInteger.ZERO
+            val fee = if (gasUsed != null && price != null) gasUsed * price + l1Fee else null
             return when (receipt.optString("status").hexOrNull()) {
                 BigInteger.ONE -> SendStatus.Stage.Confirmed(block, fee)
                 BigInteger.ZERO -> SendStatus.Stage.Reverted(block, fee)
@@ -1723,7 +1748,9 @@ class WalletSender internal constructor(
         }
 
         private fun String.hexOrNull(): BigInteger? =
-            takeIf { it.startsWith("0x") && it.length in 3..66 }?.let { runCatching { BigInteger(it.substring(2), 16) }.getOrNull() }
+            // Hex digits only: BigInteger would also take a sign (`0x-5208`), a negative fee from one RPC.
+            takeIf { it.startsWith("0x") && it.length in 3..66 && it.drop(2).all { c -> c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F' } }
+                ?.let { BigInteger(it.substring(2), 16) }
 
         /** A read (balance, nonce, fee, estimate) that failed, for the user. */
         internal fun readFailure(e: ChainRpcException): String = readFailureSaid(e).text

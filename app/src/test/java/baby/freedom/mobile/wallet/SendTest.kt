@@ -243,6 +243,19 @@ class SendTest {
         for (bad in listOf("", "0", "0.0", "-1", "1e3", "1.2.3", "1,000.5", "abc", "0x10", "1.0000001")) {
             assertNull(bad, SendAmounts.parse(bad, 6))
         }
+        // How the balance note groups thousands ("1,234"), so neither 1.234 nor 1234.
+        assertEquals("1,234", TokenAmounts.format(BigInteger.valueOf(1_234_000_000), 6))
+        for (grouped in listOf("1,234", "12,345", " 999,000 ")) {
+            assertTrue(grouped, SendAmounts.ambiguous(grouped))
+            assertNull(grouped, SendAmounts.parse(grouped, 18))
+        }
+        // A decimal comma that can't be a thousands separator is still one.
+        assertEquals(BigInteger("123000"), SendAmounts.parse("0,123", 6))
+        assertEquals(BigInteger("1230000"), SendAmounts.parse("1,23", 6))
+        assertEquals(BigInteger("1234500"), SendAmounts.parse("1,2345", 6))
+        assertEquals(BigInteger("1234000000"), SendAmounts.parse("1234", 6))
+        assertEquals(BigInteger("1234000"), SendAmounts.parse("1.234", 6))
+        assertFalse(SendAmounts.ambiguous("1.234"))
         assertEquals("1.5", SendAmounts.exact(BigInteger("1500000000000000000"), 18))
         assertEquals("0.000000000000000001", SendAmounts.exact(BigInteger.ONE, 18))
         assertEquals("3", SendAmounts.exact(BigInteger.valueOf(3_000_000), 6))
@@ -772,6 +785,44 @@ class SendTest {
         assertEquals(chain.balance - native.tx.maxFee, native.request.amount)
         assertEquals(native.request.amount, native.tx.value)
         assertEquals(chain.balance, native.nativeTotal)
+    }
+
+    @Test
+    fun `a Max send priced again after the fee rose is still all of it, less the new fee`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        val max = s.prepare(request(xdai, 1), all = true)
+        assertTrue(max.all)
+        assertEquals(chain.balance, max.nativeTotal)
+        // The base fee rises by one wei before Confirm (the quote went stale, or a Ledger's did).
+        chain.baseFee = chain.baseFee!! + BigInteger.ONE
+        // The fixed amount plus the new fee is more than the account holds: what the page asked before.
+        assertMessage("Not enough xDAI for the amount and the network fee") { s.prepare(max.request) }
+        val again = s.reprice(max)
+        assertTrue(again.all)
+        assertTrue(again.tx.maxFee > max.tx.maxFee)
+        assertEquals(chain.balance - again.tx.maxFee, again.request.amount)
+        assertEquals(again.request.amount, again.tx.value)
+        assertEquals(chain.balance, again.nativeTotal)
+        // A typed amount stays the amount typed.
+        val typed = s.prepare(request(xdai, 1_000))
+        assertFalse(typed.all)
+        assertEquals(BigInteger.valueOf(1_000), s.reprice(typed).request.amount)
+    }
+
+    @Test
+    fun `a receipt's fee includes an OP Stack chain's L1 fee, and a signed quantity is no quantity`() {
+        fun outcome(json: String) = WalletSender.outcomeOf(JSONObject(json))
+        // A Base transfer: 21000 gas at 0.01 gwei on L2, plus 0.00005 ETH to post it to L1.
+        val base = outcome("""{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x989680","l1Fee":"0x2d79883d2000"}""")
+        assertEquals(SendStatus.Stage.Confirmed(16, BigInteger("210000000000") + BigInteger("50000000000000")), base)
+        // An L1 chain's receipt has no l1Fee: gas times price, as before.
+        val l1 = outcome("""{"status":"0x0","blockNumber":"0x10","gasUsed":"0x100","effectiveGasPrice":"0x2"}""")
+        assertEquals(SendStatus.Stage.Reverted(16, BigInteger.valueOf(512)), l1)
+        // BigInteger would read "0x-5208" as -21000: an RPC could show a negative fee.
+        val signed = outcome("""{"status":"0x1","blockNumber":"0x10","gasUsed":"0x-5208","effectiveGasPrice":"0x1","l1Fee":"0x-1"}""")
+        assertEquals(SendStatus.Stage.Confirmed(16, null), signed)
+        assertNull(outcome("""{"status":"0x1","blockNumber":"0x-10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""))
     }
 
     @Test
