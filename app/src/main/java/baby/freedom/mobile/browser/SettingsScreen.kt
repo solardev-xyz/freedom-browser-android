@@ -1527,7 +1527,8 @@ private fun BrowsingDataSection(
  * without restarting the app.
  */
 private const val PERMISSIONS_EMPTY =
-    "Sites you allow or block from using your camera, microphone, location or MIDI devices, " +
+    "Sites you allow or block from using your camera, microphone or location, " +
+        "from sending system-exclusive messages to your MIDI devices, " +
         "or from opening links in other apps, " +
         "and sites you connect your wallet to, appear here."
 

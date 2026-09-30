@@ -745,7 +745,10 @@ class SitePermissionsTest {
     fun `MIDI is keyed like the desktop browser and needs nothing from Android`() {
         assertEquals("midi", SitePermission.MIDI.key)
         assertEquals(SitePermission.MIDI, SiteCapability.forKey("midi"))
-        assertEquals("use your MIDI devices", describePermissionRequest(listOf(SitePermission.MIDI)))
+        assertEquals("send system-exclusive messages to your MIDI devices", describePermissionRequest(listOf(SitePermission.MIDI)))
+        // Only SysEx is gated — WebView lets any page use MIDI devices
+        // without asking — so the label must not claim the devices.
+        assertEquals("MIDI SysEx", SitePermission.MIDI.label)
         // Nothing to hold, so never "refused by Android" (which denied it and
         // raised the Android-settings snackbar before).
         assertTrue(androidPermissionsHeld(SitePermission.MIDI) { false })
@@ -783,11 +786,11 @@ class SitePermissionsTest {
             .revoking(entry(page, SitePermission.MIDI))
         // The page's MIDIAccess keeps working; WebView can't take it back.
         assertEquals(setOf(SitePermission.MIDI), revoked.stillHeld(emptySet()))
-        assertEquals("This page can still use your MIDI devices until it's reloaded.", stillHeldNote(revoked.stillHeld(emptySet())))
-        assertEquals("MIDI devices kept until reload", sitePermissionsSummary(emptyList(), revoked.stillHeld(emptySet())))
+        assertEquals("This page can still send system-exclusive messages to your MIDI devices until it's reloaded.", stillHeldNote(revoked.stillHeld(emptySet())))
+        assertEquals("MIDI SysEx kept until reload", sitePermissionsSummary(emptyList(), revoked.stillHeld(emptySet())))
         assertEquals(
             "This page keeps your microphone until it stops using it or is reloaded, " +
-                "and can still get your location and use your MIDI devices until it's reloaded.",
+                "and can still get your location and send system-exclusive messages to your MIDI devices until it's reloaded.",
             stillHeldNote(setOf(SitePermission.MIDI, SitePermission.MICROPHONE, SitePermission.LOCATION)),
         )
     }

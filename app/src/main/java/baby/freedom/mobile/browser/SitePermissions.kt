@@ -85,10 +85,14 @@ enum class SitePermission(
      * Web MIDI with system-exclusive messages (#267): WebView asks for
      * `RESOURCE_MIDI_SYSEX` only when a page calls
      * `navigator.requestMIDIAccess({sysex: true})` — plain MIDI it
-     * allows by itself. Keyed `midi` like the desktop browser, whose one
-     * decision covers both. Android needs no runtime permission for it.
+     * allows by itself, with no callback to gate it, so any site can list
+     * and use the user's MIDI devices whatever this decision says. That's
+     * why it's labelled and phrased as SysEx only: "MIDI devices ·
+     * Blocked" would claim a site can't reach devices it still can.
+     * Keyed `midi` like the desktop browser (whose one decision covers
+     * both). Android needs no runtime permission for it.
      */
-    MIDI("midi", "MIDI devices", "use your MIDI devices", emptyList()),
+    MIDI("midi", "MIDI SysEx", "send system-exclusive messages to your MIDI devices", emptyList()),
 
     /**
      * Pop-ups a page opens without the user's gesture (#261). Never
@@ -800,7 +804,7 @@ fun stillHeldNote(held: Set<SitePermission>): String? {
     // What the page can go on doing until it's reloaded.
     val untilReload = listOfNotNull(
         "get your location".takeIf { SitePermission.LOCATION in held },
-        "use your MIDI devices".takeIf { SitePermission.MIDI in held },
+        SitePermission.MIDI.phrase.takeIf { SitePermission.MIDI in held },
     ).joinToString(" and ")
     return when {
         media.isNotEmpty() && untilReload.isNotEmpty() ->
