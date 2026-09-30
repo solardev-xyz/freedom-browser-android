@@ -6,14 +6,18 @@ import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.EthTransaction
 import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.SendRequest
+import baby.freedom.mobile.wallet.SigningHeldException
 import baby.freedom.mobile.wallet.SwarmFundLabel
 import baby.freedom.mobile.wallet.SwarmFunder
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -81,6 +85,25 @@ class FundNodeReviewTest {
         assertEquals(FUND_REVIEW_NODE_CHANGED, fundReviewHeld(null, null, node))
         assertEquals("blocked", fundReviewHeld("blocked", node, node))
         assertEquals("blocked", fundReviewHeld("blocked", otherNode, node))
+    }
+
+    @Test
+    fun `the Ledger's ready check re-reads the hold as well as the quote's age`() {
+        var held: String? = null
+        var stale = false
+        val fresh = fundLedgerFresh({ held }) { stale }
+        assertTrue(fresh())
+        stale = true
+        assertFalse(fresh())
+        // The node restarted as another account while the Ledger was connecting:
+        // ended with that reason, not the quote-too-old one, however old the quote.
+        held = FUND_REVIEW_NODE_CHANGED
+        assertEquals(FUND_REVIEW_NODE_CHANGED, assertThrows(SigningHeldException::class.java) { fresh() }.message)
+        stale = false
+        held = "blocked"
+        assertEquals("blocked", assertThrows(SigningHeldException::class.java) { fresh() }.message)
+        held = null
+        assertTrue(fresh())
     }
 
     @Test

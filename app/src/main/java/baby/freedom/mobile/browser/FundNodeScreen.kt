@@ -46,6 +46,7 @@ import baby.freedom.mobile.wallet.SendAmounts
 import baby.freedom.mobile.wallet.SendException
 import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.SendRequest
+import baby.freedom.mobile.wallet.SigningHeldException
 import baby.freedom.mobile.wallet.SwarmFundLabel
 import baby.freedom.mobile.wallet.SwarmFunder
 import baby.freedom.mobile.wallet.TokenRegistry
@@ -118,6 +119,18 @@ internal fun fundReviewRows(quote: SendQuote, plan: SwarmFunder.Plan, days: Long
  */
 internal fun fundReviewHeld(blocked: String?, running: String?, reviewNode: String): String? =
     blocked ?: if (running?.equals(reviewNode, ignoreCase = true) != true) FUND_REVIEW_NODE_CHANGED else null
+
+/**
+ * The Ledger's [fresh][WalletSender.signerFor] check for a Fund node review:
+ * asked once the device is connected and unlocked (up to ~90 s after the
+ * tap), before it shows the transaction. The node can restart as another
+ * account, or funding be blocked, in that wait too, so a [held] reason ends
+ * it with [SigningHeldException] naming it; else the quote must not be [stale].
+ */
+internal fun fundLedgerFresh(held: () -> String?, stale: () -> Boolean): () -> Boolean = {
+    held()?.let { throw SigningHeldException(it) }
+    !stale()
+}
 
 internal const val FUND_REVIEW_NODE_CHANGED =
     "The node is no longer running as the account this review pays. Cancel and review again."
@@ -345,7 +358,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                                     if (!q.request.from.isLedger && !vault.unlockedNow()) vault.unlock(auth)
                                     // The node may have restarted (or funding been blocked) while the prompt was up.
                                     if (changedNow != null) return@launch
-                                    when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from) { !sender.isStale(q) })) {
+                                    when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from, fundLedgerFresh({ changedNow }) { sender.isStale(q) }))) {
                                         WalletSender.Submit.STARTED -> {
                                             reviewing = null
                                             notice = null
