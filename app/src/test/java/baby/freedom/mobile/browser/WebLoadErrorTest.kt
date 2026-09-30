@@ -111,4 +111,78 @@ class WebLoadErrorTest {
         assertFalse(certErrorEndsLoad("https://example.com/", bad))
         assertFalse(certErrorEndsLoad(null, bad))
     }
+
+    @Test
+    fun `a refused history step's page goes in the entry it was for`() {
+        val a = "https://a.example/"
+        val b = "https://b.example/"
+        val c = "https://c.example/"
+        // A → B → C, on C: Back onto B refused → the same Back.
+        assertEquals(-1, certPageStep(listOf(a, b, c), 2, b))
+        // On A: Forward onto B refused → the same Forward, C kept ahead.
+        assertEquals(1, certPageStep(listOf(a, b, c), 0, b))
+        // Reload, or Try again, of the entry on screen.
+        assertEquals(0, certPageStep(listOf(a, b), 1, b))
+        // A page the list doesn't hold: a new entry of its own.
+        assertEquals(null, certPageStep(listOf(a, c), 1, b))
+        assertEquals(null, certPageStep(emptyList(), -1, b))
+        // The entry's fragment isn't in the request.
+        assertEquals(-1, certPageStep(listOf(a, "$b#top", c), 2, b))
+        // The nearer entry wins; Back on a tie.
+        assertEquals(-1, certPageStep(listOf(b, a, b, c), 3, b))
+        assertEquals(-1, certPageStep(listOf(b, a, b), 1, b))
+    }
+
+    @Test
+    fun `the certificate page answers only its own re-issue, once`() {
+        val bad = "https://self-signed.badssl.com/"
+        val slot = CertRefusalSlot()
+        assertTrue(slot.arm(bad, "<p>page</p>"))
+        assertEquals(null, slot.take("https://other.example/"))
+        // Disarmed by the other request.
+        assertEquals(null, slot.take(bad))
+        assertFalse(slot.isServed(bad))
+
+        slot.committed("https://other.example/")
+        assertTrue(slot.arm(bad, "<p>page</p>"))
+        assertEquals("<p>page</p>", slot.take(bad))
+        // Only once it commits.
+        assertFalse(slot.isServed(bad))
+        slot.committed(bad)
+        assertTrue(slot.isServed(bad))
+        assertTrue(slot.isServed("$bad#x"))
+        // Try again: the retry's request isn't answered, and it's refused
+        // — no commit — so the page is still what's on screen.
+        assertEquals(null, slot.take(bad))
+        assertTrue(slot.isServed(bad))
+        // The site's own page, once its certificate is fixed.
+        slot.committed(bad)
+        assertFalse(slot.isServed(bad))
+    }
+
+    @Test
+    fun `a re-issue refused before any commit isn't issued again`() {
+        val bad = "https://self-signed.badssl.com/"
+        val slot = CertRefusalSlot()
+        assertTrue(slot.arm(bad, "p"))
+        // The re-issue never reached the interceptor and was refused too.
+        assertFalse(slot.arm(bad, "p"))
+        // The user's next try arms again.
+        assertTrue(slot.arm(bad, "p"))
+        // A committed page in between: a new refusal.
+        slot.committed(bad)
+        assertTrue(slot.arm(bad, "p"))
+    }
+
+    @Test
+    fun `the certificate page escapes the host and address`() {
+        val facts = CertFacts(setOf(SSL_UNTRUSTED), null, null, "<x>", "Evil & Co")
+        val html = certErrorPageHtml("https://h.example/?q=\"<b>", "h<i>.example", facts, 0L)
+        assertTrue(html.contains("<b>h&lt;i&gt;.example</b>"))
+        assertTrue(html.contains("href=\"https://h.example/?q=&quot;&lt;b&gt;\""))
+        assertTrue(html.contains("Issued to: &lt;x&gt;"))
+        assertTrue(html.contains("Issued by: Evil &amp; Co"))
+        assertTrue(html.contains("wasn't issued by an authority this device trusts"))
+        assertFalse(html.contains("<script"))
+    }
 }

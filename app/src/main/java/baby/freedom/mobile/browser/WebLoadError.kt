@@ -25,9 +25,15 @@ import java.util.TimeZone
  *  - A **certificate error**. WebView asks `onReceivedSslError`; the
  *    answer is always cancel (no proceed-anyway, #259), and a cancelled
  *    navigation commits nothing — the previous page would stay on screen
- *    under no warning at all. There is no entry to put a page in, so the
- *    tab goes to [ErrorPage] (`error=cert_*`) as for a dweb failure:
- *    Back from it is the page before.
+ *    under no warning at all. The refused load is then issued again —
+ *    the same history step (Back/Forward) if it was one, or a load of
+ *    the URL if not ([certPageStep]) — and this time the interceptor
+ *    answers it itself with the "connection isn't secure" page
+ *    ([CertRefusalSlot], [certErrorPageHtml]), which never reaches the
+ *    network. So the page sits in the refused load's own entry: a
+ *    refused Back or Forward keeps the history on both sides of it,
+ *    rather than pushing a page on top that cuts off the entries ahead
+ *    and leaves Back going round the refused entry forever.
  */
 internal enum class NetFailure { OFFLINE, NOT_FOUND, REFUSED, RESET, TIMED_OUT, INSECURE, OTHER }
 
@@ -179,4 +185,121 @@ internal fun certErrorDetail(facts: CertFacts, host: String, nowMs: Long): Strin
         facts.issuedTo?.takeIf { it.isNotBlank() }?.let { add("Issued to: $it") }
         facts.issuedBy?.takeIf { it.isNotBlank() }?.let { add("Issued by: $it") }
     }.joinToString("\n").trimEnd()
+}
+
+/** Why the certificate failed, for the page's description ([certErrorCode]). */
+private fun certReason(code: String): String = when (code) {
+    "cert_expired" -> "has expired"
+    "cert_not_yet_valid" ->
+        "isn't valid yet. If your device's date and time are wrong, correct them and try again"
+    "cert_date_invalid" -> "has invalid dates"
+    "cert_wrong_host" -> "was issued for a different site"
+    "cert_untrusted" -> "wasn't issued by an authority this device trusts"
+    else -> "is not valid"
+}
+
+/**
+ * The "connection isn't secure" page for a certificate error on [url]
+ * (#259), served in the refused load's own entry ([CertRefusalSlot]):
+ * [inPlaceErrorPageHtml], [host] and [url] escaped. Try again is a link
+ * to [url] itself, which asks the site again (and so WebView asks
+ * `onReceivedSslError` again — nothing is remembered).
+ */
+internal fun certErrorPageHtml(url: String, host: String, facts: CertFacts, nowMs: Long): String {
+    val description = "Freedom didn't load <b>${escHtml(host)}</b> because its security certificate " +
+        certReason(certErrorCode(facts, nowMs)) + ". Someone could be impersonating the site or " +
+        "intercepting the connection, or the site is misconfigured."
+    val details = escHtml(url) + "\n\n" + escHtml(certErrorDetail(facts, host, nowMs))
+    return inPlaceErrorPageHtml("Connection isn't secure", description, details, retryHref = escHtml(url))
+}
+
+/**
+ * How to issue a certificate-refused load of [refusedUrl] again, so the
+ * page for it lands in the entry the load was for: the history step
+ * from [currentIndex] to the nearest entry of [entryUrls] (the tab's
+ * back/forward list) holding that URL — `0` for the entry on screen
+ * (a Reload, Try again) — or `null` for a new navigation, whose page
+ * gets an entry of its own.
+ *
+ * A refused load commits nothing, so the list still stands where it
+ * did, and nothing says whether it was a Back/Forward. Taking a history
+ * step for a URL the list already holds is the safe reading: a refused
+ * Back or Forward read as a new navigation would push the page on top,
+ * cutting off the entries ahead and leaving Back to go round the
+ * refused entry again; a link to a page already in the list read as a
+ * step merely shows the page in that entry. Fragments aside — a
+ * request never carries one. The nearer entry wins; Back on a tie.
+ */
+internal fun certPageStep(entryUrls: List<String?>, currentIndex: Int, refusedUrl: String): Int? {
+    val target = refusedUrl.substringBefore('#')
+    return entryUrls.indices
+        .filter { entryUrls[it]?.substringBefore('#') == target }
+        .minWithOrNull(compareBy<Int>({ kotlin.math.abs(it - currentIndex) }, { it }))
+        ?.let { it - currentIndex }
+}
+
+/**
+ * The certificate page a tab's interceptor is to answer its next
+ * main-frame request with (#259, [certPageStep]). [arm]ed on the main
+ * thread just before the refused load is issued again, taken — once,
+ * and only by a request for that URL — by `shouldInterceptRequest` on
+ * its IO thread; any other main-frame request disarms it, so it can't
+ * answer a later load. [isServed] tells the page's own callbacks (on
+ * the main thread) the document on screen is this page, to keep it out
+ * of history — from its commit until the next one, so a refused retry
+ * of the same URL (Try again), whose synthetic finish arrives while the
+ * page is still on screen, doesn't pass for a visit either.
+ */
+internal class CertRefusalSlot {
+    private data class Armed(val url: String, val html: String)
+
+    @Volatile private var armed: Armed? = null
+    /** The URL the last main-frame request was answered with the page on, if it was. */
+    @Volatile private var answered: String? = null
+
+    /** The document on screen is the page, on this URL. Main thread only. */
+    private var servedUrl: String? = null
+
+    /**
+     * Has a re-issue for [url] already been made that no commit has
+     * followed? Then the same URL failing again is that re-issue's own
+     * refusal — it never reached the interceptor — and issuing it once
+     * more would only go round: [arm] says no (once — the next refusal,
+     * the user's own, arms again). Main thread only.
+     */
+    private var reissued: String? = null
+
+    fun arm(url: String, html: String): Boolean {
+        val key = url.substringBefore('#')
+        if (reissued == key) {
+            reissued = null
+            return false
+        }
+        reissued = key
+        armed = Armed(key, html)
+        return true
+    }
+
+    /**
+     * A document committed for [url]: the page if the request just
+     * answered was, and the next refusal is a new one.
+     */
+    fun committed(url: String?) {
+        reissued = null
+        val key = url?.substringBefore('#')
+        servedUrl = answered?.takeIf { it == key }
+    }
+
+    /** The page for main-frame [url], if it is the armed one; disarms either way. */
+    @Synchronized
+    fun take(url: String): String? {
+        val a = armed
+        armed = null
+        val key = url.substringBefore('#')
+        val html = a?.takeIf { it.url == key }?.html
+        answered = if (html != null) key else null
+        return html
+    }
+
+    fun isServed(url: String?): Boolean = url != null && url.substringBefore('#') == servedUrl
 }

@@ -1784,6 +1784,10 @@ private fun buildRefreshableWebView(
     // turns it into the "connection isn't secure" page (#259).
     var pendingCertError: Pair<String, CertFacts>? = null
 
+    // The certificate page the interceptor answers the refused load's
+    // re-issue with, in that load's own entry (#259, [CertRefusalSlot]).
+    val certRefusal = CertRefusalSlot()
+
     /**
      * Swap the failed load's document for Freedom's page, if [url] is
      * the failed load ([failedLoad]). Run from `onReceivedError` and
@@ -1797,22 +1801,43 @@ private fun buildRefreshableWebView(
     }
 
     /**
-     * The "connection isn't secure" page for [url] (#259): [ErrorPage],
-     * as a navigation of its own — the refused load left no entry to
-     * put it in. Back from it is the page before; Try Again and Reload
-     * ask for [url] again.
+     * The "connection isn't secure" page for [url] (#259), in the entry
+     * the refused load was for: the load is issued again — the same
+     * Back/Forward step if the list holds [url] ([certPageStep]), a
+     * load of [url] if not — and the interceptor answers that with the
+     * page ([certRefusal]). So a refused Back or Forward keeps every
+     * entry on both sides, Back from the page is the one before it, and
+     * Try again and Reload ask for [url] again.
+     *
+     * Should the re-issue itself be refused (it never reached the
+     * interceptor), the page goes up as [ErrorPage] on top instead,
+     * rather than leave the previous page on screen with no warning.
      */
     fun showCertErrorPage(view: WebView, url: String, facts: CertFacts) {
         val host = Uri.parse(url).host.orEmpty().ifEmpty { url }
         val now = System.currentTimeMillis()
+        state.clearEnsOverride()
+        if (certRefusal.arm(url, certErrorPageHtml(url, host, facts, now))) {
+            val list = view.copyBackForwardList()
+            val step = certPageStep(
+                (0 until list.size).map { list.getItemAtIndex(it)?.url },
+                list.currentIndex,
+                url,
+            )
+            Log.i(LOG_TAG, "certificate error for $url → page in place (step $step)")
+            when (step) {
+                null, 0 -> view.loadUrl(url)
+                else -> view.goBackOrForward(step)
+            }
+            return
+        }
         val page = ErrorPage.url(
             errorCode = certErrorCode(facts, now),
             displayUrl = url,
             retryUrl = url,
             detail = certErrorDetail(facts, host, now),
         )
-        Log.i(LOG_TAG, "certificate error for $url → error page")
-        state.clearEnsOverride()
+        Log.i(LOG_TAG, "certificate error for $url again → error page")
         view.loadUrl(page)
     }
 
@@ -2723,6 +2748,7 @@ private fun buildRefreshableWebView(
                 // navigation (#259).
                 failedLoad = null
                 pendingCertError = null
+                certRefusal.committed(url)
                 // Ad blocking judges requests against it from here on
                 // (a page back from the back/forward cache made none).
                 url?.let(adblockPage::committed)
@@ -2988,7 +3014,11 @@ private fun buildRefreshableWebView(
                 val cert = pendingCertError
                 if (view != null && cert != null && certErrorEndsLoad(url, cert.first)) {
                     pendingCertError = null
-                    showCertErrorPage(view, cert.first, cert.second)
+                    // Posted: issued from here, the load would already
+                    // be the WebView's `getUrl()` for the rest of this
+                    // finish, which would record the refused address
+                    // under the old page's title.
+                    view.post { showCertErrorPage(view, cert.first, cert.second) }
                 }
                 // Chromium's synthetic finish for a navigation that never
                 // committed (a 204, Stop, superseded): the page on screen
@@ -3169,6 +3199,9 @@ private fun buildRefreshableWebView(
                 if (display.isNotBlank() &&
                     !ErrorPage.isErrorPage(url) &&
                     !nameRefusal.isRefused(url) &&
+                    // …nor the certificate page in a refused load's entry
+                    // (#259, [CertRefusalSlot]).
+                    !certRefusal.isServed(url) &&
                     // …nor a failed web load, under Chromium's "Webpage
                     // not available" title (#259).
                     failedLoad?.url != url &&
@@ -3535,8 +3568,13 @@ private fun buildRefreshableWebView(
                         return Adblock.blockedResponse()
                     }
                 }
+                // A certificate-refused load issued again: its page, in
+                // its own entry, never reaching the network (#259).
+                val certPage = if (mainFrame) request!!.url?.toString()?.let(certRefusal::take) else null
                 val work = state.gatewayWork.start(generation)
-                val response = if (heldBack) heldBackResponse() else try {
+                val response = if (heldBack) heldBackResponse() else if (certPage != null) {
+                    certPageResponse(certPage)
+                } else try {
                     interceptVirtualRequest(
                         request, ensPins, view, state::assertedProtocolFor, state.onchain,
                     ) { served ->
@@ -6003,6 +6041,13 @@ internal fun servedFromIpfs(served: ContentRoot?): Boolean = when (served) {
  */
 internal fun mainFrameNoteApplies(requestGeneration: Int, currentGeneration: Int): Boolean =
     requestGeneration == currentGeneration
+
+/** The interceptor's answer carrying a certificate page ([certErrorPageHtml]). */
+internal fun certPageResponse(html: String): WebResourceResponse =
+    WebResourceResponse(
+        "text/html", "utf-8", 200, "OK", mapOf("Cache-Control" to "no-store"),
+        java.io.ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
+    )
 
 /**
  * The answer to a main-frame request held back for the page to re-issue
