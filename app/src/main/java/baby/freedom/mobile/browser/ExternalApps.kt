@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -660,27 +661,7 @@ internal fun externalAppLaunch(url: String, ownPackage: String): ExternalAppLaun
     }
     intent.addCategory(Intent.CATEGORY_BROWSABLE)
     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    if (mustSkipBrowsers(intent.scheme, intent.`package`)) {
-        intent.addFlags(Intent.FLAG_ACTIVITY_REQUIRE_NON_BROWSER)
-    }
     return ExternalAppLaunch(ExternalScheme(scheme), intent, fallbackUrl)
-}
-
-/**
- * Whether an app-link launch whose data has [dataScheme] and that names
- * [pkg] (null: any app) must skip browsers. An `intent:` URL carrying an
- * http(s) address with no package is a web link like any other, and a
- * web link resolves to the default browser — which may be Freedom
- * itself ([IncomingLinkActivity] takes every http(s) link), so the
- * "open in another app" prompt would end in a new Freedom tab opened
- * as if from another app, the address the page chose. Only a non-browser
- * app (one with a link filter for that site) may take it; if none can,
- * the launch fails like any link with no app, and the tab goes to the
- * fallback address if the page gave one.
- */
-internal fun mustSkipBrowsers(dataScheme: String?, pkg: String?): Boolean {
-    val s = dataScheme?.lowercase() ?: return false
-    return pkg == null && (s == "http" || s == "https")
 }
 
 /**
@@ -702,25 +683,97 @@ internal fun parseIntentUrl(
     null
 }
 
-/** Start [launch]; `false` when no app on the device can take it. */
-internal fun startExternalApp(context: Context, launch: ExternalAppLaunch): Boolean = try {
-    // Never back into this app: whatever the intent names, if Android
-    // would hand it to one of Freedom's own activities it's no app link.
-    val target = context.packageManager
-        .resolveActivity(launch.intent, PackageManager.MATCH_DEFAULT_ONLY)
-        ?.activityInfo?.packageName
-    if (target == context.packageName) {
-        Log.i("ExternalApps", "${launch.scheme.scheme}: resolves to this app, not launched")
-        false
-    } else {
-        context.startActivity(launch.intent)
-        true
+/** How [startExternalApp] went. */
+internal enum class ExternalLaunchResult {
+    /** Handed to Android, which can only give it to another app. */
+    LAUNCHED,
+
+    /** No app on the device can take it. */
+    NO_APP,
+
+    /**
+     * Freedom itself is the default for this link (e.g. an `intent:`
+     * web link while Freedom is the default browser). Handing it to
+     * Android would bounce back in as an External tab, the address the
+     * page chose; the caller loads a web address in the tab instead, as
+     * Chrome does when an `intent:` resolves to itself.
+     */
+    SELF,
+}
+
+/** An activity, by package and class name. */
+internal data class AppActivity(val packageName: String, val name: String)
+
+/** Where a launch goes, from what Android would pick. */
+internal sealed interface ExternalLaunchRoute {
+    /** Start the intent as it is: it can't reach Freedom. */
+    data object Direct : ExternalLaunchRoute
+
+    /** Freedom is the default for it. */
+    data object Self : ExternalLaunchRoute
+
+    /**
+     * Freedom's [excluded] activities match and no other app is the
+     * default: Android's own resolver would list Freedom next to the
+     * other apps, so start a chooser that leaves Freedom out.
+     */
+    data class ChooserExcluding(val excluded: List<AppActivity>) : ExternalLaunchRoute
+}
+
+/**
+ * The route for an intent that the activities [matches] can take (as
+ * far as this app can see: package visibility may hide other apps, but
+ * never Freedom's own activities) and that Android resolves to
+ * [preferred] — the default app, or the system resolver when there is
+ * none. Freedom must never be a way back in: a page's `intent:` that
+ * reached one of Freedom's own activities would open the address it
+ * chose as if another app had sent it.
+ */
+internal fun externalLaunchRoute(
+    matches: List<AppActivity>,
+    preferred: AppActivity?,
+    ownPackage: String,
+): ExternalLaunchRoute {
+    if (preferred?.packageName == ownPackage) return ExternalLaunchRoute.Self
+    val own = matches.filter { it.packageName == ownPackage }
+    // Nothing of Freedom's matches, or another app is the default
+    // (Android goes straight to it, no resolver).
+    if (own.isEmpty() || preferred in matches) return ExternalLaunchRoute.Direct
+    return ExternalLaunchRoute.ChooserExcluding(own)
+}
+
+/** Start [launch], never into Freedom itself. */
+internal fun startExternalApp(context: Context, launch: ExternalAppLaunch): ExternalLaunchResult = try {
+    val pm = context.packageManager
+    val matches = pm.queryIntentActivities(launch.intent, PackageManager.MATCH_DEFAULT_ONLY)
+        .map { AppActivity(it.activityInfo.packageName, it.activityInfo.name) }
+    val preferred = pm.resolveActivity(launch.intent, PackageManager.MATCH_DEFAULT_ONLY)
+        ?.activityInfo?.let { AppActivity(it.packageName, it.name) }
+    when (val route = externalLaunchRoute(matches, preferred, context.packageName)) {
+        ExternalLaunchRoute.Self -> {
+            Log.i("ExternalApps", "${launch.scheme.scheme}: resolves to this app, not launched")
+            ExternalLaunchResult.SELF
+        }
+        ExternalLaunchRoute.Direct -> {
+            context.startActivity(launch.intent)
+            ExternalLaunchResult.LAUNCHED
+        }
+        is ExternalLaunchRoute.ChooserExcluding -> {
+            val chooser = Intent.createChooser(launch.intent, null)
+                .putExtra(
+                    Intent.EXTRA_EXCLUDE_COMPONENTS,
+                    route.excluded.map { ComponentName(it.packageName, it.name) }.toTypedArray(),
+                )
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(chooser)
+            ExternalLaunchResult.LAUNCHED
+        }
     }
 } catch (_: ActivityNotFoundException) {
-    false
+    ExternalLaunchResult.NO_APP
 } catch (e: SecurityException) {
     // An `intent:` asking for something this app may not start (e.g. a
     // protected action): the same as there being no app for it.
     Log.w("ExternalApps", "${launch.scheme.scheme}: launch refused", e)
-    false
+    ExternalLaunchResult.NO_APP
 }

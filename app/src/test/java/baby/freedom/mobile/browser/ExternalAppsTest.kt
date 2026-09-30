@@ -760,15 +760,56 @@ class ExternalAppsTest {
         assertFalse(sameRequestUrl("https://example.com/?a", "https://example.com/?b"))
     }
 
+    private val ownLink = AppActivity("baby.freedom.mobile", "baby.freedom.mobile.IncomingLinkActivity")
+    private val chrome = AppActivity("com.android.chrome", "com.google.android.apps.chrome.IntentDispatcher")
+    private val resolver = AppActivity("android", "com.android.internal.app.ResolverActivity")
+
     @Test
-    fun webIntentWithNoPackageSkipsBrowsers() {
-        // intent://x#Intent;scheme=https;end — would reach the default
-        // browser, which may be Freedom's own IncomingLinkActivity.
-        assertTrue(mustSkipBrowsers("https", null))
-        assertTrue(mustSkipBrowsers("HTTP", null))
-        // A named app gets the link; Freedom's own package is refused earlier.
-        assertFalse(mustSkipBrowsers("https", "com.example.app"))
-        assertFalse(mustSkipBrowsers("zoomus", null))
-        assertFalse(mustSkipBrowsers(null, null))
+    fun `a web intent with another default browser goes to it`() {
+        // intent://x#Intent;scheme=https;end, Chrome the default: Chrome
+        // opens it (no REQUIRE_NON_BROWSER, R2-M1).
+        assertEquals(
+            ExternalLaunchRoute.Direct,
+            externalLaunchRoute(listOf(ownLink, chrome), chrome, "baby.freedom.mobile"),
+        )
+    }
+
+    @Test
+    fun `an intent Freedom is the default for is its own`() {
+        assertEquals(
+            ExternalLaunchRoute.Self,
+            externalLaunchRoute(listOf(ownLink, chrome), ownLink, "baby.freedom.mobile"),
+        )
+        assertEquals(
+            ExternalLaunchRoute.Self,
+            externalLaunchRoute(listOf(ownLink), ownLink, "baby.freedom.mobile"),
+        )
+    }
+
+    @Test
+    fun `with no default the chooser leaves Freedom out`() {
+        // ipfs: with another handler and no default: Android's resolver
+        // would list Freedom (R2-M2).
+        val other = AppActivity("org.example.ipfs", "org.example.ipfs.Open")
+        assertEquals(
+            ExternalLaunchRoute.ChooserExcluding(listOf(ownLink)),
+            externalLaunchRoute(listOf(ownLink, other), resolver, "baby.freedom.mobile"),
+        )
+    }
+
+    @Test
+    fun `an intent Freedom can't take starts as it is`() {
+        val zoom = AppActivity("us.zoom.videomeetings", "com.zipow.Join")
+        assertEquals(
+            ExternalLaunchRoute.Direct,
+            externalLaunchRoute(listOf(zoom), zoom, "baby.freedom.mobile"),
+        )
+        // Several other apps, none Freedom: Android's resolver is fine.
+        assertEquals(
+            ExternalLaunchRoute.Direct,
+            externalLaunchRoute(listOf(zoom, chrome), resolver, "baby.freedom.mobile"),
+        )
+        // Nothing visible: Android decides (and may find no app).
+        assertEquals(ExternalLaunchRoute.Direct, externalLaunchRoute(emptyList(), null, "baby.freedom.mobile"))
     }
 }
