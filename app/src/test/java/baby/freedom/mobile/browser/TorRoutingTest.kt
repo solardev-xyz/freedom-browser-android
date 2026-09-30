@@ -32,9 +32,9 @@ class TorRoutingTest {
     @Test
     fun `onion is routed only with support, the setting on, and a listening client`() {
         val listening = TorInfo(status = TorStatus.Running, socksPort = 40123)
-        assertEquals(40123, TorRouting.desiredPort(true, true, listening))
+        assertEquals(40123, (TorRouting.desiredEndpoint(true, true, listening, null, false)?.port ?: 0))
         // Bootstrapping already listens (a connect waits for the bootstrap).
-        assertEquals(40123, TorRouting.desiredPort(true, true, listening.copy(status = TorStatus.Starting)))
+        assertEquals(40123, TorRouting.desiredEndpoint(true, true, listening.copy(status = TorStatus.Starting), null, false)?.port ?: 0)
         // Every other combination refuses.
         for (supported in listOf(true, false)) {
             for (enabled in listOf(true, false)) {
@@ -46,7 +46,7 @@ class TorRoutingTest {
                         assertEquals(
                             "supported=$supported enabled=$enabled $status port=$port",
                             if (routed) 40123 else 0,
-                            TorRouting.desiredPort(supported, enabled, info),
+                            (TorRouting.desiredEndpoint(supported, enabled, info, null, false)?.port ?: 0),
                         )
                     }
                 }
@@ -56,13 +56,13 @@ class TorRoutingTest {
 
     @Test
     fun `the proxy applies only to onion hosts, over socks5`() {
-        val config = TorRouting.proxyConfigFor(40123)
+        val config = TorRouting.proxyConfigFor(SocksEndpoint("127.0.0.1", 40123))
         assertTrue(config.isReverseBypassEnabled)
         assertEquals(listOf("*.onion", "*.onion."), config.bypassRules)
         assertEquals(listOf("socks5://127.0.0.1:40123"), config.proxyRules.map { it.url })
         assertEquals(
             listOf("socks5://127.0.0.1:${TorRouting.REFUSE_PORT}"),
-            TorRouting.proxyConfigFor(TorRouting.REFUSE_PORT).proxyRules.map { it.url },
+            TorRouting.proxyConfigFor(TorRouting.REFUSE).proxyRules.map { it.url },
         )
     }
 
@@ -95,7 +95,7 @@ class TorRoutingTest {
     @Test
     fun `a native onion fetch without Tor is refused before anything resolves`() {
         // No Tor port is routed in a unit test.
-        assertEquals(0, TorRouting.port)
+        assertEquals(0, (TorRouting.routedEndpoint?.port ?: 0))
         for (url in listOf("http://$onion/", "https://www.$onion/a.png", "http://example.onion.:8080/")) {
             try {
                 TorRouting.openConnection(URL(url))
@@ -249,12 +249,12 @@ class TorRoutingTest {
             val running = TorInfo(status = TorStatus.Running, socksPort = 40123)
             // The move to the Tor port throws: still refused.
             TorRouting.onState(context, running)
-            assertEquals(0, TorRouting.port)
+            assertEquals(0, (TorRouting.routedEndpoint?.port ?: 0))
             assertEquals(emptyList<String>(), applied)
             // The same state again (a later poll) tries again, and routes.
             TorRouting.onState(context, running)
             assertEquals(listOf("socks5://127.0.0.1:40123"), applied)
-            assertEquals(40123, TorRouting.port)
+            assertEquals(40123, (TorRouting.routedEndpoint?.port ?: 0))
             // Nothing changed: not re-applied.
             TorRouting.onState(context, running)
             assertEquals(1, applied.size)
@@ -278,12 +278,12 @@ class TorRoutingTest {
             val running = TorInfo(status = TorStatus.Running, socksPort = 40123)
             TorRouting.onState(context, running)
             confirm()
-            assertEquals(40123, TorRouting.port)
+            assertEquals(40123, (TorRouting.routedEndpoint?.port ?: 0))
 
             // Tor switched off: routing stops at once, but the unbind
             // waits until the WebView confirms the override moved.
             TorRouting.onState(context, TorInfo())
-            assertEquals(0, TorRouting.port)
+            assertEquals(0, (TorRouting.routedEndpoint?.port ?: 0))
             var released = 0
             TorRouting.afterRefusing { released++ }
             assertEquals(0, released)
@@ -304,8 +304,87 @@ class TorRoutingTest {
             confirm() // the superseded refusal
             assertEquals(2, released)
             confirm() // back on the Tor port
-            assertEquals(40123, TorRouting.port)
+            assertEquals(40123, (TorRouting.routedEndpoint?.port ?: 0))
             assertEquals(2, released)
+        } finally {
+            TorRouting.setOverride = real
+            TorRouting.resetForTest(supported = null)
+        }
+    }
+
+    @Test
+    fun `an external proxy is routed only once confirmed, and never falls back to the embedded port`() {
+        val orbot = SocksEndpoint("127.0.0.1", 9050)
+        val embedded = TorInfo(status = TorStatus.Running, socksPort = 40123)
+        assertEquals(orbot, TorRouting.desiredEndpoint(true, true, embedded, orbot, true))
+        assertEquals(orbot, TorRouting.desiredEndpoint(true, true, TorInfo(), orbot, true))
+        // Not (or no longer) confirmed: refused, even with Arti listening.
+        assertEquals(null, TorRouting.desiredEndpoint(true, true, embedded, orbot, false))
+        // Off, or no reverse-bypass support: refused.
+        assertEquals(null, TorRouting.desiredEndpoint(true, false, embedded, orbot, true))
+        assertEquals(null, TorRouting.desiredEndpoint(false, true, embedded, orbot, true))
+        // IPv6 loopback, bracketed in the proxy rule.
+        val v6 = SocksEndpoint("::1", 9150)
+        assertEquals(
+            listOf("socks5://[::1]:9150"),
+            TorRouting.proxyConfigFor(v6).proxyRules.map { it.url },
+        )
+        assertEquals(TorRouting.CODE_PROXY_DOWN, TorRouting.refusalCode(true, true, external = true))
+        assertEquals(TorRouting.CODE_OFF, TorRouting.refusalCode(true, false, external = true))
+        val down = TorRouting.refusalHtml(onion, TorRouting.CODE_PROXY_DOWN, TorInfo(), orbot)
+        assertTrue(down.contains("<h1>Tor proxy isn't reachable</h1>"))
+        assertTrue(down.contains("127.0.0.1:9050"))
+        assertTrue(down.contains("Orbot"))
+    }
+
+    @Test
+    fun `switching to an external proxy follows its probe and lets the embedded port go`() {
+        val context = android.content.ContextWrapper(null)
+        val real = TorRouting.setOverride
+        val pending = mutableListOf<Pair<String, Runnable>>()
+        TorRouting.setOverride = { config, _, done -> pending += config.proxyRules.single().url to done }
+        fun confirm() = pending.removeAt(0).second.run()
+        val orbot = SocksEndpoint("127.0.0.1", 9050)
+        try {
+            TorRouting.resetForTest(supported = true)
+            TorRouting.setEnabled(context, true)
+            confirm()
+            TorRouting.onState(context, TorInfo(status = TorStatus.Running, socksPort = 40123))
+            confirm()
+            assertEquals(40123, TorRouting.routedEndpoint?.port)
+
+            // Settings → Tor → External: nothing routed until the probe
+            // confirms; the embedded port is let go once refused.
+            TorRouting.setExternal(context, orbot, confirmed = false)
+            assertFalse(TorRouting.isRouted)
+            var released = 0
+            TorRouting.afterRefusing { released++ }
+            assertEquals("socks5://127.0.0.1:${TorRouting.REFUSE_PORT}", pending.single().first)
+            confirm()
+            assertEquals(1, released)
+            // Arti's late state changes nothing now.
+            TorRouting.onState(context, TorInfo(status = TorStatus.Running, socksPort = 40123))
+            assertTrue(pending.isEmpty())
+
+            TorRouting.setExternal(context, orbot, confirmed = true)
+            assertFalse(TorRouting.isRouted) // not before the WebView confirms
+            assertEquals("socks5://127.0.0.1:9050", pending.single().first)
+            confirm()
+            assertEquals(orbot, TorRouting.routedEndpoint)
+            TorRouting.afterRefusing { released++ }
+            assertEquals(2, released) // not on the embedded port
+
+            // Orbot went away: refused at once, before the WebView moves.
+            TorRouting.setExternal(context, orbot, confirmed = false)
+            assertFalse(TorRouting.isRouted)
+            try {
+                TorRouting.openConnection(URL("http://$onion/"))
+                fail("opened an onion URL with the proxy down")
+            } catch (e: TorRouting.RefusedException) {
+                // expected
+            }
+            confirm()
+            assertFalse(TorRouting.isRouted)
         } finally {
             TorRouting.setOverride = real
             TorRouting.resetForTest(supported = null)

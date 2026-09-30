@@ -3751,7 +3751,7 @@ private fun buildRefreshableWebView(
                 // Tor port is routed. A form POST's reload would only
                 // ask to resend (answered "don't"), so that one is
                 // loaded again as a GET (R2-F2).
-                if (isOnionHost(req.url?.host) && TorRouting.port == 0 && view != null) {
+                if (isOnionHost(req.url?.host) && !TorRouting.isRouted && view != null) {
                     Log.i(LOG_TAG, "main-frame ${error?.errorCode} for $failed with Tor down → refusal page")
                     if (onionRefusalByReload(req.method)) {
                         view.post { view.reload() }

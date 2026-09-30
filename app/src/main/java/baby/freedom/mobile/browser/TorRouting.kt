@@ -13,7 +13,6 @@ import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.IDN
-import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.URL
@@ -21,11 +20,13 @@ import java.net.URLConnection
 import java.text.Normalizer
 
 /**
- * `.onion` routing (#143): only onion hosts go through the embedded Tor
- * client's SOCKS5 port; everything else — clearnet, the local node
- * gateways, the dweb virtual origins — stays direct. And it fails closed:
- * with Tor off, stopped, still without a port, or gone, a `.onion` request
- * is refused, never resolved or connected directly.
+ * `.onion` routing (#143): only onion hosts go through Tor's SOCKS5
+ * port — the embedded Arti client's, or an external Tor client's such as
+ * Orbot (#275, Settings → Tor); everything else — clearnet, the local
+ * node gateways, the dweb virtual origins — stays direct. And it fails
+ * closed: with Tor off, stopped, still without a port, gone, or (external)
+ * not confirmed as a Tor proxy by [TorProxy.probe], a `.onion` request is
+ * refused, never resolved or connected directly.
  *
  * "Request" means the WebView's HTTP(S)/WebSocket stack and the app's own
  * native fetches. WebRTC is outside all three layers below: Chromium
@@ -40,7 +41,8 @@ import java.text.Normalizer
  *  1. **The WebView's proxy override** ([ProxyController], reverse-bypass
  *     mode: the bypass list names the hosts that *use* the proxy). It is
  *     always in place from [init] on, pointing `*.onion` at the Tor port
- *     while Tor listens and at [REFUSE_PORT] otherwise, so even a request
+ *     while Tor listens (external: while it's confirmed) and at
+ *     [REFUSE_PORT] otherwise, so even a request
  *     no interceptor sees (a WebSocket) can't reach DNS. Chromium's SOCKS5
  *     sends the hostname to the proxy, so nothing resolves locally.
  *  2. **The interceptor** ([refusalFor], first thing in
@@ -52,9 +54,10 @@ import java.text.Normalizer
  *     a `ProxySelector`, which `HttpURLConnection` would follow with a
  *     direct attempt when the proxy fails — and refuses it without one.
  *
- * The Tor side refuses anything but a `.onion` name too (see
+ * The embedded Tor side refuses anything but a `.onion` name too (see
  * freedom-mobile-ffi `src/tor.rs`), so a misrouted clearnet request can't
- * leave through a Tor exit either.
+ * leave through a Tor exit either. An external client (Orbot) would carry
+ * one out through an exit, but only onion hosts are ever sent to it.
  *
  * State is written on the main thread ([setEnabled], [onState]) and read
  * from any thread (the interceptor's IO threads).
@@ -73,6 +76,7 @@ object TorRouting {
     const val CODE_OFF = "tor_off"
     const val CODE_NOT_RUNNING = "tor_not_running"
     const val CODE_UNSUPPORTED = "tor_unsupported"
+    const val CODE_PROXY_DOWN = "tor_proxy_down"
 
     /** `null` until [init]; false when the WebView can't do reverse-bypass proxying. */
     @Volatile
@@ -83,26 +87,37 @@ object TorRouting {
     @Volatile
     private var enabled = false
 
+    /** The embedded client's state (`:tor`); ignored in external mode. */
     @Volatile
     private var info = TorInfo()
 
+    /** Settings → Tor → External SOCKS proxy, or `null` for the embedded client (#275). */
+    @Volatile
+    private var external: SocksEndpoint? = null
+
+    /** Whether [TorProxy.probe] has confirmed [external] as a live Tor proxy. */
+    @Volatile
+    private var externalConfirmed = false
+
     /**
-     * The Tor port `*.onion` is routed to — set only once the WebView has
-     * confirmed the override naming it — or 0 while onion requests are
-     * refused. Cleared *before* an override moves away from a port.
+     * The Tor SOCKS endpoint `*.onion` is routed to — set only once the
+     * WebView has confirmed the override naming it — or `null` while onion
+     * requests are refused. Cleared *before* an override moves away from
+     * an endpoint.
      */
     @Volatile
-    private var routedPort = 0
+    private var routed: SocksEndpoint? = null
 
-    /** The port the last applied (or pending) override names; main thread. */
-    private var targetPort = -1
+    /** The endpoint the last applied (or pending) override names, or `null` for none yet; main thread. */
+    private var target: SocksEndpoint? = null
 
     /** Bumped per override; a stale confirmation is ignored. Main thread. */
     private var generation = 0L
 
     /**
-     * Whether the WebView has confirmed the override naming [REFUSE_PORT],
-     * and none has been asked for since. Main thread.
+     * Whether the WebView has confirmed an override that doesn't name the
+     * embedded client's port — [REFUSE_PORT], or an external proxy — and
+     * none has been asked for since. Main thread.
      */
     private var refusing = false
 
@@ -133,6 +148,17 @@ object TorRouting {
         apply(context)
     }
 
+    /**
+     * Settings → Tor's client (#275): [proxy] for an external SOCKS proxy,
+     * `null` for the embedded one; [confirmed] once [TorProxy.probe] found
+     * a Tor client there (and while it still listens). Main thread.
+     */
+    fun setExternal(context: Context, proxy: SocksEndpoint?, confirmed: Boolean) {
+        external = proxy
+        externalConfirmed = proxy != null && confirmed
+        apply(context)
+    }
+
     /** [ProxyController.setProxyOverride]; swapped in tests. */
     internal var setOverride: (ProxyConfig, Context, Runnable) -> Unit = { config, context, done ->
         ProxyController.getInstance().setProxyOverride(config, context.mainExecutor, done)
@@ -143,16 +169,19 @@ object TorRouting {
         this.supported = supported
         enabled = false
         info = TorInfo()
-        routedPort = 0
-        targetPort = -1
+        external = null
+        externalConfirmed = false
+        routed = null
+        target = null
         refusing = false
         whenRefusing.clear()
     }
 
     /**
-     * Run [action] once `*.onion` no longer points at a Tor port in the
-     * WebView either — the override naming [REFUSE_PORT] confirmed — or at
-     * once if it already is, or if there's no override to move. For
+     * Run [action] once `*.onion` no longer points at the embedded Tor
+     * port in the WebView either — an override naming [REFUSE_PORT] or an
+     * external proxy confirmed — or at once if it already is, or if
+     * there's no override to move. For
      * letting the Tor client go (R2-F1): its port must not be freed while
      * the WebView may still send onion hostnames to it, or another app
      * binding that loopback port in the gap would receive them. An
@@ -163,33 +192,39 @@ object TorRouting {
         if (supported != true || refusing) action() else whenRefusing += action
     }
 
-    private val TOR_HOST: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
+    /** The endpoint a native onion fetch may use, or `null`. */
+    val routedEndpoint: SocksEndpoint? get() = routed
 
-    /** The port a native onion fetch may use, or 0. */
-    val port: Int get() = routedPort
+    /** Whether onion requests are routed to Tor right now. */
+    val isRouted: Boolean get() = routed != null
 
     private fun apply(context: Context) {
         if (supported != true) return
-        val desired = desiredPort(supported == true, enabled, info)
-        // Stop routing to the old port before anything else: Tor is
-        // stopping, or moved.
-        if (desired != routedPort) routedPort = 0
-        val target = if (desired == 0) REFUSE_PORT else desired
-        if (target == targetPort) return
+        val desired = desiredEndpoint(supported == true, enabled, info, external, externalConfirmed)
+        // Stop routing to the old endpoint before anything else: Tor is
+        // stopping, moved, or the client was switched.
+        if (desired != routed) routed = null
+        val next = desired ?: REFUSE
+        if (next == target) return
         val gen = ++generation
         refusing = false
-        val config = proxyConfigFor(target)
+        // Leaving the embedded port whether we refuse or go external.
+        val leavesEmbedded = desired == null || external != null
+        val config = proxyConfigFor(next)
         runCatching {
             // Recorded before the call, so a confirmation arriving inside
             // it is matched; reset below if the call throws, so the next
             // apply() with the same target retries.
-            targetPort = target
+            target = next
             setOverride(config, context) {
-                if (gen == generation && desired != 0) {
-                    routedPort = desired
-                    Log.i(TAG, ".onion → socks5://127.0.0.1:$desired")
-                } else if (gen == generation) {
-                    Log.i(TAG, ".onion refused (socks5://127.0.0.1:$REFUSE_PORT)")
+                if (gen != generation) return@setOverride
+                if (desired != null) {
+                    routed = desired
+                    Log.i(TAG, ".onion → socks5://$desired")
+                } else {
+                    Log.i(TAG, ".onion refused (socks5://$REFUSE)")
+                }
+                if (leavesEmbedded) {
                     refusing = true
                     val waiting = whenRefusing.toList()
                     whenRefusing.clear()
@@ -197,15 +232,15 @@ object TorRouting {
                 }
             }
         }.onFailure {
-            // Keep refusing (routedPort stays 0), and forget the target so
+            // Keep refusing (routed stays null), and forget the target so
             // the next state update tries again.
-            targetPort = -1
+            target = null
             Log.w(TAG, "setProxyOverride failed", it)
         }
     }
 
     /**
-     * Onion requests while [routedPort] is 0: a document gets the error
+     * Onion requests while nothing is [routed]: a document gets the error
      * page in place (kept out of history by [NAME_RESOLUTION_ERROR_HEADER],
      * as a refused ENS document is), a subresource an empty 502. `null`
      * for a non-onion request, or while Tor is routed.
@@ -213,24 +248,27 @@ object TorRouting {
     fun refusalFor(req: WebResourceRequest): WebResourceResponse? {
         val uri = req.url ?: return null
         if (!isOnionHost(uri.host)) return null
-        if (routedPort != 0) return null
+        if (routed != null) return null
         val headers = mapOf("Cache-Control" to "no-store")
         if (!isDocumentRequest(req.isForMainFrame, req.requestHeaders)) {
             return WebResourceResponse(
                 "text/plain", "utf-8", 502, "Tor Not Running", headers, ByteArrayInputStream(ByteArray(0)),
             )
         }
-        val code = refusalCode(supported, enabled)
+        val proxy = external
+        val code = refusalCode(supported, enabled, proxy != null)
         return WebResourceResponse(
             "text/html", "utf-8", 503, "Tor Not Running",
             headers + (NAME_RESOLUTION_ERROR_HEADER to code),
-            ByteArrayInputStream(refusalHtml(uri.host.orEmpty(), code, info).toByteArray(Charsets.UTF_8)),
+            ByteArrayInputStream(
+                refusalHtml(uri.host.orEmpty(), code, info, proxy).toByteArray(Charsets.UTF_8),
+            ),
         )
     }
 
     /**
      * Open [url] for a native fetch: a `.onion` URL through the routed Tor
-     * port with an explicit SOCKS proxy (the hostname goes to Tor; nothing
+     * endpoint with an explicit SOCKS proxy (the hostname goes to Tor; nothing
      * resolves here), or an [IOException] with none; anything else as
      * [URL.openConnection] would.
      *
@@ -245,11 +283,10 @@ object TorRouting {
      */
     fun openConnection(url: URL): URLConnection {
         if (!fetchMayReachOnion(url)) return url.openConnection()
-        val port = routedPort
-        if (port == 0) throw RefusedException()
-        // 127.0.0.1 by address, where the listener binds: Android's
-        // InetAddress.getLoopbackAddress() is ::1.
-        return url.openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress(TOR_HOST, port)))
+        val endpoint = routed ?: throw RefusedException()
+        // By address (a literal, no lookup), where the listener binds:
+        // Android's InetAddress.getLoopbackAddress() is ::1.
+        return url.openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress(endpoint.address, endpoint.port)))
     }
 
     /**
@@ -340,15 +377,30 @@ object TorRouting {
         return Redirect(next, toGet = !safe)
     }
 
+    /** Where `*.onion` points while refused: [REFUSE_PORT] on 127.0.0.1. */
+    internal val REFUSE = SocksEndpoint("127.0.0.1", REFUSE_PORT)
+
     /**
-     * The Tor port to route `*.onion` to, or 0 to refuse: only with the
-     * WebView able to scope the proxy to onion hosts, Tor on in Settings,
-     * and the client listening (starting or running).
+     * The Tor endpoint to route `*.onion` to, or `null` to refuse: only
+     * with the WebView able to scope the proxy to onion hosts and Tor on
+     * in Settings; then the external proxy once [TorProxy.probe] confirmed
+     * it ([externalConfirmed]), or — with no external proxy set — the
+     * embedded client's port while it listens (starting or running).
      */
-    internal fun desiredPort(supported: Boolean, enabled: Boolean, info: TorInfo): Int =
-        if (supported && enabled && info.socksPort in 1..65535 &&
-            (info.status == TorStatus.Starting || info.status == TorStatus.Running)
-        ) info.socksPort else 0
+    internal fun desiredEndpoint(
+        supported: Boolean,
+        enabled: Boolean,
+        info: TorInfo,
+        external: SocksEndpoint?,
+        externalConfirmed: Boolean,
+    ): SocksEndpoint? = when {
+        !supported || !enabled -> null
+        external != null -> external.takeIf { externalConfirmed }
+        info.socksPort in 1..65535 &&
+            (info.status == TorStatus.Starting || info.status == TorStatus.Running) ->
+            SocksEndpoint("127.0.0.1", info.socksPort)
+        else -> null
+    }
 
     /**
      * Reverse bypass: the proxy applies *only* to the listed hosts. Both
@@ -356,26 +408,35 @@ object TorRouting {
      * the host and the pattern is matched as written. SOCKS5 only (no
      * SOCKS4 fallback, which can't carry a hostname).
      */
-    internal fun proxyConfigFor(port: Int): ProxyConfig =
+    internal fun proxyConfigFor(endpoint: SocksEndpoint): ProxyConfig =
         ProxyConfig.Builder()
-            .addProxyRule("socks5://127.0.0.1:$port")
+            .addProxyRule("socks5://${endpoint.authority}")
             .addBypassRule("*.onion")
             .addBypassRule("*.onion.")
             .setReverseBypassEnabled(true)
             .build()
 
-    internal fun refusalCode(supported: Boolean?, enabled: Boolean): String = when {
+    internal fun refusalCode(supported: Boolean?, enabled: Boolean, external: Boolean = false): String = when {
         supported == false -> CODE_UNSUPPORTED
         !enabled -> CODE_OFF
+        external -> CODE_PROXY_DOWN
         else -> CODE_NOT_RUNNING
     }
 
-    /** Title and description (HTML) of the refusal page for [code]. */
-    internal fun refusalCopy(code: String, info: TorInfo): Pair<String, String> = when (code) {
+    /**
+     * Title and description (HTML) of the refusal page for [code]; [proxy]
+     * is the external SOCKS proxy for [CODE_PROXY_DOWN].
+     */
+    internal fun refusalCopy(code: String, info: TorInfo, proxy: SocksEndpoint? = null): Pair<String, String> = when (code) {
         CODE_UNSUPPORTED -> "Tor needs a newer WebView" to
             "This is an onion site, reachable only over Tor. This device's Android System " +
             "WebView can't send just <code>.onion</code> sites through Tor, so Freedom doesn't " +
             "open them. Update Android System WebView, then try again."
+        CODE_PROXY_DOWN -> "Tor proxy isn't reachable" to
+            "This is an onion site, reachable only over Tor. Freedom sends onion sites to the Tor " +
+            "proxy at <code>${proxy ?: "(not set)"}</code> (Settings &rarr; Tor), and no Tor client " +
+            "answers there right now. Start Orbot (or your Tor app), and Tor on the Nodes page, then " +
+            "try again. Freedom never opens onion sites without Tor."
         CODE_OFF -> "Tor is off" to
             "This is an onion site, reachable only over Tor. Turn on Tor in Settings &rarr; Tor " +
             "and start it, then try again. Only <code>.onion</code> sites use Tor; every other " +
@@ -392,8 +453,8 @@ object TorRouting {
             )
     }
 
-    internal fun refusalHtml(host: String, code: String, info: TorInfo): String {
-        val (title, description) = refusalCopy(code, info)
+    internal fun refusalHtml(host: String, code: String, info: TorInfo, proxy: SocksEndpoint? = null): String {
+        val (title, description) = refusalCopy(code, info, proxy)
         fun esc(t: String) = t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         val error = info.errorMessage?.takeIf { code == CODE_NOT_RUNNING && info.status == TorStatus.Error }
         val details = esc(host) + "\n\n" + code + (error?.let { "\n" + esc(it) } ?: "")
