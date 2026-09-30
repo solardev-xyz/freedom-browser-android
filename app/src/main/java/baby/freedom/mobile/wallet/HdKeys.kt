@@ -22,11 +22,25 @@ import javax.crypto.spec.SecretKeySpec
  * on the device only, a handful of times per wallet, with nothing
  * outside the app able to trigger or time it.
  *
- * Every intermediate secret is zeroed as soon as the next level has
- * been computed; callers own (and must zero) what's returned.
+ * Every intermediate secret *byte array* (each HMAC output, the `I_L`
+ * half, the parent key and chain code) is zeroed as soon as the next
+ * level has been computed; callers own (and must zero) what's returned.
+ * What can't be zeroed: the [BigInteger]s the secp256k1 child step adds
+ * `I_L` and the parent key in (immutable, with their own internal
+ * copies), and the copy of each chain code [SecretKeySpec] keeps for
+ * the HMAC key. Those stay on the heap until the GC reuses the memory.
  */
 internal object HdKeys {
     const val HARDENED = 0x80000000L
+
+    /**
+     * Test hook: sees every secret scratch array this object allocates
+     * (HMAC outputs, `I_L`), so a test can check each one was zeroed.
+     */
+    @Volatile
+    internal var scratchSeen: ((ByteArray) -> Unit)? = null
+
+    private fun scratch(b: ByteArray) = b.also { scratchSeen?.invoke(it) }
 
     /** A private key plus the chain code for deriving its children. */
     class Node(val key: ByteArray, val chainCode: ByteArray) {
@@ -76,10 +90,18 @@ internal object HdKeys {
         } else {
             hmac(parent.chainCode, Secp256k1Keys.publicKeyCompressed(parent.key), ser32(index))
         }
-        val il = BigInteger(1, i.copyOfRange(0, 32))
-        val k = il.add(BigInteger(1, parent.key)).mod(Secp256k1Keys.N)
-        val chain = i.copyOfRange(32, 64)
-        i.fill(0)
+        val ilBytes = scratch(i.copyOfRange(0, 32))
+        val il: BigInteger
+        val k: BigInteger
+        val chain: ByteArray
+        try {
+            il = BigInteger(1, ilBytes)
+            k = il.add(BigInteger(1, parent.key)).mod(Secp256k1Keys.N)
+            chain = i.copyOfRange(32, 64)
+        } finally {
+            ilBytes.fill(0)
+            i.fill(0)
+        }
         // Probability ~2⁻¹²⁷; BIP-32 says to move on to the next index,
         // which no desktop path would ever reach — refuse instead.
         check(il < Secp256k1Keys.N && k.signum() != 0) { "invalid BIP-32 child" }
@@ -118,7 +140,7 @@ internal object HdKeys {
         val mac = Mac.getInstance("HmacSHA512")
         mac.init(SecretKeySpec(key, "HmacSHA512"))
         for (part in parts) mac.update(part)
-        return mac.doFinal()
+        return scratch(mac.doFinal())
     }
 
     internal fun sha512(data: ByteArray): ByteArray = MessageDigest.getInstance("SHA-512").digest(data)

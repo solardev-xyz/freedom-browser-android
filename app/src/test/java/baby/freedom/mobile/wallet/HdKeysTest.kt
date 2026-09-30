@@ -1,6 +1,7 @@
 package baby.freedom.mobile.wallet
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -48,6 +49,24 @@ class HdKeysTest {
             "m/0'/1'" to "3a2086edd7d9df86c3487a5905a1712a9aa664bce8cc268141e07549eaa8661d",
         ),
     )
+
+    @Test
+    fun `every scratch secret - HMAC outputs and I_L - is zeroed once a key is derived`() {
+        val seen = mutableListOf<ByteArray>()
+        HdKeys.scratchSeen = { seen += it }
+        try {
+            val seed = "3ddd5602285899a946114506157c7997e5444528f3003f6134712147db19b678".unhex()
+            // Hardened and non-hardened secp256k1 levels, then SLIP-0010.
+            val key = HdKeys.secp256k1(seed, "m/44'/60'/0'/0/1")
+            val ed = HdKeys.ed25519(seed, "m/44'/73405'/0'")
+            assertTrue(key.any { it != 0.toByte() } && ed.any { it != 0.toByte() })
+            // master + 5 child HMACs + 5 I_L copies, then master + 3 child HMACs.
+            assertEquals(15, seen.size)
+            seen.forEachIndexed { n, b -> assertTrue("scratch #$n not zeroed", b.all { it == 0.toByte() }) }
+        } finally {
+            HdKeys.scratchSeen = null
+        }
+    }
 
     private fun ByteArray.hex() = joinToString("") { "%02x".format(it) }
 
