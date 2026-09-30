@@ -36,17 +36,18 @@ import java.util.concurrent.atomic.AtomicReference
  *    its Swarm account stays as it was.)
  *  - The wallet is removed: wipe them, [Change.Dropped].
  *
- * Every change is also a new Radicle identity, so before it's written
- * [beforeRadicleChange] takes sites' Radicle signing grants back
- * (`RadicleGrantStore.dropSigning`), best effort. A site that could read
- * and write as the old identity asks again before it gets the new one
- * either way — each grant names the DID it was given for — and its
- * prompt says the identity changed.
+ * [Change.Adopted] and [Change.Dropped] are a new Radicle identity, so
+ * before either is written [beforeRadicleChange] takes sites' Radicle
+ * signing grants back (`RadicleGrantStore.dropSigning`), best effort. A
+ * site that could read and write as the old identity asks again before
+ * it gets the new one either way — each grant names the DID it was given
+ * for — and its prompt says the identity changed. [Change.Resealed] is
+ * the same identities, so it takes nothing back.
  *
- * Each change goes to the [setOnChanged] listener — the activity has
- * `:node` restart the Swarm and Radicle nodes with it — and to
- * [notices], which the browser
- * shows. The `:node`
+ * Every change goes to the [setOnChanged] listener — the activity has
+ * `:node` reload its identities, restarting the Swarm and Radicle nodes
+ * that are up as another one — and every change but [Change.Resealed]
+ * to [notices], which the browser shows. The `:node`
  * process only ever reads the store, and only keys tagged with the
  * vault still on the device, so a crash between the vault and the store
  * being updated can't leave a node running as a removed wallet.

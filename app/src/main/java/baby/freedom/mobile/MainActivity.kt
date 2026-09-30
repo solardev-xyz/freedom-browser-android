@@ -383,7 +383,11 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         }
     }
 
-    /** Restarts a bound `:node`'s Swarm node on an identity change (#77); see onCreate. */
+    /**
+     * Has a bound `:node` reload the node identities on any [NodeIdentitySync.Change]
+     * (#77, #328): its Swarm and Radicle nodes restart only if they're up as
+     * another identity (or, for Radicle, their boot failed); see onCreate.
+     */
     private val identityChanged: (NodeIdentitySync.Change) -> Unit = {
         runCatching { binder?.reloadIdentity() }
     }
@@ -412,8 +416,9 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         lifecycleScope.launch(Dispatchers.IO) { Publisher.sweepStaging(this@MainActivity) }
 
         // The nodes follow the wallet's identity (#77): a wallet created,
-        // imported or removed changes what the Swarm node boots as, and a
-        // bound `:node` restarts it. (Unbound, it reads it at its next start.)
+        // imported or removed changes what the Swarm and Radicle nodes boot
+        // as, and a bound `:node` restarts them. (Unbound, it reads it at its
+        // next start.)
         // The sync outlives this activity, so the listener is taken back
         // in onDestroy rather than left holding it.
         NodeIdentitySync.get(this).apply {
