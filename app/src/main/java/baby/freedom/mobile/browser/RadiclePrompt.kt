@@ -15,38 +15,36 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 
 /** What a [RadicleAsk] prompt says: the request, what it means, and the Allow button's label. */
 internal data class RadiclePromptCopy(val request: String, val detail: String, val allow: String)
 
 internal fun radiclePromptCopy(ask: RadicleAsk): RadiclePromptCopy = when (ask) {
     is RadicleAsk.Connect -> RadiclePromptCopy(
-        "wants to connect to your Radicle node",
-        "It will see whether your node is running and which repositories you seed, " +
-            "and can ask to seed or stop seeding repositories. It can't write anything as you " +
-            "unless you allow that separately.",
-        "Connect",
+        Strings.get(R.string.radicle_prompt_connect_request),
+        Strings.get(R.string.radicle_prompt_connect_detail),
+        Strings.get(R.string.radicle_prompt_connect_allow),
     )
     is RadicleAsk.Seed -> RadiclePromptCopy(
-        "wants to seed a repository",
-        "Your node will fetch it now, keep a copy and share it with other peers, " +
-            "using storage and data for as long as you seed it.",
-        "Seed",
+        Strings.get(R.string.radicle_prompt_seed_request),
+        Strings.get(R.string.radicle_prompt_seed_detail),
+        Strings.get(R.string.radicle_prompt_seed_allow),
     )
     is RadicleAsk.Unseed -> RadiclePromptCopy(
-        "wants to stop seeding a repository",
-        "Your node will stop sharing it and drop it from your seeded list.",
-        "Stop seeding",
+        Strings.get(R.string.radicle_prompt_unseed_request),
+        Strings.get(R.string.radicle_prompt_unseed_detail),
+        Strings.get(R.string.radicle_prompt_unseed_allow),
     )
     is RadicleAsk.Signing -> RadiclePromptCopy(
-        "wants to act as you on Radicle",
-        "It will see your Radicle identity (DID and node ID) and can open issues, comment and " +
-            "change issue states signed with your key, without asking again. What it writes is " +
-            "published to the network under your name and can't be taken back.",
-        "Allow",
+        Strings.get(R.string.radicle_prompt_signing_request),
+        Strings.get(R.string.radicle_prompt_signing_detail),
+        Strings.get(R.string.common_allow),
     )
 }
 
@@ -115,7 +113,7 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
         },
         dismissButton = {
             TextButton(enabled = armed, onClick = { if (guard.accepts()) request.respond(false) }) {
-                Text("Cancel")
+                Text(stringResource(R.string.common_cancel))
             }
         },
     )

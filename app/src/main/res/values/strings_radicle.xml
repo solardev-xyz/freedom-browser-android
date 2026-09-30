@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Radicle (the node page, the window.radicle consent prompt, the rad://
+  repository viewer) and onchain web3:// apps (#280).
+-->
+<resources>
+    <!-- RadicleScreen.kt: the Radicle node page and its Settings row -->
+    <string name="radicle_row_title">Radicle node</string>
+    <!-- Settings search text for the Radicle row. -->
+    <string name="radicle_row_search_hint">Seed repositories</string>
+    <string name="radicle_status_off">Off</string>
+    <string name="radicle_status_running">Running</string>
+    <string name="radicle_status_starting">Starting…</string>
+    <string name="radicle_status_stopping">Stopping…</string>
+    <string name="radicle_status_error">Error</string>
+    <string name="radicle_status_waiting">Waiting</string>
+    <string name="radicle_status_waiting_service">Waiting for the node service</string>
+    <plurals name="radicle_summary_running">
+        <item quantity="one">Running · %1$d peer</item>
+        <item quantity="other">Running · %1$d peers</item>
+    </plurals>
+    <string name="radicle_seed_phase_resolving">Looking for seeds</string>
+    <string name="radicle_seed_phase_connecting">Connecting</string>
+    <string name="radicle_seed_phase_fetching">Fetching</string>
+    <string name="radicle_seed_phase_peer_failed">A seed failed, trying the next</string>
+    <string name="radicle_seed_phase_done">Seeded</string>
+    <string name="radicle_seed_phase_cancelled">Cancelled</string>
+    <string name="radicle_seed_phase_failed">Failed</string>
+    <!-- A seed phase (%1$s) and the node's detail on it (%2$s). -->
+    <string name="radicle_seed_line_detail">%1$s: %2$s</string>
+    <string name="radicle_section_status">Status</string>
+    <string name="radicle_status_off_detail">Collaborate on Radicle repositories peer-to-peer</string>
+    <string name="radicle_status_needs_swarm">Starts once the Swarm node is on</string>
+    <plurals name="radicle_status_connected">
+        <item quantity="one">Connected to %1$d peer</item>
+        <item quantity="other">Connected to %1$d peers</item>
+    </plurals>
+    <string name="radicle_status_starting_detail">Loading the identity and dialling seeds</string>
+    <string name="radicle_status_stopping_detail">Shutting the node down</string>
+    <string name="radicle_status_error_detail">The node couldn’t start. Retry, or turn it off and on.</string>
+    <!-- Label of the row showing the node's error message. -->
+    <string name="radicle_detail_error">Error</string>
+    <string name="radicle_section_identity">Identity</string>
+    <string name="radicle_identity_alias">Alias</string>
+    <string name="radicle_identity_peers">Peers</string>
+    <string name="radicle_identity_did">DID</string>
+    <string name="radicle_identity_node_id">Node ID</string>
+    <string name="radicle_section_seeded">Seeded repositories</string>
+    <string name="radicle_nothing_seeded">Nothing seeded yet.</string>
+    <string name="radicle_awaiting_first_fetch">Awaiting first fetch</string>
+    <string name="radicle_stop_seeding_button">Stop seeding</string>
+    <string name="radicle_rid_label">Repository ID</string>
+    <!-- The shape of a repository ID, not language. -->
+    <string name="radicle_rid_placeholder" translatable="false">rad:z…</string>
+    <string name="radicle_seeding_button">Seeding…</string>
+    <string name="radicle_seed_button">Seed</string>
+    <string name="radicle_section_sites">Connected sites</string>
+    <string name="radicle_site_can_sign">Can see your identity and write as you</string>
+    <string name="radicle_site_can_connect">Can see your node and ask to seed</string>
+
+    <!-- RadiclePrompt.kt: the window.radicle consent prompt (under the site's name) -->
+    <string name="radicle_prompt_connect_request">wants to connect to your Radicle node</string>
+    <string name="radicle_prompt_connect_detail">It will see whether your node is running and which repositories you seed, and can ask to seed or stop seeding repositories. It can\'t write anything as you unless you allow that separately.</string>
+    <string name="radicle_prompt_connect_allow">Connect</string>
+    <string name="radicle_prompt_seed_request">wants to seed a repository</string>
+    <string name="radicle_prompt_seed_detail">Your node will fetch it now, keep a copy and share it with other peers, using storage and data for as long as you seed it.</string>
+    <string name="radicle_prompt_seed_allow">Seed</string>
+    <string name="radicle_prompt_unseed_request">wants to stop seeding a repository</string>
+    <string name="radicle_prompt_unseed_detail">Your node will stop sharing it and drop it from your seeded list.</string>
+    <string name="radicle_prompt_unseed_allow">Stop seeding</string>
+    <string name="radicle_prompt_signing_request">wants to act as you on Radicle</string>
+    <string name="radicle_prompt_signing_detail">It will see your Radicle identity (DID and node ID) and can open issues, comment and change issue states signed with your key, without asking again. What it writes is published to the network under your name and can\'t be taken back.</string>
+
+    <!-- RadApi.kt -->
+    <string name="radicle_viewer_missing">The repository browser is missing.</string>
+
+    <!--
+      assets/rad/viewer.js: the rad:// repository viewer. RadApi hands these
+      to the page as /_/strings.js; the page fills %1$s / %1$d itself.
+    -->
+    <string name="radicle_viewer_loading">Loading…</string>
+    <string name="radicle_viewer_just_now">just now</string>
+    <plurals name="radicle_viewer_seconds_ago">
+        <item quantity="one">%1$d second ago</item>
+        <item quantity="other">%1$d seconds ago</item>
+    </plurals>
+    <plurals name="radicle_viewer_minutes_ago">
+        <item quantity="one">%1$d minute ago</item>
+        <item quantity="other">%1$d minutes ago</item>
+    </plurals>
+    <plurals name="radicle_viewer_hours_ago">
+        <item quantity="one">%1$d hour ago</item>
+        <item quantity="other">%1$d hours ago</item>
+    </plurals>
+    <plurals name="radicle_viewer_days_ago">
+        <item quantity="one">%1$d day ago</item>
+        <item quantity="other">%1$d days ago</item>
+    </plurals>
+    <plurals name="radicle_viewer_months_ago">
+        <item quantity="one">%1$d month ago</item>
+        <item quantity="other">%1$d months ago</item>
+    </plurals>
+    <plurals name="radicle_viewer_years_ago">
+        <item quantity="one">%1$d year ago</item>
+        <item quantity="other">%1$d years ago</item>
+    </plurals>
+    <!-- An author with no name or ID. -->
+    <string name="radicle_viewer_unknown_author">unknown</string>
+    <!-- Stands in for an image with no alt text, shown as [image]. -->
+    <string name="radicle_viewer_image">image</string>
+    <string name="radicle_viewer_unreadable_response">unreadable response</string>
+    <string name="radicle_viewer_off_title">Radicle is turned off</string>
+    <string name="radicle_viewer_off_body">Turn it on under Settings → Nodes → Radicle node to browse repositories.</string>
+    <string name="radicle_viewer_starting_title">The Radicle node is starting</string>
+    <string name="radicle_viewer_starting_body">Reload this page in a moment.</string>
+    <string name="radicle_viewer_stopped_title">The Radicle node is not running</string>
+    <string name="radicle_viewer_stopped_body">It runs alongside the Swarm node: check Settings → Nodes.</string>
+    <string name="radicle_viewer_repo_not_found_title">Repository not found on this device</string>
+    <!-- %1$s is the repository's rad:// address. -->
+    <string name="radicle_viewer_repo_not_found_body">%1$s isn’t in your node’s storage.</string>
+    <string name="radicle_viewer_repo_not_found_hint">Seed it from Settings → Nodes → Radicle node (paste the repository ID), then reload. It may also be mistyped, or not exist on the network.</string>
+    <string name="radicle_viewer_not_available_title">Not available</string>
+    <string name="radicle_viewer_not_public">This repository is not public.</string>
+    <string name="radicle_viewer_not_found_title">Not found</string>
+    <string name="radicle_viewer_nothing_here">Nothing here.</string>
+    <string name="radicle_viewer_load_failed_title">Couldn’t load this</string>
+    <!-- Heading for a repository with no name. -->
+    <string name="radicle_viewer_repository">Repository</string>
+    <!-- The tab title: the repository's name. -->
+    <string name="radicle_viewer_page_title">%1$s · Radicle</string>
+    <string name="radicle_viewer_tab_code">Code</string>
+    <string name="radicle_viewer_tab_issues">Issues</string>
+    <string name="radicle_viewer_tab_patches">Patches</string>
+    <string name="radicle_viewer_tab_commits">Commits</string>
+    <!-- %1$s is the default branch's name. -->
+    <string name="radicle_viewer_fact_branch">Branch %1$s</string>
+    <!-- %1$s is the head commit's short ID. -->
+    <string name="radicle_viewer_fact_head">Head %1$s</string>
+    <plurals name="radicle_viewer_delegates">
+        <item quantity="one">%1$d delegate</item>
+        <item quantity="other">%1$d delegates</item>
+    </plurals>
+    <plurals name="radicle_viewer_seeds">
+        <item quantity="one">%1$d seed</item>
+        <item quantity="other">%1$d seeds</item>
+    </plurals>
+    <!-- The first breadcrumb when the repository has no name. -->
+    <string name="radicle_viewer_root">root</string>
+    <string name="radicle_viewer_empty">Empty</string>
+    <string name="radicle_viewer_binary">Binary file</string>
+    <string name="radicle_viewer_binary_not_shown">Binary file — not shown</string>
+    <string name="radicle_viewer_nothing_yet_title">Nothing to show yet</string>
+    <string name="radicle_viewer_no_head_body">This repository has no default branch head in your node’s storage.</string>
+    <!-- Issue and patch states, as filters and badges. -->
+    <string name="radicle_viewer_state_open">open</string>
+    <string name="radicle_viewer_state_closed">closed</string>
+    <string name="radicle_viewer_state_solved">solved</string>
+    <string name="radicle_viewer_state_draft">draft</string>
+    <string name="radicle_viewer_state_merged">merged</string>
+    <string name="radicle_viewer_state_archived">archived</string>
+    <string name="radicle_viewer_no_open_issues">No open issues.</string>
+    <string name="radicle_viewer_no_closed_issues">No closed issues.</string>
+    <!-- %1$s is a state the page doesn't know, as the address gave it. -->
+    <string name="radicle_viewer_no_issues_in_state">No %1$s issues.</string>
+    <string name="radicle_viewer_no_open_patches">No open patches.</string>
+    <string name="radicle_viewer_no_draft_patches">No draft patches.</string>
+    <string name="radicle_viewer_no_merged_patches">No merged patches.</string>
+    <string name="radicle_viewer_no_archived_patches">No archived patches.</string>
+    <!-- %1$s is a state the page doesn't know, as the address gave it. -->
+    <string name="radicle_viewer_no_patches_in_state">No %1$s patches.</string>
+    <string name="radicle_viewer_untitled">(untitled)</string>
+    <string name="radicle_viewer_more">More</string>
+    <!-- %1$s is the issue's ID. -->
+    <string name="radicle_viewer_issue_id">issue %1$s</string>
+    <!-- %1$s is the patch's ID. -->
+    <string name="radicle_viewer_patch_id">patch %1$s</string>
+    <plurals name="radicle_viewer_comments">
+        <item quantity="one">%1$d comment</item>
+        <item quantity="other">%1$d comments</item>
+    </plurals>
+    <!-- %1$d is the revision's number, %2$s its short ID. -->
+    <string name="radicle_viewer_revision">Revision %1$d %2$s</string>
+    <!-- %1$s is the short ID of the revision's head commit. -->
+    <string name="radicle_viewer_revision_head">head %1$s</string>
+    <string name="radicle_viewer_browse_revision">Browse files at this revision</string>
+    <string name="radicle_viewer_no_history_title">No history</string>
+    <string name="radicle_viewer_no_head_commit">There is no head commit to start from.</string>
+    <string name="radicle_viewer_no_message">(no message)</string>
+    <string name="radicle_viewer_older">Older</string>
+    <string name="radicle_viewer_not_a_rid">Not a repository ID</string>
+    <string name="radicle_viewer_invalid_title">Not a Radicle repository ID</string>
+    <!-- %1$s is the rad:// address that was typed. -->
+    <string name="radicle_viewer_invalid_body">%1$s isn’t a repository ID.</string>
+    <string name="radicle_viewer_invalid_hint">Repository IDs start with z followed by base58 characters, like rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5.</string>
+    <string name="radicle_viewer_open_title">Open a repository</string>
+    <string name="radicle_viewer_open_body">Enter a Radicle repository ID. Repositories are read from your own node: seed one first from Settings → Nodes → Radicle node.</string>
+    <string name="radicle_viewer_no_page">This repository has no page here.</string>
+
+    <!-- OnchainApp.kt: web3:// onchain apps -->
+    <!-- %1$s is the chain's name, %2$s its chain ID. -->
+    <string name="radicle_onchain_detail_network">Network: %1$s (chain %2$s)</string>
+    <string name="radicle_onchain_detail_contract">Contract: %1$s</string>
+    <string name="radicle_onchain_detail_html_hash">HTML keccak256: %1$s</string>
+    <!-- %1$s is the RPC server that answered. -->
+    <string name="radicle_onchain_detail_from">From: %1$s (not cross-checked)</string>
+    <string name="radicle_onchain_detail_answered">Answered: %1$s</string>
+    <string name="radicle_onchain_detail_disagreed">Disagreed: %1$s</string>
+    <string name="radicle_onchain_failed_unknown_chain_add">Chain %1$s isn\'t in your chain list. Add it in Settings → Chains.</string>
+    <string name="radicle_onchain_failed_unknown_chain">Chain %1$s isn\'t in your chain list.</string>
+    <!-- %1$d is a number of seconds. -->
+    <string name="radicle_onchain_failed_timeout">No answer within %1$d s</string>
+    <!-- %1$s is the RPC's error message. -->
+    <string name="radicle_onchain_failed_html_call">html() failed: %1$s</string>
+    <string name="radicle_onchain_failed_no_rpc">No RPC answered</string>
+    <string name="radicle_onchain_failed_too_large">The document is larger than %1$d MiB.</string>
+    <string name="radicle_onchain_failed_malformed">html() returned no ERC-8244 document (is this an onchain app, on this chain?)</string>
+    <string name="radicle_onchain_failed_not_ready">Chain access isn\'t ready yet.</string>
+    <string name="radicle_onchain_no_app_here">No onchain application lives at this address.</string>
+    <string name="radicle_onchain_top_level_only">Onchain applications load as top-level documents only.</string>
+    <string name="radicle_onchain_get_head_only">Onchain applications only support GET and HEAD.</string>
+    <string name="radicle_onchain_unverified_title">Not cross-checked</string>
+    <string name="radicle_onchain_unverified_description">Only one RPC server returned this app\'s code, so Freedom couldn\'t check it against another server, and it isn\'t code you already let through in this session. Nothing was run.</string>
+    <string name="radicle_onchain_unverified_action">Review</string>
+    <string name="radicle_onchain_conflict_title">RPC servers disagreed</string>
+    <string name="radicle_onchain_conflict_description">The RPC servers Freedom asked returned different code for this app. At least one of them is wrong, so nothing was run.</string>
+    <string name="radicle_onchain_error_unknown_chain_title">Unknown chain</string>
+    <string name="radicle_onchain_error_not_an_app_title">Not an onchain app</string>
+    <string name="radicle_onchain_error_too_large_title">App too large</string>
+    <string name="radicle_onchain_error_invalid_title">Not a web3:// app address</string>
+    <string name="radicle_onchain_error_lookup_failed_title">Couldn\'t read the app</string>
+    <string name="radicle_onchain_error_unknown_chain_description">This app lives on a chain that isn\'t in your chain list, so Freedom doesn\'t know which RPC servers to ask. Add the chain in Settings, then try again.</string>
+    <string name="radicle_onchain_error_not_an_app_description">The contract didn\'t return an ERC-8244 html() document on this chain. Check the address and the chain ID.</string>
+    <string name="radicle_onchain_error_too_large_description">The app\'s document is larger than Freedom loads.</string>
+    <string name="radicle_onchain_error_invalid_description">Freedom loads web3:// apps by contract address: web3://0x…[:chainId]/.</string>
+    <string name="radicle_onchain_error_lookup_failed_description">Couldn\'t get an answer from the chain\'s RPC servers. Check your connection and try again.</string>
+</resources>

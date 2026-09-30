@@ -3,7 +3,8 @@
 // it from the read API at /_/api/<rid>/…. Everything a repository
 // supplies — names, paths, issue text, a README — is someone else's
 // text: it only ever reaches the page through textContent / createElement,
-// never as markup, and the page's CSP runs no script but this one.
+// never as markup, and the page's CSP runs no script but this one (and
+// /_/strings.js, the app's own text table for it).
 'use strict';
 
 (function () {
@@ -14,6 +15,70 @@
   var titleEl = document.getElementById('title');
   var ridEl = document.getElementById('rid');
   var tabsEl = document.getElementById('tabs');
+
+  // ------------------------------------------------------------------
+  // Text (#280): the app serves its string resources as
+  // window.RAD_STRINGS (/_/strings.js) — S.<key> sentences, P.<key>
+  // counted phrases by plural category. Each is only ever used as text.
+  // ------------------------------------------------------------------
+
+  var T = window.RAD_STRINGS || {};
+  var S = T.strings || {};
+  var P = T.plurals || {};
+  var LANG = T.lang || 'en';
+  var pluralRules = null;
+  var numberFormat = null;
+  try {
+    pluralRules = new Intl.PluralRules(LANG);
+    numberFormat = new Intl.NumberFormat(LANG, { useGrouping: false });
+  } catch (e) { /* plain English fallbacks below */ }
+
+  function num(n) {
+    return numberFormat ? numberFormat.format(n) : String(n);
+  }
+
+  // The pieces of pattern with %1$s / %1$d filled from args (a number
+  // formatted for the language, a DOM node kept as a node) and %% as %.
+  function pieces(pattern, args) {
+    var out = [];
+    var re = /%(\d+)\$([sd])|%%/g;
+    var last = 0;
+    var m;
+    pattern = String(pattern === undefined ? '' : pattern);
+    while ((m = re.exec(pattern)) !== null) {
+      if (m.index > last) out.push(pattern.slice(last, m.index));
+      if (!m[1]) {
+        out.push('%');
+      } else {
+        var a = args[parseInt(m[1], 10) - 1];
+        if (a === null || a === undefined) a = '';
+        out.push(m[2] === 'd' && typeof a === 'number' ? num(a) : a);
+      }
+      last = re.lastIndex;
+    }
+    if (last < pattern.length) out.push(pattern.slice(last));
+    return out;
+  }
+
+  // pattern filled in as plain text.
+  function fmt(pattern) {
+    return pieces(pattern, Array.prototype.slice.call(arguments, 1)).map(function (p) {
+      return typeof p === 'object' ? p.textContent : String(p);
+    }).join('');
+  }
+
+  // pattern filled in, as pieces for el() / append(): a node argument stays a node.
+  function fmtNodes(pattern) {
+    return pieces(pattern, Array.prototype.slice.call(arguments, 1));
+  }
+
+  // The plural form of forms (P.<key>) for count n.
+  function plural(forms, n) {
+    forms = forms || {};
+    var category = pluralRules ? pluralRules.select(n) : (n === 1 ? 'one' : 'other');
+    var form = forms[category];
+    return form === undefined ? forms.other : form;
+  }
 
   // ------------------------------------------------------------------
   // DOM helpers
@@ -52,7 +117,7 @@
   }
 
   function loading(what) {
-    show(el('div', { class: 'status' }, el('span', { class: 'spinner' }), what || 'Loading…'));
+    show(el('div', { class: 'status' }, el('span', { class: 'spinner' }), what || S.loading));
   }
 
   function notice(kind, heading) {
@@ -77,26 +142,26 @@
     if (typeof ts !== 'number' || !isFinite(ts)) return '';
     var ms = ts > 1e12 ? ts : ts * 1000;
     var secs = Math.floor((Date.now() - ms) / 1000);
-    if (secs < 60) return 'just now';
-    var units = [[60, 'minute'], [60, 'hour'], [24, 'day'], [30, 'month'], [12, 'year']];
+    if (secs < 60) return S.just_now;
+    var units = [[60, P.minutes_ago], [60, P.hours_ago], [24, P.days_ago], [30, P.months_ago], [12, P.years_ago]];
     var n = secs;
-    var name = 'second';
+    var forms = P.seconds_ago;
     for (var i = 0; i < units.length; i++) {
       if (n < units[i][0]) break;
       n = Math.floor(n / units[i][0]);
-      name = units[i][1];
+      forms = units[i][1];
     }
-    return n + ' ' + name + (n === 1 ? '' : 's') + ' ago';
+    return fmt(plural(forms, n), n);
   }
 
   function authorName(a) {
-    if (!a) return 'unknown';
+    if (!a) return S.unknown_author;
     if (typeof a === 'string') return a;
     if (a.alias) return a.alias;
     if (a.name) return a.name;
     var id = a.id || a.did || '';
     id = String(id).replace(/^did:key:/, '');
-    return id ? id.slice(0, 6) + '…' + id.slice(-4) : 'unknown';
+    return id ? id.slice(0, 6) + '…' + id.slice(-4) : S.unknown_author;
   }
 
   // ------------------------------------------------------------------
@@ -129,7 +194,7 @@
     while ((m = re.exec(text)) !== null) {
       if (m.index > last) out.push(text.slice(last, m.index));
       if (m[1]) out.push(el('code', { text: m[2] }));
-      else if (m[3] !== undefined && m[4] !== undefined) out.push('[' + (m[3] || 'image') + ']');
+      else if (m[3] !== undefined && m[4] !== undefined) out.push('[' + (m[3] || S.image) + ']');
       else if (m[5] !== undefined) {
         var href = safeHref(m[6], base);
         out.push(href ? el('a', { href: href, rel: 'noopener noreferrer' }, inline(m[5], base)) : m[5]);
@@ -232,7 +297,7 @@
             return body;
           },
           function () {
-            throw new Failure(res.status, { error: 'unreadable response' });
+            throw new Failure(res.status, { error: S.unreadable_response });
           }
         );
       }
@@ -243,30 +308,29 @@
     var body = (err && err.body) || {};
     var reason = body.reason;
     if (reason === 'integration-disabled') {
-      return notice('warn', 'Radicle is turned off',
-        el('p', { text: 'Turn it on under Settings → Nodes → Radicle node to browse repositories.' }));
+      return notice('warn', S.off_title,
+        el('p', { text: S.off_body }));
     }
     if (reason === 'node-not-ready') {
-      return notice('warn', 'The Radicle node is starting',
-        el('p', { text: 'Reload this page in a moment.' }));
+      return notice('warn', S.starting_title,
+        el('p', { text: S.starting_body }));
     }
     if (reason === 'node-stopped') {
-      return notice('warn', 'The Radicle node is not running',
-        el('p', { text: 'It runs alongside the Swarm node: check Settings → Nodes.' }));
+      return notice('warn', S.stopped_title,
+        el('p', { text: S.stopped_body }));
     }
     if (err && err.status === 404 && rid) {
-      return notice('error', 'Repository not found on this device',
-        el('p', null, el('code', { text: 'rad://' + rid }), ' isn’t in your node’s storage.'),
-        el('p', { text: 'Seed it from Settings → Nodes → Radicle node (paste the repository ID), then reload. ' +
-          'It may also be mistyped, or not exist on the network.' }));
+      return notice('error', S.repo_not_found_title,
+        el('p', null, fmtNodes(S.repo_not_found_body, el('code', { text: 'rad://' + rid }))),
+        el('p', { text: S.repo_not_found_hint }));
     }
     if (err && err.status === 403) {
-      return notice('error', 'Not available', el('p', { text: body.error || 'This repository is not public.' }));
+      return notice('error', S.not_available_title, el('p', { text: body.error || S.not_public }));
     }
     if (err && err.status === 404) {
-      return notice('error', 'Not found', el('p', { text: body.error || 'Nothing here.' }));
+      return notice('error', S.not_found_title, el('p', { text: body.error || S.nothing_here }));
     }
-    return notice('error', 'Couldn’t load this', el('p', { text: (body && body.error) || String(err) }));
+    return notice('error', S.load_failed_title, el('p', { text: (body && body.error) || String(err) }));
   }
 
   // ------------------------------------------------------------------
@@ -280,10 +344,10 @@
 
   function setHeader(rid, meta) {
     var p = project(meta);
-    var name = p.data.name || 'Repository';
+    var name = p.data.name || S.repository;
     titleEl.textContent = name;
     ridEl.textContent = 'rad://' + rid;
-    document.title = name + ' · Radicle';
+    document.title = fmt(S.page_title, name);
   }
 
   function setTabs(rid, meta, active) {
@@ -296,10 +360,10 @@
     }
     tabsEl.textContent = '';
     append(tabsEl, [
-      tab('code', 'Code', pathHref([rid]), null),
-      tab('issues', 'Issues', pathHref([rid, 'issues']), issues),
-      tab('patches', 'Patches', pathHref([rid, 'patches']), patches),
-      tab('commits', 'Commits', pathHref([rid, 'commits']), null),
+      tab('code', S.tab_code, pathHref([rid]), null),
+      tab('issues', S.tab_issues, pathHref([rid, 'issues']), issues),
+      tab('patches', S.tab_patches, pathHref([rid, 'patches']), patches),
+      tab('commits', S.tab_commits, pathHref([rid, 'commits']), null),
     ]);
     tabsEl.hidden = false;
   }
@@ -319,14 +383,16 @@
   function summaryCard(rid, meta) {
     var p = project(meta);
     var facts = el('div', { class: 'facts' });
-    if (p.data.defaultBranch) append(facts, el('span', null, 'Branch ', el('b', { text: p.data.defaultBranch })));
-    if (p.meta.head) append(facts, el('span', null, 'Head ', el('b', { class: 'mono', text: short(p.meta.head) })));
+    if (p.data.defaultBranch) {
+      append(facts, el('span', null, fmtNodes(S.fact_branch, el('b', { text: p.data.defaultBranch }))));
+    }
+    if (p.meta.head) append(facts, el('span', null, fmtNodes(S.fact_head, el('b', { class: 'mono', text: short(p.meta.head) }))));
     if (Array.isArray(meta.delegates)) {
-      append(facts, el('span', null, el('b', { text: meta.delegates.length }),
-        meta.delegates.length === 1 ? ' delegate' : ' delegates'));
+      var delegates = meta.delegates.length;
+      append(facts, el('span', null, fmtNodes(plural(P.delegates, delegates), el('b', { text: num(delegates) }))));
     }
     if (typeof meta.seeding === 'number') {
-      append(facts, el('span', null, el('b', { text: meta.seeding }), meta.seeding === 1 ? ' seed' : ' seeds'));
+      append(facts, el('span', null, fmtNodes(plural(P.seeds, meta.seeding), el('b', { text: num(meta.seeding) }))));
     }
     return el('div', { class: 'card' }, el('div', { class: 'card-body' },
       p.data.description ? el('p', { class: 'desc', text: p.data.description }) : null, facts));
@@ -335,7 +401,7 @@
   function crumbs(rid, rev, pinned, parts) {
     var box = el('div', { class: 'crumbs' });
     var root = pinned ? pathHref([rid, 'tree', rev]) : pathHref([rid]);
-    append(box, el('a', { href: root, text: titleEl.textContent || 'root' }));
+    append(box, el('a', { href: root, text: titleEl.textContent || S.root }));
     for (var i = 0; i < parts.length; i++) {
       append(box, el('span', { class: 'sep', text: '/' }));
       if (i === parts.length - 1) append(box, parts[i]);
@@ -354,7 +420,7 @@
         return ka - kb || String(a.name).localeCompare(String(b.name));
       });
       var list = el('ul', { class: 'list' });
-      if (!entries.length) list.appendChild(el('li', null, el('div', { class: 'row' }, el('span', { class: 'sub', text: 'Empty' }))));
+      if (!entries.length) list.appendChild(el('li', null, el('div', { class: 'row' }, el('span', { class: 'sub', text: S.empty }))));
       entries.forEach(function (e) {
         var child = parts.concat([String(e.name)]);
         var dir = e.kind === 'tree';
@@ -399,7 +465,7 @@
 
   function readmeCard(rid, rev, pinned, readme) {
     var body = readme.binary || typeof readme.content !== 'string'
-      ? el('div', { class: 'binary', text: 'Binary file' })
+      ? el('div', { class: 'binary', text: S.binary })
       : /\.(md|markdown)$/i.test(readme.path || '')
         ? markdown(readme.content, blobBase(rid, rev, []))
         : el('pre', { class: 'code', text: readme.content });
@@ -411,7 +477,7 @@
       var name = parts[parts.length - 1];
       var body;
       if (blob.binary || typeof blob.content !== 'string') {
-        body = el('div', { class: 'binary', text: 'Binary file — not shown' });
+        body = el('div', { class: 'binary', text: S.binary_not_shown });
       } else if (/\.(md|markdown)$/i.test(name)) {
         body = markdown(blob.content, blobBase(rid, rev, parts.slice(0, -1)));
       } else {
@@ -428,8 +494,8 @@
       var pinned = (kind === 'tree' || kind === 'blob') && REV_RE.test(rest[1] || '');
       var rev = pinned ? rest[1] : head;
       if (!rev) {
-        show(summaryCard(rid, meta), notice('warn', 'Nothing to show yet',
-          el('p', { text: 'This repository has no default branch head in your node’s storage.' })));
+        show(summaryCard(rid, meta), notice('warn', S.nothing_yet_title,
+          el('p', { text: S.no_head_body })));
         return;
       }
       var parts = pinned ? rest.slice(2) : [];
@@ -441,9 +507,27 @@
     });
   }
 
+  // An issue or patch state as the page shows it (unknown ones as they are).
+  function stateLabel(st) {
+    var labels = {
+      open: S.state_open, closed: S.state_closed, solved: S.state_solved,
+      draft: S.state_draft, merged: S.state_merged, archived: S.state_archived,
+    };
+    return Object.prototype.hasOwnProperty.call(labels, st) && labels[st] !== undefined ? labels[st] : st;
+  }
+
+  // The empty list's line: "No open issues.", or the state as the address had it.
+  function noneLine(kind, status) {
+    var lines = kind === 'issues'
+      ? { open: S.no_open_issues, closed: S.no_closed_issues }
+      : { open: S.no_open_patches, draft: S.no_draft_patches, merged: S.no_merged_patches, archived: S.no_archived_patches };
+    if (Object.prototype.hasOwnProperty.call(lines, status) && lines[status] !== undefined) return lines[status];
+    return fmt(kind === 'issues' ? S.no_issues_in_state : S.no_patches_in_state, status);
+  }
+
   function statusFilters(rid, kind, current, states) {
     return el('div', { class: 'filters' }, states.map(function (s) {
-      return el('a', { href: pathHref([rid, kind]) + '?status=' + s, class: s === current ? 'on' : null, text: s });
+      return el('a', { href: pathHref([rid, kind]) + '?status=' + s, class: s === current ? 'on' : null, text: stateLabel(s) });
     }));
   }
 
@@ -456,7 +540,7 @@
         .then(function (items) {
           var list = el('ul', { class: 'list' });
           if (!items.length) list.appendChild(el('li', null, el('div', { class: 'row' },
-            el('span', { class: 'sub', text: 'No ' + status + ' ' + kind + '.' }))));
+            el('span', { class: 'sub', text: noneLine(kind, status) }))));
           items.forEach(function (it) {
             var st = (it.state && it.state.status) || '';
             var labels = (it.labels || []).map(function (l) { return el('span', { class: 'label', text: l }); });
@@ -465,11 +549,11 @@
               : it.revisions && it.revisions[0] && it.revisions[0].timestamp;
             if (opened) sub += ' · ' + when(opened);
             list.appendChild(el('li', null, el('a', { class: 'row', href: pathHref([rid, kind, it.id]) },
-              el('span', { class: 'main' }, el('span', { class: 'badge ' + st, text: st }), it.title || '(untitled)',
+              el('span', { class: 'main' }, el('span', { class: 'badge ' + st, text: stateLabel(st) }), it.title || S.untitled,
                 el('div', { class: 'sub', text: sub }), labels.length ? el('div', null, labels) : null))));
           });
           var more = items.length === 30
-            ? el('a', { class: 'more', href: pathHref([rid, kind]) + '?status=' + status + '&page=' + (page + 1), text: 'More' })
+            ? el('a', { class: 'more', href: pathHref([rid, kind]) + '?status=' + status + '&page=' + (page + 1), text: S.more })
             : null;
           show(statusFilters(rid, kind, status, states), el('div', { class: 'card' }, list), more);
         });
@@ -495,10 +579,10 @@
         var discussion = issue.discussion || [];
         show(
           el('div', { class: 'card' }, el('div', { class: 'card-body' },
-            el('h2', null, el('span', { class: 'badge ' + st, text: st }), issue.title || '(untitled)'),
-            el('div', { class: 'sub mono', text: 'issue ' + issue.id }),
+            el('h2', null, el('span', { class: 'badge ' + st, text: stateLabel(st) }), issue.title || S.untitled),
+            el('div', { class: 'sub mono', text: fmt(S.issue_id, issue.id) }),
             labels.length ? el('div', null, labels) : null)),
-          el('div', { class: 'card' }, el('h2', { text: discussion.length === 1 ? '1 comment' : discussion.length + ' comments' }),
+          el('div', { class: 'card' }, el('h2', { text: fmt(plural(P.comments, discussion.length), discussion.length) }),
             thread(discussion))
         );
       });
@@ -511,22 +595,22 @@
         var st = (patch.state && patch.state.status) || '';
         var revisions = patch.revisions || [];
         var cards = revisions.map(function (r, i) {
-          var head = el('div', { class: 'card-head' }, 'Revision ' + (i + 1) + ' ',
-            el('span', { class: 'mono', text: short(r.id) }),
+          var head = el('div', { class: 'card-head' },
+            fmtNodes(S.revision, i + 1, el('span', { class: 'mono', text: short(r.id) })),
             el('div', { class: 'sub', text: authorName(r.author) + ' · ' + when(r.timestamp) +
-              (r.oid ? ' · head ' + short(r.oid) : '') }));
+              (r.oid ? ' · ' + fmt(S.revision_head, short(r.oid)) : '') }));
           var body = [];
           if (r.description) body.push(el('div', { class: 'comment' }, markdown(r.description)));
           body = body.concat(thread(r.discussion || []));
           var browse = r.oid && REV_RE.test(r.oid)
-            ? el('a', { class: 'more', href: pathHref([rid, 'tree', r.oid]), text: 'Browse files at this revision' })
+            ? el('a', { class: 'more', href: pathHref([rid, 'tree', r.oid]), text: S.browse_revision })
             : null;
           return el('div', { class: 'card' }, head, body, browse);
         });
         show(
           el('div', { class: 'card' }, el('div', { class: 'card-body' },
-            el('h2', null, el('span', { class: 'badge ' + st, text: st }), patch.title || '(untitled)'),
-            el('div', { class: 'sub mono', text: 'patch ' + patch.id }))),
+            el('h2', null, el('span', { class: 'badge ' + st, text: stateLabel(st) }), patch.title || S.untitled),
+            el('div', { class: 'sub mono', text: fmt(S.patch_id, patch.id) }))),
           cards
         );
       });
@@ -538,7 +622,7 @@
       var head = params.get('parent') || project(meta).meta.head;
       var page = Math.max(0, parseInt(params.get('page') || '0', 10) || 0);
       if (!head || !REV_RE.test(head)) {
-        show(notice('warn', 'No history', el('p', { text: 'There is no head commit to start from.' })));
+        show(notice('warn', S.no_history_title, el('p', { text: S.no_head_commit })));
         return;
       }
       return api(rid, '/commits?parent=' + head + '&page=' + page + '&perPage=30').then(function (res) {
@@ -549,11 +633,11 @@
           var t = c.committer && c.committer.time;
           list.appendChild(el('li', null, el('a', { class: 'row', href: pathHref([rid, 'tree', c.id]) },
             el('span', { class: 'icon mono', text: '•' }),
-            el('span', { class: 'main' }, c.summary || '(no message)',
+            el('span', { class: 'main' }, c.summary || S.no_message,
               el('div', { class: 'sub', text: short(c.id) + ' · ' + authorName(c.author) + (t ? ' · ' + when(t) : '') })))));
         });
         var more = commits.length === 30
-          ? el('a', { class: 'more', href: pathHref([rid, 'commits']) + '?parent=' + head + '&page=' + (page + 1), text: 'Older' })
+          ? el('a', { class: 'more', href: pathHref([rid, 'commits']) + '?parent=' + head + '&page=' + (page + 1), text: S.older })
           : null;
         show(el('div', { class: 'card' }, list), more);
       });
@@ -563,24 +647,24 @@
   function landing(invalid) {
     tabsEl.hidden = true;
     ridEl.textContent = '';
-    var input = el('input', { type: 'text', placeholder: 'rad:z…', autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false' });
-    var go = el('button', { type: 'button', text: 'Open' });
+    var input = el('input', { type: 'text', placeholder: S.rid_placeholder, autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false' });
+    var go = el('button', { type: 'button', text: S.open });
     function open() {
       var m = /^(?:rad:(?:\/\/)?)?(z[1-9A-HJ-NP-Za-km-z]{20,60})$/.exec(input.value.trim());
       if (m) location.href = pathHref([m[1]]);
-      else input.setCustomValidity('Not a repository ID');
+      else input.setCustomValidity(S.not_a_rid);
     }
     go.addEventListener('click', open);
     input.addEventListener('keydown', function (e) { if (e.key === 'Enter') open(); });
     input.addEventListener('input', function () { input.setCustomValidity(''); });
     var parts = [];
     if (invalid !== null) {
-      parts.push(notice('error', 'Not a Radicle repository ID',
-        el('p', null, el('code', { text: 'rad://' + invalid }), ' isn’t a repository ID.'),
-        el('p', { text: 'Repository IDs start with z followed by base58 characters, like rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5.' })));
+      parts.push(notice('error', S.invalid_title,
+        el('p', null, fmtNodes(S.invalid_body, el('code', { text: 'rad://' + invalid }))),
+        el('p', { text: S.invalid_hint })));
     }
-    parts.push(notice('', 'Open a repository',
-      el('p', { text: 'Enter a Radicle repository ID. Repositories are read from your own node: seed one first from Settings → Nodes → Radicle node.' }),
+    parts.push(notice('', S.open_title,
+      el('p', { text: S.open_body }),
       el('div', { class: 'go' }, input, go)));
     show(parts);
   }
@@ -621,7 +705,7 @@
     else if (section === 'issues' && COB_RE.test(rest[1] || '')) issueRoute(rid, rest[1]);
     else if (section === 'patches' && COB_RE.test(rest[1] || '')) patchRoute(rid, rest[1]);
     else if (section === 'commits') commitsRoute(rid, params);
-    else withRepo(rid, null, function () { show(notice('error', 'Not found', el('p', { text: 'This repository has no page here.' }))); });
+    else withRepo(rid, null, function () { show(notice('error', S.not_found_title, el('p', { text: S.no_page }))); });
   }
 
   route();
