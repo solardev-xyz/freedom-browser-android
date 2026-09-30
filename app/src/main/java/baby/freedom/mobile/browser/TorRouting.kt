@@ -18,6 +18,7 @@ import java.net.Proxy
 import java.net.URL
 import java.net.URLConnection
 import java.text.Normalizer
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -109,6 +110,39 @@ object TorRouting {
     private var externalUnreached = false
 
     /**
+     * Whether [external]'s verdict is pending: the Activity just came back
+     * (or Tor just started) and the first check since hasn't answered, or
+     * the Activity is stopped and nothing checks until it's back. Onion
+     * requests meanwhile wait for that check ([awaitExternalVerdict])
+     * rather than being refused at once — a link from another app, or a
+     * form posted on return from an authenticator, arrives with the
+     * Activity's start, before any check can have passed (#305 R1-F1).
+     */
+    @Volatile
+    private var externalPending = false
+
+    /** Notified whenever routing state changes, for [awaitExternalVerdict]. */
+    private val verdictLock = Object()
+
+    /** Requests held in [awaitExternalVerdict] right now, capped at [MAX_HELD]. */
+    private val held = AtomicInteger(0)
+
+    /**
+     * How long an onion request waits for [externalPending]'s check: the
+     * greeting, the canary and a real onion `CONNECT` through a running
+     * Orbot take a few seconds; past this it gets the refusal.
+     */
+    const val HOLD_MS = 30_000L
+
+    /**
+     * At most this many onion requests wait at once; more are refused at
+     * once, so a page firing onion requests in a loop (in the background,
+     * where the wait lasts until [HOLD_MS]) can't tie up the WebView's
+     * interceptor threads.
+     */
+    const val MAX_HELD = 8
+
+    /**
      * The Tor SOCKS endpoint `*.onion` is routed to — set only once the
      * WebView has confirmed the override naming it — or `null` while onion
      * requests are refused. Cleared *before* an override moves away from
@@ -149,12 +183,14 @@ object TorRouting {
     fun setEnabled(context: Context, on: Boolean) {
         enabled = on
         apply(context)
+        signalVerdict()
     }
 
     /** The `:tor` service's latest state (or Stopped once it's gone). Main thread. */
     fun onState(context: Context, state: TorInfo) {
         info = state
         apply(context)
+        signalVerdict()
     }
 
     /**
@@ -162,13 +198,62 @@ object TorRouting {
      * `null` for the embedded one; [confirmed] once [TorProxy.probe] found
      * a Tor client there (and while it still listens); [unreached] when
      * its last check found Tor there that couldn't reach onion sites
-     * ([TorProxy.Watch.unreached]). Main thread.
+     * ([TorProxy.Watch.unreached]); [pending] while its verdict is
+     * awaited ([externalPending]): onion requests wait for it. Main thread.
      */
-    fun setExternal(context: Context, proxy: SocksEndpoint?, confirmed: Boolean, unreached: Boolean = false) {
+    fun setExternal(
+        context: Context,
+        proxy: SocksEndpoint?,
+        confirmed: Boolean,
+        unreached: Boolean = false,
+        pending: Boolean = false,
+    ) {
         external = proxy
         externalConfirmed = proxy != null && confirmed
         externalUnreached = proxy != null && unreached
+        externalPending = proxy != null && !confirmed && pending
         apply(context)
+        signalVerdict()
+    }
+
+    private fun signalVerdict() = synchronized(verdictLock) { verdictLock.notifyAll() }
+
+    /**
+     * Whether an onion request should wait rather than be refused now: an
+     * external proxy whose check is pending ([externalPending]), or one
+     * confirmed whose override the WebView hasn't confirmed yet.
+     */
+    private fun awaitingExternal(): Boolean =
+        routed == null && enabled && supported == true && external != null &&
+            (externalPending || externalConfirmed)
+
+    /**
+     * Wait, up to [timeoutMs], while [awaitingExternal]; whether onion is
+     * routed at the end. At most [MAX_HELD] callers wait at once; more get
+     * the answer as it stands. Not on the main thread (the verdict is
+     * published there). #305 R1-F1.
+     */
+    internal fun awaitExternalVerdict(timeoutMs: Long = HOLD_MS): Boolean {
+        if (!awaitingExternal()) return routed != null
+        if (held.incrementAndGet() > MAX_HELD) {
+            held.decrementAndGet()
+            return routed != null
+        }
+        try {
+            val deadline = System.nanoTime() + timeoutMs * 1_000_000
+            synchronized(verdictLock) {
+                while (awaitingExternal()) {
+                    val left = (deadline - System.nanoTime()) / 1_000_000
+                    if (left <= 0) break
+                    verdictLock.wait(left)
+                }
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } finally {
+            held.decrementAndGet()
+        }
+        return routed != null
     }
 
     /** [ProxyController.setProxyOverride]; swapped in tests. */
@@ -184,6 +269,8 @@ object TorRouting {
         external = null
         externalConfirmed = false
         externalUnreached = false
+        externalPending = false
+        held.set(0)
         routed = null
         target = null
         refusing = false
@@ -279,6 +366,7 @@ object TorRouting {
                 if (gen != generation) return@setOverride
                 if (desired != null) {
                     routed = desired
+                    signalVerdict()
                     Log.i(TAG, ".onion → socks5://$desired")
                 } else {
                     Log.i(TAG, ".onion refused (socks5://$REFUSE)")
@@ -302,12 +390,14 @@ object TorRouting {
      * Onion requests while nothing is [routed]: a document gets the error
      * page in place (kept out of history by [NAME_RESOLUTION_ERROR_HEADER],
      * as a refused ENS document is), a subresource an empty 502. `null`
-     * for a non-onion request, or while Tor is routed.
+     * for a non-onion request, or while Tor is routed. While an external
+     * proxy's check is pending it first waits for that check's verdict
+     * ([awaitExternalVerdict], #305 R1-F1). The interceptor's thread.
      */
     fun refusalFor(req: WebResourceRequest): WebResourceResponse? {
         val uri = req.url ?: return null
         if (!isOnionHost(uri.host)) return null
-        if (routed != null) return null
+        if (awaitExternalVerdict()) return null
         val headers = mapOf("Cache-Control" to "no-store")
         if (!isDocumentRequest(req.isForMainFrame, req.requestHeaders)) {
             return WebResourceResponse(

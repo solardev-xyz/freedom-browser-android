@@ -988,17 +988,25 @@ class MainActivity : ComponentActivity() {
      * check that isn't coming (R4-M3), and on return it's routed again
      * only once a full probe passes (R1-M1, R2-F1) — the last pass is
      * forgotten, so a plain error on return isn't read as Tor that can't
-     * get through ([TorProxy.afterStop], R6-M2). Status goes through
-     * [torInfoFlow] like the embedded client's.
+     * get through ([TorProxy.afterStop], R6-M2). Meanwhile, and until
+     * the first check after starting (or returning) answers, an onion
+     * request waits for that verdict ([TorRouting.awaitExternalVerdict],
+     * up to [TorRouting.HOLD_MS]) rather than being refused at once, so a
+     * link opened from another app, or a form posted on return from an
+     * authenticator, loads once the proxy passes (R1-F1). Status goes
+     * through [torInfoFlow] like the embedded client's.
      */
     private fun startExternalTor(proxy: SocksEndpoint) {
         externalTorJob?.cancel()
         torRunning = true
-        publishExternalTor(proxy, externalTorChecking(proxy), confirmed = false)
+        publishExternalTor(proxy, externalTorChecking(proxy), confirmed = false, pending = true)
         externalTorJob = lifecycleScope.launch {
             var watch = TorProxy.Watch()
             var lastCheckAt = 0L
             repeatOnLifecycle(Lifecycle.State.STARTED) {
+                // The first check since (re)starting: onion requests wait
+                // for its verdict instead of being refused (R1-F1).
+                var pending = true
                 try {
                     while (true) {
                         // Always the full check, a real onion included, even
@@ -1018,6 +1026,7 @@ class MainActivity : ComponentActivity() {
                                     ),
                                     confirmed = false,
                                     unreached = watch.unreached,
+                                    pending = pending,
                                 )
                             }
                             TorProxy.reachOnion(proxy)
@@ -1044,6 +1053,7 @@ class MainActivity : ComponentActivity() {
                             watch.confirmed,
                             watch.unreached,
                         )
+                        pending = false
                         // A nudge checks sooner: Start Orbot always, and
                         // starts the back-off over; a page's (a failed onion
                         // load, the refusal page in a top-level document)
@@ -1074,9 +1084,19 @@ class MainActivity : ComponentActivity() {
                     // checking again" nothing would keep meanwhile (R4-M3).
                     // The last pass is forgotten too, so the 10 min
                     // fast-retry window doesn't span background time (R6-M2).
-                    if (watch.confirmed || watch.unreached) {
-                        publishExternalTor(proxy, externalTorChecking(proxy), confirmed = false, unreached = false)
-                    }
+                    // Onion requests meanwhile wait (bounded, TorRouting.HOLD_MS)
+                    // for the check on return rather than being refused at
+                    // once: a link from another app or a form posted on return
+                    // from an authenticator arrives with the start, before any
+                    // check can have passed (R1-F1). Nothing is sent to the
+                    // proxy before that check passes.
+                    publishExternalTor(
+                        proxy,
+                        externalTorChecking(proxy),
+                        confirmed = false,
+                        unreached = false,
+                        pending = true,
+                    )
                     watch = TorProxy.afterStop(watch)
                 }
             }
@@ -1100,10 +1120,11 @@ class MainActivity : ComponentActivity() {
         info: TorInfo,
         confirmed: Boolean,
         unreached: Boolean = false,
+        pending: Boolean = false,
     ) {
         if (proxy != torProxy || !torRunning) return
         torInfoFlow.value = info
-        TorRouting.setExternal(this, proxy, confirmed, unreached)
+        TorRouting.setExternal(this, proxy, confirmed, unreached, pending)
     }
 
     private fun stopExternalTor() {

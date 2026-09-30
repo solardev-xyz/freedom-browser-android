@@ -461,6 +461,72 @@ class TorRoutingTest {
     }
 
     @Test
+    fun `an onion request waits for a pending external check instead of being refused`() {
+        // R1-F1: a link from another app (or a form posted on return from an
+        // authenticator) arrives with the Activity's start, before the
+        // first check since can have passed.
+        val context = android.content.ContextWrapper(null)
+        val real = TorRouting.setOverride
+        val pending = java.util.Collections.synchronizedList(mutableListOf<Runnable>())
+        TorRouting.setOverride = { _, _, done -> pending += done }
+        fun confirm() = pending.removeAt(0).run()
+        val orbot = SocksEndpoint("127.0.0.1", 9050)
+        val pool = java.util.concurrent.Executors.newCachedThreadPool()
+        try {
+            TorRouting.resetForTest(supported = true)
+            TorRouting.setEnabled(context, true)
+            confirm()
+            // Not pending (a failed check): refused at once.
+            TorRouting.setExternal(context, orbot, confirmed = false)
+            var t0 = System.nanoTime()
+            assertFalse(TorRouting.awaitExternalVerdict(5_000))
+            assertTrue(System.nanoTime() - t0 < 1_000_000_000L)
+
+            // Pending: waits, and is let through once the check passes and
+            // the WebView has confirmed the override naming the proxy.
+            TorRouting.setExternal(context, orbot, confirmed = false, pending = true)
+            val waiting = pool.submit<Boolean> { TorRouting.awaitExternalVerdict(10_000) }
+            Thread.sleep(200)
+            assertFalse(waiting.isDone)
+            TorRouting.setExternal(context, orbot, confirmed = true)
+            Thread.sleep(200)
+            assertFalse(waiting.isDone) // not before the WebView confirms
+            confirm()
+            assertTrue(waiting.get(2, java.util.concurrent.TimeUnit.SECONDS))
+
+            // Stopped (pending again): nothing routed meanwhile; a check that
+            // fails answers the waiter with a refusal at once.
+            TorRouting.setExternal(context, orbot, confirmed = false, pending = true)
+            assertFalse(TorRouting.isRouted)
+            val refused = pool.submit<Boolean> { TorRouting.awaitExternalVerdict(10_000) }
+            Thread.sleep(200)
+            assertFalse(refused.isDone)
+            TorRouting.setExternal(context, orbot, confirmed = false)
+            assertFalse(refused.get(2, java.util.concurrent.TimeUnit.SECONDS))
+
+            // No verdict at all: refused at the deadline.
+            TorRouting.setExternal(context, orbot, confirmed = false, pending = true)
+            t0 = System.nanoTime()
+            assertFalse(TorRouting.awaitExternalVerdict(300))
+            assertTrue(System.nanoTime() - t0 >= 250_000_000L)
+
+            // At most MAX_HELD wait; the next is answered at once.
+            val held = (1..TorRouting.MAX_HELD).map { pool.submit<Boolean> { TorRouting.awaitExternalVerdict(10_000) } }
+            Thread.sleep(300)
+            t0 = System.nanoTime()
+            assertFalse(TorRouting.awaitExternalVerdict(5_000))
+            assertTrue(System.nanoTime() - t0 < 1_000_000_000L)
+            // Tor switched off: every waiter is refused.
+            TorRouting.setEnabled(context, false)
+            held.forEach { assertFalse(it.get(2, java.util.concurrent.TimeUnit.SECONDS)) }
+        } finally {
+            pool.shutdownNow()
+            TorRouting.setOverride = real
+            TorRouting.resetForTest(supported = null)
+        }
+    }
+
+    @Test
     fun `nothing to wait for without an override`() {
         TorRouting.resetForTest(supported = false)
         var released = false
