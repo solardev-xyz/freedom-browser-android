@@ -153,6 +153,8 @@ class SitePermissionBroker private constructor(
     // callbacks and [scope] both run there).
     private val pending = mutableListOf<Pending>()
     private val documents = HashMap<Long, Int>()
+    /** Tabs that are private, so a removal reaches only its own tier's documents ([noteRemoved]). */
+    private val privateTabs = HashSet<Long>()
     private val tabLocks = HashMap<Long, Mutex>()
 
     // ---------------------------------------------------------------
@@ -239,6 +241,7 @@ class SitePermissionBroker private constructor(
     fun onDocumentStarted(tab: BrowserState) {
         val doc = (documents[tab.id] ?: 0) + 1
         documents[tab.id] = doc
+        if (tab.private) privateTabs += tab.id else privateTabs -= tab.id
         withdraw(tab.id) { true }
         // The new document has asked for nothing and been given nothing.
         documentActivity.update { it + (tab.id to DocumentPermissions(doc)) }
@@ -252,6 +255,7 @@ class SitePermissionBroker private constructor(
     fun onTabClosed(tabId: Long) {
         withdraw(tabId) { true }
         documents.remove(tabId)
+        privateTabs.remove(tabId)
         tabLocks.remove(tabId)
         documentActivity.update { it - tabId }
     }
@@ -266,8 +270,9 @@ class SitePermissionBroker private constructor(
      * embedded frame's), what each of them was granted ([grants]:
      * camera, microphone, location — per origin, since a frame's grant
      * isn't the page's), and which of those the user has since removed
-     * from the sheet while the document still holds them ([revokedHeld],
-     * per origin too). WebView can't take a grant back from a live
+     * while the document still holds them ([revokedHeld], per origin
+     * too) — from any tab's sheet or Settings, not only this tab's own
+     * sheet ([noteRemoved]). WebView can't take a grant back from a live
      * document — a camera stream runs on, and a location grant keeps
      * answering the document's watches and new requests without asking —
      * so the sheet keeps saying so, and offering a reload, however often
@@ -400,11 +405,25 @@ class SitePermissionBroker private constructor(
      * session only — the only tier a private tab's decisions are in.
      */
     fun revokeOnTab(tab: BrowserState, entry: SitePermissionEntry) {
-        if (tab.private) privateSession.revoke(entry.origin, entry.permission) else revoke(entry)
-        val doc = documents[tab.id] ?: 0
+        if (tab.private) {
+            privateSession.revoke(entry.origin, entry.permission)
+            noteRemoved(entry, private = true)
+        } else {
+            revoke(entry)
+        }
+    }
+
+    /**
+     * [entry] was removed from the [private] tier: every open document of
+     * that tier its origin was given it in still holds it — wherever the
+     * × was tapped (this tab's sheet, another tab's, Settings) — so each
+     * of their sheets and menu rows says so and offers Reload.
+     */
+    private fun noteRemoved(entry: SitePermissionEntry, private: Boolean) {
         documentActivity.update { all ->
-            val cur = all[tab.id]?.takeIf { it.doc == doc } ?: return@update all
-            all + (tab.id to cur.revoking(entry))
+            revokingInDocuments(all, entry) { tabId ->
+                (tabId in privateTabs) == private && all[tabId]?.doc == (documents[tabId] ?: 0)
+            }
         }
     }
 
@@ -502,6 +521,7 @@ class SitePermissionBroker private constructor(
         session.revoke(entry.origin, entry.permission)
         // Off at once, not only once the store's next read lands.
         if (entry.permission == SitePermission.POPUPS) storedPopupAllows = storedPopupAllows - entry.origin
+        noteRemoved(entry, private = false)
         scope.launch { store.remove(entry.origin, entry.permission.key) }
     }
 
@@ -785,6 +805,18 @@ class SitePermissionBroker private constructor(
         (c as? SitePermission)?.ordinal ?: SitePermission.entries.size
 
     companion object {
+        /**
+         * [all] after [entry] is removed, for every tab [inScope] — each
+         * document whose own grants include it now holds it removed
+         * ([DocumentPermissions.revoking]).
+         */
+        internal fun revokingInDocuments(
+            all: Map<Long, DocumentPermissions>,
+            entry: SitePermissionEntry,
+            inScope: (Long) -> Boolean,
+        ): Map<Long, DocumentPermissions> =
+            all.mapValues { (tabId, d) -> if (inScope(tabId)) d.revoking(entry) else d }
+
         private const val TAG = "SitePermissions"
 
         @Volatile

@@ -598,6 +598,25 @@ class SitePermissionsTest {
     }
 
     @Test
+    fun `a removal from Settings or another tab reaches every document on that site that holds it`() {
+        val page = "https://page.example"
+        val given = SitePermissionBroker.DocumentPermissions(doc = 1).granting(page, listOf(SitePermission.LOCATION))
+        val askedOnly = SitePermissionBroker.DocumentPermissions(doc = 4).granting(page, emptyList())
+        val other = SitePermissionBroker.DocumentPermissions(doc = 2)
+            .granting("https://other.example", listOf(SitePermission.LOCATION))
+        val all = mapOf(1L to given, 2L to given, 3L to other, 4L to askedOnly, 5L to given)
+        // Tab 5 is in the other tier (private vs normal): not reached.
+        val after = SitePermissionBroker.revokingInDocuments(all, entry(page, SitePermission.LOCATION)) { it != 5L }
+        // Not only the tab whose sheet had the ×: every document given it still has it.
+        assertEquals(setOf(SitePermission.LOCATION), after.getValue(1L).stillHeld(emptySet()))
+        assertEquals(setOf(SitePermission.LOCATION), after.getValue(2L).stillHeld(emptySet()))
+        // Another site's document, one never given it, and the other tier are left alone.
+        assertEquals(other, after.getValue(3L))
+        assertEquals(askedOnly, after.getValue(4L))
+        assertEquals(given, after.getValue(5L))
+    }
+
+    @Test
     fun `a frame's grant and the page's are kept apart`() {
         val page = "https://page.example"
         val frame = "https://frame.example"
