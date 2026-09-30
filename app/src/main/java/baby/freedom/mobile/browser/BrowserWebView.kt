@@ -2782,6 +2782,16 @@ private fun buildRefreshableWebView(
         }
 
         webViewClient = object : WebViewClient() {
+            // A key the page was handed and didn't use: a hardware-
+            // keyboard shortcut that gives the page first go (#270, see
+            // [KeyboardShortcutRouter.unhandledInPage]) acts now. Any
+            // other key goes back to the view tree as before.
+            override fun onUnhandledKeyEvent(view: WebView, event: KeyEvent) {
+                val activity = view.context.findActivity() as? PageKeyEvents
+                if (activity?.onUnhandledPageKey(event) == true) return
+                super.onUnhandledKeyEvent(view, event)
+            }
+
             // A probe the *page* asked for belongs to the page that
             // asked: any document that replaces it takes the probe with
             // it rather than letting it navigate the tab up to 90 s

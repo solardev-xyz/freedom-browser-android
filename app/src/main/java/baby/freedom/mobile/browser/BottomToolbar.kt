@@ -1447,6 +1447,13 @@ internal fun BottomToolbar(
     /** "Desktop site" is on for the page's site (#180); null where it can't apply. */
     desktopSite: Boolean?,
     onToggleDesktopSite: () -> Unit,
+    /**
+     * Ctrl+L (#270) asked for the address bar: the field takes focus, as
+     * from a tap on the resting bar, and says so through
+     * [onAddressFocusRequestHandled].
+     */
+    addressFocusRequested: Boolean = false,
+    onAddressFocusRequestHandled: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // Clamp rather than trust the caller: both fractions are driven by
@@ -1698,6 +1705,8 @@ internal fun BottomToolbar(
             onAddressEditedChanged = onAddressEditedChanged,
             onAddressQueryChanged = onAddressQueryChanged,
             onSubmit = onSubmit,
+            focusRequested = addressFocusRequested,
+            onFocusRequestHandled = onAddressFocusRequestHandled,
             onReload = onReload,
             onStop = onStop,
             onExpandCapsule = onExpandCapsule,
@@ -2294,10 +2303,21 @@ private fun AddressField(
     onExpandCapsule: () -> Unit,
     menu: @Composable () -> Unit,
     modifier: Modifier = Modifier,
+    focusRequested: Boolean = false,
+    onFocusRequestHandled: () -> Unit = {},
 ) {
     val focusRequester = remember { FocusRequester() }
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    // Focus asked for from the keyboard (Ctrl+L): the same as the tap
+    // that opens the editor below.
+    LaunchedEffect(focusRequested) {
+        if (focusRequested) {
+            focusRequester.requestFocus()
+            keyboardController?.show()
+            onFocusRequestHandled()
+        }
+    }
 
     // Long-press URL actions (copy / share / paste-and-go). All three
     // are answered from what the capsule already holds — the committed
