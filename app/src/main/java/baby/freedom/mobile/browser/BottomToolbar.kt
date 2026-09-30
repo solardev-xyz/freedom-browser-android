@@ -3076,9 +3076,9 @@ private fun OverflowMenuButton(
                         DropdownMenuItem(
                             text = { MenuItemLabel("Find in page") },
                             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                            // Same rule as the bookmark row: nothing to
-                            // search on the home surface.
-                            enabled = state.url.isNotBlank(),
+                            // Nothing to search on the home surface, nor
+                            // on a tab whose renderer went away (#260).
+                            enabled = state.hasPageToActOn,
                             onClick = {
                                 menuExpanded = false
                                 onFindInPage()
@@ -3114,11 +3114,12 @@ private fun OverflowMenuButton(
                         )
                         // Print or save as PDF (#89). Same rule as Find
                         // in page: the home tab is Compose rather than a
-                        // page, so there is no document behind it to print.
+                        // page, so there is no document behind it to print
+                        // (nor is there on a tab whose renderer went away).
                         DropdownMenuItem(
                             text = { MenuItemLabel("Print") },
                             leadingIcon = { Icon(Icons.Filled.Print, contentDescription = null) },
-                            enabled = state.url.isNotBlank(),
+                            enabled = state.hasPageToActOn,
                             onClick = {
                                 menuExpanded = false
                                 onPrint()
