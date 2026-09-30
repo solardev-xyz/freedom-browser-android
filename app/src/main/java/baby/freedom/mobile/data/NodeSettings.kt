@@ -334,12 +334,16 @@ class NodeSettings private constructor(
     /**
      * Decide [introDismissed] if nothing has yet: a first launch shows the
      * introduction, but someone updating from a build that predates it
-     * isn't on one, so [usedBefore] (the install already has pages or
-     * bookmarks) counts as already dismissed. Asked only while undecided.
+     * isn't on one. Either this store already holds a setting (only the
+     * user's own choices write one, so a fresh install's is empty), or
+     * [usedBefore] (the install already has pages, bookmarks or a wallet)
+     * says so; either counts as already dismissed. Asked only while
+     * undecided.
      */
     suspend fun settleIntro(usedBefore: suspend () -> Boolean) {
-        if (store.data.first()[Keys.INTRO_DISMISSED] != null) return
-        val used = usedBefore()
+        val prefs = store.data.first()
+        if (prefs[Keys.INTRO_DISMISSED] != null) return
+        val used = prefs.asMap().keys.any { it != Keys.INTRO_DISMISSED } || usedBefore()
         store.edit { if (it[Keys.INTRO_DISMISSED] == null) it[Keys.INTRO_DISMISSED] = used }
     }
 

@@ -21,6 +21,8 @@ import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -120,7 +122,20 @@ fun HomeScreen(
     val showIntro = introDismissed == false && !introClosed
     val scope = rememberCoroutineScope()
     val externalSwarm by Gateways.externalSwarmBaseFlow.collectAsState()
-    val warmUp = swarmWarmUp(nodeInfo, runNodeEnabled, externalSwarm.isNotEmpty())
+    // `null` until the store has been read: [runNodeEnabled] arrives with
+    // an optimistic `true` before then, and Gateways' external endpoint as
+    // `""`, so for someone who switched the node off (or points Swarm at
+    // their own node) the line would flash up on a cold start.
+    val nodeSettings by remember(settings) {
+        settings.runNodeEnabled
+            .combine(settings.externalSwarmEndpoint) { run, ext -> run to ext.isNotEmpty() }
+            .catch { Log.w("HomeScreen", "reading the node settings failed (${it.javaClass.simpleName})") }
+    }.collectAsState(initial = null)
+    val warmUp = swarmWarmUp(
+        nodeInfo,
+        runNodeEnabled = nodeSettings?.let { it.first && runNodeEnabled },
+        external = nodeSettings?.second == true || externalSwarm.isNotEmpty(),
+    )
 
     Box(
         modifier = modifier.background(MaterialTheme.colorScheme.background),
@@ -247,10 +262,11 @@ internal enum class SwarmWarmUp { Starting, Connecting, Failed }
 /**
  * The Swarm warm-up line's state, or `null` once there is nothing to say:
  * the node has peers (the menu's "N peers"), the user switched it off, or
- * an external Swarm endpoint (#125) stands in for it.
+ * an external Swarm endpoint (#125) stands in for it. [runNodeEnabled] is
+ * `null` while the setting hasn't been read yet, which says nothing either.
  */
-internal fun swarmWarmUp(info: NodeInfo, runNodeEnabled: Boolean, external: Boolean): SwarmWarmUp? {
-    if (!runNodeEnabled || external) return null
+internal fun swarmWarmUp(info: NodeInfo, runNodeEnabled: Boolean?, external: Boolean): SwarmWarmUp? {
+    if (runNodeEnabled != true || external) return null
     return when (info.status) {
         // Enabled but not yet up: the service is on its way.
         NodeStatus.Stopped, NodeStatus.Starting -> SwarmWarmUp.Starting
@@ -325,7 +341,9 @@ private fun WarmUpRow(
             "Swarm sites open once it has found peers."
         SwarmWarmUp.Connecting -> "Your Swarm node is looking for peers…" to
             "Swarm sites open once it has found some."
-        SwarmWarmUp.Failed -> "Your Swarm node couldn't start" to
+        // Any error, not only one at start: a node that was running can
+        // fail later too, so this doesn't claim it never started.
+        SwarmWarmUp.Failed -> "Your Swarm node ran into a problem" to
             "Tap for details and to try again."
     }
     Row(

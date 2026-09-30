@@ -49,6 +49,17 @@ class HomeIntroTest {
     }
 
     @Test
+    fun `an install with a changed setting isn't greeted as a first launch`() = runBlocking {
+        // Upgrading with history cleared and no bookmarks, but a setting the
+        // user once changed (only their own choices write this store).
+        val file = MemoryStore(mutablePreferencesOf(booleanPreferencesKey("run_node_enabled") to false))
+        var asked = false
+        settings(file).settleIntro { asked = true; false }
+        assertFalse("the setting alone settles it", asked)
+        assertEquals(true, settings(file).introDismissed.first())
+    }
+
+    @Test
     fun `once decided, later starts don't decide again`() = runBlocking {
         // Shown on the first start; the pages visited since don't hide it.
         val file = MemoryStore()
@@ -73,6 +84,15 @@ class HomeIntroTest {
         assertNull(w(NodeStatus.Running, peers = 1))
         assertNull(w(NodeStatus.Running, peers = 42))
         assertEquals(SwarmWarmUp.Failed, w(NodeStatus.Error))
+    }
+
+    @Test
+    fun `no warm-up before the node setting has been read`() {
+        // A node-off user's cold start: the status reads Stopped and the
+        // setting isn't known yet, which must not flash "Starting…".
+        for (status in NodeStatus.entries) {
+            assertNull(swarmWarmUp(NodeInfo(status = status), runNodeEnabled = null, external = false))
+        }
     }
 
     @Test
