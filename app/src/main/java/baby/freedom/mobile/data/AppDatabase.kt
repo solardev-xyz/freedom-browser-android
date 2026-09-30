@@ -14,8 +14,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         FaviconEntry::class,
         DownloadEntry::class,
     ],
-    version = 3,
-    exportSchema = false,
+    version = 4,
+    exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun history(): HistoryDao
@@ -72,6 +72,28 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v3 -> v4: bookmarks get a `position` (#264), the order the user
+         * arranges them in. Numbered from the order they were listed in
+         * until now — newest first — so nobody's list reshuffles on
+         * upgrade.
+         */
+        internal val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `bookmarks` ADD COLUMN `position` INTEGER NOT NULL DEFAULT 0",
+                )
+                db.execSQL(
+                    "UPDATE `bookmarks` SET `position` = (" +
+                        "SELECT COUNT(*) FROM `bookmarks` AS `b` " +
+                        "WHERE `b`.`createdAt` > `bookmarks`.`createdAt` " +
+                        "OR (`b`.`createdAt` = `bookmarks`.`createdAt` AND `b`.`id` > `bookmarks`.`id`))",
+                )
+            }
+        }
+
+        internal val MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -79,7 +101,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "freedom.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(*MIGRATIONS)
                     .build()
                     .also { instance = it }
             }

@@ -487,6 +487,10 @@ fun BrowserScreen(
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
+    // The bookmark the "Bookmark added" snackbar's Edit opened (#264),
+    // and whether it was added from a private tab.
+    var editBookmark by rememberSaveable { mutableStateOf<Long?>(null) }
+    var editBookmarkPrivate by rememberSaveable { mutableStateOf(false) }
     var showDownloads by rememberSaveable { mutableStateOf(false) }
     var addressFocused by remember { mutableStateOf(false) }
     // Suggestions should only appear once the user has actively changed
@@ -1904,8 +1908,26 @@ fun BrowserScreen(
                     onToggleBookmark = {
                         val url = state.url
                         if (url.isBlank()) return@BottomToolbar
-                        if (isBookmarked) repo.unbookmark(url)
-                        else repo.bookmark(url, state.title)
+                        if (isBookmarked) {
+                            repo.unbookmark(url)
+                        } else {
+                            // Saved under the page's title; the snackbar
+                            // offers to name it (#264).
+                            val added = repo.bookmark(url, state.title)
+                            val private = state.private
+                            scope.launch {
+                                val id = added.await() ?: return@launch
+                                val result = snackbarHostState.showSnackbar(
+                                    "Bookmark added",
+                                    actionLabel = "Edit",
+                                    duration = SnackbarDuration.Short,
+                                )
+                                if (result == SnackbarResult.ActionPerformed) {
+                                    editBookmark = id
+                                    editBookmarkPrivate = private
+                                }
+                            }
+                        }
                     },
                     // Step one of the two-step tap: a tap on the compact
                     // capsule restores the resting bar and stops there.
@@ -2129,6 +2151,16 @@ fun BrowserScreen(
                 showHistory = false
                 submit(state, url)
             },
+        )
+    }
+
+    // The "Bookmark added" snackbar's Edit (#264), over the page.
+    editBookmark?.let { id ->
+        BookmarkEditDialog(
+            repo = repo,
+            id = id,
+            private = editBookmarkPrivate,
+            onDismiss = { editBookmark = null },
         )
     }
 

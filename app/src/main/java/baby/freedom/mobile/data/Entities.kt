@@ -1,5 +1,6 @@
 package baby.freedom.mobile.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -28,6 +29,12 @@ data class HistoryEntry(
  * the bookmark toggle in the chrome can be a simple upsert/delete on the
  * currently-visible URL without having to look up "is this the same as
  * an existing row?" first.
+ *
+ * [title] and [url] start as the page's, and the user can edit both
+ * (#264). [position] is the user's order: the list reads ascending
+ * [position] (ties newest first), a new bookmark goes in above all the
+ * others, and a drag or a Move up/down renumbers them
+ * ([BrowsingRepository.moveBookmark]).
  */
 @Entity(
     tableName = "bookmarks",
@@ -38,6 +45,7 @@ data class BookmarkEntry(
     val url: String,
     val title: String,
     val createdAt: Long,
+    @ColumnInfo(defaultValue = "0") val position: Long = 0,
 )
 
 /**
