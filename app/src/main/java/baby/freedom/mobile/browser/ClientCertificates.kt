@@ -107,7 +107,8 @@ internal class ClientCertChoices {
  *   background tab, from behind a full-screen panel, while Android's
  *   permission dialog is up or while the app isn't in front waits until
  *   its tab is on screen ([SitePermissionBroker.onScreenTab]). A tab
- *   closed meanwhile sends none.
+ *   closed meanwhile — or while its chooser is up — sends none, and a
+ *   pick made in that chooser isn't remembered ([chooseInTurn]).
  *
  * Main thread only, like the WebView callbacks that drive it.
  */
@@ -165,9 +166,22 @@ object ClientCertificates {
 
     /** Tab [tabId] closed: what it still had waiting for the chooser sends none. */
     fun onTabClosed(tabId: Long) {
-        for (p in pending) if (p.tabId == tabId) p.withdrawn.value = true
+        withdraw(tabId)
         privateTabs -= tabId
     }
+
+    /**
+     * Tab [tabId]'s page went with its WebView (a renderer gone, an
+     * Activity relaunch) while the tab stays: its requests send none,
+     * and an answer given in a chooser still open for one of them is
+     * neither sent nor remembered.
+     */
+    fun withdraw(tabId: Long) {
+        for (p in pending) if (p.tabId == tabId) p.withdrawn.value = true
+    }
+
+    /** Whether a private tab is open ([onPrivateTab], [onTabClosed]). */
+    internal val privateTabOpen: Boolean get() = privateTabs.isNotEmpty()
 
     /**
      * Part of *Clear cookies & site data*: forget every answer, ours and
@@ -188,24 +202,11 @@ object ClientCertificates {
                     answer(request) { ignore() }
                     return
                 }
-                val plan = chooserLock.withLock turn@{
-                    if (entry.withdrawn.value) return@turn ClientCertPlan.SendNone
-                    // Answered for this server while this request queued.
-                    val now = choices.planFor(false, request.host, request.port)
-                    if (now != ClientCertPlan.Ask) return@turn now
-                    // Switched away while queued behind another chooser: wait again.
-                    if (broker.onScreenTab.value != tabId || broker.androidDialogUp.value) return@turn null
-                    val open = choose ?: return@turn ClientCertPlan.SendNone
-                    val asOf = choices.generation
-                    val alias = try {
-                        open(request)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "client certificate chooser failed", e)
-                        return@turn ClientCertPlan.SendNone
-                    }
-                    choices.answered(request.host, request.port, alias, asOf)
-                    if (alias == null) ClientCertPlan.Refuse else ClientCertPlan.Send(alias)
-                } ?: continue
+                val plan = chooseInTurn(
+                    choices, chooserLock, request.host, request.port, tabId,
+                    broker.onScreenTab, broker.androidDialogUp, entry.withdrawn,
+                    choose?.let { open -> { open(request) } },
+                ) ?: continue
                 when (plan) {
                     ClientCertPlan.SendNone, ClientCertPlan.Ask -> answer(request) { ignore() }
                     ClientCertPlan.Refuse -> answer(request) { cancel() }
@@ -279,6 +280,45 @@ object ClientCertificates {
             Log.w(TAG, "client certificate request already answered", e)
         }
     }
+}
+
+/**
+ * One turn at the chooser for a request from tab [tabId] to [host]:[port],
+ * under [lock]. Returns what to answer, or `null` to wait for the tab to
+ * be on screen again.
+ *
+ * [withdrawn] is checked again once [open] returns: the tab may have been
+ * closed while its chooser was up (from the tab switcher, say), and then
+ * the pick is neither remembered nor sent to a request whose page is gone.
+ */
+internal suspend fun chooseInTurn(
+    choices: ClientCertChoices,
+    lock: Mutex,
+    host: String,
+    port: Int,
+    tabId: Long,
+    onScreenTab: StateFlow<Long?>,
+    androidDialogUp: StateFlow<Boolean>,
+    withdrawn: StateFlow<Boolean>,
+    open: (suspend () -> String?)?,
+): ClientCertPlan? = lock.withLock turn@{
+    if (withdrawn.value) return@turn ClientCertPlan.SendNone
+    // Answered for this server while this request queued.
+    val now = choices.planFor(false, host, port)
+    if (now != ClientCertPlan.Ask) return@turn now
+    // Switched away while queued behind another chooser: wait again.
+    if (onScreenTab.value != tabId || androidDialogUp.value) return@turn null
+    if (open == null) return@turn ClientCertPlan.SendNone
+    val asOf = choices.generation
+    val alias = try {
+        open()
+    } catch (e: Exception) {
+        Log.w("ClientCertificates", "client certificate chooser failed", e)
+        return@turn ClientCertPlan.SendNone
+    }
+    if (withdrawn.value) return@turn ClientCertPlan.SendNone
+    choices.answered(host, port, alias, asOf)
+    if (alias == null) ClientCertPlan.Refuse else ClientCertPlan.Send(alias)
 }
 
 /**

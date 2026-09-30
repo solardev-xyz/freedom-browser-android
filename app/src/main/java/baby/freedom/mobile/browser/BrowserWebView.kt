@@ -964,6 +964,7 @@ fun BrowserWebViewHost(
         EthereumProviders.onDocumentStarted(tab, url = null)
         SwarmProviders.onDocumentStarted(tab, url = null)
         X402Payments.onDocumentStarted(tab, view = null, url = null)
+        ClientCertificates.withdraw(tab.id)
         goneIds += tab.id
         refreshLayouts.remove(tab.id)?.let(frame::removeView)
         UnverifiedOrigins.release(wv)
@@ -1482,6 +1483,7 @@ fun BrowserWebViewHost(
                     EthereumProviders.onDocumentStarted(tab, url = null)
                     SwarmProviders.onDocumentStarted(tab, url = null)
                     X402Payments.onDocumentStarted(tab, view = null, url = null)
+                    ClientCertificates.withdraw(tab.id)
                 }
             } else {
                 // As when the last private tab closes (#86): the private
@@ -1493,6 +1495,11 @@ fun BrowserWebViewHost(
                 // (and keep reconnecting) for as long as the process is
                 // cached, with no page to deliver to.
                 for (tab in tabs.tabs) SwarmProviders.onDocumentStarted(tab, url = null)
+                // The tabs go too, private ones included (#316): the
+                // process can outlive them (the :node service keeps it),
+                // and a private tab still counted would keep emptying
+                // WebView's certificate table after each normal pick.
+                for (tab in tabs.tabs) ClientCertificates.onTabClosed(tab.id)
             }
             for (wv in webViews.values) {
                 UnverifiedOrigins.release(wv)

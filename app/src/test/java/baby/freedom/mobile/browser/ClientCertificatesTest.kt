@@ -4,6 +4,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
@@ -88,5 +89,42 @@ class ClientCertificatesTest {
         assertFalse(withTimeout(1_000) { wait.await() })
         // Withdrawn beats on screen.
         assertFalse(awaitChooserTurn(MutableStateFlow(2L), MutableStateFlow(false), 2L, MutableStateFlow(true)))
+    }
+
+    @Test
+    fun `a tab closed while its chooser is up sends none and its pick isn't remembered`() = runBlocking {
+        val c = ClientCertChoices()
+        val withdrawn = MutableStateFlow(false)
+        val plan = chooseInTurn(
+            c, Mutex(), "mtls.example", 443, 2L,
+            MutableStateFlow(2L), MutableStateFlow(false), withdrawn,
+        ) {
+            // The user closes the tab from the switcher, then picks.
+            withdrawn.value = true
+            "alice"
+        }
+        assertEquals(ClientCertPlan.SendNone, plan)
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "mtls.example", 443))
+    }
+
+    @Test
+    fun `a pick for a tab still open is sent and remembered`() = runBlocking {
+        val c = ClientCertChoices()
+        val plan = chooseInTurn(
+            c, Mutex(), "mtls.example", 443, 2L,
+            MutableStateFlow(2L), MutableStateFlow(false), MutableStateFlow(false),
+        ) { "alice" }
+        assertEquals(ClientCertPlan.Send("alice"), plan)
+        assertEquals(ClientCertPlan.Send("alice"), c.planFor(false, "mtls.example", 443))
+    }
+
+    @Test
+    fun `a closed private tab stops counting as open`() {
+        ClientCertificates.onPrivateTab(41L)
+        ClientCertificates.onPrivateTab(42L)
+        assertTrue(ClientCertificates.privateTabOpen)
+        // What the host's real destroy does for every tab.
+        for (id in listOf(41L, 42L)) ClientCertificates.onTabClosed(id)
+        assertFalse(ClientCertificates.privateTabOpen)
     }
 }
