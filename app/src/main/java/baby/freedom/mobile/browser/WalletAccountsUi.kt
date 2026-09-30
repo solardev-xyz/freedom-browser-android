@@ -146,6 +146,8 @@ internal fun balanceText(balance: TokenBalance?, decimals: Int, refreshing: Bool
  * makes it unlock first). Ledger accounts (#142) are listed with the
  * others, marked as the Ledger's; Connect a Ledger adds one (no unlock:
  * the key stays on the device), and Remove takes the active one off the list.
+ * Show private key (#323) opens [onShowKey] for the active account, only
+ * when its key is on this phone ([WalletAccount.hasLocalKey]).
  */
 @Composable
 internal fun AccountsSection(
@@ -157,6 +159,7 @@ internal fun AccountsSection(
     onReceive: () -> Unit,
     onConnectLedger: () -> Unit,
     onRemoveLedger: (WalletAccount) -> Unit,
+    onShowKey: (WalletAccount) -> Unit,
 ) {
     val context = LocalContext.current
     val active = list.active
@@ -181,6 +184,11 @@ internal fun AccountsSection(
             TextButton(onClick = onReceive) { Text(stringResource(R.string.wallet_accounts_show_qr)) }
             TextButton(onClick = { copyToClipboard(context, active.address) }) {
                 Text(stringResource(R.string.common_copy_address))
+            }
+            if (active.hasLocalKey) {
+                TextButton(onClick = { onShowKey(active) }, enabled = !busy, modifier = Modifier.testTag("wallet-show-key")) {
+                    Text(stringResource(R.string.wallet_key_show))
+                }
             }
         }
         if (list.accounts.size > 1) {

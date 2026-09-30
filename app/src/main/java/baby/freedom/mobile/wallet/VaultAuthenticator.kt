@@ -20,7 +20,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
  * happen just because the phone was pointed at its owner's face by someone
  * else holding it (#229); sealing a new phrase gives nobody anything. Restoring
  * from Google backup leaves an unlocked wallet, so it's held to Unlock's bar;
- * backing up opens the phrase, so it's held to Show recovery phrase's (#244).
+ * backing up opens the phrase, so it's held to Show recovery phrase's (#244),
+ * and so is showing one account's private key (#323).
  */
 enum class VaultAuthPurpose(
     @StringRes private val titleRes: Int,
@@ -33,6 +34,7 @@ enum class VaultAuthPurpose(
     REVEAL(R.string.wallet_auth_reveal_title, R.string.wallet_auth_reveal_subtitle, true),
     BACKUP(R.string.wallet_auth_backup_title, R.string.wallet_auth_backup_subtitle, true),
     RESTORE(R.string.wallet_auth_restore_title, R.string.wallet_auth_restore_subtitle, true),
+    EXPORT_KEY(R.string.wallet_auth_export_key_title, R.string.wallet_auth_export_key_subtitle, true),
     ;
 
     val title: String get() = Strings.get(titleRes)

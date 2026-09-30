@@ -326,6 +326,70 @@ class VaultTest {
     }
 
     @Test
+    fun `show private key asks every time and gives the key that signs for that account (#323)`() = runBlocking {
+        val v = vault()
+        val abandon = Mnemonic.parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        v.create(abandon, auth, imported = true)
+        // ethers: HDNodeWallet.fromPhrase(abandon…about, "", "m/44'/60'/0'/0/0").privateKey.
+        val first = WalletAccount(0, "Account 1", "0x9858EfFD232B4033E47d90003D41EC34EcaEda94")
+        val key = v.revealPrivateKey(auth, first)
+        assertEquals("0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727", key)
+        assertEquals(first.address, EthAccounts.addressOf(hex(key)))
+        // Another account's key is its own, and derives its own address.
+        val second = WalletAccount(1, "Account 2", "0x78839F6054d7ed13918bAe0473BA31b1Ca9D7265")
+        assertEquals(second.address, EthAccounts.addressOf(hex(v.revealPrivateKey(auth, second))))
+        assertEquals(
+            listOf(VaultAuthPurpose.IMPORT, VaultAuthPurpose.EXPORT_KEY, VaultAuthPurpose.EXPORT_KEY),
+            auth.asked,
+        )
+        assertTrue(VaultAuthPurpose.EXPORT_KEY.confirmationRequired)
+        // Locked, it still asks and still answers; the wallet stays locked.
+        v.lock()
+        assertEquals(key, v.revealPrivateKey(auth, first))
+        assertTrue(v.state.value is Vault.State.Locked)
+        // Cancelled: nothing.
+        auth.cancel = true
+        try {
+            v.revealPrivateKey(auth, first)
+            fail("a cancelled prompt shows no key")
+        } catch (_: VaultAuthCancelledException) {
+        }
+    }
+
+    @Test
+    fun `show private key refuses a Ledger's account and one that isn't this wallet's (#323)`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = true)
+        auth.asked.clear()
+        val ledger = WalletAccount(
+            -1, "Ledger 1", "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+            baby.freedom.mobile.wallet.ledger.LedgerKey("44'/60'/0'/0/0", "AA:BB", "Nano X"),
+        )
+        assertFalse(ledger.hasLocalKey)
+        try {
+            v.revealPrivateKey(auth, ledger)
+            fail("a Ledger's key isn't here")
+        } catch (_: IllegalArgumentException) {
+        }
+        // Not even asked: there's nothing to show.
+        assertTrue(auth.asked.isEmpty())
+        // Index 0 of another phrase: the derived key signs for a different address.
+        val stranger = WalletAccount(0, "Account 1", "0x9858EfFD232B4033E47d90003D41EC34EcaEda94")
+        try {
+            v.revealPrivateKey(auth, stranger)
+            fail("a key for another address must not be shown as this account's")
+        } catch (_: IllegalStateException) {
+        }
+    }
+
+    private fun hex(key: String): ByteArray {
+        assertTrue(key, Regex("0x[0-9a-f]{64}").matches(key))
+        return key.removePrefix("0x").chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+    }
+
+    @Test
     fun `reveal asks every time and markBackedUp clears the reminder`() = runBlocking {
         val v = vault()
         v.create(phrase, auth, imported = false)

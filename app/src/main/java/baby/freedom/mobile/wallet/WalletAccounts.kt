@@ -42,6 +42,13 @@ data class WalletAccount(val index: Int, val name: String, val address: String, 
 
     val isLedger: Boolean get() = ledger != null
 
+    /**
+     * Whether the key signing for this account is derived on this phone
+     * from the wallet's seed, and so can be shown (#323). Not a Ledger's:
+     * its key never leaves the device.
+     */
+    val hasLocalKey: Boolean get() = ledger == null && index in 0 until EthAccounts.MAX_INDEX
+
     companion object {
         fun pathFor(index: Int) = "m/44'/60'/$index'/0/0"
 
@@ -63,15 +70,23 @@ data class WalletAccountList(val accounts: List<WalletAccount>, val activeIndex:
 internal object EthAccounts {
     /** The checksummed address of account [index] (see [WalletAccount]); the private key is zeroed before returning. */
     fun address(seed: ByteArray, index: Int): String {
-        require(index in 0 until MAX_INDEX) { "account index out of range" }
-        val key = HdKeys.secp256k1(seed, WalletAccount.pathFor(index))
+        val key = privateKey(seed, index)
         return try {
-            val pub = Secp256k1Keys.publicKeyUncompressed(key)
-            NodeIdentity.checksum(Keccak256.digest(pub).copyOfRange(12, 32))
+            addressOf(key)
         } finally {
             key.fill(0)
         }
     }
+
+    /** Account [index]'s secp256k1 private key (32 bytes). The caller zeroes it. */
+    fun privateKey(seed: ByteArray, index: Int): ByteArray {
+        require(index in 0 until MAX_INDEX) { "account index out of range" }
+        return HdKeys.secp256k1(seed, WalletAccount.pathFor(index))
+    }
+
+    /** The checksummed address a secp256k1 private [key] signs for. */
+    fun addressOf(key: ByteArray): String =
+        NodeIdentity.checksum(Keccak256.digest(Secp256k1Keys.publicKeyUncompressed(key)).copyOfRange(12, 32))
 
     /** BIP-44 account indices are hardened, so 31 bits. */
     const val MAX_INDEX = 0x7fffffff
