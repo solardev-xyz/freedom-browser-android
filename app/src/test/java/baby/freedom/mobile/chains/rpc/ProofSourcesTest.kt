@@ -6,7 +6,11 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
@@ -332,7 +336,7 @@ class ProofSourcesTest {
             present = { true },
         )
         // The router's wait (its tier timeout) runs out on a stalled prover.
-        assertNull(withTimeoutOrNull(200) { source.request(100, "eth_getBalance", balance, emptyList()) })
+        assertNull(withRouterWait(200) { source.request(100, "eth_getBalance", balance, emptyList()) })
         assertEquals(ProofTierGap.UNREACHABLE, source.gap(100))
         // The next read doesn't wait again: it isn't even asked.
         assertFalse(source.isAvailable(100))
@@ -342,6 +346,64 @@ class ProofSourcesTest {
         val deadline = System.nanoTime() + 5_000_000_000L
         while (!source.isAvailable(100) && System.nanoTime() < deadline) Thread.sleep(20)
         assertTrue(source.isAvailable(100))
+    }
+
+    @Test
+    fun `a reader that stops waiting before the router does doesn't back the prover off`() = runBlocking {
+        val gate = CountDownLatch(1)
+        val v = Roundtrip(proven)
+        val source = ColibriChainSource(
+            EnsColibri(v, http = { _, _, _, _, _ ->
+                gate.await(10, TimeUnit.SECONDS)
+                EnsColibri.Http.Reply(200, ByteArray(0))
+            }),
+            present = { true },
+        )
+        try {
+            // A caller's own timeout, shorter than the router's wait (R4-M1).
+            assertNull(withTimeoutOrNull(100) { withRouterWait(5_000) { source.request(100, "eth_getBalance", balance, emptyList()) } })
+            assertNull(source.backoffRemainingMs(100))
+            // The reader going away: the user left the balances page mid-read.
+            val reader = launch(Dispatchers.Default) {
+                withRouterWait(5_000) { source.request(100, "eth_getBalance", balance, emptyList()) }
+            }
+            Thread.sleep(100)
+            reader.cancelAndJoin()
+            assertNull(source.backoffRemainingMs(100))
+            assertTrue(source.isAvailable(100))
+            // A source asked outside the router (no wait of its own) isn't backed off by its reader either.
+            assertNull(withTimeoutOrNull(100) { source.request(100, "eth_getBalance", balance, emptyList()) })
+            assertTrue(source.isAvailable(100))
+        } finally {
+            gate.countDown()
+        }
+    }
+
+    @Test
+    fun `the router's wait is null when it runs out, and passes the caller's own cancellation on`() = runBlocking {
+        assertNull(withRouterWait(50) { kotlinx.coroutines.delay(5_000); 1 })
+        assertEquals(1, withRouterWait(5_000) { 1 })
+        val ranOut = mutableListOf<Boolean>()
+        assertNull(
+            withTimeoutOrNull(50) {
+                withRouterWait(5_000) {
+                    try {
+                        kotlinx.coroutines.delay(5_000)
+                    } finally {
+                        ranOut += currentCoroutineContext()[RouterWait]!!.ranOut
+                    }
+                }
+            },
+        )
+        assertEquals(listOf(false), ranOut)
+        withRouterWait(50) {
+            try {
+                kotlinx.coroutines.delay(5_000)
+            } finally {
+                ranOut += currentCoroutineContext()[RouterWait]!!.ranOut
+            }
+        }
+        assertEquals(listOf(false, true), ranOut)
     }
 
     // ---- Colibri: a page's read doesn't back the wallet's off (R2-F1) ----
@@ -426,7 +488,7 @@ class ProofSourcesTest {
             // A site keeps slow calls going: each misses the router's wait
             // and carries on in the background, holding its slot.
             repeat(ColibriChainSource.MAX_IN_FLIGHT) {
-                runCatching { withTimeoutOrNull(200) { source.request(100, "eth_call", call, emptyList(), page) } }
+                runCatching { withRouterWait(200) { source.request(100, "eth_call", call, emptyList(), page) } }
             }
             // Only the sites' share of them reached the verifier.
             assertEquals(ColibriChainSource.MAX_PAGE_IN_FLIGHT, v.methods.count { it == "eth_call" })
@@ -448,7 +510,7 @@ class ProofSourcesTest {
         var admitted = false
         while (!admitted && System.nanoTime() < deadline) {
             val before = v.methods.count { it == "eth_call" }
-            runCatching { withTimeoutOrNull(500) { source.request(100, "eth_call", call, emptyList(), page) } }
+            runCatching { withRouterWait(500) { source.request(100, "eth_call", call, emptyList(), page) } }
             admitted = v.methods.count { it == "eth_call" } > before
             if (!admitted) Thread.sleep(20)
         }
@@ -467,7 +529,7 @@ class ProofSourcesTest {
             present = { true },
         )
         // The router's 2 s page wait runs out on a call the prover is slow to prove.
-        assertNull(withTimeoutOrNull(200) { source.request(100, "eth_call", call, emptyList(), page) })
+        assertNull(withRouterWait(200) { source.request(100, "eth_call", call, emptyList(), page) })
         // A canary no page shapes checks the prover; it proves at once.
         val deadline = System.nanoTime() + 5_000_000_000L
         while ("eth_getBlockByNumber" !in v.methods && System.nanoTime() < deadline) Thread.sleep(20)

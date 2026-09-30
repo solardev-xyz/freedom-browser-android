@@ -3,6 +3,15 @@ package baby.freedom.mobile.chains.rpc
 import androidx.annotation.StringRes
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 
 /**
  * A tier [ChainDataRouter] can ask for chain state (#108), in the order
@@ -243,4 +252,51 @@ enum class ProofTierGap {
 
     /** Not ready for this chain (the light client: off, syncing, parked on a stale anchor). */
     NOT_READY,
+}
+
+/**
+ * The router's wait for one proof tier's answer, carried into the
+ * source's call ([withRouterWait]) so the source can tell that wait
+ * running out — a missed wait, which says something about the prover —
+ * from its reader going away first: the user leaving the page, or a
+ * caller's own shorter timeout, which says nothing (#329 R4-M1).
+ */
+internal class RouterWait : AbstractCoroutineContextElement(Key) {
+    /** Set by the router's own timer just before it cancels the call: nothing else sets it. */
+    @Volatile
+    var ranOut = false
+        private set
+
+    internal fun expire() {
+        ranOut = true
+    }
+
+    companion object Key : CoroutineContext.Key<RouterWait>
+}
+
+/**
+ * [block] under the router's [ms] wait for a proof tier, as
+ * `withTimeoutOrNull`: null when the wait runs out. [block] runs with a
+ * [RouterWait] in its context whose [RouterWait.ranOut] is set before
+ * the cancellation reaches it — and only then, never when the caller
+ * itself is cancelled.
+ */
+internal suspend fun <T> withRouterWait(ms: Long, block: suspend () -> T): T? = coroutineScope {
+    val wait = RouterWait()
+    val work = async(wait) { block() }
+    val timer = launch {
+        delay(ms)
+        wait.expire()
+        work.cancel()
+    }
+    try {
+        work.await()
+    } catch (e: CancellationException) {
+        // Ours ran out: no answer. Anything else (the caller went away) goes on up.
+        if (!wait.ranOut) throw e
+        currentCoroutineContext().ensureActive()
+        null
+    } finally {
+        timer.cancel()
+    }
 }

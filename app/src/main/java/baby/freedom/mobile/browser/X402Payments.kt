@@ -10,6 +10,7 @@ import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainTrust
+import baby.freedom.mobile.chains.rpc.RoutingContext
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.X402Store
@@ -282,7 +283,11 @@ object X402Payments {
         while (true) {
             val account = activeAccount(vault, walletAccounts)
             val chains = ChainStore.get(app).chainsOrUnreadable.first().orEmpty()
-            val rpc = WalletRpc(ChainDataRouter.get(app))
+            // The offers' token contracts are the site's choice: read as the site's reads, so
+            // one it makes slow to prove can't back the proof tiers off, or take their slots,
+            // from the wallet's own reads (#329 R4-F1). Still only a verified answer counts
+            // ([tokenReadTrusted]).
+            val rpc = WalletRpc(ChainDataRouter.get(app), RoutingContext.forPage(d.origin))
             val (options, unreadable) = options(d.required, chains, rpc, account?.address)
             val unusable = d.required.unusable + unreadable
             val allowances = store.allowances.first()

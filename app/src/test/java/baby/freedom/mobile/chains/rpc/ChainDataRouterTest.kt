@@ -537,6 +537,66 @@ class ChainDataRouterTest {
     }
 
     @Test
+    fun aSitesSlowTokenContractThroughWalletRpcDoesntBackColibriOffForTheWallet() = kotlinx.coroutines.runBlocking {
+        // An x402 offer names a token contract whose decimals() the prover
+        // can't prove in time. Read as the site's (#329 R4-F1), the miss
+        // only asks a canary, which proves: the wallet's next balance read
+        // is still Colibri's, and the site's read took one of the sites'
+        // slots, not the wallet's.
+        val net = Net()
+        BuiltInChains.GNOSIS.rpcUrls.forEach { url -> net.handlers[url] = { ok("0x" + "0".repeat(63) + "6") } }
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val methods = CopyOnWriteArrayList<String>()
+        val byCtx = ConcurrentHashMap<Long, String>()
+        val next = AtomicLong(10)
+        val engine = object : baby.freedom.mobile.ens.EnsColibri.Engine {
+            override val available = true
+            override fun create(method: String, params: String, chainId: Long, proverFlags: Int, verifyFlags: Int, proverMode: Int): Long {
+                methods += method
+                return next.incrementAndGet().also { byCtx[it] = method }
+            }
+            override fun setMinLatestBlockTs(ctx: Long, unixSeconds: Long) = Unit
+            override fun execute(ctx: Long) = when (byCtx[ctx]) {
+                // The site's contract: a prover round that stalls.
+                "eth_call" -> JSONObject().put("status", "pending")
+                    .put("requests", JSONArray().put(JSONObject().put("type", "prover").put("req_ptr", "5")))
+                "eth_getBlockByNumber" -> JSONObject().put("status", "success").put("result", JSONObject().put("number", "0x10"))
+                else -> JSONObject().put("status", "success").put("result", "0x64")
+            }.toString()
+            override fun setResponse(req: Long, data: ByteArray, nodeIndex: Int) = Unit
+            override fun setError(req: Long, error: String, nodeIndex: Int) = Unit
+            override fun free(ctx: Long) = Unit
+        }
+        val colibri = ColibriChainSource(
+            baby.freedom.mobile.ens.EnsColibri(engine, http = { _, _, _, _, _ ->
+                gate.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                throw IOException("still stalled")
+            }),
+            present = { true },
+        )
+        // Real time: the router's wait mustn't run out on a virtual clock
+        // while the prover's (real) threads are still answering.
+        val r = ChainDataRouter(
+            chains = { listOf(BuiltInChains.GNOSIS) },
+            transport = net.transport,
+            verifiedSources = mapOf(ChainSource.COLIBRI to colibri),
+        )
+        val site = WalletRpc(r, RoutingContext.forPage("https://pay.example"))
+        val wallet = WalletRpc(r)
+        try {
+            val decimals = site.call(100, JSONObject().put("to", "0x" + "11".repeat(20)).put("data", "0x313ce567"))
+            assertEquals(ChainSource.QUORUM, decimals.trust.source)
+            val deadline = System.nanoTime() + 5_000_000_000L
+            while ("eth_getBlockByNumber" !in methods && System.nanoTime() < deadline) Thread.sleep(20)
+            Thread.sleep(100)
+            assertNull(colibri.backoffRemainingMs(100))
+            assertEquals(ChainSource.COLIBRI, wallet.balance(100, "0x" + "ab".repeat(20)).trust.source)
+        } finally {
+            gate.countDown()
+        }
+    }
+
+    @Test
     fun aProofSourceIsGivenTheChainsPoolUsersRpcsFirst() = runTest {
         val net = Net()
         val colibri = FakeSource { ChainDataResult("0x1", proof.copy(source = ChainSource.COLIBRI)) }

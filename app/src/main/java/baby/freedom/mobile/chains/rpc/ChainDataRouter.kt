@@ -23,7 +23,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 
 /**
@@ -357,7 +356,7 @@ class ChainDataRouter internal constructor(
             reason.also { keeper.note(ChainFailure(null, it, null, timeout)) }
         val s = verifiedSources[source]?.takeIf { it.isAvailable(chain.id) } ?: return failed("not available")
         return try {
-            withTimeoutOrNull(waitMs) { s.request(chain.id, method, params, pool, context) }
+            withRouterWait(waitMs) { s.request(chain.id, method, params, pool, context) }
                 ?: failed("no answer within ${waitMs}ms", timeout = true)
         } catch (e: CancellationException) {
             // The source's own cancellation, not ours: no answer.

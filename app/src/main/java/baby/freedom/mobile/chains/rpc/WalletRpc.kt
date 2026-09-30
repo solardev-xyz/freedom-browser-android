@@ -7,15 +7,25 @@ import org.json.JSONObject
 /**
  * The wallet's typed view of [ChainDataRouter] (#108), iOS's `WalletRPC`:
  * the reads a wallet makes (balances, nonce, gas, calls, receipts) and
- * its broadcast, all as the wallet's own requests
- * ([RoutingContext.WALLET]), each value with the [ChainTrust] behind it.
+ * its broadcast, as the wallet's own requests ([RoutingContext.WALLET])
+ * unless built for a site's ([context]), each value with the [ChainTrust] behind it.
  * Wallet code goes through here rather than to an RPC URL, so every read
  * gets the chain's verification ladder.
  *
  * Throws what the router throws ([ChainRpcException]), plus
  * [ChainRpcException.InvalidResponse] for an answer of the wrong shape.
  */
-class WalletRpc(private val router: ChainDataRouter) {
+class WalletRpc(
+    private val router: ChainDataRouter,
+    /**
+     * Whose reads these are: the wallet's own by default. A read of
+     * something a site chose — an x402 offer's token contract — is the
+     * site's ([RoutingContext.forPage]), so a slow or unprovable contract
+     * of its choosing gets a page's share of the proof tiers' slots and
+     * can't back them off for the wallet's own reads (#329 R4-F1).
+     */
+    private val context: RoutingContext = RoutingContext.WALLET,
+) {
     /** A value read from a chain, and how it was checked. */
     data class Reading<T>(val value: T, val trust: ChainTrust)
 
@@ -140,7 +150,7 @@ class WalletRpc(private val router: ChainDataRouter) {
         agreeOn: ((Any?) -> Any?)?,
         parse: (Any?) -> T,
     ): Reading<T> {
-        val r = router.request(chainId, method, params, RoutingContext.WALLET, agreeOn)
+        val r = router.request(chainId, method, params, context, agreeOn)
         return Reading(parse(r.result), r.trust)
     }
 

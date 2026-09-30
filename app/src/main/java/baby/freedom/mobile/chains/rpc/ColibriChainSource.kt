@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -40,7 +41,8 @@ import org.json.JSONObject
  * **Back-off**, per chain, as name resolution's ([baby.freedom.mobile.ens.EnsResolver]
  * `ColibriBackoff`): a call that can't reach the chain's provers or
  * servers ([EnsColibri.Failure.unreachable], or an unexpected error),
- * or that outlasts the router's wait, makes the tier unavailable for
+ * or that outlasts the router's wait ([RouterWait]: not a reader that
+ * stopped waiting sooner, which says nothing about the prover), makes the tier unavailable for
  * [BACKOFF_MS], doubling with each further one up to [BACKOFF_MAX_MS] —
  * so a prover that's down costs one read the tier's wait, not every
  * read. A call the router stops waiting for carries on in the
@@ -110,6 +112,8 @@ internal class ColibriChainSource(
         rpcs: List<String>,
         context: RoutingContext,
     ): ChainDataResult {
+        // The router's wait, which says whether it ran out: see the catch below.
+        val routerWait = currentCoroutineContext()[RouterWait]
         if (!enabled()) throw Unanswered("Colibri proofs are off")
         backoffRemainingMs(chainId)?.let { throw Unanswered("backing off for ${it}ms: the prover couldn't be reached") }
         if (method !in METHODS) throw Unanswered("Colibri doesn't prove $method")
@@ -167,9 +171,11 @@ internal class ColibriChainSource(
         val (status, provers) = try {
             call.await() ?: throw Unanswered("no proof within ${backgroundMs}ms")
         } catch (e: CancellationException) {
-            // The router's wait ran out (or its reader went away) with
-            // the call still running: a missed wait. It carries on.
-            if (call.isActive) failed()
+            // With the call still running (it carries on): a missed wait
+            // only if it was the router's wait that ran out. A reader that
+            // went away first — the user left the page, or a caller's own
+            // shorter timeout — says nothing about the prover (R4-M1).
+            if (call.isActive && routerWait?.ranOut == true) failed()
             throw e
         }
         if (status.optString("status") == "revert") {
