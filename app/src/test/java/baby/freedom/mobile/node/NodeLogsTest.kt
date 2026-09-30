@@ -74,6 +74,38 @@ class NodeLogsTest {
     }
 
     @Test
+    fun `a dnslink name of a visited ipns site is taken out`() {
+        // The name_* phases of freedom-ipfs's namesys, as logged opening ipns://docs.ipfs.tech/.
+        val lines = listOf(
+            """INFO gateway_request{request_id=3 top_level_path= namespace="ipns" path=/ipns/docs.ipfs.tech/ range=}: """ +
+                """freedom_ipfs_namesys: phase="name_cache" name="docs.ipfs.tech" cache_hit=false""",
+            """INFO freedom_ipfs_gateway: phase="name_persistent_cache" name="docs.ipfs.tech" cache_hit=true """ +
+                """resolved_target=/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi""",
+            """WARN freedom_ipfs_gateway: phase="name_persistent_cache_store" name="docs.ipfs.tech" """ +
+                """resolved_target="/ipns/docs.ipfs.tech" error=disk full""",
+            """WARN freedom_ipfs_gateway: phase="name_resolve" ok=false error=dnslink record not found for docs.ipfs.tech elapsed_ms=12""",
+            """WARN freedom_ipfs_gateway: phase="name_resolve" ok=false error="invalid dnslink record: dnslink=/ipns/docs.ipfs.tech"""",
+            "DEBUG doh query _dnslink.docs.ipfs.tech TXT",
+            """INFO freedom_ipfs_gateway: phase="gateway_conditional" etag="\"fi1:bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi:docs/a.html:12\"" """,
+            """INFO freedom_ipfs_gateway: phase="x" directory_cid=QmT5NvUtoM5nWFfrQdVrFtvGfKFmG7AHE8P34isapyhCxX source_peer_previous_top_level_path=/ipns/docs.ipfs.tech""",
+        )
+        for (l in lines) {
+            val out = LogScrub.scrub(l)
+            assertFalse(out, "docs" in out)
+            assertFalse(out, "bafybei" in out)
+            assertFalse(out, "QmT5" in out)
+        }
+        assertEquals(
+            """WARN freedom_ipfs_gateway: phase="name_resolve" ok=false error=dnslink record not found for <redacted> elapsed_ms=12""",
+            LogScrub.scrub(lines[3]),
+        )
+        assertEquals(
+            """INFO freedom_ipfs_namesys: phase="name_cache" name=<redacted> cache_hit=false""",
+            LogScrub.scrub("""INFO freedom_ipfs_namesys: phase="name_cache" name="docs.ipfs.tech" cache_hit=false"""),
+        )
+    }
+
+    @Test
     fun `a bare cid and an ipns key are taken out`() {
         val out = LogScrub.scrub(
             "resolving bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi via " +
@@ -164,6 +196,37 @@ class NodeLogsTest {
             "I RadicleNode: seed rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5 → done",
         )
         for (l in lines) assertEquals(l, LogScrub.scrub(l))
+    }
+
+    // ---- Clear cookies & site data forgets the kept lines ----
+
+    @Test
+    fun `a cleared ring is empty and takes lines again`() {
+        val ring = LogRing(maxLines = 10, maxChars = 100, maxLineChars = 50)
+        ring.add("one")
+        ring.add("two")
+        ring.clear()
+        assertEquals(0, ring.size)
+        assertEquals(0, ring.totalChars)
+        ring.add("three")
+        assertEquals(listOf("three"), ring.snapshot())
+    }
+
+    @Test
+    fun `clear forgets every node's lines, and a line read before it isn't kept after`() {
+        val before = NodeLogs.generation()
+        assertTrue(NodeLogs.keep(before, NodeLogSource.Ipfs, "ipfs line"))
+        assertTrue(NodeLogs.keep(before, NodeLogSource.Tor, "tor line"))
+        NodeLogs.clear()
+        for (s in NodeLogSource.entries) assertEquals("", NodeLogs.text(s))
+        // The reader was mid-way through logcat's output when the clear came.
+        assertFalse(NodeLogs.keep(before, NodeLogSource.Ipfs, "logged before the clear"))
+        assertEquals("", NodeLogs.text(NodeLogSource.Ipfs))
+        // Started over, it keeps what comes after.
+        val after = NodeLogs.generation()
+        assertTrue(NodeLogs.keep(after, NodeLogSource.Ipfs, "after name=\"docs.ipfs.tech\""))
+        assertEquals("after name=<redacted>", NodeLogs.text(NodeLogSource.Ipfs))
+        NodeLogs.clear()
     }
 
     // ---- LogcatLine ----

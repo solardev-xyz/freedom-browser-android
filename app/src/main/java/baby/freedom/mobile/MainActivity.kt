@@ -592,6 +592,7 @@ class MainActivity : ComponentActivity() {
                         onStatusBarTint = { statusBarTint = it },
                         onPanelShown = { panelShown = it },
                         readNodeLogs = ::readNodeLogs,
+                        clearNodeLogs = ::clearNodeLogs,
                     )
                 }
             }
@@ -778,6 +779,17 @@ class MainActivity : ComponentActivity() {
             NodeLogSource.LightClient -> myotisBinder?.logs
         }
     }.getOrNull()
+
+    /**
+     * Part of *Clear cookies & site data* (#276): every node process that's
+     * running forgets the log lines it kept. One-way calls — nothing waits.
+     * A process that isn't bound isn't running, and keeps no lines.
+     */
+    private fun clearNodeLogs() {
+        runCatching { binder?.clearLogs() }
+        runCatching { torBinder?.clearLogs() }
+        runCatching { myotisBinder?.clearLogs() }
+    }
 
     /** The IPFS node's retrieval / routing counters, same terms as above. */
     private fun ipfsCounters(): LongArray? =

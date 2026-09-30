@@ -186,8 +186,8 @@ internal fun notRunningNote(source: NodeLogSource): String =
 
 internal const val SHARE_WARNING =
     "Logs can contain this device's node addresses and peer IDs, the addresses of the peers and " +
-        "servers the node talked to, and the IDs of Radicle repositories. Addresses of the pages you " +
-        "visited are taken out before a line is kept. Share them only with someone you trust."
+        "servers the node talked to, and the IDs of Radicle repositories. The addresses and names of " +
+        "the pages you visited are taken out before a line is kept. Share them only with someone you trust."
 
 /** The shared text: which app, node and time, then the lines. */
 internal fun nodeLogShareText(version: String, source: NodeLogSource, at: Date, lines: List<String>): String {

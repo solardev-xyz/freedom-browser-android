@@ -157,4 +157,7 @@ interface INodeService {
      * addresses already taken out (NodeLogs). "" for an unknown source.
      */
     String getLogs(int source);
+
+    /** Forget every node's kept log lines (#276): Clear cookies & site data. */
+    oneway void clearLogs();
 }

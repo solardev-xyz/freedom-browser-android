@@ -453,6 +453,8 @@ fun BrowserScreen(
     onPanelShown: (Boolean) -> Unit = {},
     /** A node's recent log lines (#276), or null while its process isn't running. Blocking. */
     readNodeLogs: (NodeLogSource) -> String? = { null },
+    /** Every running node forgets its kept log lines (part of Clear cookies & site data). */
+    clearNodeLogs: () -> Unit = {},
 ) {
     // Outside composition, so the tabs survive an Activity relaunch
     // (#183, see [TabsSession]).
@@ -2172,6 +2174,8 @@ fun BrowserScreen(
                 // Closed tabs carry their saved back/forward history.
                 tabs.forgetClosedTabs()
                 tabs.clearWebViewData?.invoke()
+                // The nodes' logs can name what was browsed (#276).
+                clearNodeLogs()
             },
             onDismiss = { showSettings = false },
             onOpenIpfsLogs = { showLogs = NodeLogSource.Ipfs },

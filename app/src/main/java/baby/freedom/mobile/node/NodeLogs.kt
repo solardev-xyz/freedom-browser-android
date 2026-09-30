@@ -54,6 +54,12 @@ class LogRing(
     @Synchronized
     fun snapshot(): List<String> = lines.toList()
 
+    @Synchronized
+    fun clear() {
+        lines.clear()
+        chars = 0
+    }
+
     /** The lines, newline-joined. */
     fun text(): String = snapshot().joinToString("\n")
 
@@ -88,10 +94,32 @@ class LogRing(
 object LogScrub {
     private const val REDACTED = "<redacted>"
 
-    /** `key=value` fields that carry a page's address or content ID. */
+    /**
+     * `key=value` fields that carry a page's address, its name or a
+     * content ID — matched by the key's ending, so every variant
+     * freedom-ipfs has (`path`, `top_level_path`, `unixfs_path`,
+     * `source_peer_previous_top_level_path`; `cid`, `file_cid`,
+     * `root_cid`, `directory_cid`, `cids`; `resolved_target`, `targets`;
+     * the DNSLink / IPNS `name` of the `name_cache` phases) and any a
+     * later version adds is covered, not just the ones named here.
+     * `etag` holds a file's CID and path. A quoted value runs to its
+     * closing quote, past any `\"` inside it.
+     */
     private val FIELD = Regex(
-        """\b(path|top_level_path|unixfs_path|url|uri|href|referer|referrer|host|hostname|cid|cids|file_cid|root_cid|reference)=("[^"]*"|\[[^\]]*]|[^\s,}]*)""",
+        """\b([A-Za-z_]*(?:path|paths|cid|cids|name|names|target|targets|url|uri|href|referer|referrer|host|hostname|domain|dnslink|etag|reference))=("(?:[^"\\]|\\.)*"|\[[^\]]*]|[^\s,}]*)""",
     )
+
+    /**
+     * A DNSLink / IPNS name inside free text — freedom-ipfs's resolver
+     * errors (`dnslink record not found for docs.ipfs.tech`, `invalid
+     * dnslink record: …`, `invalid IPNS name: …`, `http resolver: …`)
+     * and the `_dnslink.<name>` it looks up. The error text runs to the
+     * end of the field, so to the next ` key=` or the end of the line.
+     */
+    private val NAME_ERROR = Regex(
+        """(?i)(dnslink record not found for|invalid dnslink record:|invalid ipns name:|invalid ipns record:|http resolver:)\s*.*?(?=\s+[A-Za-z_]+=|"|$)""",
+    )
+    private val DNSLINK_NAME = Regex("""(?i)\b_dnslink\.[A-Za-z0-9._-]+""")
 
     /** Anything with a scheme: `https://…`, `bzz://…`, `ipfs://…`, `rad://…`. */
     private val URL = Regex("""\b[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'<>]*""")
@@ -124,6 +152,8 @@ object LogScrub {
     fun scrub(line: String): String {
         var s = line
         s = FIELD.replace(s) { "${it.groupValues[1]}=$REDACTED" }
+        s = NAME_ERROR.replace(s) { "${it.groupValues[1]} $REDACTED" }
+        s = DNSLINK_NAME.replace(s, "_dnslink.$REDACTED")
         s = URL.replace(s, "<url>")
         s = GATEWAY_PATH.replace(s) { "/${it.groupValues[1]}/$REDACTED" }
         s = SWARM_REF.replace(s, "<ref>")
@@ -186,7 +216,7 @@ private val RADICLE_TARGET = Regex("""\b(?:lib)?radicle[a-z_]*(?:::[a-z_:]+)?:""
  * logcat for this process's own PID only — the native nodes log there —
  * and keeps each node's lines, scrubbed ([LogScrub]), in a [LogRing] in
  * memory. Nothing is written to a file; the lines go when the process
- * exits.
+ * exits, or when the user clears cookies & site data ([clear]).
  */
 object NodeLogs {
     private const val TAG = "NodeLogs"
@@ -199,6 +229,15 @@ object NodeLogs {
     )
 
     private val rings = NodeLogSource.entries.associateWith { LogRing() }
+
+    /** Guards [rings] against a [clear] landing between a line's check and its add. */
+    private val lock = Any()
+
+    /** Bumped by [clear]: a line read under an older one was logged before the clear. */
+    private var generation = 0
+
+    /** Wall-clock ms of the last [clear]: where the reader picks logcat up again. */
+    private var clearedAtMs = 0L
 
     @Volatile
     private var reader: Thread? = null
@@ -233,6 +272,38 @@ object NodeLogs {
         Runtime.getRuntime().addShutdownHook(Thread { stop() })
     }
 
+    /**
+     * Forget every line kept so far (part of *Clear cookies & site
+     * data*): what a line the scrubber missed, or the timing of the
+     * user's browsing, says goes with the rest of the site data. Lines
+     * logcat has already handed the reader but it hasn't kept yet are
+     * dropped too — the reader starts logcat over from this moment.
+     */
+    fun clear() {
+        synchronized(lock) {
+            generation++
+            clearedAtMs = System.currentTimeMillis()
+            rings.values.forEach { it.clear() }
+        }
+        logcat?.destroy()
+    }
+
+    /** The current [generation], for [keep]. */
+    internal fun generation(): Int = synchronized(lock) { generation }
+
+    /**
+     * Keep [line] in [source]'s ring, scrubbed, unless a [clear] has come
+     * since [gen] was read: then false, and the reader starts over.
+     */
+    internal fun keep(gen: Int, source: NodeLogSource, line: String): Boolean {
+        val scrubbed = LogScrub.scrub(line)
+        synchronized(lock) {
+            if (gen != generation) return false
+            rings.getValue(source).add(scrubbed)
+            return true
+        }
+    }
+
     /** Stop following (the process is about to exit). */
     fun stop() {
         stopped = true
@@ -242,6 +313,7 @@ object NodeLogs {
     private fun follow(pid: Int, since: String, processName: String, route: (String, String) -> NodeLogSource?) {
         var from = since
         while (!stopped) {
+            val gen = generation()
             try {
                 val proc = ProcessBuilder("logcat", "-v", "threadtime", "--pid=$pid", "-T", from)
                     .redirectErrorStream(true)
@@ -253,13 +325,21 @@ object NodeLogs {
                         val line = LogcatLine.parse(raw) ?: continue
                         if (line.tag in NOISE_TAGS || processName.endsWith(line.tag)) continue
                         val source = route(line.tag, line.message) ?: continue
-                        rings.getValue(source).add(LogScrub.scrub(line.format()))
+                        if (!keep(gen, source, line.format())) return@useLines
                     }
                 }
+                proc.destroy()
             } catch (t: Throwable) {
-                if (!stopped) Log.w(TAG, "logcat reader failed: ${t.javaClass.simpleName}")
+                // Not when stop() or clear() destroyed logcat under the reader.
+                if (!stopped && generation() == gen) Log.w(TAG, "logcat reader failed: ${t.javaClass.simpleName}")
             }
             if (stopped) break
+            val clearedAt = synchronized(lock) { if (generation != gen) clearedAtMs else null }
+            if (clearedAt != null) {
+                // Cleared: pick up from the clear, at once — nothing before it.
+                from = String.format(Locale.US, "%d.%03d", clearedAt / 1000, clearedAt % 1000)
+                continue
+            }
             // logcat went away (rare): pick up from now, not from the start again.
             val now = System.currentTimeMillis()
             from = String.format(Locale.US, "%d.%03d", now / 1000, now % 1000)

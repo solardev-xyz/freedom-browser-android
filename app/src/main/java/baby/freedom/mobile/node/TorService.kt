@@ -59,6 +59,8 @@ class TorService : Service() {
         }
 
         override fun getLogs(): String = NodeLogs.text(NodeLogSource.Tor)
+
+        override fun clearLogs() = NodeLogs.clear()
     }
 
     /**

@@ -67,6 +67,8 @@ class MyotisService : Service() {
 
         override fun getLogs(): String = NodeLogs.text(NodeLogSource.LightClient)
 
+        override fun clearLogs() = NodeLogs.clear()
+
         override fun onAppForeground() {
             node?.enterForeground()
         }
