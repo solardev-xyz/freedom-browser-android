@@ -339,7 +339,17 @@ internal fun RestoreFromBackupSection(
     }
 }
 
-/** Turning Google backup off, or deleting a backup no wallet here uses: both delete the Block Store entry. */
+/**
+ * Turning Google backup off, or deleting a backup no wallet here uses:
+ * both delete the Block Store entry.
+ *
+ * Against tapjacking (#240, #287 R2-M1), like Remove wallet's own
+ * delete-the-backup tick: the confirm button ignores taps for the
+ * dialog's first [PromptTapGuard.PROTECTION_MS], so a second tap on
+ * "Delete backup" / "Turn off" can't land on it as it appears, and drops
+ * a press another app's window covered ([protectedPress]); other apps'
+ * overlays are hidden while it's up (Android 12+).
+ */
 @Composable
 internal fun DeleteGoogleBackupDialog(
     turningOff: Boolean,
@@ -348,25 +358,32 @@ internal fun DeleteGoogleBackupDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val tap = rememberArmedTapGuard(turningOff)
+    val guard = tap.guard
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Filled.CloudUpload, contentDescription = null) },
         title = { Text(if (turningOff) "Turn off Google backup?" else "Delete Google backup?") },
         text = {
-            Text(
-                if (turningOff || walletStays) {
-                    "The backup is deleted from this phone now, and from your Google account at its " +
-                        "next sync. The wallet stays on this phone."
-                } else {
-                    "The backed-up wallet is deleted from this phone now, and from your Google " +
-                        "account at its next sync. Without its recovery phrase written down, " +
-                        "that wallet is gone for good."
-                },
-            )
+            Column {
+                Text(
+                    if (turningOff || walletStays) {
+                        "The backup is deleted from this phone now, and from your Google account at its " +
+                            "next sync. The wallet stays on this phone."
+                    } else {
+                        "The backed-up wallet is deleted from this phone now, and from your Google " +
+                            "account at its next sync. Without its recovery phrase written down, " +
+                            "that wallet is gone for good."
+                    },
+                )
+                ObscuredTapNotice(tap)
+            }
         },
         confirmButton = {
             TextButton(
-                onClick = onConfirm,
+                onClick = { if (guard.accepts()) onConfirm() },
+                enabled = tap.armed,
+                modifier = Modifier.protectedPress(tap),
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             ) { Text(if (turningOff) "Turn off" else "Delete backup") }
         },
