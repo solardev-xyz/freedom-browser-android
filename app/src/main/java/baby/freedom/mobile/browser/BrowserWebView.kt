@@ -5696,10 +5696,15 @@ private fun interceptVirtualRequestFor(
     // requests pass through to Chromium's network stack (bodies never
     // reach the interceptor), but their CORS *preflights* are bodyless
     // — answer them here so the write path works regardless of the
-    // node's own CORS configuration. The node must still stamp
-    // `Access-Control-Allow-Origin` on the actual response (see
-    // docs/virtual-origins-hardening.md for the ant/freedom-ipfs
-    // config status). Only the embedded nodes: an external endpoint
+    // node's own CORS configuration. The request itself then reaches
+    // the node, but by design (#284) the embedded Swarm gateway sends
+    // no `Access-Control-Allow-Origin` on the actual response
+    // (`SwarmNode.GATEWAY_CORS_ORIGINS` is empty), so the page can't
+    // read the reply — that is what keeps `/wallet`, `/addresses` etc.
+    // unreadable through a redirect (#283). Don't "fix" the missing
+    // header by allowing `*` or `null`; `window.swarm` is the path that
+    // returns results (see docs/virtual-origins-hardening.md). Only the
+    // embedded nodes: an external endpoint
     // (#125) keeps its own CORS policy, so its preflights go through.
     if (req.method == "OPTIONS" && Gateways.isEmbeddedGateway(url)) {
         return corsPreflightResponse(req)

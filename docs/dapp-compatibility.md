@@ -67,11 +67,13 @@ origin directly:
 await fetch('http://127.0.0.1:1633/bzz', { method: 'POST', body, headers })
 ```
 
-This is sanctioned and works from https pages: Chromium treats
-`http://127.0.0.1` as potentially trustworthy (no mixed-content
-block). CORS preflights to the node origin are answered by the app;
-response-side CORS headers are the node's job (status tracked in
-`docs/virtual-origins-hardening.md`).
+This is sanctioned and reaches the node from https pages: Chromium
+treats `http://127.0.0.1` as potentially trustworthy (no mixed-content
+block). CORS preflights to the node origin are answered by the app, but
+the node sends no CORS headers on its answers (#284), so a page on
+another origin can't read the reply (see
+`docs/virtual-origins-hardening.md`). `window.swarm` is the publishing
+path that returns its result.
 
 Only the dapp surface is part of it: `/bzz`, `/bytes`, `/chunks`,
 `/soc`, `/feeds`, `/pss`, `/gsoc`, plus the `/health` and `/readiness`
@@ -103,21 +105,26 @@ follows after an earlier cross-origin hop, or a navigation's redirect,
 is followed inside Chromium, and other apps reach the port directly. So
 the node itself also refuses to broadcast any transaction (`ant_jni.c`'s
 chain transport): an on-chain write that gets past the interceptor
-fails at the node instead. The reads have no such backstop yet: ant's
-gateway answers `Origin: null` — which a fetch carries after a
-cross-origin redirect — with `Access-Control-Allow-Origin: null`, so a
-page can still read them through a redirector until ant stops doing
-that (see `docs/virtual-origins-hardening.md`).
+fails at the node instead. And the node lets no page read its answers:
+up to ant 0.5.48 its gateway answered `Origin: null` — which a fetch
+carries after a cross-origin redirect — with
+`Access-Control-Allow-Origin: null`, so a page could read `/wallet` or
+`/addresses` through a redirector (#283). Since #284 the app starts the
+gateway with no CORS origins at all (`SwarmNode.GATEWAY_CORS_ORIGINS`),
+so the redirected request still reaches the node but its answer carries
+no CORS header, and the page's `fetch` rejects.
 
-That holds for public sites too, not just loopback or LAN pages:
-Private Network Access doesn't stop it in the shipped WebView. Checked
-on the x86_64 emulator (WebView 133.0.6943.137, ant-ffi 0.5.47) from
+That held for public sites too, not just loopback or LAN pages:
+Private Network Access doesn't stop the redirect in the shipped
+WebView. Checked on the x86_64 emulator (WebView 133.0.6943.137) from
 `https://example.com` itself, with the probe run in the page over
 DevTools: a direct `fetch('http://127.0.0.1:1633/wallet')` gets the
-app's 403, from the top-level page and from a sandboxed iframe alike,
-but `fetch('https://httpbin.org/redirect-to?url=http://127.0.0.1:1633/wallet')`
-returns `200` with the wallet JSON from both, with no preflight error or
-Private Network Access message in the console.
+app's 403, from the top-level page and from a sandboxed iframe alike.
+With ant-ffi 0.5.47,
+`fetch('https://httpbin.org/redirect-to?url=http://127.0.0.1:1633/wallet')`
+returned `200` with the wallet JSON from both; with ant-ffi 0.5.49 it
+rejects with `TypeError: Failed to fetch` (no `Access-Control-Allow-Origin`
+header), for `/wallet` and `/addresses` alike.
 
 ## Explicitly unsupported
 

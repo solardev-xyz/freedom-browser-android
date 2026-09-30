@@ -56,8 +56,11 @@ class SwarmNodeTest {
         val gatewayModes: MutableList<String> = Collections.synchronizedList(mutableListOf())
         /** How many more [startGateway] calls succeed before the rest throw; unlimited by default. */
         @Volatile var gatewayStartsLeft = Int.MAX_VALUE
-        override fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String) {
+        /** Each [startGateway]'s CORS allow-list. */
+        val gatewayCors: MutableList<List<String>> = Collections.synchronizedList(mutableListOf())
+        override fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String, corsOrigins: List<String>) {
             calls += "gateway:$handle"
+            gatewayCors += corsOrigins
             if (gatewayStartsLeft-- <= 0) throw RuntimeException("bind failed")
             gatewayModes += if (lightMode) "light:$gnosisRpc" else "ultra-light:$gnosisRpc"
         }
@@ -335,6 +338,19 @@ class SwarmNodeTest {
     }
 
     @Test
+    fun startsTheGatewayAllowingNoCorsOrigins() {
+        // Not `null` (#284): a CORS fetch carries it after any cross-origin
+        // redirect, so allowing it let any page read /wallet and /addresses.
+        assertEquals(emptyList<String>(), SwarmNode.GATEWAY_CORS_ORIGINS)
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf(emptyList<String>()), ops.gatewayCors.toList())
+        node.dispose()
+    }
+
+    @Test
     fun lightModeHandsTheGatewayItsRpcAndARestartReadsTheModeAgain() {
         val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
         val mode = java.util.concurrent.atomic.AtomicReference(SwarmNode.Mode.light("https://rpc.example"))
@@ -455,6 +471,8 @@ class SwarmNodeTest {
         node.discoverStamps()
         assertEquals(1, reloads())
         assertEquals(listOf("light:https://rpc.example/key123", "light:https://rpc.example/key123"), ops.gatewayModes)
+        // The reload keeps the gateway's CORS allow-list empty, as the first start set it (#284).
+        assertEquals(listOf(emptyList<String>(), emptyList()), ops.gatewayCors.toList())
         assertEquals(NodeStatus.Running, node.state.value.status)
         // The gateway already reports it: no further reload.
         ops.chequebookHex = chequebook
