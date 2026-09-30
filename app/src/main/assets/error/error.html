@@ -17,6 +17,9 @@
         height: 100%;
         margin: 0;
       }
+      body:not(.ready) .container {
+        visibility: hidden;
+      }
       body {
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         background: radial-gradient(ellipse at top left, #1f1f1f 0%, #141414 60%);
@@ -145,11 +148,14 @@
     </div>
 
     <script>
-      // The page's text, in the app's language (#280): the app serves
-      // this file itself and puts its string table here
-      // (ErrorPage.stringsJson). Keys are the `errorpage_` resources'
-      // names without that prefix.
-      const S = /*@ERROR_STRINGS@*/{};
+      // The page's text, in the app's language (#280). The app can't
+      // serve this asset itself (WebView doesn't ask the interceptor for
+      // file:///android_asset/), so it hands the page its string table
+      // once the page has committed: evaluateJavascript calls
+      // window.__errorPageStrings(table) (ErrorPage.stringsScript). Keys
+      // are the `errorpage_` resources' names without that prefix.
+      // Nothing shows until then, so no half-English page flashes.
+      let S = {};
 
       // The string [key] with its `%1$s`-style arguments filled in.
       function fmt(key, ...args) {
@@ -230,11 +236,6 @@
       const detailsEl = document.getElementById('details');
       const descriptionEl = document.getElementById('description');
       const titleEl = document.getElementById('title');
-      document.title = fmt('page_default_title');
-      titleEl.textContent = fmt('page_default_title');
-      descriptionEl.textContent = fmt('page_default_description');
-      document.getElementById('continue-btn').textContent = fmt('page_continue_once');
-      document.getElementById('retry-btn').textContent = fmt('page_try_again');
       const nameLabel = nameSystemLabel(url);
       // Whose RPC servers answer for it: Tezos Domains isn't on Ethereum.
       const chainLabel = nameLabel === 'Tezos Domains' ? 'Tezos' : 'Ethereum';
@@ -388,7 +389,22 @@
         if (retryLabel) document.getElementById('retry-btn').textContent = retryLabel;
       }
 
-      displayError();
+      // Run once, when the app hands over the strings; a table that came
+      // before this script ran was parked in window.__errorPageTable.
+      let started = false;
+      function start(table) {
+        if (started || !table || typeof table !== 'object') return;
+        started = true;
+        S = table;
+        document.title = fmt('page_default_title');
+        titleEl.textContent = fmt('page_default_title');
+        descriptionEl.textContent = fmt('page_default_description');
+        document.getElementById('continue-btn').textContent = fmt('page_continue_once');
+        document.getElementById('retry-btn').textContent = fmt('page_try_again');
+        displayError().finally(() => document.body.classList.add('ready'));
+      }
+      window.__errorPageStrings = start;
+      if (window.__errorPageTable) start(window.__errorPageTable);
 
       if (continueUrl) {
         const continueBtn = document.getElementById('continue-btn');

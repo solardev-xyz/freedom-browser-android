@@ -1,11 +1,7 @@
 package baby.freedom.mobile.browser
 
-import android.content.Context
-import android.util.Log
-import android.webkit.WebResourceResponse
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
-import java.io.ByteArrayInputStream
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -47,12 +43,14 @@ import java.net.URLEncoder
  *                does resolve to (#97), for "resolves to IPFS, not
  *                Swarm" and a button that opens it there.
  *
- * The page's text comes from string resources (#280). The app serves
- * the page itself ([intercept], from `shouldInterceptRequest`): the
- * asset with [STRINGS_PLACEHOLDER] in its script replaced by
- * [stringsJson], a JSON table of the `errorpage_` strings the page uses.
- * Only a request for the page's own URL is answered, so the table is
- * exactly as reachable as the asset always was; nothing else is served.
+ * The page's text comes from string resources (#280). WebView loads
+ * `file:///android_asset/` itself, without asking the interceptor, so
+ * the app can't serve the page with its strings in it. Instead, once an
+ * error page has committed, [BrowserWebView] runs [stringsScript] in it:
+ * a JSON table of the `errorpage_` strings the page uses ([stringsJson]),
+ * handed to the page's own `window.__errorPageStrings`. Nothing is served
+ * or exposed to other pages; the page shows nothing until the table
+ * arrives.
  */
 object ErrorPage {
     const val URL: String = "file:///android_asset/error/error.html"
@@ -85,11 +83,6 @@ object ErrorPage {
 
     fun isErrorPage(url: String?): Boolean = url != null && url.startsWith(URL)
 
-    /**
-     * The spot in `error.html`'s script that [html] replaces with the
-     * string table; as it stands it is an empty object literal.
-     */
-    internal const val STRINGS_PLACEHOLDER: String = "/*@ERROR_STRINGS@*/{}"
 
     /**
      * What `error.html`'s `fmt('key')` / `fmtNodes('key')` look up: each
@@ -161,9 +154,13 @@ object ErrorPage {
             "${jsonString(key)}:${jsonString(text(id))}"
         }
 
-    /** The page [template] (the asset's text) with [json] as its string table. */
-    internal fun html(template: String, json: String): String =
-        template.replace(STRINGS_PLACEHOLDER, json)
+    /**
+     * What [BrowserWebView] runs in a committed error page: hands the
+     * page [stringsJson]; parks it in `window.__errorPageTable` if the
+     * page's script hasn't run yet (it picks it up when it does).
+     */
+    internal fun stringsScript(json: String = stringsJson()): String =
+        "(window.__errorPageStrings||function(t){window.__errorPageTable=t;})($json);"
 
     private fun jsonString(s: String): String = buildString(s.length + 2) {
         append('"')
@@ -181,42 +178,6 @@ object ErrorPage {
         append('"')
     }
 
-    @Volatile
-    private var template: String? = null
-
-    /** Read the page's asset, once. */
-    fun init(context: Context) {
-        if (template != null) return
-        template = runCatching {
-            context.assets.open(ASSET).bufferedReader(Charsets.UTF_8).use { it.readText() }
-        }.onFailure { Log.w(TAG, "missing $ASSET", it) }.getOrNull()
-    }
-
-    /**
-     * Is [url] the page itself — its asset URL, with or without a query
-     * or fragment? Not another asset whose name only starts the same.
-     */
-    internal fun isPageRequest(url: String): Boolean =
-        url == URL || url.startsWith("$URL?") || url.startsWith("$URL#")
-
-    /**
-     * The interceptor's answer for [url]: the page with its strings, or
-     * null for any other URL (or before [init]), which then loads as
-     * before.
-     */
-    fun intercept(url: String): WebResourceResponse? {
-        if (!isPageRequest(url)) return null
-        val page = template ?: return null
-        val body = html(page, stringsJson()).toByteArray(Charsets.UTF_8)
-        return WebResourceResponse(
-            "text/html", "utf-8", 200, "OK",
-            mapOf("Cache-Control" to "no-store"),
-            ByteArrayInputStream(body),
-        )
-    }
-
-    private const val ASSET = "error/error.html"
-    private const val TAG = "ErrorPage"
 
     /**
      * Pull the user-facing URL (the `url=` query param originally passed

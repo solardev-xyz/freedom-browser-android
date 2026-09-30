@@ -2783,8 +2783,6 @@ private fun buildRefreshableWebView(
             }
         }
 
-        // The error page's asset, which the client below serves (#280).
-        ErrorPage.init(context)
         webViewClient = object : WebViewClient() {
             // A key the page was handed and didn't use: a hardware-
             // keyboard shortcut that gives the page first go (#270, see
@@ -3089,6 +3087,8 @@ private fun buildRefreshableWebView(
 
             override fun onPageCommitVisible(view: WebView?, url: String?) {
                 showFailedLoadPage(view, url)
+                // The error page's text, in the app's language (#280).
+                errorPageStrings(view, url)
                 // The document has laid out and painted, so its root
                 // styles are real: this is the earliest the #56 probe
                 // can answer, and pages are touchable from here on.
@@ -3127,6 +3127,9 @@ private fun buildRefreshableWebView(
                 // again from here (#262, [CacheBypass]).
                 (view as? PageWebView)?.cacheBypass?.pageFinished(url)
                 showFailedLoadPage(view, url)
+                // Again here: a page restored from the back/forward
+                // cache or a reload may skip the commit callback (#280).
+                errorPageStrings(view, url)
                 // A certificate error's cancelled navigation ends here,
                 // committing nothing: without a page of our own the
                 // previous document would stay on screen under no
@@ -5560,15 +5563,13 @@ internal fun interceptVirtualRequest(
     // outright; only the dapp surface stays open (#114, #283, fail closed).
     NodeApiGuard.refusalFor(req)?.let { return it }
     val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
-    // Freedom's error page, served with its strings (#280).
     // A contract-hosted app's origin (#123) is answered by its own rules.
     // Then an origin an unverified external IPFS gateway served before
     // the user switched away from it (#125): its next document first
     // clears what that gateway's pages left there, before anything else
     // runs.
     // The Radicle repository browser and its read API (#124).
-    val response = ErrorPage.intercept(url)
-        ?: RadApi.intercept(req, url)
+    val response = RadApi.intercept(req, url)
         ?: interceptOnchainAppRequest(req, url, onchain)
         ?: siteDataCleanupFor(req, url, tab)
         ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, onMainFrameRoot)
@@ -6493,4 +6494,16 @@ internal class CloseNotifyingInputStream(
             if (closed.compareAndSet(false, true)) onClose()
         }
     }
+}
+
+/**
+ * Hand a committed error page ([ErrorPage]) its strings (#280). Only for
+ * that page's own asset URL, and only after it committed: `view.url` is
+ * the committed document's URL by then, so a navigation away can't
+ * receive the script. The page runs the table once; a second call is a
+ * no-op there.
+ */
+private fun errorPageStrings(view: WebView?, url: String?) {
+    if (view == null || !ErrorPage.isErrorPage(url) || !ErrorPage.isErrorPage(view.url)) return
+    view.evaluateJavascript(ErrorPage.stringsScript(), null)
 }

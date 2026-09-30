@@ -33,8 +33,10 @@ class ErrorPageStringsTest {
     }
 
     @Test
-    fun `the page has exactly one spot for the table`() {
-        assertEquals(1, page.split(ErrorPage.STRINGS_PLACEHOLDER).size - 1)
+    fun `the page takes its table from the app's script`() {
+        // ErrorPage.stringsScript calls this, or parks the table here.
+        assertTrue(page.contains("window.__errorPageStrings = start;"))
+        assertTrue(page.contains("if (window.__errorPageTable) start(window.__errorPageTable);"))
     }
 
     @Test
@@ -47,9 +49,10 @@ class ErrorPageStringsTest {
         // HTML fragments stay HTML, escaped for the script element.
         assertTrue(json.contains("\\u003ccode\\u003econtenthash\\u003c/code\\u003e"))
         assertTrue(json.contains("&mdash;".replace("&", "\\u0026")))
-        val html = ErrorPage.html(page, json)
-        assertFalse(html.contains(ErrorPage.STRINGS_PLACEHOLDER))
-        assertTrue(html.contains("const S = $json;"))
+        assertEquals(
+            "(window.__errorPageStrings||function(t){window.__errorPageTable=t;})($json);",
+            ErrorPage.stringsScript(json),
+        )
     }
 
     @Test
@@ -64,15 +67,5 @@ class ErrorPageStringsTest {
                 "{\"page_default_title\":\"\\u003c/script\\u003e\\u003cb\\u003e\\\"a\\\\b\\\"\\n\\u2028\\u0026\",",
             ),
         )
-    }
-
-    @Test
-    fun `only the page's own URL is answered`() {
-        assertTrue(ErrorPage.isPageRequest(ErrorPage.URL))
-        assertTrue(ErrorPage.isPageRequest(ErrorPage.url("ens_not_found", "x.eth")))
-        assertTrue(ErrorPage.isPageRequest("${ErrorPage.URL}#top"))
-        assertFalse(ErrorPage.isPageRequest("${ErrorPage.URL}.js"))
-        assertFalse(ErrorPage.isPageRequest("file:///android_asset/error/other.html"))
-        assertFalse(ErrorPage.isPageRequest("https://example.com/error/error.html"))
     }
 }
