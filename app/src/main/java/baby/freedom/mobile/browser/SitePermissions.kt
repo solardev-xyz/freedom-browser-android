@@ -80,6 +80,15 @@ enum class SitePermission(
         "know your location",
         listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
     ),
+
+    /**
+     * Pop-ups a page opens without the user's gesture (#261). Never
+     * prompted for: a blocked pop-up raises a notice instead, whose
+     * "Always allow" grants it ([SitePermissionBroker.allowPopups]).
+     * Read synchronously, from inside `onCreateWindow`
+     * ([SitePermissionBroker.popupsAllowed]).
+     */
+    POPUPS("popups", "Pop-ups", "open pop-up windows", emptyList()),
     ;
 
     companion object {

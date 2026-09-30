@@ -293,7 +293,10 @@ class TabsState(
     /**
      * Adopt a window the page in [opener] asked for — a `target=_blank`
      * link or `window.open()` (WebView's `onCreateWindow`) — as a new
-     * tab, placed right after its opener and made active. The caller
+     * tab, placed right after its opener and made active — or, with
+     * [activate] false, opened behind the active tab (a no-gesture
+     * window of a site allowed pop-ups whose page isn't on screen, #261:
+     * a timer mustn't switch the tab under the user). The caller
      * hands the tab's WebView back to Chromium, which then loads the
      * popup's URL into it itself: nothing is scheduled here, and the
      * `window.opener` link to the page that asked stays intact (OAuth-
@@ -303,7 +306,7 @@ class TabsState(
      * the opener's session, and its WebView has to be on the same
      * profile for that.
      */
-    fun adoptPopup(opener: BrowserState): BrowserState {
+    fun adoptPopup(opener: BrowserState, activate: Boolean = true): BrowserState {
         val tab = newBlankTab(opener.private)
         tab.openerId = opener.id
         // Its blank document is the page's until something commits: not
@@ -312,6 +315,13 @@ class TabsState(
         tab.showBlankPage()
         val openerIndex = tabs.indexOfFirst { it.id == opener.id }
         val at = if (openerIndex < 0) tabs.size else openerIndex + 1
+        if (!activate) {
+            // Behind: the tab on screen stays the active one, wherever
+            // the new tab lands relative to it.
+            tabs.add(at, tab)
+            if (at <= activeIndex) activeIndex++
+            return tab
+        }
         captureActiveThumbnail?.invoke()
         // Fullscreen belongs to the active tab only (see [fullscreen]):
         // a player's own `_blank` link must not leave the opener's
