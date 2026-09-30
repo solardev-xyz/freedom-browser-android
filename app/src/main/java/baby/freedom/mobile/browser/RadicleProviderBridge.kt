@@ -103,9 +103,9 @@ object RadicleProviders {
         val store = RadicleGrantStore.get(context)
         val p = RadicleProvider(
             grants = object : RadicleProvider.Grants {
-                override suspend fun signingFor(origin: String) = store.grantFor(origin)?.signing
+                override suspend fun signingFor(origin: String) = store.grantFor(origin)?.let { it.signingAs.orEmpty() }
                 override suspend fun connect(origin: String) = store.connect(origin)
-                override suspend fun grantSigning(origin: String) = store.grantSigning(origin)
+                override suspend fun grantSigning(origin: String, did: String) = store.grantSigning(origin, did)
                 override suspend fun revoke(origin: String) = store.revoke(origin)
             },
             node = object : RadicleProvider.Node {

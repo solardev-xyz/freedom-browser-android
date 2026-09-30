@@ -20,12 +20,16 @@ import kotlinx.coroutines.flow.map
  * Which sites may use the `window.radicle` provider (#124), and how far:
  * desktop's `radicle-permissions.js`, iOS's `RadiclePermissionStore`.
  *
- *     "grant:<origin>" → "connection" | "signing"
+ *     "grant:<origin>" → "connection" | "signing:<did>"
  *
  * `connection` is the first tier (the site may see node status and the
  * seeded list, and ask to seed / unseed); `signing` adds the second
  * (the user's Radicle identity, and writing issues and comments as the
- * user). `<origin>` is the provider's origin key (a normalized
+ * user) — for the one identity `<did>` the user allowed (#328): the node
+ * runs as the wallet's or as the device's own, and a site allowed to act
+ * as one of them asks again before it learns or writes as the other. A
+ * bare `signing` (from before #328) names no identity, so it counts as
+ * `connection`. `<origin>` is the provider's origin key (a normalized
  * `scheme://host[:port]`, the one site permissions use). A private tab
  * never reads or writes here.
  *
@@ -34,8 +38,14 @@ import kotlinx.coroutines.flow.map
  * corrupt file is replaced with an empty one.
  */
 class RadicleGrantStore internal constructor(private val store: DataStore<Preferences>) {
-    /** One site's grant. */
-    data class Grant(val origin: String, val signing: Boolean)
+    /** One site's grant: [signingAs] is the DID it may sign as, or null for the connection tier only. */
+    data class Grant(val origin: String, val signingAs: String? = null) {
+        /** It may sign as some identity (maybe not the node's current one). */
+        val signing: Boolean get() = signingAs != null
+
+        /** It may sign as [did], the identity the node runs as now. */
+        fun signsAs(did: String): Boolean = did.isNotEmpty() && signingAs == did
+    }
 
     /** Every grant, by origin. */
     val all: Flow<List<Grant>> = store.data
@@ -49,8 +59,12 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
                 val name = k.name
                 if (!name.startsWith(PREFIX)) return@mapNotNull null
                 val tier = v as? String ?: return@mapNotNull null
-                if (tier != CONNECTION && tier != SIGNING) return@mapNotNull null
-                Grant(name.removePrefix(PREFIX), tier == SIGNING)
+                val signingAs = when {
+                    tier == CONNECTION || tier == SIGNING -> null
+                    tier.startsWith(SIGNING_AS) && tier.length > SIGNING_AS.length -> tier.removePrefix(SIGNING_AS)
+                    else -> return@mapNotNull null
+                }
+                Grant(name.removePrefix(PREFIX), signingAs)
             }.sortedBy { it.origin }
         }
 
@@ -64,15 +78,20 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
 
     /** Connect [origin] (keeping a signing grant it already has); `false` if it couldn't be written. */
     suspend fun connect(origin: String): Boolean = write {
-        if (it[keyOf(origin)] != SIGNING) it[keyOf(origin)] = CONNECTION
+        if (it[keyOf(origin)]?.startsWith(SIGNING_AS) != true) it[keyOf(origin)] = CONNECTION
     }
 
-    /** Give connected [origin] the signing tier; `false` if it isn't connected or the write failed. */
-    suspend fun grantSigning(origin: String): Boolean {
+    /**
+     * Give connected [origin] the signing tier for the identity [did] (and
+     * only it); `false` if it isn't connected, [did] is empty, or the write
+     * failed.
+     */
+    suspend fun grantSigning(origin: String, did: String): Boolean {
+        if (did.isEmpty()) return false
         var connected = false
         val written = write {
             connected = it[keyOf(origin)] != null
-            if (connected) it[keyOf(origin)] = SIGNING
+            if (connected) it[keyOf(origin)] = SIGNING_AS + did
         }
         return written && connected
     }
@@ -82,11 +101,15 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
      * identity changed (#328 — the node now runs as the wallet's, or as
      * its own again), and a site allowed to know and write as the old one
      * must ask before it learns or writes as the new one. `false` if the
-     * store couldn't be written.
+     * store couldn't be written. (Each grant names its identity anyway, so
+     * one this misses still isn't honored for another; this also clears
+     * the old identity's grants for good.)
      */
     suspend fun dropSigning(): Boolean = write { prefs ->
         prefs.asMap().forEach { (k, v) ->
-            if (k.name.startsWith(PREFIX) && v == SIGNING) prefs[stringPreferencesKey(k.name)] = CONNECTION
+            if (k.name.startsWith(PREFIX) && v is String && (v == SIGNING || v.startsWith(SIGNING_AS))) {
+                prefs[stringPreferencesKey(k.name)] = CONNECTION
+            }
         }
     }
 
@@ -106,7 +129,9 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
     companion object {
         private const val PREFIX = "grant:"
         private const val CONNECTION = "connection"
+        /** Before #328: signing for no identity in particular, read as [CONNECTION]. */
         private const val SIGNING = "signing"
+        private const val SIGNING_AS = "signing:"
         private const val TAG = "RadicleGrantStore"
 
         private val Context.radicleGrantStore by preferencesDataStore(

@@ -163,18 +163,34 @@ class NodeIdentityStore internal constructor(
      * What the `:node` process boots the Radicle node as (#328): the
      * wallet's Radicle identity (its secret seed, which the caller wipes,
      * and DID) — or null when there's no wallet, no keys derived from this
-     * one yet, or only version-1 keys without a Radicle one. Never throws.
+     * one yet, or only version-1 keys without a Radicle one.
+     *
+     * Throws [IllegalStateException] when it can't tell: the vault file is
+     * there but unreadable, or the keys on disk are this vault's but can't
+     * be opened (a Keystore or I/O failure). The node must not take that
+     * for "no wallet" and quietly run as the device's own key.
      */
-    fun radicle(vault: VaultStore): RadicleNode.HostIdentity? = runCatching {
-        val tag = vault.read()?.identityTag() ?: return null
-        val identity = read(tag) ?: return null
+    fun radicle(vault: VaultStore): RadicleNode.HostIdentity? {
+        val record = runCatching { vault.read() }.getOrNull()
+        if (record == null) {
+            check(!runCatching { vault.exists() }.getOrDefault(true)) { "the wallet can't be read" }
+            return null
+        }
+        val tag = record.identityTag()
+        // Keys from another (removed) vault, or none yet: this wallet has no
+        // Radicle identity on disk.
+        if (storedTag() != tag) {
+            check(isEmpty() || readFile() != null) { "the node identity file can't be read" }
+            return null
+        }
+        val identity = read(tag) ?: error("the wallet's node keys can't be opened")
         try {
             val did = identity.radicleDid ?: return null
-            RadicleNode.HostIdentity(identity.radicleSecret() ?: return null, did)
+            return RadicleNode.HostIdentity(identity.radicleSecret() ?: return null, did)
         } finally {
             identity.wipe()
         }
-    }.getOrNull()
+    }
 
     companion object {
         private const val VERSION = 2

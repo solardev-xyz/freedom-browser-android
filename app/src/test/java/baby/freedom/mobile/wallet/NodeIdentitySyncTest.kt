@@ -201,6 +201,38 @@ class NodeIdentitySyncTest {
     }
 
     @Test
+    fun `radicle throws, rather than answering no wallet, when the wallet's keys can't be opened`() = runBlocking {
+        vault.create(abandon12, auth, imported = false)
+        reconcile()
+        vault.lock()
+        fun unreadable() = runCatching { store.radicle(vaultStore) }.exceptionOrNull() is IllegalStateException
+        // The sealing key is gone (a Keystore failure): not "no wallet".
+        val sealing = keys.key
+        keys.key = null
+        assertTrue(unreadable())
+        keys.key = sealing
+        // The file is this vault's but corrupt.
+        val good = file.readText()
+        file.writeText("{not json")
+        assertTrue(unreadable())
+        file.writeText(good)
+        // The vault file is there but can't be read.
+        val record = vaultStore.record
+        vaultStore.record = null
+        vaultStore.fileExists = true
+        assertTrue(unreadable())
+        vaultStore.fileExists = false
+        vaultStore.record = record
+        assertEquals(ABANDON_DID, store.radicle(vaultStore)!!.did)
+        // Keys from another (replaced) wallet, or none yet, are plainly "none".
+        vault.remove()
+        vault.create(legal12, auth, imported = true)
+        assertNull(store.radicle(vaultStore))
+        store.wipe()
+        assertNull(store.radicle(vaultStore))
+    }
+
+    @Test
     fun `keys stored before Radicle keep booting Swarm and get the Radicle key on the next unlock`() = runBlocking {
         vault.create(abandon12, auth, imported = false)
         val tag = vault.identityTag()!!

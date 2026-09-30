@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.swarm.RadicleInfo
+import baby.freedom.swarm.RadicleNode
 import baby.freedom.swarm.RadicleSeed
 import baby.freedom.swarm.RadicleStatus
 import kotlinx.coroutines.Dispatchers
@@ -15,22 +16,25 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mozilla.javascript.Context as RhinoContext
 
+private const val ME = "did:key:z6MkMe"
+
 /** The `window.radicle` provider's tiers, prompts and checks (#124). */
 class RadicleProviderTest {
     private val bare = "z4V1sjrXqjvFdnCUbxPFqd5p4DtH5"
     private val rid = "rad:$bare"
     private val site = "https://app.example"
 
+    /** origin → the DID it may sign as, `""` for connection only. */
     private class MemoryGrants : RadicleProvider.Grants {
-        val map = HashMap<String, Boolean>()
+        val map = HashMap<String, String>()
         override suspend fun signingFor(origin: String) = map[origin]
         override suspend fun connect(origin: String): Boolean {
-            if (origin !in map) map[origin] = false
+            if (origin !in map) map[origin] = ""
             return true
         }
-        override suspend fun grantSigning(origin: String): Boolean {
+        override suspend fun grantSigning(origin: String, did: String): Boolean {
             if (origin !in map) return false
-            map[origin] = true
+            map[origin] = did
             return true
         }
         override suspend fun revoke(origin: String): Boolean {
@@ -47,13 +51,21 @@ class RadicleProviderTest {
         val seeds = mutableListOf<String>()
         val unseeds = mutableListOf<String>()
         var writeAnswer: RadicleClient.Answer = RadicleClient.Answer.Ok(JSONObject().put("id", "abcdef1234"))
+        /** The identity the node runs as; [onIdentity] runs after each identity read. */
+        var did = ME
+        var onIdentity: () -> Unit = {}
         override fun unavailableReason() = reason
         override fun call(method: String, args: JSONObject, timeoutMs: Long): RadicleClient.Answer {
             calls += method to args
+            // `:node`'s own check (RadicleNode.call).
+            val asDid = args.optString(RadicleNode.AS_DID)
+            if (asDid.isNotEmpty() && asDid != did) {
+                return RadicleClient.Answer.Failed("Radicle identity changed", RadicleClient.REASON_IDENTITY_CHANGED)
+            }
             return when (method) {
                 "identity" -> RadicleClient.Answer.Ok(
-                    JSONObject().put("did", "did:key:z6MkMe").put("nid", "z6MkMe").put("alias", "me"),
-                )
+                    JSONObject().put("did", did).put("nid", did.removePrefix("did:key:")).put("alias", "me"),
+                ).also { onIdentity() }
                 "status" -> RadicleClient.Answer.Ok(JSONObject().put("connectedPeers", 5))
                 "listSeededRepos" -> RadicleClient.Answer.Ok(seeded)
                 "repoInfo" -> RadicleClient.Answer.Failed("repository not found", null)
@@ -124,7 +136,7 @@ class RadicleProviderTest {
 
     @Test
     fun `turned-off Radicle is 4900 for everything, and a stopped node for node methods`() {
-        grants.map[site] = false
+        grants.map[site] = ""
         node.reason = RadicleClient.REASON_DISABLED
         assertEquals(RadicleProvider.UNAVAILABLE, err(req("radicle_getCapabilities")).code)
         node.reason = RadicleClient.REASON_STOPPED
@@ -136,18 +148,18 @@ class RadicleProviderTest {
 
     @Test
     fun `node status hides the NID until signing`() {
-        grants.map[site] = false
+        grants.map[site] = ""
         val s = ok(req("radicle_getNodeStatus")) as JSONObject
         assertEquals(5, s.getInt("peers"))
         assertEquals("me", s.getString("alias"))
         assertFalse(s.has("nid"))
-        grants.map[site] = true
+        grants.map[site] = ME
         assertEquals("z6MkMe", (ok(req("radicle_getNodeStatus")) as JSONObject).getString("nid"))
     }
 
     @Test
     fun `seed asks per repository, validates first, and refuses a second repo while one fetches`() {
-        grants.map[site] = false
+        grants.map[site] = ""
         assertEquals("invalid_rid", err(req("radicle_seed", JSONObject().put("rid", "nope"))).reason)
         assertEquals("invalid_rid", err(req("radicle_seed", JSONObject().put("rid", " $rid"))).reason)
         assertTrue(asked.isEmpty())
@@ -167,7 +179,7 @@ class RadicleProviderTest {
 
     @Test
     fun `seed status follows the node's seed line and pushes events to followers`() {
-        grants.map[site] = false
+        grants.map[site] = ""
         val events = mutableListOf<JSONObject>()
         provider.events = RadicleProvider.Events { _, e, d -> if (e == "seedStatus") events += d as JSONObject }
         runBlocking {
@@ -187,8 +199,8 @@ class RadicleProviderTest {
 
     @Test
     fun `a site disconnected from the Radicle page stops hearing seedStatus`() {
-        grants.map[site] = false
-        grants.map["https://b.example"] = false
+        grants.map[site] = ""
+        grants.map["https://b.example"] = ""
         val heard = mutableListOf<String>()
         provider.events = RadicleProvider.Events { o, e, _ -> if (e == "seedStatus") heard += o }
         runBlocking {
@@ -216,7 +228,7 @@ class RadicleProviderTest {
 
     @Test
     fun `sync is only for repositories already seeded`() {
-        grants.map[site] = false
+        grants.map[site] = ""
         assertEquals("not_seeded", err(req("radicle_sync", JSONObject().put("rid", rid))).reason)
         assertTrue(node.seeds.isEmpty())
         node.seeded = JSONArray().put(JSONObject().put("rid", rid))
@@ -227,7 +239,7 @@ class RadicleProviderTest {
 
     @Test
     fun `unseed asks, then drops the policy`() {
-        grants.map[site] = false
+        grants.map[site] = ""
         val r = ok(req("radicle_unseed", JSONObject().put("rid", rid))) as JSONObject
         assertFalse(r.getBoolean("seeded"))
         assertEquals(listOf(RadicleAsk.Unseed(site, rid)), asked)
@@ -236,13 +248,13 @@ class RadicleProviderTest {
 
     @Test
     fun `signing is asked once, after the parameters check out`() {
-        grants.map[site] = false
+        grants.map[site] = ""
         val bad = err(req("radicle_createIssue", JSONObject().put("rid", rid).put("title", " ").put("description", "d")))
         assertEquals("invalid_title", bad.reason)
         assertTrue("no prompt for a request that would fail", asked.isEmpty())
         answer = false
         assertEquals(RadicleProvider.USER_REJECTED, err(req("radicle_getIdentity")).code)
-        assertEquals(false, grants.map[site])
+        assertEquals("", grants.map[site])
         answer = true
         assertEquals("did:key:z6MkMe", (ok(req("radicle_getIdentity")) as JSONObject).getString("did"))
         val issue = JSONObject().put("rid", rid).put("title", "t").put("description", "d").put("labels", JSONArray().put("bug"))
@@ -250,6 +262,54 @@ class RadicleProviderTest {
         assertEquals(2, asked.size)
         val call = node.calls.last { it.first == "createIssue" }.second
         assertEquals("""["bug"]""", call.getString("labelsJson"))
+        // Made as the identity the user allowed; `:node` refuses it as any other.
+        assertEquals(ME, call.getString(RadicleNode.AS_DID))
+    }
+
+    @Test
+    fun `a signing grant covers only the identity it was given for`() {
+        // Allowed to sign as the device's own identity (#328)…
+        grants.map[site] = "did:key:z6MkDevice"
+        val s = ok(req("radicle_getNodeStatus")) as JSONObject
+        assertFalse("the NID of an identity the site wasn't allowed to know", s.has("nid"))
+        // …and the node now runs as the wallet's: the site is asked again
+        // before it learns or writes as it, and nothing is written on a refusal.
+        answer = false
+        val issue = JSONObject().put("rid", rid).put("title", "t").put("description", "d")
+        assertEquals(RadicleProvider.USER_REJECTED, err(req("radicle_createIssue", JSONObject(issue.toString()))).code)
+        assertEquals(RadicleProvider.USER_REJECTED, err(req("radicle_getIdentity")).code)
+        assertTrue(node.calls.none { it.first == "createIssue" })
+        assertEquals(listOf(RadicleAsk.Signing(site), RadicleAsk.Signing(site)), asked)
+        assertEquals("did:key:z6MkDevice", grants.map[site])
+        answer = true
+        assertEquals(ME, (ok(req("radicle_getIdentity")) as JSONObject).getString("did"))
+        assertEquals(ME, grants.map[site])
+        ok(req("radicle_createIssue", JSONObject(issue.toString())))
+        assertEquals(3, asked.size)
+    }
+
+    @Test
+    fun `an identity change while the prompt is up grants nothing`() {
+        grants.map[site] = ""
+        // The node restarts as another identity right after the first read.
+        node.onIdentity = {
+            node.did = "did:key:z6MkOther"
+            node.onIdentity = {}
+        }
+        val e = err(req("radicle_getIdentity"))
+        assertEquals("identity_changed", e.reason)
+        assertEquals("", grants.map[site])
+    }
+
+    @Test
+    fun `a write the node refuses as another identity is identity_changed`() {
+        grants.map[site] = ME
+        // Restarted between the identity read and the write.
+        node.onIdentity = { node.did = "did:key:z6MkOther" }
+        val c = JSONObject().put("rid", rid).put("issueId", "abcdef").put("body", "b")
+        val e = err(req("radicle_commentIssue", c))
+        assertEquals(RadicleProvider.UNAUTHORIZED, e.code)
+        assertEquals("identity_changed", e.reason)
     }
 
     @Test
@@ -268,11 +328,11 @@ class RadicleProviderTest {
 
     @Test
     fun `writes are rate limited per origin`() {
-        grants.map[site] = true
+        grants.map[site] = ME
         val c = JSONObject().put("rid", rid).put("issueId", "abcdef").put("body", "b")
         repeat(RadicleProvider.MAX_WRITES_PER_MINUTE) { ok(req("radicle_commentIssue", JSONObject(c.toString()))) }
         assertEquals("rate_limited", err(req("radicle_commentIssue", JSONObject(c.toString()))).reason)
-        grants.map["https://other.example"] = true
+        grants.map["https://other.example"] = ME
         ok(req("radicle_commentIssue", JSONObject(c.toString()), origin = "https://other.example"))
         now += RadicleProvider.WRITE_WINDOW_MS
         ok(req("radicle_commentIssue", JSONObject(c.toString())))
@@ -280,7 +340,7 @@ class RadicleProviderTest {
 
     @Test
     fun `native errors keep their reasons`() {
-        grants.map[site] = true
+        grants.map[site] = ME
         node.writeAnswer = RadicleClient.Answer.Failed("announce refs failed: timeout", null)
         val c = JSONObject().put("rid", rid).put("issueId", "abcdef").put("state", "closed")
         assertEquals("announce_failed", err(req("radicle_editIssueState", c)).reason)

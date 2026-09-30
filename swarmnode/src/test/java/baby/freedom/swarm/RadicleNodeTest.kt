@@ -270,6 +270,124 @@ class RadicleNodeTest {
     }
 
     @Test
+    fun anUnreadableIdentityFailsTheBootInsteadOfRunningAsTheOwnKey() {
+        val ops = FakeOps().apply { startResult = """{"did":"did:key:z6MkWallet"}""" }
+        val readable = java.util.concurrent.atomic.AtomicBoolean(false)
+        val node = RadicleNode(
+            config.copy(identity = {
+                check(readable.get()) { "keystore unavailable" }
+                RadicleNode.HostIdentity(ByteArray(32) { 1 }, "did:key:z6MkWallet")
+            }),
+            ops,
+        )
+        node.start()
+        await("error", node) { it.status == RadicleStatus.Error }
+        assertEquals(0, ops.starts.get())
+        // Once it can be read (the next unlock re-seals it), a reload boots as the wallet's.
+        readable.set(true)
+        node.reloadIdentity()
+        await("running as the wallet's", node) { it.status == RadicleStatus.Running && it.walletIdentity }
+        assertEquals(listOf("startWithKey"), ops.calls.filter { it.startsWith("start") })
+        // Unreadable again at a later bind: the node stays as it is.
+        readable.set(false)
+        node.reloadIdentity()
+        Thread.sleep(200)
+        assertEquals(RadicleStatus.Running, node.state.value.status)
+        assertFalse("shutdown" in ops.calls)
+        node.dispose()
+    }
+
+    @Test
+    fun aStopDuringAnIdentityReloadKeepsTheNodeOff() {
+        val ops = FakeOps()
+        val host = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        val reading = java.util.concurrent.atomic.AtomicReference<CountDownLatch?>(null)
+        val release = CountDownLatch(1)
+        val node = RadicleNode(
+            config.copy(identity = {
+                reading.getAndSet(null)?.let { it.countDown(); release.await(5, TimeUnit.SECONDS) }
+                host.get()?.let { RadicleNode.HostIdentity(ByteArray(32) { 1 }, it) }
+            }),
+            ops,
+        )
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        host.set("did:key:z6MkWallet")
+        val entered = CountDownLatch(1)
+        reading.set(entered)
+        node.reloadIdentity()
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+        // The user turns Radicle off while the reload is deciding.
+        node.stop()
+        release.countDown()
+        await("stopped", node) { it.status == RadicleStatus.Stopped && "shutdown" in ops.calls }
+        Thread.sleep(300)
+        assertEquals(RadicleStatus.Stopped, node.state.value.status)
+        assertEquals(1, ops.starts.get())
+
+        // Many reloads racing a stop from another thread: whatever the
+        // interleaving, the node ends up off.
+        repeat(20) { i ->
+            node.start()
+            await("running $i", node) { it.status == RadicleStatus.Running }
+            host.set(if (i % 2 == 0) null else "did:key:z6MkWallet")
+            val stopper = Thread { node.stop() }
+            node.reloadIdentity()
+            stopper.start()
+            stopper.join()
+            await("stopped $i", node) { it.status == RadicleStatus.Stopped }
+            Thread.sleep(50)
+            assertEquals("round $i", RadicleStatus.Stopped, node.state.value.status)
+        }
+        node.dispose()
+    }
+
+    @Test
+    fun movingToTheWalletIdentityWaitsForAFirstFetchInsteadOfUnseedingIt() {
+        val ops = FakeOps()
+        val host = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        val node = RadicleNode(
+            config.copy(identity = { host.get()?.let { RadicleNode.HostIdentity(ByteArray(32) { 1 }, it) } }),
+            ops,
+        )
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        node.seed(rid)
+        await("fetching", node) { it.seed?.phase == "connecting" }
+        host.set("did:key:z6MkWallet")
+        node.reloadIdentity()
+        Thread.sleep(300)
+        // The fetch runs on: no cancel, no shutdown, no rollback.
+        assertFalse(ops.calls.any { it.startsWith("cancel:") || it == "shutdown" || it.startsWith("unseed:") })
+        ops.releaseClone.countDown()
+        await("restarted as the wallet's", node) { it.status == RadicleStatus.Running && it.walletIdentity }
+        assertEquals(listOf("start", "shutdown", "startWithKey"), ops.calls.filter { it.startsWith("start") || it == "shutdown" })
+        assertFalse(ops.calls.any { it.startsWith("unseed:") })
+        assertTrue(RadicleNode.parseRepos(ops.repos)!!.any { it.rid == rid })
+        node.dispose()
+    }
+
+    @Test
+    fun goingBackToTheOwnKeyDoesntWaitForAFetch() {
+        val ops = FakeOps()
+        val host = java.util.concurrent.atomic.AtomicReference<String?>("did:key:z6MkWallet")
+        val node = RadicleNode(
+            config.copy(identity = { host.get()?.let { RadicleNode.HostIdentity(ByteArray(32) { 1 }, it) } }),
+            ops,
+        )
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running && it.walletIdentity }
+        node.seed(rid)
+        await("fetching", node) { it.seed?.phase == "connecting" }
+        // The wallet is removed: restart now (the stop cancels the fetch).
+        host.set(null)
+        node.reloadIdentity()
+        await("back to its own", node) { it.status == RadicleStatus.Running && !it.walletIdentity }
+        assertTrue(ops.calls.any { it.startsWith("cancel:") })
+        node.dispose()
+    }
+
+    @Test
     fun startFailureIsReportedAndStopClearsIt() {
         val ops = FakeOps().apply { startResult = """{"error":"storage is locked"}""" }
         val node = RadicleNode(config, ops)
