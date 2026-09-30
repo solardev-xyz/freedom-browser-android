@@ -34,6 +34,7 @@ import baby.freedom.mobile.browser.EthereumProviders
 import baby.freedom.mobile.browser.X402Payments
 import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.Adblock
+import baby.freedom.mobile.browser.AppUpdates
 import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.browser.OnchainApps
 import baby.freedom.mobile.browser.PhraseClipboard
@@ -520,6 +521,10 @@ class MainActivity : ComponentActivity() {
         // see [FirstBuildGate]) — a restored tab loads straight away.
         Adblock.start(this)
 
+        // A newer Freedom release (#272): checked on GitHub at most daily
+        // while Settings → About → Check for updates is on.
+        AppUpdates.start(this)
+
         // A cold start from a link (#268) opens straight at it instead of
         // the home surface: queued before the first composition, which
         // puts it in the first tab. A Unicode ENS link (`xn--…` host)
@@ -732,6 +737,8 @@ class MainActivity : ComponentActivity() {
         }
         runCatching { binder?.onAppForeground() }
         runCatching { myotisBinder?.onAppForeground() }
+        // A daily update check that fell due while the phone slept (#272).
+        AppUpdates.onAppForeground()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
