@@ -740,6 +740,7 @@ fun BrowserScreen(
         displayUrl: String,
         loadUri: String = contentUri,
         namedByUser: Boolean = false,
+        bypassCache: Boolean = false,
     ) {
         val generation = target.loadGeneration
         val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
@@ -822,7 +823,12 @@ fun BrowserScreen(
         }
         when (outcome) {
             GatewayProbe.Outcome.Ok ->
-                target.loadUrl(loadUri, displayPrefix = displayPrefix, namedByUser = namedByUser)
+                target.loadUrl(
+                    loadUri,
+                    displayPrefix = displayPrefix,
+                    namedByUser = namedByUser,
+                    bypassCache = bypassCache,
+                )
             GatewayProbe.Outcome.Aborted -> { /* superseded by a later submit */ }
             is GatewayProbe.Outcome.Unreachable -> showError("ERR_CONNECTION_REFUSED")
             GatewayProbe.Outcome.NotFound, is GatewayProbe.Outcome.Other -> {
@@ -851,6 +857,7 @@ fun BrowserScreen(
         source: SubmitSource,
         approvedUri: String?,
         namedByUser: Boolean,
+        bypassCache: Boolean = false,
     ) {
         target.clearEnsOverride()
         target.ipfsLoad = false
@@ -911,7 +918,7 @@ fun BrowserScreen(
                             doc.trusted || approved || approvals.contains(doc) -> {
                                 approvals.add(doc)
                                 target.onchain.handOff(doc)
-                                target.loadUrl(app.virtualUrl(tail), namedByUser = namedByUser)
+                                target.loadUrl(app.virtualUrl(tail), namedByUser = namedByUser, bypassCache = bypassCache)
                             }
                             else -> {
                                 target.onchain.offer(doc)
@@ -941,6 +948,10 @@ fun BrowserScreen(
         // An unverified ENS answer the user chose to load (#96): let
         // through if the resolver still gives exactly this one.
         approvedUri: String? = null,
+        // The user's Hard reload (#262): the load this submit schedules
+        // goes out with the caches bypassed. Handed to that load's own
+        // `loadUrl`, like [namedByUser] — never an error page's.
+        bypassCache: Boolean = false,
     ) {
         // "Continue once" on the tab's not-cross-checked warning (#96):
         // the one navigation it was shown for, again, with its answer
@@ -1142,7 +1153,7 @@ fun BrowserScreen(
                                 target.clearEnsOverride()
                                 target.addressBarText =
                                     pendingAddressBarText(target.addressBarText, web, source)
-                                target.loadUrl(web)
+                                target.loadUrl(web, bypassCache = bypassCache)
                             } else if (result.protocol == "bzz" ||
                                 result.protocol == "ipfs" ||
                                 result.protocol == "ipns"
@@ -1159,6 +1170,7 @@ fun BrowserScreen(
                                     // to the name across content updates.
                                     loadUri = "ens://$name$suffix",
                                     namedByUser = namedByUser,
+                                    bypassCache = bypassCache,
                                 )
                             } else {
                                 ensError(
@@ -1213,7 +1225,7 @@ fun BrowserScreen(
         // chain here, gated on how it was read, and handed to the
         // interceptor with the navigation.
         if (OnchainAppRef.isWeb3Scheme(canonical)) {
-            submitOnchainApp(target, canonical, source, approvedUri, namedByUser)
+            submitOnchainApp(target, canonical, source, approvedUri, namedByUser, bypassCache)
             return
         }
 
@@ -1252,6 +1264,7 @@ fun BrowserScreen(
                         displayPrefix = null,
                         displayUrl = contentUri,
                         namedByUser = namedByUser,
+                        bypassCache = bypassCache,
                     )
                 } finally {
                     target.resolving = false
@@ -1262,7 +1275,7 @@ fun BrowserScreen(
             return
         }
 
-        target.loadUrl(url, namedByUser = namedByUser)
+        target.loadUrl(url, namedByUser = namedByUser, bypassCache = bypassCache)
     }
 
     // The bar's Reload and the Reload on a tab whose renderer went away
@@ -1274,6 +1287,18 @@ fun BrowserScreen(
         } else {
             val url = state.reloadUrl()
             if (url.isNotBlank()) submit(state, url)
+        }
+    }
+
+    // The menu's Hard reload (#262): the same reload, with the HTTP cache
+    // bypassed for its load and that load's subresources, and — on a
+    // dweb page — the interceptor's own caches skipped for its document.
+    // A tab whose renderer went away has nothing cached in a page to
+    // bypass: its menu row is disabled ([BrowserState.hasPageToActOn]).
+    val hardReloadPage: () -> Unit = {
+        if (state.rendererGone == null) {
+            val url = state.reloadUrl()
+            if (url.isNotBlank()) submit(state, url, bypassCache = true)
         }
     }
 
@@ -1924,6 +1949,7 @@ fun BrowserScreen(
                     onOpenBookmarks = { showBookmarks = true },
                     onOpenDownloads = { showDownloads = true },
                     onReload = reloadPage,
+                    onHardReload = hardReloadPage,
                     // Stop covers both halves of a load: the WebView's
                     // own fetch, and the indeterminate phase in front of
                     // it (ENS resolve / gateway warm-up) that runs on a

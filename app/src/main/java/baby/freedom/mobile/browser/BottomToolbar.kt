@@ -38,6 +38,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Cached
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Computer
@@ -1421,6 +1422,8 @@ internal fun BottomToolbar(
     onOpenBookmarks: () -> Unit,
     onOpenDownloads: () -> Unit,
     onReload: () -> Unit,
+    /** The menu's Hard reload (#262): Reload with the caches bypassed. */
+    onHardReload: () -> Unit,
     onStop: () -> Unit,
     onNewTab: () -> Unit,
     onPrint: () -> Unit,
@@ -1707,6 +1710,7 @@ internal fun BottomToolbar(
                     onOpenBookmarks = onOpenBookmarks,
                     onOpenDownloads = onOpenDownloads,
                     onReload = onReload,
+                    onHardReload = onHardReload,
                     onNewTab = onNewTab,
                     onNewPrivateTab = onNewPrivateTab,
                     onFindInPage = onFindInPage,
@@ -2922,6 +2926,7 @@ private fun OverflowMenuButton(
     onOpenBookmarks: () -> Unit,
     onOpenDownloads: () -> Unit,
     onReload: () -> Unit,
+    onHardReload: () -> Unit,
     onNewTab: () -> Unit,
     onNewPrivateTab: (() -> Unit)?,
     onFindInPage: () -> Unit,
@@ -3071,6 +3076,20 @@ private fun OverflowMenuButton(
                             onClick = {
                                 menuExpanded = false
                                 onReload()
+                            },
+                        )
+                        // Reload past the caches (#262): what a site that
+                        // just deployed new files, or a gateway that served
+                        // a stale answer, needs. Nothing to reload on the
+                        // home surface, nor in a tab whose renderer went
+                        // away (#260) — its Reload rebuilds the page.
+                        DropdownMenuItem(
+                            text = { MenuItemLabel("Hard reload") },
+                            leadingIcon = { Icon(Icons.Filled.Cached, contentDescription = null) },
+                            enabled = state.hasPageToActOn,
+                            onClick = {
+                                menuExpanded = false
+                                onHardReload()
                             },
                         )
                         DropdownMenuItem(
