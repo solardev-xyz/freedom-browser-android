@@ -285,6 +285,39 @@ class SendTest {
     }
 
     @Test
+    fun `recipients - a re-check's conflict says what the servers disagreed on (#277)`() {
+        fun conflict(subject: EnsResult.Conflict.Subject) = EnsAddressResult.Conflict("alice.eth", subject, emptyList(), 1L)
+        assertEquals(
+            "Checking alice.eth again, servers disagreed on its address, so nothing was sent.",
+            Recipients.recheck("alice.eth", to, conflict(EnsResult.Conflict.Subject.RECORD), true),
+        )
+        for (subject in listOf(EnsResult.Conflict.Subject.BLOCK, EnsResult.Conflict.Subject.HEAD)) {
+            val said = Recipients.recheck("alice.eth", to, conflict(subject), true)!!
+            assertTrue(said, said.contains("which block is the chain’s"))
+            assertFalse(said, said.contains("its address"))
+        }
+    }
+
+    @Test
+    fun `recipients - Try again only for an answer asking again could change (#277)`() {
+        assertTrue(Recipients.retryable(EnsAddressResult.Error("alice.eth", "PROVIDER_ERROR", "down", retryable = true)))
+        assertTrue(
+            Recipients.retryable(EnsAddressResult.Conflict("alice.eth", EnsResult.Conflict.Subject.BLOCK, emptyList(), 1L)),
+        )
+        val tooLong = EnsAddressResult.Error("x.eth", "NAME_TOO_LONG", "a label is longer than 255 bytes", retryable = false)
+        assertFalse(Recipients.retryable(tooLong))
+        assertFalse(Recipients.retryable(EnsAddressResult.Error("alice.eth", "RESOLUTION_ERROR", "not an address record", retryable = false)))
+        assertFalse(Recipients.retryable(EnsAddressResult.NoAddress("alice.eth", "NO_ADDRESS", EnsTrust.ASSUMED)))
+        assertFalse(Recipients.retryable(EnsAddressResult.Ok("alice.eth", to.lowercase(), EnsTrust.ASSUMED)))
+        // Nor does the review's refusal tell the user to try what can only fail the same way.
+        assertFalse(Recipients.recheck("x.eth", to, tooLong, true)!!.contains("Try again"))
+        assertTrue(
+            Recipients.recheck("alice.eth", to, EnsAddressResult.Error("alice.eth", "PROVIDER_ERROR", "down", true), true)!!
+                .contains("Try again"),
+        )
+    }
+
+    @Test
     fun `recipients - a name with nothing to send to says why (#277)`() {
         assertNull(Recipients.lookupProblem(EnsAddressResult.Ok("alice.eth", to.lowercase(), EnsTrust.ASSUMED), "Gnosis"))
         assertEquals(

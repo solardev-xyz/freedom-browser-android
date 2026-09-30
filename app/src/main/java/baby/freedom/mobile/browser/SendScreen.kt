@@ -207,6 +207,10 @@ internal fun SendPage(
     // (#277): leaving the review cancels it, so an abandoned quote is
     // never signed once the answer lands.
     var recheck by remember { mutableStateOf<Job?>(null) }
+    // A failed re-check's own fresh answer for the name it puts back in
+    // the field (#277): the lookup that refill restarts shows it rather
+    // than asking again, past the cache, behind the review's error.
+    var seededLookup by remember { mutableStateOf<NameLookup?>(null) }
 
     // A name in the field is looked up for the selected asset's chain
     // (#277). Here, at the page's top, not inside the list's item: an
@@ -218,8 +222,14 @@ internal fun SendPage(
     val typedName = (parsedRecipient as? Recipients.Parsed.Name)?.name
     LaunchedEffect(typedName, fieldChain?.id, lookupAttempt) {
         unverifiedAccepted = false
+        val seeded = seededLookup
+        seededLookup = null
         if (typedName == null || fieldChain == null) {
             lookup = null
+            return@LaunchedEffect
+        }
+        if (seeded != null && seeded.name == typedName && seeded.chainId == fieldChain.id) {
+            lookup = seeded
             return@LaunchedEffect
         }
         lookup = NameLookup(typedName, fieldChain.id, null)
@@ -374,13 +384,17 @@ internal fun SendPage(
                                             Recipients.recheck(name, q.request.to, after, q.request.toNameAccepted)?.let { problem ->
                                                 // Back to the form, showing what the name says now —
                                                 // with the name in it, even on a reopened page.
-                                                if (typedName != name) {
+                                                val shown = NameLookup(name, chainId, after)
+                                                if (typedName != name || fieldChain?.id != chainId) {
                                                     assets.firstOrNull { it.second.key == q.request.token.key }?.let { assetKey = it.second.key }
                                                     recipient = name
                                                     if (amount.isBlank()) amount = SendAmounts.exact(q.request.amount, q.request.token.decimals)
                                                     all = false
+                                                    // The refill restarts the lookup: it takes this answer
+                                                    // instead of replacing it with a new, cached one.
+                                                    seededLookup = shown
                                                 }
-                                                lookup = NameLookup(name, chainId, after)
+                                                lookup = shown
                                                 unverifiedAccepted = false
                                                 quote = null
                                                 notice = null
@@ -894,7 +908,7 @@ private fun NameRecipientNote(
             }
             else -> {
                 FieldNote(Recipients.lookupProblem(result, chainName).orEmpty(), error = true)
-                if (result is EnsAddressResult.Error || result is EnsAddressResult.Conflict) {
+                if (Recipients.retryable(result)) {
                     TextButton(onClick = onRetry, enabled = enabled) { Text("Try again") }
                 }
             }

@@ -199,8 +199,30 @@ object Recipients {
             else -> null
         }
         is EnsAddressResult.NoAddress -> "$name no longer has an address for this network, so nothing was sent."
-        is EnsAddressResult.Conflict -> "Checking $name again, servers disagreed on its address, so nothing was sent."
-        is EnsAddressResult.Error -> "Couldn’t check $name again (${after.error}), so nothing was sent. Try again."
+        is EnsAddressResult.Conflict -> if (after.subject == EnsResult.Conflict.Subject.RECORD) {
+            "Checking $name again, servers disagreed on its address, so nothing was sent."
+        } else {
+            "Checking $name again, servers disagreed on which block is the chain’s, so it couldn’t be looked up safely " +
+                "and nothing was sent. Try again shortly."
+        }
+        is EnsAddressResult.Error -> if (after.retryable) {
+            "Couldn’t check $name again (${after.error}), so nothing was sent. Try again."
+        } else {
+            "Couldn’t check $name again (${after.error}), so nothing was sent."
+        }
+    }
+
+    /**
+     * Whether asking again could give a different answer for [result]:
+     * a transport failure marked retryable, or servers that disagreed.
+     * Not a malformed name, a record that isn't an address, or an answer
+     * that says there's nothing to send to — the same ask fails the same
+     * way, so no Try again is offered for it.
+     */
+    fun retryable(result: EnsAddressResult): Boolean = when (result) {
+        is EnsAddressResult.Error -> result.retryable
+        is EnsAddressResult.Conflict -> true
+        is EnsAddressResult.Ok, is EnsAddressResult.NoAddress -> false
     }
 
     private fun checksum(lowerHex: String): String =
