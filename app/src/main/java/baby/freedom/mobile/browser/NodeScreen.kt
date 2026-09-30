@@ -447,7 +447,8 @@ private fun LightClientSection(
                 Text(triple.label, fontWeight = FontWeight.Medium)
                 Text(
                     "Verifies Ethereum and Gnosis peer-to-peer on this device (Myotis). " +
-                        "Each chain runs on its own; one that's off is read through Colibri and your RPCs instead.",
+                        "Each chain runs on its own. With Ethereum off, names are checked through Colibri " +
+                        "or your RPCs instead.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -679,6 +680,9 @@ internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when 
             ready > 0 || parked > 0 -> NodeStatusTriple(
                 Color(0xFFF59E0B), Icons.Filled.HourglassTop, "$ready of ${live.size} chains synced",
             )
+            // A chain switched on that `:myotis` hasn't booted yet (its
+            // previous engine still stopping): no row to sync.
+            live.isEmpty() -> NodeStatusTriple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Starting…")
             else -> NodeStatusTriple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Syncing…")
         }
     }

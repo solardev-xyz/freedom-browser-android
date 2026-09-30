@@ -39,7 +39,11 @@ import kotlin.math.abs
  * them may block (stop has no wall-clock bound), so every engine call
  * runs on one queue ([ops]) in the order it was asked for: a Stop sent
  * right after a Start always lands after it, and a status poll never
- * reads a handle mid-teardown.
+ * reads a handle mid-teardown. The one exception is the stop of a
+ * single chain switched off while the other runs ([stopChain]): its
+ * handle has already left the queue's bookkeeping, so nothing else can
+ * reach it, and it drains on its own coroutine ([stopping]) rather than
+ * holding up the other chain's polls, pause and recovery.
  *
  * Stale-anchor checkpoint recovery (#195): when a chain parks on a trust
  * anchor older than the engine's weak-subjectivity bound, the node asks
@@ -120,6 +124,7 @@ class MyotisNode internal constructor(
         class Retry(val network: MyotisNetwork) : Op
         class Repair(val network: MyotisNetwork) : Op
         class Barrier(val done: CompletableDeferred<Unit>) : Op
+        class Stopped(val network: MyotisNetwork) : Op
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -133,6 +138,15 @@ class MyotisNode internal constructor(
 
     /** Each running chain's generation (its data directory and anchor). */
     private val generations = LinkedHashMap<MyotisNetwork, MyotisGeneration>()
+
+    /**
+     * Chains switched off whose `engine.stop` is still draining off the
+     * queue ([stopChain]). A chain in here that's switched back on waits
+     * for its stop ([Op.Stopped]) before it boots again, since its engine
+     * still holds the data directory. Written on the queue; read by
+     * [awaitIdle] and [shutdown].
+     */
+    private val stopping: MutableMap<MyotisNetwork, Job> = java.util.concurrent.ConcurrentHashMap()
 
     /** Set once [startEngines] got as far as the chains; cleared by [stopEngines]. */
     private var started = false
@@ -269,7 +283,12 @@ class MyotisNode internal constructor(
                     }
                 } finally {
                     when (op) {
-                        is Op.Stop -> op.done?.complete(Unit)
+                        is Op.Stop -> op.done?.let { done ->
+                            // The owning service exits once this returns:
+                            // let a chain's stop still draining finish first.
+                            stopping.values.toList().forEach { it.join() }
+                            done.complete(Unit)
+                        }
                         is Op.Barrier -> op.done.complete(Unit)
                         else -> Unit
                     }
@@ -358,11 +377,16 @@ class MyotisNode internal constructor(
         return engine.ethCall(handle, to, data, "latest") ?: """{"error":"no result from the engine"}"""
     }
 
-    /** Wait until every op sent so far has run. Tests only. */
-    internal suspend fun awaitIdle() {
-        val done = CompletableDeferred<Unit>()
-        ops.send(Op.Barrier(done))
-        done.await()
+    /** Wait until every op sent so far has run, and every chain's stop with it. Tests only. */
+    internal suspend fun awaitIdle(stops: Boolean = true) {
+        while (true) {
+            val done = CompletableDeferred<Unit>()
+            ops.send(Op.Barrier(done))
+            done.await()
+            val pending = stopping.values.toList()
+            if (!stops || pending.isEmpty()) return
+            pending.forEach { it.join() }
+        }
     }
 
     /** Run one status poll now, as the ticker would. Tests only. */
@@ -448,6 +472,14 @@ class MyotisNode internal constructor(
                 }
             }
             is Op.Barrier -> Unit
+            is Op.Stopped -> {
+                stopping.remove(op.network)
+                // Switched back on while it was stopping: boot it now.
+                if (started && op.network in enabled && op.network !in handles && op.network !in recovery) {
+                    startChain(op.network)
+                    if (!settleIfNothingRuns()) refreshStatus()
+                }
+            }
         }
     }
 
@@ -469,7 +501,7 @@ class MyotisNode internal constructor(
             return
         }
         for (network in enabled) startChain(network)
-        if (handles.isEmpty() && recovery.isEmpty()) {
+        if (nothingRuns()) {
             publish(MyotisStatus.Error, startErrors.values.distinct().joinToString("; "))
             return
         }
@@ -479,11 +511,36 @@ class MyotisNode internal constructor(
     }
 
     /**
+     * No chain switched on has an engine, a recovery, or a stop to wait
+     * out before it boots: only start errors are left, which is the
+     * light client failing, not running.
+     */
+    private fun nothingRuns(): Boolean =
+        handles.isEmpty() && recovery.isEmpty() && enabled.none { it in stopping }
+
+    /**
+     * After a chain was switched off or booted mid-session: if only failed
+     * chains are left, report [MyotisStatus.Error] the way [startEngines]
+     * does, and drop back to not started so the next switch retries the
+     * start of every chain. True if it did.
+     */
+    private fun settleIfNothingRuns(): Boolean {
+        if (!nothingRuns()) return false
+        readable = emptyMap()
+        polling = false
+        started = false
+        publish(MyotisStatus.Error, startErrors.values.distinct().joinToString("; "))
+        return true
+    }
+
+    /**
      * Boot [network] from its current generation: its engine in [handles],
      * or why not in [recovery] (blocked) or [startErrors]. Shared by the
      * first start and a chain switched on later ([setEnabled]).
      */
     private fun startChain(network: MyotisNetwork) {
+        // Its engine is still stopping and holds the directory: [Op.Stopped] boots it.
+        if (network in stopping) return
         val generation = try {
             store.load(network).also { store.checkNativeMarker(it, network) }
         } catch (e: MyotisCheckpointException) {
@@ -542,10 +599,15 @@ class MyotisNode internal constructor(
         }
         for (network in removed) stopChain(network)
         for (network in added) startChain(network)
-        refreshStatus()
+        if (!settleIfNothingRuns()) refreshStatus()
     }
 
-    /** Stop [network]'s engine and drop everything kept for it, leaving the other chains alone. */
+    /**
+     * Stop [network]'s engine and drop everything kept for it, leaving the
+     * other chains alone. The stop itself has no wall-clock bound, so it
+     * runs off the queue ([stopping]): the handle is out of [handles] and
+     * [readable] first, so no op or read reaches it again.
+     */
     private fun stopChain(network: MyotisNetwork) {
         readable = readable - network
         val handle = handles.remove(network)
@@ -557,8 +619,16 @@ class MyotisNode internal constructor(
         attempts.remove(network)
         generations.remove(network)
         if (handle != null) {
-            engine.stop(handle)
-            Log.i(TAG, "${network.engineName}: stopped (switched off)")
+            stopping[network] = scope.launch {
+                try {
+                    engine.stop(handle)
+                    Log.i(TAG, "${network.engineName}: stopped (switched off)")
+                } catch (t: Throwable) {
+                    Log.e(TAG, "${network.engineName}: stop failed", t)
+                } finally {
+                    ops.trySend(Op.Stopped(network))
+                }
+            }
         }
     }
 

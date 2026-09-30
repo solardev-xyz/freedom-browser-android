@@ -141,8 +141,9 @@ class LightClientLabelsTest {
         assertEquals("0 of 2 chains synced", label(serving.copy(beaconState = "SYNCING"), stale))
         // A chain that failed to start doesn't hold the other one back...
         assertEquals("Synced", label(serving, MyotisChainStatus(100L, error = "boom")))
-        // ...but nothing live at all is not "Synced".
-        assertEquals("Syncing…", label())
+        // ...but nothing live at all is not "Synced": a chain switched on
+        // that hasn't booted yet is still starting.
+        assertEquals("Starting…", label())
         assertEquals("Off", lightClientStatusTriple(MyotisInfo()).label)
         assertEquals("Error", lightClientStatusTriple(MyotisInfo(MyotisStatus.Error)).label)
     }
