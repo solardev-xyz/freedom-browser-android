@@ -133,6 +133,21 @@ class DownloadNotificationsDeviceTest {
     }
 
     @Test
+    fun aResumeThatFailsBackToTheSamePausedRowWithinOnePassShowsItAgain() {
+        startNotifications()
+        assertTrue(awaitPosted() != null)
+        // Just after the pass that posted it: swiped away, resumed, and
+        // back (a 503) to the very row it was posted from, all before the
+        // next pass — which sees only that row, and must post it again.
+        DownloadNotifications.noteDismissed(context, id, DownloadStatus.PAUSED)
+        mgr.cancel("download", notificationId)
+        DownloadNotifications.forgetDismissals(context, id)
+        downloads.value = listOf(paused.copy(status = DownloadStatus.RUNNING))
+        downloads.value = listOf(paused)
+        assertTrue("shown again once re-paused", awaitPosted() != null)
+    }
+
+    @Test
     fun aPausedNotificationDroppedForLackOfPermissionIsPostedOnceAllowed() {
         // Not allowed yet: what's posted is dropped by the system.
         enabled = false
