@@ -78,8 +78,21 @@ class TabsRendererGoneTest {
     fun `crashed and killed for memory say different things`() {
         val crashed = BrowserState.RendererGone(crashed = true, reloadWhenShown = false)
         val killed = BrowserState.RendererGone(crashed = false, reloadWhenShown = false)
-        assertEquals("This page crashed", rendererGoneTitle(crashed))
+        assertEquals("This page closed after a crash", rendererGoneTitle(crashed))
         assertEquals("This page was closed to free memory", rendererGoneTitle(killed))
+    }
+
+    @Test
+    fun `the copy neither blames this page nor promises the other tabs survived`() {
+        // Every tab shares the renderer and gets the same verdict (R3-M1).
+        for (crashed in listOf(true, false)) {
+            val gone = BrowserState.RendererGone(crashed = crashed, reloadWhenShown = false)
+            val copy = rendererGoneTitle(gone) + " " + rendererGoneBody(gone)
+            assertFalse(copy, copy.contains("tabs are fine"))
+            assertFalse(copy, copy.contains("This page crashed"))
+            assertFalse(copy, copy.contains("while showing it"))
+            assertTrue(copy, copy.contains("reload when you switch to them"))
+        }
     }
 
     @Test

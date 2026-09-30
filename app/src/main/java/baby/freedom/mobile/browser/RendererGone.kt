@@ -78,16 +78,28 @@ fun RendererGoneScreen(
     }
 }
 
-/** The headline for [gone]: crashed, or closed to free memory. */
+/**
+ * The headline for [gone]: the page closed after a crash, or to free
+ * memory. Worded for the tab, not blaming its page: every tab's WebView
+ * usually runs in the one renderer process, so every tab gets the same
+ * verdict ([android.webkit.RenderProcessGoneDetail.didCrash]) whichever
+ * page actually brought the process down (R3-M1).
+ */
 internal fun rendererGoneTitle(gone: BrowserState.RendererGone): String =
-    if (gone.crashed) "This page crashed" else "This page was closed to free memory"
+    if (gone.crashed) "This page closed after a crash" else "This page was closed to free memory"
 
-/** What happened, and what Reload does. */
+/**
+ * What happened, and what Reload does. Doesn't claim the other tabs are
+ * fine: those sharing the process went with it and reload when shown
+ * (R3-M1).
+ */
 internal fun rendererGoneBody(gone: BrowserState.RendererGone): String =
     if (gone.crashed) {
-        "Something went wrong while showing it. Your other tabs are fine. Reload to open it again."
+        "The process that shows web pages crashed, maybe because of a page in another tab. " +
+            "Other tabs that closed with it reload when you switch to them. Reload to open this page again."
     } else {
-        "Android needed the memory it was using. Your other tabs are fine. Reload to open it again."
+        "Android needed the memory the browser's pages were using. " +
+            "Other tabs that closed with it reload when you switch to them. Reload to open this page again."
     }
 
 /**
