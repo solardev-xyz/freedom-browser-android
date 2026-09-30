@@ -130,6 +130,52 @@ class ImportPhraseClipboardTest {
         assertEquals("https://example.com", clipText())
     }
 
+    /**
+     * Freedom losing window focus with the page up, as on Home or another
+     * app coming to the front: a dialog window of its own takes focus here.
+     */
+    private fun loseFocus(block: () -> Unit) {
+        val dialog = rule.runOnIdle { android.app.Dialog(rule.activity).apply { setTitle("focus"); show() } }
+        rule.waitUntil(5_000) { rule.runOnIdle { !rule.activity.hasWindowFocus() } }
+        rule.waitForIdle()
+        try {
+            block()
+        } finally {
+            rule.runOnIdle { dialog.dismiss() }
+        }
+    }
+
+    @Test
+    fun pastedPhraseIsClearedWhenFreedomLosesFocus() {
+        setClip(twelve)
+        paste()
+        loseFocus {
+            // The page is still up, nothing else happened: cleared unread.
+            assertTrue(shown)
+            assertEquals(null, clipText())
+        }
+    }
+
+    @Test
+    fun somethingCopiedSinceThePasteIsLeftAloneWhenFreedomLosesFocus() {
+        setClip(twelve)
+        paste()
+        setClip("https://example.com")
+        loseFocus { assertEquals("https://example.com", clipText()) }
+        // …and on Back once focus is back, read and still left alone.
+        pressBack()
+        assertEquals("https://example.com", clipText())
+    }
+
+    @Test
+    fun wordsTypedAWordAtATimeLeaveTheClipboardAloneWhenFreedomLosesFocus() {
+        // A swiped word goes in whole, but it's no phrase-sized paste.
+        setClip(twelve)
+        rule.onNode(field).performTextInput("abandon")
+        rule.waitForIdle()
+        loseFocus { assertEquals(twelve, clipText()) }
+    }
+
     @Test
     fun aTypedPhraseLeavesTheClipboardAlone() {
         // The same words on the clipboard, but the user typed them: nothing

@@ -73,6 +73,79 @@ class WalletScreenTest {
     }
 
     @Test
+    fun `a paste is had whole, even where it shares words with the field`() {
+        fun at(text: String, cursor: Int = text.length) = TextFieldValue(text, TextRange(cursor))
+        // The first word typed, the whole phrase pasted after it by mistake:
+        // what went in at the cursor, not what a shared prefix leaves over.
+        assertEquals(twelve, insertedText(at("abandon "), at("abandon $twelve", "abandon $twelve".length)))
+        // Pasted at the start, in front of words it ends with.
+        assertEquals("$twelve ", insertedText(at("about", 0), at("$twelve about", twelve.length + 1)))
+        assertEquals("", insertedText(at("abandon"), at("abando")))
+    }
+
+    @Test
+    fun `leaving the import page clears only what was pasted into it (#241)`() {
+        val words = twelve.split(" ")
+        val pasted = listOf(clipWords(twelve))
+        fun clear(
+            vararg texts: CharSequence?,
+            readable: Boolean = true,
+            hasText: Boolean = true,
+            pasted: List<List<String>> = listOf(clipWords(twelve)),
+            imported: List<String>? = null,
+        ): Boolean = shouldClearPasted(readable, hasText, { texts.toList() }, pasted, imported)
+        // The pasted phrase, still on the clipboard: cleared, whatever its spacing or case.
+        assertTrue(clear(twelve))
+        assertTrue(clear("  " + twelve.uppercase().replace(" ", "\n") + "\n"))
+        // Pasted from a note: the whole note went in, and is what's cleared.
+        val note = "My phrase: $twelve. Keep it safe!"
+        assertTrue(clear(note, pasted = listOf(clipWords(note))))
+        // Something copied since the paste: left alone.
+        assertFalse(clear("https://example.com"))
+        assertFalse(clear(twelve.replace("about", "abandon")))
+        assertFalse(clear(twelve.substringBeforeLast(" ")))
+        // Something containing the paste but not it: left alone before an import…
+        assertFalse(clear(note))
+        // …and cleared after one, when it holds the imported phrase (#75).
+        assertTrue(clear(note, imported = words))
+        assertFalse(clear("https://example.com", imported = words))
+        // Nothing pasted (typed), unreadable (no focus) or not text: the
+        // clipboard's items are never read at all.
+        var read = false
+        fun never(): List<CharSequence?> { read = true; return listOf(twelve) }
+        assertFalse(shouldClearPasted(true, true, ::never, emptyList(), words))
+        assertFalse(shouldClearPasted(false, true, ::never, pasted))
+        assertFalse(shouldClearPasted(true, false, ::never, pasted))
+        assertFalse(read)
+        // A non-text item (a `content:` URI) has no `text`, and isn't opened.
+        assertFalse(clear(null))
+        assertTrue(clear(null, twelve))
+        // Focus lost with the page up (Home): unreadable, so cleared unread
+        // only while a phrase-sized paste is the last thing seen on it.
+        assertTrue(shouldClearPasted(false, false, ::never, pasted, clipIsPaste = true))
+        assertFalse(shouldClearPasted(false, false, ::never, emptyList(), clipIsPaste = true))
+        assertFalse(read)
+        // Readable, the read decides: something else there isn't cleared.
+        assertFalse(shouldClearPasted(true, true, { listOf("https://example.com") }, pasted, clipIsPaste = true))
+    }
+
+    @Test
+    fun `only a phrase-sized paste may be cleared unread (#241)`() {
+        val pastes = PastedPhrases()
+        // Swipe typing and keyboard suggestions insert a word at a time.
+        pastes.add(listOf("abandon"))
+        pastes.add(listOf("abandon", "ability"))
+        pastes.add(emptyList())
+        assertEquals(2, pastes.words.size)
+        assertFalse(pastes.clipIsPaste)
+        pastes.add(clipWords(twelve))
+        assertTrue(pastes.clipIsPaste)
+        pastes.forget()
+        assertTrue(pastes.words.isEmpty())
+        assertFalse(pastes.clipIsPaste)
+    }
+
+    @Test
     fun `settings row states and the reminder that stays under it`() {
         val fresh = Vault.Info(VaultProtection.SCREEN_LOCK, strongBox = true, backedUp = false)
         assertEquals(BACKUP_REMINDER, walletAttentionLine(Vault.State.Locked(fresh)))
