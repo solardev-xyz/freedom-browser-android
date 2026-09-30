@@ -18,6 +18,7 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.StringRes
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -66,6 +67,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -76,7 +78,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.OpenLvSession
 import baby.freedom.mobile.wallet.ScannedCode
 import baby.freedom.mobile.wallet.TokenAmounts
@@ -95,8 +99,7 @@ import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import java.math.BigInteger
 import java.util.concurrent.Executors
 
-internal const val RECEIVE_TITLE = "Receive"
-internal const val SCAN_TITLE = "Scan QR code"
+internal val SCAN_TITLE: String get() = Strings.get(R.string.wallet_qr_scan_title)
 
 /**
  * [content] as a QR code's modules: iOS's `ReceiveView` settings — error
@@ -185,7 +188,7 @@ internal fun QrCodeImage(content: String, description: String, modifier: Modifie
 internal fun ReceivePage(account: WalletAccount, onBack: () -> Unit) {
     val context = LocalContext.current
     BackHandler(onBack = onBack)
-    FullScreenScaffold(title = RECEIVE_TITLE, onDismiss = onBack) {
+    FullScreenScaffold(title = stringResource(R.string.wallet_qr_receive_title), onDismiss = onBack) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -196,7 +199,7 @@ internal fun ReceivePage(account: WalletAccount, onBack: () -> Unit) {
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                         QrCodeImage(
                             account.address,
-                            description = "QR code of ${account.name}’s address",
+                            description = stringResource(R.string.wallet_qr_receive_code_description, account.name),
                             modifier = Modifier.fillMaxWidth().widthIn(max = 300.dp),
                         )
                     }
@@ -209,15 +212,15 @@ internal fun ReceivePage(account: WalletAccount, onBack: () -> Unit) {
                         )
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        TextButton(onClick = { copyToClipboard(context, account.address) }) { Text("Copy address") }
+                        TextButton(onClick = { copyToClipboard(context, account.address) }) {
+                            Text(stringResource(R.string.common_copy_address))
+                        }
                     }
                 }
             }
             item("note") {
                 Text(
-                    "Send ETH, xDAI or tokens to this address on Ethereum, Gnosis or any other EVM " +
-                        "chain: it’s the same address on all of them. Ask the sender which network " +
-                        "they’re sending on, so you know where to look for it.",
+                    stringResource(R.string.wallet_qr_receive_note),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 4.dp),
@@ -237,31 +240,41 @@ internal data class ScannedLine(val label: String, val value: String, val note: 
  */
 internal fun scannedLines(code: ScannedCode, chains: List<Chain>, accounts: List<WalletAccount>): List<ScannedLine> {
     fun own(address: String) = accounts.firstOrNull { it.address.equals(address, ignoreCase = true) }
-        ?.let { "This is your ${it.name}" }
+        ?.let { Strings.get(R.string.wallet_qr_own_account, it.name) }
     return when (code) {
-        is ScannedCode.Address -> listOf(ScannedLine("Address", code.address, own(code.address)))
+        is ScannedCode.Address ->
+            listOf(ScannedLine(Strings.get(R.string.wallet_qr_line_address), code.address, own(code.address)))
         is ScannedCode.Payment -> {
             val chain = code.chainId?.let { id -> chains.firstOrNull { it.id == id } }
             val network = when {
                 code.chainId == null -> ScannedLine(
-                    "Network",
-                    "Not given",
-                    "Ask the sender which network the payment is for.",
+                    Strings.get(R.string.wallet_qr_line_network),
+                    Strings.get(R.string.wallet_qr_not_given),
+                    Strings.get(R.string.wallet_qr_network_not_given_note),
                 )
                 chain == null -> ScannedLine(
-                    "Network",
-                    "Chain ID ${code.chainId}",
-                    "Not one of your networks.",
+                    Strings.get(R.string.wallet_qr_line_network),
+                    // The ID as the request wrote it, never locale-formatted: it's what to look up.
+                    Strings.get(R.string.wallet_qr_chain_id, code.chainId.toString()),
+                    Strings.get(R.string.wallet_qr_network_unknown_note),
                 )
-                else -> ScannedLine("Network", chain.name)
+                else -> ScannedLine(Strings.get(R.string.wallet_qr_line_network), chain.name)
             }
             val token = code.token?.let { contract ->
                 TokenRegistry.builtins.firstOrNull { it.chainId == code.chainId && it.address.equals(contract, true) }
             }
             val asset = when {
                 code.token == null -> null
-                token != null -> ScannedLine("Token", "${token.symbol} (${token.name})", code.token)
-                else -> ScannedLine("Token", code.token, "A token Freedom doesn’t know. Check it with the sender.")
+                token != null -> ScannedLine(
+                    Strings.get(R.string.wallet_qr_line_token),
+                    Strings.get(R.string.wallet_qr_token_symbol_name, token.symbol, token.name),
+                    code.token,
+                )
+                else -> ScannedLine(
+                    Strings.get(R.string.wallet_qr_line_token),
+                    code.token,
+                    Strings.get(R.string.wallet_qr_token_unknown_note),
+                )
             }
             val amount = code.amount?.let { raw ->
                 val decimalsAndSymbol = when {
@@ -271,25 +284,38 @@ internal fun scannedLines(code: ScannedCode, chains: List<Chain>, accounts: List
                 }
                 if (decimalsAndSymbol != null) {
                     val (decimals, symbol) = decimalsAndSymbol
-                    ScannedLine("Amount", "${exactAmount(raw, decimals)} $symbol")
+                    ScannedLine(Strings.get(R.string.wallet_qr_line_amount), "${exactAmount(raw, decimals)} $symbol")
                 } else {
-                    val units = if (raw == BigInteger.ONE) "base unit" else "base units"
                     ScannedLine(
-                        "Amount",
-                        "$raw $units",
+                        Strings.get(R.string.wallet_qr_line_amount),
+                        // The raw number as the request wrote it (no grouping): an amount stays fixed-format.
+                        Strings.plural(R.plurals.wallet_qr_base_units, pluralCount(raw), raw.toString()),
                         if (code.token == null) {
-                            "The network isn’t known, so this is in its currency’s smallest unit (like wei for ETH)."
+                            Strings.get(R.string.wallet_qr_base_units_network_note)
                         } else {
-                            "The token’s decimals aren’t known, so this is its smallest unit."
+                            Strings.get(R.string.wallet_qr_base_units_token_note)
                         },
                     )
                 }
-            } ?: ScannedLine("Amount", "Not given")
-            listOfNotNull(ScannedLine("Pay to", code.recipient, own(code.recipient)), network, asset, amount)
+            } ?: ScannedLine(Strings.get(R.string.wallet_qr_line_amount), Strings.get(R.string.wallet_qr_not_given))
+            listOfNotNull(
+                ScannedLine(Strings.get(R.string.wallet_qr_line_pay_to), code.recipient, own(code.recipient)),
+                network,
+                asset,
+                amount,
+            )
         }
         is ScannedCode.Pairing, is ScannedCode.SafeRequest, is ScannedCode.Unrecognized -> emptyList()
     }
 }
+
+/**
+ * [raw] as the count that picks its plural form: itself when it fits an
+ * Int, else a number with the same last nine digits (what plural rules look
+ * at), kept above one so it never reads as singular.
+ */
+private fun pluralCount(raw: BigInteger): Int =
+    if (raw.bitLength() < Int.SIZE_BITS) raw.toInt() else raw.mod(BigInteger.valueOf(1_000_000_000L)).toInt() + 1_000_000_000
 
 /** [raw] base units with every digit kept: a request's amount must not be rounded. */
 internal fun exactAmount(raw: BigInteger, decimals: Int): String =
@@ -340,7 +366,7 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onSafe
             modifier = Modifier.fillMaxSize(),
         ) {
             item("camera") {
-                SectionCard(title = "Camera") {
+                SectionCard(title = stringResource(R.string.wallet_qr_camera_title)) {
                     QrScanner(
                         permission = cameraPermission,
                         onCode = { text -> if (dedup.isNew(text)) show(ScannedCode.parse(text)) },
@@ -348,8 +374,7 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onSafe
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Point the camera at an address, a payment request, a pairing code or a Safe request. " +
-                            "Codes are read on this phone; nothing the camera sees is saved or sent.",
+                        stringResource(R.string.wallet_qr_camera_note),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -365,7 +390,7 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onSafe
                 }
             }
             item("paste") {
-                SectionCard(title = "Or paste it") {
+                SectionCard(title = stringResource(R.string.wallet_qr_paste_title)) {
                     // A pairing link is a session secret: the keyboard neither corrects nor learns it.
                     TabTextInput(private = true) {
                         NoSuggestionsTextInput {
@@ -375,7 +400,7 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onSafe
                                     pasted = it
                                     if (it.isBlank()) dedup.release()
                                 },
-                                placeholder = { Text("0x…, ethereum:… or openlv://…") },
+                                placeholder = { Text(stringResource(R.string.wallet_qr_paste_placeholder)) },
                                 singleLine = true,
                                 keyboardOptions = urlKeyboardOptions(ImeAction.Done),
                                 keyboardActions = KeyboardActions(
@@ -389,7 +414,7 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onSafe
                         TextButton(
                             onClick = { readPasted() },
                             enabled = pasted.isNotBlank(),
-                        ) { Text("Read") }
+                        ) { Text(stringResource(R.string.wallet_qr_read)) }
                     }
                 }
             }
@@ -400,11 +425,11 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onSafe
 @Composable
 private fun ScannedCodeSection(code: ScannedCode, lines: List<ScannedLine>, onCopy: (String) -> Unit) {
     val title = when (code) {
-        is ScannedCode.Address -> "Address"
-        is ScannedCode.Payment -> "Payment request"
-        is ScannedCode.Pairing -> "Pairing code"
-        is ScannedCode.SafeRequest -> "Safe request"
-        is ScannedCode.Unrecognized -> "Can’t use this code"
+        is ScannedCode.Address -> stringResource(R.string.wallet_qr_line_address)
+        is ScannedCode.Payment -> stringResource(R.string.wallet_qr_kind_payment)
+        is ScannedCode.Pairing -> stringResource(R.string.wallet_qr_kind_pairing)
+        is ScannedCode.SafeRequest -> stringResource(R.string.wallet_qr_kind_safe_request)
+        is ScannedCode.Unrecognized -> stringResource(R.string.wallet_qr_kind_unrecognized)
     }
     SectionCard(title = title) {
         for (line in lines) {
@@ -442,15 +467,18 @@ private fun ScannedCodeSection(code: ScannedCode, lines: List<ScannedLine>, onCo
                 val address = if (code is ScannedCode.Address) code.address else (code as ScannedCode.Payment).recipient
                 if (code is ScannedCode.Payment) {
                     Text(
-                        "Sending from this wallet isn’t available yet. To pay from another wallet, " +
-                            "copy the address and check the network and amount there.",
+                        stringResource(R.string.wallet_qr_payment_note),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = { onCopy(address) }) {
-                        Text(if (code is ScannedCode.Payment) "Copy address to pay" else "Copy address")
+                        Text(
+                            stringResource(
+                                if (code is ScannedCode.Payment) R.string.wallet_qr_copy_address_to_pay else R.string.common_copy_address,
+                            ),
+                        )
                     }
                 }
             }
@@ -686,27 +714,26 @@ internal fun QrScanner(permission: CameraPermissionState, onCode: (String) -> Un
     ) {
         Text(
             if (blocked) {
-                "Freedom isn’t allowed to use the camera. Turn it on in Android settings to scan, " +
-                    "or paste the code below."
+                stringResource(R.string.wallet_qr_camera_blocked)
             } else {
-                "Scanning needs the camera. You can also paste the code below."
+                stringResource(R.string.wallet_qr_camera_needed)
             },
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(12.dp))
         if (blocked) {
-            OutlinedButton(onClick = { openAppSettings(context) }) { Text("Open Android settings") }
+            OutlinedButton(onClick = { openAppSettings(context) }) { Text(stringResource(R.string.common_open_android_settings)) }
         } else if (permission.asked && !permission.requesting) {
-            Button(onClick = { permission.request() }) { Text("Allow camera") }
+            Button(onClick = { permission.request() }) { Text(stringResource(R.string.wallet_qr_allow_camera)) }
         }
     }
 }
 
 /** Whether the camera failed to start, and why, in a sentence. */
-private sealed class CameraProblem(val text: String) {
-    object NoCamera : CameraProblem("This device has no camera Freedom can use. Paste the code below instead.")
-    object Failed : CameraProblem("The camera couldn’t be started. Paste the code below instead.")
+private sealed class CameraProblem(@StringRes val text: Int) {
+    object NoCamera : CameraProblem(R.string.wallet_qr_camera_none)
+    object Failed : CameraProblem(R.string.wallet_qr_camera_failed)
 }
 
 @Composable
@@ -786,7 +813,7 @@ private fun CameraPreview(onCode: (String) -> Unit, modifier: Modifier) {
             AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
         } else {
             Text(
-                current.text,
+                stringResource(current.text),
                 color = Color.White,
                 style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center,
@@ -808,10 +835,10 @@ internal fun openAppSettings(context: Context) {
 
 internal fun copyToClipboard(context: Context, address: String) {
     val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
-    clipboard.setPrimaryClip(ClipData.newPlainText("Address", address))
+    clipboard.setPrimaryClip(ClipData.newPlainText(Strings.get(R.string.wallet_qr_clip_label), address))
     // Android 13+ shows its own clipboard confirmation.
     if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) {
-        Toast.makeText(context, "Address copied", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, Strings.get(R.string.wallet_qr_address_copied), Toast.LENGTH_SHORT).show()
     }
 }
 

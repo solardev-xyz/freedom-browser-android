@@ -1,5 +1,7 @@
 package baby.freedom.mobile.wallet
 
+import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.R
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.net.URLDecoder
@@ -49,8 +51,7 @@ sealed class ScannedCode {
 
     companion object {
         private val HEX_ADDRESS = Regex("^0x[0-9a-fA-F]{40}$")
-        private const val NOT_A_WALLET_CODE =
-            "This code isn’t an address, a payment request, a pairing code or a Safe request."
+        private val NOT_A_WALLET_CODE: String get() = Strings.get(R.string.wallet_scan_not_a_wallet_code)
 
         /** Reads [raw], the text a QR code decoded to or the user pasted. */
         fun parse(raw: String): ScannedCode {
@@ -86,10 +87,7 @@ sealed class ScannedCode {
             return if (!mixed || checksummed.substring(2) == hex) checksummed else null
         }
 
-        private fun badChecksum() = Unrecognized(
-            "This address’s capital letters don’t match its checksum, so a character may have " +
-                "been misread or changed. Don’t send to it.",
-        )
+        private fun badChecksum() = Unrecognized(Strings.get(R.string.wallet_scan_bad_checksum))
 
         /**
          * The `openlv://` URI in [text]: [text] itself, or the fragment
@@ -125,10 +123,9 @@ sealed class ScannedCode {
             if (!HEX_ADDRESS.matches(target)) {
                 return Unrecognized(
                     if (target.contains('.')) {
-                        "This payment request names “${shortened(target)}” instead of an address. Names in " +
-                            "payment requests aren’t supported yet."
+                        Strings.get(R.string.wallet_scan_name_not_address, shortened(target))
                     } else {
-                        "This payment request has no valid address in it."
+                        Strings.get(R.string.wallet_scan_no_valid_address)
                     },
                 )
             }
@@ -139,7 +136,7 @@ sealed class ScannedCode {
             } else {
                 chainText.takeIf { it.isNotEmpty() && it.length <= 18 && it.all { c -> c in '0'..'9' } }
                     ?.toLong()?.takeIf { it > 0 }
-                    ?: return Unrecognized("This payment request names a chain that isn’t a valid chain ID.")
+                    ?: return Unrecognized(Strings.get(R.string.wallet_scan_bad_chain))
             }
 
             val params = mutableMapOf<String, String>()
@@ -151,7 +148,7 @@ sealed class ScannedCode {
                     // Two of the same key (value=1&value=1000) could be read
                     // either way by different wallets: refuse, don't pick one.
                     if (params.put(key, value) != null) {
-                        return Unrecognized("This payment request gives “${shortened(key)}” twice, so it’s ambiguous.")
+                        return Unrecognized(Strings.get(R.string.wallet_scan_duplicate_param, shortened(key)))
                     }
                 }
             }
@@ -167,24 +164,18 @@ sealed class ScannedCode {
                     // `value` would move the chain's native currency along with the token.
                     val value = params["value"]?.let { eip681Number(it) ?: return badAmount() }
                     if (value != null && value.signum() != 0) {
-                        return Unrecognized(
-                            "This token payment request also asks for the chain’s own currency, " +
-                                "which a token transfer doesn’t take.",
-                        )
+                        return Unrecognized(Strings.get(R.string.wallet_scan_token_with_native_value))
                     }
                     val to = params["address"]
-                        ?: return Unrecognized("This token payment request doesn’t say who to pay.")
+                        ?: return Unrecognized(Strings.get(R.string.wallet_scan_token_no_recipient))
                     if (!HEX_ADDRESS.matches(to)) {
-                        return Unrecognized("This token payment request doesn’t name a valid address to pay.")
+                        return Unrecognized(Strings.get(R.string.wallet_scan_token_bad_recipient))
                     }
                     val recipient = checkedAddress(to) ?: return badChecksum()
                     val amount = params["uint256"]?.let { eip681Number(it) ?: return badAmount() }
                     Payment(recipient, chainId, token = targetAddress, amount = amount)
                 }
-                else -> Unrecognized(
-                    "This code asks to call a contract function (“${shortened(function)}”), not to make a payment. " +
-                        "That isn’t supported.",
-                )
+                else -> Unrecognized(Strings.get(R.string.wallet_scan_contract_call, shortened(function)))
             }
         }
 
@@ -215,7 +206,7 @@ sealed class ScannedCode {
             return out.toString()
         }
 
-        private fun badAmount() = Unrecognized("This payment request’s amount isn’t a valid whole number of base units.")
+        private fun badAmount() = Unrecognized(Strings.get(R.string.wallet_scan_bad_amount))
 
         private val NUMBER = Regex("^([0-9]+)(?:\\.([0-9]+))?(?:[eE]\\+?([0-9]{1,3}))?$")
         private val UINT256_MAX: BigInteger = BigInteger.ONE.shiftLeft(256) - BigInteger.ONE

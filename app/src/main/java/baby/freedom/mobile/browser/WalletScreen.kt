@@ -72,6 +72,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -85,6 +87,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.DuplicateAccountException
@@ -127,17 +131,17 @@ internal const val WALLET_ROW_KEY = "wallet"
 /** Between chain reads for a pending send while the wallet page is up: at first, doubling to [TX_HISTORY_POLL_MAX_MS]. */
 private const val TX_HISTORY_POLL_MS = 15_000L
 private const val TX_HISTORY_POLL_MAX_MS = 5 * 60_000L
-internal const val WALLET_TITLE = "Wallet"
-internal const val BACKUP_REMINDER = "Recovery phrase not backed up yet"
-internal const val SHOW_PHRASE = "Show recovery phrase"
-private const val NO_SCREEN_LOCK_LINE = "No screen lock protects this wallet"
+internal val WALLET_TITLE: String get() = Strings.get(R.string.wallet_title)
+internal val BACKUP_REMINDER: String get() = Strings.get(R.string.wallet_reminder_line)
+internal val SHOW_PHRASE: String get() = Strings.get(R.string.wallet_show_phrase)
+private val NO_SCREEN_LOCK_LINE: String get() = Strings.get(R.string.wallet_no_screen_lock_line)
 
 /** The Wallet row's one-line state, for Settings and its search. */
 internal fun walletSummary(state: Vault.State): String = when (state) {
-    Vault.State.Empty -> "Not set up · create or import a recovery phrase"
-    is Vault.State.Locked -> "Locked"
-    is Vault.State.Unlocked -> "Unlocked"
-    Vault.State.Unreadable -> "Can’t be read"
+    Vault.State.Empty -> Strings.get(R.string.wallet_summary_empty)
+    is Vault.State.Locked -> Strings.get(R.string.wallet_summary_locked)
+    is Vault.State.Unlocked -> Strings.get(R.string.wallet_summary_unlocked)
+    Vault.State.Unreadable -> Strings.get(R.string.wallet_summary_unreadable)
 }
 
 /**
@@ -170,23 +174,24 @@ internal fun walletAttentionLine(state: Vault.State): String? {
  * Freedom can't tell: Block Store uploads it with the phone's own Google
  * backup, which may be off (#244 R5-F1).
  */
-internal fun backupReminderText(protection: VaultProtection, googleBackup: Boolean): String =
-    (
-        if (googleBackup) {
-            "Google backup reaches your Google account only if this phone’s Google backup is on in " +
-                "Android settings, which Freedom can’t check. So this wallet may exist only on this phone."
-        } else {
-            "This wallet exists only on this phone."
-        }
-        ) + " Until you’ve written its recovery phrase down, the wallet " +
-        (if (googleBackup) "may be" else "is") + " gone for good if the phone is lost, broken or reset" +
-        (if (protection == VaultProtection.SCREEN_LOCK) ", or its screen lock is removed." else ".")
+internal fun backupReminderText(protection: VaultProtection, googleBackup: Boolean): String {
+    val screenLock = protection == VaultProtection.SCREEN_LOCK
+    return Strings.get(
+        when {
+            googleBackup && screenLock -> R.string.wallet_reminder_google_screen_lock
+            googleBackup -> R.string.wallet_reminder_google
+            screenLock -> R.string.wallet_reminder_phone_only_screen_lock
+            else -> R.string.wallet_reminder_phone_only
+        },
+    )
+}
 
 /** Settings' Wallet section rows, for settings search. */
 internal fun walletSettingsRows(state: Vault.State) = listOf(
     settingsRow(
         WALLET_ROW_KEY, WALLET_TITLE, walletSummary(state), walletAttentionLine(state),
-        "Recovery phrase", "Identity", "Back up", GOOGLE_BACKUP_TITLE, "Restore",
+        Strings.get(R.string.wallet_search_recovery_phrase), Strings.get(R.string.wallet_search_identity),
+        Strings.get(R.string.wallet_search_back_up), GOOGLE_BACKUP_TITLE, Strings.get(R.string.wallet_search_restore),
     ),
 )
 
@@ -197,24 +202,25 @@ internal fun walletSettingsRows(state: Vault.State) = listOf(
  */
 internal fun walletBackupDetail(cloudBackup: Boolean, known: PhraseBackup.Known?, walletAddress: String?): String {
     val held = backupHeld(cloudBackup, known, walletAddress)
-    return when {
-        cloudBackup && known?.status == PhraseBackup.Status.NONE -> "This phone (Google backup missing)"
-        // Written for the cloud, but whether it got there hangs on the phone's own Google
-        // backup, which no app can see (#244 R5-F1).
-        held == BackupHeld.CLOUD -> if (cloudBackup) {
-            "This phone, and Google if this phone’s Google backup is on (end-to-end encrypted)"
-        } else {
-            "This phone, and Google if this phone’s Google backup is on (a backup kept from before, " +
-                "end-to-end encrypted)"
-        }
-        held == BackupHeld.DEVICE -> if (cloudBackup) {
-            "This phone (Google backup paused)"
-        } else {
-            "This phone (a Google backup kept from before, paused)"
-        }
-        held == BackupHeld.UNKNOWN && cloudBackup -> "This phone, and Google once it answers"
-        else -> "This phone only"
-    }
+    return Strings.get(
+        when {
+            cloudBackup && known?.status == PhraseBackup.Status.NONE -> R.string.wallet_where_google_missing
+            // Written for the cloud, but whether it got there hangs on the phone's own Google
+            // backup, which no app can see (#244 R5-F1).
+            held == BackupHeld.CLOUD -> if (cloudBackup) {
+                R.string.wallet_where_google_if_on
+            } else {
+                R.string.wallet_where_google_if_on_kept
+            }
+            held == BackupHeld.DEVICE -> if (cloudBackup) {
+                R.string.wallet_where_google_paused
+            } else {
+                R.string.wallet_where_google_paused_kept
+            }
+            held == BackupHeld.UNKNOWN && cloudBackup -> R.string.wallet_where_google_unknown
+            else -> R.string.wallet_where_phone_only
+        },
+    )
 }
 
 /**
@@ -223,48 +229,29 @@ internal fun walletBackupDetail(cloudBackup: Boolean, known: PhraseBackup.Known?
  * even one written for the cloud is only off this phone if the phone's own
  * Google backup is on, which Freedom can't check (#244 R5-F1).
  */
-internal fun removeWalletKeepsBackupText(backup: BackupHeld): String = when (backup) {
-    BackupHeld.CLOUD -> "This deletes the wallet and its recovery phrase from this phone. Its Google " +
-        "backup stays, and this page offers to restore it. It reaches your Google account only if this " +
-        "phone’s Google backup is on in Android settings, which Freedom can’t check: without the " +
-        "recovery phrase written down, losing or resetting this phone may still lose this wallet."
-    BackupHeld.DEVICE -> "This deletes the wallet and its recovery phrase from this phone. Its Google " +
-        "backup stays, but it’s paused: it’s only in Google Play services on this phone, not in your " +
-        "Google account, until the phone has a screen lock and a Google account again. This page " +
-        "offers to restore it."
-    BackupHeld.UNATTRIBUTED -> "This deletes the wallet and its recovery phrase from this phone. Google " +
-        "Play services holds a Google backup of a wallet, which may be this one or another — this " +
-        "wallet can’t be read to tell. That backup stays, and this page offers to restore it. " +
-        "Without the recovery phrase written down, this wallet may be gone for good."
-    BackupHeld.MAYBE_UNATTRIBUTED -> "This deletes the wallet and its recovery phrase from this phone. Google " +
-        "Play services hasn’t answered, so it isn’t known whether it holds a Google backup of a wallet " +
-        "(this one or another — this wallet can’t be read to tell); if it does, it stays, and this page " +
-        "offers to restore it. Without the recovery phrase written down, this wallet may be gone for good."
-    BackupHeld.UNKNOWN -> "This deletes the wallet and its recovery phrase from this phone. Google Play " +
-        "services hasn’t answered, so it isn’t known whether a Google backup of this wallet is there; " +
-        "if it is, it stays, and this page offers to restore it. Without the recovery phrase written " +
-        "down, this wallet may be gone for good."
-    BackupHeld.NONE -> "This deletes the wallet and its recovery phrase from this phone. There is no " +
-        "undo and no copy anywhere else: without the recovery phrase written down, this wallet and " +
-        "everything in it are gone for good."
-}
+internal fun removeWalletKeepsBackupText(backup: BackupHeld): String = Strings.get(
+    when (backup) {
+        BackupHeld.CLOUD -> R.string.wallet_remove_keeps_cloud
+        BackupHeld.DEVICE -> R.string.wallet_remove_keeps_device
+        BackupHeld.UNATTRIBUTED -> R.string.wallet_remove_keeps_unattributed
+        BackupHeld.MAYBE_UNATTRIBUTED -> R.string.wallet_remove_keeps_maybe_unattributed
+        BackupHeld.UNKNOWN -> R.string.wallet_remove_keeps_unknown
+        BackupHeld.NONE -> R.string.wallet_remove_keeps_none
+    },
+)
 
 /**
  * The Unreadable wallet card: with a Block Store entry there (#231),
  * restoring it is the way back. [googleBackupThere] null: Play services
  * hasn't said yet whether there is one (#244 R6-M1).
  */
-internal fun unreadableWalletDetail(googleBackupThere: Boolean?): String =
-    "The wallet file on this phone isn’t one this version can open. " + when (googleBackupThere) {
-        true -> "Google Play services holds a $GOOGLE_BACKUP_TITLE of a wallet: remove this one but keep that " +
-            "backup, then restore it (with a screen lock set). Or, if you have the recovery phrase, " +
-            "remove it and import the phrase."
-        null -> "Google Play services hasn’t answered yet, so it isn’t known whether it holds a " +
-            "$GOOGLE_BACKUP_TITLE of a wallet. If it does, remove this one but keep that backup, then " +
-            "restore it (with a screen lock set). Or, if you have the recovery phrase, remove it and " +
-            "import the phrase."
-        false -> "If you have its recovery phrase, remove it and import the phrase to get your wallet back."
-    }
+internal fun unreadableWalletDetail(googleBackupThere: Boolean?): String = Strings.get(
+    when (googleBackupThere) {
+        true -> R.string.wallet_unreadable_detail_google_backup
+        null -> R.string.wallet_unreadable_detail_google_unknown
+        false -> R.string.wallet_unreadable_detail_no_google_backup
+    },
+)
 
 /** What the import field says under the phrase as it's typed. */
 internal sealed class ImportHint(val text: String) {
@@ -281,23 +268,23 @@ internal sealed class ImportHint(val text: String) {
  */
 internal fun importHint(phrase: String): ImportHint {
     val count = Mnemonic.wordCount(phrase)
-    if (count == 0) return ImportHint.Neutral("Enter 12, 15, 18, 21 or 24 words, separated by spaces")
+    if (count == 0) return ImportHint.Neutral(Strings.get(R.string.wallet_import_hint_empty))
     val words = Mnemonic.words(phrase)
     val finished = if (phrase.last().isWhitespace()) words else words.dropLast(1)
     val unknown = finished.indexOfFirst { it !in bip39Words }
     if (unknown >= 0) {
-        return ImportHint.Problem("Word ${unknown + 1} (“${finished[unknown]}”) isn’t a recovery-phrase word")
+        return ImportHint.Problem(Strings.get(R.string.wallet_import_hint_unknown_word_named, unknown + 1, finished[unknown]))
     }
     return when (val problem = Mnemonic.problemWith(phrase)) {
-        null -> ImportHint.Valid("Valid $count-word recovery phrase")
-        is Mnemonic.Problem.WordCount -> ImportHint.Neutral(if (count == 1) "1 word" else "$count words")
+        null -> ImportHint.Valid(Strings.plural(R.plurals.wallet_import_hint_valid, count, count))
+        is Mnemonic.Problem.WordCount -> ImportHint.Neutral(Strings.plural(R.plurals.wallet_import_hint_word_count, count, count))
         is Mnemonic.Problem.UnknownWord ->
-            ImportHint.Problem("Word ${problem.position} isn’t a recovery-phrase word")
+            ImportHint.Problem(Strings.get(R.string.wallet_import_hint_unknown_word, problem.position))
         // 12 words that don't check out may be the first half of 24.
         Mnemonic.Problem.Checksum -> if (count < Mnemonic.CREATE_WORD_COUNT) {
-            ImportHint.Neutral("$count words · not a valid recovery phrase (yet) — check spelling and order")
+            ImportHint.Neutral(Strings.plural(R.plurals.wallet_import_hint_checksum_partial, count, count))
         } else {
-            ImportHint.Problem("These $count words aren’t a valid recovery phrase — check their spelling and order")
+            ImportHint.Problem(Strings.plural(R.plurals.wallet_import_hint_checksum, count, count))
         }
     }
 }
@@ -590,23 +577,25 @@ internal fun walletErrorMessage(
 ): String? = when (e) {
     is VaultAuthCancelledException -> null
     is CancellationException -> null
-    is VaultAuthFailedException -> "Couldn’t $action: ${e.message}"
-    is VaultLockedException -> "Couldn’t $action: the wallet locked. Unlock it and try again."
-    is TooManyAccountsException -> "Couldn’t $action: ${e.message}."
-    is DuplicateAccountException -> "Couldn’t $action: the next account of this wallet is already on the list, added from a " +
-        "Ledger that holds the same recovery phrase. Remove that Ledger account to add it here."
-    is VaultKeyLostException -> "Android has erased this wallet’s key. That happens when the screen lock is removed. " +
-        lostWalletAdvice(phraseBackedUp, googleBackup, backupOwnerKnown, backupThereKnown)
-    is VaultUnreadableException -> "This wallet can’t be read. " + lostWalletAdvice(phraseBackedUp, googleBackup, backupOwnerKnown, backupThereKnown)
+    is VaultAuthFailedException -> Strings.get(R.string.wallet_error_couldnt_reason, action, e.message)
+    is VaultLockedException -> Strings.get(R.string.wallet_error_couldnt_locked, action)
+    is TooManyAccountsException -> Strings.get(R.string.wallet_error_couldnt_reason_sentence, action, e.message)
+    is DuplicateAccountException -> Strings.get(R.string.wallet_error_couldnt_duplicate_account, action)
+    is VaultKeyLostException -> Strings.get(
+        R.string.wallet_error_key_lost,
+        lostWalletAdvice(phraseBackedUp, googleBackup, backupOwnerKnown, backupThereKnown),
+    )
+    is VaultUnreadableException -> Strings.get(
+        R.string.wallet_error_unreadable,
+        lostWalletAdvice(phraseBackedUp, googleBackup, backupOwnerKnown, backupThereKnown),
+    )
     // Google backup (#231). None of these messages can carry the phrase.
-    is BackupUnavailableException -> "Couldn’t $action: ${e.message}."
-    is BackupNotEncryptedException -> "Couldn’t $action: Google can’t end-to-end encrypt the backup on this " +
-        "phone. That needs a screen lock and a Google account."
-    is BackupUnreadableException -> "Couldn’t $action: the Google backup isn’t one this version can read."
-    is BackupMissingException -> "Couldn’t $action: there’s no Google backup on this phone any more."
-    is RestoreNeedsScreenLockException -> "Couldn’t $action: set a screen lock first, so the restored " +
-        "wallet asks who you are before it opens."
-    else -> "Couldn’t $action (${e.javaClass.simpleName})"
+    is BackupUnavailableException -> Strings.get(R.string.wallet_error_couldnt_reason_sentence, action, e.message)
+    is BackupNotEncryptedException -> Strings.get(R.string.wallet_error_couldnt_not_encrypted, action)
+    is BackupUnreadableException -> Strings.get(R.string.wallet_error_couldnt_backup_unreadable, action)
+    is BackupMissingException -> Strings.get(R.string.wallet_error_couldnt_backup_missing, action)
+    is RestoreNeedsScreenLockException -> Strings.get(R.string.wallet_error_couldnt_restore_needs_screen_lock, action)
+    else -> Strings.get(R.string.wallet_error_couldnt_other, action, e.javaClass.simpleName)
 }
 
 private fun lostWalletAdvice(
@@ -614,23 +603,19 @@ private fun lostWalletAdvice(
     googleBackup: Boolean,
     ownerKnown: Boolean,
     thereKnown: Boolean,
-) = if (googleBackup && !thereKnown) {
-    "Google Play services hasn’t answered yet, so it isn’t known whether it holds a $GOOGLE_BACKUP_TITLE " +
-        "of a wallet (this one or another). If it does, remove this wallet but keep that backup, then " +
-        "restore it (with a screen lock set). " +
-        if (phraseBackedUp) "Or remove it and import your recovery phrase." else ""
-} else if (googleBackup && !ownerKnown) {
-    "Google Play services holds a $GOOGLE_BACKUP_TITLE of a wallet, which may be this one or another: " +
-        "remove this wallet but keep that backup, then restore it (with a screen lock set). " +
-        if (phraseBackedUp) "Or remove it and import your recovery phrase." else ""
-} else if (googleBackup) {
-    "Its $GOOGLE_BACKUP_TITLE can bring it back: remove the wallet but keep that backup, " +
-        "then restore it (with a screen lock set)."
-} else if (phraseBackedUp) {
-    "Remove the wallet and import your recovery phrase to get it back."
-} else {
-    "Its recovery phrase was never shown, so it can’t be restored: remove it and set up a new wallet."
-}
+) = Strings.get(
+    if (googleBackup && !thereKnown) {
+        if (phraseBackedUp) R.string.wallet_error_advice_google_unknown_or_import else R.string.wallet_error_advice_google_unknown
+    } else if (googleBackup && !ownerKnown) {
+        if (phraseBackedUp) R.string.wallet_error_advice_google_unattributed_or_import else R.string.wallet_error_advice_google_unattributed
+    } else if (googleBackup) {
+        R.string.wallet_error_advice_google
+    } else if (phraseBackedUp) {
+        R.string.wallet_error_advice_import
+    } else {
+        R.string.wallet_error_advice_never_shown
+    },
+)
 
 /**
  * The wallet page (#75, #76), from Settings → Wallet, or opened by a
@@ -990,7 +975,7 @@ fun WalletScreen(
             protection = stored.protection,
             reveal = { vault.revealMnemonic(auth) },
             onSeen = { vault.markBackedUp() },
-            errorMessage = { e -> walletErrorMessage(e, "show the recovery phrase", phraseBackedUp) },
+            errorMessage = { e -> walletErrorMessage(e, Strings.get(R.string.wallet_action_show_phrase), phraseBackedUp) },
             onBack = { showingPhrase = false },
         )
         return
@@ -1009,7 +994,7 @@ fun WalletScreen(
             error = error,
             deviceSecure = deviceSecure,
             onImport = { mnemonic, clear ->
-                run("import the wallet") {
+                run(Strings.get(R.string.wallet_action_import)) {
                     vault.create(mnemonic, auth, imported = true)
                     clear()
                     importing = false
@@ -1028,20 +1013,20 @@ fun WalletScreen(
         onDismiss()
     }
     BackHandler(onBack = dismiss)
-    FullScreenScaffold(title = WALLET_TITLE, onDismiss = dismiss) {
+    FullScreenScaffold(title = stringResource(R.string.wallet_title), onDismiss = dismiss) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
             if (request != null) item("request") {
-                SectionCard(title = "Wallet needed") {
+                SectionCard(title = stringResource(R.string.wallet_needed_title)) {
                     Text(request.reason, style = MaterialTheme.typography.bodyMedium)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                         // Declines only the feature's request: the page stays
                         // if the user opened it themselves (Settings → Wallet),
                         // and closes with the request if the request opened it.
-                        TextButton(onClick = { request.finish(false) }) { Text("Not now") }
+                        TextButton(onClick = { request.finish(false) }) { Text(stringResource(R.string.common_not_now)) }
                     }
                 }
             }
@@ -1050,17 +1035,14 @@ fun WalletScreen(
                     busy = busy,
                     deviceSecure = deviceSecure,
                     onRestore = {
-                        run("restore the wallet") {
+                        run(Strings.get(R.string.wallet_action_restore)) {
                             vault.restore(auth, phraseBackup)
                             backupCheck++
                         }
                     },
                     onDelete = { confirmBackupDelete = true },
                     noScreenLock = {
-                        NoScreenLockWarning(
-                            text = "Restoring asks for your fingerprint, face or screen lock, and this " +
-                                "phone has none. Set a PIN, pattern or password first.",
-                        )
+                        NoScreenLockWarning(text = stringResource(R.string.wallet_restore_no_screen_lock))
                         ScreenLockSettingsButton()
                     },
                 )
@@ -1071,7 +1053,7 @@ fun WalletScreen(
                         busy = busy,
                         deviceSecure = deviceSecure,
                         onCreate = {
-                            run("create the wallet") {
+                            run(Strings.get(R.string.wallet_action_create)) {
                                 vault.create(Mnemonic.generate(), auth, imported = false)
                             }
                         },
@@ -1086,7 +1068,7 @@ fun WalletScreen(
                         backupKnown = backupKnown,
                         walletAddress = walletAddress,
                         busy = busy,
-                        onAction = { run("unlock the wallet") { vault.unlock(auth) } },
+                        onAction = { run(Strings.get(R.string.wallet_action_unlock)) { vault.unlock(auth) } },
                     )
                     is Vault.State.Unlocked -> StatusSection(
                         locked = false,
@@ -1096,11 +1078,11 @@ fun WalletScreen(
                         busy = busy,
                         onAction = { vault.lock() },
                     )
-                    Vault.State.Unreadable -> SectionCard(title = WALLET_TITLE) {
+                    Vault.State.Unreadable -> SectionCard(title = stringResource(R.string.wallet_title)) {
                         StatusLine(
                             icon = Icons.Filled.ErrorOutline,
                             color = Color(0xFFEF4444),
-                            title = "Can’t be read",
+                            title = stringResource(R.string.wallet_summary_unreadable),
                             detail = unreadableWalletDetail(googleBackupThere = backupEntry),
                         )
                     }
@@ -1111,7 +1093,7 @@ fun WalletScreen(
             }
             val info = stored
             val turnOnBackup = {
-                run("turn on Google backup") {
+                run(Strings.get(R.string.wallet_action_turn_on_google_backup)) {
                     vault.enableCloudBackup(auth, phraseBackup)
                     backupCheck++
                 }
@@ -1123,7 +1105,7 @@ fun WalletScreen(
                     GoogleBackupOffer(
                         busy = busy,
                         onTurnOn = turnOnBackup,
-                        onNotNow = { run("save your answer") { vault.markCloudBackupOffered() } },
+                        onNotNow = { run(Strings.get(R.string.wallet_action_save_answer)) { vault.markCloudBackupOffered() } },
                     )
                 }
             }
@@ -1135,7 +1117,7 @@ fun WalletScreen(
                             locked = state is Vault.State.Locked,
                             failed = accountSyncFailed,
                             busy = busy,
-                            onRetry = { run("find your accounts") { walletAccounts.retry() } },
+                            onRetry = { run(Strings.get(R.string.wallet_action_find_accounts)) { walletAccounts.retry() } },
                         )
                     }
                 } else {
@@ -1146,9 +1128,9 @@ fun WalletScreen(
                             busy = busy,
                             // Through run(): saving the choice can fail
                             // (a full disk), and that's an error line, not a crash.
-                            onSelect = { index -> run("switch account") { walletAccounts.select(index) } },
+                            onSelect = { index -> run(Strings.get(R.string.wallet_action_switch_account)) { walletAccounts.select(index) } },
                             onAdd = {
-                                run("add an account") {
+                                run(Strings.get(R.string.wallet_action_add_account)) {
                                     if (!vault.unlockedNow()) vault.unlock(auth)
                                     walletAccounts.add()
                                 }
@@ -1162,12 +1144,11 @@ fun WalletScreen(
                                 connectingLedger = true
                             },
                             onRemoveLedger = { account ->
-                                run("remove the Ledger account") {
+                                run(Strings.get(R.string.wallet_action_remove_ledger_account)) {
                                     // Its sites first (#220 R2-M2): told they lost it now, and not
                                     // quietly reconnected if the same Ledger account is added again.
                                     if (!EthereumProviders.accountRemoved(context, account.address)) {
-                                        error = "Couldn’t remove the Ledger account: the sites connected to it " +
-                                            "couldn’t be disconnected. Try again."
+                                        error = Strings.get(R.string.wallet_error_remove_ledger_sites)
                                         return@run
                                     }
                                     // And desktop's OpenLV session, if it was given it (#220 R1-M2).
@@ -1225,10 +1206,10 @@ fun WalletScreen(
                 }
             }
             if (info != null) item("scan") {
-                SectionCard(title = "Scan") {
+                SectionCard(title = stringResource(R.string.wallet_scan_section)) {
                     PageRow(
                         title = SCAN_TITLE,
-                        subtitle = "An address, a payment request, a pairing code or a Safe request",
+                        subtitle = stringResource(R.string.wallet_scan_subtitle),
                         style = PageRowStyle.Inset,
                         leadingIcon = Icons.Filled.QrCodeScanner,
                         enabled = !busy,
@@ -1254,13 +1235,13 @@ fun WalletScreen(
                 )
             }
             if (info != null) item("phrase") {
-                SectionCard(title = "Recovery phrase") {
+                SectionCard(title = stringResource(R.string.wallet_phrase_section)) {
                     PageRow(
-                        title = SHOW_PHRASE,
+                        title = stringResource(R.string.wallet_show_phrase),
                         subtitle = if (info.protection == VaultProtection.SCREEN_LOCK) {
-                            "Asks for your fingerprint, face or PIN each time"
+                            stringResource(R.string.wallet_phrase_asks)
                         } else {
-                            "Opens without asking: no screen lock"
+                            stringResource(R.string.wallet_phrase_opens_without_asking)
                         },
                         style = PageRowStyle.Inset,
                         leadingIcon = Icons.Filled.Key,
@@ -1283,13 +1264,8 @@ fun WalletScreen(
                 )
             }
             if (info?.protection == VaultProtection.DEVICE_ONLY) item("no-lock") {
-                SectionCard(title = "No screen lock") {
-                    NoScreenLockWarning(
-                        text = "This wallet was made when the phone had no screen lock, so nothing " +
-                            "asks who you are before it opens: anyone holding the phone can use it. " +
-                            "To protect it, write down its recovery phrase and set a screen lock, " +
-                            "then remove the wallet and import the phrase again.",
-                    )
+                SectionCard(title = stringResource(R.string.wallet_no_screen_lock_section)) {
+                    NoScreenLockWarning(text = stringResource(R.string.wallet_no_screen_lock_detail))
                     ScreenLockSettingsButton()
                 }
             }
@@ -1349,7 +1325,7 @@ fun WalletScreen(
                 }
             }
             if (state is Vault.State.Locked || state is Vault.State.Unlocked) item("publishing") {
-                SectionCard(title = "Publishing") {
+                SectionCard(title = stringResource(R.string.wallet_publishing_section)) {
                     PageRow(
                         title = PUBLISHER_IDENTITIES_TITLE,
                         subtitle = publisherIdentitiesSummary(publisherSites),
@@ -1364,10 +1340,10 @@ fun WalletScreen(
                 }
             }
             if (state != Vault.State.Empty) item("remove") {
-                SectionCard(title = "Remove") {
+                SectionCard(title = stringResource(R.string.wallet_remove_section)) {
                     PageRow(
-                        title = "Remove wallet",
-                        subtitle = "Erases it from this phone",
+                        title = stringResource(R.string.wallet_remove_title),
+                        subtitle = stringResource(R.string.wallet_remove_subtitle),
                         style = PageRowStyle.Inset,
                         leadingIcon = Icons.Filled.DeleteForever,
                         enabled = !busy,
@@ -1387,12 +1363,12 @@ fun WalletScreen(
                 confirmBackupOff = false
                 confirmBackupDelete = false
                 if (turningOff) {
-                    run("turn off Google backup") {
+                    run(Strings.get(R.string.wallet_action_turn_off_google_backup)) {
                         vault.disableCloudBackup(phraseBackup)
                         backupCheck++
                     }
                 } else {
-                    run("delete the Google backup") {
+                    run(Strings.get(R.string.wallet_action_delete_google_backup)) {
                         phraseBackup.delete()
                         backupCheck++
                     }
@@ -1410,7 +1386,7 @@ fun WalletScreen(
             backup = googleBackupHeld,
             onConfirm = { withBackup ->
                 confirmRemove = false
-                run("remove the wallet") {
+                run(Strings.get(R.string.wallet_action_remove)) {
                     var backupLeft: String? = null
                     var backupKept: PhraseBackup.DeleteIfOf? = null
                     // With backup on, only this wallet's phrase is ever stored, and an
@@ -1460,8 +1436,7 @@ fun WalletScreen(
                     // (#244 R4-F4).
                     if (withBackup) phraseBackup.exclusive { removeWith(this) } else removeWith(null)
                     backupLeft?.let {
-                        error = "The wallet is removed, but its Google backup couldn’t be deleted ($it). " +
-                            "Delete it below once Google Play services answers."
+                        error = Strings.get(R.string.wallet_removed_backup_not_deleted, it)
                     }
                     backupKeptMessage(backupKept)?.let { error = it }
                     backupCheck++
@@ -1479,12 +1454,8 @@ fun WalletScreen(
  * which may well be this wallet's (#244 R1-M3). Null when none was kept.
  */
 internal fun backupKeptMessage(kept: PhraseBackup.DeleteIfOf?): String? = when (kept) {
-    PhraseBackup.DeleteIfOf.OTHER_WALLET ->
-        "The wallet is removed. The Google backup on this phone is another wallet’s, so it was kept: " +
-            "restore or delete it below."
-    PhraseBackup.DeleteIfOf.UNKNOWN ->
-        "The wallet is removed. Freedom couldn’t tell whether the Google backup on this phone is this " +
-            "wallet’s, so it was kept: restore or delete it below."
+    PhraseBackup.DeleteIfOf.OTHER_WALLET -> Strings.get(R.string.wallet_removed_kept_other_wallets)
+    PhraseBackup.DeleteIfOf.UNKNOWN -> Strings.get(R.string.wallet_removed_kept_unknown)
     else -> null
 }
 
@@ -1495,36 +1466,28 @@ private fun SetupSection(
     onCreate: () -> Unit,
     onImport: () -> Unit,
 ) {
-    SectionCard(title = "Set up your wallet") {
+    SectionCard(title = stringResource(R.string.wallet_setup_title)) {
         Text(
-            "Your wallet is your identity for dApps, publishing and payments: a 24-word " +
-                "recovery phrase, encrypted on this phone. You don’t need one to browse.",
+            stringResource(R.string.wallet_setup_intro),
             style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            "It stays on this phone only unless you turn on $GOOGLE_BACKUP_TITLE. Once it’s made, " +
-                "write down its recovery phrase ($SHOW_PHRASE): without it, the wallet can’t be " +
-                "restored if the phone is lost, broken or reset.",
+            stringResource(R.string.wallet_setup_write_down, stringResource(R.string.wallet_show_phrase)),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (!deviceSecure) {
             Spacer(Modifier.height(12.dp))
-            NoScreenLockWarning(
-                text = "This phone has no screen lock. You can still make a wallet, but nothing " +
-                    "will ask who you are before it opens: anyone holding the phone can use it. " +
-                    "Set a PIN, pattern or password first to protect it with your fingerprint, " +
-                    "face or screen lock.",
-            )
+            NoScreenLockWarning(text = stringResource(R.string.wallet_setup_no_screen_lock))
             ScreenLockSettingsButton()
         }
         Spacer(Modifier.height(12.dp))
         Button(onClick = onCreate, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-            Text(if (busy) "Creating…" else "Create wallet")
+            Text(stringResource(if (busy) R.string.wallet_creating else R.string.wallet_create))
         }
         OutlinedButton(onClick = onImport, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-            Text("Import recovery phrase")
+            Text(stringResource(R.string.wallet_import_phrase_button))
         }
     }
 }
@@ -1538,47 +1501,56 @@ private fun StatusSection(
     busy: Boolean,
     onAction: () -> Unit,
 ) {
-    SectionCard(title = WALLET_TITLE) {
+    SectionCard(title = stringResource(R.string.wallet_title)) {
         if (locked) {
             StatusLine(
                 icon = Icons.Filled.Lock,
                 color = Color(0xFF94A3B8),
-                title = "Locked",
+                title = stringResource(R.string.wallet_summary_locked),
                 detail = if (info.protection == VaultProtection.SCREEN_LOCK) {
-                    "Unlock with your fingerprint, face or screen lock"
+                    stringResource(R.string.wallet_locked_detail)
                 } else {
-                    "Unlocks without asking — this phone has no screen lock"
+                    stringResource(R.string.wallet_locked_detail_no_screen_lock)
                 },
             )
         } else {
             StatusLine(
                 icon = Icons.Filled.LockOpen,
                 color = Color(0xFF22C55E),
-                title = "Unlocked",
-                detail = "Locks after 15 minutes without wallet activity, 1 minute after you " +
-                    "leave the app, and whenever the app restarts",
+                title = stringResource(R.string.wallet_summary_unlocked),
+                detail = stringResource(R.string.wallet_unlocked_detail),
             )
         }
         Spacer(Modifier.height(8.dp))
         DetailRow(
-            "Unlock with",
-            if (info.protection == VaultProtection.SCREEN_LOCK) "Biometrics or screen lock" else "Nothing (no screen lock)",
+            stringResource(R.string.wallet_detail_unlock_with),
+            stringResource(
+                if (info.protection == VaultProtection.SCREEN_LOCK) {
+                    R.string.wallet_detail_unlock_with_screen_lock
+                } else {
+                    R.string.wallet_detail_unlock_with_nothing
+                },
+            ),
             singleLine = false,
         )
-        DetailRow("Key kept in", if (info.strongBox) "StrongBox secure chip" else "Android Keystore", singleLine = false)
         DetailRow(
-            "Backup",
+            stringResource(R.string.wallet_detail_key_kept_in),
+            stringResource(if (info.strongBox) R.string.wallet_detail_key_strongbox else R.string.wallet_detail_key_keystore),
+            singleLine = false,
+        )
+        DetailRow(
+            stringResource(R.string.wallet_detail_backup),
             walletBackupDetail(info.cloudBackup, backupKnown, walletAddress),
             singleLine = false,
         )
         Spacer(Modifier.height(8.dp))
         if (locked) {
             Button(onClick = onAction, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                Text(if (busy) "Unlocking…" else "Unlock")
+                Text(stringResource(if (busy) R.string.wallet_unlocking else R.string.wallet_unlock))
             }
         } else {
             OutlinedButton(onClick = onAction, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                Text("Lock now")
+                Text(stringResource(R.string.wallet_lock_now))
             }
         }
     }
@@ -1613,11 +1585,11 @@ private fun StatusLine(
  */
 @Composable
 private fun BackupReminder(protection: VaultProtection, googleBackup: Boolean, busy: Boolean, onShow: () -> Unit) {
-    SectionCard(title = BACKUP_REMINDER) {
+    SectionCard(title = stringResource(R.string.wallet_reminder_line)) {
         NoScreenLockWarning(text = backupReminderText(protection, googleBackup))
         Spacer(Modifier.height(12.dp))
         Button(onClick = onShow, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-            Text("Back up now")
+            Text(stringResource(R.string.wallet_back_up_now))
         }
     }
 }
@@ -1643,7 +1615,7 @@ private fun ScreenLockSettingsButton() {
             } catch (_: ActivityNotFoundException) {
                 context.startActivity(Intent(Settings.ACTION_SETTINGS))
             }
-        }) { Text("Screen lock settings") }
+        }) { Text(stringResource(R.string.wallet_screen_lock_settings)) }
     }
 }
 
@@ -1755,19 +1727,16 @@ internal fun ImportPhrasePage(
             }
         }
     }
-    FullScreenScaffold(title = "Import wallet", onDismiss = back) {
+    FullScreenScaffold(title = stringResource(R.string.wallet_import_title), onDismiss = back) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
             item("field") {
-                SectionCard(title = "Recovery phrase") {
+                SectionCard(title = stringResource(R.string.wallet_phrase_section)) {
                     Text(
-                        "Type or paste the words, separated by spaces. They’re encrypted on this " +
-                            "phone only and never sent anywhere. A phrase pasted in, or copied out of " +
-                            "this field, is taken off the clipboard when you tap Import wallet or " +
-                            "leave this page.",
+                        stringResource(R.string.wallet_import_intro),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1808,17 +1777,14 @@ internal fun ImportPhrasePage(
                     )
                     if (!deviceSecure) {
                         Spacer(Modifier.height(12.dp))
-                        NoScreenLockWarning(
-                            text = "This phone has no screen lock, so anyone holding it will be able " +
-                                "to open this wallet.",
-                        )
+                        NoScreenLockWarning(text = stringResource(R.string.wallet_import_no_screen_lock))
                     }
                     Spacer(Modifier.height(12.dp))
                     Button(
                         onClick = submit,
                         enabled = !busy && hint is ImportHint.Valid,
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text(if (busy) "Importing…" else "Import wallet") }
+                    ) { Text(stringResource(if (busy) R.string.wallet_importing else R.string.wallet_import_button)) }
                 }
             }
             error?.let { message -> item("error") { ErrorText(message) } }
@@ -1852,30 +1818,24 @@ private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boo
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Filled.AccountBalanceWallet, contentDescription = null) },
-        title = { Text("Remove wallet?") },
+        title = { Text(stringResource(R.string.wallet_remove_dialog_title)) },
         text = {
             Column {
                 Text(
                     if (cloudBackup && deleteBackup) {
-                        "This deletes the wallet and its recovery phrase from this phone, and " +
-                            (
-                                when {
-                                    backup == BackupHeld.MAYBE_UNATTRIBUTED ->
-                                        "that Google backup, whichever wallet it’s of, if there is one, "
-                                    unattributed -> "that Google backup, whichever wallet it’s of, "
-                                    // Deleted only once it's seen to be this wallet's (#244 R5-F2).
-                                    backup == BackupHeld.UNKNOWN -> "its Google backup, if there is one, "
-                                    else -> "its Google backup "
-                                }
-                                ) +
-                            "too. There is no undo: without the recovery phrase written " +
-                            "down, this wallet and everything in it are gone for good."
+                        stringResource(
+                            when {
+                                backup == BackupHeld.MAYBE_UNATTRIBUTED -> R.string.wallet_remove_deletes_maybe_unattributed
+                                unattributed -> R.string.wallet_remove_deletes_unattributed
+                                // Deleted only once it's seen to be this wallet's (#244 R5-F2).
+                                backup == BackupHeld.UNKNOWN -> R.string.wallet_remove_deletes_unknown
+                                else -> R.string.wallet_remove_deletes_own
+                            },
+                        )
                     } else if (cloudBackup) {
                         removeWalletKeepsBackupText(backup)
                     } else {
-                        "This deletes the wallet and its recovery phrase from this phone. There is no " +
-                            "undo and no copy anywhere else: without the recovery phrase written down, " +
-                            "this wallet and everything in it are gone for good."
+                        stringResource(R.string.wallet_remove_keeps_none)
                     },
                 )
                 Spacer(Modifier.height(12.dp))
@@ -1887,7 +1847,7 @@ private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boo
                 ) {
                     Checkbox(checked = acknowledged, onCheckedChange = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("I have my recovery phrase, or I accept losing this wallet")
+                    Text(stringResource(R.string.wallet_remove_acknowledge))
                 }
                 if (cloudBackup) {
                     Row(
@@ -1899,12 +1859,14 @@ private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boo
                         Checkbox(checked = deleteBackup, onCheckedChange = null)
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            when {
-                                backup == BackupHeld.MAYBE_UNATTRIBUTED -> "Also delete that Google backup, if there is one"
-                                unattributed -> "Also delete that Google backup"
-                                backup == BackupHeld.UNKNOWN -> "Also delete its Google backup, if there is one"
-                                else -> "Also delete its Google backup"
-                            },
+                            stringResource(
+                                when {
+                                    backup == BackupHeld.MAYBE_UNATTRIBUTED -> R.string.wallet_remove_also_delete_maybe_unattributed
+                                    unattributed -> R.string.wallet_remove_also_delete_unattributed
+                                    backup == BackupHeld.UNKNOWN -> R.string.wallet_remove_also_delete_unknown
+                                    else -> R.string.wallet_remove_also_delete_own
+                                },
+                            ),
                         )
                     }
                 }
@@ -1917,10 +1879,10 @@ private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boo
                 enabled = acknowledged && tap.armed,
                 modifier = Modifier.protectedPress(tap),
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
-            ) { Text("Remove wallet") }
+            ) { Text(stringResource(R.string.wallet_remove_confirm)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }
@@ -1930,10 +1892,9 @@ private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boo
  * page can show; also used by the unit test so the copy and
  * [PhraseClipboard.TTL_MS] can't drift apart.
  */
-internal val COPY_NOTE = "Copying puts the words on the clipboard, where other apps can read them. " +
-    "They’re taken off again after ${PhraseClipboard.TTL_MS / 1000 / 60} minute. If Freedom is in the " +
-    "background by then, usually up to a minute later, but battery saving can hold it back until " +
-    "you next open Freedom."
+internal val COPY_NOTE: String get() = (PhraseClipboard.TTL_MS / 1000 / 60).toInt().let { minutes ->
+    Strings.plural(R.plurals.wallet_copy_note, minutes, minutes)
+}
 
 /**
  * Show recovery phrase (#78): the words behind a fresh authentication,
@@ -2010,37 +1971,40 @@ private fun RecoveryPhrasePage(
         }
     }
 
-    FullScreenScaffold(title = "Recovery phrase", onDismiss = back) {
+    FullScreenScaffold(title = stringResource(R.string.wallet_phrase_section), onDismiss = back) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
             item("warning") {
-                SectionCard(title = "Keep it secret") {
-                    NoScreenLockWarning(
-                        text = "Anyone with these words can take everything in this wallet, from any " +
-                            "device. Never share them or type them into a website or app — no one " +
-                            "legitimate will ask. Write them down on paper, in order, and keep it " +
-                            "somewhere safe. Don’t photograph them.",
-                    )
+                SectionCard(title = stringResource(R.string.wallet_phrase_keep_secret_title)) {
+                    NoScreenLockWarning(text = stringResource(R.string.wallet_phrase_keep_secret))
                 }
             }
             item("words") {
                 val shown = words
-                SectionCard(title = if (shown != null) "Your ${shown.size} words" else "Hidden") {
+                SectionCard(
+                    title = if (shown != null) {
+                        pluralStringResource(R.plurals.wallet_phrase_your_words, shown.size, shown.size)
+                    } else {
+                        stringResource(R.string.wallet_phrase_hidden)
+                    },
+                ) {
                     if (shown == null) {
                         Text(
-                            "Make sure no one can see your screen. " + if (protection == VaultProtection.SCREEN_LOCK) {
-                                "You’ll be asked for your fingerprint, face or screen lock."
-                            } else {
-                                "This phone has no screen lock, so they show without asking."
-                            },
+                            stringResource(
+                                if (protection == VaultProtection.SCREEN_LOCK) {
+                                    R.string.wallet_phrase_reveal_asks
+                                } else {
+                                    R.string.wallet_phrase_reveal_no_screen_lock
+                                },
+                            ),
                             style = MaterialTheme.typography.bodyMedium,
                         )
                         Spacer(Modifier.height(12.dp))
                         Button(onClick = { show() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                            Text(if (busy) "Waiting…" else SHOW_PHRASE)
+                            Text(if (busy) stringResource(R.string.wallet_waiting) else stringResource(R.string.wallet_show_phrase))
                         }
                     } else {
                         PhraseGrid(shown)
@@ -2058,7 +2022,7 @@ private fun RecoveryPhrasePage(
                             OutlinedButton(onClick = hide) {
                                 Icon(Icons.Filled.VisibilityOff, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text("Hide")
+                                Text(stringResource(R.string.wallet_hide))
                             }
                         }
                         Spacer(Modifier.height(8.dp))
@@ -2086,8 +2050,8 @@ private fun RecoveryPhrasePage(
 internal fun CopyLabel(copied: Boolean, modifier: Modifier = Modifier) {
     val hidden = Modifier.alpha(0f).clearAndSetSemantics {}
     Box(contentAlignment = Alignment.Center, modifier = modifier) {
-        Text("Copy", modifier = if (copied) hidden else Modifier)
-        Text("Copied", modifier = if (copied) Modifier else hidden)
+        Text(stringResource(R.string.wallet_copy), modifier = if (copied) hidden else Modifier)
+        Text(stringResource(R.string.wallet_copied), modifier = if (copied) Modifier else hidden)
     }
 }
 

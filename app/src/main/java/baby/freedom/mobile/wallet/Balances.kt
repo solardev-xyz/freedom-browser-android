@@ -1,5 +1,7 @@
 package baby.freedom.mobile.wallet
 
+import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
@@ -48,7 +50,7 @@ class BalanceFetcher(private val rpc: WalletRpc) {
             val r = rpc.call(token.chainId, call)
             val value = Erc20.decodeUint256(r.value)
             if (value == null) {
-                TokenBalance.Failed("the ${token.symbol} contract gave no balance", null)
+                TokenBalance.Failed(Strings.get(R.string.wallet_balance_no_balance_from_contract, token.symbol), null)
             } else {
                 TokenBalance.Known(value, r.trust)
             }
@@ -61,11 +63,11 @@ class BalanceFetcher(private val rpc: WalletRpc) {
 
     companion object {
         internal fun failureReason(e: ChainRpcException): String = when (e) {
-            is ChainRpcException.UnknownChain -> "the chain isn’t set up"
-            is ChainRpcException.AllSourcesFailed -> "no RPC answered"
-            is ChainRpcException.Rpc -> "the RPC answered with an error (${e.code})"
-            is ChainRpcException.InvalidResponse -> "the RPC’s answer made no sense"
-            else -> "couldn’t read it"
+            is ChainRpcException.UnknownChain -> Strings.get(R.string.wallet_balance_chain_not_set_up)
+            is ChainRpcException.AllSourcesFailed -> Strings.get(R.string.wallet_balance_no_rpc_answered)
+            is ChainRpcException.Rpc -> Strings.get(R.string.wallet_balance_rpc_error, e.code.toString())
+            is ChainRpcException.InvalidResponse -> Strings.get(R.string.wallet_balance_rpc_nonsense)
+            else -> Strings.get(R.string.wallet_balance_read_failed)
         }
     }
 }
