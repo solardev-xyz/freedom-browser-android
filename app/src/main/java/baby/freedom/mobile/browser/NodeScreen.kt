@@ -776,7 +776,8 @@ private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
                 TextButton(onClick = tor.onOpenOrbot) { Text("Open Orbot") }
             }
         }
-        LogsButton(onOpenLogs)
+        // An external client's logs are in that app, not here.
+        if (proxy == null) LogsButton(onOpenLogs)
     }
 }
 

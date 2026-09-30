@@ -2493,7 +2493,12 @@ fun BrowserScreen(
 
     // Over the node card that opened it; Back returns there.
     showLogs?.let { source ->
-        NodeLogsScreen(initial = source, read = readNodeLogs, onDismiss = { showLogs = null })
+        NodeLogsScreen(
+            initial = source,
+            read = readNodeLogs,
+            onDismiss = { showLogs = null },
+            externalTor = tor.proxy != null,
+        )
     }
 
     if (showTabSwitcher) {

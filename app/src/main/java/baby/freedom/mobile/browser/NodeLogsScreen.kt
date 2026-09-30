@@ -56,13 +56,15 @@ import java.util.Locale
  * [read] asks the node's process for its lines; null when the node itself
  * is off — its process may be gone, or (Swarm, IPFS and Radicle share
  * `:node`) still running another node, in which case earlier lines of this
- * one aren't shown.
+ * one aren't shown. [externalTor]: Settings → Tor uses an external
+ * proxy (#275), so no Tor client runs here and Tor's logs are that app's.
  */
 @Composable
 fun NodeLogsScreen(
     initial: NodeLogSource,
     read: (NodeLogSource) -> String?,
     onDismiss: () -> Unit,
+    externalTor: Boolean = false,
 ) {
     BackHandler(onBack = onDismiss)
     val context = LocalContext.current
@@ -82,7 +84,10 @@ fun NodeLogsScreen(
             }
         }
     }
-    val lines = logs?.lines.orEmpty()
+    // Settings → Tor uses an external client: whatever the embedded one
+    // logged before the switch isn't what's routing now; nothing to share.
+    val external = source == NodeLogSource.Tor && externalTor
+    val lines = if (external) emptyList() else logs?.lines.orEmpty()
 
     FullScreenScaffold(
         title = "Node logs",
@@ -108,6 +113,7 @@ fun NodeLogsScreen(
             }
             val current = logs
             when {
+                external -> LogNote(EXTERNAL_TOR_NOTE)
                 current == null -> LogNote("Reading…")
                 current.lines == null -> LogNote(notRunningNote(source))
                 current.lines.isEmpty() -> LogNote("No log lines yet.")
@@ -191,6 +197,9 @@ internal fun nodeLogLines(text: String): List<String> =
 internal fun notRunningNote(source: NodeLogSource): String =
     "${source.title} isn't running, so there are no logs to show. They're shown only while it runs, " +
         "and kept in memory only, never written to storage."
+
+internal const val EXTERNAL_TOR_NOTE =
+    "Tor runs in an external app (Orbot, say), set in Settings → Tor. Its logs are in that app."
 
 internal const val SHARE_WARNING =
     "Logs can contain this device's node addresses and peer IDs, the addresses of the peers and " +
