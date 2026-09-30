@@ -20,6 +20,8 @@ internal fun nodeIdentityNotice(
     radicleRestarting: Boolean = false,
 ): String? {
     val parts = when (change) {
+        // The same identities, sealed again: nothing to tell.
+        NodeIdentitySync.Change.Resealed -> emptyList()
         is NodeIdentitySync.Change.Adopted -> listOfNotNull(
             if (!change.swarmChanged) {
                 null

@@ -25,8 +25,10 @@ import java.util.concurrent.atomic.AtomicReference
  *  - The wallet opens (create, import, or any unlock) and the stored keys
  *    aren't this vault's — none yet, or another vault's —
  *    derive them from the seed and store them: [Change.Adopted]. (This
- *    vault's keys that can't be opened are derived and sealed again, but
- *    they're the same identities, so that's no change.) An
+ *    vault's keys that can't be opened are derived and sealed again,
+ *    [Change.Resealed]: the same identities, so no grants are taken back
+ *    and there's no notice — but `:node` is told, since it may have
+ *    failed the same read when it booted.) An
  *    unlock of the same vault finds them already there and does nothing,
  *    so the nodes only restart when the identity really changes. (A
  *    wallet made before #77 gets its identities on its first unlock, and
@@ -72,6 +74,17 @@ class NodeIdentitySync internal constructor(
          * #328 for this same wallet), so the Swarm node stays as it is.
          */
         data class Adopted(val swarmAddress: String, val radicleDid: String, val swarmChanged: Boolean = true) : Change
+
+        /**
+         * This vault's keys were on disk but couldn't be opened, and are
+         * sealed again: the very same identities, so no grants were taken
+         * back and there's nothing to tell the user. But `:node` may have
+         * hit the same unreadable file when it booted — Radicle then fails
+         * its boot and Swarm runs as the device's own key — so the
+         * listener still has it reload; it restarts only a node that's up
+         * as another identity, or whose boot failed.
+         */
+        data object Resealed : Change
 
         /** The wallet is gone; the nodes are back to their own identities. */
         data object Dropped : Change
@@ -131,7 +144,8 @@ class NodeIdentitySync internal constructor(
             null
         } ?: return null
         runCatching { onChanged.get()?.invoke(change) }
-        _notices.trySend(change)
+        // Nothing to tell about the same identities sealed again.
+        if (change != Change.Resealed) _notices.trySend(change)
         return change
     }
 
@@ -143,11 +157,15 @@ class NodeIdentitySync internal constructor(
         // seed, and derivation is deterministic, so deriving them again gives
         // the very same identities. Sealed again below (healing a corrupt
         // file), but it's no identity change: no grants taken back, no
-        // restart, no notice — unless the file was version 1, whose Radicle
-        // identity really is new.
+        // notice — unless the file was version 1, whose Radicle identity
+        // really is new. `:node` is still told ([Change.Resealed]): its
+        // boot read the same file, and may have failed on it.
         val sameVault = stored == null && store.storedTag() == tag
         val sameRadicle = sameVault && store.storedHasRadicle()
-        val hadSwarm = stored != null || sameVault
+        // Only keys that could be read count as Swarm already adopted: if
+        // they couldn't be, `:node`'s Swarm booted as the device's key and
+        // restarts onto the wallet's account now.
+        val hadSwarm = stored != null
         if (stored != null) {
             val complete = stored.radicleKey != null
             stored.wipe()
@@ -162,7 +180,7 @@ class NodeIdentitySync internal constructor(
         return try {
             if (!sameRadicle) takeBackRadicleGrants()
             store.write(tag, identity)
-            if (sameRadicle) null else Change.Adopted(identity.swarmAddress, identity.radicleDid.orEmpty(), swarmChanged = !hadSwarm)
+            if (sameRadicle) Change.Resealed else Change.Adopted(identity.swarmAddress, identity.radicleDid.orEmpty(), swarmChanged = !hadSwarm)
         } finally {
             identity.wipe()
         }

@@ -8,7 +8,9 @@ import javax.crypto.SecretKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -149,14 +151,21 @@ class NodeIdentitySyncTest {
         vault.create(abandon12, auth, imported = false)
         withGrants.reconcile(vault.state.value)
         assertEquals(1, takenBack)
+        assertTrue(withGrants.notices.first() is NodeIdentitySync.Change.Adopted)
         // The sealing key is gone (or the Keystore failed once): unreadable.
         keys.key = null
         assertNull(store.read(vault.identityTag()!!))
         vault.lock()
         vault.unlock(auth)
-        // Same seed, same identities: no grants taken back, no restart, no notice.
-        assertNull(withGrants.reconcile(vault.state.value))
+        val told = mutableListOf<NodeIdentitySync.Change>()
+        withGrants.setOnChanged { told += it }
+        // Same seed, same identities: no grants taken back, no notice — but
+        // `:node`, which may have failed the same read at boot, is told to reload.
+        assertEquals(NodeIdentitySync.Change.Resealed, withGrants.reconcile(vault.state.value))
+        assertEquals(listOf<NodeIdentitySync.Change>(NodeIdentitySync.Change.Resealed), told)
         assertEquals(1, takenBack)
+        assertNull(nodeIdentityNotice(NodeIdentitySync.Change.Resealed, restarting = true, radicleOn = true, radicleRestarting = true))
+        assertNull(withTimeoutOrNull(100) { withGrants.notices.first() })
         // Healed: the same keys, readable again.
         val healed = store.read(vault.identityTag()!!)!!
         assertEquals("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", healed.swarmAddress)
@@ -164,15 +173,17 @@ class NodeIdentitySyncTest {
     }
 
     @Test
-    fun `this vault's version-1 keys that can't be opened get the new Radicle identity, keeping Swarm`() = runBlocking {
+    fun `this vault's version-1 keys that can't be opened get the new Radicle identity, and Swarm the wallet's account`() = runBlocking {
         var takenBack = 0
         val withGrants = NodeIdentitySync(vault, store, scope, io = Dispatchers.Unconfined, beforeRadicleChange = { takenBack++ })
         vault.create(abandon12, auth, imported = false)
         writeVersion1(vault.identityTag()!!, NodeIdentity.derive(abandon12.seed()))
         keys.key = null
-        // The Radicle identity really is new (the node ran as its own key), the Swarm one isn't.
+        // The Radicle identity really is new (the node ran as its own key),
+        // and so, as far as `:node` knows, is the Swarm one: it couldn't open
+        // the file either, so its Swarm booted as the device's key.
         assertEquals(
-            NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", ABANDON_DID, swarmChanged = false),
+            NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", ABANDON_DID, swarmChanged = true),
             withGrants.reconcile(vault.state.value),
         )
         assertEquals(1, takenBack)
