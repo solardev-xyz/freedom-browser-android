@@ -98,4 +98,23 @@ class SettingsSearchTest {
         assertEquals(setOf("theme"), visibleSettingsRows("appearance", "Appearance", appearanceSectionRows(Appearance.System)))
         assertEquals(emptySet<Any>(), visibleSettingsRows("bookmarks", "Appearance", appearanceSectionRows(Appearance.Dark)))
     }
+
+    @Test
+    fun `language row is searchable while shown`() {
+        // #280: shown only with a language to name; found by its title, the language and "locale".
+        val rows = appearanceSectionRows(Appearance.System, language = "Deutsch")
+        for (q in listOf("language", "deutsch", "locale")) {
+            assertEquals(q, setOf("language"), visibleSettingsRows(q, "Appearance", rows))
+        }
+        assertEquals(setOf("theme", "language"), visibleSettingsRows("appearance", "Appearance", rows))
+        assertEquals(emptySet<Any>(), visibleSettingsRows("language", "Appearance", appearanceSectionRows(Appearance.System)))
+    }
+
+    @Test
+    fun `search keywords split the resource on commas`() {
+        assertEquals(
+            listOf("dark mode", "light mode", "night mode"),
+            searchKeywords(baby.freedom.mobile.R.string.settings_theme_keywords).toList(),
+        )
+    }
 }
