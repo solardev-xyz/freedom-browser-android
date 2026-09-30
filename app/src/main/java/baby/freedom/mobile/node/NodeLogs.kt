@@ -308,7 +308,14 @@ object LogScrub {
  * and message, with the terminal colours and tracing's own timestamp
  * taken out of native lines.
  */
-internal data class LogcatLine(val time: String, val level: Char, val tag: String, val message: String) {
+internal data class LogcatLine(
+    val time: String,
+    val level: Char,
+    val tag: String,
+    val message: String,
+    /** When it was logged, wall-clock ms (0: unknown). */
+    val atMs: Long = 0,
+) {
     fun format(): String = "$time $level $tag: $message"
 
     companion object {
@@ -330,7 +337,7 @@ internal data class LogcatLine(val time: String, val level: Char, val tag: Strin
             )
             val sb = StringBuilder(raw.length)
             cleanNative(raw, sb)
-            return LogcatLine(time, levelOf(priority), tag, sb.toString())
+            return LogcatLine(time, levelOf(priority), tag, sb.toString(), epochSec * 1000 + nanos / 1_000_000)
         }
 
         /** logcat's letter for an `android_LogPriority`. */
@@ -481,6 +488,14 @@ object NodeLogs {
     private const val TAG = "NodeLogs"
     private const val RESTART_DELAY_MS = 5_000L
 
+    /**
+     * How long after a [clear] lines aren't kept (R1-M1). The pages the
+     * clear is for — the private tabs just closed, or the site data just
+     * cleared — can still have node requests in flight: freedom-ipfs goes
+     * on fetching and logging a closed tab's request for a few seconds.
+     */
+    internal const val SETTLE_MS = 20_000L
+
     /** Framework lines every process logs at start; not a node's. */
     private val NOISE_TAGS = setOf(
         "nativeloader", "GraphicsEnvironment", "ApplicationLoaders", "ziparchive", "libc", "linker",
@@ -497,6 +512,9 @@ object NodeLogs {
 
     /** Wall-clock ms of the last [clear]: where the reader picks logcat up again. */
     private var clearedAtMs = 0L
+
+    /** Lines logged before this (wall-clock ms) aren't kept: [SETTLE_MS] after the last [clear]. */
+    private var quietUntilMs = 0L
 
     @Volatile
     private var reader: Thread? = null
@@ -536,12 +554,16 @@ object NodeLogs {
      * data*): what a line the scrubber missed, or the timing of the
      * user's browsing, says goes with the rest of the site data. Lines
      * logcat has already handed the reader but it hasn't kept yet are
-     * dropped too — the reader starts logcat over from this moment.
+     * dropped too — the reader starts logcat over from this moment. So
+     * are lines logged in the [SETTLE_MS] after it, whatever they're from:
+     * requests the cleared pages still had in flight log then too, and a
+     * line can't be told apart by page (R1-M1).
      */
-    fun clear() {
+    fun clear(nowMs: Long = System.currentTimeMillis()) {
         synchronized(lock) {
             generation++
-            clearedAtMs = System.currentTimeMillis()
+            clearedAtMs = nowMs
+            quietUntilMs = nowMs + SETTLE_MS
             rings.values.forEach { it.clear() }
         }
         logcat?.destroy()
@@ -553,8 +575,14 @@ object NodeLogs {
     /**
      * Keep [line] in [source]'s ring, scrubbed, unless a [clear] has come
      * since [gen] was read: then false, and the reader starts over.
+     * A line logged ([atMs]) within [SETTLE_MS] of the last clear is
+     * dropped, and the reader goes on.
      */
-    internal fun keep(gen: Int, source: NodeLogSource, line: String, kind: String = ""): Boolean {
+    internal fun keep(gen: Int, source: NodeLogSource, line: String, kind: String = "", atMs: Long = System.currentTimeMillis()): Boolean {
+        synchronized(lock) {
+            if (gen != generation) return false
+            if (atMs < quietUntilMs) return true
+        }
         val scrubbed = LogScrub.scrub(line)
         synchronized(lock) {
             if (gen != generation) return false
@@ -591,7 +619,7 @@ object NodeLogs {
                     val line = entries.next() ?: break
                     if (line.tag in NOISE_TAGS || processName.endsWith(line.tag)) continue
                     val source = route(line.tag, line.message) ?: continue
-                    if (!keep(gen, source, line.format(), LogRing.kindOf(line.tag, line.message))) break
+                    if (!keep(gen, source, line.format(), LogRing.kindOf(line.tag, line.message), line.atMs)) break
                 }
             } catch (t: Throwable) {
                 // Not when stop() or clear() destroyed logcat under the reader.

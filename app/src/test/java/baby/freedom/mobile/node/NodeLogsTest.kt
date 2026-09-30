@@ -396,19 +396,42 @@ class NodeLogsTest {
 
     @Test
     fun `clear forgets every node's lines, and a line read before it isn't kept after`() {
+        NodeLogs.clear(nowMs = 0L) // long settled
         val before = NodeLogs.generation()
         assertTrue(NodeLogs.keep(before, NodeLogSource.Ipfs, "ipfs line"))
         assertTrue(NodeLogs.keep(before, NodeLogSource.Tor, "tor line"))
+        assertEquals("ipfs line", NodeLogs.text(NodeLogSource.Ipfs))
         NodeLogs.clear()
         for (s in NodeLogSource.entries) assertEquals("", NodeLogs.text(s))
         // The reader was mid-way through logcat's output when the clear came.
         assertFalse(NodeLogs.keep(before, NodeLogSource.Ipfs, "logged before the clear"))
         assertEquals("", NodeLogs.text(NodeLogSource.Ipfs))
-        // Started over, it keeps what comes after.
+        // Started over, it keeps what comes after the settle window.
         val after = NodeLogs.generation()
-        assertTrue(NodeLogs.keep(after, NodeLogSource.Ipfs, "after name=\"docs.ipfs.tech\""))
+        val later = System.currentTimeMillis() + NodeLogs.SETTLE_MS
+        assertTrue(NodeLogs.keep(after, NodeLogSource.Ipfs, "after name=\"docs.ipfs.tech\"", atMs = later))
         assertEquals("after name=<redacted>", NodeLogs.text(NodeLogSource.Ipfs))
         NodeLogs.clear()
+    }
+
+    @Test
+    fun `lines logged just after a clear aren't kept, and the reader goes on`() {
+        // A closed private tab's request still in flight logs for a few seconds after the clear (R1-M1).
+        val at = 5_000_000L
+        NodeLogs.clear(nowMs = at)
+        val gen = NodeLogs.generation()
+        // Dropped, but true: not a clear under the reader, so it doesn't start logcat over.
+        assertTrue(NodeLogs.keep(gen, NodeLogSource.Ipfs, "request_start", atMs = at + 2_000))
+        assertTrue(NodeLogs.keep(gen, NodeLogSource.Swarm, "fetch chunk", atMs = at + NodeLogs.SETTLE_MS - 1))
+        for (s in NodeLogSource.entries) assertEquals("", NodeLogs.text(s))
+        assertTrue(NodeLogs.keep(gen, NodeLogSource.Ipfs, "settled", atMs = at + NodeLogs.SETTLE_MS))
+        assertEquals("settled", NodeLogs.text(NodeLogSource.Ipfs))
+        NodeLogs.clear()
+    }
+
+    @Test
+    fun `a logcat entry carries when it was logged`() {
+        assertEquals(1_790_752_391_733L, read(entry("x")).single().atMs)
     }
 
     // ---- Restarting logcat ----

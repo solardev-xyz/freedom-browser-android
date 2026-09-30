@@ -36,6 +36,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import baby.freedom.mobile.node.NodeLogSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -65,13 +68,18 @@ fun NodeLogsScreen(
     val context = LocalContext.current
     var source by rememberSaveable { mutableStateOf(initial) }
     var confirmShare by rememberSaveable { mutableStateOf(false) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     // Null until first read; then the lines, or null lines while the node's process isn't running.
-    val logs by produceState<NodeLogRead?>(null, source) {
+    // Only while the app is on screen: in the background the page would go on
+    // asking the node's process for up to ~190 KB every couple of seconds (R1-M2).
+    val logs by produceState<NodeLogRead?>(null, source, lifecycle) {
         value = null
-        while (true) {
-            val text = withContext(Dispatchers.IO) { read(source) }
-            value = NodeLogRead(text?.let(::nodeLogLines))
-            delay(REFRESH_MS)
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                val text = withContext(Dispatchers.IO) { read(source) }
+                value = NodeLogRead(text?.let(::nodeLogLines))
+                delay(REFRESH_MS)
+            }
         }
     }
     val lines = logs?.lines.orEmpty()
