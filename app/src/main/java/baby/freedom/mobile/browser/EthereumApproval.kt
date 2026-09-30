@@ -1,6 +1,5 @@
 package baby.freedom.mobile.browser
 
-import android.os.SystemClock
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -42,14 +41,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -66,7 +63,6 @@ import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.WalletAccounts
 import java.net.URI
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** What an approval sheet says: its title, what the site wants, and the approve button's label. */
@@ -95,9 +91,14 @@ internal fun ethApprovalCopy(ask: EthAsk): EthApprovalCopy = when (ask) {
  *
  * Like the site-permission prompt, the buttons, a swipe down, a tap
  * outside and Back all ignore input for the first
- * [PromptTapGuard.PROTECTION_MS] the sheet is on screen, counted from its
- * first drawn frame, so a page can't time its request to catch a tap
- * meant for the page. Everything but the action rejects.
+ * [PromptTapGuard.PROTECTION_MS] the sheet is on screen — for Sign, Send
+ * and Pay [PromptTapGuard.SPEND_PROTECTION_MS] (#240) — counted from its
+ * first drawn frame and started over by every touch before then, so a
+ * page can't time its request to catch a tap meant for the page, nor keep
+ * a "tap fast here" game going until the sheet arms. The action also
+ * drops a press begun before that, or one another app's window covered
+ * ([protectedPress]); other apps' overlays are hidden while the sheet is
+ * up (Android 12+). Everything but the action rejects.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -109,8 +110,15 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
     val walletAccounts = remember(context) { WalletAccounts.get(context) }
     val vaultState by vault.state.collectAsState()
     val accountList by walletAccounts.accounts.collectAsState()
-    val guard = remember(request) { PromptTapGuard(SystemClock::uptimeMillis) }
-    var armed by remember(request) { mutableStateOf(false) }
+    // Sign and Send can't be taken back: they arm later (#240).
+    val spends = ask is EthAsk.SignMessage || ask is EthAsk.SignTypedData || ask is EthAsk.SendTransaction ||
+        ask is EthAsk.Payment
+    val tap = rememberArmedTapGuard(
+        request,
+        if (spends) PromptTapGuard.SPEND_PROTECTION_MS else PromptTapGuard.PROTECTION_MS,
+    )
+    val guard = tap.guard
+    val armed = tap.armed
     var busy by remember(request) { mutableStateOf(false) }
     var error by remember(request) { mutableStateOf<String?>(null) }
     var picked by remember(request) { mutableStateOf<String?>(null) }
@@ -122,12 +130,6 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
         skipPartiallyExpanded = true,
         confirmValueChange = { it != SheetValue.Hidden || (guard.accepts() && !busy) },
     )
-    LaunchedEffect(request) {
-        withFrameNanos { }
-        guard.onShown()
-        delay(guard.remainingMs())
-        armed = true
-    }
 
     val accounts = accountList?.accounts
     val connectAccount = accounts?.let { list ->
@@ -174,12 +176,15 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
     }
 
     ModalBottomSheet(
-        onDismissRequest = { if (guard.accepts() && !busy) request.respond(EthAnswer.Rejected) },
+        onDismissRequest = {
+            if (guard.accepts() && !busy) request.respond(EthAnswer.Rejected) else guard.noteInput()
+        },
         sheetState = sheetState,
         modifier = Modifier.testTag("ethereum-approval"),
     ) {
         Column(
             modifier = Modifier
+                .restartsTapGuard(guard)
                 .fillMaxWidth()
                 .navigationBarsPadding()
                 .padding(horizontal = 24.dp)
@@ -241,6 +246,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             Spacer(Modifier.height(16.dp))
+            ObscuredTapNotice(tap)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(
                     onClick = { if (guard.accepts() && !busy) request.respond(EthAnswer.Rejected) },
@@ -250,7 +256,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                 Button(
                     onClick = ::approve,
                     enabled = armed && !busy && canApprove,
-                    modifier = Modifier.weight(1f).testTag("ethereum-approve"),
+                    modifier = Modifier.weight(1f).protectedPress(tap).testTag("ethereum-approve"),
                 ) {
                     if (busy) {
                         CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))

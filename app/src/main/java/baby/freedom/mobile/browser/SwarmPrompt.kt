@@ -1,6 +1,5 @@
 package baby.freedom.mobile.browser
 
-import android.os.SystemClock
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,14 +34,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -54,7 +51,6 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.Vault
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -210,8 +206,9 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
     val context = LocalContext.current
     val vault = remember(context) { Vault.get(context) }
     val vaultState by vault.state.collectAsState()
-    val guard = remember(request) { PromptTapGuard(SystemClock::uptimeMillis) }
-    var armed by remember(request) { mutableStateOf(false) }
+    val tap = rememberArmedTapGuard(request)
+    val guard = tap.guard
+    val armed = tap.armed
     var busy by remember(request) { mutableStateOf(false) }
     var error by remember(request) { mutableStateOf<String?>(null) }
     var always by remember(request) { mutableStateOf(false) }
@@ -220,12 +217,6 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
         skipPartiallyExpanded = true,
         confirmValueChange = { it != SheetValue.Hidden || (guard.accepts() && !busy) },
     )
-    LaunchedEffect(request) {
-        withFrameNanos { }
-        guard.onShown()
-        delay(guard.remainingMs())
-        armed = true
-    }
     // No wallet yet: approving opens wallet setup (SwarmProviders.askOnTab), so there's nothing to unlock here.
     val needsWallet = ask is SwarmAsk.Sign && ask.needsWallet && vaultState is Vault.State.Empty
     val needsUnlock = ask is SwarmAsk.Sign && !needsWallet && vaultState !is Vault.State.Unlocked
@@ -370,6 +361,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             Spacer(Modifier.height(16.dp))
+            ObscuredTapNotice(tap)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(
                     onClick = ::reject,
@@ -379,7 +371,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                 Button(
                     onClick = ::approve,
                     enabled = armed && !busy,
-                    modifier = Modifier.weight(1f).testTag("swarm-approve"),
+                    modifier = Modifier.weight(1f).protectedPress(tap).testTag("swarm-approve"),
                 ) {
                     if (busy) {
                         CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))

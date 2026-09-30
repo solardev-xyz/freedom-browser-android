@@ -468,6 +468,8 @@ fun WalletScreen(
     // behind keeps running, and a redirect or script navigation there must
     // not change which origin "This site" → Set up applies to.
     val cameFrom = remember { currentSite }
+    // No other app's overlay over the wallet (#240): Android 12+ hides them while it's open.
+    HideOverlayWindows()
     var showingPhrase by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -1571,6 +1573,11 @@ private fun ImportPhrasePage(
  * Remove wallet's strong confirmation (maintainer decision 9): the
  * consequence spelled out, and Remove stays disabled until the user
  * ticks that they have the phrase or accept losing the wallet.
+ *
+ * Against tapjacking (#240): the tick and Remove ignore taps for the
+ * dialog's first [PromptTapGuard.PROTECTION_MS] and drop a press another
+ * app's window covered ([protectedPress]); other apps' overlays are
+ * hidden while it's up (Android 12+).
  */
 @Composable
 private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boolean) -> Unit, onDismiss: () -> Unit) {
@@ -1578,6 +1585,8 @@ private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boo
     // Whose the backup is can't be told (#244 R4-F3): "that" backup, never "its".
     val unattributed = backup == BackupHeld.UNATTRIBUTED || backup == BackupHeld.MAYBE_UNATTRIBUTED
     var acknowledged by remember { mutableStateOf(false) }
+    val tap = rememberArmedTapGuard(Unit)
+    val guard = tap.guard
     // Remove wallet keeps its Google backup (#231) unless the user ticks it away: the way
     // back for a wallet whose key Android erased is to remove it and restore that backup,
     // and a pre-ticked box there would delete what may be the only copy. A backup kept
@@ -1617,10 +1626,12 @@ private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boo
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
+                        .protectedPress(tap)
                         .toggleable(
                             value = acknowledged,
                             role = Role.Checkbox,
-                            onValueChange = { acknowledged = it },
+                            enabled = tap.armed,
+                            onValueChange = { if (guard.accepts()) acknowledged = it },
                         ),
                 ) {
                     Checkbox(checked = acknowledged, onCheckedChange = null)
@@ -1650,12 +1661,14 @@ private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boo
                         )
                     }
                 }
+                ObscuredTapNotice(tap)
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { onConfirm(cloudBackup && deleteBackup) },
-                enabled = acknowledged,
+                onClick = { if (guard.accepts()) onConfirm(cloudBackup && deleteBackup) },
+                enabled = acknowledged && tap.armed,
+                modifier = Modifier.protectedPress(tap),
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             ) { Text("Remove wallet") }
         },

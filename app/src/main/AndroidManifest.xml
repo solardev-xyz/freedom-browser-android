@@ -9,6 +9,12 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- The wallet's BiometricPrompt unlock (#76): fingerprint/face or the screen lock. Normal permission, no prompt. -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!--
+      Tapjacking protection (#240): hide other apps' overlay windows while a
+      wallet approval or confirmation is on screen (Android 12+). Normal
+      permission, no prompt.
+    -->
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
 
     <!--
       Site permissions (#81). Requested at runtime only after the user

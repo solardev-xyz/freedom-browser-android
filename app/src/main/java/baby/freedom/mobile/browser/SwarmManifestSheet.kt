@@ -1,6 +1,5 @@
 package baby.freedom.mobile.browser
 
-import android.os.SystemClock
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,18 +27,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
 
 /** The browser's own name for a manifest row, and what granting it means — never the app's words. */
 internal fun manifestRowLabel(capability: ManifestCapability): Pair<String, String> = when (capability) {
@@ -76,18 +68,13 @@ internal fun manifestNotes(consent: SwarmManifests.Consent): List<String> = list
 @Composable
 fun SwarmManifestSheet(request: SwarmPromptRequest, ask: SwarmAsk.Manifest) {
     val consent = ask.consent
-    val guard = remember(request) { PromptTapGuard(SystemClock::uptimeMillis) }
-    var armed by remember(request) { mutableStateOf(false) }
+    val tap = rememberArmedTapGuard(request)
+    val guard = tap.guard
+    val armed = tap.armed
     val sheetState = rememberModalBottomSheetState(
         skipPartiallyExpanded = true,
         confirmValueChange = { it != SheetValue.Hidden || guard.accepts() },
     )
-    LaunchedEffect(request) {
-        withFrameNanos { }
-        guard.onShown()
-        delay(guard.remainingMs())
-        armed = true
-    }
 
     fun answer(answer: SwarmProvider.Answer) {
         if (guard.accepts()) request.respond(answer)
@@ -169,16 +156,17 @@ fun SwarmManifestSheet(request: SwarmPromptRequest, ask: SwarmAsk.Manifest) {
                 }
             }
             Spacer(Modifier.height(16.dp))
+            ObscuredTapNotice(tap)
             Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(
                     onClick = { answer(SwarmProvider.Answer(allowed = true, always = true)) },
                     enabled = armed,
-                    modifier = Modifier.fillMaxWidth().testTag("swarm-manifest-allow"),
+                    modifier = Modifier.fillMaxWidth().protectedPress(tap).testTag("swarm-manifest-allow"),
                 ) { Text("Allow all") }
                 OutlinedButton(
                     onClick = { answer(SwarmProvider.Answer(allowed = true, always = false)) },
                     enabled = armed,
-                    modifier = Modifier.fillMaxWidth().testTag("swarm-manifest-individual"),
+                    modifier = Modifier.fillMaxWidth().protectedPress(tap).testTag("swarm-manifest-individual"),
                 ) { Text("Use individual approvals") }
                 TextButton(
                     onClick = { answer(SwarmProvider.Answer.REJECTED) },

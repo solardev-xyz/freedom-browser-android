@@ -1,6 +1,5 @@
 package baby.freedom.mobile.browser
 
-import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -49,7 +48,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -91,7 +89,6 @@ import baby.freedom.mobile.wallet.WalletSender
 import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -762,14 +759,9 @@ private fun SafeCallReview(
 ) {
     val request = quote.request
     val chain = request.chain
-    val guard = remember(quote) { PromptTapGuard(SystemClock::uptimeMillis) }
-    var armed by remember(quote) { mutableStateOf(false) }
-    LaunchedEffect(quote) {
-        withFrameNanos { }
-        guard.onShown()
-        delay(guard.remainingMs())
-        armed = true
-    }
+    val tap = rememberArmedTapGuard(quote, PromptTapGuard.SPEND_PROTECTION_MS)
+    val guard = tap.guard
+    val armed = tap.armed
     SectionCard(title = "Review") {
         ReviewRow("What", what)
         ReviewRow("Network", chain.name)
@@ -787,9 +779,10 @@ private fun SafeCallReview(
     Spacer(Modifier.height(12.dp))
     notice?.let { FieldText(it, error = false) }
     error?.let { FieldText(it, error = true) }
+    ObscuredTapNotice(tap)
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         OutlinedButton(onClick = onCancel, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Cancel") }
-        Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy, modifier = Modifier.weight(1f)) {
+        Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy, modifier = Modifier.weight(1f).protectedPress(tap)) {
             if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Confirm and send")
         }
     }
@@ -1456,14 +1449,9 @@ internal fun SafeCoSignPage(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var signature by remember { mutableStateOf<Pair<WalletAccount, String>?>(null) }
-    val guard = remember(raw) { PromptTapGuard(SystemClock::uptimeMillis) }
-    var armed by remember(raw) { mutableStateOf(false) }
-    LaunchedEffect(raw) {
-        withFrameNanos { }
-        guard.onShown()
-        delay(guard.remainingMs())
-        armed = true
-    }
+    val tap = rememberArmedTapGuard(raw, PromptTapGuard.SPEND_PROTECTION_MS)
+    val guard = tap.guard
+    val armed = tap.armed
     LaunchedEffect(request, chain) {
         val r = request ?: return@LaunchedEffect
         val c = chain ?: return@LaunchedEffect
@@ -1568,6 +1556,7 @@ internal fun SafeCoSignPage(
                         outdated -> Text("This transaction can no longer execute, so there’s nothing to sign.", style = MaterialTheme.typography.bodyMedium)
                         else -> {
                             error?.let { FieldText(it, error = true) }
+                            ObscuredTapNotice(tap)
                             mine.forEach { account ->
                                 Button(
                                     onClick = {
@@ -1589,7 +1578,7 @@ internal fun SafeCoSignPage(
                                         }
                                     },
                                     enabled = armed && !busy,
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier.fillMaxWidth().protectedPress(tap),
                                 ) { Text("Sign with ${account.name}") }
                             }
                         }

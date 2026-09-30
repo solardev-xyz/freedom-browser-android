@@ -164,6 +164,58 @@ class SitePermissionsTest {
     }
 
     @Test
+    fun `every touch before the prompt arms starts its protection period over`() {
+        // #240: a page's "tap fast here" game lined up with Send must never reach it.
+        var now = 1_000L
+        val g = PromptTapGuard(PromptTapGuard.SPEND_PROTECTION_MS) { now }
+        g.onShown()
+        // Four taps a second for ten seconds: never armed, however long it goes on.
+        repeat(40) {
+            now += 250
+            assertFalse(g.accepts())
+            g.noteInput()
+        }
+        assertEquals(PromptTapGuard.SPEND_PROTECTION_MS, g.remainingMs())
+        // The user stops: it arms a full period after the last touch, not before.
+        now += PromptTapGuard.SPEND_PROTECTION_MS - 1
+        assertFalse(g.accepts())
+        now += 1
+        assertTrue(g.accepts())
+        // Armed stays armed: reading on, scrolling, then tapping doesn't disarm it.
+        g.noteInput()
+        assertTrue(g.accepts())
+        assertEquals(0L, g.remainingMs())
+    }
+
+    @Test
+    fun `a touch before the prompt is drawn doesn't start the period early`() {
+        var now = 1_000L
+        val g = PromptTapGuard(PromptTapGuard.SPEND_PROTECTION_MS) { now }
+        g.noteInput()
+        now += 5_000
+        assertFalse(g.accepts())
+        g.onShown()
+        now += PromptTapGuard.SPEND_PROTECTION_MS - 1
+        assertFalse(g.accepts())
+        now += 1
+        assertTrue(g.accepts())
+    }
+
+    @Test
+    fun `sign and send arm later than other prompts`() {
+        // #240: the old half second was a page's whole window to time a tap onto Send.
+        assertTrue(PromptTapGuard.SPEND_PROTECTION_MS >= 1_000)
+        var now = 0L
+        val spend = PromptTapGuard(PromptTapGuard.SPEND_PROTECTION_MS) { now }
+        val plain = PromptTapGuard { now }
+        spend.onShown()
+        plain.onShown()
+        now = PromptTapGuard.PROTECTION_MS
+        assertTrue(plain.accepts())
+        assertFalse(spend.accepts())
+    }
+
+    @Test
     fun `settings snackbar only for a permission Android won't ask for again`() {
         // First refusal: a re-request shows the dialog again.
         assertFalse(androidPermissionBlockedInSettings(rationale = true, deniedBefore = false))

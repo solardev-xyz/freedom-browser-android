@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
-import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -33,8 +32,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,7 +44,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -68,16 +64,9 @@ import kotlinx.coroutines.launch
 @Composable
 fun SitePermissionPrompt(prompt: PermissionPrompt) {
     var remember by remember(prompt) { mutableStateOf(true) }
-    val guard = remember(prompt) { PromptTapGuard(SystemClock::uptimeMillis) }
-    var armed by remember(prompt) { mutableStateOf(false) }
-    LaunchedEffect(prompt) {
-        // Count from the first frame the prompt is actually drawn in,
-        // not from composition.
-        withFrameNanos { }
-        guard.onShown()
-        delay(guard.remainingMs())
-        armed = true
-    }
+    val tap = rememberArmedTapGuard(prompt)
+    val guard = tap.guard
+    val armed = tap.armed
     val icon = when {
         prompt.permissions.any { it is ExternalScheme } -> Icons.AutoMirrored.Filled.OpenInNew
         SitePermission.CAMERA in prompt.permissions -> Icons.Filled.Videocam
@@ -124,12 +113,14 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
                         )
                     }
                 }
+                ObscuredTapNotice(tap)
             }
         },
         confirmButton = {
             TextButton(
                 enabled = armed,
                 onClick = { if (guard.accepts()) prompt.respond(PromptAnswer.Allow(remember && !prompt.private)) },
+                modifier = Modifier.protectedPress(tap),
             ) {
                 Text("Allow")
             }
