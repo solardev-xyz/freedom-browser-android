@@ -7,7 +7,8 @@
  * (`crates/ant-ffi/src/jni.rs`) are mangled for the upstream
  * download-smoke app's class and don't cover the gateway, so Freedom
  * carries this thin wrapper instead: init, start/stop the bee-shaped
- * HTTP gateway, peer count, postage stamps (#116), shutdown. Errors surface as
+ * HTTP gateway (and its CORS allow-list, #284), peer count, postage
+ * stamps (#116), shutdown. Errors surface as
  * RuntimeException with the message ant allocated (freed here).
  */
 
@@ -320,11 +321,66 @@ static int install_guard(jlong handle) {
     return tr == ANT_CHAIN_TRANSPORT_OK || tr == ANT_CHAIN_TRANSPORT_UNSUPPORTED ? 0 : -1;
 }
 
+/*
+ * The gateway's CORS allow-list (#284), handed to ant_set_gateway_cors
+ * before every ant_start_gateway, while the gateway is stopped (it
+ * refuses a change while one runs). SwarmNode.GATEWAY_CORS_ORIGINS
+ * picks the list — empty: the gateway sends no CORS headers, so no page
+ * on another origin can read its answers, and `null` (what a fetch
+ * carries after a cross-origin redirect) no longer reads /wallet or
+ * /addresses. Set on every start rather than trusted to ant's default,
+ * so a later ant that changes its default can't widen it. 0 on success;
+ * otherwise an exception is pending.
+ */
+static int set_gateway_cors(JNIEnv *env, jlong handle, jobjectArray origins) {
+    jsize n = origins != NULL ? (*env)->GetArrayLength(env, origins) : 0;
+    const char **list = NULL;
+    jstring *refs = NULL;
+    char *err = NULL;
+    int rc = -1;
+    if (n > 0) {
+        list = calloc((size_t)n, sizeof(*list));
+        refs = calloc((size_t)n, sizeof(*refs));
+        if (list == NULL || refs == NULL) {
+            free(list);
+            free(refs);
+            throw_runtime(env, NULL, "out of memory");
+            return -1;
+        }
+    }
+    jsize got = 0;
+    for (; got < n; got++) {
+        refs[got] = (jstring)(*env)->GetObjectArrayElement(env, origins, got);
+        if (refs[got] == NULL) {
+            if (!(*env)->ExceptionCheck(env)) throw_runtime(env, NULL, "null CORS origin");
+            goto out;
+        }
+        list[got] = (*env)->GetStringUTFChars(env, refs[got], NULL);
+        if (list[got] == NULL) goto out; /* OOM — exception already pending */
+    }
+    if (ant_set_gateway_cors((const AntHandle *)(uintptr_t)handle, list, (size_t)n, &err)) {
+        rc = 0;
+    } else {
+        throw_runtime(env, err, "ant_set_gateway_cors failed");
+    }
+out:
+    for (jsize i = 0; i <= got && i < n; i++) {
+        if (refs[i] == NULL) continue;
+        if (list[i] != NULL) (*env)->ReleaseStringUTFChars(env, refs[i], list[i]);
+        (*env)->DeleteLocalRef(env, refs[i]);
+    }
+    free(list);
+    free(refs);
+    return rc;
+}
+
 JNIEXPORT void JNICALL
 Java_baby_freedom_swarm_AntNative_startGateway(JNIEnv *env, jobject thiz, jlong handle,
                                                jstring api_addr, jboolean light_mode,
-                                               jstring gnosis_rpc) {
+                                               jstring gnosis_rpc, jobjectArray cors_origins) {
     (void)thiz;
+    /* Before the gateway starts, which is when ant reads it. */
+    if (set_gateway_cors(env, handle, cors_origins) != 0) return;
     const char *addr = (*env)->GetStringUTFChars(env, api_addr, NULL);
     if (addr == NULL) return;
     const char *rpc = (*env)->GetStringUTFChars(env, gnosis_rpc, NULL);

@@ -35,9 +35,17 @@ internal object AntNative {
      * Start the in-process bee-shaped HTTP gateway on [apiAddr]
      * (e.g. `127.0.0.1:1633`). [lightMode] false = ultra-light
      * (read-only) mode; [gnosisRpc] backs the on-chain endpoints,
-     * `""` disables them.
+     * `""` disables them. [corsOrigins] is the gateway's CORS allow-list
+     * (`ant_set_gateway_cors`, set just before the start; empty: none, see
+     * [SwarmNode.GATEWAY_CORS_ORIGINS]).
      */
-    external fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String)
+    external fun startGateway(
+        handle: Long,
+        apiAddr: String,
+        lightMode: Boolean,
+        gnosisRpc: String,
+        corsOrigins: Array<String>,
+    )
 
     external fun stopGateway(handle: Long)
 

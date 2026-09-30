@@ -66,32 +66,36 @@ Status:
   preflight leg works today regardless of node configuration.
 - **Actual responses**: the node itself must send
   `Access-Control-Allow-Origin` for the browser to let the page read
-  the result. ant's FFI gateway currently pins
-  `CorsConfig::new(["null"])` (`ant/crates/ant-ffi/src/gateway.rs`) —
-  correct for desktop Electron's opaque origins, but virtual-origin
-  pages send `Origin: https://<label>.bzz.freedom.baby`, which `null`
-  does not match. **Follow-up (upstream, ant repo / freedom-mobile-ffi
-  release):** extend the FFI gateway config to allow the virtual
-  suffixes (`*.bzz.freedom.baby` etc., or `*` — the API is
-  loopback-only) and bump the pinned FFI version in `release.yml`.
-  Same check applies to the freedom-ipfs API. Until then, reads work
-  everywhere; browser-`fetch` writes from dweb pages will be
-  CORS-blocked on the response leg.
-- **`Origin: null` is a leak, not just a mismatch** (#283): the same
-  pinned `null` lets any opaque-origin context read the node's private
-  API (`/wallet`, `/addresses`, `/stamps`, …) — and a CORS fetch carries
+  the result, and it doesn't: since #284 the app starts ant's gateway
+  with an empty CORS allow-list (`SwarmNode.GATEWAY_CORS_ORIGINS`,
+  handed to `ant_set_gateway_cors` before every `ant_start_gateway`,
+  ant ≥ 0.5.49 / freedom-mobile-ffi v0.12.5), so it sends no CORS
+  headers at all. ant matches exact origins only (plus `*` and `null`),
+  and there's one virtual origin per content root, so no entry but `*`
+  could cover `https://<label>.bzz.freedom.baby` pages — and `*` would
+  let every page read the node's private API. So browser-`fetch` writes
+  from dweb pages stay CORS-blocked on the response leg, as they were
+  under the old pinned `null` (which never matched them either); the
+  write itself reaches the node. Reads through virtual origins are
+  unaffected: the interceptor fetches them natively and stamps its own
+  `Access-Control-Allow-Origin: *`. A future way to allow the virtual
+  suffixes would need ant to match origin suffixes. Same check applies
+  to the freedom-ipfs API.
+- **`Origin: null` was a leak, not just a mismatch** (#283, fixed by
+  #284): up to ant 0.5.48 the FFI gateway pinned `CorsConfig::new(["null"])`,
+  which let any opaque-origin context read the node's private API
+  (`/wallet`, `/addresses`, `/stamps`, …) — and a CORS fetch carries
   `Origin: null` after any cross-origin redirect, so an ordinary page
-  can too, through a redirector — from a public https site as well:
-  Private Network Access doesn't block it in WebView 133 (checked from
-  `https://example.com` through `httpbin.org/redirect-to`, see
-  `docs/dapp-compatibility.md`). `NodeApiGuard` refuses every page
-  request outside the dapp surface to the gateway port on a host that
-  may be this device (a loopback or unspecified literal, `localhost`,
-  or any name other than the external Swarm node set in Settings;
-  chain writes on every host), but WebView never
-  asks the interceptor about such a redirect hop, and other browsers
-  and apps don't pass through it at all. The fix belongs in the node:
-  let the FFI host choose the gateway's CORS origins
-  (https://github.com/freedom-hq/ant/issues/101) and start it with none
-  (or only the virtual suffixes) — tracked in
-  https://github.com/solardev-xyz/freedom-browser-android/issues/284.
+  could too, through a redirector, from a public https site as well
+  (Private Network Access doesn't block it in WebView 133).
+  `NodeApiGuard` refuses every page request outside the dapp surface to
+  the gateway port on a host that may be this device (a loopback or
+  unspecified literal, `localhost`, or any name other than the external
+  Swarm node set in Settings; chain writes on every host), but WebView
+  never asks the interceptor about such a redirect hop, and other
+  browsers don't pass through it at all. With the empty allow-list the
+  redirected fetch still reaches the node, but its answer carries no
+  CORS header and the page's `fetch` rejects (checked in
+  `docs/dapp-compatibility.md`). The app's own error page, a `file://`
+  document whose origin is `null`, probes `/health` with a `no-cors`
+  fetch for the same reason.

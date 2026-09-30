@@ -67,7 +67,8 @@ class SwarmNode internal constructor(
         fun init(dataDir: String): Long
         fun initWithIdentity(dataDir: String, identity: ByteArray): Long
         fun accountInfo(handle: Long): String?
-        fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String)
+        /** Starts the gateway allowing CORS reads from [corsOrigins] only. */
+        fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String, corsOrigins: List<String>)
         fun agentString(handle: Long): String?
         fun peerCount(handle: Long): Int
         fun stopGateway(handle: Long)
@@ -95,8 +96,13 @@ class SwarmNode internal constructor(
             override fun initWithIdentity(dataDir: String, identity: ByteArray) =
                 AntNative.initWithIdentity(dataDir, identity)
             override fun accountInfo(handle: Long) = AntNative.accountInfo(handle)
-            override fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String) =
-                AntNative.startGateway(handle, apiAddr, lightMode, gnosisRpc)
+            override fun startGateway(
+                handle: Long,
+                apiAddr: String,
+                lightMode: Boolean,
+                gnosisRpc: String,
+                corsOrigins: List<String>,
+            ) = AntNative.startGateway(handle, apiAddr, lightMode, gnosisRpc, corsOrigins.toTypedArray())
             override fun agentString(handle: Long) = AntNative.agentString(handle)
             override fun peerCount(handle: Long) = AntNative.peerCount(handle)
             override fun stopGateway(handle: Long) = AntNative.stopGateway(handle)
@@ -282,6 +288,7 @@ class SwarmNode internal constructor(
                     // chain surfaces publishing needs (#114).
                     lightMode = mode.light,
                     gnosisRpc = mode.gnosisRpc,
+                    corsOrigins = GATEWAY_CORS_ORIGINS,
                 )
             } catch (t: Throwable) {
                 // As in [stop]: a chain read ant began before the gateway
@@ -703,7 +710,13 @@ class SwarmNode internal constructor(
             // behind a gateway handler's read, up to the reader's deadline
             // (#300 R2-M1).
             ops.stopGateway(h)
-            ops.startGateway(handle = h, apiAddr = GATEWAY_ADDR, lightMode = mode.light, gnosisRpc = mode.gnosisRpc)
+            ops.startGateway(
+                handle = h,
+                apiAddr = GATEWAY_ADDR,
+                lightMode = mode.light,
+                gnosisRpc = mode.gnosisRpc,
+                corsOrigins = GATEWAY_CORS_ORIGINS,
+            )
             Log.i(TAG, "reloaded the gateway so it reports the node's chequebook")
         } catch (t: Throwable) {
             Log.w(TAG, "reloading the gateway failed: ${t.javaClass.simpleName}")
@@ -775,6 +788,33 @@ class SwarmNode internal constructor(
 
         /** Canonical URL of the embedded bee-shaped HTTP gateway. */
         const val GATEWAY_URL: String = "http://$GATEWAY_ADDR"
+
+        /**
+         * The origins the gateway lets read its answers across origins
+         * (`ant_set_gateway_cors`, #284): none. The gateway then sends no
+         * CORS headers at all, so a page on any other origin can send it
+         * requests but never read what comes back.
+         *
+         * Up to ant 0.5.48 the list was pinned to `null`, which a CORS
+         * fetch carries after any cross-origin redirect: any page could
+         * read `/wallet` and `/addresses` through a redirector, past the
+         * app's `NodeApiGuard` (which WebView never asks about such a hop)
+         * and from other browsers, which never pass through it.
+         *
+         * Nothing the app serves needs an entry here:
+         * - bzz://, ens:// and the other dweb pages are served on virtual
+         *   origins by the app's interceptor, which fetches from the gateway
+         *   natively and stamps its own CORS headers; `window.swarm` and
+         *   the app's own screens talk to the gateway natively too.
+         * - A page on a virtual origin (`https://<label>.bzz.freedom.baby`)
+         *   that fetches `127.0.0.1:1633` itself never matched `null`
+         *   either. ant matches exact origins only, and there's one per
+         *   root, so the only entry that would cover them is `*`, which
+         *   would let every page read the node's private API.
+         * - The error page (a `file://` document, origin `null`) asks
+         *   `/health` with a `no-cors` probe, which needs no CORS answer.
+         */
+        val GATEWAY_CORS_ORIGINS: List<String> = emptyList()
 
         private const val TAG = "SwarmNode"
 
