@@ -36,6 +36,7 @@ import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.RadicleInfo
 import baby.freedom.swarm.RadicleNode
 import baby.freedom.swarm.SwarmNode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -480,9 +481,12 @@ class NodeService : Service() {
      */
     private fun swarmMode(): SwarmNode.Mode = relayedMode ?: try {
         runBlocking {
-            val chains = ChainStore.get(this@NodeService).chains.first()
-            storedGnosis = gnosisChainFor(chains)
-            swarmModeFor(NodeSettings.get(this@NodeService).swarmLightMode.first(), chains)
+            // Null while the file can't be read: nothing is kept then, so
+            // a passing read error doesn't pin the Swarm node's reads to
+            // the shipped RPCs ([gnosisForReads] reads again).
+            val chains = ChainStore.get(this@NodeService).chainsOrUnreadable.first()
+            chains?.let { storedGnosis = gnosisChainFor(it) }
+            swarmModeFor(NodeSettings.get(this@NodeService).swarmLightMode.first(), chains ?: BuiltInChains.ALL)
         }
     } catch (e: Exception) {
         Log.w(TAG, "reading the swarm mode failed (${e.javaClass.simpleName}); ultra-light")
@@ -492,14 +496,17 @@ class NodeService : Service() {
     /**
      * The Gnosis chain for the Swarm node's reads (#273): the UI's latest
      * relay, or — before this process has heard one — the chains store,
-     * read here as [swarmMode] does; the shipped chain if that fails.
+     * read here as [swarmMode] does. While that can't be read, the shipped
+     * chain answers this read, and nothing is kept: the next read tries
+     * the store again, so a passing error doesn't leave the user's own
+     * Gnosis RPC out until the UI next relays.
      */
     private suspend fun gnosisForReads(): Chain = relayedGnosis ?: storedGnosis ?: try {
-        gnosisChainFor(ChainStore.get(this).chains.first()).also { storedGnosis = it }
+        ChainStore.get(this).chainsOrUnreadable.first()?.let { chains -> gnosisChainFor(chains).also { storedGnosis = it } }
     } catch (e: Exception) {
-        Log.w(TAG, "reading the Gnosis RPCs failed (${e.javaClass.simpleName}); the shipped ones")
-        BuiltInChains.GNOSIS
-    }
+        if (e is CancellationException) throw e
+        null
+    } ?: BuiltInChains.GNOSIS.also { Log.w(TAG, "reading the Gnosis RPCs failed; the shipped ones for now") }
 
     /**
      * Drop stale connections and redial on every node. Triggered by a
@@ -599,7 +606,7 @@ class NodeService : Service() {
         chainBridge = AntChainBridge(
             ChainDataRouter(chains = { listOf(gnosisForReads()) }, transport = PinnedHttpTransport()),
         )
-        AntChainTransport.install(chainBridge::serve)
+        AntChainTransport.install(chainBridge::serve, chainBridge::cancelInFlight)
         swarmNode = SwarmNode(
             SwarmNode.Config(
                 dataDir = filesDir.absolutePath,

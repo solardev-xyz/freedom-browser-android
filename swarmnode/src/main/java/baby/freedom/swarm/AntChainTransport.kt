@@ -14,14 +14,32 @@ import java.util.concurrent.atomic.AtomicReference
  * unverified answer, and never an empty result.
  */
 object AntChainTransport {
-    private val reader = AtomicReference<((String) -> String)?>(null)
+    private class Reader(val read: (String) -> String, val cancelInFlight: () -> Unit)
+
+    private val reader = AtomicReference<Reader?>(null)
 
     /**
      * Answer ant's reads with [read] (a JSON-RPC request body in, a
      * response body out) from now on, in place of any earlier reader.
+     * [cancelInFlight] ends every read [read] is working on at once, each
+     * with an error; reads that come after are answered as usual.
      */
-    fun install(read: (String) -> String) {
-        reader.set(read)
+    fun install(read: (String) -> String, cancelInFlight: () -> Unit = {}) {
+        reader.set(Reader(read, cancelInFlight))
+    }
+
+    /**
+     * A node is about to stop ([SwarmNode.stop]): end the reads it's
+     * waiting on now rather than let ant's gateway stop and shutdown —
+     * which wait for every read inside the transport — sit behind them
+     * for up to the reader's own deadline. Only called once no storage
+     * call (a spend) is using the node any more.
+     */
+    fun cancelInFlight() {
+        try {
+            reader.get()?.cancelInFlight?.invoke()
+        } catch (_: Throwable) {
+        }
     }
 
     /**
@@ -32,7 +50,7 @@ object AntChainTransport {
     @JvmStatic
     fun serve(request: ByteArray): ByteArray {
         val answer = try {
-            reader.get()?.invoke(String(request, Charsets.UTF_8)) ?: NOT_READY
+            reader.get()?.read?.invoke(String(request, Charsets.UTF_8)) ?: NOT_READY
         } catch (t: Throwable) {
             FAILED
         }

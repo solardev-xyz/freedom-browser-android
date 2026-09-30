@@ -11,7 +11,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -49,7 +49,7 @@ internal class AntChainBridge(
     private val deadlineMs: Long = DEADLINE_MS,
     private val chainId: Long = BuiltInChains.GNOSIS.id,
 ) {
-    /** Where requests run; [close] cancels it, so a request ant is blocked on returns at once. */
+    /** Where requests run; [cancelInFlight] cancels what runs in it, so a request ant is blocked on returns at once. */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val active = Semaphore(MAX_ACTIVE)
 
@@ -83,9 +83,13 @@ internal class AntChainBridge(
         return reply(id, body)
     }
 
-    /** Stop answering: requests in flight end at once with an error. */
-    fun close() {
-        scope.cancel()
+    /**
+     * End every request in flight at once, each with an error (the node
+     * is stopping, [baby.freedom.swarm.AntChainTransport.cancelInFlight]);
+     * requests that come after are answered as usual.
+     */
+    fun cancelInFlight() {
+        scope.coroutineContext.cancelChildren()
     }
 
     /** `{"result": …}` or `{"error": …}` for one request. */
@@ -112,8 +116,8 @@ internal class AntChainBridge(
         /**
          * The longest ant waits on one read — desktop's two minutes cut to
          * one: the router's own walk is bounded well inside it (a few
-         * endpoint timeouts), and a node shutting down waits on reads in
-         * flight ([close] ends them sooner).
+         * endpoint timeouts), and a node shutting down would wait on reads
+         * in flight but for [cancelInFlight], which ends them at once.
          */
         const val DEADLINE_MS = 60_000L
 
@@ -242,26 +246,40 @@ internal class AntChainBridge(
                         // Nothing ant can act on: its scan gives up (to be
                         // retried later) rather than halving on a throttle.
                         logScan -> error(GENERIC_ERROR, "Chain request failed: every chain source failed (endpoint unavailable)")
-                        else -> error(GENERIC_ERROR, "Chain request failed: ${sanitize(e.message.orEmpty())}")
+                        // The router's own summary names each RPC's host,
+                        // which can carry an API key (a user RPC's
+                        // subdomain): only a node's own wording goes on.
+                        else -> error(
+                            GENERIC_ERROR,
+                            "Chain request failed: every chain source failed" +
+                                (e.nodeError?.let { " (${sanitize(it.rpcMessage)})" } ?: ""),
+                        )
                     }
                 }
                 else -> error(GENERIC_ERROR, "Chain request failed: ${sanitize(e.message.orEmpty())}")
             }
         }
 
-        /** The failure a ranked walk kept ([ChainRpcException.AllSourcesFailed.kept]), in words ant reacts to rightly. */
+        /**
+         * The failure a ranked walk kept ([ChainRpcException.AllSourcesFailed.kept]),
+         * in words ant reacts to rightly. It's never ranked
+         * [ErrorRank.ENDPOINT] (the router keeps nothing that low), and one
+         * no node answered ([ChainFailure.code] null) can only be a timeout:
+         * that one's wording is the router's own and can name an RPC's host
+         * (a key in a user RPC's subdomain), so it never reaches ant.
+         */
         private fun keptError(logScan: Boolean, f: ChainFailure): JSONObject {
-            var detail = sanitize(f.message)
             val rank = rankLogScanError(f)
+            if (f.code == null) {
+                return error(GENERIC_ERROR, if (rank == ErrorRank.TIMEOUT) "Chain request failed: query timeout" else "Chain request failed")
+            }
+            var detail = sanitize(f.message)
             if (logScan && rank == ErrorRank.TIMEOUT && !antShrinksLogScanOn(detail)) {
                 // A timeout worded without "query timeout" still has to
                 // make ant halve its window rather than give up.
                 detail = "query timeout ($detail)"
-            } else if (logScan && rank == ErrorRank.ENDPOINT && antShrinksLogScanOn(detail)) {
-                // A throttle must not read as a range limit.
-                detail = "endpoint unavailable"
             }
-            return error(f.code ?: GENERIC_ERROR, "Chain request failed: $detail", f.data)
+            return error(f.code, "Chain request failed: $detail", f.data)
         }
 
         /** An `error` member; `-32000` never goes out as such (see [ANT_CANT_SERVE]). */

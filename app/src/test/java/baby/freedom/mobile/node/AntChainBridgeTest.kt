@@ -204,6 +204,44 @@ class AntChainBridgeTest {
     }
 
     @Test
+    fun aLateRangeCapFromAMemberStillInFlightReachesAnt() {
+        // Gnosis's shipped pool: two fast throttles fail the quorum, the
+        // third answers a moment later with a range cap. ant must halve.
+        val net = Net()
+        net.handlers[a] = { err(-32005, "rate limit exceeded") }
+        net.handlers[b] = { err(-32005, "daily request quota exceeded") }
+        net.handlers[c] = { kotlinx.coroutines.delay(200); err(-32000, "query returned more than 10000 results") }
+        val r = serve(bridge(net), "eth_getLogs", logsQuery)
+        assertTrue(r.error().getString("message"), r.error().getString("message").contains("more than 10000 results"))
+        assertTrue(r.antHalves())
+        assertEquals("the cap ends the walk", 0, net.count(d))
+    }
+
+    @Test
+    fun aLateTimeoutFromAMemberStillInFlightIsAQueryTimeoutWithNoHost() {
+        // As above, but the third runs out of time; its host carries a key.
+        val keyed = "https://k3yAbCdEf0123456789xyz.gnosis.example"
+        val net = Net()
+        net.handlers[a] = { err(-32005, "rate limit exceeded") }
+        net.handlers[b] = { err(-32005, "daily request quota exceeded") }
+        net.handlers[keyed] = { awaitCancellation() }
+        val r = serve(bridge(net, rpcs = listOf(a, b, keyed, d)), "eth_getLogs", logsQuery)
+        assertEquals("Chain request failed: query timeout", r.error().getString("message"))
+        assertTrue(r.antHalves())
+        assertFalse(r.toString().contains("k3yAbCdEf"))
+    }
+
+    @Test
+    fun aFailedReadNamesNoRpcHost() {
+        val keyed = "https://k3yAbCdEf0123456789xyz.gnosis.example"
+        val net = Net()
+        for (u in listOf(a, b, keyed, d)) net.handlers[u] = { throw IOException("unable to resolve host ${u.substringAfter("//")}") }
+        val r = serve(bridge(net, rpcs = listOf(a, b, keyed, d)), "eth_getBalance", JSONArray().put("0x" + "22".repeat(20)).put("latest"))
+        assertTrue(r.error().getString("message").startsWith("Chain request failed"))
+        assertFalse(r.toString(), r.toString().contains("k3yAbCdEf"))
+    }
+
+    @Test
     fun aRangeCapSurvivesALaterThrottleAndTransportFailure() {
         val net = Net()
         net.handlers[a] = { err(-32005, "rate limit exceeded") }
@@ -297,13 +335,22 @@ class AntChainBridgeTest {
     }
 
     @Test
-    fun aClosedBridgeAnswersAnErrorAtOnce() {
+    fun cancellingInFlightEndsThoseReadsAtOnceAndServesLaterOnes() {
         val net = Net()
-        val bridge = bridge(net)
-        bridge.close()
-        val r = serve(bridge, "eth_blockNumber")
-        assertFalse(r.has("result"))
-        assertTrue(r.error().getInt("code") != AntChainBridge.ANT_CANT_SERVE)
+        for (u in listOf(a, b, c, d)) net.handlers[u] = { awaitCancellation() }
+        val bridge = bridge(net, deadlineMs = 30_000)
+        var r: JSONObject? = null
+        val t = Thread { r = serve(bridge, "eth_blockNumber") }.apply { start() }
+        Thread.sleep(200)
+        val started = System.nanoTime()
+        bridge.cancelInFlight()
+        t.join(5_000)
+        assertTrue("returns at once, not at the deadline", (System.nanoTime() - started) / 1_000_000 < 2_000)
+        assertFalse(r!!.has("result"))
+        assertTrue(r!!.error().getInt("code") != AntChainBridge.ANT_CANT_SERVE)
+        assertTrue(r!!.error().getString("message").contains("stopping"))
+        for (u in listOf(a, b, c)) net.handlers[u] = { ok("0x10") }
+        assertEquals("0x10", serve(bridge, "eth_blockNumber").getString("result"))
     }
 
     @Test

@@ -310,7 +310,9 @@ class SwarmNode internal constructor(
             if (!published) {
                 Log.i(TAG, "stopped while starting; shutting the new node down")
                 runCatching {
+                    AntChainTransport.cancelInFlight()
                     ops.stopGateway(h)
+                    AntChainTransport.cancelInFlight()
                     ops.shutdown(h)
                 }.onFailure { Log.w(TAG, "shutdown threw", it) }
             }
@@ -356,7 +358,11 @@ class SwarmNode internal constructor(
                 runCatching {
                     // After any storage call still using it (#116).
                     handleUse.write {
+                        // Its gateway's chain reads end now, not at their
+                        // deadline: both calls below wait for them (#273).
+                        AntChainTransport.cancelInFlight()
                         ops.stopGateway(h)
+                        AntChainTransport.cancelInFlight()
                         ops.shutdown(h)
                     }
                 }.onFailure { Log.w(TAG, "shutdown threw", it) }

@@ -173,9 +173,12 @@ class ChainDataRouter internal constructor(
                                 is QuorumRun.Verdict.Failed -> {
                                     v.nodeError?.let { nodeError = it }
                                     if (rankError != null) {
-                                        run.failures().forEach(keeper::note)
-                                        // Members cut off by the quorum's wait.
-                                        if (v.timedOut && run.pending() > 0) {
+                                        keeper.noteQuorum(run)
+                                        // Members cut off by the quorum's wait
+                                        // and then cancelled. Those the direct
+                                        // tier waits for instead are noted as
+                                        // they really end, there.
+                                        if (!keepLegs && v.timedOut && run.pending() > 0) {
                                             keeper.note(ChainFailure(null, "no answer within ${waitMs}ms", null, timeout = true))
                                         }
                                     }
@@ -396,6 +399,11 @@ class ChainDataRouter internal constructor(
                 )
             }
         }
+        // The members it just waited for without an answer: how they
+        // failed counts like any other failure — a range cap or a timeout
+        // from the one still in flight when the others' refusals failed
+        // the quorum is what ends the walk or makes the caller halve.
+        quorum?.let(keeper::noteQuorum)
         val asked = quorum?.asked().orEmpty()
         var last: String? = null
         // A failure about the query itself: no other RPC would answer it.
@@ -411,7 +419,8 @@ class ChainDataRouter internal constructor(
                     last = "${hostOf(url)}: ${leg.error.message}"
                 }
                 is Leg.Failed -> {
-                    keeper.note(ChainFailure(null, "${hostOf(url)}: ${leg.reason}", null, leg.timeout))
+                    // No host in it: it can carry a key (a user RPC's subdomain).
+                    keeper.note(ChainFailure(null, leg.reason, null, leg.timeout))
                     last = "${hostOf(url)}: ${leg.reason}"
                 }
             }
@@ -490,6 +499,17 @@ class ChainDataRouter internal constructor(
     internal class ErrorKeeper(private val rank: ((ChainFailure) -> Int)?) {
         private var kept: ChainFailure? = null
         private var keptRank = -1
+
+        /** How many of the quorum's failures ([QuorumRun.failures], append-only) are noted already. */
+        private var quorumNoted = 0
+
+        /** Note the quorum's failures not yet noted: those that ended since the last call. */
+        fun noteQuorum(run: QuorumRun) {
+            if (rank == null) return
+            val failures = run.failures()
+            failures.drop(quorumNoted).forEach(::note)
+            quorumNoted = failures.size
+        }
 
         fun note(failure: ChainFailure) {
             val rank = rank ?: return

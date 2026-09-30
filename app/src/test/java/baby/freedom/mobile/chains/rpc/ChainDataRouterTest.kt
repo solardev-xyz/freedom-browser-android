@@ -710,6 +710,36 @@ class ChainDataRouterTest {
     }
 
     @Test
+    fun aRequestRankedFailureFromAMemberStillInFlightEndsTheWalk() = runTest {
+        // The quorum fails on two fast node errors while c is still out;
+        // the direct tier waits for c, whose own refusal is about the query.
+        val net = Net().apply { rangeCapped() }
+        net.handlers[a] = { err(-32603, "internal error") }
+        net.handlers[c] = { delay(1_000); err(-32005, "query exceeds max block range 50000") }
+        try {
+            router(net, listOf(chain())).request(137, "eth_getLogs", JSONArray().put(JSONObject()), rankError = requestRank)
+            fail()
+        } catch (e: ChainRpcException.AllSourcesFailed) {
+            assertEquals(ChainFailure(-32005, "query exceeds max block range 50000", null, timeout = false), e.kept)
+        }
+        assertEquals("the late cap ends the walk: d is never asked", 0, net.count(d))
+    }
+
+    @Test
+    fun aTimeoutFromAMemberStillInFlightIsKept() = runTest {
+        val net = Net().apply { rangeCapped() }
+        net.handlers[a] = { err(-32603, "internal error") }
+        net.handlers[c] = { awaitCancellation() }
+        net.handlers[d] = { err(-32603, "internal error") }
+        try {
+            router(net, listOf(chain())).request(137, "eth_getLogs", JSONArray().put(JSONObject()), rankError = requestRank)
+            fail()
+        } catch (e: ChainRpcException.AllSourcesFailed) {
+            assertEquals(true, e.kept?.timeout)
+        }
+    }
+
+    @Test
     fun withoutRankErrorNothingIsKeptOrEndsEarly() = runTest {
         val net = Net().apply { rangeCapped() }
         val r = router(net, listOf(chain())).request(137, "eth_getLogs", JSONArray().put(JSONObject()))

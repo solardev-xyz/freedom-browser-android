@@ -12,6 +12,7 @@
  */
 
 #include <jni.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -297,10 +298,25 @@ static char *chain_transport(const char *request_json, void *host_ctx) {
     return out != NULL ? out : error_reply(request_json, -32002, "Chain request failed");
 }
 
-/* Install the transport (the broadcast gate, the app's reads) on `handle`;
- * 0 on success (or a build with no chain to broadcast on). */
+/*
+ * The handle chain_transport was last installed on (0: none). Nothing
+ * but install_guard replaces a handle's transport, so once installed it
+ * stays: installing it again before every storage call would only wait
+ * on ant's write lock, i.e. for every read already inside the callback
+ * (up to AntChainBridge's 60 s deadline) — and hold every other read up
+ * behind it. Cleared before ant_shutdown, since a later handle may get
+ * the same address.
+ */
+static _Atomic uintptr_t g_installed_on = 0;
+
+/* Install the transport (the broadcast gate, the app's reads) on `handle`,
+ * unless it already is; 0 on success (or a build with no chain to
+ * broadcast on). */
 static int install_guard(jlong handle) {
-    int tr = ant_set_chain_transport((AntHandle *)(uintptr_t)handle, chain_transport, NULL);
+    uintptr_t h = (uintptr_t)handle;
+    if (h != 0 && atomic_load(&g_installed_on) == h) return 0;
+    int tr = ant_set_chain_transport((AntHandle *)h, chain_transport, NULL);
+    if (tr == ANT_CHAIN_TRANSPORT_OK) atomic_store(&g_installed_on, h);
     return tr == ANT_CHAIN_TRANSPORT_OK || tr == ANT_CHAIN_TRANSPORT_UNSUPPORTED ? 0 : -1;
 }
 
@@ -573,5 +589,7 @@ JNIEXPORT void JNICALL
 Java_baby_freedom_swarm_AntNative_shutdown(JNIEnv *env, jobject thiz, jlong handle) {
     (void)env;
     (void)thiz;
+    uintptr_t h = (uintptr_t)handle;
+    atomic_compare_exchange_strong(&g_installed_on, &h, (uintptr_t)0);
     ant_shutdown((AntHandle *)(uintptr_t)handle);
 }
