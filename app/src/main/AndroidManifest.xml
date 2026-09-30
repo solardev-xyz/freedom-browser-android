@@ -74,6 +74,46 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
+
+        <!--
+          Links, shares and searches from other apps (#268) arrive here,
+          not at MainActivity: this invisible activity hands the link or
+          query on to the browser's own task and finishes (see
+          IncomingLinkActivity for why).
+        -->
+        <activity
+            android:name=".IncomingLinkActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.NoDisplay">
+
+            <!--
+              Any http(s) link, so Freedom can be the default browser
+              (RoleManager.ROLE_BROWSER wants a filter for every web URL:
+              scheme only, no host).
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+            </intent-filter>
+
+            <!-- The dweb schemes the address bar opens. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="bzz" />
+                <data android:scheme="ipfs" />
+                <data android:scheme="ipns" />
+                <data android:scheme="ens" />
+                <data android:scheme="rad" />
+            </intent-filter>
 
             <!--
               App Links for the virtual origins (see VirtualOrigin.kt).
@@ -96,6 +136,25 @@
                 <data android:host="*.ipfs.freedom.baby" />
                 <data android:host="*.ipns.freedom.baby" />
                 <data android:host="*.ens.freedom.baby" />
+            </intent-filter>
+
+            <!-- Share → Freedom: a link opens, other text is searched for. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.intent.action.WEB_SEARCH" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+
+            <!-- The text-selection menu in other apps. -->
+            <intent-filter android:label="@string/search_with_app">
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
 

@@ -338,4 +338,19 @@ class RendererSubmitTest {
         assertFalse(probe.isCancelled)
         assertSame(probe, state.pendingProbeJob)
     }
+
+    @Test
+    fun `a link from another app names its destination like the user does (#268)`() {
+        // Its own fresh tab: the pill shows it, the editor closes, and a
+        // page can't cancel its probe…
+        assertEquals("https://a.example", pendingAddressBarText("", "https://a.example", SubmitSource.External))
+        assertTrue(submitEndsAddressEditing(SubmitSource.External))
+        assertFalse(submitSupersedesPendingProbe(pending = SubmitSource.External, incoming = SubmitSource.Renderer))
+        // …while the user can, and it can replace a probe of theirs.
+        assertTrue(submitSupersedesPendingProbe(pending = SubmitSource.External, incoming = SubmitSource.User))
+        assertTrue(submitSupersedesPendingProbe(pending = SubmitSource.User, incoming = SubmitSource.External))
+        assertTrue(submitSupersedesPendingProbe(pending = null, incoming = SubmitSource.External))
+        // A commit elsewhere doesn't cancel it either, as for the user.
+        assertFalse(commitCancelsPendingProbe(SubmitSource.External, "https://a.example/", "https://b.example/"))
+    }
 }

@@ -27,10 +27,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import baby.freedom.mobile.browser.BrowserScreen
 import baby.freedom.mobile.browser.DeepLinkQueue
+import baby.freedom.mobile.browser.Incoming
+import baby.freedom.mobile.browser.IncomingLinks
 import baby.freedom.mobile.browser.EthereumProviders
 import baby.freedom.mobile.browser.X402Payments
 import baby.freedom.mobile.browser.Gateways
-import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.Adblock
 import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.browser.OnchainApps
@@ -79,6 +80,7 @@ import baby.freedom.swarm.SwarmNode
 import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -120,15 +122,18 @@ class MainActivity : ComponentActivity() {
     private lateinit var settings: NodeSettings
 
     /**
-     * App Links that arrived after the UI was already composed (see
-     * [onNewIntent]), waiting to be opened in tabs, oldest first. Cold-start links
-     * don't use this — they're passed straight in as the initial URL.
+     * Links, shares and searches from other apps (#268, handed on by
+     * [IncomingLinkActivity]) waiting to be opened in tabs, oldest first:
+     * the one the app was cold-started from, and each [onNewIntent].
      */
     private val deepLinkQueue = DeepLinkQueue()
 
-    /** Publishes [onNewIntent] links into [deepLinkQueue] in arrival order. */
-    private val deepLinks = OrderedDeepLinks(lifecycleScope, Dispatchers.Default) {
-        deepLinkQueue.offer(it)
+    /** Publishes incoming links into [deepLinkQueue] in arrival order. */
+    private val deepLinks = OrderedDeepLinks<Incoming>(lifecycleScope, Dispatchers.Default) {
+        when (it) {
+            is Incoming.Open -> deepLinkQueue.offer(it.url)
+            is Incoming.Search -> deepLinkQueue.offer(it.query, search = true)
+        }
     }
 
     // The page theme colour the browser paints behind the status bar,
@@ -464,28 +469,33 @@ class MainActivity : ComponentActivity() {
         // see [FirstBuildGate]) — a restored tab loads straight away.
         Adblock.start(this)
 
-        // A cold start from an App Link opens straight at the shared
-        // content instead of the home surface. A Unicode ENS link
-        // (`xn--…` host) needs the ENSIP-15 tables to map back to its
-        // name, and the warm-up above has only just started — so parse
-        // it on Default once they're decoded and compose then, rather
-        // than decode them on Main here (every later main-thread parse
-        // is cheap once the tables are warm).
-        val link = intent
-        if (!EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(deepLinkData(link))) {
+        // A cold start from a link (#268) opens straight at it instead of
+        // the home surface: queued before the first composition, which
+        // puts it in the first tab. A Unicode ENS link (`xn--…` host)
+        // needs the ENSIP-15 tables to map back to its name, and the
+        // warm-up above has only just started — so it's parsed on Default
+        // once they're decoded, and the UI composed then, rather than
+        // decode them on Main here (every later main-thread parse is cheap
+        // once the tables are warm).
+        //
+        // Only a launch that is the link's own: not a relaunch that
+        // restores tabs (the same intent comes back after process death),
+        // nor a relaunch from Recents, which replays the intent the task
+        // was first started with.
+        val ownLaunch = savedInstanceState == null &&
+            intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY == 0
+        val coldLink = if (ownLaunch) submitIncoming(intent) else null
+        if (coldLink != null) {
             lifecycleScope.launch {
-                val startUrl = withContext(Dispatchers.Default) {
-                    EnsNormalize.warm()
-                    displayUrlForDeepLink(link)
-                }
-                showBrowser(startUrl ?: HOME_URL)
+                coldLink.join()
+                showBrowser()
             }
         } else {
-            showBrowser(displayUrlForDeepLink(link) ?: HOME_URL)
+            showBrowser()
         }
     }
 
-    private fun showBrowser(startUrl: String) {
+    private fun showBrowser() {
         setContent {
             FreedomTheme {
                 SystemBarsForScheme()
@@ -534,7 +544,6 @@ class MainActivity : ComponentActivity() {
                             supported = TorRouting.supported != false,
                             onRun = ::onToggleTor,
                         ),
-                        initialUrl = startUrl,
                         deepLink = pendingLinks.firstOrNull(),
                         onDeepLinkHandled = deepLinkQueue::handled,
                         onRecoverNodes = ::onRecoverNodes,
@@ -599,40 +608,41 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * An App Link tapped while the app was already running. The
-     * manifest declares `singleTop` so the link lands here instead of
-     * spawning a second activity instance — the user's open tabs
-     * survive.
+     * A link from another app while the browser was already running
+     * ([IncomingLinkActivity] starts us `singleTop` in our own task), so
+     * it lands here instead of in a second activity instance — the
+     * user's open tabs survive.
      */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        // Same off-Main parse as a cold-start link if the ENSIP-15
-        // tables are still decoding (a link tapped right after launch);
-        // [deepLinks] keeps a later ASCII link from overtaking it.
-        val slow = !EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(deepLinkData(intent))
-        deepLinks.submit(slow) {
-            if (slow) EnsNormalize.warm()
-            displayUrlForDeepLink(intent)
-        }
+        submitIncoming(intent)
     }
 
-    private fun deepLinkData(intent: Intent?): String? =
-        intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString
-
     /**
-     * The user-facing display URL for an incoming `VIEW` intent, or
-     * `null` if it isn't one of our virtual origins.
+     * Queue what [intent] asks to open (#268), read through the same
+     * gate [IncomingLinkActivity] used — any app can start this exported
+     * activity directly. A virtual-origin share link maps back to its
+     * content ([IncomingLinks.displayUrl], through [VirtualOrigin], so the
+     * deep-link path can't drift from the mapping the WebView and the
+     * redirector use); off Main if that needs the ENSIP-15 tables still
+     * decoding (a link tapped right after launch), and [deepLinks] keeps a
+     * later ASCII link from overtaking it.
      *
-     * The translation goes through [VirtualOrigin] — the label
-     * encodings are never parsed here, so the deep-link path can't
-     * drift from the mapping the WebView and the redirector use. A
-     * `null` return also acts as the gate: an intent aimed at some
-     * other https host (a stale filter, an explicit `am start`) is
-     * ignored rather than loaded.
+     * Returns the job still parsing it, or null once it's queued (or
+     * there was nothing to queue).
      */
-    private fun displayUrlForDeepLink(intent: Intent?): String? {
-        return deepLinkData(intent)?.let { VirtualOrigin.displayUrlFor(it) }
+    private fun submitIncoming(intent: Intent?): Job? {
+        val incoming = IncomingLinks.from(intent) ?: return null
+        val slow = incoming is Incoming.Open &&
+            !EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(incoming.url)
+        return deepLinks.submit(slow) {
+            if (slow) EnsNormalize.warm()
+            when (incoming) {
+                is Incoming.Open -> Incoming.Open(IncomingLinks.displayUrl(incoming.url))
+                is Incoming.Search -> incoming
+            }
+        }
     }
 
     /**
