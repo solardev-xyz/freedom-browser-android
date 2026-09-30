@@ -1,5 +1,9 @@
 package baby.freedom.mobile.browser
 
+import androidx.annotation.StringRes
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
+
 /**
  * Pure (Android-free) half of pause and resume for downloads (#265):
  * what a response says about resuming later, what a resume request
@@ -124,14 +128,71 @@ internal fun resumeAnswer(status: Int, offset: Long, contentRange: String?, cont
         else -> ResumeAnswer.FromStart(restarted = offset > 0)
     }
 
-/** The note a resume that had to start over leaves on its row. */
-internal const val DOWNLOAD_RESTARTED_NOTE = "Restarted from the beginning: the server couldn't resume it"
+/** The note a resume that had to start over leaves on its row ([DownloadNote]). */
+internal val DOWNLOAD_RESTARTED_NOTE: String get() = DownloadNote.of(R.string.library_download_note_restarted)
 
-/** The note on a download a lost connection paused. */
-internal const val DOWNLOAD_CONNECTION_LOST_NOTE = "Connection lost"
+/** The note on a download a lost connection paused ([DownloadNote]). */
+internal val DOWNLOAD_CONNECTION_LOST_NOTE: String get() = DownloadNote.of(R.string.library_download_note_connection_lost)
 
-/** The note on a download the app's process died under. */
-internal const val DOWNLOAD_INTERRUPTED_NOTE = "Interrupted"
+/** The note on a download the app's process died under ([DownloadNote]). */
+internal val DOWNLOAD_INTERRUPTED_NOTE: String get() = DownloadNote.of(R.string.library_download_note_interrupted)
+
+/**
+ * A download row's `note` or `error` as it's stored (#313 R1-M5): one of
+ * the app's own lines is kept as a key and its arguments, and read in the
+ * app language whenever the row is drawn ([shown]), so a paused row's
+ * "Connection lost" follows a change of the per-app language. Words from
+ * elsewhere (a redirect's refusal, an exception's) are kept as they are.
+ * The key is a stable name, not the resource id, which can change
+ * between builds while the row stays in the database.
+ */
+internal object DownloadNote {
+    private const val MARK = '\u0001'
+    private const val SEP = '\u001F'
+
+    private val KEYS: Map<String, Int> = linkedMapOf(
+        "restarted" to R.string.library_download_note_restarted,
+        "connection_lost" to R.string.library_download_note_connection_lost,
+        "interrupted" to R.string.library_download_note_interrupted,
+        "file_deleted" to R.string.library_download_file_deleted,
+        "failed" to R.string.library_download_failed,
+        "network_error" to R.string.library_download_network_error,
+        "network_error_detail" to R.string.library_download_network_error_detail,
+        "create_file_failed" to R.string.library_download_create_file_failed,
+        "save_file_failed" to R.string.library_download_save_file_failed,
+        "partial_file" to R.string.library_download_partial_file,
+        "write_failed" to R.string.library_download_write_failed,
+        "not_enough_storage" to R.string.library_download_not_enough_storage,
+        "malformed_data_uri" to R.string.library_download_malformed_data_uri,
+        "ens_unresolved" to R.string.library_download_ens_unresolved,
+        "node_not_running" to R.string.library_download_node_not_running,
+        "scheme_unsupported" to R.string.library_download_scheme_unsupported,
+        "gateway_no_answer" to R.string.library_download_gateway_no_answer,
+        "content_not_found" to R.string.library_download_content_not_found,
+        "gateway_error" to R.string.library_download_gateway_error,
+        "server_error" to R.string.library_download_server_error,
+        "too_many_redirects" to R.string.library_download_too_many_redirects,
+        "write_to_downloads_failed" to R.string.library_download_write_to_downloads_failed,
+    )
+    private val NAMES: Map<Int, String> = KEYS.entries.associate { (k, v) -> v to k }
+
+    /** [id] with [args] (kept as text), stored to be read later; resolved now if [id] has no key. */
+    fun of(@StringRes id: Int, vararg args: Any?): String {
+        val name = NAMES[id] ?: return Strings.get(id, *args)
+        return buildString {
+            append(MARK).append(name)
+            for (a in args) append(SEP).append(a.toString().replace(SEP, ' '))
+        }
+    }
+
+    /** [stored] as the user reads it now: a key resolved in the app language, anything else as it is. */
+    fun shown(stored: String?): String? {
+        if (stored == null || !stored.startsWith(MARK)) return stored
+        val parts = stored.substring(1).split(SEP)
+        val id = KEYS[parts[0]] ?: return stored
+        return runCatching { Strings.get(id, *parts.drop(1).toTypedArray()) }.getOrDefault(stored)
+    }
+}
 
 /**
  * Can a running download be paused? A web one always can — a server

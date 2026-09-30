@@ -1,8 +1,10 @@
 package baby.freedom.mobile.wallet
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.Secp256k1
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.l10n.Strings
 import java.math.BigInteger
 import java.security.SecureRandom
 import org.json.JSONArray
@@ -281,54 +283,54 @@ object SafeProtocol {
      * code, a refund pays someone from it).
      */
     fun parseRequest(raw: String): Request {
-        if (raw.length > MAX_REQUEST) throw Eip712.Invalid("This request is too large to be a Safe transaction")
-        val o = runCatching { JSONObject(raw.trim()) }.getOrNull() ?: throw Eip712.Invalid("This isn’t a Safe signing request")
+        if (raw.length > MAX_REQUEST) throw Eip712.Invalid(Strings.said(R.string.safe_request_too_large))
+        val o = runCatching { JSONObject(raw.trim()) }.getOrNull() ?: throw Eip712.Invalid(Strings.said(R.string.safe_request_not_safe))
         val primary = o.opt("primaryType") as? String
         val expected = when (primary) {
             "SafeTx" -> SAFE_TX_FIELDS
             "SafeMessage" -> SAFE_MESSAGE_FIELDS
-            else -> throw Eip712.Invalid("This isn’t a Safe signing request")
+            else -> throw Eip712.Invalid(Strings.said(R.string.safe_request_not_safe))
         }
-        val types = o.optJSONObject("types") ?: throw Eip712.Invalid("This isn’t a Safe signing request")
+        val types = o.optJSONObject("types") ?: throw Eip712.Invalid(Strings.said(R.string.safe_request_not_safe))
         if (types.length() != 2 || !sameFields(types.optJSONArray("EIP712Domain"), DOMAIN_FIELDS) ||
             !sameFields(types.optJSONArray(primary), expected)
         ) {
-            throw Eip712.Invalid("This request’s types aren’t those of a Safe v$VERSION ${if (primary == "SafeTx") "transaction" else "message"}")
+            throw Eip712.Invalid(Strings.said(if (primary == "SafeTx") R.string.safe_request_wrong_types_tx else R.string.safe_request_wrong_types_message, VERSION))
         }
-        val domain = o.optJSONObject("domain") ?: throw Eip712.Invalid("This request has no domain")
-        if (domain.length() != 2) throw Eip712.Invalid("This request’s domain has fields a Safe doesn’t sign")
+        val domain = o.optJSONObject("domain") ?: throw Eip712.Invalid(Strings.said(R.string.safe_request_no_domain))
+        if (domain.length() != 2) throw Eip712.Invalid(Strings.said(R.string.safe_request_domain_fields))
         val safe = (domain.opt("verifyingContract") as? String)?.takeIf { ADDRESS.matches(it) }
-            ?: throw Eip712.Invalid("This request names no Safe")
+            ?: throw Eip712.Invalid(Strings.said(R.string.safe_request_no_safe))
         val chainId = domain.opt("chainId")?.let { runCatching { Eip712.integer(it, "chainId") }.getOrNull() }
             ?.takeIf { it.signum() > 0 && it.bitLength() < 63 }?.toLong()
-            ?: throw Eip712.Invalid("This request names no chain")
-        val message = o.optJSONObject("message") ?: throw Eip712.Invalid("This request has no message")
+            ?: throw Eip712.Invalid(Strings.said(R.string.safe_request_no_chain))
+        val message = o.optJSONObject("message") ?: throw Eip712.Invalid(Strings.said(R.string.safe_request_no_message))
         // Checked by the strict encoder, which is also what the owners' signatures cover.
         val parsed = Eip712.parseStrict(JSONObject().put("types", types).put("domain", domain).put("primaryType", primary).put("message", message).toString())
         val hash = Eip712.digest(parsed)
         return if (primary == "SafeTx") {
             fun int(name: String) = Eip712.integer(message.get(name), name)
-            if (int("operation").signum() != 0) throw Eip712.Invalid("This transaction is a delegate call, which can hand the Safe to other code. Freedom doesn’t sign those.")
+            if (int("operation").signum() != 0) throw Eip712.Invalid(Strings.said(R.string.safe_request_delegate_call))
             if (int("safeTxGas").signum() != 0 || int("baseGas").signum() != 0 || int("gasPrice").signum() != 0 ||
                 !message.getString("gasToken").equals(ZERO_ADDRESS, ignoreCase = true) ||
                 !message.getString("refundReceiver").equals(ZERO_ADDRESS, ignoreCase = true)
             ) {
-                throw Eip712.Invalid("This transaction pays a gas refund out of the Safe. Freedom doesn’t sign those.")
+                throw Eip712.Invalid(Strings.said(R.string.safe_request_gas_refund))
             }
-            val nonce = int("nonce").takeIf { it.bitLength() <= 53 } ?: throw Eip712.Invalid("This transaction’s nonce is out of range")
-            val data = Eip712.hex(message.getString("data")) ?: throw Eip712.Invalid("This transaction’s data isn’t hex")
+            val nonce = int("nonce").takeIf { it.bitLength() <= 53 } ?: throw Eip712.Invalid(Strings.said(R.string.safe_request_nonce_range))
+            val data = Eip712.hex(message.getString("data")) ?: throw Eip712.Invalid(Strings.said(R.string.safe_request_data_not_hex))
             val tx = SafeTx(eip55(message.getString("to")), int("value"), data, nonce)
             Request.Tx(eip55(safe), chainId, tx, safeTxTypedData(safe, chainId, tx), hash)
         } else {
             val digest = Eip712.hex(message.getString("message"))?.takeIf { it.size == 32 }
-                ?: throw Eip712.Invalid("This message request isn’t for a signed text")
+                ?: throw Eip712.Invalid(Strings.said(R.string.safe_request_message_not_text))
             // The words are required, and must be what the digest is of: a bare 32-byte
             // `message` could be any hash — a Permit2 permit's, an exchange order's — and the
             // Safe's EIP-1271 `isValidSignature(bytes32)` would then approve it for anyone.
             val text = (o.opt("text") as? String)
-                ?: throw Eip712.Invalid("This message request doesn’t include the words to sign, only a hash. Freedom doesn’t sign those: the hash could approve anything.")
+                ?: throw Eip712.Invalid(Strings.said(R.string.safe_request_message_no_text))
             if (!MessageSigning.personalDigest(text.toByteArray(Charsets.UTF_8)).contentEquals(digest)) {
-                throw Eip712.Invalid("This message request’s text doesn’t match what would be signed")
+                throw Eip712.Invalid(Strings.said(R.string.safe_request_message_mismatch))
             }
             val typedData = JSONObject()
                 .put("types", types(primary, SAFE_MESSAGE_FIELDS))

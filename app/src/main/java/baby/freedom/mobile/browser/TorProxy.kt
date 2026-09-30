@@ -2,6 +2,8 @@ package baby.freedom.mobile.browser
 
 import android.content.Context
 import android.content.Intent
+import baby.freedom.mobile.R
+import baby.freedom.swarm.HeldText
 import java.io.IOException
 import java.io.InputStream
 import java.net.ConnectException
@@ -560,16 +562,18 @@ object TorProxy {
     }
 
     /** One line on what [probe] found at [endpoint], for Settings and the Nodes page. */
-    fun describe(result: Probe, endpoint: SocksEndpoint): String = when (result) {
-        Probe.Tor -> "Tor reached a .onion site through $endpoint"
-        Probe.NotListening -> "Nothing is listening on $endpoint. Start Orbot (or your Tor app) and check its SOCKS port."
-        Probe.NotSocks -> "$endpoint isn't a SOCKS5 proxy without a password"
-        Probe.NotTor -> "The proxy on $endpoint isn't Tor: it claims to connect even to a .onion address " +
-            "that can't exist, as shadowsocks, v2ray or clash proxies do. Freedom sends onion sites only to Tor."
+    fun describe(result: Probe, endpoint: SocksEndpoint): String = describeHeld(result, endpoint).text
+
+    /** [describe] kept as a [HeldText], for a state that should follow a language change (#313 R1-M5). */
+    fun describeHeld(result: Probe, endpoint: SocksEndpoint): HeldText = when (result) {
+        Probe.Tor -> HeldText.res(R.string.node_tor_probe_tor, endpoint.authority)
+        Probe.NotListening -> HeldText.res(R.string.node_tor_probe_not_listening, endpoint.authority)
+        Probe.NotSocks -> HeldText.res(R.string.node_tor_probe_not_socks, endpoint.authority)
+        Probe.NotTor -> HeldText.res(R.string.node_tor_probe_not_tor, endpoint.authority)
         is Probe.NoOnion -> if (result.code < 0) {
-            "The proxy on $endpoint didn't reach a .onion site in time. Is it Tor, and connected?"
+            HeldText.res(R.string.node_tor_probe_no_onion_timeout, endpoint.authority)
         } else {
-            "The proxy on $endpoint couldn't reach a .onion site (SOCKS error ${result.code}). Is it Tor, and connected?"
+            HeldText.res(R.string.node_tor_probe_no_onion, endpoint.authority, result.code)
         }
     }
 }

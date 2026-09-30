@@ -6,6 +6,8 @@ import android.content.ContextWrapper
 import android.print.PrintAttributes
 import android.print.PrintManager
 import android.webkit.WebView
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 
 /**
  * Print the current page (#89): hand [webView]'s document to the system
@@ -41,7 +43,7 @@ internal fun printWebView(webView: WebView, jobName: String) {
  * would make a meaningless file name.
  */
 internal fun printJobName(title: String, addressBarText: String, url: String): String =
-    title.trim().ifEmpty { urlActionTarget(addressBarText, url) ?: "Page" }
+    title.trim().ifEmpty { urlActionTarget(addressBarText, url) ?: Strings.get(R.string.library_print_job_default_name) }
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this

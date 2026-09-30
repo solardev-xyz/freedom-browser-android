@@ -45,16 +45,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.ens.EnsAddressResult
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.EthTransaction
 import baby.freedom.mobile.wallet.GasOracle
@@ -82,8 +86,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 
-internal const val SEND_TITLE = "Send"
-
 /** A fee in the native currency, rounded *up* to [maxFraction] digits — a fee must never read lower than it can be. */
 internal fun feeText(wei: BigInteger, chain: Chain, maxFraction: Int = 8): String {
     if (wei.signum() == 0) return "0 ${chain.symbol}"
@@ -99,8 +101,9 @@ internal fun gweiText(wei: BigInteger): String =
 internal fun feeDetail(tx: EthTransaction): String {
     val limit = "%,d".format(java.util.Locale.ROOT, tx.gasLimit)
     return when (val f = tx.fees) {
-        is EthTransaction.Fees.Eip1559 -> "Gas limit $limit · up to ${gweiText(f.maxFeePerGas)} per gas, tip ${gweiText(f.maxPriorityFeePerGas)}"
-        is EthTransaction.Fees.Legacy -> "Gas limit $limit · ${gweiText(f.gasPrice)} per gas"
+        is EthTransaction.Fees.Eip1559 ->
+            Strings.get(R.string.send_fee_detail_eip1559, limit, gweiText(f.maxFeePerGas), gweiText(f.maxPriorityFeePerGas))
+        is EthTransaction.Fees.Legacy -> Strings.get(R.string.send_fee_detail_legacy, limit, gweiText(f.gasPrice))
     }
 }
 
@@ -115,16 +118,13 @@ internal fun feeDetail(tx: EthTransaction): String {
  */
 internal fun feeFootnote(tx: EthTransaction): String {
     val paid = when (tx.fees) {
-        is EthTransaction.Fees.Eip1559 ->
-            "The “up to” leaves room for unused gas and for the base fee to rise; what isn't used stays in the " +
-                "account. The tip is paid on the gas used, less only if the base fee rises into that room."
-        is EthTransaction.Fees.Legacy ->
-            "The “up to” leaves room for unused gas, which stays in the account; the gas used is paid at the price above in full."
+        is EthTransaction.Fees.Eip1559 -> Strings.get(R.string.send_fee_footnote_eip1559)
+        is EthTransaction.Fees.Legacy -> Strings.get(R.string.send_fee_footnote_legacy)
     }
     return if (GasOracle.quiet(tx.fees, tx.chainId)) {
         paid
     } else {
-        "This network fee is unusually high per gas; check it before you confirm. $paid"
+        Strings.get(R.string.send_fee_footnote_high, paid)
     }
 }
 
@@ -133,19 +133,38 @@ internal fun sendStatusText(status: SendStatus): Pair<String, String> {
     val chain = status.quote.request.chain
     return when (val s = status.stage) {
         SendStatus.Stage.Signing -> status.quote.request.from.ledger?.let {
-            "Confirm on your Ledger…" to "Check the transaction on ${it.deviceName}’s screen and approve it there."
-        } ?: ("Signing…" to "With this account’s key, on this phone.")
-        SendStatus.Stage.Broadcasting -> "Sending…" to "Handing the signed transaction to ${chain.name}’s RPCs."
-        SendStatus.Stage.Pending -> "Waiting to be mined" to "Sent. It usually takes a block or two."
-        is SendStatus.Stage.Confirmed -> "Sent" to "Mined in block ${"%,d".format(java.util.Locale.ROOT, s.block)}" +
-            (s.feePaid?.let { " · fee ${feeText(it, chain)}" } ?: "")
-        is SendStatus.Stage.Reverted -> "Failed on chain" to "Mined in block ${"%,d".format(java.util.Locale.ROOT, s.block)}, " +
-            (if (status.quote.request.dapp != null) "but the contract refused the transaction, so it changed nothing. The network fee"
-            else "but the transfer itself failed, so nothing arrived. The network fee") +
-            (s.feePaid?.let { " (${feeText(it, chain)})" } ?: "") + " was still paid."
-        SendStatus.Stage.Unconfirmed -> "Not mined yet" to "No receipt after ${WalletSender.CONFIRM_TIMEOUT_MS / 60_000} minutes. " +
-            "It may still go through; the explorer shows where it stands."
-        is SendStatus.Stage.Failed -> (if (s.mayHaveGone) "Not confirmed" else "Not sent") to s.message
+            Strings.get(R.string.send_status_ledger_title) to Strings.get(R.string.send_status_ledger_text, it.deviceName)
+        } ?: (Strings.get(R.string.send_status_signing_title) to Strings.get(R.string.send_status_signing_text))
+        SendStatus.Stage.Broadcasting ->
+            Strings.get(R.string.send_status_broadcasting_title) to Strings.get(R.string.send_status_broadcasting_text, chain.name)
+        SendStatus.Stage.Pending -> Strings.get(R.string.send_status_pending_title) to Strings.get(R.string.send_status_pending_text)
+        is SendStatus.Stage.Confirmed -> {
+            val block = "%,d".format(java.util.Locale.ROOT, s.block)
+            Strings.get(R.string.send_status_confirmed_title) to (
+                s.feePaid?.let { Strings.get(R.string.send_status_confirmed_text_fee, block, feeText(it, chain)) }
+                    ?: Strings.get(R.string.send_status_confirmed_text, block)
+                )
+        }
+        is SendStatus.Stage.Reverted -> {
+            val block = "%,d".format(java.util.Locale.ROOT, s.block)
+            val contract = status.quote.request.dapp != null
+            Strings.get(R.string.send_status_reverted_title) to (
+                s.feePaid?.let {
+                    Strings.get(
+                        if (contract) R.string.send_status_reverted_contract_fee else R.string.send_status_reverted_transfer_fee,
+                        block,
+                        feeText(it, chain),
+                    )
+                } ?: Strings.get(if (contract) R.string.send_status_reverted_contract else R.string.send_status_reverted_transfer, block)
+                )
+        }
+        SendStatus.Stage.Unconfirmed -> {
+            val minutes = (WalletSender.CONFIRM_TIMEOUT_MS / 60_000).toInt()
+            Strings.get(R.string.send_status_unconfirmed_title) to Strings.plural(R.plurals.send_status_unconfirmed_text, minutes, minutes)
+        }
+        is SendStatus.Stage.Failed -> Strings.get(
+            if (s.mayHaveGone) R.string.send_status_not_confirmed_title else R.string.send_status_not_sent_title,
+        ) to s.message
     }
 }
 
@@ -275,7 +294,7 @@ internal fun SendPage(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                error = "Couldn’t prepare the send: ${e.javaClass.simpleName}"
+                error = Strings.get(R.string.send_prepare_failed, e.javaClass.simpleName)
             } finally {
                 busy = false
             }
@@ -308,7 +327,7 @@ internal fun SendPage(
     }
     BackHandler(onBack = back)
 
-    FullScreenScaffold(title = SEND_TITLE, onDismiss = back) {
+    FullScreenScaffold(title = stringResource(R.string.send_title), onDismiss = back) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -351,8 +370,7 @@ internal fun SendPage(
                             val reprice = {
                                 prepare(q.request, sendAll = false) { fresh ->
                                     quote = fresh
-                                    notice = "The fee estimate was over a minute old, so it’s been priced again. " +
-                                        "Check it and confirm."
+                                    notice = Strings.get(R.string.send_repriced_notice)
                                 }
                             }
                             if (sender.isStale(q)) {
@@ -370,7 +388,7 @@ internal fun SendPage(
                                         // answer, as well vouched for as when it was accepted.
                                         q.request.toName?.let { name ->
                                             val chainId = q.request.chain.id
-                                            notice = "Looking up $name again before signing…"
+                                            notice = Strings.get(R.string.send_rechecking_name, name)
                                             // Back/✕/Edit during the lookup cancels this job (leaveReview).
                                             recheck = coroutineContext.job
                                             val after = try {
@@ -416,13 +434,13 @@ internal fun SendPage(
                                                 quote = null
                                                 notice = null
                                             }
-                                            WalletSender.Submit.BUSY -> error = "Another send is still going out, or may have. Settle it (or stop tracking it) first."
+                                            WalletSender.Submit.BUSY -> error = Strings.get(R.string.send_busy)
                                             WalletSender.Submit.STALE -> stale = true
                                         }
                                     } catch (e: CancellationException) {
                                         throw e
                                     } catch (e: Exception) {
-                                        error = walletErrorMessage(e, "unlock the wallet", phraseBackedUp)
+                                        error = walletErrorMessage(e, Strings.get(R.string.wallet_action_unlock), phraseBackedUp)
                                     } finally {
                                         busy = false
                                     }
@@ -434,7 +452,7 @@ internal fun SendPage(
                 }
                 else -> {
                     item("from") {
-                        SectionCard(title = "From") {
+                        SectionCard(title = stringResource(R.string.send_label_from)) {
                             Text(account.name, fontWeight = FontWeight.Medium)
                             AddressText(
                                 account.address,
@@ -454,7 +472,7 @@ internal fun SendPage(
                     val chain = fieldChain
                     item("to") {
                         val parsed = parsedRecipient
-                        SectionCard(title = "To") {
+                        SectionCard(title = stringResource(R.string.send_label_to)) {
                             OutlinedTextField(
                                 value = recipient,
                                 onValueChange = {
@@ -463,7 +481,7 @@ internal fun SendPage(
                                 },
                                 enabled = !busy,
                                 singleLine = true,
-                                placeholder = { Text("0x… or name.eth") },
+                                placeholder = { Text(stringResource(R.string.send_recipient_placeholder)) },
                                 textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                                 keyboardOptions = KeyboardOptions(
                                     capitalization = KeyboardCapitalization.None,
@@ -490,14 +508,14 @@ internal fun SendPage(
                                     },
                                 )
                                 parsed is Recipients.Parsed.Ok && parsed.address.equals(account.address, ignoreCase = true) ->
-                                    FieldNote("That’s this account’s own address: only the fee leaves it.", error = false)
+                                    FieldNote(stringResource(R.string.send_own_address_note), error = false)
                             }
                         }
                     }
                     item("amount") {
                         val held = token?.let { (balances[it.key] as? TokenBalance.Known)?.raw }
                         val parsedAmount = token?.let { SendAmounts.parse(amount, it.decimals) }
-                        SectionCard(title = "Amount") {
+                        SectionCard(title = stringResource(R.string.send_label_amount)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 OutlinedTextField(
                                     value = amount,
@@ -508,7 +526,7 @@ internal fun SendPage(
                                     },
                                     enabled = !busy,
                                     singleLine = true,
-                                    placeholder = { Text("0.0") },
+                                    placeholder = { Text(stringResource(R.string.send_amount_placeholder)) },
                                     suffix = { Text(token?.symbol.orEmpty()) },
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                     modifier = Modifier.weight(1f),
@@ -523,20 +541,20 @@ internal fun SendPage(
                                             error = null
                                         }
                                     },
-                                ) { Text("Max") }
+                                ) { Text(stringResource(R.string.send_max)) }
                             }
                             if (token != null) {
                                 when {
                                     amount.isNotEmpty() && parsedAmount == null -> FieldNote(
-                                        "Enter a positive amount with at most ${token.decimals} decimals",
+                                        pluralText(R.plurals.send_amount_invalid, token.decimals, token.decimals),
                                         error = true,
                                     )
                                     all && token.isNative -> FieldNote(
-                                        "All of it, less the network fee: the review shows the exact amount",
+                                        stringResource(R.string.send_all_note),
                                         error = false,
                                     )
                                     held != null -> FieldNote(
-                                        "Balance ${TokenAmounts.format(held, token.decimals)} ${token.symbol}",
+                                        stringResource(R.string.send_balance_note, TokenAmounts.format(held, token.decimals), token.symbol),
                                         error = false,
                                     )
                                 }
@@ -570,9 +588,9 @@ internal fun SendPage(
                                 if (busy) {
                                     CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                                     Spacer(Modifier.width(8.dp))
-                                    Text("Pricing…")
+                                    Text(stringResource(R.string.send_pricing))
                                 } else {
-                                    Text("Review")
+                                    Text(stringResource(R.string.send_review_button))
                                 }
                             }
                         }
@@ -592,7 +610,7 @@ private fun AssetPicker(
     enabled: Boolean,
     onPick: (Token) -> Unit,
 ) {
-    SectionCard(title = "Asset") {
+    SectionCard(title = stringResource(R.string.send_label_asset)) {
         var lastChain: Long? = null
         assets.forEach { (chain, token) ->
             if (chain.id != lastChain) {
@@ -649,25 +667,33 @@ private fun SendReviewSection(
     val tap = rememberArmedTapGuard(quote, PromptTapGuard.SPEND_PROTECTION_MS)
     val guard = tap.guard
     val armed = tap.armed
-    SectionCard(title = "Review") {
-        ReviewRow("Network", chain.name)
-        ReviewRow("Asset", token.symbol, address = token.address)
-        ReviewRow("From", request.from.name, address = request.from.address)
+    SectionCard(title = stringResource(R.string.send_review_title)) {
+        ReviewRow(stringResource(R.string.send_label_network), chain.name)
+        ReviewRow(stringResource(R.string.send_label_asset), token.symbol, address = token.address)
+        ReviewRow(stringResource(R.string.send_label_from), request.from.name, address = request.from.address)
+        val recheckNote = stringResource(R.string.send_name_recheck_note)
         ReviewRow(
-            "To",
+            stringResource(R.string.send_label_to),
             request.toName,
             address = request.to,
-            detail = recipientTrust?.let { "${it.tier.title}. ${it.recipientSummary}" }
-                ?: request.toName?.let { "The name is looked up again just before signing; the address, not the name, is signed." },
+            detail = recipientTrust?.let { stringResource(R.string.send_name_trust_detail, it.tier.title, it.recipientSummary) }
+                ?: request.toName?.let { recheckNote },
         )
         if (request.to.equals(request.from.address, ignoreCase = true)) {
-            FieldNote("This is the sending account itself.", error = false)
+            FieldNote(stringResource(R.string.send_self_send_note), error = false)
         }
-        ReviewRow("Amount", "${SendAmounts.exact(request.amount, token.decimals)} ${token.symbol}", mono = true)
-        ReviewRow("Network fee", "up to ${feeText(quote.tx.maxFee, chain)}", mono = true, detail = feeDetail(quote.tx))
-        quote.nativeTotal?.let { ReviewRow("Total", "up to ${feeText(it, chain)}", mono = true) }
+        ReviewRow(stringResource(R.string.send_label_amount), "${SendAmounts.exact(request.amount, token.decimals)} ${token.symbol}", mono = true)
         ReviewRow(
-            "Nonce",
+            stringResource(R.string.send_label_network_fee),
+            stringResource(R.string.send_up_to, feeText(quote.tx.maxFee, chain)),
+            mono = true,
+            detail = feeDetail(quote.tx),
+        )
+        quote.nativeTotal?.let {
+            ReviewRow(stringResource(R.string.send_label_total), stringResource(R.string.send_up_to, feeText(it, chain)), mono = true)
+        }
+        ReviewRow(
+            stringResource(R.string.send_label_nonce),
             quote.tx.nonce.toString(),
             detail = nonceDetail(quote),
         )
@@ -689,7 +715,7 @@ private fun SendReviewSection(
     }
     ObscuredTapNotice(tap)
     SheetButtonRow {
-        OutlinedButton(onClick = onEdit, enabled = !busy) { Text("Edit") }
+        OutlinedButton(onClick = onEdit, enabled = !busy) { Text(stringResource(R.string.common_edit)) }
         Button(
             onClick = { if (guard.accepts()) onConfirm() },
             enabled = armed && !busy,
@@ -698,7 +724,7 @@ private fun SendReviewSection(
             if (busy) {
                 CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
             } else {
-                Text(if (request.from.isLedger) "Confirm on Ledger" else "Confirm and send")
+                Text(stringResource(if (request.from.isLedger) R.string.send_confirm_on_ledger else R.string.send_confirm_and_send))
             }
         }
     }
@@ -738,7 +764,7 @@ internal fun SendStatusSection(
     val request = status.quote.request
     val green = if (MaterialTheme.colorScheme.isLight) Color(0xFF15803D) else Color(0xFF22C55E)
     val amber = if (MaterialTheme.colorScheme.isLight) Color(0xFFB45309) else Color(0xFFF59E0B)
-    SectionCard(title = SEND_TITLE) {
+    SectionCard(title = stringResource(R.string.send_title)) {
         Row(verticalAlignment = Alignment.Top) {
             when (val stage = status.stage) {
                 SendStatus.Stage.Signing, SendStatus.Stage.Broadcasting, SendStatus.Stage.Pending ->
@@ -762,14 +788,34 @@ internal fun SendStatusSection(
         }
         Spacer(Modifier.height(8.dp))
         // A site's transaction (#110): who asked for it, whatever it carries.
-        request.dapp?.let { ReviewRow("Requested by", dappRequester(it)) }
-        ReviewRow("Amount", "${SendAmounts.exact(request.amount, request.token.decimals)} ${request.token.symbol} on ${request.chain.name}", mono = true)
-        ReviewRow(if (request.dapp != null) "Contract" else "To", request.toName, address = request.to)
+        request.dapp?.let { ReviewRow(stringResource(R.string.send_label_requested_by), dappRequester(it)) }
+        ReviewRow(
+            stringResource(R.string.send_label_amount),
+            stringResource(
+                R.string.send_amount_on_chain,
+                SendAmounts.exact(request.amount, request.token.decimals),
+                request.token.symbol,
+                request.chain.name,
+            ),
+            mono = true,
+        )
+        ReviewRow(
+            stringResource(if (request.dapp != null) R.string.send_label_contract else R.string.send_label_to),
+            request.toName,
+            address = request.to,
+        )
         // One desktop Freedom composed (#113): what it calls is part of what was sent.
-        request.dapp?.takeIf { it.origin == null && it.safe == null && it.swarm == null }?.let { HexRow("Data", "0x" + it.data.toHex(), selector = true, detail = "Asked for over a scanned pairing code") }
+        request.dapp?.takeIf { it.origin == null && it.safe == null && it.swarm == null }?.let {
+            HexRow(
+                stringResource(R.string.send_label_data),
+                "0x" + it.data.toHex(),
+                selector = true,
+                detail = stringResource(R.string.send_data_scanned_detail),
+            )
+        }
         status.hash?.let { hash ->
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                Text("Transaction", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(R.string.send_label_transaction), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 SelectionContainer {
                     Text(hash, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                 }
@@ -783,52 +829,57 @@ internal fun SendStatusSection(
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         when {
             stage is SendStatus.Stage.Failed && stage.mayHaveGone -> Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
-                Text("Try again")
+                Text(stringResource(R.string.common_try_again))
             }
             // A transaction a site or desktop Freedom composed is theirs to ask for again, not this page's.
             stage is SendStatus.Stage.Failed && request.dapp == null -> Button(onClick = onReviewAgain, modifier = Modifier.fillMaxWidth()) {
-                Text("Review again")
+                Text(stringResource(R.string.send_review_again))
             }
             stage == SendStatus.Stage.Unconfirmed -> Button(onClick = onCheckAgain, modifier = Modifier.fillMaxWidth()) {
-                Text("Keep waiting")
+                Text(stringResource(R.string.send_keep_waiting))
             }
         }
         explorer?.let { url ->
             OutlinedButton(onClick = { onOpenUrl(url) }, modifier = Modifier.fillMaxWidth()) {
-                Text("View on ${android.net.Uri.parse(url).host ?: "the explorer"}")
+                Text(
+                    android.net.Uri.parse(url).host?.let { stringResource(R.string.send_view_on, it) }
+                        ?: stringResource(R.string.send_view_on_explorer),
+                )
             }
         }
         if (stage != SendStatus.Stage.Signing && stage != SendStatus.Stage.Broadcasting) {
             TextButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    when {
-                        stage == SendStatus.Stage.Pending -> "Close (it keeps going)"
-                        status.mayHaveGone -> "Close (Try again stays here)"
-                        stage == SendStatus.Stage.Unconfirmed -> "Close (it stays here)"
-                        else -> "Done"
-                    },
+                    stringResource(
+                        when {
+                            stage == SendStatus.Stage.Pending -> R.string.send_close_keeps_going
+                            status.mayHaveGone -> R.string.send_close_try_again_stays
+                            stage == SendStatus.Stage.Unconfirmed -> R.string.send_close_stays
+                            else -> R.string.common_done
+                        },
+                    ),
                 )
             }
         }
         // Giving up on one that may still land is its own, confirmed step.
         if (status.mayHaveGone || stage == SendStatus.Stage.Unconfirmed) {
             TextButton(onClick = { confirmStop = true }, modifier = Modifier.fillMaxWidth()) {
-                Text("Stop tracking it…", color = MaterialTheme.colorScheme.error)
+                Text(stringResource(R.string.send_stop_tracking_ellipsis), color = MaterialTheme.colorScheme.error)
             }
         }
     }
     if (confirmStop) {
         AlertDialog(
             onDismissRequest = { confirmStop = false },
-            title = { Text("Stop tracking this send?") },
+            title = { Text(stringResource(R.string.send_stop_tracking_title)) },
             text = { Text(stopTrackingText(status)) },
             confirmButton = {
                 TextButton(onClick = {
                     confirmStop = false
                     onStopTracking()
-                }) { Text("Stop tracking", color = MaterialTheme.colorScheme.error) }
+                }) { Text(stringResource(R.string.send_stop_tracking), color = MaterialTheme.colorScheme.error) }
             },
-            dismissButton = { TextButton(onClick = { confirmStop = false }) { Text("Keep it") } },
+            dismissButton = { TextButton(onClick = { confirmStop = false }) { Text(stringResource(R.string.send_keep_it)) } },
         )
     }
 }
@@ -836,9 +887,14 @@ internal fun SendStatusSection(
 /** What giving up on an unresolved send means, for the confirmation. */
 internal fun stopTrackingText(status: SendStatus): String {
     val r = status.quote.request
-    return "It may still go through: if it does, ${SendAmounts.exact(r.amount, r.token.decimals)} ${r.token.symbol} is paid. " +
-        "Until it’s mined, the next send from ${r.from.name} on ${r.chain.name} reuses its nonce " +
-        "(${status.quote.tx.nonce}) at a higher fee, so it takes this one’s place: only one of the two can go through."
+    return Strings.get(
+        R.string.send_stop_tracking_text,
+        SendAmounts.exact(r.amount, r.token.decimals),
+        r.token.symbol,
+        r.from.name,
+        r.chain.name,
+        status.quote.tx.nonce.toString(),
+    )
 }
 
 /**
@@ -866,7 +922,7 @@ private fun NameRecipientNote(
                 CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(14.dp))
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    "Looking up $name on $chainName…",
+                    stringResource(R.string.send_looking_up_name, name, chainName),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -908,18 +964,18 @@ private fun NameRecipientNote(
                         Checkbox(checked = unverifiedAccepted, onCheckedChange = null, enabled = enabled)
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "I’ve checked this address with the recipient. Send to it anyway.",
+                            stringResource(R.string.send_accept_unverified),
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
                     result.address.equals(ownAddress, ignoreCase = true) ->
-                        FieldNote("That’s this account’s own address: only the fee leaves it.", error = false)
+                        FieldNote(stringResource(R.string.send_own_address_note), error = false)
                 }
             }
             else -> {
                 FieldNote(Recipients.lookupProblem(result, chainName).orEmpty(), error = true)
                 if (Recipients.retryable(result)) {
-                    TextButton(onClick = onRetry, enabled = enabled) { Text("Try again") }
+                    TextButton(onClick = onRetry, enabled = enabled) { Text(stringResource(R.string.common_try_again)) }
                 }
             }
         }
@@ -939,14 +995,14 @@ private fun FieldNote(text: String, error: Boolean) {
 /** The wallet page's way into Send, saying where the current send is if there is one. */
 @Composable
 internal fun SendEntrySection(status: SendStatus?, enabled: Boolean, onOpen: () -> Unit) {
-    SectionCard(title = SEND_TITLE) {
+    SectionCard(title = stringResource(R.string.send_title)) {
         PageRow(
-            title = if (status == null) "Send" else sendStatusText(status).first,
+            title = if (status == null) stringResource(R.string.send_title) else sendStatusText(status).first,
             subtitle = status?.let {
                 val r = it.quote.request
-                val what = "${SendAmounts.exact(r.amount, r.token.decimals)} ${r.token.symbol} on ${r.chain.name}"
-                r.dapp?.let { d -> "$what, for ${dappRequester(d)}" } ?: what
-            } ?: "Native currency or tokens, from this account",
+                val what = stringResource(R.string.send_amount_on_chain, SendAmounts.exact(r.amount, r.token.decimals), r.token.symbol, r.chain.name)
+                r.dapp?.let { d -> stringResource(R.string.send_entry_for, what, dappRequester(d)) } ?: what
+            } ?: stringResource(R.string.send_entry_subtitle),
             style = PageRowStyle.Inset,
             leadingIcon = Icons.AutoMirrored.Filled.Send,
             enabled = enabled,
@@ -961,6 +1017,8 @@ internal fun SendEntrySection(status: SendStatus?, enabled: Boolean, onOpen: () 
  * (#115), or — for desktop Freedom's (#113) — the code that was scanned.
  */
 internal fun dappRequester(d: DappCall): String = d.origin?.let(::permissionOriginDisplay)
-    ?: d.safe?.let { if (it.activates) "Safe “${it.name}” (activation)" else "Safe “${it.name}” (its owners’ transaction)" }
-    ?: d.swarm?.let { "your Swarm node (funding and a postage stamp)" }
-    ?: "a scanned pairing code"
+    ?: d.safe?.let {
+        Strings.get(if (it.activates) R.string.send_requester_safe_activation else R.string.send_requester_safe_owners, it.name)
+    }
+    ?: d.swarm?.let { Strings.get(R.string.send_requester_swarm_node) }
+    ?: Strings.get(R.string.send_requester_pairing_code)

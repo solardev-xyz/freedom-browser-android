@@ -1,6 +1,8 @@
 package baby.freedom.mobile.browser
 
 import android.util.Log
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.node.INodeService
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.SpendPermit
@@ -8,7 +10,7 @@ import baby.freedom.swarm.SwarmNode
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
-import java.util.Locale
+import java.text.NumberFormat
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -103,32 +105,45 @@ private val EFFECTIVE_GB = doubleArrayOf(
     208.52, 435.98, 908.81, 1870.0, 3810.0, 7730.0, 15610.0, 31430.0, 63150.0,
 )
 
-/** Bytes in 1000-based units, as bee and the other Freedom apps show them. */
+/**
+ * Bytes in 1000-based units, as bee and the other Freedom apps show them;
+ * the number in the user's locale (display only).
+ */
 internal fun formatStampBytes(bytes: Long): String {
-    fun one(v: Double) = if (v >= 100) String.format(Locale.US, "%.0f", v) else String.format(Locale.US, "%.1f", v).removeSuffix(".0")
+    fun one(v: Double) = NumberFormat.getNumberInstance().apply {
+        minimumFractionDigits = 0
+        maximumFractionDigits = if (v >= 100) 0 else 1
+        roundingMode = RoundingMode.HALF_UP
+    }.format(v)
     return when {
-        bytes >= 1_000_000_000_000 -> "${one(bytes / 1e12)} TB"
-        bytes >= 1_000_000_000 -> "${one(bytes / 1e9)} GB"
-        bytes >= 1_000_000 -> "${one(bytes / 1e6)} MB"
-        bytes >= 1_000 -> "${one(bytes / 1e3)} kB"
-        else -> "$bytes B"
+        bytes >= 1_000_000_000_000 -> Strings.get(R.string.stamps_bytes_tb, one(bytes / 1e12))
+        bytes >= 1_000_000_000 -> Strings.get(R.string.stamps_bytes_gb, one(bytes / 1e9))
+        bytes >= 1_000_000 -> Strings.get(R.string.stamps_bytes_mb, one(bytes / 1e6))
+        bytes >= 1_000 -> Strings.get(R.string.stamps_bytes_kb, one(bytes / 1e3))
+        else -> Strings.get(R.string.stamps_bytes_b, NumberFormat.getIntegerInstance().format(bytes))
     }
 }
 
 /** Time left in its two largest units ("12 days 4 hours"), or "Expired". */
 internal fun formatStampTtl(seconds: Long): String {
-    if (seconds <= 0) return "Expired"
-    fun unit(n: Long, name: String) = if (n == 1L) "1 $name" else "$n ${name}s"
+    if (seconds <= 0) return Strings.get(R.string.stamps_ttl_expired)
+    fun days(n: Long) = Strings.plural(R.plurals.stamps_days, n.toPluralCount(), n)
+    fun hours(n: Long) = Strings.plural(R.plurals.stamps_hours, n.toPluralCount(), n)
+    fun minutes(n: Long) = Strings.plural(R.plurals.stamps_minutes, n.toPluralCount(), n)
+    fun two(a: String, b: String) = Strings.get(R.string.stamps_ttl_two_units, a, b)
     val days = seconds / 86_400
     val hours = seconds % 86_400 / 3_600
     val minutes = seconds % 3_600 / 60
     return when {
-        days > 0 -> unit(days, "day") + if (hours > 0) " " + unit(hours, "hour") else ""
-        hours > 0 -> unit(hours, "hour") + if (minutes > 0) " " + unit(minutes, "minute") else ""
-        minutes > 0 -> unit(minutes, "minute")
-        else -> "Under a minute"
+        days > 0 -> if (hours > 0) two(days(days), hours(hours)) else days(days)
+        hours > 0 -> if (minutes > 0) two(hours(hours), minutes(minutes)) else hours(hours)
+        minutes > 0 -> minutes(minutes)
+        else -> Strings.get(R.string.stamps_ttl_under_a_minute)
     }
 }
+
+/** A count for picking a plural form: clamped into Int (the form of a huge count is `other` anyway). */
+private fun Long.toPluralCount(): Int = coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 
 /** The sizes the buy screen offers (depths); the node service takes the same range. */
 internal val STAMP_DEPTHS = (17..24).toList()
@@ -142,7 +157,7 @@ internal const val DEFAULT_STAMP_DAYS = 30L
 internal val STAMP_EXTEND_DAYS = listOf(1L, 7L, 30L, 90L)
 internal const val DEFAULT_EXTEND_DAYS = 30L
 
-internal fun daysLabel(days: Long) = if (days == 1L) "1 day" else "$days days"
+internal fun daysLabel(days: Long): String = Strings.plural(R.plurals.stamps_days, days.toPluralCount(), days)
 
 /**
  * ant's price for a new batch or an extension (`ant_storage_quote` /
@@ -202,9 +217,7 @@ internal fun spendCostText(q: StampQuote, buy: Boolean): String {
     // string, which ant truncates to 4 decimals (0.017899 → "0.0178").
     val bound = formatXdaiCeiling(q.xdaiRequired)
     val txs = SpendPermit.slotsFor(buy).size
-    return "The node pays from its xDAI: it swaps what it needs for xBZZ, about $estimate including gas. " +
-        "At most, it swaps $bound and pays up to ${formatXdai(SpendPermit.maxGasWei(buy))} of gas " +
-        "on top, across up to $txs transactions."
+    return Strings.plural(R.plurals.stamps_spend_cost, txs, estimate, bound, formatXdai(SpendPermit.maxGasWei(buy)), txs)
 }
 
 /**
@@ -286,8 +299,18 @@ internal object StampClient {
          * [unbound]: this process holds no binder to `:node` right now —
          * not proof `:node` is gone: the Activity that binds it may just
          * be being recreated while `:node` runs on.
+         * [timedOut]: no answer within the wait ([TIMED_OUT]'s words).
+         * [maybeSent]: `:node` says a deposit's transfer may already be
+         * out ([SwarmNode.DEPOSIT_MAYBE_SENT]'s words). Flags, never read
+         * off [message]: that is in the app language, which may change
+         * while a spend is held (#280).
          */
-        data class Failed(val message: String, val unbound: Boolean = false) : Answer
+        data class Failed(
+            val message: String,
+            val unbound: Boolean = false,
+            val timedOut: Boolean = false,
+            val maybeSent: Boolean = false,
+        ) : Answer
     }
 
     /** Runs [method] on the node and waits up to [timeoutMs]. Blocking; never throws. */
@@ -303,9 +326,9 @@ internal object StampClient {
         } finally {
             runCatching { pipe.close() }
         }
-        raw ?: return Answer.Failed(TIMED_OUT)
-        val o = runCatching { JSONObject(raw) }.getOrNull() ?: return Answer.Failed("The Swarm node's answer couldn't be read")
-        return o.optString("error").takeIf { it.isNotEmpty() }?.let { Answer.Failed(it) } ?: Answer.Ok(o)
+        raw ?: return Answer.Failed(TIMED_OUT, timedOut = true)
+        val o = runCatching { JSONObject(raw) }.getOrNull() ?: return Answer.Failed(Strings.get(R.string.stamps_node_answer_unreadable))
+        return o.optString("error").takeIf { it.isNotEmpty() }?.let { Answer.Failed(it, maybeSent = o.optBoolean("maybeSent")) } ?: Answer.Ok(o)
     }
 
     /**
@@ -319,7 +342,7 @@ internal object StampClient {
         return when (val a = call("discover", JSONObject().put("id", id), timeoutMs = DISCOVER_TIMEOUT_MS)) {
             is Answer.Ok -> Result.success(registeredIds(a.json))
             is Answer.Failed -> {
-                if (a.message == TIMED_OUT) {
+                if (a.timedOut) {
                     // The page stopped waiting, but `:node` is most likely
                     // still scanning — and may yet adopt a chequebook and
                     // restart the gateway. The search stays Running (so no
@@ -366,18 +389,18 @@ internal object StampClient {
      */
     internal fun nodeWorkStillRunning(a: Answer): Boolean = when (a) {
         is Answer.Ok -> a.json.optBoolean("running", false)
-        is Answer.Failed -> a.message == TIMED_OUT || a.unbound
+        is Answer.Failed -> a.timedOut || a.unbound
     }
 
     /**
      * How a search that outlived the page's wait ended, from `:node`'s
      * last "discovering" answer ([awaitNodeWorkEnd]): what it found, or
-     * why it failed, if `:node` kept its outcome; [DISCOVER_OVERRAN] if
+     * why it failed, if `:node` kept its outcome; [DiscoverOverran] if
      * not (`:node` went away mid-search).
      */
     internal fun overranOutcome(end: Answer): Result<List<String>> {
         val outcome = (end as? Answer.Ok)?.json?.optJSONObject("outcome")
-            ?: return Result.failure(IllegalStateException(DISCOVER_OVERRAN))
+            ?: return Result.failure(DiscoverOverran())
         return outcome.optString("error").takeIf { it.isNotEmpty() }
             ?.let { Result.failure(IllegalStateException(it)) }
             ?: Result.success(registeredIds(outcome))
@@ -425,7 +448,7 @@ internal object StampClient {
                 discoverNow()
             } catch (t: Throwable) {
                 Log.w(TAG, "stamp discover failed: ${t.javaClass.simpleName}")
-                Result.failure(IllegalStateException("Something went wrong"))
+                Result.failure(IllegalStateException(Strings.get(R.string.stamps_something_went_wrong)))
             }
             _discovery.compareAndSet(Discovery.Running, Discovery.Finished(account, found))
         }
@@ -516,7 +539,13 @@ internal object StampClient {
         data object Idle : Spend
         data class Running(val kind: Kind, val batchId: String?) : Spend
         data class Done(val kind: Kind, val batchId: String?) : Spend
-        data class Failed(val kind: Kind, val batchId: String?, val message: String) : Spend
+        /**
+         * [noReport]: it ended without a clear answer — it outlived the
+         * wait, or a deposit may already be out — so it isn't called a
+         * failure. A flag, not read off [message], which is in the app
+         * language (#280).
+         */
+        data class Failed(val kind: Kind, val batchId: String?, val message: String, val noReport: Boolean = false) : Spend
     }
 
     private val _spend = MutableStateFlow<Spend>(Spend.Idle)
@@ -585,7 +614,7 @@ internal object StampClient {
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "stamp $method failed: ${t.javaClass.simpleName}")
-                Spend.Failed(kind, batchId, "Something went wrong")
+                Spend.Failed(kind, batchId, Strings.get(R.string.stamps_something_went_wrong))
             }
             _spend.compareAndSet(running, outcome)
         }
@@ -602,12 +631,12 @@ internal object StampClient {
     internal fun spendOutcome(kind: Kind, batchId: String?, a: Answer, awaitBuyEnd: () -> Unit): Spend = when (a) {
         is Answer.Ok -> Spend.Done(kind, batchId)
         is Answer.Failed -> when {
-            a.message != TIMED_OUT -> Spend.Failed(kind, batchId, a.message)
+            !a.timedOut -> Spend.Failed(kind, batchId, a.message, noReport = a.maybeSent)
             kind.mayRestartGateway -> {
                 awaitBuyEnd()
-                Spend.Failed(kind, batchId, if (kind == Kind.Connect) CONNECT_OVERRAN else BUY_OVERRAN)
+                Spend.Failed(kind, batchId, if (kind == Kind.Connect) CONNECT_OVERRAN else BUY_OVERRAN, noReport = true)
             }
-            else -> Spend.Failed(kind, batchId, stillSendingMessage(kind))
+            else -> Spend.Failed(kind, batchId, stillSendingMessage(kind), noReport = true)
         }
     }
 
@@ -619,29 +648,31 @@ internal object StampClient {
      * not as a failure (#117).
      */
     internal fun stillSendingMessage(kind: Kind): String = when (kind) {
-        Kind.Deposit -> "${SwarmNode.DEPOSIT_MAYBE_SENT} (the node is still sending it). " +
-            "The chequebook's balance shows it once it confirms"
-        else -> "The node is still sending the transactions. The list shows the stamp once they confirm."
+        Kind.Deposit -> Strings.get(R.string.stamps_deposit_still_sending, SwarmNode.DEPOSIT_MAYBE_SENT)
+        else -> Strings.get(R.string.stamps_still_sending)
     }
 
-    private const val NOT_BOUND = "The Swarm node isn't running"
+    private val NOT_BOUND: String get() = Strings.get(R.string.stamps_node_not_running)
 
     /**
      * How a buy that outlived [SPEND_TIMEOUT_MS] ended, once `:node` said
      * it had: `:node` doesn't keep a buy's outcome for the app to read.
      */
-    internal const val BUY_OVERRAN =
-        "it took longer than expected, and ended without telling the app how it went. " +
-            "The list shows the stamp if it was bought."
+    internal val BUY_OVERRAN: String get() = Strings.get(R.string.stamps_buy_overran)
 
     /** The same for a connect (#115): `:node` doesn't keep its outcome either. */
-    internal const val CONNECT_OVERRAN =
-        "it took longer than expected, and ended without telling the app how it went. " +
-            "If the stamp doesn't show in the list, try Connect again."
-    internal const val TIMED_OUT = "The Swarm node didn't answer in time"
-    internal const val DISCOVER_OVERRAN =
-        "The search took longer than expected, and ended without telling the app what it found. " +
-            "The list shows any stamps it registered."
+    internal val CONNECT_OVERRAN: String get() = Strings.get(R.string.stamps_connect_overran)
+    internal val TIMED_OUT: String get() = Strings.get(R.string.stamps_node_timed_out)
+    internal val DISCOVER_OVERRAN: String get() = Strings.get(R.string.stamps_discover_overran)
+
+    /**
+     * A search that outlived the page's wait and whose outcome never
+     * reached the app. Told apart by type, not by its words, which are
+     * read in the app language when shown (#280).
+     */
+    class DiscoverOverran : IllegalStateException() {
+        override val message: String get() = DISCOVER_OVERRAN
+    }
 
     /**
      * How often `:node` is asked after a search that outlived

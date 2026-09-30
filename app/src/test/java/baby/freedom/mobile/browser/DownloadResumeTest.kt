@@ -177,7 +177,7 @@ class DownloadResumeTest {
     @Test
     fun `a running row that restarted says so`() {
         assertEquals(
-            "1.0 KB of 2.0 KB · $DOWNLOAD_RESTARTED_NOTE",
+            "1.0 KB of 2.0 KB · Restarted from the beginning: the server couldn't resume it",
             downloadStatusLine(
                 row(DownloadStatus.RUNNING, 0, 2048, note = DOWNLOAD_RESTARTED_NOTE),
                 DownloadProgress(1024, 2048),
@@ -188,5 +188,45 @@ class DownloadResumeTest {
             "Saving to Downloads…",
             downloadStatusLine(row(DownloadStatus.RUNNING, 0, 2048), DownloadProgress(2048, 2048, saving = true), "t"),
         )
+    }
+
+    @Test
+    fun `a stored note reads in the language of the moment`() {
+        // Kept as a key, not the words (#313 R1-M5).
+        val stored = DOWNLOAD_CONNECTION_LOST_NOTE
+        assertEquals(false, stored.contains("Connection lost"))
+        assertEquals("Connection lost", DownloadNote.shown(stored))
+        val row = row(DownloadStatus.PAUSED, 1024, 2048, note = stored)
+        baby.freedom.mobile.l10n.inPseudoLanguage {
+            assertEquals("[xx] Connection lost", DownloadNote.shown(stored))
+        }
+        // Lowering the note's first letter is English's rule only.
+        val german = object : baby.freedom.mobile.l10n.StringSource {
+            val english = baby.freedom.mobile.l10n.ResourceXmlStrings()
+            override fun string(id: Int, vararg args: Any?): String = when (id) {
+                baby.freedom.mobile.R.string.library_download_note_connection_lost -> "Verbindung unterbrochen"
+                baby.freedom.mobile.R.string.library_download_status_paused_reason -> "Pausiert: %1\$s".format(*args)
+                else -> english.string(id, *args)
+            }
+            override fun plural(id: Int, count: Int, vararg args: Any?): String = english.plural(id, count, *args)
+            override fun language(): java.util.Locale = java.util.Locale.GERMAN
+        }
+        baby.freedom.mobile.l10n.Strings.useForTest(german)
+        try {
+            assertEquals(true, downloadStatusLine(row, null, "t").startsWith("Pausiert: Verbindung unterbrochen · "))
+        } finally {
+            baby.freedom.mobile.l10n.Strings.useForTest(null)
+        }
+        assertEquals(true, downloadStatusLine(row, null, "t").startsWith("Paused: connection lost · "))
+    }
+
+    @Test
+    fun `a stored note keeps its argument and passes other words through`() {
+        val stored = DownloadNote.of(baby.freedom.mobile.R.string.library_download_gateway_error, 502)
+        assertEquals("Gateway error 502", DownloadNote.shown(stored))
+        assertEquals("a redirect's own words", DownloadNote.shown("a redirect's own words"))
+        assertEquals(null, DownloadNote.shown(null))
+        // A key a later build dropped shows as stored rather than failing.
+        assertEquals("\u0001gone", DownloadNote.shown("\u0001gone"))
     }
 }

@@ -7,23 +7,23 @@
 # tab (workflow_dispatch) for a dry run that builds without publishing.
 #
 # Jobs (#309): `ffi` builds libfreedom_mobile_ffi.so, one matrix job per
-# ABI, `colibri` builds libc4.so and `unit-tests` runs the JVM tests,
-# all in parallel; `apk` packages the two libraries as soon as they're
-# there, alongside the tests; `publish` needs both `apk` and
-# `unit-tests`, so nothing is released unless the tests passed. The two
-# native libraries are cached with actions/cache, keyed on everything
-# that shapes them (see each job's "Cache key" step), and a hit skips
-# their build entirely; the checks after the build run on a hit too
-# (scripts/check-native-libs.sh, and the Radicle bindings compared with
-# the generated copy cached alongside the library), so a stale or wrong
-# artefact still fails the job. A cache miss builds as before, the two
-# ABIs side by side, and caches the result once the library check
-# passes. The bindings comparison runs after the save, so a FFI_REF bump
-# that needs regenerated bindings still caches its (correct) library and
-# generated bindings: the commit that updates the committed copy then
-# hits the cache instead of rebuilding. The matrix doesn't fail fast
-# either, so that failure in the arm64 job doesn't cancel x86_64's build
-# before it's cached.
+# ABI, `colibri` builds libc4.so and `unit-tests` runs the JVM tests and
+# the localisation lint (#280), all in parallel; `apk` packages the two
+# libraries as soon as they're there, alongside the tests; `publish`
+# needs both `apk` and `unit-tests`, so nothing is released unless the
+# tests and lint passed. The two native libraries are cached with
+# actions/cache, keyed on everything that shapes them (see each job's
+# "Cache key" step), and a hit skips their build entirely; the checks
+# after the build run on a hit too (scripts/check-native-libs.sh, and
+# the Radicle bindings compared with the generated copy cached alongside
+# the library), so a stale or wrong artefact still fails the job. A
+# cache miss builds as before, the two ABIs side by side, and caches the
+# result once the library check passes. The bindings comparison runs
+# after the save, so a FFI_REF bump that needs regenerated bindings
+# still caches its (correct) library and generated bindings: the commit
+# that updates the committed copy then hits the cache instead of
+# rebuilding. The matrix doesn't fail fast either, so that failure in
+# the arm64 job doesn't cancel x86_64's build before it's cached.
 #
 # Why actions/cache rather than publishing the .so files as assets on
 # the freedom-mobile-ffi release: that needs a token with write access to
@@ -308,10 +308,23 @@ jobs:
       - name: Unit tests
         run: ./gradlew --no-daemon :app:testDebugUnitTest
 
+      # The localisation gate (#280): the HardcodedUiText check's own
+      # tests, then lint with it (what it checks: `lint {}` in
+      # app/build.gradle.kts). Run even when a unit test failed, so one
+      # run reports both. Lint bundles :swarmnode as an AAR, which would
+      # build its JNI shim, and that links against libfreedom_mobile_ffi.so,
+      # which this job doesn't have; lint doesn't need the shim, so skip it.
+      - name: Lint (hardcoded UI text)
+        if: ${{ !cancelled() }}
+        run: >-
+          ./gradlew --no-daemon :lint-checks:test :app:lintDebug
+          -x ':swarmnode:buildCMakeDebug[arm64-v8a]'
+          -x ':swarmnode:buildCMakeDebug[x86_64]'
+
       # The build log has each failure's message and stack trace
       # (app/build.gradle.kts testLogging); the reports have every test's
-      # output too (#310).
-      - name: Upload unit test reports on failure
+      # output too (#310). The lint report lists every finding.
+      - name: Upload unit test and lint reports on failure
         if: failure()
         uses: actions/upload-artifact@v6
         with:
@@ -319,6 +332,8 @@ jobs:
           path: |
             app/build/reports/tests/testDebugUnitTest/
             app/build/test-results/testDebugUnitTest/
+            lint-checks/build/reports/tests/test/
+            app/build/reports/lint-results-debug.*
           if-no-files-found: ignore
 
   apk:

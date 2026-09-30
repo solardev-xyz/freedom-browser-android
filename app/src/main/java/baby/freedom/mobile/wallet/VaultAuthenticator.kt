@@ -1,5 +1,8 @@
 package baby.freedom.mobile.wallet
 
+import androidx.annotation.StringRes
+import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.R
 import android.content.Context
 import android.hardware.biometrics.BiometricManager.Authenticators
 import android.hardware.biometrics.BiometricPrompt
@@ -19,13 +22,21 @@ import kotlinx.coroutines.suspendCancellableCoroutine
  * from Google backup leaves an unlocked wallet, so it's held to Unlock's bar;
  * backing up opens the phrase, so it's held to Show recovery phrase's (#244).
  */
-enum class VaultAuthPurpose(val title: String, val subtitle: String, val confirmationRequired: Boolean) {
-    CREATE("Create your wallet", "Confirm it’s you to encrypt your new recovery phrase", false),
-    IMPORT("Import your wallet", "Confirm it’s you to encrypt your recovery phrase", false),
-    UNLOCK("Unlock your wallet", "Confirm it’s you to open your wallet", true),
-    REVEAL("Show recovery phrase", "Confirm it’s you to see your recovery phrase", true),
-    BACKUP("Back up with Google", "Confirm it’s you to back up your recovery phrase", true),
-    RESTORE("Restore your wallet", "Confirm it’s you to restore your wallet from Google backup", true),
+enum class VaultAuthPurpose(
+    @StringRes private val titleRes: Int,
+    @StringRes private val subtitleRes: Int,
+    val confirmationRequired: Boolean,
+) {
+    CREATE(R.string.wallet_auth_create_title, R.string.wallet_auth_create_subtitle, false),
+    IMPORT(R.string.wallet_auth_import_title, R.string.wallet_auth_import_subtitle, false),
+    UNLOCK(R.string.wallet_auth_unlock_title, R.string.wallet_auth_unlock_subtitle, true),
+    REVEAL(R.string.wallet_auth_reveal_title, R.string.wallet_auth_reveal_subtitle, true),
+    BACKUP(R.string.wallet_auth_backup_title, R.string.wallet_auth_backup_subtitle, true),
+    RESTORE(R.string.wallet_auth_restore_title, R.string.wallet_auth_restore_subtitle, true),
+    ;
+
+    val title: String get() = Strings.get(titleRes)
+    val subtitle: String get() = Strings.get(subtitleRes)
 }
 
 /** The user backed out of the prompt (or the system dismissed it); not an error to show. */
@@ -73,7 +84,7 @@ class BiometricVaultAuthenticator(private val context: Context) : VaultAuthentic
                         val authed = result.cryptoObject?.cipher
                         if (!cont.isActive) return
                         if (authed != null) cont.resume(authed)
-                        else cont.resumeWithException(VaultAuthFailedException("No key came back from the prompt"))
+                        else cont.resumeWithException(VaultAuthFailedException(Strings.get(R.string.wallet_auth_no_key)))
                     }
 
                     override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {

@@ -76,11 +76,13 @@ import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.ens.EnsNormalize
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.NameSystem
 import baby.freedom.mobile.ens.TezosDomainsResolver
+import baby.freedom.mobile.l10n.Strings
 import kotlinx.coroutines.flow.collectLatest
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
@@ -291,38 +293,31 @@ internal fun nameResolutionRefusalCopy(
                 "bzz" -> "Swarm"
                 "ipfs" -> "IPFS"
                 "ipns" -> "IPNS"
-                else -> "the network"
+                else -> null
             }
-            val scheme = assertedProtocol?.let { "<code>$it://</code>" } ?: "scheme"
-            "Name lives on a different network" to
-                "This $label name no longer resolves to $network content, which the $scheme " +
-                "address asks for, so nothing was loaded: Freedom doesn't switch networks " +
-                "behind the address bar. Enter the name on its own to follow wherever it " +
-                "points now."
+            Strings.get(R.string.errorpage_ens_wrong_protocol_title) to when {
+                network != null ->
+                    Strings.get(R.string.errorpage_refusal_wrong_protocol, label, network, assertedProtocol)
+                assertedProtocol != null ->
+                    Strings.get(R.string.errorpage_refusal_wrong_protocol_other_network, label, assertedProtocol)
+                else -> Strings.get(R.string.errorpage_refusal_wrong_protocol_no_scheme, label)
+            }
         }
-        "ens_not_found" -> "No content for this $label name" to
+        "ens_not_found" -> Strings.get(R.string.errorpage_ens_not_found_title, label) to
             if (tezos) {
-                "This $label name doesn't point at a website any more. The owner may " +
-                    "have removed its <code>web:content_url</code> record, or the name has expired."
+                Strings.get(R.string.errorpage_refusal_not_found_tezos, label)
             } else {
-                "This $label name doesn't point at any content any more. The owner may " +
-                    "have removed its <code>contenthash</code> record, or the name has no resolver."
+                Strings.get(R.string.errorpage_refusal_not_found, label)
             }
-        "ens_unsupported_codec" -> "Unsupported content format" to
-            "This $label name now resolves to a content format Freedom Browser " +
-            "cannot load yet on mobile."
-        "ens_ccip_disabled" -> "$label lookup failed" to
-            "This name is resolved through an off-chain gateway (CCIP-Read), which is " +
-            "turned off in Settings &rarr; Name resolution."
+        "ens_unsupported_codec" -> Strings.get(R.string.errorpage_unsupported_format_title) to
+            Strings.get(R.string.errorpage_refusal_unsupported_codec, label)
+        "ens_ccip_disabled" -> Strings.get(R.string.errorpage_lookup_failed_title, label) to
+            Strings.get(R.string.errorpage_ccip_disabled_description)
         // ENSIP-15 refused the name ([EnsNormalize]): no lookup ran.
-        "ens_invalid_name" -> "Not a valid $label name" to
-            "This name breaks the ENSIP-15 naming rules " +
-            "(a disallowed character, mixed scripts, a lookalike, &hellip;), so Freedom Browser " +
-            "won't look it up &mdash; other $label apps refuse it too, and it could be " +
-            "mistaken for a different name. Check the spelling."
-        "ens_name_too_long" -> "$label name too long" to
-            "A label of this name is longer than the 255 bytes an $label lookup can " +
-            "carry, so Freedom Browser can't ask a resolver about it. Check the address."
+        "ens_invalid_name" -> Strings.get(R.string.errorpage_ens_invalid_name_title, label) to
+            Strings.get(R.string.errorpage_ens_invalid_name_description, label)
+        "ens_name_too_long" -> Strings.get(R.string.errorpage_ens_name_too_long_title, label) to
+            Strings.get(R.string.errorpage_ens_name_too_long_description, label)
         // [Gateways.reverifyEnsDocument] lands here for one server's
         // record that isn't what this tab or session had — including when
         // they had nothing yet (an iframe of a name never resolved) — and
@@ -330,22 +325,15 @@ internal fun nameResolutionRefusalCopy(
         // A typed navigation shows the record with Continue and "no
         // content" as "No content" with a trust note, so the copy neither
         // promises an answer to review nor claims an earlier one.
-        "ens_unverified" -> "Not cross-checked" to
-            "Only one $chain RPC server answered for this name, so Freedom " +
-            "couldn't check its answer against another server. An answer only " +
-            "one server gave is loaded here only if it matches one already " +
-            "loaded in this session, so nothing was loaded. Try again, or " +
-            "enter the name in the address bar to see what that server answered."
-        "ens_conflict" -> "RPC servers disagreed" to
-            "The $chain RPC servers Freedom asked gave different answers for " +
-            "this name. At least one of them is wrong, so nothing was loaded."
-        else -> "$label lookup failed" to
+        "ens_unverified" -> Strings.get(R.string.errorpage_not_cross_checked_title) to
+            Strings.get(R.string.errorpage_refusal_unverified, chain)
+        "ens_conflict" -> Strings.get(R.string.errorpage_rpc_disagreed_title) to
+            Strings.get(R.string.errorpage_refusal_conflict, chain)
+        else -> Strings.get(R.string.errorpage_lookup_failed_title, label) to
             if (tezos) {
-                "Couldn't reach a Tezos RPC endpoint to resolve this name. " +
-                    "Check your connection and try again."
+                Strings.get(R.string.errorpage_tezos_rpc_unreachable_description)
             } else {
-                "Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your " +
-                    "connection, or the endpoints in Settings &rarr; RPC providers, and try again."
+                Strings.get(R.string.errorpage_ethereum_rpc_unreachable_description)
             }
     }
 }
@@ -385,8 +373,9 @@ internal fun inPlaceErrorPageHtml(
     detailsHtml: String,
     retryHref: String = "",
     refreshSeconds: Int? = null,
-): String =
-    """<!doctype html><html lang="en"><head><meta charset="utf-8">${refreshSeconds?.let { "\n<meta http-equiv=\"refresh\" content=\"$it\">" }.orEmpty()}
+): String {
+    val tryAgain = Strings.get(R.string.common_try_again)
+    return """<!doctype html><html lang="en"><head><meta charset="utf-8">${refreshSeconds?.let { "\n<meta http-equiv=\"refresh\" content=\"$it\">" }.orEmpty()}
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
 <title>$title</title><style>
@@ -403,7 +392,8 @@ border-radius:8px;font-size:15px;text-decoration:none}
 @media (prefers-color-scheme:light){body{background:#fff;color:#24292f}h1{color:#cf222e}
 p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-color:#d0d7de;color:#24292f}}
 </style></head><body><div class="c"><h1>$title</h1><p>$descriptionHtml</p>
-<div class="d">$detailsHtml</div><a href="$retryHref">Try again</a></div></body></html>"""
+<div class="d">$detailsHtml</div><a href="$retryHref">$tryAgain</a></div></body></html>"""
+}
 
 /** Where [nameWebRecordNavigation] sends a request for [pathAndQuery] on the name's origin. */
 internal fun webRecordTarget(result: EnsResult.Ok, pathAndQuery: String): String =
@@ -3097,6 +3087,8 @@ private fun buildRefreshableWebView(
 
             override fun onPageCommitVisible(view: WebView?, url: String?) {
                 showFailedLoadPage(view, url)
+                // The error page's text, in the app's language (#280).
+                errorPageStrings(view, url)
                 // The document has laid out and painted, so its root
                 // styles are real: this is the earliest the #56 probe
                 // can answer, and pages are touchable from here on.
@@ -3135,6 +3127,9 @@ private fun buildRefreshableWebView(
                 // again from here (#262, [CacheBypass]).
                 (view as? PageWebView)?.cacheBypass?.pageFinished(url)
                 showFailedLoadPage(view, url)
+                // Again here: a page restored from the back/forward
+                // cache or a reload may skip the commit callback (#280).
+                errorPageStrings(view, url)
                 // A certificate error's cancelled navigation ends here,
                 // committing nothing: without a page of our own the
                 // previous document would stay on screen under no
@@ -5172,7 +5167,10 @@ private class SearchSelectionCallback(
         val present = menu.findItem(SEARCH_SELECTION_ITEM_ID) != null
         if (searchable == present) return false
         if (searchable) {
-            menu.add(Menu.NONE, SEARCH_SELECTION_ITEM_ID, SEARCH_SELECTION_ITEM_ORDER, "Search")
+            menu.add(
+                Menu.NONE, SEARCH_SELECTION_ITEM_ID, SEARCH_SELECTION_ITEM_ORDER,
+                Strings.get(R.string.errorpage_selection_search),
+            )
                 .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
         } else {
             menu.removeItem(SEARCH_SELECTION_ITEM_ID)
@@ -6501,4 +6499,16 @@ internal class CloseNotifyingInputStream(
             if (closed.compareAndSet(false, true)) onClose()
         }
     }
+}
+
+/**
+ * Hand a committed error page ([ErrorPage]) its strings (#280). Only for
+ * that page's own asset URL, and only after it committed: `view.url` is
+ * the committed document's URL by then, so a navigation away can't
+ * receive the script. The page runs the table once; a second call is a
+ * no-op there.
+ */
+private fun errorPageStrings(view: WebView?, url: String?) {
+    if (view == null || !ErrorPage.isErrorPage(url) || !ErrorPage.isErrorPage(view.url)) return
+    view.evaluateJavascript(ErrorPage.stringsScript(), null)
 }

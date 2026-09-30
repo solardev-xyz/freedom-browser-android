@@ -1,7 +1,10 @@
 package baby.freedom.mobile.wallet
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.l10n.Said
+import baby.freedom.mobile.l10n.Strings
 import java.math.BigDecimal
 import java.math.BigInteger
 import org.json.JSONArray
@@ -30,7 +33,23 @@ import org.json.JSONTokener
  * as every encoder does (they aren't signed, and nothing shows them).
  */
 object Eip712 {
-    class Invalid(message: String) : Exception(message)
+    /**
+     * The typed data can't be signed as sent: [message] for the user, in
+     * the app language; [english] for the site or peer that sent it (#280).
+     */
+    class Invalid private constructor(message: String, val english: String) : Exception(message) {
+        constructor(said: Said) : this(said.text, said.english)
+
+        companion object {
+            /**
+             * One whose [message] is already English (a literal about the
+             * payload's shape): the same for the user and the page. No
+             * plain `String` constructor, so an app-language text can't
+             * reach a page by default (#280): pass a [Said] for one.
+             */
+            fun ofEnglish(text: String) = Invalid(text, text)
+        }
+    }
 
     data class Field(val name: String, val type: String)
 
@@ -135,7 +154,7 @@ object Eip712 {
     fun parseStrict(raw: Any?): TypedData = parse(raw, strict = true)
 
     private fun parse(raw: Any?, strict: Boolean): TypedData {
-        if (strict && raw is String && raw.length > MAX_JSON) throw Invalid("The typed data is too large")
+        if (strict && raw is String && raw.length > MAX_JSON) throw Invalid(Strings.said(R.string.send_typed_too_large))
         val o = when (raw) {
             is JSONObject -> raw
             is String -> try {
@@ -144,39 +163,39 @@ object Eip712 {
                 null
             } catch (e: StackOverflowError) {
                 null
-            } ?: throw Invalid("typed data isn't a JSON object")
-            else -> throw Invalid("typed data isn't a JSON object")
+            } ?: throw Invalid.ofEnglish("typed data isn't a JSON object")
+            else -> throw Invalid.ofEnglish("typed data isn't a JSON object")
         }
-        val typesJson = o.opt("types") as? JSONObject ?: throw Invalid("types is missing")
-        val primaryType = o.opt("primaryType") as? String ?: throw Invalid("primaryType is missing")
-        val domain = o.opt("domain") as? JSONObject ?: throw Invalid("domain is missing")
+        val typesJson = o.opt("types") as? JSONObject ?: throw Invalid.ofEnglish("types is missing")
+        val primaryType = o.opt("primaryType") as? String ?: throw Invalid.ofEnglish("primaryType is missing")
+        val domain = o.opt("domain") as? JSONObject ?: throw Invalid.ofEnglish("domain is missing")
         val message = when (val m = o.opt("message")) {
             is JSONObject -> m
-            null, JSONObject.NULL -> if (strict && primaryType != DOMAIN) throw Invalid("The typed data has no message") else JSONObject()
-            else -> throw Invalid("message isn't an object")
+            null, JSONObject.NULL -> if (strict && primaryType != DOMAIN) throw Invalid(Strings.said(R.string.send_typed_no_message)) else JSONObject()
+            else -> throw Invalid.ofEnglish("message isn't an object")
         }
         val types = LinkedHashMap<String, List<Field>>()
         for (name in typesJson.keys()) {
-            if (!IDENT.matches(name)) throw Invalid("bad type name")
-            val arr = typesJson.opt(name) as? JSONArray ?: throw Invalid("type $name isn't a list of fields")
+            if (!IDENT.matches(name)) throw Invalid.ofEnglish("bad type name")
+            val arr = typesJson.opt(name) as? JSONArray ?: throw Invalid.ofEnglish("type $name isn't a list of fields")
             types[name] = (0 until arr.length()).map { i ->
-                val f = arr.opt(i) as? JSONObject ?: throw Invalid("type $name has a field that isn't an object")
-                val fname = f.opt("name") as? String ?: throw Invalid("type $name has a field with no name")
-                val ftype = f.opt("type") as? String ?: throw Invalid("field $name.$fname has no type")
+                val f = arr.opt(i) as? JSONObject ?: throw Invalid.ofEnglish("type $name has a field that isn't an object")
+                val fname = f.opt("name") as? String ?: throw Invalid.ofEnglish("type $name has a field with no name")
+                val ftype = f.opt("type") as? String ?: throw Invalid.ofEnglish("field $name.$fname has no type")
                 // Checked before anything walks it: a page-sized type string is never scanned more than once (#215 R3-F1).
-                if (ftype.length > MAX_TYPE_CHARS) throw Invalid("field $name.$fname has a type that's too long")
+                if (ftype.length > MAX_TYPE_CHARS) throw Invalid.ofEnglish("field $name.$fname has a type that's too long")
                 // A label on the sheet: never one that could carry a hidden character.
-                if (strict && !IDENT.matches(fname)) throw Invalid("Type $name has a malformed field")
+                if (strict && !IDENT.matches(fname)) throw Invalid(Strings.said(R.string.send_typed_malformed_field, name))
                 Field(fname, ftype)
             }
             if (strict && types.getValue(name).map { it.name }.toSet().size != types.getValue(name).size) {
-                throw Invalid("Type $name names a field twice")
+                throw Invalid(Strings.said(R.string.send_typed_duplicate_field, name))
             }
         }
         if (!types.containsKey("EIP712Domain")) {
             types[DOMAIN] = DOMAIN_FIELDS.filter { domain.has(it.name) && !domain.isNull(it.name) }
         }
-        if (!types.containsKey(primaryType)) throw Invalid("types has no entry for $primaryType")
+        if (!types.containsKey(primaryType)) throw Invalid.ofEnglish("types has no entry for $primaryType")
         if (strict) for (fields in types.values) for (f in fields) checkType(f.type, types)
         return TypedData(types, primaryType, domain, message, strict)
     }
@@ -236,7 +255,7 @@ object Eip712 {
     }
 
     private fun declaredOnly(types: Map<String, List<Field>>, type: String, value: Any?, depth: Int): Any? {
-        if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
+        if (depth > MAX_DEPTH) throw Invalid.ofEnglish("typed data nests too deeply")
         arrayType(type)?.let { a ->
             val arr = value as? JSONArray ?: return value
             return JSONArray().apply {
@@ -257,18 +276,18 @@ object Eip712 {
 
         private fun spend(n: Int = 1) {
             work += n
-            if (work > MAX_WORK) throw Invalid("typed data is too large")
+            if (work > MAX_WORK) throw Invalid.ofEnglish("typed data is too large")
         }
 
         fun hashStruct(type: String, value: JSONObject, depth: Int): ByteArray {
-            if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
-            val fields = types[type] ?: throw Invalid("unknown type $type")
+            if (depth > MAX_DEPTH) throw Invalid.ofEnglish("typed data nests too deeply")
+            val fields = types[type] ?: throw Invalid.ofEnglish("unknown type $type")
             val out = java.io.ByteArrayOutputStream()
             out.write(typeHash(type))
             for (f in fields) {
                 spend()
                 val v = value.opt(f.name)
-                if (strict && (v == null || v == JSONObject.NULL)) throw Invalid("$type.${f.name} is missing")
+                if (strict && (v == null || v == JSONObject.NULL)) throw Invalid.ofEnglish("$type.${f.name} is missing")
                 out.write(encodeField(f.type, if (v == JSONObject.NULL) null else v, f.name, depth))
             }
             return Keccak256.digest(out.toByteArray())
@@ -277,7 +296,7 @@ object Eip712 {
         fun encodeType(primary: String): String {
             val deps = LinkedHashSet<String>()
             fun walk(t: String, depth: Int) {
-                if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
+                if (depth > MAX_DEPTH) throw Invalid.ofEnglish("typed data nests too deeply")
                 spend()
                 val base = baseType(t)
                 if (base in deps || !types.containsKey(base)) return
@@ -297,24 +316,24 @@ object Eip712 {
             typeHashes.getOrPut(type) { Keccak256.digest(encodeType(type).toByteArray(Charsets.UTF_8)) }
 
         private fun encodeField(type: String, value: Any?, name: String, depth: Int): ByteArray {
-            if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
+            if (depth > MAX_DEPTH) throw Invalid.ofEnglish("typed data nests too deeply")
             arrayType(type)?.let { a ->
                 val inner = a.inner
-                val arr = value as? JSONArray ?: throw Invalid("$name should be an array")
+                val arr = value as? JSONArray ?: throw Invalid.ofEnglish("$name should be an array")
                 val fixed = a.length
-                if (fixed.isNotEmpty() && fixed.toIntOrNull() != arr.length()) throw Invalid("$name should have $fixed elements")
+                if (fixed.isNotEmpty() && fixed.toIntOrNull() != arr.length()) throw Invalid.ofEnglish("$name should have $fixed elements")
                 val out = java.io.ByteArrayOutputStream()
                 for (i in 0 until arr.length()) {
                     spend()
                     val e = arr.opt(i)
-                    if (strict && (e == null || e == JSONObject.NULL)) throw Invalid("$name[$i] is missing")
+                    if (strict && (e == null || e == JSONObject.NULL)) throw Invalid.ofEnglish("$name[$i] is missing")
                     out.write(encodeField(inner, if (e == JSONObject.NULL) null else e, "$name[$i]", depth + 1))
                 }
                 return Keccak256.digest(out.toByteArray())
             }
             if (types.containsKey(type)) {
                 if (value == null) return ByteArray(32)
-                val obj = value as? JSONObject ?: throw Invalid("$name should be a $type object")
+                val obj = value as? JSONObject ?: throw Invalid.ofEnglish("$name should be a $type object")
                 return hashStruct(type, obj, depth + 1)
             }
             if (strict) checkAtom(type, value, name)
@@ -336,7 +355,7 @@ object Eip712 {
         val message = ArrayList<Line>()
         if (td.primaryType != DOMAIN) describe(td.primaryType, td.message, td.types, 0, message)
         val shown = (domain + message).sumOf { it.label.length.toLong() + it.value.length }
-        if (shown > MAX_SHOWN) throw Invalid("The typed data is too long to show on the phone")
+        if (shown > MAX_SHOWN) throw Invalid(Strings.said(R.string.send_typed_too_long))
         domain to message
     }
 
@@ -345,13 +364,13 @@ object Eip712 {
     }
 
     private fun describeValue(type: String, value: Any?, types: Map<String, List<Field>>, label: String, depth: Int, out: MutableList<Line>) {
-        if (out.size >= MAX_LINES) throw Invalid("The typed data has too many fields to show on the phone")
-        if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
+        if (out.size >= MAX_LINES) throw Invalid(Strings.said(R.string.send_typed_too_many_fields))
+        if (depth > MAX_DEPTH) throw Invalid.ofEnglish("typed data nests too deeply")
         val array = arrayType(type)
         when {
             array != null -> {
                 val items = value as JSONArray
-                out += Line(label, "${items.length()} item" + if (items.length() == 1) "" else "s", depth)
+                out += Line(label, Strings.plural(R.plurals.send_typed_items, items.length(), items.length()), depth)
                 for (i in 0 until items.length()) describeValue(array.inner, items.get(i), types, "[$i]", depth + 1, out)
             }
             type in types -> {
@@ -404,7 +423,7 @@ object Eip712 {
             UINT.find(base)?.groupValues?.get(1)?.let(::bits) != null ||
             INT.find(base)?.groupValues?.get(1)?.let(::bits) != null ||
             BYTES_N.find(base)?.groupValues?.get(1)?.toIntOrNull()?.let { it in 1..32 } == true
-        if (!ok) throw Invalid("Unknown type: $type")
+        if (!ok) throw Invalid(Strings.said(R.string.send_typed_unknown_type, type))
     }
 
     private fun bits(digits: String): Int? = digits.toIntOrNull()?.takeIf { it in 8..256 && it % 8 == 0 }
@@ -421,12 +440,12 @@ object Eip712 {
                 (value.length - 2) / 2 == BYTES_N.find(type)!!.groupValues[1].toInt()
             else -> value is Number || value is String
         }
-        if (!ok) throw Invalid("$name isn’t a valid $type")
+        if (!ok) throw Invalid(Strings.said(R.string.send_typed_invalid_value, name, type))
     }
 
     private fun strictHex(value: Any?, where: String): ByteArray {
         val s = value as? String
-        if (s == null || !HEX.matches(s)) throw Invalid("$where isn’t 0x hex bytes")
+        if (s == null || !HEX.matches(s)) throw Invalid(Strings.said(R.string.send_typed_not_hex, where))
         return hex(s)!!
     }
 
@@ -436,13 +455,13 @@ object Eip712 {
     } catch (e: Invalid) {
         throw e
     } catch (e: ClassCastException) {
-        throw Invalid("The typed data doesn’t match its types")
+        throw Invalid(Strings.said(R.string.send_typed_mismatch))
     } catch (e: NullPointerException) {
-        throw Invalid("The typed data doesn’t match its types")
+        throw Invalid(Strings.said(R.string.send_typed_mismatch))
     } catch (e: JSONException) {
-        throw Invalid("The typed data doesn’t match its types")
+        throw Invalid(Strings.said(R.string.send_typed_mismatch))
     } catch (e: StackOverflowError) {
-        throw Invalid("The typed data is nested too deeply")
+        throw Invalid(Strings.said(R.string.send_typed_nested_too_deeply))
     }
 
     /** [t] with every `[n]` suffix taken off, in one pass over it (#215 R3-F1). */
@@ -456,40 +475,40 @@ object Eip712 {
     }
 
     private fun encodeAtom(type: String, value: Any?, name: String): ByteArray {
-        if (value == null) throw Invalid("missing value for $name")
+        if (value == null) throw Invalid.ofEnglish("missing value for $name")
         return when {
             type == "string" -> Keccak256.digest((value as? String ?: value.toString()).toByteArray(Charsets.UTF_8))
             type == "bytes" -> Keccak256.digest(dynamicBytes(value, name))
             type == "bool" -> word(if (bool(value, name)) BigInteger.ONE else BigInteger.ZERO)
             type == "address" -> {
-                val s = value as? String ?: throw Invalid("$name should be an address")
-                val b = hex(s) ?: throw Invalid("$name should be an address")
-                if (b.size != 20) throw Invalid("$name should be an address")
+                val s = value as? String ?: throw Invalid.ofEnglish("$name should be an address")
+                val b = hex(s) ?: throw Invalid.ofEnglish("$name should be an address")
+                if (b.size != 20) throw Invalid.ofEnglish("$name should be an address")
                 ByteArray(12) + b
             }
             type.startsWith("bytes") -> {
-                val n = type.removePrefix("bytes").toIntOrNull()?.takeIf { it in 1..32 } ?: throw Invalid("unknown type $type")
+                val n = type.removePrefix("bytes").toIntOrNull()?.takeIf { it in 1..32 } ?: throw Invalid.ofEnglish("unknown type $type")
                 val b = when (value) {
-                    is String -> hex(value) ?: throw Invalid("$name should be hex")
+                    is String -> hex(value) ?: throw Invalid.ofEnglish("$name should be hex")
                     else -> BigIntegerBytes.of(integer(value, name))
                 }
-                if (b.size > n) throw Invalid("$name is longer than $n bytes")
+                if (b.size > n) throw Invalid.ofEnglish("$name is longer than $n bytes")
                 b + ByteArray(32 - b.size)
             }
             type.startsWith("uint") || type.startsWith("int") -> {
                 val signed = type.startsWith("int")
                 val bits = type.removePrefix(if (signed) "int" else "uint").ifEmpty { "256" }.toIntOrNull()
-                    ?.takeIf { it in 8..256 && it % 8 == 0 } ?: throw Invalid("unknown type $type")
+                    ?.takeIf { it in 8..256 && it % 8 == 0 } ?: throw Invalid.ofEnglish("unknown type $type")
                 val v = integer(value, name)
                 val ok = if (signed) {
                     v >= BigInteger.ONE.shiftLeft(bits - 1).negate() && v < BigInteger.ONE.shiftLeft(bits - 1)
                 } else {
                     v.signum() >= 0 && v.bitLength() <= bits
                 }
-                if (!ok) throw Invalid("$name is out of range for $type")
+                if (!ok) throw Invalid.ofEnglish("$name is out of range for $type")
                 word(if (v.signum() < 0) v.add(BigInteger.ONE.shiftLeft(256)) else v)
             }
-            else -> throw Invalid("unknown type $type")
+            else -> throw Invalid.ofEnglish("unknown type $type")
         }
     }
 
@@ -503,13 +522,13 @@ object Eip712 {
         is Number -> integer(v, name).signum() != 0
         "true" -> true
         "false" -> false
-        else -> throw Invalid("$name should be true or false")
+        else -> throw Invalid.ofEnglish("$name should be true or false")
     }
 
     private fun dynamicBytes(v: Any, name: String): ByteArray = when (v) {
-        is String -> if (v.startsWith("0x") || v.startsWith("0X")) hex(v) ?: throw Invalid("$name isn't hex") else v.toByteArray(Charsets.UTF_8)
+        is String -> if (v.startsWith("0x") || v.startsWith("0X")) hex(v) ?: throw Invalid.ofEnglish("$name isn't hex") else v.toByteArray(Charsets.UTF_8)
         is Number -> BigIntegerBytes.of(integer(v, name))
-        else -> throw Invalid("$name should be bytes")
+        else -> throw Invalid.ofEnglish("$name should be bytes")
     }
 
     /** A JSON number, a decimal string or a `0x` hex string as an integer. */
@@ -530,8 +549,8 @@ object Eip712 {
                 }
             }
             else -> null
-        } ?: throw Invalid("$name should be an integer")
-        if (n.bitLength() > 256) throw Invalid("$name is out of range")
+        } ?: throw Invalid.ofEnglish("$name should be an integer")
+        if (n.bitLength() > 256) throw Invalid.ofEnglish("$name is out of range")
         return n
     }
 
@@ -551,7 +570,7 @@ object Eip712 {
 
     private object BigIntegerBytes {
         fun of(v: BigInteger): ByteArray {
-            if (v.signum() < 0) throw Invalid("negative bytes")
+            if (v.signum() < 0) throw Invalid.ofEnglish("negative bytes")
             val raw = v.toByteArray()
             return if (raw.size > 1 && raw[0].toInt() == 0) raw.copyOfRange(1, raw.size) else raw
         }

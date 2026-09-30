@@ -1,0 +1,386 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Chains, name resolution and the trust behind a name (#280): Settings →
+  Chains, → Name resolution, → RPC providers, the address bar's trust
+  shield, the not-cross-checked warning's details, and the error text the
+  resolvers (ens/*, chains/*) hand to those screens.
+-->
+<resources>
+    <!-- browser/ChainsSettings.kt -->
+    <string name="names_section_chains">Chains</string>
+    <string name="names_add_chain">Add chain</string>
+    <!-- %1$s: chain ID (digits as typed), %2$s: currency symbol -->
+    <string name="names_chain_subtitle">Chain ID %1$s · %2$s</string>
+    <plurals name="names_rpc_endpoints">
+        <item quantity="one">%d RPC endpoint</item>
+        <item quantity="other">%d RPC endpoints</item>
+    </plurals>
+    <string name="names_chain_testnet">Testnet</string>
+    <string name="names_chain_built_in">Built in</string>
+    <string name="names_chain_custom">Custom</string>
+    <!-- Settings search keywords for the Add chain row. -->
+    <string name="names_search_custom_chain">Custom chain</string>
+    <string name="names_search_network">Network</string>
+    <!-- Content description of a remove button; %1$s: what it removes (a chain name, a URL). -->
+    <string name="names_remove_item">Remove %1$s</string>
+    <string name="names_add_chain_subtitle">Search chainlist.org or enter one yourself</string>
+    <string name="names_rpc_add_invalid">Not a usable RPC URL.</string>
+    <string name="names_rpc_add_duplicate">That RPC is already in your list.</string>
+    <string name="names_rpc_add_public">That\'s already one of this chain\'s public RPCs.</string>
+    <!-- %1$s: host name -->
+    <string name="names_rpc_add_name_resolution_public_host">Already provided by %1$s, one of name resolution\'s public RPCs, asked under its own switch there — it can\'t be one of yours.</string>
+    <string name="names_rpc_add_name_resolution_public">That server is already provided, one of name resolution\'s public RPCs, asked under its own switch there — it can\'t be one of yours.</string>
+    <string name="names_rpc_add_full">At most %1$d of your own RPCs per chain.</string>
+    <string name="names_rpc_add_no_chain">This chain was removed.</string>
+    <string name="names_rpc_add_failed">Couldn\'t save the RPC. Try again.</string>
+    <!-- Read steps: %1$s is the tier's name (P2P light client, RPC quorum, …). -->
+    <string name="names_read_step_proof">%1$s: a proof checked on this device</string>
+    <!-- %2$d: answers that must match, %3$d: RPCs asked (the plural's count) -->
+    <plurals name="names_read_step_quorum">
+        <item quantity="one">%1$s: %2$d of the first %3$d RPC (each from a different provider) must give the same answer — verified</item>
+        <item quantity="other">%1$s: %2$d of the first %3$d RPCs (each from a different provider) must give the same answer — verified</item>
+    </plurals>
+    <plurals name="names_read_step_quorum_yours_among">
+        <item quantity="one">%1$s: %2$d of the first %3$d RPC (each from a different provider, yours among them) must give the same answer — verified</item>
+        <item quantity="other">%1$s: %2$d of the first %3$d RPCs (each from a different provider, yours among them) must give the same answer — verified</item>
+    </plurals>
+    <plurals name="names_read_step_quorum_all_yours">
+        <item quantity="one">%1$s: %2$d of the first %3$d RPC (each from a different provider, all of them yours) must give the same answer — verified</item>
+        <item quantity="other">%1$s: %2$d of the first %3$d RPCs (each from a different provider, all of them yours) must give the same answer — verified</item>
+    </plurals>
+    <!-- %2$d: providers needed (the plural's count), %3$d: providers the chain has -->
+    <plurals name="names_read_step_quorum_skipped">
+        <item quantity="one">%1$s: skipped, needs RPCs from at least %2$d provider (this chain has %3$d)</item>
+        <item quantity="other">%1$s: skipped, needs RPCs from at least %2$d providers (this chain has %3$d)</item>
+    </plurals>
+    <!-- A numbered read step. %1$d: its number, %2$s: the step -->
+    <string name="names_read_step_numbered">%1$d. %2$s</string>
+    <string name="names_read_step_direct">%1$s: otherwise the first RPC that answers — unverified, or marked as yours if it\'s one of your RPCs</string>
+    <!-- %1$s: hosts, comma-separated -->
+    <string name="names_trust_dissent">%1$s answered differently</string>
+    <!-- %1$d: RPCs that agreed, %2$d: RPCs asked (the plural's count), %3$s: their hosts -->
+    <plurals name="names_trust_verified_quorum">
+        <item quantity="one">Verified: %1$d of %2$d RPC agreed (%3$s)</item>
+        <item quantity="other">Verified: %1$d of %2$d RPCs agreed (%3$s)</item>
+    </plurals>
+    <!-- %1$s: the tier's name (P2P light client, Colibri prover) -->
+    <string name="names_trust_verified_by">Verified by the %1$s</string>
+    <string name="names_trust_your_rpc">From your RPC %1$s</string>
+    <string name="names_trust_unverified">Unverified: only %1$s\'s word</string>
+    <string name="names_user_rpcs_note_lead">Your own node or provider for this chain.</string>
+    <string name="names_user_rpcs_note_tail">An answer only your RPC gave is marked as yours rather than unverified.</string>
+    <string name="names_user_rpcs_note_order_none">One you add is asked before the public RPCs.</string>
+    <string name="names_user_rpcs_note_order_one">It\'s asked before the public RPCs.</string>
+    <string name="names_user_rpcs_note_order_many">They\'re asked before the public RPCs.</string>
+    <plurals name="names_user_rpcs_note_reads">
+        <item quantity="one">Each read goes to up to %d RPC from different providers at the same time.</item>
+        <item quantity="other">Each read goes to up to %d RPCs from different providers at the same time.</item>
+    </plurals>
+    <string name="names_user_rpcs_note_no_seats">Until you add one, those are all the chain\'s public RPCs; one you add takes a seat ahead of them.</string>
+    <string name="names_user_rpcs_note_all_seats">Your RPCs fill every seat, so the quorum is only yours: a public RPC is asked only if it falls short.</string>
+    <!-- One RPC of the user's own in the quorum; the count is the public RPCs' seats. -->
+    <plurals name="names_user_rpcs_note_one_seat">
+        <item quantity="one">Yours takes a seat ahead of public RPCs, so it\'s in the quorum, but not alone: public RPCs fill the other seat and see the same read.</item>
+        <item quantity="other">Yours takes a seat ahead of public RPCs, so it\'s in the quorum, but not alone: public RPCs fill the other %d seats and see the same read.</item>
+    </plurals>
+    <!-- Several RPCs of the user's own in the quorum; the count is the public RPCs' seats. -->
+    <plurals name="names_user_rpcs_note_seats">
+        <item quantity="one">Yours take seats ahead of public RPCs, so they\'re in the quorum, but not alone: public RPCs fill the other seat and see the same read.</item>
+        <item quantity="other">Yours take seats ahead of public RPCs, so they\'re in the quorum, but not alone: public RPCs fill the other %d seats and see the same read.</item>
+    </plurals>
+    <!-- %1$d: the user's RPCs left out of the quorum (the plural's count), %2$d: the quorum's size -->
+    <plurals name="names_user_rpcs_note_spare">
+        <item quantity="one">%1$d RPC of yours isn\'t in the quorum — it takes one per provider (this device counts as one) and %2$d at most — so it\'s asked only if it falls short.</item>
+        <item quantity="other">%1$d RPCs of yours aren\'t in the quorum — it takes one per provider (this device counts as one) and %2$d at most — so they\'re asked only if it falls short.</item>
+    </plurals>
+    <string name="names_chain_section">Chain</string>
+    <string name="names_chain_id">Chain ID</string>
+    <string name="names_currency">Currency</string>
+    <!--
+      %1$s: currency name, %2$s: symbol, %3$s: decimals (the plural's count),
+      in plain digits like the chain ID and send_eth_currency's decimals.
+    -->
+    <plurals name="names_currency_detail">
+        <item quantity="one">%1$s (%2$s), %3$s decimal</item>
+        <item quantity="other">%1$s (%2$s), %3$s decimals</item>
+    </plurals>
+    <string name="names_block_explorer">Block explorer</string>
+    <string name="names_block_explorer_none">None</string>
+    <string name="names_chain_type">Type</string>
+    <string name="names_your_rpcs">Your RPCs</string>
+    <string name="names_rpc_url">RPC URL</string>
+    <string name="names_add_your_rpc">Add your RPC</string>
+    <string name="names_public_rpcs">Public RPCs</string>
+    <string name="names_how_reads_are_checked">How reads are checked</string>
+    <!-- %1$s: chain name -->
+    <string name="names_proof_tiers_missing">The P2P light client and the Colibri prover, which verify %1$s reads with a proof, aren\'t in this version yet.</string>
+    <string name="names_check_no_answer">No answer</string>
+    <string name="names_check_latest_block">Check latest block</string>
+    <!-- %1$s: block number, already formatted -->
+    <string name="names_check_block">Block %1$s</string>
+    <!-- Check failed. %1$s: chain ID -->
+    <string name="names_check_unknown_chain">Unknown chain %1$s</string>
+    <!-- %1$d: JSON-RPC error code, %2$s: the node's message -->
+    <string name="names_check_rpc_error">RPC error %1$s: %2$s</string>
+    <!-- %1$s: why each source failed (technical, as the router wrote it) -->
+    <string name="names_check_no_source">No chain source answered (%1$s)</string>
+    <!-- %2$s: the error the last node answered with -->
+    <string name="names_check_no_source_node_error">No chain source answered (%1$s) — %2$s</string>
+    <string name="names_chainlist_search_placeholder">Name or chain ID</string>
+    <string name="names_clear_search">Clear search</string>
+    <string name="names_enter_manually">Enter manually</string>
+    <string name="names_enter_manually_subtitle">Chain ID, currency and RPC endpoints</string>
+    <string name="names_chainlist_note">From chainlist.org, refreshed daily. Only RPC endpoints that need no API key and aren\'t marked as tracking are kept.</string>
+    <string name="names_chainlist_loading">Loading chainlist.org…</string>
+    <string name="names_chainlist_failed">Couldn\'t load chainlist.org. Check your connection and try again, or enter the chain manually.</string>
+    <string name="names_chainlist_no_match">No chains match “%1$s”</string>
+    <string name="names_catalog_already_added">Already added</string>
+    <string name="names_catalog_no_key_free_rpc">No key-free RPC endpoint — you\'d add your own</string>
+    <plurals name="names_catalog_key_free_rpcs">
+        <item quantity="one">%d key-free RPC endpoint</item>
+        <item quantity="other">%d key-free RPC endpoints</item>
+    </plurals>
+    <string name="names_rpc_hint_not_a_url">Not a URL: e.g. https://rpc.example.org</string>
+    <string name="names_rpc_hint_too_long">Too long: at most 2048 characters</string>
+    <string name="names_rpc_hint_non_ascii">Use the xn-- form of an international domain name</string>
+    <string name="names_rpc_hint_scheme">Needs https:// (http:// only to localhost, 127.0.0.1 or [::1])</string>
+    <string name="names_rpc_hint_credentials">Remove the user name or password before the host</string>
+    <string name="names_rpc_hint_placeholder">Replace the {API_KEY} placeholder: only key-free RPCs are supported</string>
+    <string name="names_rpc_hint_internal_host">Needs a public host name, not a local network address</string>
+    <!-- %1$s: chain ID -->
+    <string name="names_add_chain_built_in">Chain ID %1$s is built in already.</string>
+    <string name="names_add_chain_duplicate">A chain with ID %1$s is already added. Remove it first to replace it.</string>
+    <string name="names_add_chain_failed">Couldn\'t save the chain. Try again.</string>
+    <string name="names_chain_id_hint">A whole number from 1 to %1$s (or 0x hex)</string>
+    <string name="names_chain_name">Name</string>
+    <string name="names_chain_name_hint">1 to %1$d characters</string>
+    <string name="names_currency_symbol">Symbol</string>
+    <string name="names_currency_symbol_hint">1 to %1$d characters, no spaces</string>
+    <string name="names_currency_decimals">Decimals</string>
+    <string name="names_currency_decimals_hint">0 to 36</string>
+    <string name="names_block_explorer_url">URL (optional)</string>
+    <string name="names_block_explorer_hint">Needs https:// and a host name</string>
+    <string name="names_rpc_endpoints_section">RPC endpoints</string>
+    <string name="names_rpc_endpoints_empty">Add at least one.</string>
+    <string name="names_add_rpc_endpoint">Add RPC endpoint</string>
+    <!-- browser/NameResolutionSettings.kt -->
+    <string name="names_section_ens">Name resolution</string>
+    <string name="names_section_rpc">RPC providers</string>
+    <string name="names_ens_about">How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. With Colibri proofs on, an answer is proven first: checked on this device against Ethereum\'s own consensus. An answer that can\'t be proven is cross-checked: it\'s only trusted when at least two RPC endpoints return exactly the same one. An answer only one endpoint gave is shown to you before anything loads.</string>
+    <string name="names_colibri_title">Colibri proofs</string>
+    <string name="names_colibri_help">Each name\'s record is proven by corpus.core\'s Colibri prover (colibri-proof.tech) and the proof checked on this device against Ethereum\'s sync committee, so no server can make up the answer. The prover learns which contract storage a lookup reads; the reads themselves go to the endpoints in the resolution order. If no proof comes back within a few seconds, the endpoints are cross-checked instead. Off: every name is cross-checked.</string>
+    <string name="names_order_title">Resolution order</string>
+    <string name="names_order_help">The first three providers in this order that are reachable read each name, so the order decides who answers; the rest are asked, in order, when those can\'t agree or don\'t answer. Two endpoints of one provider count once: the first that answers. Change it under RPC providers.</string>
+    <string name="names_ccip_title">Off-chain lookups (CCIP-Read)</string>
+    <string name="names_ccip_help">Some names (base.eth and cb.id subnames, NameStone names) are answered by a gateway their resolver names. The gateway sees the name you look up. Off: those names don\'t resolve.</string>
+    <string name="names_custom_title">Your endpoints</string>
+    <string name="names_custom_help">First in the resolution order, as listed here. These are Ethereum\'s own RPCs (Settings → Chains → Ethereum), so every mainnet read uses them too.</string>
+    <string name="names_add_endpoint">Add endpoint</string>
+    <string name="names_keyed_title">Keyed providers</string>
+    <string name="names_keyed_help">Next in the resolution order, with your own API key.</string>
+    <string name="names_public_title">Public endpoints</string>
+    <string name="names_public_help">Last in the resolution order. Switch off any you\'d rather not send lookups to.</string>
+    <string name="names_last_endpoint_help">At least one endpoint has to stay on.</string>
+    <!-- Too few providers to cross-check. %1$d: endpoints on, %2$d: providers they come from (the plural's count), %3$d: providers needed -->
+    <plurals name="names_too_few_providers">
+        <item quantity="one">The %1$d endpoints that are on come from only %2$d provider, and a provider\'s answer counts once. Cross-checking needs %3$d different providers (to agree on a block), so answers aren\'t cross-checked: you\'ll be asked before each name loads.</item>
+        <item quantity="other">The %1$d endpoints that are on come from only %2$d different providers, and a provider\'s answer counts once. Cross-checking needs %3$d different providers (to agree on a block), so answers aren\'t cross-checked: you\'ll be asked before each name loads.</item>
+    </plurals>
+    <plurals name="names_too_few_providers_colibri">
+        <item quantity="one">The %1$d endpoints that are on come from only %2$d provider, and a provider\'s answer counts once. Cross-checking needs %3$d different providers (to agree on a block), so an answer Colibri can\'t prove isn\'t cross-checked: you\'ll be asked before that name loads.</item>
+        <item quantity="other">The %1$d endpoints that are on come from only %2$d different providers, and a provider\'s answer counts once. Cross-checking needs %3$d different providers (to agree on a block), so an answer Colibri can\'t prove isn\'t cross-checked: you\'ll be asked before that name loads.</item>
+    </plurals>
+    <!-- %1$d: endpoints needed -->
+    <string name="names_one_endpoint">Only one endpoint is on, so answers can\'t be cross-checked: you\'ll be asked before each name loads. Turn on %1$d or more to cross-check.</string>
+    <string name="names_one_endpoint_colibri">Only one endpoint is on, so an answer Colibri can\'t prove can\'t be cross-checked: you\'ll be asked before that name loads. Turn on %1$d or more to cross-check.</string>
+    <!-- %1$d: endpoints on (the plural's count), %2$d: endpoints needed -->
+    <plurals name="names_too_few_endpoints">
+        <item quantity="one">Only %1$d endpoint is on. Cross-checking needs %2$d (to agree on a block), so answers aren\'t cross-checked: you\'ll be asked before each name loads.</item>
+        <item quantity="other">Only %1$d endpoints are on. Cross-checking needs %2$d (to agree on a block), so answers aren\'t cross-checked: you\'ll be asked before each name loads.</item>
+    </plurals>
+    <plurals name="names_too_few_endpoints_colibri">
+        <item quantity="one">Only %1$d endpoint is on. Cross-checking needs %2$d (to agree on a block), so an answer Colibri can\'t prove isn\'t cross-checked: you\'ll be asked before that name loads.</item>
+        <item quantity="other">Only %1$d endpoints are on. Cross-checking needs %2$d (to agree on a block), so an answer Colibri can\'t prove isn\'t cross-checked: you\'ll be asked before that name loads.</item>
+    </plurals>
+    <string name="names_on">On</string>
+    <string name="names_off">Off</string>
+    <!-- Settings search keywords for the Colibri row. -->
+    <string name="names_search_proof">proof</string>
+    <string name="names_search_verified">verified</string>
+    <!-- %1$s: the API key, masked (••••1234) -->
+    <string name="names_key_masked">Key %1$s</string>
+    <string name="names_no_key">No key</string>
+    <string name="names_api_key">API key</string>
+    <!-- Toast. %1$s: why (names_last_endpoint_help, names_edit_failed) -->
+    <string name="names_not_changed">Not changed: %1$s</string>
+    <!-- %1$s: endpoint URL -->
+    <string name="names_move_up">Move %1$s up</string>
+    <string name="names_move_down">Move %1$s down</string>
+    <string name="names_add_endpoint_subtitle">Your own node or a provider URL</string>
+    <string name="names_not_added_duplicate">Not added: already in your endpoints</string>
+    <!-- %1$s: names_public_endpoint_hint* -->
+    <string name="names_not_added_reason">Not added: %1$s</string>
+    <plurals name="names_not_added_full">
+        <item quantity="one">Not added: at most %d endpoint</item>
+        <item quantity="other">Not added: at most %d endpoints</item>
+    </plurals>
+    <string name="names_not_added_invalid">Not added: not a valid endpoint URL</string>
+    <string name="names_not_added_failed">Not added: couldn\'t save it. Try again.</string>
+    <!-- %1$s: why (names_last_endpoint_help, names_edit_failed) -->
+    <string name="names_not_saved">Not saved: %1$s</string>
+    <!-- Follows "Not changed: " / "Not saved: " -->
+    <string name="names_edit_failed">couldn\'t save it. Try again.</string>
+    <string name="names_endpoint_hint">An Ethereum mainnet JSON-RPC URL</string>
+    <!-- %1$d: milliseconds -->
+    <string name="names_check_works">Works: Ethereum mainnet, %1$d ms</string>
+    <!-- %1$s: chain ID -->
+    <string name="names_check_wrong_chain">Not Ethereum mainnet (chain %1$s) — names won\'t resolve</string>
+    <!-- %1$s: the error -->
+    <string name="names_check_failed">Didn\'t answer: %1$s</string>
+    <string name="names_testing">Testing…</string>
+    <string name="names_test">Test</string>
+    <!-- Lower-case start: it follows "Not added: " (the dialog capitalises it). %1$s: host, %2$s: names_public_title -->
+    <string name="names_public_endpoint_hint_host">already provided by %1$s, one of the built-in public endpoints; turn it on or off under %2$s</string>
+    <string name="names_public_endpoint_hint">already provided, one of the built-in public endpoints; turn it on or off under %1$s</string>
+    <!-- Under a public endpoint's switch. %1$s: keyed provider name (Alchemy, …) -->
+    <string name="names_twin_not_asked_key">Not asked: same server as your %1$s key, which is asked in its place</string>
+    <!-- %1$s: the user's endpoint URL, key redacted -->
+    <string name="names_twin_not_asked_endpoint">Not asked: same server as your endpoint %1$s, which is asked in its place</string>
+    <string name="names_twin_same_provider_key">Same provider as your %1$s key: one vote between them — this one casts it when that one fails to answer</string>
+    <string name="names_twin_same_provider_endpoint">Same provider as your endpoint %1$s: one vote between them — this one casts it when that one fails to answer</string>
+    <string name="names_endpoint_placeholder" translatable="false">https://your-node.example</string>
+    <string name="names_endpoint_duplicate">Already in your endpoints</string>
+    <string name="names_endpoint_unencrypted">Unencrypted http://, allowed only to a node on this device</string>
+    <string name="names_api_key_not_url">Just the key, not the whole URL</string>
+    <string name="names_api_key_stored">Stored on this device only</string>
+    <string name="names_hide_key">Hide key</string>
+    <string name="names_show_key">Show key</string>
+    <!-- %1$s: the provider's website -->
+    <string name="names_get_a_key">Get a key: %1$s</string>
+    <string name="names_remove_key">Remove key</string>
+    <!-- %1$s: names_last_endpoint_help -->
+    <string name="names_remove_key_locked">Remove key — %1$s</string>
+    <!-- browser/TrustShield.kt -->
+    <string name="names_tier_proven">Proven name</string>
+    <string name="names_tier_verified">Verified name</string>
+    <string name="names_tier_unverified">Name not cross-checked</string>
+    <!-- The tier after the protocol badge's name in its content description (names_badge_with_trust). -->
+    <string name="names_tier_proven_mark">proven name</string>
+    <string name="names_tier_verified_mark">verified name</string>
+    <string name="names_tier_unverified_mark">name not cross-checked</string>
+    <!-- %1$s: the badge (Swarm, IPFS, …), %2$s: names_tier_*_mark -->
+    <string name="names_badge_with_trust">%1$s, %2$s</string>
+    <!-- Where a record was read, as %…$s in the summaries below. %1$s: block number -->
+    <string name="names_trust_at_block">block #%1$s</string>
+    <string name="names_trust_at_latest_block">the latest block</string>
+    <!-- Between provers' hosts, as in "a and b". -->
+    <string name="names_trust_prover_separator">" and "</string>
+    <string name="names_trust_colibri_prover">the Colibri prover</string>
+    <string name="names_trust_one_rpc_server">one RPC server</string>
+    <!-- What a page's name answer's trust means. %1$s: ENS/WNS/GNS/Tezos Domains, %2$s: the name, %3$s: names_trust_at_* -->
+    <string name="names_summary_light_client">The Myotis light client on this device read the %1$s record for %2$s at %3$s and checked it against Ethereum state proofs signed off by the chain\'s sync committee. No RPC server\'s word was involved.</string>
+    <!-- %1$s: the name, %2$s: its system, %3$s: the prover, %4$s: names_trust_at_* -->
+    <string name="names_summary_proven_offchain">%1$s\'s %2$s record comes from an off-chain gateway (CCIP-Read). This device checked a proof from %3$s against Ethereum\'s sync committee that the name\'s resolver contract accepted that answer at %4$s; the record itself isn\'t on chain.</string>
+    <!-- %1$s: the prover, %2$s: the name, %3$s: its system, %4$s: names_trust_at_* -->
+    <string name="names_summary_proven">This device checked a proof from %1$s against Ethereum\'s sync committee: %2$s\'s %3$s record is what the chain itself holds at %4$s, not just what RPC servers agree on.</string>
+    <!-- %1$d: servers (the plural's count, 2 or more), %2$s: system, %3$s: name, %4$s: names_trust_at_* -->
+    <plurals name="names_summary_verified">
+        <item quantity="one">%1$d independent RPC server returned the same %2$s record for %3$s at %4$s.</item>
+        <item quantity="other">%1$d independent RPC servers returned the same %2$s record for %3$s at %4$s.</item>
+    </plurals>
+    <string name="names_summary_verified_servers">Independent RPC servers returned the same %1$s record for %2$s at %3$s.</string>
+    <!-- %1$s: the server's host or names_trust_one_rpc_server, %2$s: name, %3$s: system -->
+    <string name="names_summary_unverified">Only %1$s answered for %2$s, so its %3$s record wasn\'t checked against another server. A single misbehaving server could have picked where this page comes from.</string>
+    <!-- The same, for a send's recipient. %1$s: name, %2$s: system, %3$s: names_trust_at_* -->
+    <string name="names_recipient_light_client">The Myotis light client on this device read %1$s\'s %2$s address record at %3$s and checked it against Ethereum state proofs signed off by the chain\'s sync committee. No RPC server\'s word was involved.</string>
+    <!-- %1$s: name, %2$s: the prover, %3$s: names_trust_at_* -->
+    <string name="names_recipient_proven_offchain">%1$s\'s address comes from an off-chain gateway (CCIP-Read). This device checked a proof from %2$s against Ethereum\'s sync committee that the name\'s resolver contract accepted that answer at %3$s; the record itself isn\'t on chain.</string>
+    <!-- %1$s: the prover, %2$s: name, %3$s: system, %4$s: names_trust_at_* -->
+    <string name="names_recipient_proven">This device checked a proof from %1$s against Ethereum\'s sync committee: this is the address %2$s\'s %3$s record holds at %4$s, not just what RPC servers agree on.</string>
+    <!-- %1$d: servers (the plural's count, 2 or more), %2$s: name, %3$s: names_trust_at_* -->
+    <plurals name="names_recipient_verified">
+        <item quantity="one">%1$d independent RPC server returned the same address for %2$s at %3$s.</item>
+        <item quantity="other">%1$d independent RPC servers returned the same address for %2$s at %3$s.</item>
+    </plurals>
+    <string name="names_recipient_verified_servers">Independent RPC servers returned the same address for %1$s at %2$s.</string>
+    <!-- %1$s: the server's host or names_trust_one_rpc_server, %2$s: name -->
+    <string name="names_recipient_unverified">Only %1$s answered for %2$s, so its address wasn\'t checked against another server. A single misbehaving server could have picked where this money goes.</string>
+    <!-- Trust details dialog -->
+    <string name="names_fact_name">Name</string>
+    <string name="names_fact_resolves_to">Resolves to</string>
+    <string name="names_fact_block">Block</string>
+    <string name="names_fact_block_latest">latest</string>
+    <string name="names_fact_verified_by">Verified by</string>
+    <string name="names_fact_proof_from">Proof from</string>
+    <!-- %1$d: how many servers -->
+    <string name="names_fact_agreed">Agreed (%1$d)</string>
+    <string name="names_fact_answered_by">Answered by</string>
+    <string name="names_fact_outvoted">Outvoted (%1$d)</string>
+
+    <!-- browser/EnsGate.kt: the not-cross-checked and conflict warnings' details -->
+    <string name="names_gate_answer">Answer: %1$s</string>
+    <!-- %1$s: hosts -->
+    <string name="names_gate_from">From: %1$s</string>
+    <!-- %1$s: #block or names_gate_block_latest -->
+    <string name="names_gate_block">Block: %1$s</string>
+    <string name="names_gate_block_latest">latest</string>
+    <!-- %1$d: endpoints needed -->
+    <string name="names_gate_too_few">Fewer than %1$d RPC endpoints are enabled in Settings → RPC providers, so no answer can be cross-checked.</string>
+    <!-- %1$s: hosts or names_trust_one_rpc_server, %2$s: #block or names_gate_block_latest -->
+    <string name="names_gate_not_cross_checked">Not cross-checked: only %1$s answered (block %2$s)</string>
+    <!-- %1$s: #block, or names_conflict_anchor_block -->
+    <string name="names_conflict_answers">Answers at block %1$s:</string>
+    <string name="names_conflict_hashes">Hashes reported for block %1$s:</string>
+    <string name="names_conflict_anchor_block">the anchor block</string>
+    <string name="names_conflict_heads">Chain heads reported:</string>
+    <!-- %1$s: hosts that gave an answer -->
+    <string name="names_conflict_from">from %1$s</string>
+    <!-- browser/ExternalEndpoints.kt -->
+    <string name="names_ipfs_unverified_warning">Unverified: content from an external gateway isn\'t checked against its CID, so the gateway is trusted for everything it serves. Prefer one you run yourself.</string>
+    <!-- chains/rpc/ChainAccess.kt: the read tiers -->
+    <string name="names_source_myotis">P2P light client</string>
+    <string name="names_source_colibri">Colibri prover</string>
+    <string name="names_source_quorum">RPC quorum</string>
+    <string name="names_source_direct">Direct RPC</string>
+    <!-- ens/*: errors and answers the error page, the conflict warning and the wallet's send show -->
+    <string name="names_error_empty_name">empty name</string>
+    <string name="names_error_invalid_name">invalid name</string>
+    <string name="names_error_tezos_no_accounts">Tezos Domains names don\'t name Ethereum accounts</string>
+    <!-- %1$s: WNS or GNS -->
+    <string name="names_error_chain_unsupported">%1$s names hold an Ethereum address only, not one for this network</string>
+    <string name="names_error_no_rpc_endpoints">no RPC endpoints configured</string>
+    <!-- %1$d: bytes -->
+    <string name="names_error_label_too_long">a label is longer than %1$d bytes</string>
+    <string name="names_error_no_rpc_answered">no RPC server answered</string>
+    <string name="names_error_all_rpc_failed">all RPC providers failed</string>
+    <string name="names_error_ccip_off">name needs an off-chain lookup (CCIP-Read), which is off</string>
+    <string name="names_error_not_an_address">not an address record</string>
+    <!-- One server's answer in the conflict warning's list. -->
+    <string name="names_answer_no_address">no address</string>
+    <!-- %1$s: the reason code (NO_RESOLVER, …) -->
+    <string name="names_answer_no_content">no content (%1$s)</string>
+    <!-- %1$s: hex bytes -->
+    <string name="names_answer_unsupported_contenthash">unsupported contenthash 0x%1$s</string>
+    <string name="names_answer_conflict">conflict</string>
+    <!-- Who vouched for a light-client answer (the trust details' "Verified by"). -->
+    <string name="names_light_client_source">Myotis light client (on this device)</string>
+    <string name="names_your_endpoint">Your endpoint</string>
+    <!-- The endpoint check's "Didn't answer: …" reasons. -->
+    <string name="names_check_not_json_rpc">not a JSON-RPC endpoint</string>
+    <string name="names_check_rpc_error_generic">RPC error</string>
+    <string name="names_tezos_all_failed">all Tezos RPC providers failed</string>
+    <!-- %1$s: block level -->
+    <string name="names_tezos_chain_head">chain head #%1$s</string>
+    <string name="names_tezos_no_anchor">Tezos RPC providers could not anchor a block</string>
+    <string name="names_tezos_registry_failed">Tezos Domains registry lookup failed</string>
+    <!-- %1$s: the parser's error -->
+    <string name="names_tezos_invalid_metadata">invalid Tezos Domains metadata: %1$s</string>
+    <string name="names_tezos_invalid_website_uri">invalid website URI</string>
+    <string name="names_tezos_redirect_http">redirect URL must use HTTP(S)</string>
+    <string name="names_tezos_invalid_http_uri">invalid HTTP(S) website URI</string>
+    <!-- %1$s: IPFS or IPNS -->
+    <string name="names_tezos_invalid_protocol_uri">invalid %1$s website URI</string>
+    <string name="names_tezos_uri_names_a_name">%1$s website URI must reference content, not a name</string>
+    <!-- %1$s: the URI's scheme -->
+    <string name="names_tezos_unsupported_protocol">unsupported website protocol: %1$s</string>
+</resources>

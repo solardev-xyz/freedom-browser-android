@@ -1,24 +1,31 @@
 package baby.freedom.mobile.chains.rpc
 
+import androidx.annotation.StringRes
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
+
 /**
  * A tier [ChainDataRouter] can ask for chain state (#108), in the order
  * a chain's [ChainAccessPolicy] lists them. [key] is desktop's
  * `access.readOrder` entry (`chain-data-router.js`) and iOS's
  * `ChainSource` raw value.
  */
-enum class ChainSource(val key: String, val label: String) {
+enum class ChainSource(val key: String, @StringRes private val labelRes: Int) {
     /** Embedded P2P light client (Ethereum, Gnosis). Not wired on Android yet (#72). */
-    MYOTIS("myotis", "P2P light client"),
+    MYOTIS("myotis", R.string.names_source_myotis),
 
     /** Remote prover with a sync-committee proof (Ethereum, Gnosis). Not wired on Android yet. */
-    COLIBRI("colibri", "Colibri prover"),
+    COLIBRI("colibri", R.string.names_source_colibri),
 
     /** [ChainAccessPolicy.quorumM] of the first [ChainAccessPolicy.quorumK] RPCs return the same bytes. */
-    QUORUM("quorum", "RPC quorum"),
+    QUORUM("quorum", R.string.names_source_quorum),
 
     /** The first RPC that answers, on its own word. */
-    DIRECT("direct", "Direct RPC"),
+    DIRECT("direct", R.string.names_source_direct),
     ;
+
+    /** The tier's name, as the chain page and the wallet show it. */
+    val label: String get() = Strings.get(labelRes)
 
     /** Whether an answer from this tier carries a proof or an agreement. */
     val verifies: Boolean get() = this != DIRECT

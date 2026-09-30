@@ -30,28 +30,33 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 
 /** The browser's own name for a manifest row, and what granting it means — never the app's words. */
 internal fun manifestRowLabel(capability: ManifestCapability): Pair<String, String> = when (capability) {
-    ManifestCapability.Publish -> "Publish content" to "Upload to Swarm with your postage stamps and bandwidth, without asking each time."
-    ManifestCapability.Feeds -> "Manage feeds" to "Create and update this app's feeds without asking each time."
-    ManifestCapability.Signing -> "Sign Swarm content" to "Sign with this app's publisher identity without asking each time."
-    ManifestCapability.Messaging -> "Send and receive messages" to "Use PSS and GSOC messaging."
+    ManifestCapability.Publish ->
+        Strings.get(R.string.swarm_manifest_publish_label) to Strings.get(R.string.swarm_manifest_publish_meaning)
+    ManifestCapability.Feeds ->
+        Strings.get(R.string.swarm_manifest_feeds_label) to Strings.get(R.string.swarm_manifest_feeds_meaning)
+    ManifestCapability.Signing ->
+        Strings.get(R.string.swarm_manifest_signing_label) to Strings.get(R.string.swarm_manifest_signing_meaning)
+    ManifestCapability.Messaging ->
+        Strings.get(R.string.swarm_manifest_messaging_label) to Strings.get(R.string.swarm_manifest_messaging_meaning)
 }
 
 /** The notes under the rows: what happens to the site's publisher identity, and what still asks. */
 internal fun manifestNotes(consent: SwarmManifests.Consent): List<String> = listOfNotNull(
-    "Feeds and signing use a new app-scoped publisher identity for this site.".takeIf { consent.createsIdentity },
-    "The site's existing publisher identity is kept.".takeIf { consent.preservedIdentity },
-    "You don't have a wallet yet: the first signature asks you to set one up.".takeIf { consent.needsWallet },
+    Strings.get(R.string.swarm_manifest_note_new_identity).takeIf { consent.createsIdentity },
+    Strings.get(R.string.swarm_manifest_note_identity_kept).takeIf { consent.preservedIdentity },
+    Strings.get(R.string.swarm_manifest_note_needs_wallet).takeIf { consent.needsWallet },
     consent.removed.takeIf { it.isNotEmpty() }?.let { removed ->
-        "No longer asked for: " + removed.joinToString(", ") { manifestRowLabel(it).first } +
-            ". What the manifest allowed for them has been taken back."
+        Strings.get(R.string.swarm_manifest_note_removed, removed.joinToString(", ") { manifestRowLabel(it).first })
     },
-    "Uploads still need a usable postage stamp, and signing an unlocked wallet. " +
-        "Use individual approvals to be asked before each upload and signature instead.",
+    Strings.get(R.string.swarm_manifest_note_still_asks),
 )
 
 /**
@@ -100,7 +105,9 @@ fun SwarmManifestSheet(request: SwarmPromptRequest, ask: SwarmAsk.Manifest) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.VerifiedUser, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(12.dp))
-                Text(if (consent.isUpdate) "App asks for more" else "App permissions", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    stringResource(if (consent.isUpdate) R.string.swarm_manifest_update_title else R.string.swarm_manifest_title),
+                    style = MaterialTheme.typography.titleLarge)
             }
             Spacer(Modifier.height(16.dp))
             Surface(
@@ -117,7 +124,9 @@ fun SwarmManifestSheet(request: SwarmPromptRequest, ask: SwarmAsk.Manifest) {
                         )
                     }
                     Text(
-                        if (consent.isUpdate) "now asks for these Swarm permissions too" else "asks for these Swarm permissions",
+                        stringResource(
+                            if (consent.isUpdate) R.string.swarm_manifest_update_request else R.string.swarm_manifest_request_rows,
+                        ),
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
@@ -129,11 +138,13 @@ fun SwarmManifestSheet(request: SwarmPromptRequest, ask: SwarmAsk.Manifest) {
                     .verticalScroll(rememberScrollState()),
             ) {
                 Text(
-                    "The app calls itself",
+                    stringResource(R.string.swarm_manifest_name_label),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Text("“${consent.name}”", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.testTag("swarm-manifest-name"))
+                Text(
+                    stringResource(R.string.swarm_manifest_name, consent.name),
+                    style = MaterialTheme.typography.bodyLarge, modifier = Modifier.testTag("swarm-manifest-name"))
                 if (consent.description.isNotEmpty()) {
                     Text(consent.description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -148,7 +159,7 @@ fun SwarmManifestSheet(request: SwarmPromptRequest, ask: SwarmAsk.Manifest) {
                     ) {
                         Text(label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                         Text(meaning, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("App's reason: “$why”", style = MaterialTheme.typography.bodyMedium)
+                        Text(stringResource(R.string.swarm_manifest_reason, why), style = MaterialTheme.typography.bodyMedium)
                     }
                 }
                 manifestNotes(consent).forEach {
@@ -167,17 +178,17 @@ fun SwarmManifestSheet(request: SwarmPromptRequest, ask: SwarmAsk.Manifest) {
                     onClick = { answer(SwarmProvider.Answer(allowed = true, always = true)) },
                     enabled = armed,
                     modifier = Modifier.fillMaxWidth().protectedPress(tap).testTag("swarm-manifest-allow"),
-                ) { Text("Allow all") }
+                ) { Text(stringResource(R.string.swarm_allow_all)) }
                 OutlinedButton(
                     onClick = { answer(SwarmProvider.Answer(allowed = true, always = false)) },
                     enabled = armed,
                     modifier = Modifier.fillMaxWidth().protectedPress(tap).testTag("swarm-manifest-individual"),
-                ) { Text("Use individual approvals") }
+                ) { Text(stringResource(R.string.swarm_manifest_individual)) }
                 TextButton(
                     onClick = { answer(SwarmProvider.Answer.REJECTED) },
                     enabled = armed,
                     modifier = Modifier.fillMaxWidth().testTag("swarm-manifest-deny"),
-                ) { Text("Don't allow") }
+                ) { Text(stringResource(R.string.swarm_manifest_deny)) }
             }
         }
     }

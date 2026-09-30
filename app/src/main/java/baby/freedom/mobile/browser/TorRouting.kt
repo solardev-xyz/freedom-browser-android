@@ -7,6 +7,8 @@ import android.webkit.WebResourceResponse
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
 import androidx.webkit.WebViewFeature
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
 import java.io.ByteArrayInputStream
@@ -582,7 +584,7 @@ object TorRouting {
         var payload = body
         repeat(MAX_REDIRECTS + 1) {
             val conn = openConnection(current) as? HttpURLConnection
-                ?: throw IOException("Not an HTTP URL: $current")
+                ?: throw IOException(Strings.get(R.string.node_fetch_not_http, current))
             var keep = false
             try {
                 conn.configure(current)
@@ -607,11 +609,11 @@ object TorRouting {
                 if (!keep) runCatching { conn.disconnect() }
             }
         }
-        throw IOException("Too many redirects")
+        throw IOException(Strings.get(R.string.node_fetch_too_many_redirects))
     }
 
     /** [openConnection]'s refusal of an onion URL while no Tor port is routed. */
-    class RefusedException : IOException("Tor isn't running: .onion addresses need Tor")
+    class RefusedException : IOException(Strings.get(R.string.node_tor_refused_fetch))
 
     /**
      * Whether [a] and [b] are the same origin (scheme, host, port) — a
@@ -717,45 +719,31 @@ object TorRouting {
         info: TorInfo,
         proxy: SocksEndpoint? = null,
         unreached: Boolean = false,
-    ): Pair<String, String> = when (code) {
-        CODE_UNSUPPORTED -> "Tor needs a newer WebView" to
-            "This is an onion site, reachable only over Tor. This device's Android System " +
-            "WebView can't send just <code>.onion</code> sites through Tor, so Freedom doesn't " +
-            "open them. Update Android System WebView, then try again."
-        CODE_PROXY_CHECKING -> "Checking the Tor proxy" to
-            "This is an onion site, reachable only over Tor. Freedom is still checking the Tor " +
-            "proxy at <code>${proxy ?: "(not set)"}</code> (Settings &rarr; Tor); this page loads " +
-            "by itself once it passes. Freedom never opens onion sites without Tor."
-        CODE_PROXY_PAUSED -> "Tor proxy not checked yet" to
-            "This is an onion site, reachable only over Tor. Freedom checks the Tor proxy at " +
-            "<code>${proxy ?: "(not set)"}</code> (Settings &rarr; Tor) only while Freedom is on " +
-            "screen, and hasn't since it went to the background. Try again once you're back in " +
-            "Freedom. Freedom never opens onion sites without Tor."
-        CODE_PROXY_DOWN -> if (unreached) {
-            "Tor can't reach onion sites" to
-                "This is an onion site, reachable only over Tor. The Tor client at " +
-                "<code>${proxy ?: "(not set)"}</code> (Settings &rarr; Tor) answers, but couldn't " +
-                "reach an onion site when Freedom last checked: its connection may be down or slow. " +
-                "Freedom is checking again; try again in a moment. Freedom never opens onion sites " +
-                "without Tor."
-        } else "Tor proxy isn't reachable" to
-            "This is an onion site, reachable only over Tor. Freedom sends onion sites to the Tor " +
-            "proxy at <code>${proxy ?: "(not set)"}</code> (Settings &rarr; Tor), and no Tor client " +
-            "answers there right now. Start Orbot (or your Tor app), then try again. Freedom never opens onion sites without Tor."
-        CODE_OFF -> "Tor is off" to
-            "This is an onion site, reachable only over Tor. Turn on Tor in Settings &rarr; Tor " +
-            "and start it, then try again. Only <code>.onion</code> sites use Tor; every other " +
-            "site connects directly."
-        else -> "Tor isn't running" to (
-            if (info.status == TorStatus.Error) {
-                "Tor couldn't start, so this onion site wasn't opened. Try starting it again " +
-                    "on the Nodes page."
+    ): Pair<String, String> {
+        // The copy is HTML; the proxy goes in as it always has, unescaped (an authority, host:port).
+        val at = proxy?.toString() ?: Strings.get(R.string.node_tor_proxy_not_set)
+        val (title, description) = when (code) {
+            CODE_UNSUPPORTED -> R.string.node_tor_refusal_unsupported_title to
+                Strings.get(R.string.node_tor_refusal_unsupported)
+            CODE_PROXY_CHECKING -> R.string.node_tor_refusal_checking_title to
+                Strings.get(R.string.node_tor_refusal_checking, at)
+            CODE_PROXY_PAUSED -> R.string.node_tor_refusal_paused_title to
+                Strings.get(R.string.node_tor_refusal_paused, at)
+            CODE_PROXY_DOWN -> if (unreached) {
+                R.string.node_tor_refusal_unreached_title to Strings.get(R.string.node_tor_refusal_unreached, at)
             } else {
-                "This is an onion site, reachable only over Tor, and Tor isn't running. Start " +
-                    "it on the Nodes page (or turn on <em>Start Tor at launch</em> in " +
-                    "Settings &rarr; Tor), then try again. Freedom never opens onion sites without Tor."
+                R.string.node_tor_refusal_proxy_down_title to Strings.get(R.string.node_tor_refusal_proxy_down, at)
             }
+            CODE_OFF -> R.string.node_tor_refusal_off_title to Strings.get(R.string.node_tor_refusal_off)
+            else -> R.string.node_tor_refusal_not_running_title to Strings.get(
+                if (info.status == TorStatus.Error) {
+                    R.string.node_tor_refusal_failed
+                } else {
+                    R.string.node_tor_refusal_not_running
+                },
             )
+        }
+        return Strings.get(title) to description
     }
 
     internal fun refusalHtml(

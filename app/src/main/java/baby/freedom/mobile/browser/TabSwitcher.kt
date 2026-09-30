@@ -51,10 +51,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.stateDescription
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.PrivateTheme
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -139,7 +142,7 @@ fun TabSwitcherScreen(
                 }) {
                     Icon(Icons.Filled.Add, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
-                    Text("New tab", fontWeight = FontWeight.Medium, softWrap = false)
+                    Text(stringResource(R.string.browser_tabs_new_tab), fontWeight = FontWeight.Medium, softWrap = false)
                 }
                 if (onNewPrivateTab != null) {
                     TextButton(onClick = {
@@ -148,7 +151,7 @@ fun TabSwitcherScreen(
                     }) {
                         Icon(PrivateTabIcon, contentDescription = null)
                         Spacer(Modifier.size(8.dp))
-                        Text("Private", fontWeight = FontWeight.Medium, softWrap = false)
+                        Text(stringResource(R.string.browser_tabs_new_private), fontWeight = FontWeight.Medium, softWrap = false)
                     }
                 }
                 if (tabs.canReopenClosedTab) {
@@ -160,12 +163,12 @@ fun TabSwitcherScreen(
                     }) {
                         Icon(Icons.Filled.Restore, contentDescription = null)
                         Spacer(Modifier.size(8.dp))
-                        Text("Reopen", fontWeight = FontWeight.Medium, softWrap = false)
+                        Text(stringResource(R.string.browser_tabs_reopen), fontWeight = FontWeight.Medium, softWrap = false)
                     }
                 }
             }
             IconButton(onClick = onDismiss, shapes = IconButtonDefaults.shapes()) {
-                Icon(Icons.Filled.Close, contentDescription = "Close tab switcher")
+                Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.browser_tabs_close_switcher))
             }
         }
 
@@ -247,12 +250,12 @@ fun TabSwitcherScreen(
 internal fun tabMoveTargets(index: Int, count: Int): List<Pair<String, Int>> = buildList {
     if (index !in 0 until count) return@buildList
     if (index > 0) {
-        add("Move tab earlier" to index - 1)
-        if (index > 1) add("Move tab to start" to 0)
+        add(Strings.get(R.string.browser_tabs_move_earlier) to index - 1)
+        if (index > 1) add(Strings.get(R.string.browser_tabs_move_to_start) to 0)
     }
     if (index < count - 1) {
-        add("Move tab later" to index + 1)
-        if (index < count - 2) add("Move tab to end" to count - 1)
+        add(Strings.get(R.string.browser_tabs_move_later) to index + 1)
+        if (index < count - 2) add(Strings.get(R.string.browser_tabs_move_to_end) to count - 1)
     }
 }
 
@@ -457,6 +460,9 @@ private fun TabCard(
         MaterialTheme.colorScheme.outlineVariant
     }
     val borderWidth = if (isActive) 2.dp else 1.dp
+    val currentTabState = stringResource(R.string.browser_tabs_current_tab)
+    val closeTabLabel = stringResource(R.string.browser_tabs_close_tab)
+    val muteLabel = stringResource(if (tab.audioMuted) R.string.browser_tabs_unmute_tab else R.string.browser_tabs_mute_tab)
 
     Column(
         modifier = modifier
@@ -469,18 +475,18 @@ private fun TabCard(
                 color = borderColor,
                 shape = MaterialTheme.shapes.large,
             )
-            .clickable(onClickLabel = "Switch to tab") { onClick() }
+            .clickable(onClickLabel = stringResource(R.string.browser_tabs_switch_to_tab)) { onClick() }
             // Which card is the tab on screen, said rather than only
             // drawn as the thicker border; and Close (and Mute) as
             // actions on the card itself, so TalkBack users needn't hunt
             // for the small buttons in its header (#279).
             .semantics {
                 selected = isActive
-                if (isActive) stateDescription = "Current tab"
+                if (isActive) stateDescription = currentTabState
                 customActions = listOfNotNull(
-                    CustomAccessibilityAction("Close tab") { onClose(); true },
+                    CustomAccessibilityAction(closeTabLabel) { onClose(); true },
                     onToggleMute?.takeIf { tab.playingAudio || tab.audioMuted }?.let { toggle ->
-                        CustomAccessibilityAction(if (tab.audioMuted) "Unmute tab" else "Mute tab") {
+                        CustomAccessibilityAction(muteLabel) {
                             toggle(); true
                         }
                     },
@@ -496,12 +502,18 @@ private fun TabCard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             val title = tab.title.ifBlank {
-                tab.url.ifBlank { if (tab.private) "Private tab" else "New tab" }
+                tab.url.ifBlank {
+                    if (tab.private) {
+                        stringResource(R.string.browser_tabs_private_tab)
+                    } else {
+                        stringResource(R.string.browser_tabs_new_tab)
+                    }
+                }
             }
             if (tab.private) {
                 Icon(
                     PrivateTabIcon,
-                    contentDescription = "Private",
+                    contentDescription = stringResource(R.string.browser_tabs_private),
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(14.dp),
                 )
@@ -526,7 +538,7 @@ private fun TabCard(
             ) {
                 Icon(
                     Icons.Filled.Close,
-                    contentDescription = "Close tab",
+                    contentDescription = closeTabLabel,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(16.dp),
                 )
@@ -573,7 +585,7 @@ private fun TabAudioButton(muted: Boolean, onToggleMute: (() -> Unit)?) {
         Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
             Icon(
                 icon,
-                contentDescription = if (muted) "Tab muted" else "Tab playing audio",
+                contentDescription = if (muted) stringResource(R.string.browser_tabs_muted) else stringResource(R.string.browser_tabs_playing_audio),
                 tint = tint,
                 modifier = Modifier.size(16.dp),
             )
@@ -587,7 +599,7 @@ private fun TabAudioButton(muted: Boolean, onToggleMute: (() -> Unit)?) {
     ) {
         Icon(
             icon,
-            contentDescription = if (muted) "Unmute tab" else "Mute tab",
+            contentDescription = if (muted) stringResource(R.string.browser_tabs_unmute_tab) else stringResource(R.string.browser_tabs_mute_tab),
             tint = tint,
             modifier = Modifier.size(16.dp),
         )
@@ -699,4 +711,4 @@ fun TabsCountButton(
 
 /** Spoken label of [TabsCountButton]: what it opens and how many tabs there are. */
 internal fun tabsCountDescription(count: Int): String =
-    if (count == 1) "Tabs, 1 open" else "Tabs, $count open"
+    Strings.plural(R.plurals.browser_tabs_count_description, count, count)

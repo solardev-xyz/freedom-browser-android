@@ -1,5 +1,8 @@
 package baby.freedom.mobile.ens
 
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
+
 /**
  * Outcome of an ENS `contenthash` lookup.
  *
@@ -171,6 +174,14 @@ data class EnsTrust(
      * client — not just agreed on by servers.
      */
     val proven: Boolean get() = verified && source != Source.RPC
+
+    /**
+     * [agreed] as the user reads it: the light client
+     * ([EnsResolver.LIGHT_CLIENT_SOURCE]) by its name in the app language,
+     * read now rather than when the answer was cached (#280).
+     */
+    val shownAgreed: List<String>
+        get() = agreed.map { if (it == EnsResolver.LIGHT_CLIENT_SOURCE) Strings.get(R.string.names_light_client_source) else it }
 
     /** Answered by the Myotis light client (#101). */
     val lightClient: Boolean get() = source == Source.MYOTIS

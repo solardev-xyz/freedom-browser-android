@@ -1,5 +1,8 @@
 package baby.freedom.mobile.browser
 
+import androidx.annotation.StringRes
+import baby.freedom.mobile.l10n.Strings
+
 /**
  * Settings search (#93): the Settings page's filter field narrows every
  * section to the rows whose text contains the query — case-insensitive
@@ -15,6 +18,10 @@ package baby.freedom.mobile.browser
  * permission is findable by its site and state, the search engine row
  * by the engine in use — and a section that isn't on the page (IPFS
  * while advanced options are off) isn't searched.
+ *
+ * Every text comes from string resources (#280), section titles and the
+ * extra words a row is found by ([searchKeywords]) included, so a
+ * translated build searches the words it shows.
  */
 internal class SettingsRow(val key: Any, val texts: List<String>)
 
@@ -40,3 +47,12 @@ internal fun visibleSettingsRows(
     }
     return shown.mapTo(LinkedHashSet()) { it.key }
 }
+
+/**
+ * The extra words a row is found by, from the comma-separated resource
+ * [id] ("dark mode, light mode, night mode"): words people search for
+ * that the row doesn't show. In resources like the rest, so a
+ * translation searches its own words.
+ */
+internal fun searchKeywords(@StringRes id: Int): Array<String> =
+    Strings.get(id).split(',').map { it.trim() }.filter { it.isNotEmpty() }.toTypedArray()

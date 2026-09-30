@@ -41,10 +41,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 
@@ -93,13 +96,13 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
         },
         text = {
             Column {
-                Text("wants to ${describePermissionRequest(prompt.permissions)}")
+                Text(stringResource(R.string.library_permission_prompt_wants_to, describePermissionRequest(prompt.permissions)))
                 Spacer(Modifier.height(12.dp))
                 // A private tab's answer lasts the private session only
                 // (#86): there's nothing to remember it in.
                 if (prompt.private) {
                     Text(
-                        "Private tab: your answer lasts until you close your private tabs.",
+                        stringResource(R.string.library_permission_prompt_private),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -116,7 +119,7 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
                     ) {
                         Checkbox(checked = remember, onCheckedChange = null, enabled = tap.armed)
                         Text(
-                            "Remember this decision",
+                            stringResource(R.string.library_permission_prompt_remember),
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.padding(start = 8.dp, end = 8.dp),
                         )
@@ -131,7 +134,7 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
                 onClick = { if (guard.accepts()) prompt.respond(PromptAnswer.Allow(remember && !prompt.private)) },
                 modifier = Modifier.protectedPress(tap),
             ) {
-                Text("Allow")
+                Text(stringResource(R.string.common_allow))
             }
         },
         dismissButton = {
@@ -139,7 +142,7 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
                 enabled = armed,
                 onClick = { if (guard.accepts()) prompt.respond(PromptAnswer.Block(remember && !prompt.private)) },
             ) {
-                Text("Block")
+                Text(stringResource(R.string.library_permission_prompt_block))
             }
         },
     )
@@ -187,11 +190,11 @@ fun SitePermissionAndroidBridge(
                 p.androidPermissions.isNotEmpty() && p.androidPermissions.all { androidPermissionBlocked(activity, it) }
             }
             if (missing.isEmpty()) return@missing
-            val what = missing.joinToString(" and ") { it.label.lowercase() }
+            val what = joinWithAnd(missing.map(::permissionNoun)) ?: return@missing
             scope.launch {
                 val r = snackbarHostState.showSnackbar(
-                    message = "Freedom isn't allowed to use your $what. Turn it on in Android settings.",
-                    actionLabel = "Settings",
+                    message = Strings.get(R.string.library_permission_android_refused, what),
+                    actionLabel = Strings.get(R.string.library_permission_android_settings),
                     duration = SnackbarDuration.Long,
                 )
                 if (r == SnackbarResult.ActionPerformed) {
@@ -209,7 +212,7 @@ fun SitePermissionAndroidBridge(
         }
         broker.onNoAppForLink = { scheme ->
             scope.launch {
-                snackbarHostState.showSnackbar("No app on this device can open ${scheme.label}.")
+                snackbarHostState.showSnackbar(Strings.get(R.string.library_permission_no_app_for_link, scheme.label))
             }
         }
         broker.onProtectedMediaRefused = {

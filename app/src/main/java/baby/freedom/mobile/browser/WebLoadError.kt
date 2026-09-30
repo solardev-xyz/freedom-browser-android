@@ -1,8 +1,10 @@
 package baby.freedom.mobile.browser
 
 import android.webkit.WebViewClient
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import org.json.JSONObject
-import java.text.SimpleDateFormat
+import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
@@ -76,25 +78,20 @@ private fun escHtml(t: String) =
 internal fun netErrorCopy(failure: NetFailure, host: String): Pair<String, String> {
     val h = "<b>${escHtml(host)}</b>"
     return when (failure) {
-        NetFailure.OFFLINE -> "You're offline" to
-            "Your device isn't connected to the internet. Check Wi-Fi or mobile data, or turn " +
-            "off airplane mode, then try again."
-        NetFailure.NOT_FOUND -> "Site can't be found" to
-            "Couldn't find the server at $h. Check the address for typos. If it's right, the " +
-            "site may be gone, or your network's DNS may not be answering."
-        NetFailure.REFUSED -> "Site refused the connection" to
-            "$h is reachable, but nothing there accepted the connection. The site may be " +
-            "down, or not serving on this address."
-        NetFailure.RESET -> "Connection was interrupted" to
-            "The connection to $h was cut off before the page arrived. This is often " +
-            "temporary; try again."
-        NetFailure.TIMED_OUT -> "Site took too long to respond" to
-            "$h didn't answer in time. The site may be overloaded, or your connection slow."
-        NetFailure.INSECURE -> "Connection isn't secure" to
-            "Freedom couldn't set up a secure connection to $h, so nothing was loaded. The " +
-            "site may be misconfigured, or someone may be interfering with the connection."
-        NetFailure.OTHER -> "Couldn't load this page" to
-            "Something went wrong loading $h."
+        NetFailure.OFFLINE -> Strings.get(R.string.errorpage_net_offline_title) to
+            Strings.get(R.string.errorpage_net_offline)
+        NetFailure.NOT_FOUND -> Strings.get(R.string.errorpage_net_not_found_title) to
+            Strings.get(R.string.errorpage_net_not_found, h)
+        NetFailure.REFUSED -> Strings.get(R.string.errorpage_net_refused_title) to
+            Strings.get(R.string.errorpage_net_refused, h)
+        NetFailure.RESET -> Strings.get(R.string.errorpage_net_reset_title) to
+            Strings.get(R.string.errorpage_net_reset, h)
+        NetFailure.TIMED_OUT -> Strings.get(R.string.errorpage_net_timed_out_title) to
+            Strings.get(R.string.errorpage_net_timed_out, h)
+        NetFailure.INSECURE -> Strings.get(R.string.errorpage_cert_title) to
+            Strings.get(R.string.errorpage_net_insecure, h)
+        NetFailure.OTHER -> Strings.get(R.string.errorpage_net_other_title) to
+            Strings.get(R.string.errorpage_net_other, h)
     }
 }
 
@@ -165,39 +162,49 @@ internal fun certErrorCode(facts: CertFacts, nowMs: Long): String {
 
 /** Every problem with the certificate, one per line, then who it names — the page's details box. */
 internal fun certErrorDetail(facts: CertFacts, host: String, nowMs: Long): String {
-    val fmt = SimpleDateFormat("d MMM yyyy", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
+    // For the user to read, in their locale's style; the certificate's own dates are UTC.
+    val fmt = DateFormat.getDateInstance(DateFormat.MEDIUM).apply { timeZone = TimeZone.getTimeZone("UTC") }
     fun day(ms: Long) = fmt.format(Date(ms))
     val e = facts.errors
     val dates = SSL_EXPIRED in e || SSL_NOTYETVALID in e || SSL_DATE_INVALID in e
     return buildList {
-        if (SSL_IDMISMATCH in e) add("Not issued for $host")
-        if (SSL_UNTRUSTED in e) add("Issuer not trusted by this device")
+        if (SSL_IDMISMATCH in e) add(Strings.get(R.string.errorpage_cert_detail_wrong_host, host))
+        if (SSL_UNTRUSTED in e) add(Strings.get(R.string.errorpage_cert_detail_untrusted))
         if (dates) {
             val after = facts.notAfterMs
             val before = facts.notBeforeMs
             when {
-                after != null && nowMs > after -> add("Expired on ${day(after)}")
-                before != null && nowMs < before -> add("Not valid until ${day(before)}")
-                else -> add("Dates not valid")
+                after != null && nowMs > after ->
+                    add(Strings.get(R.string.errorpage_cert_detail_expired_on, day(after)))
+                before != null && nowMs < before ->
+                    add(Strings.get(R.string.errorpage_cert_detail_not_valid_until, day(before)))
+                else -> add(Strings.get(R.string.errorpage_cert_detail_dates_invalid))
             }
         }
-        if (isEmpty()) add("Certificate not valid")
+        if (isEmpty()) add(Strings.get(R.string.errorpage_cert_detail_invalid))
         add("")
-        facts.issuedTo?.takeIf { it.isNotBlank() }?.let { add("Issued to: $it") }
-        facts.issuedBy?.takeIf { it.isNotBlank() }?.let { add("Issued by: $it") }
+        facts.issuedTo?.takeIf { it.isNotBlank() }
+            ?.let { add(Strings.get(R.string.errorpage_cert_detail_issued_to, it)) }
+        facts.issuedBy?.takeIf { it.isNotBlank() }
+            ?.let { add(Strings.get(R.string.errorpage_cert_detail_issued_by, it)) }
     }.joinToString("\n").trimEnd()
 }
 
-/** Why the certificate failed, for the page's description ([certErrorCode]). */
-private fun certReason(code: String): String = when (code) {
-    "cert_expired" -> "has expired"
-    "cert_not_yet_valid" ->
-        "isn't valid yet. If your device's date and time are wrong, correct them and try again"
-    "cert_date_invalid" -> "has invalid dates"
-    "cert_wrong_host" -> "was issued for a different site"
-    "cert_untrusted" -> "wasn't issued by an authority this device trusts"
-    else -> "is not valid"
-}
+/**
+ * The page's sentence on why the certificate failed ([certErrorCode]),
+ * naming [hostHtml]; the same wording `error.html` uses.
+ */
+private fun certReason(code: String, hostHtml: String): String = Strings.get(
+    when (code) {
+        "cert_expired" -> R.string.errorpage_cert_description_expired
+        "cert_not_yet_valid" -> R.string.errorpage_cert_description_not_yet_valid
+        "cert_date_invalid" -> R.string.errorpage_cert_description_date_invalid
+        "cert_wrong_host" -> R.string.errorpage_cert_description_wrong_host
+        "cert_untrusted" -> R.string.errorpage_cert_description_untrusted
+        else -> R.string.errorpage_cert_description_invalid
+    },
+    hostHtml,
+)
 
 /**
  * The "connection isn't secure" page for a certificate error on [url]
@@ -214,11 +221,12 @@ internal fun certErrorPageHtml(
     nowMs: Long,
     retryUrl: String = url,
 ): String {
-    val description = "Freedom didn't load <b>${escHtml(host)}</b> because its security certificate " +
-        certReason(certErrorCode(facts, nowMs)) + ". Someone could be impersonating the site or " +
-        "intercepting the connection, or the site is misconfigured."
+    val description = certReason(certErrorCode(facts, nowMs), "<b>${escHtml(host)}</b>") + " " +
+        Strings.get(R.string.errorpage_cert_description_risk)
     val details = escHtml(url) + "\n\n" + escHtml(certErrorDetail(facts, host, nowMs))
-    return inPlaceErrorPageHtml("Connection isn't secure", description, details, retryHref = escHtml(retryUrl))
+    return inPlaceErrorPageHtml(
+        Strings.get(R.string.errorpage_cert_title), description, details, retryHref = escHtml(retryUrl),
+    )
 }
 
 /**

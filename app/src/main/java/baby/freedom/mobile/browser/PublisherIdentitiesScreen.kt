@@ -36,12 +36,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.PublisherIdentity
 import baby.freedom.mobile.wallet.PublisherIdentityStore
@@ -54,24 +57,23 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-internal const val PUBLISHER_IDENTITIES_TITLE = "Publisher identities"
+internal val PUBLISHER_IDENTITIES_TITLE: String get() = Strings.get(R.string.publish_identities_title)
 
 /** The Wallet page row's line under "Publisher identities". */
 internal fun publisherIdentitiesSummary(siteCount: Int): String = when (siteCount) {
-    0 -> "The keys sites sign their Swarm feeds with"
-    1 -> "1 site"
-    else -> "$siteCount sites"
+    0 -> Strings.get(R.string.publish_identities_summary_none)
+    else -> Strings.plural(R.plurals.publish_identities_summary_sites, siteCount, siteCount)
 }
 
 /** A site row's line: the identity it publishes as, and how many it has. */
 internal fun publisherSiteSummary(site: SitePublisher): String {
     val count = site.identities.size
-    return "Publishes as ${site.active.label} · ${if (count == 1) "1 identity" else "$count identities"}"
+    return Strings.plural(R.plurals.publish_identities_site_summary, count, site.active.label, count)
 }
 
 /** What an identity's row says under its name: its kind and key path. */
 internal fun publisherIdentityDetail(identity: PublisherIdentity): String =
-    "${identity.kind} · ${identity.derivationPath}"
+    Strings.get(R.string.publish_identities_detail, identity.kind, identity.derivationPath)
 
 /**
  * Publisher identities (#119), from Wallet: which key each site signs its
@@ -113,7 +115,7 @@ internal fun PublisherIdentitiesPage(currentSite: String?, onBack: () -> Unit) {
                 if (e is CancellationException) throw e
                 error = when (e) {
                     is IllegalArgumentException -> e.message
-                    is VaultLockedException -> "The wallet locked. Unlock it and try again."
+                    is VaultLockedException -> Strings.get(R.string.publish_identities_error_locked)
                     else -> walletErrorMessage(e, action, phraseBackedUp)
                 }
             } finally {
@@ -122,7 +124,7 @@ internal fun PublisherIdentitiesPage(currentSite: String?, onBack: () -> Unit) {
         }
     }
 
-    val unlock = { run("unlock the wallet") { vault.unlock(auth) } }
+    val unlock = { run(Strings.get(R.string.publish_identities_action_unlock)) { vault.unlock(auth) } }
 
     val openOrigin = open
     val openSite = sites?.firstOrNull { it.origin == openOrigin }
@@ -135,13 +137,13 @@ internal fun PublisherIdentitiesPage(currentSite: String?, onBack: () -> Unit) {
             error = error,
             onUnlock = unlock,
             onActivate = { id ->
-                run("switch identity") {
+                run(Strings.get(R.string.publish_identities_action_switch)) {
                     withContext(Dispatchers.IO) { store.activate(openSite.origin, id) }
                     sites = withContext(Dispatchers.IO) { store.sites() }
                 }
             },
             onCreate = { label, done ->
-                run("create the identity") {
+                run(Strings.get(R.string.publish_identities_action_create)) {
                     withContext(Dispatchers.IO) { store.createAppScoped(openSite.origin, label) }
                     sites = withContext(Dispatchers.IO) { store.sites() }
                     done()
@@ -163,50 +165,44 @@ internal fun PublisherIdentitiesPage(currentSite: String?, onBack: () -> Unit) {
             modifier = Modifier.fillMaxSize(),
         ) {
             item("intro") {
-                SectionCard(title = "Publishing on Swarm") {
+                SectionCard(title = stringResource(R.string.publish_identities_intro_title)) {
                     Text(
-                        "A site signs its Swarm feeds with a key from your wallet. Each site gets an " +
-                            "app-scoped identity of its own, so its feeds can’t be tied to your other " +
-                            "sites or accounts. You can give a site more identities and switch between " +
-                            "them, or have it publish as your Ant wallet identity — your Swarm node’s " +
-                            "account, which every site using it shares.",
+                        stringResource(R.string.publish_identities_intro),
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Sites can’t publish feeds from this browser yet; when they can, they’ll use " +
-                            "the identity chosen here.",
+                        stringResource(R.string.publish_identities_intro_not_yet),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
             if (!unlocked) item("locked") {
-                SectionCard(title = "Wallet locked") {
+                SectionCard(title = stringResource(R.string.publish_identities_locked_title)) {
                     Text(
-                        "Unlock the wallet to see each identity’s owner address, create identities " +
-                            "or switch between them.",
+                        stringResource(R.string.publish_identities_locked_body),
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Spacer(Modifier.height(8.dp))
                     Button(onClick = unlock, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                        Text(if (busy) "Unlocking…" else "Unlock")
+                        Text(stringResource(if (busy) R.string.publish_identities_unlocking else R.string.publish_identities_unlock))
                     }
                 }
             }
             val known = sites
             if (currentSite != null && known != null && known.none { it.origin == currentSite }) item("current") {
-                SectionCard(title = "This site") {
+                SectionCard(title = stringResource(R.string.publish_identities_this_site)) {
                     Text(permissionOriginDisplay(currentSite), fontWeight = FontWeight.Medium)
                     Text(
-                        "Has no publisher identity yet. Setting one up gives it a new app-scoped identity.",
+                        stringResource(R.string.publish_identities_this_site_none),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(
                         onClick = {
-                            run("set up the site") {
+                            run(Strings.get(R.string.publish_identities_action_set_up_site)) {
                                 withContext(Dispatchers.IO) { store.ensureSite(currentSite) }
                                 sites = withContext(Dispatchers.IO) { store.sites() }
                                 open = currentSite
@@ -214,16 +210,15 @@ internal fun PublisherIdentitiesPage(currentSite: String?, onBack: () -> Unit) {
                         },
                         enabled = unlocked && !busy,
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Set up a publisher identity") }
+                    ) { Text(stringResource(R.string.publish_identities_set_up)) }
                 }
             }
             error?.let { message -> item("error") { PublisherErrorText(message) } }
             if (known != null) item("sites") {
-                SectionCard(title = "Sites") {
+                SectionCard(title = stringResource(R.string.publish_identities_sites)) {
                     if (known.isEmpty()) {
                         Text(
-                            "No site has a publisher identity yet. Open a site, then come back here to " +
-                                "set one up for it.",
+                            stringResource(R.string.publish_identities_sites_empty),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -285,31 +280,29 @@ private fun SitePublisherPage(
             modifier = Modifier.fillMaxSize(),
         ) {
             item("site") {
-                SectionCard(title = "Site") {
+                SectionCard(title = stringResource(R.string.publish_identities_site)) {
                     Text(permissionOriginDisplay(site.origin), fontWeight = FontWeight.Medium)
                     Text(
-                        "Its Swarm feeds are signed by the identity chosen below. Feeds belong to the key " +
-                            "that signs them, so after a switch the site publishes under another owner " +
-                            "address; what it published before stays with the old one.",
+                        stringResource(R.string.publish_identities_site_body),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
             if (!unlocked) item("locked") {
-                SectionCard(title = "Wallet locked") {
+                SectionCard(title = stringResource(R.string.publish_identities_locked_title)) {
                     Text(
-                        "Unlock the wallet to see owner addresses and switch identities.",
+                        stringResource(R.string.publish_identities_site_locked_body),
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Spacer(Modifier.height(8.dp))
                     Button(onClick = onUnlock, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                        Text(if (busy) "Unlocking…" else "Unlock")
+                        Text(stringResource(if (busy) R.string.publish_identities_unlocking else R.string.publish_identities_unlock))
                     }
                 }
             }
             item("choices") {
-                SectionCard(title = "Publishes as") {
+                SectionCard(title = stringResource(R.string.publish_identities_publishes_as)) {
                     choices.forEach { identity ->
                         IdentityChoice(
                             identity = identity,
@@ -325,7 +318,7 @@ private fun SitePublisherPage(
                         onClick = { creating = true },
                         enabled = unlocked && !busy,
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Create new identity") }
+                    ) { Text(stringResource(R.string.publish_identities_create_new)) }
                 }
             }
             error?.let { message -> item("error") { PublisherErrorText(message) } }
@@ -363,7 +356,7 @@ private fun IdentityChoice(
         Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                identity.label + if (selected) " (active)" else "",
+                if (selected) stringResource(R.string.publish_identities_label_active, identity.label) else identity.label,
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
             )
@@ -373,7 +366,7 @@ private fun IdentityChoice(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                owner ?: if (unlocked) "Working out the address…" else "Unlock to see its address",
+                owner ?: stringResource(if (unlocked) R.string.publish_identities_owner_working else R.string.publish_identities_owner_locked),
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = if (owner != null) FontFamily.Monospace else null),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -392,19 +385,18 @@ private fun CreateIdentityDialog(busy: Boolean, error: String?, onCreate: (Strin
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("New publisher identity") },
+        title = { Text(stringResource(R.string.publish_identities_new_title)) },
         text = {
             Column {
                 Text(
-                    "A new app-scoped key for this site, with an owner address of its own. It becomes " +
-                        "the identity the site publishes as.",
+                    stringResource(R.string.publish_identities_new_body),
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = label,
                     onValueChange = { label = it },
-                    label = { Text("Name") },
+                    label = { Text(stringResource(R.string.publish_identities_name)) },
                     singleLine = true,
                     isError = problem != null,
                     supportingText = problem?.let { { Text(it) } },
@@ -420,11 +412,11 @@ private fun CreateIdentityDialog(busy: Boolean, error: String?, onCreate: (Strin
         },
         confirmButton = {
             TextButton(onClick = submit, enabled = !busy && label.isNotBlank() && problem == null) {
-                Text(if (busy) "Creating…" else "Create")
+                Text(stringResource(if (busy) R.string.publish_identities_creating else R.string.publish_identities_create))
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }

@@ -13,10 +13,13 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.ParcelUuid
 import android.util.Log
+import androidx.annotation.StringRes
 import androidx.core.content.ContextCompat
+import baby.freedom.mobile.R
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.Secp256k1
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.Eip712
 import baby.freedom.mobile.wallet.EthSigning
 import baby.freedom.mobile.wallet.EthTransaction
@@ -52,10 +55,12 @@ data class LedgerKey(val path: String, val device: String, val deviceName: Strin
 data class LedgerDevice(val id: String, val name: String, val paired: Boolean)
 
 /** How accounts are laid out on a Ledger: desktop's `PATH_SCHEMES`. */
-enum class LedgerScheme(val label: String) {
-    LIVE("Ledger Live"),
-    LEGACY("Legacy (MEW / MyCrypto)"),
+enum class LedgerScheme(@StringRes private val labelRes: Int) {
+    LIVE(R.string.signing_ledger_scheme_live),
+    LEGACY(R.string.signing_ledger_scheme_legacy),
     ;
+
+    val label: String get() = Strings.get(labelRes)
 
     fun path(i: Int): String = when (this) {
         LIVE -> "44'/60'/$i'/0/0"
@@ -164,7 +169,7 @@ class Ledger internal constructor(private val context: Context) {
 
     /** [count] accounts from [start] on [device] under [scheme]: (path, address). */
     suspend fun accounts(device: LedgerDevice, scheme: LedgerScheme, start: Int, count: Int): List<Pair<String, String>> =
-        session(device.id, device.name, "Reading accounts from your Ledger") { app, stage ->
+        session(device.id, device.name, Strings.get(R.string.signing_ledger_purpose_read_accounts)) { app, stage ->
             val first = scheme.path(start)
             ready(app, first, stage)
             stage(Stage.READING)
@@ -180,7 +185,7 @@ class Ledger internal constructor(private val context: Context) {
     suspend fun signTransaction(account: WalletAccount, tx: EthTransaction, fresh: () -> Boolean = { true }): EthTransaction.Signed {
         val key = account.ledger ?: error("not a Ledger account")
         val payload = tx.signingPayload()
-        val sig = session(key.device, key.deviceName, "Confirm the transaction on your Ledger") { app, stage ->
+        val sig = session(key.device, key.deviceName, Strings.get(R.string.signing_ledger_purpose_confirm_transaction)) { app, stage ->
             verified(app, key, account.address, stage) { if (!fresh()) throw QuoteStaleException() }
             app.signTransaction(key.path, payload)
         }
@@ -190,7 +195,7 @@ class Ledger internal constructor(private val context: Context) {
     /** `personal_sign` of [message] on the Ledger holding [account]: `0x` + r ‖ s ‖ v. */
     suspend fun signPersonal(account: WalletAccount, message: ByteArray): String {
         val key = account.ledger ?: error("not a Ledger account")
-        val sig = session(key.device, key.deviceName, "Confirm the message on your Ledger") { app, stage ->
+        val sig = session(key.device, key.deviceName, Strings.get(R.string.signing_ledger_purpose_confirm_message)) { app, stage ->
             verified(app, key, account.address, stage)
             app.signPersonal(key.path, message)
         }
@@ -212,7 +217,7 @@ class Ledger internal constructor(private val context: Context) {
     suspend fun signTypedData(account: WalletAccount, prepare: () -> Pair<Eip712.TypedData, ByteArray>): String {
         val key = account.ledger ?: error("not a Ledger account")
         var digest = ByteArray(0)
-        val sig = session(key.device, key.deviceName, "Review and sign the data on your Ledger") { app, stage ->
+        val sig = session(key.device, key.deviceName, Strings.get(R.string.signing_ledger_purpose_sign_data)) { app, stage ->
             verified(app, key, account.address, stage)
             val (data, d) = prepare()
             digest = d

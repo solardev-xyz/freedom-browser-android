@@ -3,6 +3,8 @@ package baby.freedom.mobile.browser
 import android.util.Log
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.SwarmNode
 import java.io.ByteArrayInputStream
 
@@ -92,16 +94,9 @@ internal object NodeApiGuard {
     fun refusalFor(request: WebResourceRequest): WebResourceResponse? {
         val url = request.url?.toString() ?: return null
         val method = request.method.orEmpty()
-        if (!refuses(method, url)) return null
-        val segment = firstSegment(pathOf(url))
-        val write = isWrite(method) && segment in CHAIN_PATHS
-        val text = when {
-            write -> SPEND_REFUSAL
-            isLoopbackLiteral(WhatwgHost.parse(url)?.hostname) -> READ_REFUSAL
-            else -> READ_REFUSAL + OTHER_NODE_HINT
-        }
+        val text = refusalText(method, url) ?: return null
         // The endpoint only: a query can carry anything.
-        Log.w(TAG, "refused a page's request to the Swarm node's API: ${method.uppercase()} /${segment.orEmpty()}")
+        Log.w(TAG, "refused a page's request to the Swarm node's API: ${method.uppercase()} /${firstSegment(pathOf(url)).orEmpty()}")
         return WebResourceResponse(
             "text/plain", "utf-8", 403, "Forbidden",
             mapOf(
@@ -111,6 +106,22 @@ internal object NodeApiGuard {
             ),
             ByteArrayInputStream(text.toByteArray(Charsets.UTF_8)),
         )
+    }
+
+    /**
+     * [refusalFor]'s body, or null if [url] isn't refused. Always English,
+     * whatever the app language: it goes out with
+     * `Access-Control-Allow-Origin: *`, so any page can read it, and it
+     * mustn't tell a site which language the user picked (#313 R3-F1).
+     */
+    internal fun refusalText(method: String, url: String): String? {
+        if (!refuses(method, url)) return null
+        val write = isWrite(method) && firstSegment(pathOf(url)) in CHAIN_PATHS
+        return when {
+            write -> Strings.english(R.string.node_api_spend_refusal)
+            isLoopbackLiteral(WhatwgHost.parse(url)?.hostname) -> READ_REFUSAL
+            else -> Strings.english(R.string.node_api_read_refusal_other_node, dappPathList())
+        }
     }
 
     /**
@@ -268,22 +279,10 @@ internal object NodeApiGuard {
 
     private const val TAG = "NodeApiGuard"
 
-    private const val SPEND_REFUSAL =
-        "Freedom doesn't let web pages spend the Swarm node's funds. " +
-            "Postage stamps and the chequebook are managed in the app."
-
     /** Lists every path in [DAPP_PATHS], so the text can't drift from what's allowed. */
-    internal val READ_REFUSAL =
-        "Freedom doesn't let web pages use the Swarm node's own API. " +
-            "Pages can upload and read content, send messages and check the node is up (" +
-            DAPP_PATHS.joinToString(", ") { "/$it" } + "); " +
-            "the node's wallet, stamps and addresses are shown in the app."
+    internal val READ_REFUSAL: String
+        get() = Strings.english(R.string.node_api_read_refusal, dappPathList())
 
-    /**
-     * Added for a name, which may resolve to the device: how to reach a
-     * Bee node on another machine instead.
-     */
-    private const val OTHER_NODE_HINT =
-        " If this is a Bee node on another machine, use its IP address, " +
-            "or set it as the external Swarm node in Settings."
+    /** [DAPP_PATHS] as the refusal lists them: `/bzz, /bytes, …`. */
+    private fun dappPathList(): String = DAPP_PATHS.joinToString(", ") { "/$it" }
 }

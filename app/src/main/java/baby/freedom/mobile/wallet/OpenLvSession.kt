@@ -2,9 +2,11 @@ package baby.freedom.mobile.wallet
 
 import android.content.Context
 import android.util.Log
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.ens.hexToBytes
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.ledger.Ledger
 import baby.freedom.mobile.wallet.ledger.LedgerApdus
 import baby.freedom.mobile.wallet.ledger.LedgerException
@@ -347,7 +349,7 @@ class OpenLvSession internal constructor(
                 Parsed(td, Eip712.digest(td), Eip712.lines(td), if (account.isLedger) LedgerApdus.blindHashes(td) else null)
             }
         } catch (e: Eip712.Invalid) {
-            return invalid(e.message ?: "The typed data can’t be read.")
+            return invalid(e.english)
         }
         val domainChain = typed.chainId
         val chain = domainChain?.takeIf { it.bitLength() < 63 }?.toLong()?.let { id -> chains().firstOrNull { it.id == id } }
@@ -399,7 +401,8 @@ class OpenLvSession internal constructor(
             val quote = try {
                 sender.prepare(request)
             } catch (e: SendException) {
-                return OpenLvResponse.Error(INTERNAL, e.message ?: "The phone couldn’t price this transaction.")
+                // English, whatever the app language: the peer must not learn it (#280).
+                return OpenLvResponse.Error(INTERNAL, e.english)
             }
             when (ask(sid, Request.SendTransaction(quote, notice))) {
                 Decision.Reject -> return REJECTED
@@ -410,7 +413,7 @@ class OpenLvSession internal constructor(
                 is WalletSender.Broadcast.Sent -> OpenLvResponse.Result(b.hash)
                 is WalletSender.Broadcast.Failed -> OpenLvResponse.Error(
                     INTERNAL,
-                    if (b.mayHaveGone) "${b.message} It may still go out: see the wallet on the phone." else b.message,
+                    if (b.mayHaveGone) "${b.english} It may still go out: see the wallet on the phone." else b.english,
                 )
                 WalletSender.Broadcast.Busy -> OpenLvResponse.Error(
                     BUSY,
@@ -420,10 +423,9 @@ class OpenLvSession internal constructor(
                 is WalletSender.Broadcast.Stale -> {
                     notice = if (b.droppedSigned) {
                         // Approved on the Ledger, but its review there outlasted SIGNED_TTL_MS (#220 R1-M1).
-                        "The Ledger approval came over three minutes after the fees were worked out, so it wasn’t " +
-                            "sent and they’ve been priced again. Check them and confirm again."
+                        Strings.get(R.string.signing_remote_notice_ledger_repriced)
                     } else {
-                        "The fees were over a minute old, so they’ve been priced again. Check them and confirm again."
+                        Strings.get(R.string.signing_remote_notice_repriced)
                     }
                     continue
                 }
@@ -449,7 +451,7 @@ class OpenLvSession internal constructor(
         when (e.kind) {
             // Refused on the device, or the user cancelled waiting for it: a rejection, as for a site.
             LedgerException.Kind.REJECTED, LedgerException.Kind.CANCELLED -> REJECTED_ON_LEDGER
-            else -> OpenLvResponse.Error(INTERNAL, "Ledger: ${e.message}")
+            else -> OpenLvResponse.Error(INTERNAL, "Ledger: ${e.said.english}")
         }
     }
 

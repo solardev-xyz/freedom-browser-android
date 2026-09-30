@@ -40,12 +40,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.WalletRpc
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.SwarmNode
@@ -108,9 +111,9 @@ internal data class PublishReadiness(
  */
 internal fun publishBlockedReason(node: NodeInfo): String? = when (node.status) {
     NodeStatus.Running -> null
-    NodeStatus.Starting -> "The Swarm node is starting…"
-    NodeStatus.Stopped -> "Turn on the Swarm node to set up publishing."
-    NodeStatus.Error -> "The Swarm node reported an error. Turn it off and on again on the node page."
+    NodeStatus.Starting -> Strings.get(R.string.publish_blocked_node_starting)
+    NodeStatus.Stopped -> Strings.get(R.string.publish_setup_blocked_node_off)
+    NodeStatus.Error -> Strings.get(R.string.publish_setup_blocked_node_error)
 }
 
 /**
@@ -164,70 +167,61 @@ internal fun publishSteps(r: PublishReadiness): List<PublishStep> {
     return listOf(
         PublishStep(
             PublishStepKey.Identity,
-            "Use your wallet's identity",
+            Strings.get(R.string.publish_setup_identity_title),
             if (identityDone) {
-                "The node runs as the Swarm account from your recovery phrase."
+                Strings.get(R.string.publish_setup_identity_done)
             } else {
-                "Publishing pays from the node's own account. Set up a wallet so that account comes " +
-                    "from your recovery phrase, and can be restored on another device."
+                Strings.get(R.string.publish_setup_identity_todo)
             },
             status(PublishStepKey.Identity),
         ),
         PublishStep(
             PublishStepKey.LightMode,
-            "Switch to light mode",
+            Strings.get(R.string.publish_setup_light_title),
             when {
-                light -> "The node is connected to Gnosis Chain."
-                r.lightModeWanted -> "Restarting the node in light mode…"
-                else -> "Light mode connects the node to Gnosis Chain, which publishing needs. " +
-                    "Browsing works the same in either mode."
+                light -> Strings.get(R.string.publish_setup_light_done)
+                r.lightModeWanted -> Strings.get(R.string.publish_setup_light_restarting)
+                else -> Strings.get(R.string.publish_setup_light_todo)
             },
             // Switched on and the node restarting into it: nothing to do but wait.
             status(PublishStepKey.LightMode, waiting = r.lightModeWanted),
         ),
         PublishStep(
             PublishStepKey.Fund,
-            "Fund the node with xDAI",
+            Strings.get(R.string.publish_setup_fund_title),
             when {
-                !walletIdentity -> "Once the node runs as your wallet's identity (step 1), send xDAI on " +
-                    "Gnosis Chain to its address. Don't fund the node before that: its current key " +
-                    "exists only on this device and is replaced when you set up a wallet."
-                r.xdaiWei != null && r.xdaiWei.signum() > 0 -> "Funded with ${formatXdai(r.xdaiWei)}."
-                chequebookDeployed -> "Funded: the node has deployed its chequebook."
-                else -> "Send xDAI on Gnosis Chain to the node's address below. It pays the gas for the " +
-                    "chequebook and the postage stamps. Or pay from your wallet in one transaction that " +
-                    "funds the node and buys its first stamp." +
-                    if (r.xdaiUnavailable) " Its balance can't be read right now; this updates once it can." else ""
+                !walletIdentity -> Strings.get(R.string.publish_setup_fund_needs_identity)
+                r.xdaiWei != null && r.xdaiWei.signum() > 0 -> Strings.get(R.string.publish_setup_fund_funded, formatXdai(r.xdaiWei))
+                chequebookDeployed -> Strings.get(R.string.publish_setup_fund_chequebook)
+                r.xdaiUnavailable -> Strings.get(R.string.publish_setup_fund_todo_unavailable)
+                else -> Strings.get(R.string.publish_setup_fund_todo)
             },
             // The balance still being read: wait for it before asking for funds.
             status(PublishStepKey.Fund, waiting = r.xdaiWei == null && !r.xdaiUnavailable),
         ),
         PublishStep(
             PublishStepKey.Chequebook,
-            "Chequebook",
+            Strings.get(R.string.publish_setup_chequebook_title),
             if (chequebookDeployed) {
-                "Deployed at ${r.chequebook}." + (r.chequebookBalancePlur?.let { " Holds ${formatBzz(it)}." } ?: "")
+                r.chequebookBalancePlur?.let { Strings.get(R.string.publish_setup_chequebook_deployed_holds, r.chequebook, formatBzz(it)) }
+                    ?: Strings.get(R.string.publish_setup_chequebook_deployed, r.chequebook)
             } else {
-                "The chequebook pays other nodes for storing your data. The node deploys it with " +
-                    "its first postage stamp."
+                Strings.get(R.string.publish_setup_chequebook_todo)
             },
             // Nothing to tap here: it comes with the stamp.
             if (done[PublishStepKey.Chequebook] == true) StepStatus.Done else StepStatus.Pending,
         ),
         PublishStep(
             PublishStepKey.Stamp,
-            "Buy a postage stamp",
+            Strings.get(R.string.publish_setup_stamp_title),
             when {
-                stamped -> "${plural(r.usableStamps ?: 0, "usable postage batch", "usable postage batches")}."
-                else -> "Postage stamps pre-pay the network for storing your data. The node buys one " +
-                    "with its xDAI, and deploys its chequebook with the first."
+                stamped -> (r.usableStamps ?: 0).let { Strings.plural(R.plurals.publish_setup_stamp_usable, it, it) }
+                else -> Strings.get(R.string.publish_setup_stamp_todo)
             },
             status(PublishStepKey.Stamp),
         ),
     )
 }
-
-private fun plural(n: Int, one: String, many: String) = if (n == 1) "1 $one" else "$n $many"
 
 /** Wei as xDAI, to at most 6 decimals (rounded down, so a dust balance never reads as more). */
 internal fun formatXdai(wei: BigInteger): String {
@@ -340,7 +334,7 @@ internal fun PublishSetupScreen(
     val connectOwed = funding?.connectOwed?.collectAsState()?.value
     val spend by StampClient.spend.collectAsState()
 
-    FullScreenScaffold(title = "Set up publishing", onDismiss = onDismiss) {
+    FullScreenScaffold(title = stringResource(R.string.publish_set_up), onDismiss = onDismiss) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -372,37 +366,39 @@ internal fun PublishSetupScreen(
                     StepCard(number = index + 1, step = step) {
                         when (step.key) {
                             PublishStepKey.Identity -> if (step.status == StepStatus.Active) {
-                                Button(onClick = onOpenWallet) { Text("Set up wallet") }
+                                Button(onClick = onOpenWallet) { Text(stringResource(R.string.publish_setup_set_up_wallet)) }
                             }
                             PublishStepKey.LightMode -> if (step.status == StepStatus.Active) {
-                                Button(onClick = onSwitchToLightMode) { Text("Switch to light mode") }
+                                Button(onClick = onSwitchToLightMode) { Text(stringResource(R.string.publish_setup_light_title)) }
                             }
                             PublishStepKey.Fund -> if (address != null) {
                                 // The address in full, selectable: it's what the user
                                 // copies into another wallet to send to.
-                                DetailRow("Node address", address, mono = true, singleLine = false)
+                                DetailRow(stringResource(R.string.publish_setup_node_address), address, mono = true, singleLine = false)
                                 DetailRow(
-                                    "Balance",
-                                    xdai?.let(::formatXdai) ?: if (balance.failed) "Unavailable" else "Checking…",
+                                    stringResource(R.string.publish_setup_balance),
+                                    xdai?.let(::formatXdai) ?: stringResource(
+                                        if (balance.failed) R.string.publish_setup_balance_unavailable else R.string.publish_setup_balance_checking,
+                                    ),
                                 )
                                 if (step.status != StepStatus.Done) {
                                     Spacer(Modifier.height(4.dp))
                                     OutlinedButton(onClick = { copyNodeAddress(context, address) }) {
-                                        Text("Copy address")
+                                        Text(stringResource(R.string.common_copy_address))
                                     }
                                     // One wallet transaction instead (#115): needs light mode, for the node's price.
                                     if (light) {
-                                        Button(onClick = onFundAndBuy) { Text("Fund and buy a stamp from your wallet") }
+                                        Button(onClick = onFundAndBuy) { Text(stringResource(R.string.publish_setup_fund_and_buy)) }
                                     }
                                 }
                             }
                             PublishStepKey.Chequebook -> if (step.status == StepStatus.Done) {
-                                OutlinedButton(onClick = onOpenChequebook) { Text("Deposit") }
+                                OutlinedButton(onClick = onOpenChequebook) { Text(stringResource(R.string.publish_setup_deposit)) }
                             }
                             PublishStepKey.Stamp -> if (step.status == StepStatus.Active) {
-                                Button(onClick = onBuyStamp) { Text("Buy a postage stamp") }
+                                Button(onClick = onBuyStamp) { Text(stringResource(R.string.publish_setup_stamp_title)) }
                                 // Or have the wallet pay for it, in one transaction (#115).
-                                OutlinedButton(onClick = onFundAndBuy) { Text("Pay from your wallet instead") }
+                                OutlinedButton(onClick = onFundAndBuy) { Text(stringResource(R.string.publish_setup_pay_from_wallet)) }
                             }
                             else -> Unit
                         }
@@ -415,7 +411,7 @@ internal fun PublishSetupScreen(
 
 @Composable
 private fun StepCard(number: Int, step: PublishStep, actions: @Composable () -> Unit) {
-    SectionCard(title = "Step $number") {
+    SectionCard(title = stringResource(R.string.publish_setup_step, number)) {
         Row(
             verticalAlignment = Alignment.Top,
             modifier = Modifier
@@ -449,18 +445,18 @@ private fun StepIcon(status: StepStatus) {
     val modifier = Modifier.size(24.dp)
     when (status) {
         StepStatus.Pending -> Icon(
-            Icons.Outlined.Circle, contentDescription = "Not yet", modifier = modifier,
+            Icons.Outlined.Circle, contentDescription = stringResource(R.string.publish_setup_status_pending), modifier = modifier,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         StepStatus.Active -> Icon(
-            Icons.Filled.PlayCircle, contentDescription = "To do", modifier = modifier,
+            Icons.Filled.PlayCircle, contentDescription = stringResource(R.string.publish_setup_status_active), modifier = modifier,
             tint = MaterialTheme.colorScheme.primary,
         )
         StepStatus.Waiting -> CircularProgressIndicator(
             strokeWidth = 2.dp, modifier = Modifier.padding(2.dp).size(20.dp),
         )
         StepStatus.Done -> Icon(
-            Icons.Filled.CheckCircle, contentDescription = "Done", modifier = modifier,
+            Icons.Filled.CheckCircle, contentDescription = stringResource(R.string.publish_setup_status_done), modifier = modifier,
             tint = Color(0xFF22C55E),
         )
     }
@@ -471,10 +467,10 @@ private data class BalanceRead(val wei: BigInteger? = null, val failed: Boolean 
 
 private fun copyNodeAddress(context: Context, address: String) {
     val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
-    clipboard.setPrimaryClip(ClipData.newPlainText("Swarm node address", address))
+    clipboard.setPrimaryClip(ClipData.newPlainText(Strings.get(R.string.publish_setup_clip_label), address))
     // Android 13+ confirms every copy itself.
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-        Toast.makeText(context, "Address copied", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, Strings.get(R.string.publish_setup_address_copied), Toast.LENGTH_SHORT).show()
     }
 }
 

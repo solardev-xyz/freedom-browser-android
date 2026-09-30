@@ -2,7 +2,10 @@ package baby.freedom.mobile.browser
 
 import android.content.Context
 import android.util.Log
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.Text
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -101,8 +104,16 @@ internal sealed interface UpdateCheckOutcome {
     /** The installed version is [latest] (or newer: a build ahead of the last release). */
     data class UpToDate(val latest: LatestRelease) : UpdateCheckOutcome
 
-    /** The check didn't get an answer it could compare; [reason] says why, for the Settings row. */
-    data class Failed(val reason: String) : UpdateCheckOutcome
+    /**
+     * The check didn't get an answer it could compare; [reason] says why,
+     * for the Settings row — read when shown, so it follows a change of
+     * the app language (#280).
+     */
+    data class Failed(private val why: Text) : UpdateCheckOutcome {
+        constructor(reason: String) : this(Text.raw(reason))
+
+        val reason: String get() = why.text
+    }
 }
 
 /**
@@ -112,7 +123,7 @@ internal sealed interface UpdateCheckOutcome {
  */
 internal fun compareRelease(installed: ReleaseVersion?, latest: LatestRelease): UpdateCheckOutcome =
     when {
-        installed == null -> UpdateCheckOutcome.Failed("this build's version isn't a release number")
+        installed == null -> UpdateCheckOutcome.Failed(Text.res(R.string.settings_updates_error_not_release))
         latest.version > installed -> UpdateCheckOutcome.Available(latest)
         else -> UpdateCheckOutcome.UpToDate(latest)
     }
@@ -165,28 +176,31 @@ internal fun MutableStateFlow<AppUpdateState>.claimCheck(): Boolean {
  * Sideloads report the system package installer, a file manager, a
  * browser, or nothing (adb).
  */
-internal val STORE_INSTALLERS: Map<String, String> = mapOf(
-    "com.android.vending" to "Google Play",
-    "org.fdroid.fdroid" to "F-Droid",
-    "org.fdroid.fdroid.privileged" to "F-Droid",
-    "org.fdroid.basic" to "F-Droid",
-    "com.aurora.store" to "Aurora Store",
-    "app.accrescent.client" to "Accrescent",
-    "com.amazon.venezia" to "the Amazon Appstore",
-    "com.sec.android.app.samsungapps" to "Galaxy Store",
-    "com.huawei.appmarket" to "AppGallery",
-    "com.xiaomi.market" to "GetApps",
+internal val STORE_INSTALLERS: Map<String, Int> = mapOf(
+    "com.android.vending" to R.string.settings_store_google_play,
+    "org.fdroid.fdroid" to R.string.settings_store_fdroid,
+    "org.fdroid.fdroid.privileged" to R.string.settings_store_fdroid,
+    "org.fdroid.basic" to R.string.settings_store_fdroid,
+    "com.aurora.store" to R.string.settings_store_aurora,
+    "app.accrescent.client" to R.string.settings_store_accrescent,
+    "com.amazon.venezia" to R.string.settings_store_amazon,
+    "com.sec.android.app.samsungapps" to R.string.settings_store_galaxy,
+    "com.huawei.appmarket" to R.string.settings_store_appgallery,
+    "com.xiaomi.market" to R.string.settings_store_getapps,
 )
 
 /** The store [installer] names, or `null` when it isn't one ([STORE_INSTALLERS]). */
-internal fun storeFor(installer: String?): String? = installer?.let { STORE_INSTALLERS[it] }
+internal fun storeFor(installer: String?): String? = storeTextFor(installer)?.text
+
+/** [storeFor] as [Text], to hold in state: read in the app language whenever it's shown (#280). */
+internal fun storeTextFor(installer: String?): Text? = installer?.let { STORE_INSTALLERS[it] }?.let { Text.res(it) }
 
 /** What Settings and the home notice read. */
 internal data class AppUpdateState(
     /** The installed `versionName`, as shown. */
     val installedName: String = "",
-    /** The store this build came from ([storeFor]); no check runs while it's set. */
-    val store: String? = null,
+    /** The store this build came from ([storeTextFor]); no check runs while it's set. */
+    val store: Text? = null,
     val checking: Boolean = false,
     /** When the last check ran (epoch ms), from disk; `null` before the first. */
     val lastCheckedAt: Long? = null,
@@ -294,7 +308,7 @@ internal object AppUpdates {
             _state.update {
                 it.copy(
                     installedName = versionName,
-                    store = storeFor(installer),
+                    store = storeTextFor(installer),
                     lastCheckedAt = saved.checkedAt,
                     latest = saved.latest,
                     dismissedTag = saved.dismissed,
@@ -375,14 +389,14 @@ internal object AppUpdates {
                 is Fetched.Body -> {
                     val latest = parseLatestRelease(body.text)
                     if (latest == null) {
-                        UpdateCheckOutcome.Failed("GitHub's answer didn't name a release")
+                        UpdateCheckOutcome.Failed(Text.res(R.string.settings_updates_error_no_release))
                     } else {
                         _state.update { it.copy(latest = latest) }
                         save()
                         compareRelease(ReleaseVersion.parse(_state.value.installedName), latest)
                     }
                 }
-                is Fetched.Error -> UpdateCheckOutcome.Failed(body.reason)
+                is Fetched.Error -> UpdateCheckOutcome.Failed(body.why)
             }
             Log.i(TAG, "update check: $outcome")
             _state.update { it.copy(checking = false, last = outcome) }
@@ -459,11 +473,13 @@ internal fun saveAppUpdateState(f: File, current: () -> AppUpdateState) {
 /** What [fetchLatestRelease] got: the body, or why not (for the Settings row). */
 internal sealed interface Fetched {
     class Body(val text: String) : Fetched
-    class Error(val reason: String) : Fetched
+    class Error(val why: Text) : Fetched {
+        val reason: String get() = why.text
+    }
 }
 
 /** [Fetched.Error]'s reason when the deadline, and only the deadline, ended the request. */
-internal const val FETCH_TIMED_OUT = "GitHub took too long to answer"
+internal val FETCH_TIMED_OUT: String get() = Strings.get(R.string.settings_updates_error_timed_out)
 
 /**
  * GET the connection [open] builds (not yet connected) and read its
@@ -485,8 +501,8 @@ internal suspend fun fetchLatestRelease(timeoutMs: Long, open: () -> HttpURLConn
                 val code = conn.responseCode
                 if (code != HttpURLConnection.HTTP_OK) {
                     return@withHardDeadline Fetched.Error(
-                        if (code == 403 || code == 429) "GitHub is limiting requests; try again later"
-                        else "GitHub answered HTTP $code",
+                        if (code == 403 || code == 429) Text.res(R.string.settings_updates_error_rate_limited)
+                        else Text.res(R.string.settings_updates_error_http, code.toString()),
                     )
                 }
                 val bytes = conn.inputStream.use { input ->
@@ -505,12 +521,12 @@ internal suspend fun fetchLatestRelease(timeoutMs: Long, open: () -> HttpURLConn
                 conn.disconnect()
             }
         } catch (e: IOException) {
-            Fetched.Error("couldn't reach GitHub")
+            Fetched.Error(Text.res(R.string.settings_updates_error_unreachable))
         } catch (e: Throwable) {
             Log.w(TAG, "update check request failed", e)
-            Fetched.Error("the request failed (${e.javaClass.simpleName})")
+            Fetched.Error(Text.res(R.string.settings_updates_error_request, e.javaClass.simpleName))
         }
-    } ?: Fetched.Error(FETCH_TIMED_OUT)
+    } ?: Fetched.Error(Text.res(R.string.settings_updates_error_timed_out))
 
 /** A release body is a few KB; anything this big isn't one. */
 private const val MAX_RELEASE_BODY_BYTES = 1 shl 20

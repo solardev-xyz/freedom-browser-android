@@ -9,12 +9,14 @@ import androidx.webkit.ScriptHandler
 import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.RoutingContext
 import baby.freedom.mobile.data.AutoApproveStore
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.DappGrantStore
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.MessageSigning
 import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.SendRequest
@@ -212,7 +214,8 @@ object EthereumProviders {
             } else if (stage.rejected) {
                 EthereumProvider.Submitted.Rejected
             } else {
-                EthereumProvider.Submitted.Failed(stage.message, status.hash.takeIf { stage.mayHaveGone })
+                // English, for the page (#280).
+                EthereumProvider.Submitted.Failed(stage.english ?: WalletSender.NOT_SENT_ENGLISH, status.hash.takeIf { stage.mayHaveGone })
             }
             else -> status.hash?.let { EthereumProvider.Submitted.Sent(it) }
                 ?: EthereumProvider.Submitted.Failed("The transaction didn't go out.", null)
@@ -356,11 +359,10 @@ object EthereumProviders {
         val lock = promptLocks.getOrPut(tab.id) { Mutex() }
         return lock.withLock {
             if (!live()) return@withLock EthAnswer.Rejected
-            val reason = if (ask is EthAsk.Payment) {
-                "${permissionOriginDisplay(ask.origin)} asks to be paid"
-            } else {
-                "${permissionOriginDisplay(ask.origin)} wants to connect to your wallet"
-            }
+            val reason = Strings.get(
+                if (ask is EthAsk.Payment) R.string.send_eth_setup_reason_pay else R.string.send_eth_setup_reason_connect,
+                permissionOriginDisplay(ask.origin),
+            )
             val request = EthereumPromptRequest(ask) { setUpWallet(reason) }
             pending.getOrPut(tab.id) { mutableSetOf() }.add(request)
             tab.ethereumPrompt = request

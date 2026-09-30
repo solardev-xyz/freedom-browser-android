@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainRpcException
@@ -9,6 +10,9 @@ import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.wallet.EthTransaction
 import baby.freedom.mobile.wallet.MessageSigning
 import baby.freedom.mobile.wallet.SendException
+import baby.freedom.mobile.l10n.PseudoLanguage
+import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.inPseudoLanguage
 import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.SendRequest
 import baby.freedom.mobile.wallet.Eip712
@@ -104,12 +108,14 @@ class EthereumProviderTest {
         val prepared = mutableListOf<SendRequest>()
         val outcomes = ArrayDeque<EthereumProvider.Submitted>()
         var prepareError: String? = null
+        var prepareFailure: SendException? = null
         var busy = false
         /** What the send is priced at. */
         var fees: EthTransaction.Fees = EthTransaction.Fees.Eip1559(BigInteger.valueOf(2_000_000_000), BigInteger.ONE)
         override fun busy() = busy
         override suspend fun prepare(request: SendRequest): SendQuote {
-            prepareError?.let { throw SendException(it) }
+            prepareFailure?.let { throw it }
+            prepareError?.let { throw SendException.ofEnglish(it) }
             prepared += request
             val (to, value, data) = request.call()
             val tx = EthTransaction(
@@ -362,6 +368,25 @@ class EthereumProviderTest {
             val data = call("eth_signTypedData_v4", JSONArray().put(main.address).put(typed.toString()))
             assertEquals(failure.kind.name, code, code(data))
             if (code != 4001) assertTrue(message(personal).contains(failure.kind.message))
+        }
+    }
+
+    @Test
+    fun `what the page reads stays English in a translated build`() {
+        // The app language must not reach a page (#313 R1-F1): it would tell
+        // every connected site the user's language.
+        connect()
+        answer = { EthAnswer.Approved() }
+        inPseudoLanguage {
+            sends.prepareFailure = SendException(Strings.said(R.string.send_no_gas_price))
+            val unpriced = message(call("eth_sendTransaction", tx("to" to second.address)))
+            assertEquals("The network gave no usable gas price. Try again.", unpriced)
+            sends.prepareFailure = null
+            wallet.ledgerFailure = LedgerException(LedgerException.Kind.DISCONNECTED)
+            val ledger = message(call("personal_sign", JSONArray().put("0x68656c6c6f").put(main.address)))
+            assertEquals("Ledger: " + Strings.english(R.string.signing_ledger_error_disconnected), ledger)
+            // …while the wallet itself reads it in the app language.
+            assertTrue(LedgerException(LedgerException.Kind.DISCONNECTED).message.startsWith(PseudoLanguage.MARK))
         }
     }
 

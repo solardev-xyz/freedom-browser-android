@@ -9,6 +9,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
+import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -47,6 +48,7 @@ import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Star
@@ -76,6 +78,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
@@ -86,6 +89,7 @@ import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.DappGrantStore
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsRpcConfig
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.Appearance
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.Vault
@@ -226,6 +230,8 @@ fun SettingsScreen(
 
     val scope = rememberCoroutineScope()
     val appVersion = remember(context) { appVersionLabel(context) }
+    val rpcNotRemovedLast = stringResource(R.string.settings_rpc_not_removed_last)
+    val rpcRemoveFailed = stringResource(R.string.settings_rpc_remove_failed)
     val appUpdate by AppUpdates.state.collectAsState()
     val checkForUpdates by settings.checkForUpdates.collectAsState(initial = true)
 
@@ -236,7 +242,11 @@ fun SettingsScreen(
     val searchRows = visibleSettingsRows(
         query, SECTION_SEARCH, searchSectionRows(searchEngine, customSearchTemplate),
     )
-    val appearanceRows = visibleSettingsRows(query, SECTION_APPEARANCE, appearanceSectionRows(appearance))
+    // Language (#280): only on Android 13+ and once there is more than one.
+    val appLanguage = rememberAppLanguage()
+    val appearanceRows = visibleSettingsRows(
+        query, SECTION_APPEARANCE, appearanceSectionRows(appearance, appLanguage),
+    )
     val defaultBrowser = rememberDefaultBrowserState()
     val defaultBrowserRows = visibleSettingsRows(
         query, DefaultBrowser.SECTION, defaultBrowserRows(defaultBrowser.isDefault),
@@ -312,14 +322,13 @@ fun SettingsScreen(
                             // last-endpoint check applies.
                             when (settings.removeEnsRpcEndpoint(url)) {
                                 NodeSettings.EnsEdit.DONE -> null
-                                NodeSettings.EnsEdit.LAST_ENDPOINT ->
-                                    "Not removed: it's the last RPC names resolve through (Settings → RPC providers)"
-                                NodeSettings.EnsEdit.FAILED -> "Couldn't remove the RPC. Try again."
+                                NodeSettings.EnsEdit.LAST_ENDPOINT -> rpcNotRemovedLast
+                                NodeSettings.EnsEdit.FAILED -> rpcRemoveFailed
                             }
                         } else if (chainStore.removeUserRpc(chain.id, url)) {
                             null
                         } else {
-                            "Couldn't remove the RPC. Try again."
+                            rpcRemoveFailed
                         }
                     },
                     onRemove = { confirmRemoveChain = chain },
@@ -346,7 +355,7 @@ fun SettingsScreen(
         )
     }
     if (chainPage == null && site == null) FullScreenScaffold(
-        title = "Settings",
+        title = stringResource(R.string.settings_title),
         onDismiss = onDismiss,
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -371,7 +380,17 @@ fun SettingsScreen(
                     )
                 }
                 if (appearanceRows.isNotEmpty()) item("appearance") {
-                    AppearanceSection(appearance = appearance, onClick = { pickAppearance = true })
+                    AppearanceSection(
+                        visible = appearanceRows,
+                        appearance = appearance,
+                        onClick = { pickAppearance = true },
+                        language = appLanguage,
+                        onLanguageClick = {
+                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                                AppLanguage.openSettings(context)
+                            }
+                        },
+                    )
                 }
                 if (defaultBrowserRows.isNotEmpty()) item("default-browser") {
                     DefaultBrowserSection(defaultBrowser)
@@ -497,7 +516,7 @@ fun SettingsScreen(
                 }
                 if (nothingMatches) item("no-match") {
                     Text(
-                        "No settings match \u201c${query.trim()}\u201d",
+                        stringResource(R.string.settings_no_match, query.trim()),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier
@@ -560,10 +579,9 @@ fun SettingsScreen(
     }
     confirmRemoveChain?.let { chain ->
         ConfirmDialog(
-            title = "Remove ${chain.name}?",
-            message = "Removes chain ${chain.id} and its RPC endpoints from this device. " +
-                "You can add it again later.",
-            confirmLabel = "Remove",
+            title = stringResource(R.string.settings_remove_chain_title, chain.name),
+            message = stringResource(R.string.settings_remove_chain_message, chain.id.toString()),
+            confirmLabel = stringResource(R.string.common_remove),
             onConfirm = {
                 scope.launch {
                     if (chainStore.remove(chain.id) == ChainStore.RemoveResult.FAILED) {
@@ -578,10 +596,10 @@ fun SettingsScreen(
     removeChainFailed?.let { chain ->
         AlertDialog(
             onDismissRequest = { removeChainFailed = null },
-            title = { Text("Couldn't remove ${chain.name}") },
-            text = { Text("Chain ${chain.id} is still on this device. Try again.") },
+            title = { Text(stringResource(R.string.settings_remove_chain_failed_title, chain.name)) },
+            text = { Text(stringResource(R.string.settings_remove_chain_failed_message, chain.id.toString())) },
             confirmButton = {
-                TextButton(onClick = { removeChainFailed = null }) { Text("OK") }
+                TextButton(onClick = { removeChainFailed = null }) { Text(stringResource(R.string.common_ok)) }
             },
         )
     }
@@ -596,9 +614,9 @@ fun SettingsScreen(
     }
     if (confirmClearHistory) {
         ConfirmDialog(
-            title = "Clear history?",
-            message = "Removes every entry from the browsing history on this device.",
-            confirmLabel = "Clear history",
+            title = stringResource(R.string.settings_clear_history_title),
+            message = stringResource(R.string.settings_clear_history_message),
+            confirmLabel = stringResource(R.string.settings_clear_history),
             onConfirm = {
                 repo.clearHistory()
                 onClearHistory()
@@ -609,9 +627,9 @@ fun SettingsScreen(
     }
     if (confirmClearBookmarks) {
         ConfirmDialog(
-            title = "Clear bookmarks?",
-            message = "Removes every saved bookmark on this device.",
-            confirmLabel = "Clear bookmarks",
+            title = stringResource(R.string.settings_clear_bookmarks_title),
+            message = stringResource(R.string.settings_clear_bookmarks_message),
+            confirmLabel = stringResource(R.string.settings_clear_bookmarks),
             onConfirm = {
                 repo.clearBookmarks()
                 confirmClearBookmarks = false
@@ -621,9 +639,9 @@ fun SettingsScreen(
     }
     if (confirmClearSiteData) {
         ConfirmDialog(
-            title = "Clear cookies and site data?",
-            message = "Signs you out of most sites and wipes cached page data, cookies, form autofill, remembered page zoom levels and desktop-site choices from every open tab, and the nodes' recent logs. Unfinished downloads are cancelled.",
-            confirmLabel = "Clear site data",
+            title = stringResource(R.string.settings_clear_site_data_title),
+            message = stringResource(R.string.settings_clear_site_data_message),
+            confirmLabel = stringResource(R.string.settings_clear_site_data_confirm),
             onConfirm = {
                 onClearWebViewData()
                 confirmClearSiteData = false
@@ -633,17 +651,19 @@ fun SettingsScreen(
     }
 }
 
-private const val SECTION_WALLET = "Wallet"
-private const val SECTION_SEARCH = "Search"
-private const val SECTION_APPEARANCE = "Appearance"
-private const val SECTION_ADBLOCK = "Ad blocking"
-private const val SECTION_BROWSING = "Browsing data"
-private const val SECTION_PERMISSIONS = "Site permissions"
-private const val SECTION_NODES = "Nodes"
-private const val SECTION_TOR = "Tor"
-private const val SECTION_ABOUT = "About"
-private const val SECTION_OTHER = "Other"
-private const val SECTION_IPFS = "IPFS"
+// Section titles: each card's heading, and searched too (a query naming
+// a section shows all of it, see [visibleSettingsRows]).
+private val SECTION_WALLET: String get() = Strings.get(R.string.settings_section_wallet)
+private val SECTION_SEARCH: String get() = Strings.get(R.string.settings_section_search)
+private val SECTION_APPEARANCE: String get() = Strings.get(R.string.settings_section_appearance)
+private val SECTION_ADBLOCK: String get() = Strings.get(R.string.settings_section_adblock)
+private val SECTION_BROWSING: String get() = Strings.get(R.string.settings_section_browsing)
+private val SECTION_PERMISSIONS: String get() = Strings.get(R.string.settings_section_permissions)
+private val SECTION_NODES: String get() = Strings.get(R.string.settings_section_nodes)
+private val SECTION_TOR: String get() = Strings.get(R.string.settings_section_tor)
+private val SECTION_ABOUT: String get() = Strings.get(R.string.settings_section_about)
+private val SECTION_OTHER: String get() = Strings.get(R.string.settings_section_other)
+private val SECTION_IPFS: String get() = Strings.get(R.string.settings_section_ipfs)
 
 /**
  * The filter field above the sections (#93). Pinned under the title
@@ -659,12 +679,12 @@ private fun SettingsSearchField(
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
-        placeholder = { Text("Search settings") },
+        placeholder = { Text(stringResource(R.string.settings_search_placeholder)) },
         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
         trailingIcon = if (query.isNotEmpty()) {
             {
                 IconButton(onClick = { onQueryChange("") }) {
-                    Icon(Icons.Filled.Close, contentDescription = "Clear search")
+                    Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.settings_search_clear))
                 }
             }
         } else null,
@@ -678,7 +698,7 @@ private fun SettingsSearchField(
     )
 }
 
-private const val ROW_SEARCH_ENGINE = "Search engine"
+private val ROW_SEARCH_ENGINE: String get() = Strings.get(R.string.settings_search_engine)
 
 /**
  * The engine row, findable by the engine in use and by the name of
@@ -702,24 +722,28 @@ private fun customSearchTemplateLine(engineId: String, customTemplate: String): 
         SearchEngines.effectiveId(engineId, customTemplate) == SearchEngines.CUSTOM_ID
     }
 
-private const val ROW_THEME = "Theme"
+private val ROW_THEME: String get() = Strings.get(R.string.settings_theme)
+
+private val ROW_LANGUAGE: String get() = Strings.get(R.string.settings_language)
 
 /**
  * The theme row (#269), findable by the choice in use and by every
  * choice it can be switched to, plus the words people search for them
- * with ("dark mode" → the Theme row).
+ * with ("dark mode" → the Theme row); and, while it's shown, the
+ * Language row (#280) with the app's current [language].
  */
-internal fun appearanceSectionRows(appearance: Appearance) = listOf(
+internal fun appearanceSectionRows(appearance: Appearance, language: String? = null) = listOfNotNull(
     settingsRow(
         "theme",
         ROW_THEME,
         appearance.label,
         APPEARANCE_DETAIL,
         *Appearance.entries.map { it.label }.toTypedArray(),
-        "dark mode",
-        "light mode",
-        "night mode",
+        *searchKeywords(R.string.settings_theme_keywords),
     ),
+    language?.let {
+        settingsRow("language", ROW_LANGUAGE, it, *searchKeywords(R.string.settings_language_keywords))
+    },
 )
 
 /**
@@ -727,22 +751,39 @@ internal fun appearanceSectionRows(appearance: Appearance) = listOf(
  * only where [Appearance.apply] can set the app's night mode. Nothing
  * is claimed on Android 11, where only the chrome follows.
  */
-private val APPEARANCE_DETAIL: String? =
-    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-        "Freedom's own pages, and web pages that offer a light and a dark look, follow it too"
+private val APPEARANCE_DETAIL: String?
+    get() = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+        Strings.get(R.string.settings_appearance_detail)
     } else null
 
-/** Settings → Appearance: the theme row, which opens [AppearanceDialog]. */
+/**
+ * Settings → Appearance: the theme row, which opens [AppearanceDialog];
+ * and the Language row while there is a [language] to show, which opens
+ * Android's per-app language page.
+ */
 @Composable
-private fun AppearanceSection(appearance: Appearance, onClick: () -> Unit) {
-    SectionCard(title = SECTION_APPEARANCE) {
-        PageRow(
-            title = ROW_THEME,
-            subtitle = appearance.label,
+private fun AppearanceSection(
+    visible: Set<Any>,
+    appearance: Appearance,
+    onClick: () -> Unit,
+    language: String?,
+    onLanguageClick: () -> Unit,
+) {
+    SectionCard(title = stringResource(R.string.settings_section_appearance)) {
+        if ("theme" in visible) PageRow(
+            title = stringResource(R.string.settings_theme),
+            subtitle = stringResource(appearance.labelRes),
             style = PageRowStyle.Inset,
             leadingIcon = Icons.Filled.Contrast,
             thirdLine = APPEARANCE_DETAIL,
             onClick = onClick,
+        )
+        if (language != null && "language" in visible) PageRow(
+            title = stringResource(R.string.settings_language),
+            subtitle = language,
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Language,
+            onClick = onLanguageClick,
         )
     }
 }
@@ -756,12 +797,12 @@ private fun AppearanceDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(ROW_THEME) },
+        title = { Text(stringResource(R.string.settings_theme)) },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 Appearance.entries.forEach { choice ->
                     EngineRadioRow(
-                        label = choice.label,
+                        label = stringResource(choice.labelRes),
                         selected = choice == selected,
                         onClick = { onSelect(choice) },
                     )
@@ -770,7 +811,7 @@ private fun AppearanceDialog(
         },
         confirmButton = {},
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }
@@ -782,7 +823,7 @@ private fun AppearanceDialog(
  */
 @Composable
 private fun WalletSection(state: Vault.State, onOpen: () -> Unit) {
-    SectionCard(title = SECTION_WALLET) {
+    SectionCard(title = stringResource(R.string.settings_section_wallet)) {
         PageRow(
             title = WALLET_TITLE,
             subtitle = walletSummary(state),
@@ -800,9 +841,9 @@ private fun SearchSection(
     customTemplate: String,
     onClick: () -> Unit,
 ) {
-    SectionCard(title = SECTION_SEARCH) {
+    SectionCard(title = stringResource(R.string.settings_section_search)) {
         PageRow(
-            title = ROW_SEARCH_ENGINE,
+            title = stringResource(R.string.settings_search_engine),
             subtitle = SearchEngines.labelFor(engineId, customTemplate),
             style = PageRowStyle.Inset,
             leadingIcon = Icons.Filled.Search,
@@ -841,7 +882,7 @@ private fun SearchEngineDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Search engine") },
+        title = { Text(stringResource(R.string.settings_search_engine)) },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 SearchEngines.BUILT_IN.forEach { engine ->
@@ -852,7 +893,7 @@ private fun SearchEngineDialog(
                     )
                 }
                 EngineRadioRow(
-                    label = "Custom",
+                    label = stringResource(R.string.settings_search_engine_custom),
                     selected = customSelected,
                     onClick = { customSelected = true },
                 )
@@ -861,15 +902,15 @@ private fun SearchEngineDialog(
                         OutlinedTextField(
                             value = draft,
                             onValueChange = { draft = it },
-                            label = { Text("Search URL") },
-                            placeholder = { Text("https://example.com/search?q={searchTerms}") },
+                            label = { Text(stringResource(R.string.settings_search_url)) },
+                            placeholder = { Text(stringResource(R.string.settings_search_url_placeholder)) },
                             isError = draft.isNotBlank() && normalized == null,
                             supportingText = {
                                 Text(
                                     validation.rejection
                                         ?.takeIf { draft.isNotBlank() }
                                         ?.let(::templateHint)
-                                        ?: "Your search replaces {searchTerms} (or %s)",
+                                        ?: stringResource(R.string.settings_search_url_helper),
                                 )
                             },
                             keyboardOptions = urlKeyboardOptions(),
@@ -884,11 +925,11 @@ private fun SearchEngineDialog(
                 TextButton(
                     onClick = { normalized?.let(onSaveCustom) },
                     enabled = normalized != null,
-                ) { Text("Save") }
+                ) { Text(stringResource(R.string.common_save)) }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }
@@ -896,13 +937,12 @@ private fun SearchEngineDialog(
 /** What to fix, for each reason [SearchEngines.validateTemplate] refuses a template. */
 private fun templateHint(rejection: SearchEngines.Rejection): String = when (rejection) {
     SearchEngines.Rejection.EMPTY,
-    SearchEngines.Rejection.NO_PLACEHOLDER -> "Put {searchTerms} (or %s) where your search goes"
-    SearchEngines.Rejection.MULTIPLE_PLACEHOLDERS -> "Use {searchTerms} (or %s) only once"
-    SearchEngines.Rejection.TOO_LONG -> "Too long: at most 2048 characters"
-    SearchEngines.Rejection.NOT_A_URL -> "Not a full URL: start with https:// and a host name"
-    SearchEngines.Rejection.SCHEME ->
-        "Needs https:// (http:// only to localhost, 127.0.0.1 or [::1])"
-    SearchEngines.Rejection.USER_INFO -> "Remove the user name or password before the host"
+    SearchEngines.Rejection.NO_PLACEHOLDER -> Strings.get(R.string.settings_search_hint_no_placeholder)
+    SearchEngines.Rejection.MULTIPLE_PLACEHOLDERS -> Strings.get(R.string.settings_search_hint_multiple_placeholders)
+    SearchEngines.Rejection.TOO_LONG -> Strings.get(R.string.settings_hint_too_long)
+    SearchEngines.Rejection.NOT_A_URL -> Strings.get(R.string.settings_search_hint_not_a_url)
+    SearchEngines.Rejection.SCHEME -> Strings.get(R.string.settings_search_hint_scheme)
+    SearchEngines.Rejection.USER_INFO -> Strings.get(R.string.settings_hint_remove_credentials)
 }
 
 @Composable
@@ -927,32 +967,41 @@ private fun EngineRadioRow(
 /** The two content sources an external endpoint can replace (#125). */
 internal enum class NodeEndpoint(
     val key: String,
-    val title: String,
-    val embeddedLabel: String,
+    @StringRes private val titleRes: Int,
+    @StringRes private val embeddedLabelRes: Int,
     val placeholder: String,
-    val helper: String,
-    /** Shown while an external endpoint of this kind is in use. */
-    val warning: String?,
+    @StringRes private val helperRes: Int,
+    /** Extra words Settings search finds the row by. */
+    @StringRes val keywordsRes: Int,
 ) {
     Swarm(
         key = "swarm",
-        title = "Swarm endpoint",
-        embeddedLabel = "Embedded Swarm node",
+        titleRes = R.string.settings_swarm_endpoint,
+        embeddedLabelRes = R.string.settings_swarm_embedded,
         placeholder = "http://192.168.1.10:1633",
-        helper = "A Bee or Ant node API that serves /bzz/",
-        warning = null,
+        helperRes = R.string.settings_swarm_endpoint_helper,
+        keywordsRes = R.string.settings_swarm_endpoint_keywords,
     ),
     Ipfs(
         key = "ipfs",
-        title = "IPFS gateway",
-        embeddedLabel = "Embedded IPFS node (verified)",
+        titleRes = R.string.settings_ipfs_gateway,
+        embeddedLabelRes = R.string.settings_ipfs_embedded,
         placeholder = "http://192.168.1.10:8080",
-        helper = "A path gateway serving /ipfs/ and /ipns/",
-        warning = ExternalEndpoints.IPFS_UNVERIFIED_WARNING,
+        helperRes = R.string.settings_ipfs_gateway_helper,
+        keywordsRes = R.string.settings_ipfs_gateway_keywords,
     ),
+    ;
+
+    val title: String get() = Strings.get(titleRes)
+    val embeddedLabel: String get() = Strings.get(embeddedLabelRes)
+    val helper: String get() = Strings.get(helperRes)
+
+    /** Shown while an external endpoint of this kind is in use. */
+    val warning: String?
+        get() = if (this == Ipfs) ExternalEndpoints.IPFS_UNVERIFIED_WARNING else null
 }
 
-private const val EXTERNAL_LABEL = "External"
+private val EXTERNAL_LABEL: String get() = Strings.get(R.string.settings_external)
 
 private fun endpointSubtitle(endpoint: NodeEndpoint, external: String) =
     if (external.isEmpty()) endpoint.embeddedLabel else EXTERNAL_LABEL
@@ -969,7 +1018,7 @@ internal fun nodeRows(externalSwarm: String, externalIpfs: String, showIpfsUi: B
             NodeEndpoint.Swarm.title,
             endpointSubtitle(NodeEndpoint.Swarm, externalSwarm),
             externalSwarm,
-            "External node",
+            *searchKeywords(NodeEndpoint.Swarm.keywordsRes),
         ),
         if (showIpfsUi || externalIpfs.isNotEmpty()) settingsRow(
             NodeEndpoint.Ipfs.key,
@@ -977,31 +1026,33 @@ internal fun nodeRows(externalSwarm: String, externalIpfs: String, showIpfsUi: B
             endpointSubtitle(NodeEndpoint.Ipfs, externalIpfs),
             externalIpfs,
             externalIpfs.takeIf { it.isNotEmpty() }?.let { NodeEndpoint.Ipfs.warning },
-            "External gateway",
+            *searchKeywords(NodeEndpoint.Ipfs.keywordsRes),
         ) else null,
     )
 
-private const val TOR_ENABLED = "Tor for .onion sites"
-private const val TOR_ENABLED_DETAIL =
-    "Only .onion sites use Tor; every other site connects directly. While off, onion sites are refused."
-private const val TOR_ON_LAUNCH = "Start Tor at launch"
-private const val TOR_ON_LAUNCH_SUBTITLE = "Otherwise start it on the Nodes page"
-private const val TOR_CLIENT = "Tor client"
-private const val TOR_CLIENT_EMBEDDED = "Embedded (Arti)"
-private const val TOR_CLIENT_EXTERNAL = "External SOCKS proxy"
-private const val TOR_CLIENT_HELPER = "A Tor SOCKS port on this device, e.g. Orbot's 127.0.0.1:9050"
+private val TOR_ENABLED: String get() = Strings.get(R.string.settings_tor_enabled)
+private val TOR_ENABLED_DETAIL: String get() = Strings.get(R.string.settings_tor_enabled_detail)
+private val TOR_ON_LAUNCH: String get() = Strings.get(R.string.settings_tor_on_launch)
+private val TOR_ON_LAUNCH_SUBTITLE: String get() = Strings.get(R.string.settings_tor_on_launch_subtitle)
+private val TOR_CLIENT: String get() = Strings.get(R.string.settings_tor_client)
+private val TOR_CLIENT_EMBEDDED: String get() = Strings.get(R.string.settings_tor_client_embedded)
+private val TOR_CLIENT_EXTERNAL: String get() = Strings.get(R.string.settings_tor_client_external)
+private val TOR_CLIENT_HELPER: String get() = Strings.get(R.string.settings_tor_client_helper)
+
+/** "On" / "Off": a switch row's state, for settings search. */
+private fun onOff(on: Boolean): String = Strings.get(if (on) R.string.settings_on else R.string.settings_off)
 
 private fun torClientSubtitle(externalProxy: String) =
     if (externalProxy.isEmpty()) TOR_CLIENT_EMBEDDED else TOR_CLIENT_EXTERNAL
 
 /** Settings → Tor (#143, #275), for settings search. */
 internal fun torRows(enabled: Boolean, startOnLaunch: Boolean, externalProxy: String = "") = listOf(
-    settingsRow("tor-enabled", TOR_ENABLED, if (enabled) "On" else "Off", TOR_ENABLED_DETAIL, "Arti"),
+    settingsRow("tor-enabled", TOR_ENABLED, onOff(enabled), TOR_ENABLED_DETAIL, "Arti"),
     settingsRow(
         "tor-client", TOR_CLIENT, torClientSubtitle(externalProxy), externalProxy,
         TOR_CLIENT_EMBEDDED, TOR_CLIENT_EXTERNAL, "Orbot", "SOCKS",
     ),
-    settingsRow("tor-launch", TOR_ON_LAUNCH, TOR_ON_LAUNCH_SUBTITLE, if (startOnLaunch) "On" else "Off", "onion"),
+    settingsRow("tor-launch", TOR_ON_LAUNCH, TOR_ON_LAUNCH_SUBTITLE, onOff(startOnLaunch), "onion"),
 )
 
 /**
@@ -1019,10 +1070,10 @@ private fun TorSettingsSection(
     onEnabled: (Boolean) -> Unit,
     onStartOnLaunch: (Boolean) -> Unit,
 ) {
-    SectionCard(title = SECTION_TOR) {
+    SectionCard(title = stringResource(R.string.settings_section_tor)) {
         if ("tor-enabled" in visible) PageRow(
-            title = TOR_ENABLED,
-            subtitle = if (enabled) "On" else "Off",
+            title = stringResource(R.string.settings_tor_enabled),
+            subtitle = stringResource(if (enabled) R.string.settings_on else R.string.settings_off),
             // Wraps: the whole explanation is readable on a phone.
             thirdLine = TOR_ENABLED_DETAIL,
             style = PageRowStyle.Inset,
@@ -1064,7 +1115,7 @@ private fun NodesSection(
     radicle: RadicleControls,
     onOpenRadicle: () -> Unit,
 ) {
-    SectionCard(title = SECTION_NODES) {
+    SectionCard(title = stringResource(R.string.settings_section_nodes)) {
         if (NodeEndpoint.Swarm.key in visible) {
             EndpointRow(
                 endpoint = NodeEndpoint.Swarm,
@@ -1176,7 +1227,7 @@ private fun EndpointDialog(
                         OutlinedTextField(
                             value = draft,
                             onValueChange = { draft = it },
-                            label = { Text("URL") },
+                            label = { Text(stringResource(R.string.settings_url)) },
                             placeholder = { Text(endpoint.placeholder) },
                             isError = draft.isNotBlank() && normalized == null,
                             supportingText = {
@@ -1204,11 +1255,11 @@ private fun EndpointDialog(
                 TextButton(
                     onClick = { normalized?.let(onSave) },
                     enabled = normalized != null,
-                ) { Text("Save") }
+                ) { Text(stringResource(R.string.common_save)) }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }
@@ -1267,7 +1318,7 @@ private fun TorClientDialog(
                         OutlinedTextField(
                             value = draft,
                             onValueChange = { draft = it.take(TOR_PROXY_MAX_LENGTH) },
-                            label = { Text("host:port") },
+                            label = { Text(stringResource(R.string.settings_tor_proxy_label)) },
                             placeholder = { Text(TorProxy.DEFAULT.authority) },
                             isError = endpoint == null,
                             supportingText = {
@@ -1282,21 +1333,21 @@ private fun TorClientDialog(
                         TextButton(
                             onClick = { endpoint?.let { runTest(it) } },
                             enabled = endpoint != null && !(shown != null && shown.second == null),
-                        ) { Text("Test") }
+                        ) { Text(stringResource(R.string.settings_tor_test)) }
                         if (endpoint != null && orbotInstalled &&
                             (shown?.second == TorProxy.Probe.NotListening)
                         ) {
                             TextButton(onClick = {
                                 TorProxy.requestOrbotStart(context)
                                 runTest(endpoint, delayMs = 3_000)
-                            }) { Text("Start Orbot") }
+                            }) { Text(stringResource(R.string.settings_tor_start_orbot)) }
                         }
                     }
                     if (shown != null && endpoint != null) {
                         val result = shown.second
                         Text(
                             if (result == null) {
-                                "Testing: connecting to a .onion site through $endpoint…"
+                                stringResource(R.string.settings_tor_testing, endpoint.toString())
                             } else {
                                 TorProxy.describe(result, endpoint)
                             },
@@ -1324,11 +1375,11 @@ private fun TorClientDialog(
                 TextButton(
                     onClick = { endpoint?.let { onSave(it.authority) } },
                     enabled = endpoint != null,
-                ) { Text("Save") }
+                ) { Text(stringResource(R.string.common_save)) }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }
@@ -1339,33 +1390,34 @@ private const val TOR_PROXY_MAX_LENGTH = 64
 /** What to fix, for each reason [TorProxy.parse] refuses a proxy. */
 private fun torProxyHint(rejection: TorProxy.Rejection): String = when (rejection) {
     TorProxy.Rejection.EMPTY,
-    TorProxy.Rejection.FORMAT -> "Use host:port, e.g. 127.0.0.1:9050"
-    TorProxy.Rejection.SCHEME -> "Only socks5:// (or no scheme)"
-    TorProxy.Rejection.NOT_LOOPBACK -> "Only a proxy on this device: 127.0.0.1, localhost or [::1]"
-    TorProxy.Rejection.PORT -> "Needs a port from 1 to 65535"
+    TorProxy.Rejection.FORMAT -> Strings.get(R.string.settings_tor_hint_format)
+    TorProxy.Rejection.SCHEME -> Strings.get(R.string.settings_tor_hint_scheme)
+    TorProxy.Rejection.NOT_LOOPBACK -> Strings.get(R.string.settings_tor_hint_not_loopback)
+    TorProxy.Rejection.PORT -> Strings.get(R.string.settings_tor_hint_port)
 }
 
 /** What to fix, for each reason [ExternalEndpoints.validate] refuses a URL. */
 private fun endpointHint(rejection: ExternalEndpoints.Rejection): String = when (rejection) {
     ExternalEndpoints.Rejection.EMPTY,
-    ExternalEndpoints.Rejection.NOT_A_URL -> "Not a URL: e.g. http://192.168.1.10:1633"
-    ExternalEndpoints.Rejection.TOO_LONG -> "Too long: at most 2048 characters"
-    ExternalEndpoints.Rejection.SCHEME -> "Needs http:// or https://"
-    ExternalEndpoints.Rejection.QUERY_OR_FRAGMENT -> "Remove the ? or # part"
-    ExternalEndpoints.Rejection.CREDENTIALS -> "Remove the user name or password before the host"
+    ExternalEndpoints.Rejection.NOT_A_URL -> Strings.get(R.string.settings_endpoint_hint_not_a_url)
+    ExternalEndpoints.Rejection.TOO_LONG -> Strings.get(R.string.settings_hint_too_long)
+    ExternalEndpoints.Rejection.SCHEME -> Strings.get(R.string.settings_endpoint_hint_scheme)
+    ExternalEndpoints.Rejection.QUERY_OR_FRAGMENT -> Strings.get(R.string.settings_endpoint_hint_query)
+    ExternalEndpoints.Rejection.CREDENTIALS -> Strings.get(R.string.settings_hint_remove_credentials)
 }
 
-private const val ADBLOCK_ALLOWLIST_EMPTY =
-    "Sites you allow ads on — from the page menu, or with Add site — appear here. Blocking is off for them and their subdomains."
-private const val ADBLOCK_ADD_SITE = "Add site"
-private const val ADBLOCK_ADD_SITE_SUBTITLE = "Turn ad blocking off for a site"
-private const val ADBLOCK_CREDITS =
-    "Filter lists: EasyList, EasyPrivacy and Fanboy's lists (easylist.to), © their authors, used under CC BY-SA 3.0. Changes apply to pages as they next load."
+private val ADBLOCK_ALLOWLIST_EMPTY: String get() = Strings.get(R.string.settings_adblock_allowlist_empty)
+private val ADBLOCK_ADD_SITE: String get() = Strings.get(R.string.settings_adblock_add_site)
+private val ADBLOCK_ADD_SITE_SUBTITLE: String get() = Strings.get(R.string.settings_adblock_add_site_subtitle)
+private val ADBLOCK_CREDITS: String get() = Strings.get(R.string.settings_adblock_credits)
 
-private const val ADBLOCK_AUTO_UPDATE = "Keep filter lists up to date"
-private const val ADBLOCK_AUTO_UPDATE_SUBTITLE = "Signed updates over Swarm"
-private const val ADBLOCK_CHECK_UPDATES = "Check for list updates"
-private const val ADBLOCK_CHECK_UPDATES_SUBTITLE = "Reads the update feed on Swarm now"
+private val ADBLOCK_AUTO_UPDATE: String get() = Strings.get(R.string.settings_adblock_auto_update)
+private val ADBLOCK_AUTO_UPDATE_SUBTITLE: String get() = Strings.get(R.string.settings_adblock_auto_update_subtitle)
+private val ADBLOCK_CHECK_UPDATES: String get() = Strings.get(R.string.settings_adblock_check_updates)
+private val ADBLOCK_CHECK_UPDATES_SUBTITLE: String get() = Strings.get(R.string.settings_adblock_check_updates_subtitle)
+
+/** List names in a status line: "EasyList, EasyPrivacy". */
+private fun List<String>.joinNames(): String = joinToString(Strings.get(R.string.settings_list_separator))
 
 /**
  * The wrapping line under "Keep filter lists up to date": which lists
@@ -1377,7 +1429,8 @@ private const val ADBLOCK_CHECK_UPDATES_SUBTITLE = "Reads the update feed on Swa
  * the version on a phone.)
  */
 internal fun adblockListsLine(status: AdblockStatus): String {
-    val version = status.listsVersion ?: return "Using the built-in lists"
+    val builtIn = Strings.get(R.string.settings_adblock_lists_builtin)
+    val version = status.listsVersion ?: return builtIn
     if (status.updatedLists.isEmpty()) {
         // Give each built-in list its real reason: newer than the
         // update's copy, the update's copy failed its hash check (it's
@@ -1390,30 +1443,45 @@ internal fun adblockListsLine(status: AdblockStatus): String {
         val reasons = listOfNotNull(
             when {
                 newer.isEmpty() -> null
-                newer.size == all.size -> "newer than update $version"
-                else -> "${newer.joinToString(", ")} newer than update $version's"
+                newer.size == all.size -> Strings.get(R.string.settings_adblock_reason_all_newer, version)
+                else -> Strings.get(R.string.settings_adblock_reason_some_newer, newer.joinNames(), version)
             },
             when {
                 damaged.isEmpty() -> null
-                damaged.size == all.size -> "update $version's copies failed their hash check"
-                else -> "update $version's ${damaged.joinToString(", ")} failed its hash check"
+                damaged.size == all.size -> Strings.get(R.string.settings_adblock_reason_all_damaged, version)
+                else -> Strings.get(R.string.settings_adblock_reason_some_damaged, version, damaged.joinNames())
             },
             when {
                 uncovered.isEmpty() -> null
-                uncovered.size == all.size -> "update $version doesn't include them"
-                else -> "update $version doesn't include ${uncovered.joinToString(", ")}"
+                uncovered.size == all.size -> Strings.get(R.string.settings_adblock_reason_none_included, version)
+                else -> Strings.get(R.string.settings_adblock_reason_some_not_included, version, uncovered.joinNames())
             },
         )
-        if (reasons.isEmpty()) return "Using the built-in lists"
-        return "Using the built-in lists (${reasons.joinToString("; ")})"
+        if (reasons.isEmpty()) return builtIn
+        return Strings.get(
+            R.string.settings_adblock_lists_builtin_because,
+            reasons.joinToString(Strings.get(R.string.settings_clause_separator)),
+        )
     }
     val day = status.listsGeneratedAt?.take(10)?.takeIf { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) }
-    val update = "Using update $version" + (day?.let { " of $it" } ?: "")
+    val update = if (day != null) {
+        Strings.get(R.string.settings_adblock_using_update_of, version, day)
+    } else {
+        Strings.get(R.string.settings_adblock_using_update, version)
+    }
     if (status.builtInLists.isEmpty()) return update
     val damaged = status.damagedLists.filter { it in status.builtInLists }
-    return "$update for ${status.updatedLists.joinToString(", ")}; " +
-        "the built-in ${status.builtInLists.joinToString(", ")}" +
-        (if (damaged.isEmpty()) "" else " (update $version's ${damaged.joinToString(", ")} failed its hash check)")
+    return if (damaged.isEmpty()) {
+        Strings.get(
+            R.string.settings_adblock_using_update_and_builtin,
+            update, status.updatedLists.joinNames(), status.builtInLists.joinNames(),
+        )
+    } else {
+        Strings.get(
+            R.string.settings_adblock_using_update_and_builtin_damaged,
+            update, status.updatedLists.joinNames(), status.builtInLists.joinNames(), version, damaged.joinNames(),
+        )
+    }
 }
 
 /** The Settings name of the category [key] ("ads" → "EasyList"). */
@@ -1425,37 +1493,40 @@ private fun adblockListName(key: String): String =
  * or how the last one ended; `null` before the first check.
  */
 internal fun adblockUpdateLine(update: AdblockUpdateState): String? {
-    if (update.checking) return "Checking…"
+    if (update.checking) return Strings.get(R.string.settings_checking)
     return when (val last = update.last) {
         null -> null
         is AdblockUpdateOutcome.Applied ->
             if (last.olderThanBuiltIn.isEmpty()) {
-                "Updated to version ${last.version}"
+                Strings.get(R.string.settings_adblock_updated, last.version)
             } else {
-                "Updated to version ${last.version}; the built-in " +
-                    last.olderThanBuiltIn.joinToString(", ") { adblockListName(it) } +
-                    if (last.olderThanBuiltIn.size == 1) " stays, it's newer" else " stay, they're newer"
+                Strings.plural(
+                    R.plurals.settings_adblock_updated_builtin_newer, last.olderThanBuiltIn.size,
+                    last.version, last.olderThanBuiltIn.map { adblockListName(it) }.joinNames(),
+                )
             }
         is AdblockUpdateOutcome.BuiltInNewer ->
-            "Version ${last.version} on the feed is older than the built-in lists; they stay in use"
+            Strings.get(R.string.settings_adblock_builtin_newer, last.version)
         is AdblockUpdateOutcome.UpToDate ->
-            if (last.version > 0) "Up to date (version ${last.version})" else "Up to date"
-        AdblockUpdateOutcome.FeedUnavailable ->
-            "Couldn't reach the update feed on Swarm — is the Swarm node running? Tap to try again"
-        is AdblockUpdateOutcome.Rejected ->
-            "Refused an update that failed verification (${last.reason}); the current lists stay"
+            if (last.version > 0) {
+                Strings.get(R.string.settings_adblock_up_to_date_version, last.version)
+            } else {
+                Strings.get(R.string.settings_adblock_up_to_date)
+            }
+        AdblockUpdateOutcome.FeedUnavailable -> Strings.get(R.string.settings_adblock_feed_unavailable)
+        is AdblockUpdateOutcome.Rejected -> Strings.get(R.string.settings_adblock_rejected, last.reason)
         is AdblockUpdateOutcome.DownloadFailed ->
-            "Couldn't download ${adblockListName(last.category)}; the current lists stay"
+            Strings.get(R.string.settings_adblock_download_failed, adblockListName(last.category))
         is AdblockUpdateOutcome.HashMismatch ->
-            "${adblockListName(last.category)} didn't match its signed hash; the current lists stay"
-        AdblockUpdateOutcome.NothingEnabled -> "Every filter list is off"
-        is AdblockUpdateOutcome.Failed -> "The update failed (${last.message}); the current lists stay"
+            Strings.get(R.string.settings_adblock_hash_mismatch, adblockListName(last.category))
+        AdblockUpdateOutcome.NothingEnabled -> Strings.get(R.string.settings_adblock_nothing_enabled)
+        is AdblockUpdateOutcome.Failed -> Strings.get(R.string.settings_adblock_failed, last.message)
     }
 }
 
 /** The line under a category: its list, and while it's on, how the engine is doing. */
 internal fun adblockCategorySubtitle(category: AdblockCategory, on: Boolean, status: AdblockStatus): String =
-    if (on && status.loading) "${category.listName} · loading…" else category.listName
+    if (on && status.loading) Strings.get(R.string.settings_adblock_category_loading, category.listName) else category.listName
 
 private fun adblockSectionRows(
     enabled: Set<AdblockCategory>,
@@ -1464,16 +1535,27 @@ private fun adblockSectionRows(
     update: AdblockUpdateState,
 ) = buildList {
     for (category in AdblockCategory.entries) {
-        add(settingsRow(category, category.title, category.listName, if (category in enabled) "On" else "Off"))
+        add(settingsRow(category, category.title, category.listName, onOff(category in enabled)))
     }
-    add(settingsRow("auto-update", ADBLOCK_AUTO_UPDATE, ADBLOCK_AUTO_UPDATE_SUBTITLE, adblockListsLine(status), "filter list updates"))
-    add(settingsRow("update-check", ADBLOCK_CHECK_UPDATES, ADBLOCK_CHECK_UPDATES_SUBTITLE, adblockUpdateLine(update), "filter list updates"))
-    add(settingsRow("allowlist-add", ADBLOCK_ADD_SITE, ADBLOCK_ADD_SITE_SUBTITLE, "allowlist", "allowed sites"))
+    val updateWords = searchKeywords(R.string.settings_adblock_updates_keywords)
+    add(settingsRow("auto-update", ADBLOCK_AUTO_UPDATE, ADBLOCK_AUTO_UPDATE_SUBTITLE, adblockListsLine(status), *updateWords))
+    add(settingsRow("update-check", ADBLOCK_CHECK_UPDATES, ADBLOCK_CHECK_UPDATES_SUBTITLE, adblockUpdateLine(update), *updateWords))
+    add(
+        settingsRow(
+            "allowlist-add", ADBLOCK_ADD_SITE, ADBLOCK_ADD_SITE_SUBTITLE,
+            *searchKeywords(R.string.settings_adblock_add_site_keywords),
+        ),
+    )
     if (allowlist.isEmpty()) {
         add(settingsRow("allowlist-empty", ADBLOCK_ALLOWLIST_EMPTY))
     } else {
         for (site in allowlist) {
-            add(settingsRow("site:$site", allowlistHostForDisplay(site), allowlistSiteSubtitle(site), "allowlist", site))
+            add(
+                settingsRow(
+                    "site:$site", allowlistHostForDisplay(site), allowlistSiteSubtitle(site),
+                    *searchKeywords(R.string.settings_adblock_site_keywords), site,
+                ),
+            )
         }
     }
     add(settingsRow("credits", ADBLOCK_CREDITS))
@@ -1486,7 +1568,11 @@ private fun adblockSectionRows(
  */
 internal fun allowlistSiteSubtitle(site: String): String {
     val shown = allowlistHostForDisplay(site)
-    return if (shown == site) "Ads allowed" else "$site · Ads allowed"
+    return if (shown == site) {
+        Strings.get(R.string.settings_adblock_site_allowed)
+    } else {
+        Strings.get(R.string.settings_adblock_site_allowed_punycode, site)
+    }
 }
 
 /**
@@ -1509,7 +1595,7 @@ private fun AdblockSection(
     onRemoveSite: (String) -> Unit,
     onAddSite: () -> Unit,
 ) {
-    SectionCard(title = SECTION_ADBLOCK) {
+    SectionCard(title = stringResource(R.string.settings_section_adblock)) {
         for (category in AdblockCategory.entries) {
             if (category !in visible) continue
             val on = category in enabled
@@ -1587,7 +1673,7 @@ private fun AdblockSection(
                 IconButton(onClick = { onRemoveSite(site) }) {
                     Icon(
                         Icons.Filled.Close,
-                        contentDescription = "Block ads on $shown again",
+                        contentDescription = stringResource(R.string.settings_adblock_site_remove, shown),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -1611,19 +1697,22 @@ private fun AllowlistSiteDialog(onAdd: (String) -> Unit, onDismiss: () -> Unit) 
     val host = normalizeAllowlistHost(draft)
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Allow ads on a site") },
+        title = { Text(stringResource(R.string.settings_adblock_allow_site_title)) },
         text = {
             NoSuggestionsTextInput {
                 OutlinedTextField(
                     value = draft,
                     onValueChange = { draft = it },
-                    label = { Text("Site") },
-                    placeholder = { Text("example.com") },
+                    label = { Text(stringResource(R.string.settings_adblock_allow_site_label)) },
+                    placeholder = { Text(stringResource(R.string.settings_adblock_allow_site_placeholder)) },
                     isError = draft.isNotBlank() && host == null,
                     supportingText = {
                         Text(
-                            if (draft.isNotBlank() && host == null) "Not a site: e.g. example.com"
-                            else "Its subdomains are included.",
+                            if (draft.isNotBlank() && host == null) {
+                                stringResource(R.string.settings_adblock_allow_site_invalid)
+                            } else {
+                                stringResource(R.string.settings_adblock_allow_site_helper)
+                            },
                         )
                     },
                     singleLine = true,
@@ -1633,24 +1722,32 @@ private fun AllowlistSiteDialog(onAdd: (String) -> Unit, onDismiss: () -> Unit) 
             }
         },
         confirmButton = {
-            TextButton(onClick = { host?.let(onAdd) }, enabled = host != null) { Text("Add") }
+            TextButton(onClick = { host?.let(onAdd) }, enabled = host != null) { Text(stringResource(R.string.common_add)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }
 
-private const val ROW_CLEAR_HISTORY = "Clear history"
-private const val ROW_CLEAR_BOOKMARKS = "Clear bookmarks"
-private const val ROW_CLEAR_SITE_DATA = "Clear cookies & site data"
-private const val ROW_CLEAR_SITE_DATA_SUBTITLE = "Cookies, DOM storage, cache, form data, zoom levels, and desktop sites"
+private val ROW_CLEAR_HISTORY: String get() = Strings.get(R.string.settings_clear_history)
+private val ROW_CLEAR_BOOKMARKS: String get() = Strings.get(R.string.settings_clear_bookmarks)
+private val ROW_CLEAR_SITE_DATA: String get() = Strings.get(R.string.settings_clear_site_data)
+private val ROW_CLEAR_SITE_DATA_SUBTITLE: String get() = Strings.get(R.string.settings_clear_site_data_subtitle)
 
 private fun historySubtitle(count: Int) =
-    if (count == 0) "Nothing to clear" else "$count visit${if (count == 1) "" else "s"}"
+    if (count == 0) {
+        Strings.get(R.string.settings_nothing_to_clear)
+    } else {
+        Strings.plural(R.plurals.settings_history_visits, count, count)
+    }
 
 private fun bookmarksSubtitle(count: Int) =
-    if (count == 0) "Nothing to clear" else "$count bookmark${if (count == 1) "" else "s"}"
+    if (count == 0) {
+        Strings.get(R.string.settings_nothing_to_clear)
+    } else {
+        Strings.plural(R.plurals.settings_bookmarks_count, count, count)
+    }
 
 internal fun browsingDataRows(historyCount: Int, bookmarkCount: Int) = listOf(
     settingsRow("history", ROW_CLEAR_HISTORY, historySubtitle(historyCount)),
@@ -1667,7 +1764,7 @@ private fun BrowsingDataSection(
     onClearBookmarksRequested: () -> Unit,
     onClearSiteDataRequested: () -> Unit,
 ) {
-    SectionCard(title = SECTION_BROWSING) {
+    SectionCard(title = stringResource(R.string.settings_section_browsing)) {
         if ("history" in visible) ActionRow(
             icon = Icons.Filled.History,
             title = ROW_CLEAR_HISTORY,
@@ -1701,18 +1798,14 @@ private fun BrowsingDataSection(
  * too, so a Block or a dismissal embargo made this run can be lifted
  * without restarting the app.
  */
-private const val PERMISSIONS_EMPTY =
-    "Sites you allow or block from using your camera, microphone or location, " +
-        "from sending system-exclusive messages to your MIDI devices, " +
-        "or from opening links in other apps, " +
-        "and sites you connect your wallet to, appear here."
+private val PERMISSIONS_EMPTY: String get() = Strings.get(R.string.settings_permissions_empty)
 
 /** A wallet connection's row key in Site permissions: its own type, so it never equals a [SitePermissionEntry]. */
 internal data class DappConnectionRow(val origin: String)
 
 /** "Wallet · Account 1 · 0x9858…da94 · Gnosis Chain": a connected site's line in Site permissions. */
 internal fun dappConnectionDetail(grant: DappGrantStore.Grant, accounts: List<WalletAccount>, chains: List<Chain>) =
-    "Wallet · ${connectedSiteSummary(grant, accounts, chains)}"
+    Strings.get(R.string.settings_dapp_connection_detail, connectedSiteSummary(grant, accounts, chains))
 
 /**
  * One row per wallet connection (#111), then one per decision, each keyed by
@@ -1757,7 +1850,7 @@ private fun SitePermissionsSection(
     disconnectFailed: String?,
     onDisconnect: (String) -> Unit,
 ) {
-    SectionCard(title = SECTION_PERMISSIONS) {
+    SectionCard(title = stringResource(R.string.settings_section_permissions)) {
         if (entries.isEmpty() && grants.isEmpty() && "empty" in visible) {
             Text(
                 PERMISSIONS_EMPTY,
@@ -1774,7 +1867,7 @@ private fun SitePermissionsSection(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(MaterialTheme.shapes.small)
-                    .clickable(onClickLabel = "Open") { onOpenSite(grant.origin) }
+                    .clickable(onClickLabel = stringResource(R.string.common_open)) { onOpenSite(grant.origin) }
                     .padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1802,7 +1895,7 @@ private fun SitePermissionsSection(
                 IconButton(onClick = { onDisconnect(grant.origin) }) {
                     Icon(
                         Icons.Filled.Close,
-                        contentDescription = "Disconnect $site from the wallet",
+                        contentDescription = stringResource(R.string.settings_dapp_disconnect, site),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -1836,7 +1929,11 @@ private fun SitePermissionsSection(
                 IconButton(onClick = { onRevoke(entry) }) {
                     Icon(
                         Icons.Filled.Close,
-                        contentDescription = "Remove ${entry.permission.label} permission for ${permissionOriginDisplay(entry.origin)}",
+                        contentDescription = stringResource(
+                            R.string.settings_permission_remove,
+                            entry.permission.label,
+                            permissionOriginDisplay(entry.origin),
+                        ),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -1850,32 +1947,31 @@ private fun appVersionLabel(context: Context): String {
     val info = runCatching {
         context.packageManager.getPackageInfo(context.packageName, 0)
     }.getOrNull()
-    val versionName = info?.versionName ?: "unknown"
+    val versionName = info?.versionName ?: Strings.get(R.string.settings_app_version_unknown)
     @Suppress("DEPRECATION")
     val versionCode = info?.let {
         if (android.os.Build.VERSION.SDK_INT >= 28) it.longVersionCode
         else it.versionCode.toLong()
     } ?: 0L
-    return "$versionName (build $versionCode)"
+    return Strings.get(R.string.settings_app_version, versionName, versionCode)
 }
 
-private const val ABOUT_NAME = "Freedom"
-private const val ABOUT_TAGLINE = "Swarm-native browser for Android"
-private const val ABOUT_BLURB =
-    "Loads regular https:// sites plus decentralised content via bzz:// hashes and ENS names (vitalik.eth), served through embedded nodes."
+private val ABOUT_NAME: String get() = Strings.get(R.string.app_name)
+private val ABOUT_TAGLINE: String get() = Strings.get(R.string.settings_about_tagline)
+private val ABOUT_BLURB: String get() = Strings.get(R.string.settings_about_blurb)
 
-private const val UPDATES_CHECK = "Check for updates"
-private const val UPDATES_CHECK_SUBTITLE = "Once a day, from GitHub Releases"
-private const val UPDATES_CHECK_NOW = "Check now"
-private const val UPDATES_CHECK_NOW_SUBTITLE = "Reads the latest release from GitHub"
-private const val UPDATES_OPEN_SUBTITLE = "Opens its release page"
+private val UPDATES_CHECK: String get() = Strings.get(R.string.settings_updates_check)
+private val UPDATES_CHECK_SUBTITLE: String get() = Strings.get(R.string.settings_updates_check_subtitle)
+private val UPDATES_CHECK_NOW: String get() = Strings.get(R.string.settings_updates_check_now)
+private val UPDATES_CHECK_NOW_SUBTITLE: String get() = Strings.get(R.string.settings_updates_check_now_subtitle)
+private val UPDATES_OPEN_SUBTITLE: String get() = Strings.get(R.string.settings_updates_open_subtitle)
 
 /**
  * The line under **Check for updates** for a build from an app store:
  * it doesn't check, the store updates it. `null` otherwise.
  */
 internal fun appUpdateStoreLine(update: AppUpdateState): String? =
-    update.store?.let { "Installed from $it, which keeps Freedom up to date: no check runs" }
+    update.store?.let { Strings.get(R.string.settings_updates_from_store, it.text) }
 
 /**
  * The line under **Check now**: a check under way, what the last one
@@ -1883,17 +1979,21 @@ internal fun appUpdateStoreLine(update: AppUpdateState): String? =
  * failed — with when it last ran, by [formatTime].
  */
 internal fun appUpdateLine(update: AppUpdateState, formatTime: (Long) -> String): String {
-    if (update.store != null) return "Updates come from ${update.store}"
-    if (update.checking) return "Checking…"
+    if (update.store != null) return Strings.get(R.string.settings_updates_come_from, update.store.text)
+    if (update.checking) return Strings.get(R.string.settings_checking)
     val available = update.available
     val found = when {
-        available != null -> "Freedom ${available.version} is out; this is ${update.installedName}"
-        update.latest != null -> "Up to date: ${update.latest.version} is the latest release"
+        available != null ->
+            Strings.get(R.string.settings_updates_available, available.version.toString(), update.installedName)
+        update.latest != null -> Strings.get(R.string.settings_updates_up_to_date, update.latest.version.toString())
         else -> null
     }
-    val failed = (update.last as? UpdateCheckOutcome.Failed)?.let { "The last check failed: ${it.reason}" }
-    val checked = update.lastCheckedAt?.let { "last checked ${formatTime(it)}" }
-    val lead = failed ?: found ?: return checked?.replaceFirstChar { it.uppercase() } ?: "Not checked yet"
+    val failed = (update.last as? UpdateCheckOutcome.Failed)
+        ?.let { Strings.get(R.string.settings_updates_last_failed, it.reason) }
+    val lead = failed ?: found
+        ?: return update.lastCheckedAt?.let { Strings.get(R.string.settings_updates_last_checked_alone, formatTime(it)) }
+            ?: Strings.get(R.string.settings_updates_not_checked)
+    val checked = update.lastCheckedAt?.let { Strings.get(R.string.settings_updates_last_checked, formatTime(it)) }
     return listOfNotNull(lead, checked).joinToString(" · ")
 }
 
@@ -1902,22 +2002,27 @@ internal fun appUpdateAvailableTitle(release: LatestRelease): String = updateNot
 
 private fun aboutRows(version: String, packageName: String, update: AppUpdateState, checkOn: Boolean) = buildList {
     add(settingsRow("app", ABOUT_NAME, ABOUT_TAGLINE))
-    add(settingsRow("version", "Version", version))
-    add(settingsRow("package", "Package", packageName))
+    add(settingsRow("version", Strings.get(R.string.settings_version), version))
+    add(settingsRow("package", Strings.get(R.string.settings_package), packageName))
     add(
         settingsRow(
             "update-check", UPDATES_CHECK, UPDATES_CHECK_SUBTITLE, appUpdateStoreLine(update),
-            if (checkOn) "On" else "Off", "updates", "release",
+            onOff(checkOn), *searchKeywords(R.string.settings_updates_check_keywords),
         ),
     )
     add(
         settingsRow(
             "update-now", UPDATES_CHECK_NOW, UPDATES_CHECK_NOW_SUBTITLE, appUpdateLine(update) { txDateFormat().format(java.util.Date(it)) },
-            "check for updates", "release",
+            *searchKeywords(R.string.settings_updates_check_now_keywords),
         ),
     )
     update.available?.let {
-        add(settingsRow("update-open", appUpdateAvailableTitle(it), UPDATES_OPEN_SUBTITLE, "update", "release", it.url))
+        add(
+            settingsRow(
+                "update-open", appUpdateAvailableTitle(it), UPDATES_OPEN_SUBTITLE,
+                *searchKeywords(R.string.settings_updates_open_keywords), it.url,
+            ),
+        )
     }
     add(settingsRow("blurb", ABOUT_BLURB))
 }
@@ -1933,7 +2038,7 @@ private fun AboutSection(
     onOpenRelease: (LatestRelease) -> Unit,
 ) {
     val context = LocalContext.current
-    SectionCard(title = SECTION_ABOUT) {
+    SectionCard(title = stringResource(R.string.settings_section_about)) {
         if ("app" in visible) Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -1958,8 +2063,8 @@ private fun AboutSection(
         if ("app" in visible && ("version" in visible || "package" in visible)) {
             Spacer(Modifier.height(8.dp))
         }
-        if ("version" in visible) DetailRow("Version", version)
-        if ("package" in visible) DetailRow("Package", context.packageName, mono = true)
+        if ("version" in visible) DetailRow(stringResource(R.string.settings_version), version)
+        if ("package" in visible) DetailRow(stringResource(R.string.settings_package), context.packageName, mono = true)
         val available = update.available
         if ("update-open" in visible && available != null) PageRow(
             title = appUpdateAvailableTitle(available),
@@ -2008,8 +2113,8 @@ private fun AboutSection(
     }
 }
 
-private const val ROW_ADVANCED = "Show advanced options"
-private const val ROW_ADVANCED_SUBTITLE = "Experimental protocol settings"
+private val ROW_ADVANCED: String get() = Strings.get(R.string.settings_advanced)
+private val ROW_ADVANCED_SUBTITLE: String get() = Strings.get(R.string.settings_advanced_subtitle)
 
 private fun otherRows() = listOf(settingsRow("advanced", ROW_ADVANCED, ROW_ADVANCED_SUBTITLE))
 
@@ -2018,7 +2123,7 @@ private fun OtherSection(
     showIpfsUi: Boolean,
     onToggleShowIpfsUi: (Boolean) -> Unit,
 ) {
-    SectionCard(title = SECTION_OTHER) {
+    SectionCard(title = stringResource(R.string.settings_section_other)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2057,10 +2162,9 @@ private fun OtherSection(
 // toggle is always off at cold launch. Flipping it on calls
 // [onIpfsToggle] which routes through `MainActivity` → `NodeService`
 // to start/stop the IPFS node live.
-private const val ROW_ROUTING_MODE = "Routing mode"
-private const val ROW_ROUTING_MODE_SUBTITLE = "Content discovery strategy"
-private const val ROUTING_MODE_HELPER =
-    "Routing mode applies the next time IPFS starts — toggle IPFS off and on to re-init."
+private val ROW_ROUTING_MODE: String get() = Strings.get(R.string.settings_routing_mode)
+private val ROW_ROUTING_MODE_SUBTITLE: String get() = Strings.get(R.string.settings_routing_mode_subtitle)
+private val ROUTING_MODE_HELPER: String get() = Strings.get(R.string.settings_routing_mode_helper)
 
 /**
  * The IPFS switch with the node's details under it (one row: they
@@ -2070,15 +2174,18 @@ private const val ROUTING_MODE_HELPER =
 internal fun ipfsRows(info: IpfsInfo) = listOf(
     settingsRow(
         "status",
-        "IPFS",
+        SECTION_IPFS,
         ipfsStatusTriple(info).label,
         // The details [IpfsSection] lists under the switch.
         *(if (info.gatewayUrl.isNotBlank()) arrayOf(
-            "Blocks fetched", info.connectedPeers.toString(),
-            "Gateway", info.gatewayUrl,
-            "Client", info.clientVersion.takeIf { it.isNotBlank() }?.let { "freedom-ipfs/$it" },
+            Strings.get(R.string.settings_ipfs_blocks_fetched), info.connectedPeers.toString(),
+            Strings.get(R.string.settings_ipfs_gateway_label), info.gatewayUrl,
+            Strings.get(R.string.settings_ipfs_client),
+            info.clientVersion.takeIf { it.isNotBlank() }?.let { "freedom-ipfs/$it" },
         ) else emptyArray()),
-        *(if (!info.errorMessage.isNullOrBlank()) arrayOf("Error", info.errorMessage) else emptyArray()),
+        *(if (!info.errorMessage.isNullOrBlank()) {
+            arrayOf(Strings.get(R.string.settings_ipfs_error), info.errorMessage)
+        } else emptyArray()),
     ),
     settingsRow(
         "routing",
@@ -2104,7 +2211,7 @@ private fun IpfsSection(
     val triple = ipfsStatusTriple(ipfsInfo)
     val isOn = ipfsInfo.status != IpfsStatus.Stopped
 
-    SectionCard(title = SECTION_IPFS) {
+    SectionCard(title = stringResource(R.string.settings_section_ipfs)) {
         if ("status" in visible) {
             Row(
                 modifier = Modifier
@@ -2116,7 +2223,7 @@ private fun IpfsSection(
                 Icon(triple.icon, contentDescription = null, tint = triple.color)
                 Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("IPFS", fontWeight = FontWeight.Medium)
+                    Text(stringResource(R.string.settings_section_ipfs), fontWeight = FontWeight.Medium)
                     Text(
                         triple.label,
                         style = MaterialTheme.typography.bodySmall,
@@ -2133,16 +2240,20 @@ private fun IpfsSection(
                 Spacer(Modifier.height(8.dp))
                 // connectedPeers carries verified blocks fetched — the
                 // reader has no peer set (see swarmnode IpfsNode).
-                DetailRow("Blocks fetched", ipfsInfo.connectedPeers.toString())
-                DetailRow("Gateway", ipfsInfo.gatewayUrl, mono = true)
+                DetailRow(stringResource(R.string.settings_ipfs_blocks_fetched), ipfsInfo.connectedPeers.toString())
+                DetailRow(stringResource(R.string.settings_ipfs_gateway_label), ipfsInfo.gatewayUrl, mono = true)
                 if (ipfsInfo.clientVersion.isNotBlank()) {
-                    DetailRow("Client", "freedom-ipfs/${ipfsInfo.clientVersion}", mono = true)
+                    DetailRow(
+                        stringResource(R.string.settings_ipfs_client),
+                        "freedom-ipfs/${ipfsInfo.clientVersion}",
+                        mono = true,
+                    )
                 }
             }
             val err = ipfsInfo.errorMessage
             if (!err.isNullOrBlank()) {
                 Spacer(Modifier.height(8.dp))
-                DetailRow("Error", err, singleLine = false)
+                DetailRow(stringResource(R.string.settings_ipfs_error), err, singleLine = false)
             }
             LogsButton(onOpenLogs)
         }
@@ -2254,7 +2365,7 @@ private fun ConfirmDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }
@@ -2278,15 +2389,15 @@ private fun ipfsStatusTriple(info: IpfsInfo): IpfsStatusTriple = when (info.stat
     // freedom-ipfs is an on-demand reader: the gateway being up means
     // the node is usable — there is no peer set to wait for.
     IpfsStatus.Running -> IpfsStatusTriple(
-        Color(0xFF22C55E), Icons.Filled.CheckCircle, "Connected",
+        Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.settings_ipfs_connected),
     )
     IpfsStatus.Starting -> IpfsStatusTriple(
-        Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Connecting…",
+        Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.settings_ipfs_connecting),
     )
     IpfsStatus.Stopped -> IpfsStatusTriple(
-        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, "Disconnected",
+        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.settings_ipfs_disconnected),
     )
     IpfsStatus.Error -> IpfsStatusTriple(
-        Color(0xFFEF4444), Icons.Filled.ErrorOutline, "Error",
+        Color(0xFFEF4444), Icons.Filled.ErrorOutline, Strings.get(R.string.settings_ipfs_error),
     )
 }

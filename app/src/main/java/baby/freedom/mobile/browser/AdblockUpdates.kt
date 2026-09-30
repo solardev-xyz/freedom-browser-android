@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.l10n.Text
 import android.util.Log
 import java.io.File
 import java.io.IOException
@@ -311,8 +312,15 @@ internal sealed interface AdblockUpdateOutcome {
     /** Every category is off, so there's nothing to update. */
     data object NothingEnabled : AdblockUpdateOutcome
 
-    /** Writing the update failed. */
-    data class Failed(val message: String) : AdblockUpdateOutcome
+    /**
+     * Writing the update failed, or it couldn't run; [message] says why,
+     * read when shown so it follows a change of the app language (#280).
+     */
+    data class Failed(private val why: Text) : AdblockUpdateOutcome {
+        constructor(message: String) : this(Text.raw(message))
+
+        val message: String get() = why.text
+    }
 }
 
 /**

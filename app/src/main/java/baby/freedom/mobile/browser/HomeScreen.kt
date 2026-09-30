@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import android.graphics.BitmapFactory
 import android.util.Log
+import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -13,12 +14,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import kotlinx.coroutines.CancellationException
@@ -227,7 +230,7 @@ internal fun HomeScreen(
             if (bookmarks.isNotEmpty()) {
                 Spacer(Modifier.height(firstGap))
                 SectionHeader(
-                    "Bookmarks",
+                    stringResource(R.string.browser_home_bookmarks),
                     modifier = Modifier.padding(horizontal = 24.dp),
                 )
                 Spacer(Modifier.height(12.dp))
@@ -237,7 +240,7 @@ internal fun HomeScreen(
             if (recent.isNotEmpty()) {
                 Spacer(Modifier.height(if (bookmarks.isEmpty()) firstGap else 16.dp))
                 SectionHeader(
-                    "Recent",
+                    stringResource(R.string.browser_home_recent),
                     modifier = Modifier.padding(horizontal = 24.dp),
                 )
                 Spacer(Modifier.height(8.dp))
@@ -246,7 +249,7 @@ internal fun HomeScreen(
 
             Spacer(Modifier.height(if (bookmarks.isEmpty() && recent.isEmpty()) firstGap else 16.dp))
             SectionHeader(
-                "Explore",
+                stringResource(R.string.browser_home_explore),
                 modifier = Modifier.padding(horizontal = 24.dp),
             )
             Spacer(Modifier.height(8.dp))
@@ -262,16 +265,18 @@ private const val RECENT_LIMIT = 8
 /** A curated dweb site on the home page's Explore row. */
 internal data class ExploreEntry(
     val title: String,
-    val subtitle: String,
+    @StringRes private val subtitleRes: Int,
     /** Submitted through the address bar's pipeline, like a typed address. */
     val address: String,
-)
+) {
+    val subtitle: String get() = Strings.get(subtitleRes)
+}
 
 /** iOS's `ExploreEntry.mainnetCurated`, the same list on both platforms. */
 internal val EXPLORE_CURATED: List<ExploreEntry> = listOf(
     ExploreEntry(
         title = "Swarmit",
-        subtitle = "Decentralized social feed on Swarm",
+        subtitleRes = R.string.browser_explore_swarmit_subtitle,
         address = "app.swarmit.eth",
     ),
 )
@@ -310,7 +315,7 @@ private fun IntroCard(
     ) {
         Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp)) {
             Text(
-                text = "Welcome to Freedom",
+                text = stringResource(R.string.browser_intro_title),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
@@ -318,23 +323,19 @@ private fun IntroCard(
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "Freedom opens the web you know and the decentralized web: sites " +
-                    "stored on Swarm (bzz://) and IPFS (ipfs://), and ENS names such as " +
-                    "app.swarmit.eth.",
+                text = stringResource(R.string.browser_intro_body_web),
                 style = body,
                 color = bodyColor,
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "It reaches them through its own nodes, running on this phone and " +
-                    "talking straight to peers. The nodes use data and battery while they " +
-                    "run; the peers row in the menu shows them and can switch them off.",
+                text = stringResource(R.string.browser_intro_body_nodes),
                 style = body,
                 color = bodyColor,
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "You don't need a wallet to browse. If you want one later, it's in Settings.",
+                text = stringResource(R.string.browser_intro_body_wallet),
                 style = body,
                 color = bodyColor,
             )
@@ -343,8 +344,8 @@ private fun IntroCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                TextButton(onClick = onDismiss) { Text("Got it") }
-                Button(onClick = onTry) { Text("Try ${EXPLORE_CURATED.first().title}") }
+                TextButton(onClick = onDismiss) { Text(stringResource(R.string.browser_intro_got_it)) }
+                Button(onClick = onTry) { Text(stringResource(R.string.browser_intro_try, EXPLORE_CURATED.first().title)) }
             }
         }
     }
@@ -357,21 +358,21 @@ private fun WarmUpRow(
     modifier: Modifier = Modifier,
 ) {
     val (title, detail) = when (warmUp) {
-        SwarmWarmUp.Starting -> "Starting your Swarm node…" to
-            "Swarm sites open once it has found peers."
-        SwarmWarmUp.Connecting -> "Your Swarm node is looking for peers…" to
-            "Swarm sites open once it has found some."
+        SwarmWarmUp.Starting -> stringResource(R.string.browser_warmup_starting) to
+            stringResource(R.string.browser_warmup_starting_detail)
+        SwarmWarmUp.Connecting -> stringResource(R.string.browser_warmup_connecting) to
+            stringResource(R.string.browser_warmup_connecting_detail)
         // Any error, not only one at start: a node that was running can
         // fail later too, so this doesn't claim it never started.
-        SwarmWarmUp.Failed -> "Your Swarm node ran into a problem" to
-            "Tap for details and to try again."
+        SwarmWarmUp.Failed -> stringResource(R.string.browser_warmup_failed) to
+            stringResource(R.string.browser_warmup_failed_detail)
     }
     Row(
         modifier = modifier
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.medium)
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClickLabel = "Open node details", onClick = onClick)
+            .clickable(onClickLabel = stringResource(R.string.browser_warmup_open_node_details), onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp)
             // Read out as it changes, so TalkBack hears when the node is up.
             .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
@@ -426,7 +427,8 @@ private fun ExploreList(onOpen: (String) -> Unit) {
 }
 
 /** "Freedom 0.6.11 is available", as the home notice (and Settings) says it. */
-internal fun updateNoticeTitle(release: LatestRelease): String = "Freedom ${release.version} is available"
+internal fun updateNoticeTitle(release: LatestRelease): String =
+    Strings.get(R.string.browser_update_available, release.version.toString())
 
 /**
  * The home screen's notice of a newer release (#272): its version, a
@@ -462,18 +464,18 @@ private fun UpdateNotice(
             )
             Spacer(Modifier.height(2.dp))
             Text(
-                "A newer version of this browser is out. Its release page has the APK and what changed.",
+                stringResource(R.string.browser_update_body),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             TextButton(onClick = onOpen, contentPadding = PaddingValues(horizontal = 0.dp)) {
-                Text("View release")
+                Text(stringResource(R.string.browser_update_view_release))
             }
         }
         IconButton(onClick = onDismiss) {
             Icon(
                 Icons.Filled.Close,
-                contentDescription = "Close the notice for Freedom ${release.version}",
+                contentDescription = stringResource(R.string.browser_update_close, release.version.toString()),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -496,14 +498,12 @@ private fun HomeHero(modifier: Modifier = Modifier) {
     Column(modifier = modifier) {
         Image(
             painter = painterResource(id = logo),
-            contentDescription = "Freedom",
+            contentDescription = stringResource(R.string.app_name),
             modifier = Modifier.height(32.dp),
         )
         Spacer(Modifier.height(16.dp))
         Text(
-            text = "The decentralized web is here. Powered by built-in nodes, " +
-                "this browser connects you directly to peers, keeping the " +
-                "network strong and user-controlled.",
+            text = stringResource(R.string.browser_home_hero),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -718,34 +718,27 @@ fun PrivateHomeScreen(
             )
             Spacer(Modifier.height(16.dp))
             Text(
-                text = "Private tab",
+                text = stringResource(R.string.browser_private_home_title),
                 style = MaterialTheme.typography.headlineSmall,
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Spacer(Modifier.height(12.dp))
             Text(
-                text = "Pages you open in private tabs aren't kept in your history, and their " +
-                    "cookies, site data and cache are deleted when you close your last private " +
-                    "tab. Site permissions and zoom levels you set here last only until then too.",
+                text = stringResource(R.string.browser_private_home_body),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(12.dp))
             Text(
-                text = "Downloaded files and bookmarks you add are still saved. So is Swarm and " +
-                    "IPFS content you open: your Swarm and IPFS nodes keep what they fetch in " +
-                    "their own storage on this device, for private tabs too.",
+                text = stringResource(R.string.browser_private_home_still_saved),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(24.dp))
-            SectionHeader("What private tabs don't do")
+            SectionHeader(stringResource(R.string.browser_private_home_limits_header))
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "This is privacy on this device, not anonymity. Sites you sign in to " +
-                    "still know it's you, your network operator can still see your traffic, " +
-                    "Swarm and IPFS peers still see your nodes' requests, and your IP address " +
-                    "stays visible to sites and peers.",
+                text = stringResource(R.string.browser_private_home_limits),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

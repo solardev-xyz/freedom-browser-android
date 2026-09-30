@@ -7,6 +7,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.util.Log
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import java.net.URISyntaxException
 
 /**
@@ -74,8 +76,8 @@ import java.net.URISyntaxException
 /** One kind of link a site may hand to another app, e.g. `mailto`. */
 data class ExternalScheme(val scheme: String) : SiteCapability {
     override val key: String get() = "$KEY_PREFIX$scheme"
-    override val label: String get() = "$scheme: links"
-    override val phrase: String get() = "open $scheme: links in another app"
+    override val label: String get() = Strings.get(R.string.errorpage_external_scheme_label, scheme)
+    override val phrase: String get() = Strings.get(R.string.errorpage_external_scheme_phrase, scheme)
     override val androidPermissions: List<String> get() = emptyList()
 
     companion object {

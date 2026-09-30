@@ -25,6 +25,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
+ * A chequebook deposit whose outcome the node couldn't tell: its transfer
+ * may already be out (#117). A type of its own, so the app tells it from
+ * a failure without reading [message], which is in the app language (#280).
+ */
+class DepositMaybeSentException(message: String) : RuntimeException(message)
+
+/**
  * Kotlin wrapper around the embedded ant light-node (`libant_ffi.so`,
  * bridged through [AntNative]).
  *
@@ -495,10 +502,10 @@ class SwarmNode internal constructor(
             val want = normalizeBatchId(batchId) ?: throw IllegalArgumentException("not a batch id")
             val connected = JSONObject(ops.storageStatus(h))
             if (!connected.optBoolean("enabled") || normalizeBatchId(connected.optString("batch_id")) != want) {
-                throw IllegalStateException("this stamp isn't the node's active one")
+                throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_stamp_not_active))
             }
             val depth = connected.optInt("batch_depth", -1).takeIf { it in 17..64 }
-                ?: throw IllegalStateException("the node reported no depth for this stamp")
+                ?: throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_stamp_no_depth))
             val plan = SpendPlan.ExtendStamp(owner(), want, depth, amountPerChunk, maxSwapWei)
             SpendGuard.during(plan) { ops.storageTopupXdai(h, rpc, amountPerChunk.toString()) }
         }
@@ -537,16 +544,16 @@ class SwarmNode internal constructor(
         val want = normalizeAddress(chequebook) ?: throw IllegalArgumentException("not a chequebook address")
         return withLightNode { _, _ ->
             when (gatewayChequebook()) {
-                null -> throw IllegalStateException("the node couldn't say which chequebook it has")
-                "" -> throw IllegalStateException("the node has no chequebook yet")
+                null -> throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_chequebook_unknown))
+                "" -> throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_chequebook_none))
                 want -> Unit
-                else -> throw IllegalStateException("the node's chequebook isn't the one you confirmed")
+                else -> throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_chequebook_other))
             }
             val wallet = ops.gateway("GET", "/wallet", GATEWAY_READ_TIMEOUT_MS)
                 ?.takeIf { it.code == 200 }
                 ?.let { runCatching { BigInteger(JSONObject(it.body).getString("bzzBalance")) }.getOrNull() }
-                ?: throw IllegalStateException("the node couldn't read its xBZZ balance")
-            check(wallet >= amountPlur) { "the node holds only ${formatBzz(wallet)} xBZZ" }
+                ?: throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_balance_unreadable))
+            check(wallet >= amountPlur) { SwarmStrings.get(R.string.swarmnode_balance_short, formatBzz(wallet)) }
             val before = chequebookBalance()
             synchronized(lock) {
                 loadUnconfirmedDeposit()
@@ -560,10 +567,7 @@ class SwarmNode internal constructor(
                     if (landed || u.chequebook != want || holdElapsedMs(clock(), u.atMs, sameBoot(u.bootId)) >= UNCONFIRMED_DEPOSIT_HOLD_MS) {
                         setUnconfirmedDeposit(null)
                     } else {
-                        throw IllegalStateException(
-                            "an earlier deposit may still be on its way; check the chequebook's balance, " +
-                                "and deposit again in a few minutes if it hasn't grown",
-                        )
+                        throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_deposit_earlier_pending))
                     }
                 }
             }
@@ -576,13 +580,16 @@ class SwarmNode internal constructor(
             }
             if (depositMaybeSent(answer, message)) {
                 synchronized(lock) { setUnconfirmedDeposit(UnconfirmedDeposit(want, before, amountPlur, clock(), bootId())) }
-                throw RuntimeException(
-                    "$DEPOSIT_MAYBE_SENT (${message ?: "the node's gateway didn't answer"}). " +
-                        "Check the chequebook's balance before depositing again",
+                throw DepositMaybeSentException(
+                    SwarmStrings.get(
+                        R.string.swarmnode_deposit_maybe_sent_detail,
+                        DEPOSIT_MAYBE_SENT,
+                        message ?: SwarmStrings.get(R.string.swarmnode_gateway_no_answer),
+                    ),
                 )
             }
             if (answer!!.code !in 200..299) {
-                throw RuntimeException(message ?: "the deposit failed (HTTP ${answer.code})")
+                throw RuntimeException(message ?: SwarmStrings.get(R.string.swarmnode_deposit_failed_http, answer.code))
             }
             answer.body
         }
@@ -736,16 +743,19 @@ class SwarmNode internal constructor(
 
     /** The node's account, as [SpendPlan.owner]. */
     private fun owner(): String = _state.value.accountAddress.removePrefix("0x").lowercase()
-        .takeIf { it.length == 40 } ?: throw IllegalStateException("the node has no account")
+        .takeIf { it.length == 40 } ?: throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_no_account))
 
     private fun <T> withLightNode(block: (Long, String) -> T): T = handleUse.read {
         val (h, mode) = synchronized(lock) { handle to handleMode }
-        check(h != 0L && _state.value.status == NodeStatus.Running) { "the Swarm node isn't running" }
-        check(mode.light) { "the Swarm node isn't in light mode" }
+        check(h != 0L && _state.value.status == NodeStatus.Running) { SwarmStrings.get(R.string.swarmnode_not_running) }
+        check(mode.light) { SwarmStrings.get(R.string.swarmnode_not_light) }
         try {
             block(h, mode.gnosisRpc)
         } catch (e: IllegalStateException) {
             throw e
+        } catch (e: DepositMaybeSentException) {
+            // Scrubbed too, and still told apart by its type (#313 R1-M1).
+            throw DepositMaybeSentException(scrubRpc(e.message ?: e.javaClass.simpleName, mode.gnosisRpc))
         } catch (e: RuntimeException) {
             throw RuntimeException(scrubRpc(e.message ?: e.javaClass.simpleName, mode.gnosisRpc))
         }
@@ -776,7 +786,7 @@ class SwarmNode internal constructor(
          * for a new chequebook — after a buy or a search for owned stamps
          * alike, so it names neither.
          */
-        const val GATEWAY_RELOAD_FAILED = "The gateway didn't come back after the node set up its chequebook"
+        val GATEWAY_RELOAD_FAILED: String get() = SwarmStrings.get(R.string.swarmnode_gateway_reload_failed)
 
         /**
          * Listen address handed to `ant_start_gateway`. ant defaults to
@@ -873,7 +883,7 @@ class SwarmNode internal constructor(
         private const val UNCONFIRMED_DEPOSIT_FILE = "unconfirmed-deposit.json"
 
         /** How a deposit that may have gone out after all ([depositMaybeSent]) starts its error. */
-        const val DEPOSIT_MAYBE_SENT = "it may already have been sent"
+        val DEPOSIT_MAYBE_SENT: String get() = SwarmStrings.get(R.string.swarmnode_deposit_maybe_sent)
 
         /** [address] as 40 lowercase hex without `0x`, or null if it isn't an address. */
         fun normalizeAddress(address: String): String? = address.trim().removePrefix("0x").removePrefix("0X").lowercase()
@@ -889,6 +899,11 @@ class SwarmNode internal constructor(
 
         /** [message] with [rpc] (an endpoint that can carry an API key) taken out. */
         internal fun scrubRpc(message: String, rpc: String): String =
-            if (rpc.isBlank()) message else message.replace(rpc, "the Gnosis RPC").replace(rpc.trimEnd('/'), "the Gnosis RPC")
+            if (rpc.isBlank()) {
+                message
+            } else {
+                val name = SwarmStrings.get(R.string.swarmnode_gnosis_rpc)
+                message.replace(rpc, name).replace(rpc.trimEnd('/'), name)
+            }
     }
 }

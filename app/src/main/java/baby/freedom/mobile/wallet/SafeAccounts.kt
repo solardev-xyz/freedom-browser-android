@@ -3,10 +3,12 @@ package baby.freedom.mobile.wallet
 import android.content.Context
 import android.util.Log
 import androidx.annotation.VisibleForTesting
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.ledger.Ledger
 import java.io.File
 import java.math.BigInteger
@@ -295,7 +297,7 @@ class SafeAccounts internal constructor(
     private val io: CoroutineDispatcher = Dispatchers.IO,
     private val clock: () -> Long = System::currentTimeMillis,
     /** Signs typed data as a Ledger account (#142): on the device, which shows it. */
-    private val ledgerSign: suspend (WalletAccount, Eip712.TypedData, ByteArray) -> String = { _, _, _ -> throw SafeException("This account’s key is on a Ledger.") },
+    private val ledgerSign: suspend (WalletAccount, Eip712.TypedData, ByteArray) -> String = { _, _, _ -> throw SafeException(Strings.get(R.string.safe_error_ledger_key)) },
 ) {
     private val _state = MutableStateFlow<SafeState?>(null)
 
@@ -380,10 +382,10 @@ class SafeAccounts internal constructor(
 
     /** Applies [change] to the state, saves it, then shows it; returns what [change] returned. */
     private suspend fun <T> update(change: (SafeState) -> Pair<SafeState, T>): T = mutex.withLock {
-        val tag = withContext(io) { vault.identityTag() } ?: throw SafeException("There’s no wallet on this phone.")
+        val tag = withContext(io) { vault.identityTag() } ?: throw SafeException(Strings.get(R.string.safe_error_no_wallet))
         // What's in memory is only this wallet's if it was read under this wallet's tag.
         val current = _state.value?.takeIf { loadedTag == tag } ?: withContext(io) { store.read(tag) }
-            ?: throw SafeException("The Safe accounts on this phone can’t be read.")
+            ?: throw SafeException(Strings.get(R.string.safe_error_unreadable))
         val (next, result) = change(current)
         if (next != current || loadedTag != tag) {
             if (next != current) withContext(io) { store.write(tag, next) }
@@ -401,20 +403,20 @@ class SafeAccounts internal constructor(
      * to be able to sign and pay for its activation.
      */
     suspend fun create(name: String, owners: List<String>, threshold: Int, local: Collection<String>): SafeAccount {
-        if (!SafeProtocol.validPreset(owners.size, threshold)) throw SafeException("A Safe needs 1 of 2 or 2 of 3 owners.")
+        if (!SafeProtocol.validPreset(owners.size, threshold)) throw SafeException(Strings.get(R.string.safe_error_preset))
         val checked = owners.map { SafeProtocol.eip55(it) }
-        if (checked.map { it.lowercase() }.toSet().size != checked.size) throw SafeException("The same account is listed as an owner twice.")
+        if (checked.map { it.lowercase() }.toSet().size != checked.size) throw SafeException(Strings.get(R.string.safe_error_owner_twice))
         if (checked.none { o -> local.any { it.equals(o, ignoreCase = true) } }) {
-            throw SafeException("At least one owner must be an account in this wallet, to sign and pay for the activation.")
+            throw SafeException(Strings.get(R.string.safe_error_no_local_owner))
         }
         val salt = SafeProtocol.newSaltNonce()
         val address = SafeProtocol.predictAddress(checked, threshold, salt)
         return update { s ->
-            if (s.safes.size >= MAX_SAFES) throw SafeException("This wallet has as many Safe accounts as it can hold.")
-            if (s.safes.any { o -> checked.any { it.equals(o.address, ignoreCase = true) } }) throw SafeException("A Safe can’t own another Safe.")
+            if (s.safes.size >= MAX_SAFES) throw SafeException(Strings.get(R.string.safe_error_too_many_safes))
+            if (s.safes.any { o -> checked.any { it.equals(o.address, ignoreCase = true) } }) throw SafeException(Strings.get(R.string.safe_error_safe_owns_safe))
             val safe = SafeAccount(
                 address = address,
-                name = name.trim().take(MAX_NAME).ifBlank { "Safe ${s.safes.size + 1}" },
+                name = name.trim().take(MAX_NAME).ifBlank { Strings.get(R.string.safe_default_name, s.safes.size + 1) },
                 owners = checked,
                 threshold = threshold,
                 saltNonce = salt,
@@ -448,10 +450,10 @@ class SafeAccounts internal constructor(
         val typedData = SafeProtocol.safeTxTypedData(safe.address, safe.chainId, tx)
         val id = "0x" + SafeProtocol.hash(typedData).toHex()
         return update { s ->
-            val current = s.safe(safe.address) ?: throw SafeException("This Safe is no longer on this phone.")
-            if (!current.deployed) throw SafeException("Activate this Safe before sending from it.")
+            val current = s.safe(safe.address) ?: throw SafeException(Strings.get(R.string.safe_error_gone))
+            if (!current.deployed) throw SafeException(Strings.get(R.string.safe_error_activate_to_send))
             if (s.pendingFor(safe.address).any { it.kind == SafePending.Kind.TX }) {
-                throw SafeException("A transaction is already waiting for signatures. Execute or discard it first.")
+                throw SafeException(Strings.get(R.string.safe_error_tx_waiting))
             }
             val entry = SafePending(id, current.address, SafePending.Kind.TX, current.chainId, typedData.toString(), current.threshold, emptyList(), clock(), payment = payment)
             s.copy(pending = s.pending + entry) to entry
@@ -460,17 +462,17 @@ class SafeAccounts internal constructor(
 
     /** A new SafeMessage for [text] from [safe], waiting for signatures (the same words again give the same one). */
     suspend fun proposeMessage(safe: SafeAccount, text: String): SafePending {
-        if (text.isEmpty()) throw SafeException("Write the message to sign.")
-        if (text.length > MAX_MESSAGE) throw SafeException("The message is too long.")
+        if (text.isEmpty()) throw SafeException(Strings.get(R.string.safe_error_message_empty))
+        if (text.length > MAX_MESSAGE) throw SafeException(Strings.get(R.string.safe_error_message_too_long))
         val typedData = SafeProtocol.messageTypedData(safe.address, safe.chainId, text)
         val id = "0x" + SafeProtocol.hash(typedData).toHex()
         return update { s ->
-            val current = s.safe(safe.address) ?: throw SafeException("This Safe is no longer on this phone.")
+            val current = s.safe(safe.address) ?: throw SafeException(Strings.get(R.string.safe_error_gone))
             // Its EIP-1271 signature is checked by the Safe's contract, which doesn't exist until it's activated.
-            if (!current.deployed) throw SafeException("Activate this Safe before signing messages with it.")
+            if (!current.deployed) throw SafeException(Strings.get(R.string.safe_error_activate_to_sign))
             s.pending.firstOrNull { it.id == id }?.let { return@update s to it }
             if (s.pendingFor(safe.address).count { it.kind == SafePending.Kind.MESSAGE } >= MAX_MESSAGES) {
-                throw SafeException("This Safe has as many messages waiting as it can hold. Discard one first.")
+                throw SafeException(Strings.get(R.string.safe_error_too_many_messages))
             }
             val entry = SafePending(id, current.address, SafePending.Kind.MESSAGE, current.chainId, typedData.toString(), current.threshold, emptyList(), clock(), text = text)
             s.copy(pending = s.pending + entry) to entry
@@ -489,17 +491,17 @@ class SafeAccounts internal constructor(
      * leave the executed transaction on the board.
      */
     suspend fun addSignature(id: String, signature: String): SafePending = update { s ->
-        val entry = s.pending.firstOrNull { it.id == id } ?: throw SafeException("This request was discarded.")
-        val safe = s.safe(entry.safe) ?: throw SafeException("This Safe is no longer on this phone.")
-        val sig = SafeProtocol.normalized(signature) ?: throw SafeException("That isn’t a signature: it should be 0x followed by 130 hex digits.")
+        val entry = s.pending.firstOrNull { it.id == id } ?: throw SafeException(Strings.get(R.string.safe_error_discarded))
+        val safe = s.safe(entry.safe) ?: throw SafeException(Strings.get(R.string.safe_error_gone))
+        val sig = SafeProtocol.normalized(signature) ?: throw SafeException(Strings.get(R.string.safe_error_not_a_signature))
         val hash = SafeProtocol.hash(JSONObject(entry.typedData))
         check("0x" + hash.toHex() == entry.id)
-        val signer = SafeProtocol.recoverSigner(hash, sig) ?: throw SafeException("That signature isn’t valid.")
+        val signer = SafeProtocol.recoverSigner(hash, sig) ?: throw SafeException(Strings.get(R.string.safe_error_invalid_signature))
         if (!safe.isOwner(signer)) {
-            throw SafeException("That signature is from $signer, which isn’t an owner of this Safe — or it was made for a different request.")
+            throw SafeException(Strings.get(R.string.safe_error_not_an_owner, signer))
         }
         if (entry.hasSigned(signer)) return@update s to entry
-        if (entry.superseded) throw SafeException("This transaction can no longer be executed. Discard it.")
+        if (entry.superseded) throw SafeException(Strings.get(R.string.safe_error_superseded))
         if (entry.ready) return@update s to entry
         val next = entry.copy(signatures = entry.signatures + SafeProtocol.OwnerSignature(signer, sig))
         s.copy(pending = s.pending.map { if (it.id == id) next else it }) to next
@@ -512,7 +514,7 @@ class SafeAccounts internal constructor(
      * [VaultLockedException] if the wallet isn't open.
      */
     suspend fun signWith(id: String, account: WalletAccount): SafePending {
-        val entry = _state.value?.pending?.firstOrNull { it.id == id } ?: throw SafeException("This request was discarded.")
+        val entry = _state.value?.pending?.firstOrNull { it.id == id } ?: throw SafeException(Strings.get(R.string.safe_error_discarded))
         if (entry.ready) return entry
         val signature = ownerSignature(account, entry.typedData)
         return addSignature(id, signature)
@@ -666,10 +668,10 @@ class SafeChain(private val rpc: WalletRpc) {
     suspend fun deployed(chainId: Long, address: String): Boolean = rpc.code(chainId, address).value.length > 2
 
     suspend fun nonce(chainId: Long, safe: String): BigInteger =
-        SafeProtocol.decodeUint(call(chainId, safe, SafeProtocol.NONCE_CALL)) ?: throw SafeException("The Safe gave no nonce.")
+        SafeProtocol.decodeUint(call(chainId, safe, SafeProtocol.NONCE_CALL)) ?: throw SafeException(Strings.get(R.string.safe_error_no_nonce))
 
     suspend fun owners(chainId: Long, safe: String): List<String> =
-        SafeProtocol.decodeAddresses(call(chainId, safe, SafeProtocol.OWNERS_CALL)) ?: throw SafeException("The Safe gave no owner list.")
+        SafeProtocol.decodeAddresses(call(chainId, safe, SafeProtocol.OWNERS_CALL)) ?: throw SafeException(Strings.get(R.string.safe_error_no_owner_list))
 
     suspend fun balance(chainId: Long, address: String): BigInteger = rpc.balance(chainId, address).value
 
@@ -688,8 +690,8 @@ class SafeChain(private val rpc: WalletRpc) {
         val tag = "0x" + block.toString(16)
         return Snapshot(
             block = block,
-            nonce = SafeProtocol.decodeUint(call(chainId, safe, SafeProtocol.NONCE_CALL, tag)) ?: throw SafeException("The Safe gave no nonce."),
-            owners = SafeProtocol.decodeAddresses(call(chainId, safe, SafeProtocol.OWNERS_CALL, tag)) ?: throw SafeException("The Safe gave no owner list."),
+            nonce = SafeProtocol.decodeUint(call(chainId, safe, SafeProtocol.NONCE_CALL, tag)) ?: throw SafeException(Strings.get(R.string.safe_error_no_nonce)),
+            owners = SafeProtocol.decodeAddresses(call(chainId, safe, SafeProtocol.OWNERS_CALL, tag)) ?: throw SafeException(Strings.get(R.string.safe_error_no_owner_list)),
             modules = SafeProtocol.decodeModules(call(chainId, safe, SafeProtocol.MODULES_CALL, tag)),
             balance = if (withBalance) rpc.balance(chainId, safe, tag).value else null,
         )
@@ -722,7 +724,7 @@ class SafeChain(private val rpc: WalletRpc) {
     suspend fun minedCount(chainId: Long, address: String): BigInteger = rpc.transactionCount(chainId, address, "latest").value
 
     suspend fun tokenBalance(chainId: Long, token: String, holder: String): BigInteger =
-        Erc20.decodeUint256(call(chainId, token, Erc20.balanceOfData(holder))) ?: throw SafeException("The token gave no balance.")
+        Erc20.decodeUint256(call(chainId, token, Erc20.balanceOfData(holder))) ?: throw SafeException(Strings.get(R.string.safe_error_no_token_balance))
 
     /** What activating [safe] costs at most, paid by [executor], against what [executor] holds. */
     suspend fun activation(safe: SafeAccount, executor: String): Activation {

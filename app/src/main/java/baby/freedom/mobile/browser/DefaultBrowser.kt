@@ -15,22 +15,24 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 
 /**
  * Settings → Default browser (#268): Freedom as the app that opens links
  * from other apps, through Android's browser role.
  */
 internal object DefaultBrowser {
-    const val SECTION = "Default browser"
-    const val ROW_SET = "Set as default browser"
-    const val ROW_SET_SUBTITLE = "Open links from other apps in Freedom"
-    const val ROW_IS = "Freedom is your default browser"
-    const val ROW_IS_SUBTITLE = "Tap to change it in Android settings"
+    val SECTION: String get() = Strings.get(R.string.settings_default_browser)
+    val ROW_SET: String get() = Strings.get(R.string.settings_default_browser_set)
+    val ROW_SET_SUBTITLE: String get() = Strings.get(R.string.settings_default_browser_set_subtitle)
+    val ROW_IS: String get() = Strings.get(R.string.settings_default_browser_is)
+    val ROW_IS_SUBTITLE: String get() = Strings.get(R.string.settings_default_browser_is_subtitle)
 
     /** Under [ROW_SET] once Android's own prompt came back without the role. */
-    const val DECLINED_LINE =
-        "Not changed. Tap again to pick Freedom in Android's Default apps → Browser app"
+    val DECLINED_LINE: String get() = Strings.get(R.string.settings_default_browser_declined)
 
     fun isDefault(context: Context): Boolean {
         val roles = context.getSystemService(RoleManager::class.java) ?: return false
@@ -114,13 +116,18 @@ internal fun rememberDefaultBrowserState(): DefaultBrowserState {
 
 @Composable
 internal fun DefaultBrowserSection(state: DefaultBrowserState) {
-    SectionCard(title = DefaultBrowser.SECTION) {
+    SectionCard(title = stringResource(R.string.settings_default_browser)) {
         PageRow(
-            title = if (state.isDefault) DefaultBrowser.ROW_IS else DefaultBrowser.ROW_SET,
-            subtitle = if (state.isDefault) DefaultBrowser.ROW_IS_SUBTITLE else DefaultBrowser.ROW_SET_SUBTITLE,
+            title = stringResource(
+                if (state.isDefault) R.string.settings_default_browser_is else R.string.settings_default_browser_set,
+            ),
+            subtitle = stringResource(
+                if (state.isDefault) R.string.settings_default_browser_is_subtitle
+                else R.string.settings_default_browser_set_subtitle,
+            ),
             style = PageRowStyle.Inset,
             leadingIcon = Icons.Filled.OpenInBrowser,
-            thirdLine = if (state.declined) DefaultBrowser.DECLINED_LINE else null,
+            thirdLine = if (state.declined) stringResource(R.string.settings_default_browser_declined) else null,
             onClick = state.onClick,
         )
     }

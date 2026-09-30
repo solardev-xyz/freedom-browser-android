@@ -43,11 +43,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.OpenLvSession
 import baby.freedom.mobile.wallet.SendAmounts
@@ -104,7 +108,7 @@ internal fun HexRow(label: String, hex: String, selector: Boolean, detail: Strin
             )
         }
         when {
-            lines.isEmpty() -> Text("None")
+            lines.isEmpty() -> Text(stringResource(R.string.signing_hex_none))
             lines.size <= HEX_INLINE_LINES -> SelectionContainer { Column { lines.forEach { line(it) } } }
             else -> Surface(
                 shape = RoundedCornerShape(8.dp),
@@ -118,7 +122,7 @@ internal fun HexRow(label: String, hex: String, selector: Boolean, detail: Strin
                 }
             }
         }
-        val more = if (lines.size > HEX_INLINE_LINES) "${lines.size} lines: scroll the box to read them all" else null
+        val more = if (lines.size > HEX_INLINE_LINES) pluralText(R.plurals.signing_hex_lines_scroll, lines.size, lines.size) else null
         listOfNotNull(detail, more).joinToString(" · ").takeIf { it.isNotEmpty() }?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -128,11 +132,11 @@ internal fun HexRow(label: String, hex: String, selector: Boolean, detail: Strin
 
 /** What the connection over a scanned code is doing, in a line: the code doesn't prove who's on the other end. */
 internal fun remoteStatusText(status: OpenLvSession.Status): String = when (status) {
-    OpenLvSession.Status.Idle -> "Not connected."
-    OpenLvSession.Status.Connecting -> "Connecting over the scanned code…"
-    OpenLvSession.Status.Connected -> "Connected. Requests over this code show up here for you to approve."
-    OpenLvSession.Status.Disconnected -> "Done: the other side closed the connection. Each request on the computer shows a new code to scan."
-    is OpenLvSession.Status.Failed -> "Couldn’t connect: ${status.message}"
+    OpenLvSession.Status.Idle -> Strings.get(R.string.signing_remote_status_idle)
+    OpenLvSession.Status.Connecting -> Strings.get(R.string.signing_remote_status_connecting)
+    OpenLvSession.Status.Connected -> Strings.get(R.string.signing_remote_status_connected)
+    OpenLvSession.Status.Disconnected -> Strings.get(R.string.signing_remote_status_disconnected)
+    is OpenLvSession.Status.Failed -> Strings.get(R.string.signing_remote_status_failed, status.message)
 }
 
 /**
@@ -146,7 +150,7 @@ internal fun PairingSection(uri: String) {
     val context = LocalContext.current
     val session = remember(context) { OpenLvSession.get(context) }
     val status by session.status.collectAsState()
-    SectionCard(title = "Signing connection") {
+    SectionCard(title = stringResource(R.string.signing_remote_connection_title)) {
         Row(verticalAlignment = Alignment.Top) {
             when (status) {
                 OpenLvSession.Status.Connecting -> CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
@@ -159,15 +163,14 @@ internal fun PairingSection(uri: String) {
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            "This code connects this phone to whatever showed it — Freedom on your computer, if that’s where you scanned it — " +
-                "so the phone can sign for it. Each signature or transaction it asks for is shown here first; nothing is signed without you.",
+            stringResource(R.string.signing_remote_pairing_explained),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             when {
-                session.active -> TextButton(onClick = { session.stop() }) { Text("Disconnect") }
-                else -> TextButton(onClick = { session.start(uri, again = true) }) { Text("Connect again") }
+                session.active -> TextButton(onClick = { session.stop() }) { Text(stringResource(R.string.common_disconnect)) }
+                else -> TextButton(onClick = { session.start(uri, again = true) }) { Text(stringResource(R.string.signing_remote_connect_again)) }
             }
         }
     }
@@ -221,6 +224,7 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
         is Vault.State.Unlocked -> s.info.backedUp
         else -> true
     }
+    val unlockAction = stringResource(R.string.signing_remote_action_unlock_wallet)
     val reject = { if (!busy) approval.decide(OpenLvSession.Decision.Reject) }
     val approve = approve@{
         if (busy || !guard.accepts()) return@approve
@@ -236,17 +240,21 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                error = walletErrorMessage(e, "unlock the wallet", backedUp)
+                error = walletErrorMessage(e, unlockAction, backedUp)
             } finally {
                 busy = false
             }
         }
     }
     val (title, action) = when (request) {
-        is OpenLvSession.Request.Connect -> "Connect an account" to "Connect"
-        is OpenLvSession.Request.PersonalSign -> "Sign a message" to "Sign"
-        is OpenLvSession.Request.TypedData -> "Sign typed data" to "Sign"
-        is OpenLvSession.Request.SendTransaction -> "Send a transaction" to "Confirm and send"
+        is OpenLvSession.Request.Connect ->
+            stringResource(R.string.signing_remote_title_connect) to stringResource(R.string.signing_remote_action_connect)
+        is OpenLvSession.Request.PersonalSign ->
+            stringResource(R.string.signing_remote_title_sign_message) to stringResource(R.string.signing_remote_action_sign)
+        is OpenLvSession.Request.TypedData ->
+            stringResource(R.string.signing_remote_title_sign_typed_data) to stringResource(R.string.signing_remote_action_sign)
+        is OpenLvSession.Request.SendTransaction ->
+            stringResource(R.string.signing_remote_title_send_transaction) to stringResource(R.string.signing_remote_action_confirm_send)
     }
     Dialog(
         onDismissRequest = reject,
@@ -263,7 +271,7 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
                 Text(title, style = MaterialTheme.typography.titleLarge)
                 Text(
                     // The phone can't tell who made the code: a web page can show one too.
-                    "Asked for over the code you scanned. Only approve if that code came from Freedom on your own computer.",
+                    stringResource(R.string.signing_remote_asked_over_code),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -290,7 +298,7 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
                 Spacer(Modifier.height(16.dp))
                 ObscuredTapNotice(tap)
                 SheetButtonRow {
-                    OutlinedButton(onClick = reject, enabled = !busy) { Text("Reject") }
+                    OutlinedButton(onClick = reject, enabled = !busy) { Text(stringResource(R.string.common_reject)) }
                     Button(onClick = approve, enabled = armed && !busy, modifier = Modifier.protectedPress(tap)) {
                         if (busy) {
                             CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
@@ -327,8 +335,7 @@ internal fun ConnectBody(
     onPick: (WalletAccount) -> Unit,
 ) {
     Text(
-        "The code you scanned asks to add an account of this wallet. It learns the account’s address, nothing else; " +
-            "every signature or transaction it asks for later is shown here first.",
+        stringResource(R.string.signing_remote_connect_explained),
         style = MaterialTheme.typography.bodyMedium,
     )
     Spacer(Modifier.height(8.dp))
@@ -354,7 +361,7 @@ internal fun ConnectBody(
 
 @Composable
 private fun AccountRow(account: WalletAccount) {
-    ReviewRow("Account", account.name, address = account.address)
+    ReviewRow(stringResource(R.string.signing_review_account), account.name, address = account.address)
 }
 
 @Composable
@@ -362,13 +369,18 @@ private fun PersonalSignBody(request: OpenLvSession.Request.PersonalSign) {
     AccountRow(request.account)
     val text = request.text
     if (text != null) {
-        ReviewRow("Message", text)
+        ReviewRow(stringResource(R.string.signing_review_message), text)
     } else {
-        HexRow("Message", "0x" + request.message.toHex(), selector = false, detail = "${request.message.size} bytes that aren’t text")
+        HexRow(
+            stringResource(R.string.signing_review_message),
+            "0x" + request.message.toHex(),
+            selector = false,
+            detail = pluralText(R.plurals.signing_review_binary_bytes, request.message.size, request.message.size),
+        )
     }
     Spacer(Modifier.height(4.dp))
     Text(
-        "Signing proves this account agreed to the message. It can’t move funds by itself, but only sign messages you understand.",
+        stringResource(R.string.signing_remote_personal_sign_warning),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -380,18 +392,25 @@ private fun TypedDataBody(request: OpenLvSession.Request.TypedData) {
     // Only a chainId the domain type declares (as a uint) is signed; otherwise the signature isn't tied to any chain (R6-F1).
     val id = request.chainId
     if (id == null) {
-        ReviewRow("Network", "Any — the signature names no chain", detail = "It could be used on any network where this contract accepts it")
+        ReviewRow(
+            stringResource(R.string.signing_review_network),
+            stringResource(R.string.signing_review_network_any),
+            detail = stringResource(R.string.signing_review_network_any_detail),
+        )
     } else {
-        ReviewRow("Network", request.chain?.name ?: "Chain $id", detail = if (request.chain == null) "A chain this phone doesn’t have set up" else null)
+        ReviewRow(
+            stringResource(R.string.signing_review_network),
+            request.chain?.name ?: stringResource(R.string.signing_review_chain_id, id.toString()),
+            detail = if (request.chain == null) stringResource(R.string.signing_review_chain_not_set_up) else null,
+        )
     }
-    ReviewRow("Type", request.primaryType)
-    TypedLines("Domain", request.domain)
-    TypedLines("Message", request.message)
+    ReviewRow(stringResource(R.string.signing_review_type), request.primaryType)
+    TypedLines(stringResource(R.string.signing_review_domain), request.domain)
+    TypedLines(stringResource(R.string.signing_review_message), request.message)
     request.ledgerHashes?.let { LedgerHashesOnly(it) }
     Spacer(Modifier.height(4.dp))
     Text(
-        "Typed data can authorise things — a permit to spend your tokens, an order, a multisig transaction. " +
-            "Only sign it if you started this on your computer.",
+        stringResource(R.string.signing_remote_typed_data_warning),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -411,7 +430,7 @@ internal fun typedIndent(depth: Int): Int = depth.coerceIn(0, TYPED_MAX_INDENT)
 
 /** A typed-data line's label, naming its level once the indent stops showing it. */
 internal fun typedLabel(line: baby.freedom.mobile.wallet.Eip712.Line): String =
-    if (line.depth > TYPED_MAX_INDENT) "level ${line.depth} · ${line.label}" else line.label
+    if (line.depth > TYPED_MAX_INDENT) Strings.get(R.string.signing_typed_level_label, line.depth, line.label) else line.label
 
 @Composable
 internal fun TypedLines(title: String, lines: List<baby.freedom.mobile.wallet.Eip712.Line>) {
@@ -441,30 +460,34 @@ private fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) 
         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
         Spacer(Modifier.height(4.dp))
     }
-    ReviewRow("Network", chain.name)
-    ReviewRow("From", r.from.name, address = r.from.address)
-    ReviewRow("To", null, address = r.to)
+    ReviewRow(stringResource(R.string.signing_review_network), chain.name)
+    ReviewRow(stringResource(R.string.signing_review_from), r.from.name, address = r.from.address)
+    ReviewRow(stringResource(R.string.signing_review_to), null, address = r.to)
     if (r.to.equals(r.from.address, ignoreCase = true)) {
-        Text("This is the sending account itself.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(stringResource(R.string.signing_review_to_self), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-    ReviewRow("Value", "${SendAmounts.exact(r.amount, chain.decimals)} ${chain.symbol}", mono = true)
+    ReviewRow(stringResource(R.string.signing_review_value), "${SendAmounts.exact(r.amount, chain.decimals)} ${chain.symbol}", mono = true)
     val data = "0x" + (r.dapp?.data?.toHex() ?: "")
     HexRow(
-        "Data",
+        stringResource(R.string.signing_review_data),
         data,
         selector = true,
-        detail = if (data.length > 2) "${(data.length - 2) / 2} bytes: the contract call it asks to make" else "A plain transfer",
+        detail = if (data.length > 2) {
+            pluralText(R.plurals.signing_review_call_bytes, (data.length - 2) / 2, (data.length - 2) / 2)
+        } else {
+            stringResource(R.string.signing_review_plain_transfer)
+        },
     )
-    ReviewRow("Network fee", "up to ${feeText(quote.tx.maxFee, chain)}", mono = true, detail = feeDetail(quote.tx))
-    quote.nativeTotal?.let { ReviewRow("Total", "up to ${feeText(it, chain)}", mono = true) }
+    ReviewRow(stringResource(R.string.signing_review_network_fee), stringResource(R.string.signing_review_up_to, feeText(quote.tx.maxFee, chain)), mono = true, detail = feeDetail(quote.tx))
+    quote.nativeTotal?.let { ReviewRow(stringResource(R.string.signing_review_total), stringResource(R.string.signing_review_up_to, feeText(it, chain)), mono = true) }
     ReviewRow(
-        "Nonce",
+        stringResource(R.string.signing_review_nonce),
         quote.tx.nonce.toString(),
         detail = nonceDetail(quote),
     )
     Spacer(Modifier.height(4.dp))
     Text(
-        "The phone signs and sends this itself and follows it in the wallet. " + feeFootnote(quote.tx),
+        stringResource(R.string.signing_remote_send_footnote, feeFootnote(quote.tx)),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

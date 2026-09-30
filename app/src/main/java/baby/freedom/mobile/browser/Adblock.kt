@@ -4,7 +4,11 @@ import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import android.webkit.WebResourceResponse
+import androidx.annotation.StringRes
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.Text
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -41,14 +45,24 @@ private const val TAG = "Adblock"
 enum class AdblockCategory(
     val key: String,
     val file: String,
-    val title: String,
+    @StringRes private val titleRes: Int,
     val listName: String,
     val enabledByDefault: Boolean,
 ) {
-    ADS("ads", "easylist.txt", "Block ads", "EasyList", true),
-    PRIVACY("privacy", "easyprivacy.txt", "Block trackers", "EasyPrivacy", true),
-    COOKIES("cookies", "fanboy-cookiemonster.txt", "Block cookie notices", "Fanboy's Cookiemonster", false),
-    ANNOYANCES("annoyances", "fanboy-annoyance.txt", "Block other annoyances", "Fanboy's Annoyances", false),
+    ADS("ads", "easylist.txt", R.string.settings_adblock_block_ads, "EasyList", true),
+    PRIVACY("privacy", "easyprivacy.txt", R.string.settings_adblock_block_trackers, "EasyPrivacy", true),
+    COOKIES(
+        "cookies", "fanboy-cookiemonster.txt", R.string.settings_adblock_block_cookie_notices,
+        "Fanboy's Cookiemonster", false,
+    ),
+    ANNOYANCES(
+        "annoyances", "fanboy-annoyance.txt", R.string.settings_adblock_block_annoyances,
+        "Fanboy's Annoyances", false,
+    ),
+    ;
+
+    /** The category's switch in Settings ("Block ads"). */
+    val title: String get() = Strings.get(titleRes)
 }
 
 /**
@@ -128,18 +142,21 @@ internal fun adblockSiteFor(url: String): String? {
  * screen (#126). Only [BLOCKING] shows the switch on; [BLOCKING] and
  * [ALLOWED] are the states a tap changes.
  */
-internal enum class AdblockSiteState(val note: String?) {
+internal enum class AdblockSiteState(@StringRes private val noteRes: Int?) {
     /** Filters apply to the page. */
     BLOCKING(null),
     /** The user allowlisted the site; a tap lifts that. */
-    ALLOWED("Allowed on this site"),
+    ALLOWED(R.string.settings_adblock_state_allowed),
     /** No engine yet: the lists are still compiling. */
-    LOADING("Loading filter lists…"),
+    LOADING(R.string.settings_adblock_state_loading),
     /** No engine: every category is off in Settings. */
-    OFF("All filter lists are off in Settings"),
+    OFF(R.string.settings_adblock_state_off),
     /** A list's `@@…$document` exception exempts the page. */
-    EXEMPT("The filter lists allow this page"),
+    EXEMPT(R.string.settings_adblock_state_exempt),
     ;
+
+    /** What the page menu says under the switch; `null` while blocking. */
+    val note: String? get() = noteRes?.let { Strings.get(it) }
 
     /** Whether the switch shows blocking on. */
     val checked: Boolean get() = this == BLOCKING
@@ -625,7 +642,7 @@ internal object Adblock {
         val app = appContext
         if (lists == null || settings == null || app == null) {
             // Only before [start]; say so rather than leave the row blank.
-            val outcome = AdblockUpdateOutcome.Failed("ad blocking hasn't started yet")
+            val outcome = AdblockUpdateOutcome.Failed(Text.res(R.string.settings_adblock_not_started))
             _updateState.value = AdblockUpdateState(checking = false, last = outcome)
             return outcome
         }

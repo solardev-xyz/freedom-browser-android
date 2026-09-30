@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.swarm.HeldText
 import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
 import org.junit.Assert.assertEquals
@@ -82,7 +83,7 @@ class TorRoutingTest {
         // A start failure is shown, escaped.
         val failed = TorRouting.refusalHtml(
             onion, TorRouting.CODE_NOT_RUNNING,
-            TorInfo(status = TorStatus.Error, errorMessage = "bind <denied>"),
+            TorInfo(status = TorStatus.Error, error = HeldText.raw("bind <denied>")),
         )
         assertTrue(failed.contains("couldn't start"))
         assertTrue(failed.contains("bind &lt;denied&gt;"))
@@ -597,7 +598,7 @@ class TorRoutingTest {
             TorRouting.setExternal(context, orbot, confirmed = false)
             assertEquals(TorRouting.CODE_NOT_RUNNING, TorRouting.documentRefusalCode())
             // A stale embedded error doesn't reach the external page.
-            TorRouting.onState(context, TorInfo(status = TorStatus.Error, errorMessage = "arti failed"))
+            TorRouting.onState(context, TorInfo(status = TorStatus.Error, error = HeldText.raw("arti failed")))
             val page = TorRouting.documentRefusalHtml(onion)
             assertTrue(page.contains("<h1>Tor isn't running</h1>"))
             assertTrue(page.contains("Nodes page"))

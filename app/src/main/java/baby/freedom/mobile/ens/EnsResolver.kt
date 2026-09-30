@@ -1,7 +1,9 @@
 package baby.freedom.mobile.ens
 
 import android.util.Log
+import baby.freedom.mobile.R
 import baby.freedom.mobile.browser.PublicSuffixList
+import baby.freedom.mobile.l10n.Strings
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -671,7 +673,7 @@ class EnsResolver internal constructor(
     private suspend fun resolve(rawName: String, record: Record, fresh: Boolean): EnsResult {
         val trimmed = rawName.trim()
         if (trimmed.isEmpty()) {
-            return EnsResult.Error(name = "", reason = "INVALID_NAME", error = "empty name")
+            return EnsResult.Error(name = "", reason = "INVALID_NAME", error = Strings.get(R.string.names_error_empty_name))
         }
         val normalized = try {
             EnsNormalize.fastNormalize(trimmed)
@@ -682,14 +684,14 @@ class EnsResolver internal constructor(
         val system = NameSystem.forName(normalized)
         if (record is Record.Address) {
             if (system == NameSystem.TEZOS) {
-                return EnsResult.Error(normalized, "UNSUPPORTED_SYSTEM", "Tezos Domains names don't name Ethereum accounts")
+                return EnsResult.Error(normalized, "UNSUPPORTED_SYSTEM", Strings.get(R.string.names_error_tezos_no_accounts))
             }
             // A NameNFT registry has one chain-agnostic address; see [resolveAddress].
             if (system.contractAddress != null && record.coinType != ETH_COIN_TYPE) {
                 return EnsResult.Error(
                     normalized,
                     "CHAIN_UNSUPPORTED",
-                    "${system.label} names hold an Ethereum address only, not one for this network",
+                    Strings.get(R.string.names_error_chain_unsupported, system.label),
                 )
             }
         }
@@ -705,7 +707,7 @@ class EnsResolver internal constructor(
         // Read afresh per lookup (#101), outside the settings: see the class KDoc.
         val generation = lightClient?.readyGeneration()
         if (config.endpoints.isEmpty() && generation == null) {
-            return EnsResult.Error(normalized, "NO_RPC_ENDPOINTS", "no RPC endpoints configured")
+            return EnsResult.Error(normalized, "NO_RPC_ENDPOINTS", Strings.get(R.string.names_error_no_rpc_endpoints))
         }
 
         // The light client first (#101) — backing off after a miss, unless
@@ -753,7 +755,11 @@ class EnsResolver internal constructor(
                 return EnsResult.Error(
                     name = normalized,
                     reason = if (tooLong) "NAME_TOO_LONG" else "INVALID_NAME",
-                    error = if (tooLong) "a label is longer than $MAX_DNS_LABEL_BYTES bytes" else e.message.orEmpty(),
+                    error = if (tooLong) {
+                        Strings.get(R.string.names_error_label_too_long, MAX_DNS_LABEL_BYTES)
+                    } else {
+                        e.message.orEmpty()
+                    },
                 )
             }
         }
@@ -776,7 +782,7 @@ class EnsResolver internal constructor(
                     return verdict.result
                 }
             if (config.endpoints.isEmpty()) {
-                return EnsResult.Error(normalized, "NO_RPC_ENDPOINTS", "no RPC endpoints configured")
+                return EnsResult.Error(normalized, "NO_RPC_ENDPOINTS", Strings.get(R.string.names_error_no_rpc_endpoints))
             }
         }
 
@@ -1569,7 +1575,7 @@ class EnsResolver internal constructor(
                 EnsResult.Error(
                     name = name,
                     reason = if (vote.ccip) "CCIP_GATEWAY_FAILED" else "PROVIDER_ERROR",
-                    error = "no RPC server answered",
+                    error = Strings.get(R.string.names_error_no_rpc_answered),
                     retryable = true,
                 ),
                 verified = false,
@@ -1740,10 +1746,14 @@ class EnsResolver internal constructor(
     /** What an answer says, for a warning listing the disagreeing servers. */
     private fun describe(result: EnsResult): String = when (result) {
         is EnsResult.Ok -> result.uri
-        is EnsResult.NotFound -> if (result.reason == "NO_ADDRESS") "no address" else "no content (${result.reason})"
-        is EnsResult.Unsupported -> "unsupported contenthash 0x${result.rawContentHash}"
+        is EnsResult.NotFound -> if (result.reason == "NO_ADDRESS") {
+            Strings.get(R.string.names_answer_no_address)
+        } else {
+            Strings.get(R.string.names_answer_no_content, result.reason)
+        }
+        is EnsResult.Unsupported -> Strings.get(R.string.names_answer_unsupported_contenthash, result.rawContentHash)
         is EnsResult.Error -> result.error
-        is EnsResult.Conflict -> "conflict"
+        is EnsResult.Conflict -> Strings.get(R.string.names_answer_conflict)
     }
 
     /**
@@ -1911,7 +1921,7 @@ class EnsResolver internal constructor(
             lastError ?: EnsResult.Error(
                 name = normalized,
                 reason = "PROVIDER_ERROR",
-                error = "all RPC providers failed",
+                error = Strings.get(R.string.names_error_all_rpc_failed),
                 retryable = true,
             ),
             verified = false,
@@ -1943,7 +1953,7 @@ class EnsResolver internal constructor(
     private fun ccipDisabled(name: String) = EnsResult.Error(
         name = name,
         reason = "CCIP_DISABLED",
-        error = "name needs an off-chain lookup (CCIP-Read), which is off",
+        error = Strings.get(R.string.names_error_ccip_off),
     )
 
     private fun EnsResult.withTrust(trust: EnsTrust): EnsResult = when (this) {
@@ -2586,8 +2596,12 @@ class EnsResolver internal constructor(
         /** Tries at a CCIP-Read name whose callback lands on a newer head than its first call. */
         private const val LIGHT_CLIENT_CCIP_ATTEMPTS = 3
 
-        /** How [EnsTrust.agreed] names the light client. */
-        const val LIGHT_CLIENT_SOURCE = "Myotis light client (on this device)"
+        /**
+         * How [EnsTrust.agreed] names the light client: a key, not words,
+         * since an answer's trust is cached; [EnsTrust.shownAgreed] shows
+         * it by name in the app language of the moment (#280).
+         */
+        const val LIGHT_CLIENT_SOURCE = "myotis-light-client"
         private const val RPC_MAX_RESPONSE_BYTES = 1L * 1024 * 1024
 
         // Per-gateway bounds for CCIP-Read fetches (same as the desktop

@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import java.net.URI
 
 /**
@@ -23,9 +25,7 @@ import java.net.URI
 object ExternalEndpoints {
     const val MAX_LENGTH = 2048
 
-    const val IPFS_UNVERIFIED_WARNING =
-        "Unverified: content from an external gateway isn't checked against its CID, " +
-            "so the gateway is trusted for everything it serves. Prefer one you run yourself."
+    val IPFS_UNVERIFIED_WARNING: String get() = Strings.get(R.string.names_ipfs_unverified_warning)
 
     enum class Rejection { EMPTY, TOO_LONG, NOT_A_URL, SCHEME, QUERY_OR_FRAGMENT, CREDENTIALS }
 

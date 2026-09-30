@@ -12,7 +12,7 @@
  *  - page → app: {type: 'ready'}
  *                {type: 'status', sid, status: 'connecting' | 'connected' | 'disconnected' | 'failed', message?}
  *                {type: 'request', sid, id, method, params}
- *  - app → page: {type: 'start', sid, uri, max} | {type: 'stop'}
+ *  - app → page: {type: 'start', sid, uri, max, strings} | {type: 'stop'}
  *                {type: 'response', sid, id, result} | {type: 'response', sid, id, error: {code, message}}
  *
  * `sid` is the app's number for the session a message belongs to, so
@@ -40,6 +40,11 @@ const post = (message) => channel.postMessage(JSON.stringify(message));
 
 let current = null; // {sid, session, pending: Map<id, resolve>, max}
 let nextId = 1;
+
+// The text this page shows the user (a failed status's message), in the
+// app's language: the app sends the table with each `start` (#280).
+let strings = {};
+const t = (key, arg) => String(strings[key] ?? key).replace('%1$s', () => String(arg));
 
 function requestHandler(state) {
   return (payload) => {
@@ -76,15 +81,15 @@ function signalingRefusal(url) {
   try {
     u = new URL(url);
   } catch {
-    return 'That pairing code’s server address can’t be read. Scan the code on the computer again.';
+    return t('serverUnreadable');
   }
   if (u.protocol === 'wss:') return null;
   if (u.protocol === 'ws:') {
     if (u.hostname === '127.0.0.1' || u.hostname === 'localhost') return null;
-    return 'That pairing code points at an unencrypted server. Scan the code on the computer again.';
+    return t('serverUnencrypted');
   }
   // Scheme only: the rest of the URL can carry credentials.
-  return `That pairing code’s server uses ${u.protocol}, but the phone connects over secure WebSockets (wss:) only. Scan the code on the computer again.`;
+  return t('serverScheme', u.protocol);
 }
 
 function stop() {
@@ -112,9 +117,9 @@ async function start(sid, uri, max) {
       params = decodeConnectionURL(uri);
     } catch {
       // The SDK's message quotes the whole code, session key included: not for the screen.
-      throw new Error('That pairing code can’t be read. Scan the code on the computer again.');
+      throw new Error(t('codeUnreadable'));
     }
-    if (params.p !== 'mqtt') throw new Error(`Unsupported signaling protocol "${params.p}"`);
+    if (params.p !== 'mqtt') throw new Error(t('unsupportedProtocol', params.p));
     const refusal = params.s != null ? signalingRefusal(String(params.s)) : null;
     if (refusal) throw new Error(refusal);
     report('connecting');
@@ -156,6 +161,7 @@ channel.addEventListener('message', (event) => {
   }
   switch (message?.type) {
     case 'start':
+      strings = message.strings && typeof message.strings === 'object' ? message.strings : {};
       start(message.sid, String(message.uri), Number.isFinite(message.max) ? message.max : 0);
       break;
     case 'stop':

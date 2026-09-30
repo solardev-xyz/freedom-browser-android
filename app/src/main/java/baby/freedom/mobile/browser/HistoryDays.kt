@@ -1,6 +1,8 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.HistoryEntry
+import baby.freedom.mobile.l10n.Strings
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -56,8 +58,8 @@ internal fun historyDays(
  */
 internal fun historyDayLabel(date: LocalDate, today: LocalDate, locale: Locale): String =
     when (date) {
-        today -> "Today"
-        today.minusDays(1) -> "Yesterday"
+        today -> Strings.get(R.string.library_history_today)
+        today.minusDays(1) -> Strings.get(R.string.library_history_yesterday)
         else -> DateTimeFormatter.ofLocalizedDate(FormatStyle.FULL).withLocale(locale).format(date)
     }
 

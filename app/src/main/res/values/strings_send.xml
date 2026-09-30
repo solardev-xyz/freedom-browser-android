@@ -1,0 +1,335 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Send, the dApp approval sheets, connected sites and auto-approve rules (#280).
+  Token amounts, fees, gas, nonces, block numbers, addresses and chain IDs are
+  passed in already formatted (fixed format, as a block explorer shows them):
+  only the words around them are here.
+-->
+<resources>
+    <!-- browser/SendScreen.kt -->
+    <string name="send_title">Send</string>
+    <string name="send_fee_detail_eip1559">Gas limit %1$s · up to %2$s per gas, tip %3$s</string>
+    <string name="send_fee_detail_legacy">Gas limit %1$s · %2$s per gas</string>
+    <string name="send_fee_footnote_eip1559">The “up to” leaves room for unused gas and for the base fee to rise; what isn\'t used stays in the account. The tip is paid on the gas used, less only if the base fee rises into that room.</string>
+    <string name="send_fee_footnote_legacy">The “up to” leaves room for unused gas, which stays in the account; the gas used is paid at the price above in full.</string>
+    <string name="send_fee_footnote_high">This network fee is unusually high per gas; check it before you confirm. %1$s</string>
+    <string name="send_status_ledger_title">Confirm on your Ledger…</string>
+    <string name="send_status_ledger_text">Check the transaction on %1$s’s screen and approve it there.</string>
+    <string name="send_status_signing_title">Signing…</string>
+    <string name="send_status_signing_text">With this account’s key, on this phone.</string>
+    <string name="send_status_broadcasting_title">Sending…</string>
+    <string name="send_status_broadcasting_text">Handing the signed transaction to %1$s’s RPCs.</string>
+    <string name="send_status_pending_title">Waiting to be mined</string>
+    <string name="send_status_pending_text">Sent. It usually takes a block or two.</string>
+    <string name="send_status_confirmed_title">Sent</string>
+    <string name="send_status_confirmed_text">Mined in block %1$s</string>
+    <string name="send_status_confirmed_text_fee">Mined in block %1$s · fee %2$s</string>
+    <string name="send_status_reverted_title">Failed on chain</string>
+    <string name="send_status_reverted_contract">Mined in block %1$s, but the contract refused the transaction, so it changed nothing. The network fee was still paid.</string>
+    <string name="send_status_reverted_contract_fee">Mined in block %1$s, but the contract refused the transaction, so it changed nothing. The network fee (%2$s) was still paid.</string>
+    <string name="send_status_reverted_transfer">Mined in block %1$s, but the transfer itself failed, so nothing arrived. The network fee was still paid.</string>
+    <string name="send_status_reverted_transfer_fee">Mined in block %1$s, but the transfer itself failed, so nothing arrived. The network fee (%2$s) was still paid.</string>
+    <string name="send_status_unconfirmed_title">Not mined yet</string>
+    <plurals name="send_status_unconfirmed_text">
+        <item quantity="one">No receipt after %d minute. It may still go through; the explorer shows where it stands.</item>
+        <item quantity="other">No receipt after %d minutes. It may still go through; the explorer shows where it stands.</item>
+    </plurals>
+    <string name="send_status_not_confirmed_title">Not confirmed</string>
+    <string name="send_status_not_sent_title">Not sent</string>
+    <string name="send_prepare_failed">Couldn’t prepare the send: %1$s</string>
+    <string name="send_repriced_notice">The fee estimate was over a minute old, so it’s been priced again. Check it and confirm.</string>
+    <string name="send_rechecking_name">Looking up %1$s again before signing…</string>
+    <string name="send_busy">Another send is still going out, or may have. Settle it (or stop tracking it) first.</string>
+    <string name="send_label_from">From</string>
+    <string name="send_label_to">To</string>
+    <string name="send_label_asset">Asset</string>
+    <string name="send_label_amount">Amount</string>
+    <string name="send_label_network">Network</string>
+    <string name="send_label_network_fee">Network fee</string>
+    <string name="send_label_total">Total</string>
+    <string name="send_label_nonce">Nonce</string>
+    <string name="send_label_requested_by">Requested by</string>
+    <string name="send_label_contract">Contract</string>
+    <string name="send_label_data">Data</string>
+    <string name="send_label_transaction">Transaction</string>
+    <string name="send_label_account">Account</string>
+    <string name="send_recipient_placeholder">0x… or name.eth</string>
+    <string name="send_amount_placeholder" translatable="false">0.0</string>
+    <string name="send_own_address_note">That’s this account’s own address: only the fee leaves it.</string>
+    <string name="send_max">Max</string>
+    <plurals name="send_amount_invalid">
+        <item quantity="one">Enter a positive amount with at most %1$s decimal</item>
+        <item quantity="other">Enter a positive amount with at most %1$s decimals</item>
+    </plurals>
+    <string name="send_all_note">All of it, less the network fee: the review shows the exact amount</string>
+    <!-- %1$s: the balance, fixed format; %2$s: the token's symbol. -->
+    <string name="send_balance_note">Balance %1$s %2$s</string>
+    <string name="send_pricing">Pricing…</string>
+    <string name="send_review_button">Review</string>
+    <string name="send_review_title">Review</string>
+    <!-- %1$s: the trust tier's title; %2$s: what it means for the recipient. -->
+    <string name="send_name_trust_detail">%1$s. %2$s</string>
+    <string name="send_name_recheck_note">The name is looked up again just before signing; the address, not the name, is signed.</string>
+    <string name="send_self_send_note">This is the sending account itself.</string>
+    <!-- %1$s: a fee with its currency symbol, fixed format. -->
+    <string name="send_up_to">up to %1$s</string>
+    <string name="send_confirm_on_ledger">Confirm on Ledger</string>
+    <string name="send_confirm_and_send">Confirm and send</string>
+    <!-- %1$s: the amount, fixed format; %2$s: the token's symbol; %3$s: the network. -->
+    <string name="send_amount_on_chain">%1$s %2$s on %3$s</string>
+    <string name="send_data_scanned_detail">Asked for over a scanned pairing code</string>
+    <string name="send_review_again">Review again</string>
+    <string name="send_keep_waiting">Keep waiting</string>
+    <!-- %1$s: the block explorer's host name. -->
+    <string name="send_view_on">View on %1$s</string>
+    <string name="send_view_on_explorer">View on the explorer</string>
+    <string name="send_close_keeps_going">Close (it keeps going)</string>
+    <string name="send_close_try_again_stays">Close (Try again stays here)</string>
+    <string name="send_close_stays">Close (it stays here)</string>
+    <string name="send_stop_tracking_ellipsis">Stop tracking it…</string>
+    <string name="send_stop_tracking_title">Stop tracking this send?</string>
+    <string name="send_stop_tracking">Stop tracking</string>
+    <string name="send_keep_it">Keep it</string>
+    <!-- %1$s: amount (fixed format); %2$s: symbol; %3$s: account; %4$s: network; %5$s: the nonce. -->
+    <string name="send_stop_tracking_text">It may still go through: if it does, %1$s %2$s is paid. Until it’s mined, the next send from %3$s on %4$s reuses its nonce (%5$s) at a higher fee, so it takes this one’s place: only one of the two can go through.</string>
+    <!-- %1$s: the name; %2$s: the network. -->
+    <string name="send_looking_up_name">Looking up %1$s on %2$s…</string>
+    <string name="send_accept_unverified">I’ve checked this address with the recipient. Send to it anyway.</string>
+    <string name="send_entry_subtitle">Native currency or tokens, from this account</string>
+    <!-- %1$s: what is sent ("1.5 xDAI on Gnosis"); %2$s: who asked for it. -->
+    <string name="send_entry_for">%1$s, for %2$s</string>
+    <string name="send_requester_safe_activation">Safe “%1$s” (activation)</string>
+    <string name="send_requester_safe_owners">Safe “%1$s” (its owners’ transaction)</string>
+    <string name="send_requester_swarm_node">your Swarm node (funding and a postage stamp)</string>
+    <string name="send_requester_pairing_code">a scanned pairing code</string>
+
+    <!-- wallet/Send.kt: recipients -->
+    <string name="send_recipient_empty_names">Enter an address or a name to send to</string>
+    <string name="send_recipient_empty">Enter the address to send to</string>
+    <string name="send_recipient_bad_name">Not a valid name: it breaks the ENS naming rules (ENSIP-15)</string>
+    <string name="send_recipient_tezos">Tezos Domains names don’t name Ethereum accounts: enter an address or an ENS, .wei or .gwei name</string>
+    <string name="send_recipient_not_address_or_name">Not an address or a name: an address is 0x and 40 hex digits, a name is like alice.eth</string>
+    <string name="send_recipient_not_address">Not an address: it’s 0x and 40 hex digits (names aren’t supported here yet)</string>
+    <string name="send_recipient_checksum_typo">This address has a typo: its capital letters don’t match its checksum</string>
+    <string name="send_recipient_record_not_address">The name’s record isn’t an Ethereum address</string>
+    <string name="send_recipient_zero">That’s the zero address: anything sent there is lost</string>
+    <string name="send_recipient_token_contract">That’s the %1$s contract itself, not an account: tokens sent there are lost</string>
+    <string name="send_name_no_resolver">%1$s isn’t set up: it has no resolver, so no address to send to.</string>
+    <string name="send_name_no_address">%1$s has no address for %2$s. Only an address its owner set for this network is safe to send to.</string>
+    <!-- %1$s: the naming system ("Basenames"); %2$s: the network. -->
+    <string name="send_name_chain_unsupported">%1$s names hold an Ethereum address only, not one for %2$s: funds sent there could be lost. Send an Ethereum asset to it, or enter an address.</string>
+    <string name="send_name_chain_id_unsupported">Names can’t hold an address for %1$s: its chain id is past the range ENS address records cover (ENSIP-11). Enter an address instead.</string>
+    <string name="send_name_not_account">%1$s doesn’t name an Ethereum account.</string>
+    <!-- %2$s: each server's answer with the servers that gave it. -->
+    <string name="send_name_conflict_record">Servers disagree on %1$s’s address, so nothing can be sent to it: %2$s.</string>
+    <string name="send_name_conflict_block">Servers disagree on which block is the chain’s, so %1$s can’t be looked up safely right now. Try again shortly.</string>
+    <string name="send_name_lookup_error">Couldn’t look up %1$s: %2$s</string>
+    <string name="send_recheck_moved">%1$s now resolves to a different address (%2$s), so nothing was sent. Look at the new one before sending.</string>
+    <string name="send_recheck_unverified">Checking %1$s again, only one server vouched for its address, so nothing was sent. Look at it again before sending.</string>
+    <string name="send_recheck_no_address">%1$s no longer has an address for this network, so nothing was sent.</string>
+    <string name="send_recheck_conflict_record">Checking %1$s again, servers disagreed on its address, so nothing was sent.</string>
+    <string name="send_recheck_conflict_block">Checking %1$s again, servers disagreed on which block is the chain’s, so it couldn’t be looked up safely and nothing was sent. Try again shortly.</string>
+    <string name="send_recheck_error_retry">Couldn’t check %1$s again (%2$s), so nothing was sent. Try again.</string>
+    <string name="send_recheck_error">Couldn’t check %1$s again (%2$s), so nothing was sent.</string>
+
+    <!-- wallet/Send.kt: pricing, signing and sending -->
+    <string name="send_no_gas_price">The network gave no usable gas price. Try again.</string>
+    <string name="send_save_failed">Couldn’t save the transaction before sending it, so nothing was sent.</string>
+    <string name="send_token_no_balance">The %1$s contract gave no balance for this account</string>
+    <string name="send_no_token">This account has no %1$s</string>
+    <!-- %1$s: the token's symbol; %2$s: the balance, fixed format. -->
+    <string name="send_not_enough_token">Not enough %1$s: this account has %2$s %1$s</string>
+    <!-- %1$s: the native currency's symbol; %2$s: the most the fee can be; %3$s: the balance (both fixed format). -->
+    <string name="send_not_enough_for_fee_all">Not enough %1$s to pay the network fee (up to %2$s %1$s): this account has %3$s %1$s</string>
+    <string name="send_not_enough_for_amount_and_fee">Not enough %1$s for the amount and the network fee (up to %2$s %1$s): this account has %3$s %1$s</string>
+    <string name="send_not_enough_for_fee">Not enough %1$s for the network fee (up to %2$s %1$s): this account has %3$s %1$s</string>
+    <!-- %1$s: why signing was held back, a sentence. -->
+    <string name="send_signing_held">%1$s Nothing was signed or sent.</string>
+    <string name="send_signing_locked">The wallet locked before the transaction was signed. Nothing was sent; confirm again to unlock it.</string>
+    <!-- %1$s: the Ledger's own words, a sentence. -->
+    <string name="send_ledger_failed">%1$s Nothing was sent.</string>
+    <string name="send_signing_failed">Couldn’t sign the transaction. Nothing was sent.</string>
+    <string name="send_stopped_on_phone">The send was stopped on the phone while it was going out; it may still go through.</string>
+    <string name="send_no_hash">No transaction hash came back.</string>
+    <string name="send_interrupted">The app closed while this was going out, so it may or may not have gone out. Try again sends the very same transaction, so it can’t be paid twice.</string>
+    <string name="send_stale_while_signing">The network fee was worked out over three minutes ago, before this was signed, so it may no longer get the transaction in. Nothing was sent; review the new fee and confirm again.</string>
+    <string name="send_stale_before_signing">The network fee was worked out over a minute ago, so it may no longer get the transaction in. Nothing was signed or sent; review the new fee and confirm again.</string>
+    <string name="send_read_unknown_chain">This chain isn’t set up in Settings → Chains.</string>
+    <string name="send_read_no_rpc">No RPC answered for this chain. Check the connection and try again.</string>
+    <string name="send_read_rpc_error">The RPC answered with an error: %1$s</string>
+    <string name="send_read_nonsense">The RPC’s answer made no sense. Try again.</string>
+    <string name="send_estimate_insufficient">Not enough %1$s to pay for this transaction.</string>
+    <string name="send_estimate_contract_refuses">The contract would refuse this transaction.</string>
+    <string name="send_estimate_contract_refuses_reason">The contract would refuse this transaction: %1$s</string>
+    <string name="send_estimate_recipient_refuses">The recipient would refuse this transfer.</string>
+    <string name="send_estimate_recipient_refuses_reason">The recipient would refuse this transfer: %1$s</string>
+    <string name="send_estimate_token_refuses">The %1$s contract would refuse this transfer.</string>
+    <string name="send_estimate_token_refuses_reason">The %1$s contract would refuse this transfer: %2$s</string>
+    <string name="send_estimate_failed">The network couldn’t price this transaction: %1$s</string>
+    <string name="send_broadcast_uncertain">No RPC confirmed it took the transaction, so it may or may not have gone out. Try again sends the very same transaction, so it can’t be paid twice.</string>
+    <string name="send_broadcast_one_unanswered">One RPC didn’t answer and may have taken it; another refused it (%1$s). Try again sends the very same transaction, so it can’t be paid twice.</string>
+    <string name="send_broadcast_insufficient">Not sent: not enough %1$s for the amount and the fee any more.</string>
+    <!-- %1$s: the nonce. -->
+    <string name="send_broadcast_nonce_too_high">Not sent: nonce %1$s is ahead of what the network expects — an earlier transaction may not have reached it. Review it again.</string>
+    <!-- %1$s: the nonce; %2$s: the hash of the send that went through. -->
+    <string name="send_broadcast_nonce_used_by_replacement">Not sent: nonce %1$s was already used — most likely by your send that took the place of the one you stopped tracking, which went through (%2$s). Check it on the explorer before sending again.</string>
+    <string name="send_broadcast_nonce_used_by_stopped">Not sent: nonce %1$s was already used — most likely the send you stopped tracking went through (%2$s). Check it on the explorer before sending again.</string>
+    <string name="send_broadcast_nonce_used">Not sent: nonce %1$s was already used — maybe by another wallet with this account. Review it again.</string>
+    <string name="send_broadcast_invalid_nonce">Not sent: the network didn’t accept nonce %1$s. Review it again.</string>
+    <string name="send_broadcast_stopped_holds_nonce">Not sent: the send you stopped tracking still holds nonce %1$s and the network wouldn’t swap it. Review it again for a fresh fee.</string>
+    <string name="send_broadcast_nonce_waiting">Not sent: another transaction with nonce %1$s is still waiting to be mined. Review it again.</string>
+    <string name="send_broadcast_underpriced">Not sent: its fee is below what the network takes now. Review it again for a fresh fee.</string>
+    <string name="send_broadcast_rpc_error">The RPC answered with an error (%1$s), so it may or may not have gone out. Try again sends the very same transaction, so it can’t be paid twice.</string>
+
+    <!-- wallet/Eip712.kt: typed data a signing sheet can't show -->
+    <string name="send_typed_too_large">The typed data is too large</string>
+    <string name="send_typed_no_message">The typed data has no message</string>
+    <string name="send_typed_malformed_field">Type %1$s has a malformed field</string>
+    <string name="send_typed_duplicate_field">Type %1$s names a field twice</string>
+    <string name="send_typed_too_long">The typed data is too long to show on the phone</string>
+    <string name="send_typed_too_many_fields">The typed data has too many fields to show on the phone</string>
+    <plurals name="send_typed_items">
+        <item quantity="one">%d item</item>
+        <item quantity="other">%d items</item>
+    </plurals>
+    <string name="send_typed_unknown_type">Unknown type: %1$s</string>
+    <!-- %1$s: the field; %2$s: its EIP-712 type. -->
+    <string name="send_typed_invalid_value">%1$s isn’t a valid %2$s</string>
+    <string name="send_typed_not_hex">%1$s isn’t 0x hex bytes</string>
+    <string name="send_typed_mismatch">The typed data doesn’t match its types</string>
+    <string name="send_typed_nested_too_deeply">The typed data is nested too deeply</string>
+
+    <!-- browser/EthereumApproval.kt -->
+    <string name="send_eth_connect_title">Connect wallet</string>
+    <string name="send_eth_connect_request">wants to connect to your wallet</string>
+    <string name="send_eth_connect_action">Connect</string>
+    <string name="send_eth_sign_message_title">Sign message</string>
+    <string name="send_eth_sign_message_request">wants you to sign a message</string>
+    <string name="send_eth_sign_action">Sign</string>
+    <string name="send_eth_sign_data_title">Sign data</string>
+    <string name="send_eth_sign_data_request">wants you to sign typed data</string>
+    <string name="send_eth_send_title">Send transaction</string>
+    <string name="send_eth_send_request">wants to send a transaction</string>
+    <string name="send_eth_switch_title">Switch network</string>
+    <string name="send_eth_switch_request">wants to switch networks</string>
+    <string name="send_eth_switch_action">Switch</string>
+    <string name="send_eth_add_chain_title">Add network</string>
+    <string name="send_eth_add_chain_request">wants to add a network and switch to it</string>
+    <string name="send_eth_add_chain_action">Add and switch</string>
+    <string name="send_eth_pay_title">Pay for this page</string>
+    <string name="send_eth_pay_request">asks to be paid to show this page</string>
+    <string name="send_eth_pay_action">Pay</string>
+    <string name="send_eth_loopback">Not encrypted: a loopback page on this device</string>
+    <string name="send_eth_no_wallet">There\'s no wallet on this device yet. Set one up to connect — or reject, and keep browsing without one.</string>
+    <string name="send_eth_set_up_wallet">Set up a wallet</string>
+    <string name="send_eth_account_to_share">Account to share</string>
+    <string name="send_eth_connect_note">The site will see this account\'s address and can read its balances. It can ask you to sign messages and send transactions, and each one asks you here first (unless you later turn on auto-approve for a call). Disconnect it any time on the wallet page or in Settings → Site permissions.</string>
+    <string name="send_eth_message">Message</string>
+    <string name="send_eth_message_whole">The signature covers the whole message.</string>
+    <string name="send_eth_message_hex">This message isn\'t readable text; it\'s shown as hex bytes.</string>
+    <string name="send_eth_message_note">A signature can authorise actions off-chain, such as a login or an order. Only sign if you trust the site.</string>
+    <!-- %1$s: the network's name; %2$s: its chain ID. -->
+    <string name="send_eth_chain_with_id">%1$s (chain %2$s)</string>
+    <string name="send_eth_any_chain">Any — the signature names no chain</string>
+    <string name="send_eth_application">Application</string>
+    <string name="send_eth_type">Type</string>
+    <string name="send_eth_data_whole">The signature covers all of the data.</string>
+    <string name="send_eth_typed_note">Typed data can authorise a transfer or a trade (a permit, an order) without a transaction. Only sign if you trust the site and expect it.</string>
+    <string name="send_eth_repriced">It took more than a minute, so the network fee was priced again. Check it before you confirm.</string>
+    <!-- %1$s: the hash of the send the user stopped tracking. -->
+    <string name="send_eth_replaces">This transaction takes the place of the send you stopped tracking (%1$s): only one of the two can go through, and this one pays the higher fee. If that send still matters, reject this and settle it on the wallet page first.</string>
+    <plurals name="send_eth_data_bytes">
+        <item quantity="one">Data (%d byte)</item>
+        <item quantity="other">Data (%d bytes)</item>
+    </plurals>
+    <string name="send_eth_tx_whole">The transaction sends all of it.</string>
+    <!-- %1$s: the fee footnote. -->
+    <string name="send_eth_send_footnote">%1$s A transaction can\'t be undone once it\'s sent: only confirm if you trust the site and expect it.</string>
+    <string name="send_eth_ruled_replaces">An auto-approve rule you turned on covers this call. It\'s asked here because it takes the place of a send you stopped tracking.</string>
+    <string name="send_eth_ruled_high_fee_locked">An auto-approve rule you turned on covers this call. It\'s asked here because its network fee is higher than a rule sends without asking, and because the wallet is locked; it goes out once you confirm.</string>
+    <string name="send_eth_ruled_high_fee">An auto-approve rule you turned on covers this call. It\'s asked here because its network fee is higher than a rule sends without asking.</string>
+    <string name="send_eth_ruled_locked">An auto-approve rule you turned on covers this call. It\'s asked here because the wallet is locked; it goes out once you confirm.</string>
+    <string name="send_eth_ruled_check">An auto-approve rule you turned on covers this call. It\'s asked here for you to check before it goes out.</string>
+    <string name="send_eth_switch_note">Only this site switches; other sites stay on their own network.</string>
+    <string name="send_eth_chain_id">Chain ID</string>
+    <string name="send_eth_currency_label">Currency</string>
+    <!--
+      %1$s: the currency's name; %2$s: its symbol; %3$s: its decimals, as the
+      site gave them (plain digits, like the chain ID: the user checks them).
+    -->
+    <plurals name="send_eth_currency">
+        <item quantity="one">%1$s (%2$s, %3$s decimal)</item>
+        <item quantity="other">%1$s (%2$s, %3$s decimals)</item>
+    </plurals>
+    <string name="send_eth_rpc">RPC</string>
+    <string name="send_eth_explorer">Explorer</string>
+    <string name="send_eth_add_chain_note">The site chose these RPCs. They\'ll see your addresses and what you read and send on this network, and their answers aren\'t checked against other RPCs. You can change or remove the network in Settings → Chains.</string>
+    <!-- %1$s: the Ledger's name. -->
+    <string name="send_eth_ledger_note_hashes">You’ll confirm this on your Ledger (%1$s) next, where it shows only the two hashes above.</string>
+    <string name="send_eth_ledger_note">You’ll check and confirm this on your Ledger (%1$s) next.</string>
+    <string name="send_eth_ledger_hashes_only">Your Ledger can’t show this data field by field. It will show only these two hashes of it, and signs them only with Blind signing on — so its screen can’t confirm the data above. Check the data here, and that the Ledger shows these same hashes.</string>
+    <string name="send_eth_domain_hash">Domain hash</string>
+    <string name="send_eth_message_hash">Message hash</string>
+    <!-- %1$s: how many characters, formatted; %2$s: that the signature covers them all the same (may be empty). -->
+    <plurals name="send_eth_too_long">
+        <item quantity="one">Too long to show whole: %1$s more character isn\'t shown. %2$s</item>
+        <item quantity="other">Too long to show whole: %1$s more characters aren\'t shown. %2$s</item>
+    </plurals>
+
+    <!-- browser/EthereumProvider.kt -->
+    <string name="send_eth_custom_network">Custom network</string>
+
+    <!-- browser/EthereumProviderBridge.kt: why the wallet page opens to set up a wallet -->
+    <string name="send_eth_setup_reason_pay">%1$s asks to be paid</string>
+    <string name="send_eth_setup_reason_connect">%1$s wants to connect to your wallet</string>
+
+    <!-- browser/AutoApprove.kt -->
+    <string name="send_auto_approve_token_transfers">token transfers</string>
+    <string name="send_auto_approve_unknown_risk">The wallet can\'t tell what this function does. If it can move tokens you\'ve approved this contract to use, run calls it\'s handed (as a swap router can), or let someone else spend, borrow or withdraw for you, this rule lets the site do that with no sheet, to anyone.</string>
+    <!-- %1$s: send_auto_approve_unknown_risk. -->
+    <string name="send_auto_approve_warning_switch">%1$s Only turn it on for a function you know.</string>
+    <string name="send_auto_approve_warning_rule">%1$s Remove it unless you know the function.</string>
+    <!-- %1$s: what the function does ("token transfers"). -->
+    <string name="send_auto_approve_switch_label">Always approve %1$s on this contract</string>
+    <string name="send_auto_approve_switch_label_unknown">Always approve this function on this contract</string>
+    <!-- %1$s: the function's selector; %2$s: the contract; %3$s: the network. -->
+    <string name="send_auto_approve_scope">Function %1$s on %2$s, on %3$s, from this site only. Every such call is covered, whatever its recipient, spender or amount. Calls that also send funds still ask.</string>
+    <string name="send_auto_approve_function">Function %1$s</string>
+    <!-- %1$s: the function's selector; %2$s: the network. -->
+    <string name="send_auto_approve_rule_detail">Function %1$s · %2$s</string>
+    <!-- %3$s: the date the rule was turned on. -->
+    <string name="send_auto_approve_rule_detail_since">Function %1$s · %2$s · since %3$s</string>
+    <!-- A network the chain list doesn't have, by its chain ID. -->
+    <string name="send_chain_fallback">chain %1$s</string>
+    <string name="send_auto_approve_explainer">Transactions from this site that match a rule go out without asking while the wallet is unlocked. Each rule covers one function on one contract on one network — with any recipient, spender or amount — and only calls that send no funds. The best-known approval, permit, multicall and execute functions can\'t have a rule. Disconnecting the site removes its rules.</string>
+    <string name="send_auto_approve_remove_failed">Couldn\'t remove the rule: the change couldn\'t be saved. Try again.</string>
+    <string name="send_auto_approve_rules">Auto-approve rules</string>
+    <string name="send_auto_approve_unreadable">Couldn\'t read the rules right now. None of them apply until they can be read.</string>
+    <string name="send_auto_approve_none">None. Turn one on from a transaction\'s approval sheet.</string>
+
+    <!-- browser/ConnectedSites.kt -->
+    <string name="send_gone_account">An account this wallet no longer has</string>
+    <string name="send_connected_sites">Connected sites</string>
+    <string name="send_connected_site">Connected site</string>
+    <string name="send_site">Site</string>
+    <!-- %1$s: the account's name. -->
+    <string name="send_account_named">Account · %1$s</string>
+    <string name="send_connected">Connected</string>
+    <string name="send_connected_site_explainer">This site can see the account below and ask you to sign messages or send transactions from it. Each signature and transaction still needs your approval, unless an auto-approve rule below covers it.</string>
+    <string name="send_disconnect_explainer">The site\'s open pages lose the account at once, and its auto-approve rules are removed. It can ask to connect again; nothing is shared until you approve.</string>
+    <string name="send_disconnect_failed">Couldn\'t disconnect: the change couldn\'t be saved. Try again.</string>
+    <string name="send_ask_each_time_failed">Couldn\'t switch to asking each time: the change couldn\'t be saved. Try again.</string>
+    <string name="send_swarm_publishes">publishes</string>
+    <string name="send_swarm_manages_feeds">manages feeds</string>
+    <string name="send_swarm_signs">signs</string>
+    <string name="send_swarm_sends_messages">sends messages</string>
+    <string name="send_swarm_asks_each">Asks before each upload and signature</string>
+    <!-- %1$s: what the site may do, a list ("Publishes, signs"). -->
+    <string name="send_swarm_without_asking">%1$s without asking</string>
+    <!-- %1$s: what the site may do without asking. -->
+    <string name="send_swarm_can_message">%1$s · Can send and receive messages</string>
+    <!-- %1$s: the rows the manifest allowed, a list. -->
+    <string name="send_swarm_manifest_allowed">Allowed by the app\'s permission manifest: %1$s</string>
+    <string name="send_connected_to_swarm">Connected to Swarm</string>
+    <string name="send_ask_each_time">Ask each time</string>
+</resources>

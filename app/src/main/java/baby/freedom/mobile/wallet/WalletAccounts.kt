@@ -1,5 +1,7 @@
 package baby.freedom.mobile.wallet
 
+import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.R
 import android.content.Context
 import android.util.Log
 import androidx.annotation.VisibleForTesting
@@ -43,7 +45,7 @@ data class WalletAccount(val index: Int, val name: String, val address: String, 
     companion object {
         fun pathFor(index: Int) = "m/44'/60'/$index'/0/0"
 
-        fun defaultName(index: Int) = "Account ${index + 1}"
+        fun defaultName(index: Int) = Strings.get(R.string.wallet_account_default_name, index + 1)
     }
 }
 
@@ -152,7 +154,7 @@ class WalletAccountStore internal constructor(private val file: File) {
 class DuplicateAccountException : IllegalStateException("this account is already in the wallet")
 
 /** No more accounts can be added ([WalletAccountStore.MAX_ACCOUNTS]). */
-class TooManyAccountsException : IllegalStateException("this wallet has as many accounts as it can hold")
+class TooManyAccountsException : IllegalStateException(Strings.get(R.string.wallet_account_too_many))
 
 /**
  * The wallet's accounts (#104), kept in step with the [Vault]:
@@ -293,7 +295,7 @@ class WalletAccounts internal constructor(
         if (current.accounts.size >= WalletAccountStore.MAX_ACCOUNTS) throw TooManyAccountsException()
         if (current.accounts.any { it.address.equals(address, ignoreCase = true) }) throw DuplicateAccountException()
         val index = minOf(0, current.accounts.minOf { it.index }) - 1
-        val shown = name.trim().take(WalletAccountStore.MAX_NAME).ifBlank { "Ledger ${current.accounts.count { it.ledger != null } + 1}" }
+        val shown = name.trim().take(WalletAccountStore.MAX_NAME).ifBlank { Strings.get(R.string.wallet_account_default_ledger_name, current.accounts.count { it.ledger != null } + 1) }
         val added = WalletAccount(index, shown, address, key)
         val list = WalletAccountList(current.accounts + added, index)
         withContext(io) { store.write(tag, list) }

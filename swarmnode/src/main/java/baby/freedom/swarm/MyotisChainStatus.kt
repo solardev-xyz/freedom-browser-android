@@ -88,12 +88,12 @@ data class MyotisChainStatus(
             if (!running || paused || !synced || ready || recovery != null) return ""
             val reasons = mutableListOf<String>()
             if (snapPeers < 1) {
-                reasons += "no state peer"
+                reasons += SwarmStrings.get(R.string.swarmnode_not_serving_no_state_peer)
             } else if (snapServingPeers < 1) {
-                reasons += "no state peer at the head"
+                reasons += SwarmStrings.get(R.string.swarmnode_not_serving_no_state_peer_at_head)
             }
-            if (!elReaderAvailable) reasons += "execution reader down"
-            if (elHunting) reasons += "looking for peers at the head"
+            if (!elReaderAvailable) reasons += SwarmStrings.get(R.string.swarmnode_not_serving_reader_down)
+            if (elHunting) reasons += SwarmStrings.get(R.string.swarmnode_not_serving_hunting)
             return reasons.joinToString(", ")
         }
 

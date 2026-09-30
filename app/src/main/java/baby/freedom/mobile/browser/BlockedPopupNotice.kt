@@ -26,12 +26,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 
 /**
  * The pop-up blocker's notice (#261): which site's pop-ups were blocked
@@ -107,7 +110,7 @@ fun BlockedPopupNotice(
                 )
                 // Closing only takes the notice down: no need to guard it.
                 IconButton(onClick = onClose) {
-                    Icon(Icons.Filled.Close, contentDescription = "Close the pop-up notice")
+                    Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.browser_popup_close_notice))
                 }
             }
             Column(
@@ -153,14 +156,14 @@ fun BlockedPopupNotice(
                                 enabled = tap.armed && whole,
                                 onClick = { if (inView[index] && tap.guard.accepts()) onOpen(entry, shown!!) },
                                 modifier = Modifier.protectedPress(tap),
-                            ) { Text("Open") }
+                            ) { Text(stringResource(R.string.common_open)) }
                         }
                     }
                 }
                 val more = popups.unlisted
                 if (more > 0) {
                     Text(
-                        "and $more more",
+                        stringResource(R.string.browser_popup_and_more, more),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(vertical = 4.dp),
@@ -170,8 +173,8 @@ fun BlockedPopupNotice(
             if (origin != null) {
                 if (popups.allowed) {
                     Text(
-                        "Pop-ups from this site will open from now on" +
-                            if (private) ", until you close your private tabs." else ". Settings → Site permissions can undo it.",
+                        if (private) stringResource(R.string.browser_popup_allowed_private)
+                        else stringResource(R.string.browser_popup_allowed),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 8.dp, bottom = 4.dp, end = 12.dp),
@@ -183,14 +186,14 @@ fun BlockedPopupNotice(
                         enabled = tap.armed && named,
                         onClick = { if ((site == null || inView[SITE_KEY]) && tap.guard.accepts()) onAlwaysAllow(origin) },
                         modifier = Modifier.protectedPress(tap),
-                    ) { Text("Always allow pop-ups on this site") }
+                    ) { Text(stringResource(R.string.browser_popup_always_allow)) }
                 }
             }
             if (inView.mustScroll) {
                 // #292 R6-M1: a row taller than the space it scrolls in
                 // opens once all of it has been in view; say so.
                 Text(
-                    "Scroll through the whole of a long address to use its button.",
+                    stringResource(R.string.browser_popup_scroll_through),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(vertical = 4.dp),
@@ -312,7 +315,7 @@ private fun PopupAddressLabel(shown: String, posted: Boolean, modifier: Modifier
     val address = PopupAddress.of(shown)
     Column(modifier = modifier) {
         Text(
-            if (posted) "A form sent to ${address.site}" else address.site,
+            if (posted) stringResource(R.string.browser_popup_form_sent_to, address.site) else address.site,
             style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.Medium,
         )
@@ -326,7 +329,7 @@ private fun PopupAddressLabel(shown: String, posted: Boolean, modifier: Modifier
         }
         if (posted) {
             Text(
-                "Its data can't be sent again from here.",
+                stringResource(R.string.browser_popup_form_not_resent),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -336,4 +339,5 @@ private fun PopupAddressLabel(shown: String, posted: Boolean, modifier: Modifier
 
 /** "Pop-up blocked" / "3 pop-ups blocked". */
 internal fun blockedPopupsTitle(count: Int): String =
-    if (count <= 1) "Pop-up blocked" else "$count pop-ups blocked"
+    if (count <= 1) Strings.get(R.string.browser_popup_blocked_single)
+    else Strings.plural(R.plurals.browser_popups_blocked, count, count)

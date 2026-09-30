@@ -1,8 +1,10 @@
 package baby.freedom.mobile.ens
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.RpcUrls
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.l10n.Strings
 import java.net.URI
 import org.json.JSONArray
 import org.json.JSONObject
@@ -84,7 +86,7 @@ data class EnsRpcConfig(
             val seen = HashSet<String>()
             val out = ArrayList<Source>()
             for (url in customEndpoints) {
-                if (seen.add(endpointKey(url))) out += Source(Kind.CUSTOM, "Your endpoint", url)
+                if (seen.add(endpointKey(url))) out += Source(Kind.CUSTOM, Strings.get(R.string.names_your_endpoint), url)
             }
             for (provider in KEYED_PROVIDERS) {
                 val key = apiKeys[provider.id]?.trim().orEmpty()
@@ -390,14 +392,14 @@ object RpcEndpointCheck {
         val latency = (System.nanoTime() - started) / 1_000_000
         if (reply.code !in 200..299) return Outcome.Failed("HTTP ${reply.code}")
         val json = runCatching { JSONObject(reply.body) }.getOrNull()
-            ?: return Outcome.Failed("not a JSON-RPC endpoint")
+            ?: return Outcome.Failed(Strings.get(R.string.names_check_not_json_rpc))
         json.optJSONObject("error")?.let {
-            return Outcome.Failed(it.optString("message").ifBlank { "RPC error" })
+            return Outcome.Failed(it.optString("message").ifBlank { Strings.get(R.string.names_check_rpc_error_generic) })
         }
         val chain = json.optString("result", "")
-        if (chain.isEmpty()) return Outcome.Failed("not a JSON-RPC endpoint")
+        if (chain.isEmpty()) return Outcome.Failed(Strings.get(R.string.names_check_not_json_rpc))
         val id = chain.removePrefix("0x").removePrefix("0X").toLongOrNull(16)
-            ?: return Outcome.Failed("not a JSON-RPC endpoint")
+            ?: return Outcome.Failed(Strings.get(R.string.names_check_not_json_rpc))
         return if (id == 1L) Outcome.Ok(latency) else Outcome.WrongChain(id.toString())
     }
 }

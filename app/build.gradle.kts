@@ -58,6 +58,15 @@ android {
         }
     }
 
+    // Per-app language (#280): the locale config Android 13+ offers in
+    // Settings → Apps → Freedom → Language is generated from the
+    // `res/values-<lang>/` folders, so adding a language is a
+    // translation-only change. `res/resources.properties` names the
+    // language of the unqualified `res/values/` (English).
+    androidResources {
+        generateLocaleConfig = true
+    }
+
     buildFeatures {
         compose = true
         aidl = true
@@ -118,6 +127,40 @@ android {
         }
     }
 
+    // `./gradlew :app:lintDebug` is the gate for localisation (#280), not
+    // a general lint run: it checks only the issues below and fails the
+    // build on any of them. Full lint also reports some existing errors
+    // and ~150 warnings that have nothing to do with #280 (RestrictedApi,
+    // WrongConstant, RequiresFeature, UseKtx, …); a gate that is red for
+    // unrelated reasons stops being a gate. This one takes ~15 s of
+    // analysis and is green once the strings are migrated. Pass
+    // `-Plint.checkAll` for the full report (it fails on those errors).
+    //   HardcodedUiText: our own check (:lint-checks), user-visible string
+    //     literals in Kotlin; see docs/localisation.md § The lint check.
+    //   DevicePluralRules: also ours, a plural form chosen by the phone's
+    //     language instead of the text's (pluralStringResource,
+    //     getQuantityString; #313 R1-F1).
+    //   HardcodedText: the same for XML layouts and menus (a warning by
+    //     default, made an error here).
+    //   MissingTranslation / ExtraTranslation (an error and a fatal error
+    //     by default): a values-<lang> folder that lacks a string, or has
+    //     one values/ doesn't.
+    lint {
+        if (!project.hasProperty("lint.checkAll")) {
+            checkOnly += setOf("HardcodedUiText", "DevicePluralRules", "HardcodedText", "MissingTranslation", "ExtraTranslation")
+        }
+        error += setOf("HardcodedUiText", "DevicePluralRules", "HardcodedText")
+        abortOnError = true
+        // Test code isn't UI: its literals are fixtures.
+        ignoreTestSources = true
+        // Not :swarmnode: MissingTranslation doesn't see its strings from
+        // here even with checkDependencies (it judges the library by the
+        // library's own values-<lang> folders, and it has none), so a
+        // translation that leaves them out is caught by
+        // TranslationCoverageTest instead (#313 R1-M2).
+        checkDependencies = false
+    }
+
     packaging {
         resources.excludes += setOf(
             "META-INF/INDEX.LIST",
@@ -172,6 +215,8 @@ kotlin {
 
 dependencies {
     implementation(project(":swarmnode"))
+    // HardcodedUiText (#280), run by `:app:lintDebug`.
+    lintChecks(project(":lint-checks"))
 
     val composeBom = platform("androidx.compose:compose-bom:2026.03.01")
     implementation(composeBom)

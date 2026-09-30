@@ -10,8 +10,10 @@ import android.content.Intent
 import android.graphics.drawable.Icon
 import android.net.Uri
 import android.util.Log
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.DownloadEntry
 import baby.freedom.mobile.data.DownloadStatus
+import baby.freedom.mobile.l10n.Strings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -81,8 +83,8 @@ internal class DownloadNotifications(
         val mgr = manager ?: return
         runCatching {
             mgr.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "Downloads", NotificationManager.IMPORTANCE_LOW).apply {
-                    description = "Progress of downloads, with pause, resume and cancel."
+                NotificationChannel(CHANNEL_ID, Strings.get(R.string.library_download_channel_name), NotificationManager.IMPORTANCE_LOW).apply {
+                    description = Strings.get(R.string.library_download_channel_description)
                     setShowBadge(false)
                 },
             )
@@ -169,12 +171,12 @@ internal class DownloadNotifications(
             )
         }
         if (running && canPause(entry)) {
-            builder.addAction(action(entry.id, ACTION_PAUSE, "Pause", android.R.drawable.ic_media_pause))
+            builder.addAction(action(entry.id, ACTION_PAUSE, Strings.get(R.string.library_download_action_pause), android.R.drawable.ic_media_pause))
         }
         if (!running) {
-            builder.addAction(action(entry.id, ACTION_RESUME, "Resume", android.R.drawable.ic_media_play))
+            builder.addAction(action(entry.id, ACTION_RESUME, Strings.get(R.string.library_download_action_resume), android.R.drawable.ic_media_play))
         }
-        builder.addAction(action(entry.id, ACTION_CANCEL, "Cancel", android.R.drawable.ic_menu_close_clear_cancel))
+        builder.addAction(action(entry.id, ACTION_CANCEL, Strings.get(R.string.common_cancel), android.R.drawable.ic_menu_close_clear_cancel))
         builder.setDeleteIntent(
             PendingIntent.getBroadcast(
                 appContext,

@@ -43,10 +43,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.Vault
 import kotlinx.coroutines.CancellationException
@@ -68,44 +71,42 @@ internal data class SwarmPromptCopy(
 /** Desktop's wording, per tier (`swarm-connect.js`). */
 internal fun swarmPromptCopy(ask: SwarmAsk): SwarmPromptCopy = when (ask) {
     is SwarmAsk.Connect -> SwarmPromptCopy(
-        "Connect to Swarm",
-        "wants to connect to your Swarm node",
-        "It can ask to publish data and files to Swarm with your postage stamps, to create and update " +
-            "feeds signed with a publisher identity of its own, and to send and receive messages. Each of those asks first.",
-        "Connect",
+        Strings.get(R.string.swarm_connect_title),
+        Strings.get(R.string.swarm_connect_request),
+        Strings.get(R.string.swarm_connect_warning),
+        Strings.get(R.string.swarm_connect_approve),
         null,
     )
     is SwarmAsk.Publish -> SwarmPromptCopy(
-        "Publish to Swarm",
-        "wants to publish to Swarm",
-        "Publishing uses your postage stamps, and what's published can't be taken back: anyone with its " +
-            "address can read it.",
-        "Publish",
-        "Always allow this site to publish without asking",
+        Strings.get(R.string.swarm_publish_title),
+        Strings.get(R.string.swarm_publish_request),
+        Strings.get(R.string.swarm_publish_warning),
+        Strings.get(R.string.swarm_publish_approve),
+        Strings.get(R.string.swarm_publish_always),
     )
     // Its own sheet (SwarmManifestSheet); this is only what it's called.
     is SwarmAsk.Manifest -> SwarmPromptCopy(
-        "App permissions",
-        "asks for Swarm permissions",
+        Strings.get(R.string.swarm_manifest_title),
+        Strings.get(R.string.swarm_manifest_request),
         "",
-        "Allow all",
+        Strings.get(R.string.swarm_allow_all),
         null,
     )
     is SwarmAsk.Sign -> if (ask.kind == SwarmProvider.AutoApprove.Signing) {
         SwarmPromptCopy(
-            "Publisher signing",
-            "wants to use your publisher identity",
-            "Publisher signing can create Single Owner Chunks and reveal the active publisher owner for this site.",
-            "Allow",
-            "Always allow this site to use this publisher identity without asking",
+            Strings.get(R.string.swarm_signing_title),
+            Strings.get(R.string.swarm_signing_request),
+            Strings.get(R.string.swarm_signing_warning),
+            Strings.get(R.string.common_allow),
+            Strings.get(R.string.swarm_signing_always),
         )
     } else {
         SwarmPromptCopy(
-            "Feed access",
-            "wants to create and manage feeds",
-            "Feeds provide stable URLs that this app can update over time. Uses your stamps and bandwidth.",
-            "Allow",
-            "Always allow this site to manage feeds without asking",
+            Strings.get(R.string.swarm_feeds_title),
+            Strings.get(R.string.swarm_feeds_request),
+            Strings.get(R.string.swarm_feeds_warning),
+            Strings.get(R.string.common_allow),
+            Strings.get(R.string.swarm_feeds_always),
         )
     }
     is SwarmAsk.Message -> swarmMessagingCopy(ask)
@@ -118,21 +119,20 @@ internal fun swarmPromptCopy(ask: SwarmAsk): SwarmPromptCopy = when (ask) {
  */
 private fun swarmMessagingCopy(ask: SwarmAsk.Message): SwarmPromptCopy = when {
     ask.grant -> SwarmPromptCopy(
-        "Messaging access",
-        "wants to send and receive real-time messages",
-        "Messaging discloses your node's identity key to this site. It's the same key every site with messaging " +
-            "access sees, so those sites can tell they're talking to the same person. Sending uses your stamps; open subscriptions use " +
-            "bandwidth while the page is loaded. A subscription can also read any PSS traffic your node decrypts for " +
-            "the topic it joins, not only this site's own messages.",
-        "Allow",
+        Strings.get(R.string.swarm_messaging_title),
+        Strings.get(R.string.swarm_messaging_request),
+        Strings.get(R.string.swarm_messaging_warning),
+        Strings.get(R.string.common_allow),
         null,
     )
     else -> SwarmPromptCopy(
-        "Confirm message",
-        if (ask.send == SwarmAsk.Message.Kind.Pss) "wants to send a private message (PSS)" else "wants to broadcast a message (GSOC)",
-        "Sending this message uses your stamps and is visible to the Swarm network.",
-        "Send",
-        "Always allow this site to send messages without asking",
+        Strings.get(R.string.swarm_message_title),
+        Strings.get(
+            if (ask.send == SwarmAsk.Message.Kind.Pss) R.string.swarm_message_request_pss else R.string.swarm_message_request_gsoc,
+        ),
+        Strings.get(R.string.swarm_message_warning),
+        Strings.get(R.string.swarm_message_approve),
+        Strings.get(R.string.swarm_message_always),
     )
 }
 
@@ -156,25 +156,30 @@ internal fun swarmShownTopic(topic: String): String = buildString {
 
 /** "3 files", "text/html", "Swarm chunk": what a publish is. */
 internal fun swarmPublishWhat(ask: SwarmAsk.Publish): String = when (ask.kind) {
-    SwarmAsk.Publish.Kind.Files -> if (ask.paths.size == 1) "1 file" else "${ask.paths.size} files"
-    SwarmAsk.Publish.Kind.Chunk -> "Swarm chunk"
-    SwarmAsk.Publish.Kind.Data -> ask.contentType ?: "Data"
+    SwarmAsk.Publish.Kind.Files -> Strings.plural(R.plurals.swarm_publish_files, ask.paths.size, ask.paths.size)
+    SwarmAsk.Publish.Kind.Chunk -> Strings.get(R.string.swarm_publish_chunk)
+    SwarmAsk.Publish.Kind.Data -> ask.contentType ?: Strings.get(R.string.swarm_publish_data)
 }
 
 /** The first few paths of a files publish, and how many more: desktop's preview. */
-internal fun swarmPathsPreview(paths: List<String>): String =
-    paths.take(3).joinToString(", ") + if (paths.size > 3) " …and ${paths.size - 3} more" else ""
+internal fun swarmPathsPreview(paths: List<String>): String {
+    val shown = paths.take(3).joinToString(", ")
+    if (paths.size <= 3) return shown
+    val more = paths.size - 3
+    return Strings.plural(R.plurals.swarm_paths_preview_more, more, shown, more)
+}
 
 /** What a signing sheet's request row says: the method's own detail, or the feed it's on. */
-internal fun swarmSignRequest(ask: SwarmAsk.Sign): String = ask.detail ?: ask.feedName ?: "Feed operation"
+internal fun swarmSignRequest(ask: SwarmAsk.Sign): String = ask.detail ?: ask.feedName ?: Strings.get(R.string.swarm_sign_request_feed_operation)
 
 /** The note on a signing sheet with no wallet on the device yet. */
 internal fun swarmNeedsWalletNote(copy: SwarmPromptCopy): String =
-    "You don't have a wallet yet: ${copy.approve} opens wallet setup first, and the site's identity comes from it."
+    Strings.get(R.string.swarm_needs_wallet_note, copy.approve)
 
 /** Which identity signs: the one a feed was created with, the site's active one, or the new one its first grant will make. */
 internal fun swarmSignIdentity(ask: SwarmAsk.Sign): String =
-    ask.identity?.let { "${it.label} (${it.kind})" } ?: "A new app-scoped identity for this site"
+    ask.identity?.let { Strings.get(R.string.swarm_sign_identity, it.label, it.kind) }
+        ?: Strings.get(R.string.swarm_sign_identity_new)
 
 /**
  * A `window.swarm` approval sheet (#120), one per tier as on desktop:
@@ -246,7 +251,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                error = walletErrorMessage(e, "unlock the wallet", phraseBackedUp = true)
+                error = walletErrorMessage(e, Strings.get(R.string.wallet_action_unlock), phraseBackedUp = true)
             } finally {
                 busy = false
             }
@@ -307,23 +312,27 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                 when (ask) {
                     is SwarmAsk.Connect, is SwarmAsk.Manifest -> Unit
                     is SwarmAsk.Publish -> {
-                        DetailRow("What", swarmPublishWhat(ask))
-                        DetailRow("Size", formatStampBytes(ask.size))
-                        ask.name?.let { DetailRow("Name", it) }
-                        if (ask.kind == SwarmAsk.Publish.Kind.Files) DetailRow("Files", swarmPathsPreview(ask.paths), mono = true)
+                        DetailRow(stringResource(R.string.swarm_detail_what), swarmPublishWhat(ask))
+                        DetailRow(stringResource(R.string.swarm_detail_size), formatStampBytes(ask.size))
+                        ask.name?.let { DetailRow(stringResource(R.string.swarm_detail_name), it) }
+                        if (ask.kind == SwarmAsk.Publish.Kind.Files) DetailRow(stringResource(R.string.swarm_detail_files), swarmPathsPreview(ask.paths), mono = true)
                     }
                     is SwarmAsk.Sign -> {
                         if (ask.kind == SwarmProvider.AutoApprove.Signing) {
-                            DetailRow("Request", swarmSignRequest(ask), mono = ask.detail?.startsWith("Single") == true)
+                            DetailRow(
+                                stringResource(R.string.swarm_detail_request),
+                                swarmSignRequest(ask),
+                                mono = ask.method == "swarm_writeSingleOwnerChunk",
+                            )
                         } else {
-                            DetailRow("Feed name", swarmSignRequest(ask))
+                            DetailRow(stringResource(R.string.swarm_detail_feed_name), swarmSignRequest(ask))
                         }
-                        DetailRow("Signs as", swarmSignIdentity(ask))
+                        DetailRow(stringResource(R.string.swarm_detail_signs_as), swarmSignIdentity(ask))
                     }
                     is SwarmAsk.Message -> {
-                        ask.topic?.let { DetailRow("Topic", swarmShownTopic(it)) }
-                        ask.address?.let { DetailRow("Room address", it) }
-                        if (ask.send != null) DetailRow("Size", formatStampBytes(ask.size.toLong()))
+                        ask.topic?.let { DetailRow(stringResource(R.string.swarm_detail_topic), swarmShownTopic(it)) }
+                        ask.address?.let { DetailRow(stringResource(R.string.swarm_detail_room_address), it) }
+                        if (ask.send != null) DetailRow(stringResource(R.string.swarm_detail_size), formatStampBytes(ask.size.toLong()))
                     }
                 }
                 Text(
@@ -342,7 +351,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                 }
                 if (needsUnlock) {
                     Text(
-                        "Your wallet is locked: ${copy.approve} asks for your screen lock first.",
+                        stringResource(R.string.swarm_unlock_note, copy.approve),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.testTag("swarm-unlock-note"),
@@ -374,7 +383,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                     onClick = ::reject,
                     enabled = armed && !busy,
                     modifier = Modifier.testTag("swarm-reject"),
-                ) { Text("Reject") }
+                ) { Text(stringResource(R.string.common_reject)) }
                 Button(
                     onClick = ::approve,
                     enabled = armed && !busy,

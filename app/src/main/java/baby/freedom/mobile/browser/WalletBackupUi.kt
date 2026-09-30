@@ -21,13 +21,16 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.PhraseBackup
 import baby.freedom.mobile.wallet.WalletAccountList
 
-internal const val GOOGLE_BACKUP_TITLE = "Google backup"
+internal val GOOGLE_BACKUP_TITLE: String get() = Strings.get(R.string.wallet_backup_google_title)
 
 /**
  * How Block Store's end-to-end encryption hangs on the screen lock, in
@@ -35,13 +38,7 @@ internal const val GOOGLE_BACKUP_TITLE = "Google backup"
  * dependency") — and how its upload hangs on the phone's own Google
  * backup, which no app can check (#244 R5-F1).
  */
-internal const val GOOGLE_BACKUP_E2EE_NOTE =
-    "Google encrypts the backup on this phone with a key protected by your screen lock, so Google " +
-        "can’t read it. Restoring it on a new phone asks for this phone’s PIN, pattern or password " +
-        "while you set that phone up. Without a screen lock (or a Google account) there’s no " +
-        "encryption, so no backup. It goes to your Google account with this phone’s own Google " +
-        "backup, so that must be on in Android settings; Freedom can’t check it, so write your " +
-        "recovery phrase down too."
+internal val GOOGLE_BACKUP_E2EE_NOTE: String get() = Strings.get(R.string.wallet_backup_e2ee_note)
 
 /**
  * The Google backup row's status line: whether it's on and, if so, where
@@ -58,25 +55,25 @@ internal fun googleBackupStatus(
     when (status) {
         // Written for the cloud; it only gets there with the phone's own Google backup on,
         // which no app can see (#244 R5-F1).
-        PhraseBackup.Status.CLOUD -> "On · end-to-end encrypted, for your Google account backup (if this " +
-            "phone’s Google backup is on)"
-        PhraseBackup.Status.PAUSED -> "On, paused · this phone can’t end-to-end encrypt it now (no screen " +
-            "lock or no Google account), so it’s kept on this phone only until it can"
-        PhraseBackup.Status.NONE -> "On, but the backup is missing from Google Play services · turn it " +
-            "off and on again to back up"
-        null -> "On · Google Play services isn’t answering right now"
+        PhraseBackup.Status.CLOUD -> Strings.get(R.string.wallet_backup_status_on_cloud)
+        PhraseBackup.Status.PAUSED -> Strings.get(R.string.wallet_backup_status_on_paused)
+        PhraseBackup.Status.NONE -> Strings.get(R.string.wallet_backup_status_on_missing)
+        null -> Strings.get(R.string.wallet_backup_status_on_no_answer)
     }
 } else {
     when (availability) {
-        PhraseBackup.Availability.READY -> "Off · back up the recovery phrase to your Google account, " +
-            "end-to-end encrypted"
-        PhraseBackup.Availability.NOT_ENCRYPTED -> "Unavailable · needs a screen lock and a Google " +
-            "account on this phone"
-        PhraseBackup.Availability.UNSUPPORTED -> "Unavailable · needs Google Play services, which this " +
-            "phone doesn’t have"
-        PhraseBackup.Availability.NO_ANSWER -> "Unavailable · Google Play services isn’t answering right now"
-        null -> "Checking…"
-    }.let { if (availability == PhraseBackup.Availability.READY && !entryKnown) "Checking…" else it }
+        PhraseBackup.Availability.READY -> Strings.get(R.string.wallet_backup_status_off_ready)
+        PhraseBackup.Availability.NOT_ENCRYPTED -> Strings.get(R.string.wallet_backup_status_unavailable_not_encrypted)
+        PhraseBackup.Availability.UNSUPPORTED -> Strings.get(R.string.wallet_backup_status_unavailable_unsupported)
+        PhraseBackup.Availability.NO_ANSWER -> Strings.get(R.string.wallet_backup_status_unavailable_no_answer)
+        null -> Strings.get(R.string.wallet_backup_status_checking)
+    }.let {
+        if (availability == PhraseBackup.Availability.READY && !entryKnown) {
+            Strings.get(R.string.wallet_backup_status_checking)
+        } else {
+            it
+        }
+    }
 }
 
 /**
@@ -206,12 +203,9 @@ internal fun showGoogleBackupOffer(
  */
 internal fun keptBackupNote(entryThere: Boolean, thisWallet: Boolean?): String? = when {
     !entryThere -> null
-    thisWallet == true -> "Google Play services still holds a backup of this wallet from before. Turn " +
-        "backup on to keep it up to date here, or delete it."
-    thisWallet == false -> "Google Play services already holds a backup of a different wallet from " +
-        "before. Turning backup on replaces it."
-    else -> "Google Play services already holds a wallet backup from before, which may be of a " +
-        "different wallet. Turning backup on replaces it."
+    thisWallet == true -> Strings.get(R.string.wallet_backup_kept_this_wallet)
+    thisWallet == false -> Strings.get(R.string.wallet_backup_kept_other_wallet)
+    else -> Strings.get(R.string.wallet_backup_kept_unknown_wallet)
 }
 
 /** The wallet page's Google backup section (#231): the switch, where the backup stands, and what it depends on. */
@@ -228,7 +222,7 @@ internal fun GoogleBackupSection(
     screenLockButton: @Composable () -> Unit,
 ) {
     val enabled = !busy && googleBackupSwitchEnabled(on, availability, entryKnown = entryThere != null)
-    SectionCard(title = GOOGLE_BACKUP_TITLE) {
+    SectionCard(title = stringResource(R.string.wallet_backup_google_title)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
@@ -238,7 +232,7 @@ internal fun GoogleBackupSection(
             Icon(Icons.Filled.CloudUpload, contentDescription = null)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text("Back up recovery phrase", fontWeight = FontWeight.Medium)
+                Text(stringResource(R.string.wallet_backup_switch_label), fontWeight = FontWeight.Medium)
                 Text(
                     googleBackupStatus(on, availability, status, entryKnown = entryThere != null),
                     style = MaterialTheme.typography.bodySmall,
@@ -250,7 +244,7 @@ internal fun GoogleBackupSection(
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            GOOGLE_BACKUP_E2EE_NOTE,
+            stringResource(R.string.wallet_backup_e2ee_note),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -268,7 +262,7 @@ internal fun GoogleBackupSection(
             )
             // The only way to remove a kept entry while a wallet is here (#244 R2-F3).
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = onDeleteKept, enabled = !busy) { Text("Delete that backup") }
+                TextButton(onClick = onDeleteKept, enabled = !busy) { Text(stringResource(R.string.wallet_backup_delete_kept)) }
             }
         }
         if (availability == PhraseBackup.Availability.NOT_ENCRYPTED ||
@@ -282,26 +276,23 @@ internal fun GoogleBackupSection(
 /** The one-time offer after create or import (#231): off unless the user says so. */
 @Composable
 internal fun GoogleBackupOffer(busy: Boolean, onTurnOn: () -> Unit, onNotNow: () -> Unit) {
-    SectionCard(title = "Back up with Google?") {
+    SectionCard(title = stringResource(R.string.wallet_backup_offer_title)) {
         Text(
-            "Keep an end-to-end encrypted copy of this wallet’s recovery phrase in your Google " +
-                "account backup, so a new phone can restore the wallet. It stays off unless you " +
-                "turn it on, and you can turn it off at any time here. It’s no substitute for " +
-                "writing the phrase down.",
+            stringResource(R.string.wallet_backup_offer_text),
             style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            GOOGLE_BACKUP_E2EE_NOTE,
+            stringResource(R.string.wallet_backup_e2ee_note),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(12.dp))
         Button(onClick = onTurnOn, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-            Text("Turn on Google backup")
+            Text(stringResource(R.string.wallet_backup_offer_turn_on))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            TextButton(onClick = onNotNow, enabled = !busy) { Text("Not now") }
+            TextButton(onClick = onNotNow, enabled = !busy) { Text(stringResource(R.string.common_not_now)) }
         }
     }
 }
@@ -319,10 +310,9 @@ internal fun RestoreFromBackupSection(
     onDelete: () -> Unit,
     noScreenLock: @Composable () -> Unit,
 ) {
-    SectionCard(title = "Restore from Google backup") {
+    SectionCard(title = stringResource(R.string.wallet_backup_restore_title)) {
         Text(
-            "Google Play services holds a wallet backed up from Freedom — on this phone before, or " +
-                "on the phone this one was set up from. Restore it to use that wallet here.",
+            stringResource(R.string.wallet_backup_restore_text),
             style = MaterialTheme.typography.bodyMedium,
         )
         if (!deviceSecure) {
@@ -331,10 +321,10 @@ internal fun RestoreFromBackupSection(
         }
         Spacer(Modifier.height(12.dp))
         Button(onClick = onRestore, enabled = !busy && deviceSecure, modifier = Modifier.fillMaxWidth()) {
-            Text(if (busy) "Restoring…" else "Restore wallet")
+            Text(stringResource(if (busy) R.string.wallet_backup_restoring else R.string.wallet_backup_restore_button))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            TextButton(onClick = onDelete, enabled = !busy) { Text("Delete backup") }
+            TextButton(onClick = onDelete, enabled = !busy) { Text(stringResource(R.string.wallet_backup_delete)) }
         }
     }
 }
@@ -363,17 +353,20 @@ internal fun DeleteGoogleBackupDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Filled.CloudUpload, contentDescription = null) },
-        title = { Text(if (turningOff) "Turn off Google backup?" else "Delete Google backup?") },
+        title = {
+            Text(
+                stringResource(
+                    if (turningOff) R.string.wallet_backup_dialog_turn_off_title else R.string.wallet_backup_dialog_delete_title,
+                ),
+            )
+        },
         text = {
             Column {
                 Text(
                     if (turningOff || walletStays) {
-                        "The backup is deleted from this phone now, and from your Google account at its " +
-                            "next sync. The wallet stays on this phone."
+                        stringResource(R.string.wallet_backup_dialog_wallet_stays)
                     } else {
-                        "The backed-up wallet is deleted from this phone now, and from your Google " +
-                            "account at its next sync. Without its recovery phrase written down, " +
-                            "that wallet is gone for good."
+                        stringResource(R.string.wallet_backup_dialog_wallet_gone)
                     },
                 )
                 ObscuredTapNotice(tap)
@@ -385,8 +378,10 @@ internal fun DeleteGoogleBackupDialog(
                 enabled = tap.armed,
                 modifier = Modifier.protectedPress(tap),
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
-            ) { Text(if (turningOff) "Turn off" else "Delete backup") }
+            ) {
+                Text(stringResource(if (turningOff) R.string.wallet_backup_dialog_turn_off else R.string.wallet_backup_delete))
+            }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
 }

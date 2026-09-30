@@ -30,9 +30,12 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogWindowProvider
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import java.util.WeakHashMap
 import kotlinx.coroutines.delay
 
@@ -108,8 +111,8 @@ internal fun touchObscured(flags: Int, sdk: Int = Build.VERSION.SDK_INT): Boolea
     flags and MotionEvent.FLAG_WINDOW_IS_OBSCURED != 0 ||
         (sdk < Build.VERSION_CODES.S && flags and MotionEvent.FLAG_WINDOW_IS_PARTIALLY_OBSCURED != 0)
 
-internal const val OBSCURED_TAP_MESSAGE =
-    "Another app is drawing over the screen, so that tap was ignored. Close it (a chat bubble or a screen filter) and try again."
+internal val OBSCURED_TAP_MESSAGE: String
+    get() = Strings.get(R.string.browser_obscured_tap)
 
 /**
  * For a confirm button: drops a whole press — down to up, so the button
@@ -142,7 +145,7 @@ internal fun Modifier.protectedPress(tap: ArmedTapGuard): Modifier = pointerInpu
 internal fun ObscuredTapNotice(tap: ArmedTapGuard, modifier: Modifier = Modifier) {
     if (!tap.obscuredTap) return
     Text(
-        OBSCURED_TAP_MESSAGE,
+        stringResource(R.string.browser_obscured_tap),
         color = MaterialTheme.colorScheme.error,
         style = MaterialTheme.typography.bodySmall,
         modifier = modifier.padding(vertical = 4.dp).testTag("obscured-tap-notice"),

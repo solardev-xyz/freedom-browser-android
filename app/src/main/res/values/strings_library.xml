@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Downloads, history, bookmarks and site permissions (#280).
+-->
+<resources>
+    <!-- DownloadManager.kt: why a download couldn't be opened, or failed. -->
+    <string name="library_download_file_not_available">File not available</string>
+    <string name="library_download_file_in_trash">The file is in the trash</string>
+    <string name="library_download_file_was_deleted">The file was deleted</string>
+    <string name="library_download_no_app_to_open">No app can open this file</string>
+    <string name="library_download_file_deleted">File deleted</string>
+    <string name="library_download_create_file_failed">Couldn\'t create the file in Downloads</string>
+    <string name="library_download_save_file_failed">Couldn\'t save the file in Downloads</string>
+    <string name="library_download_failed">Download failed</string>
+    <string name="library_download_network_error">Network error</string>
+    <!-- %1$s: the system's description of the network failure. -->
+    <string name="library_download_network_error_detail">Network error: %1$s</string>
+    <string name="library_download_partial_file">The server sent only part of the file</string>
+    <string name="library_download_write_failed">Couldn\'t write the download</string>
+    <string name="library_download_connection_closed_early">Connection closed early</string>
+    <string name="library_download_not_enough_storage">Not enough storage</string>
+    <string name="library_download_malformed_data_uri">Malformed data: URI</string>
+    <!-- %1$s: an ENS name, e.g. vitalik.eth -->
+    <string name="library_download_ens_unresolved">Couldn\'t resolve %1$s</string>
+    <string name="library_download_node_not_running">Node not running</string>
+    <!-- %1$s: a URL scheme, e.g. ftp -->
+    <string name="library_download_scheme_unsupported">%1$s: downloads aren\'t supported</string>
+    <string name="library_download_gateway_no_answer">Gateway didn\'t answer</string>
+    <string name="library_download_content_not_found">Content not found</string>
+    <!-- %1$d: an HTTP status code -->
+    <string name="library_download_gateway_error">Gateway error %1$s</string>
+    <!-- %1$d: an HTTP status code -->
+    <string name="library_download_server_error">Server error %1$s</string>
+    <string name="library_download_too_many_redirects">Too many redirects</string>
+    <string name="library_download_write_to_downloads_failed">Couldn\'t write to Downloads</string>
+
+    <!-- DownloadNotifications.kt -->
+    <string name="library_download_channel_name">Downloads</string>
+    <string name="library_download_channel_description">Progress of downloads, with pause, resume and cancel.</string>
+    <string name="library_download_action_pause">Pause</string>
+    <string name="library_download_action_resume">Resume</string>
+
+    <!-- DownloadRequest.kt: file sizes ("1.4 MB"). %1$s: the number. -->
+    <string name="library_size_bytes">%1$s B</string>
+    <string name="library_size_kb">%1$s KB</string>
+    <string name="library_size_mb">%1$s MB</string>
+    <string name="library_size_gb">%1$s GB</string>
+    <string name="library_size_tb">%1$s TB</string>
+    <!-- Who asked for a download, when the page has neither a host nor a scheme. -->
+    <string name="library_download_requester_unknown">a page</string>
+    <string name="library_download_redirect_no_location">Redirect without a location</string>
+    <!-- %1$s: a URL scheme, e.g. ftp -->
+    <string name="library_download_redirect_unsupported">Redirected to an unsupported %1$s: link</string>
+    <string name="library_download_redirect_malformed">Malformed redirect</string>
+
+    <!-- DownloadResume.kt: notes on a download's row. -->
+    <string name="library_download_note_restarted">Restarted from the beginning: the server couldn\'t resume it</string>
+    <string name="library_download_note_connection_lost">Connection lost</string>
+    <string name="library_download_note_interrupted">Interrupted</string>
+
+    <!-- DownloadsScreen.kt -->
+    <string name="library_downloads_title">Downloads</string>
+    <string name="library_downloads_empty_title">No downloads yet</string>
+    <string name="library_downloads_empty_hint">Files you download from web and dweb pages will show up here.</string>
+    <!-- %1$s: bytes received so far, %2$s: the file's size, e.g. "12.0 MB of 40.0 MB" -->
+    <string name="library_download_bytes_of_total">%1$s of %2$s</string>
+    <!-- %1$s: bytes received so far, when the size isn't known -->
+    <string name="library_download_bytes_downloaded">%1$s downloaded</string>
+    <string name="library_download_status_starting">Starting…</string>
+    <string name="library_download_status_saving">Saving to Downloads…</string>
+    <!-- %1$s: the progress line, %2$s: a note such as why it restarted -->
+    <string name="library_download_status_with_note">%1$s · %2$s</string>
+    <string name="library_download_status_paused">Paused</string>
+    <!-- %1$s: why it paused, lowercased, e.g. "connection lost" -->
+    <string name="library_download_status_paused_reason">Paused: %1$s</string>
+    <!-- %1$s: "Paused" or "Paused: why", %2$s: how far it got -->
+    <string name="library_download_status_paused_line">%1$s · %2$s</string>
+    <!-- %1$s: "Paused" or "Paused: why", %2$s: how far it got; no validator, so Resume starts over -->
+    <string name="library_download_status_paused_line_restarts">%1$s · %2$s · resuming starts over</string>
+    <!-- %1$s: the file's size, %2$s: date and time -->
+    <string name="library_download_status_completed">%1$s · %2$s</string>
+    <!-- %1$s: date and time -->
+    <string name="library_download_status_cancelled">Cancelled · %1$s</string>
+    <!-- %1$s: why it failed, %2$s: date and time -->
+    <string name="library_download_status_failed">Failed: %1$s · %2$s</string>
+    <string name="library_download_unknown_error">unknown error</string>
+    <string name="library_download_pause">Pause download</string>
+    <string name="library_download_resume">Resume download</string>
+    <string name="library_download_cancel">Cancel download</string>
+    <string name="library_download_remove_from_list">Remove from list</string>
+    <string name="library_download_size_unknown">Size unknown</string>
+    <!-- %1$d: downloads dropped, %2$d: how many were already waiting -->
+    <plurals name="library_download_offer_dropped">
+        <item quantity="one">%1$d further download from this tab wasn\'t offered: %2$d were already waiting.</item>
+        <item quantity="other">%1$d further downloads from this tab weren\'t offered: %2$d were already waiting.</item>
+    </plurals>
+    <string name="library_download_offer_title">Download file?</string>
+    <!-- %1$s: where the file comes from (an address) -->
+    <string name="library_download_offer_from">From %1$s</string>
+    <!-- %1$s: the page that asked, e.g. https://example.com -->
+    <string name="library_download_offer_requested_by">Requested by %1$s</string>
+    <string name="library_download_offer_cancel_blocks">Cancel also blocks further downloads from this tab until you reload it or enter an address.</string>
+    <plurals name="library_download_offer_more_waiting">
+        <item quantity="one">%1$d more download waiting</item>
+        <item quantity="other">%1$d more downloads waiting</item>
+    </plurals>
+    <string name="library_download_offer_download">Download</string>
+    <string name="library_download_offer_cancel_all">Cancel all</string>
+
+    <!-- HistoryBookmarksScreens.kt -->
+    <string name="library_history_title">History</string>
+    <string name="library_history_empty_title">No history yet</string>
+    <string name="library_history_empty_hint">Pages you visit will show up here.</string>
+    <string name="library_history_no_matches_title">No matches</string>
+    <string name="library_history_no_matches_hint">Nothing in your history matches that. Search looks at page titles and addresses.</string>
+    <string name="library_history_search_placeholder">Search history</string>
+    <string name="library_history_clear_search">Clear search</string>
+
+    <!-- HistoryDays.kt: day headers -->
+    <string name="library_history_today">Today</string>
+    <string name="library_history_yesterday">Yesterday</string>
+
+    <!-- BookmarksScreen.kt -->
+    <string name="library_bookmarks_title">Bookmarks</string>
+    <string name="library_bookmarks_empty_title">No bookmarks yet</string>
+    <string name="library_bookmarks_empty_hint">Tap the star in the menu while on a page to save it.</string>
+    <string name="library_bookmark_options">Bookmark options</string>
+
+    <!-- BookmarkEditDialog.kt -->
+    <string name="library_bookmark_already_bookmarked">Already bookmarked</string>
+    <!-- %1$s: the existing bookmark's name -->
+    <string name="library_bookmark_already_bookmarked_as">Already bookmarked as “%1$s”</string>
+    <string name="library_bookmark_removed">This bookmark has been removed</string>
+    <string name="library_bookmark_save_failed">Couldn\'t save the bookmark. Try again.</string>
+    <string name="library_bookmark_edit_title">Edit bookmark</string>
+    <string name="library_bookmark_name">Name</string>
+    <string name="library_bookmark_address">Address</string>
+    <!-- %1$s: the address the bookmark will be saved as -->
+    <string name="library_bookmark_saves_as">Saves as %1$s</string>
+
+    <!-- BookmarkAddress.kt -->
+    <string name="library_bookmark_enter_address">Enter an address</string>
+    <string name="library_bookmark_not_an_address">Not an address: the address bar would search the web for this</string>
+    <string name="library_bookmark_cannot_bookmark">This address can\'t be bookmarked</string>
+    <string name="library_bookmark_move_up">Move up</string>
+    <string name="library_bookmark_move_to_top">Move to top</string>
+    <string name="library_bookmark_move_down">Move down</string>
+    <string name="library_bookmark_move_to_bottom">Move to bottom</string>
+
+    <!-- PagePrint.kt: a print job's name when the page has neither title nor address -->
+    <string name="library_print_job_default_name">Page</string>
+
+    <!-- SitePermissions.kt -->
+    <string name="library_permission_camera">Camera</string>
+    <string name="library_permission_camera_phrase">use your camera</string>
+    <string name="library_permission_microphone">Microphone</string>
+    <string name="library_permission_microphone_phrase">use your microphone</string>
+    <string name="library_permission_location">Location</string>
+    <string name="library_permission_location_phrase">know your location</string>
+    <string name="library_permission_midi">MIDI SysEx</string>
+    <string name="library_permission_midi_phrase">send system-exclusive messages to your MIDI devices</string>
+    <string name="library_permission_popups">Pop-ups</string>
+    <string name="library_permission_popups_phrase">open pop-up windows</string>
+    <string name="library_permission_camera_and_microphone_phrase">use your camera and microphone</string>
+    <string name="library_permission_device_phrase">use a device</string>
+    <!-- Joins two items of a list inside a sentence ("use your camera and know your location"). -->
+    <string name="library_permission_list_and">%1$s and %2$s</string>
+    <!-- The permission's name inside a sentence ("your camera"). -->
+    <string name="library_permission_camera_noun">camera</string>
+    <string name="library_permission_microphone_noun">microphone</string>
+    <string name="library_permission_location_noun">location</string>
+    <string name="library_permission_protected_media_notice">This page wanted to play protected (DRM) video. Freedom doesn\'t allow it, as it would identify your device to the video\'s provider — so the video won\'t play.</string>
+    <string name="library_permission_camera_and_microphone_in_use">Camera and microphone in use</string>
+    <string name="library_permission_camera_in_use">Camera in use</string>
+    <string name="library_permission_microphone_in_use">Microphone in use</string>
+    <string name="library_permission_allowed">Allowed</string>
+    <string name="library_permission_allowed_session">Allowed (this session)</string>
+    <string name="library_permission_allowed_private">Allowed (private tabs)</string>
+    <string name="library_permission_blocked">Blocked</string>
+    <string name="library_permission_blocked_session">Blocked (this session)</string>
+    <string name="library_permission_blocked_private">Blocked (private tabs)</string>
+    <plurals name="library_permission_embargoed">
+        <item quantity="one">Blocked after %1$d dismissal</item>
+        <item quantity="other">Blocked after %1$d dismissals</item>
+    </plurals>
+    <plurals name="library_permission_embargoed_session">
+        <item quantity="one">Blocked after %1$d dismissal (this session)</item>
+        <item quantity="other">Blocked after %1$d dismissals (this session)</item>
+    </plurals>
+    <plurals name="library_permission_embargoed_private">
+        <item quantity="one">Blocked after %1$d dismissal (private tabs)</item>
+        <item quantity="other">Blocked after %1$d dismissals (private tabs)</item>
+    </plurals>
+    <string name="library_permission_still_held_get_location">get your location</string>
+    <!-- %1$s: "camera", "microphone" or "camera and microphone"; %2$s: what it can still do, e.g. "get your location" -->
+    <string name="library_permission_still_held_media_and_more">This page keeps your %1$s until it stops using it or is reloaded, and can still %2$s until it\'s reloaded.</string>
+    <!-- %1$s: "camera", "microphone" or "camera and microphone" -->
+    <string name="library_permission_still_held_media">This page keeps your %1$s until it stops using it or is reloaded.</string>
+    <!-- %1$s: what it can still do, e.g. "get your location" -->
+    <string name="library_permission_still_held_more">This page can still %1$s until it\'s reloaded.</string>
+    <!-- %1$s: permission names, e.g. "Location" or "Camera · Location" -->
+    <string name="library_permission_kept_until_reload">%1$s kept until reload</string>
+
+    <!-- SitePermissionPrompt.kt -->
+    <!-- Under the site's name: "example.com / wants to use your camera". %1$s: what it asks for. -->
+    <string name="library_permission_prompt_wants_to">wants to %1$s</string>
+    <string name="library_permission_prompt_private">Private tab: your answer lasts until you close your private tabs.</string>
+    <string name="library_permission_prompt_remember">Remember this decision</string>
+    <string name="library_permission_prompt_block">Block</string>
+    <!-- %1$s: e.g. "camera" or "camera and microphone" -->
+    <string name="library_permission_android_refused">Freedom isn\'t allowed to use your %1$s. Turn it on in Android settings.</string>
+    <string name="library_permission_android_settings">Settings</string>
+    <!-- %1$s: the kind of link, e.g. "email links" -->
+    <string name="library_permission_no_app_for_link">No app on this device can open %1$s.</string>
+
+    <!-- PageSitePermissions.kt -->
+    <string name="library_site_permissions_title">Site permissions</string>
+    <string name="library_site_permissions_none">This site has no permissions. It will ask again if it needs one.</string>
+    <string name="library_site_permissions_nothing_saved">Nothing is saved for this site any more.</string>
+    <string name="library_site_permissions_private">Private tab: these last until you close your private tabs.</string>
+    <string name="library_site_permissions_removing_hint">Removing one lets the site ask again. Settings › Site permissions lists every site.</string>
+    <string name="library_site_permissions_reload">Reload page</string>
+    <!-- %1$s: "Allowed", "Blocked (this session)", … -->
+    <string name="library_site_permissions_in_use_now">%1$s · in use now</string>
+    <!-- %1$s: the frame's site -->
+    <string name="library_site_permissions_embedded">Embedded: %1$s</string>
+    <!-- %1$s: the permission, e.g. Camera; %2$s: the site -->
+    <string name="library_site_permissions_remove">Remove %1$s permission for %2$s</string>
+</resources>

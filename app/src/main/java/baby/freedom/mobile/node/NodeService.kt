@@ -21,6 +21,8 @@ import android.system.OsConstants
 import android.system.StructPollfd
 import android.util.Log
 import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.TextLocale
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
@@ -30,6 +32,7 @@ import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.wallet.KeystoreVaultStore
 import baby.freedom.mobile.wallet.NodeIdentityStore
 import baby.freedom.swarm.AntChainTransport
+import baby.freedom.swarm.DepositMaybeSentException
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsNode
 import baby.freedom.swarm.NodeInfo
@@ -311,7 +314,10 @@ class NodeService : Service() {
                     runCatching { stampCallNow(method.orEmpty(), JSONObject(argsJson ?: "{}")) }
                         .getOrElse { e ->
                             Log.w(TAG, "stamp call $method failed: ${e.javaClass.simpleName}: ${e.message}")
-                            JSONObject().put("error", e.message ?: "the Swarm node couldn't do that").toString()
+                            JSONObject().put("error", e.message ?: Strings.get(R.string.node_call_failed))
+                                // By type, for the app to tell "may be out" from "failed" (#280).
+                                .apply { if (e is DepositMaybeSentException) put("maybeSent", true) }
+                                .toString()
                         }
                 }
                 runCatching {
@@ -342,7 +348,9 @@ class NodeService : Service() {
      */
     private fun <T> spending(buy: Boolean = false, block: () -> T): T {
         check(!doomed && stopGate.begin(buy)) {
-            if (!doomed && stopGate.discoverRunning) "The node is searching for your stamps. Try again once it's done." else "The Swarm node is turning off"
+            Strings.get(
+                if (!doomed && stopGate.discoverRunning) R.string.node_stamps_searching else R.string.node_turning_off,
+            )
         }
         try {
             return block()
@@ -398,7 +406,7 @@ class NodeService : Service() {
         fun amount() = BigInteger(args.getString("amountPerChunk")).also { require(it.signum() > 0) { "bad amount" } }
         fun maxSwap() = BigInteger(args.getString("maxSwapWei")).also { require(it.signum() >= 0) { "bad xDAI total" } }
         fun spendable() = check(swarmNode.state.value.walletIdentity) {
-            "The Swarm node isn't running as your wallet's identity"
+            Strings.get(R.string.node_not_wallet_identity)
         }
         return when (method) {
             "status" -> swarmNode.storageStatus()
@@ -411,14 +419,14 @@ class NodeService : Service() {
                 val want = SwarmNode.normalizeBatchId(args.getString("batchId")) ?: throw IllegalArgumentException("bad batch id")
                 val connected = JSONObject(swarmNode.storageStatus())
                 check(SwarmNode.normalizeBatchId(connected.optString("batch_id")) == want) {
-                    "this stamp isn't the node's active one"
+                    Strings.get(R.string.node_stamp_not_active)
                 }
                 swarmNode.storageTopupQuote(days())
             }
             // Registers the stamps this account already owns (#118). Never
             // alongside a spend, so no permit is open and it sends nothing.
             "discover" -> {
-                check(stopGate.beginDiscover()) { "A stamp purchase or search is still running. Try again once it's done." }
+                check(stopGate.beginDiscover()) { Strings.get(R.string.node_stamp_work_running) }
                 // Kept under the app's id for it, for a search that runs
                 // on after the app stopped waiting ("discovering" below).
                 val id = args.optString("id").ifEmpty { null }
@@ -426,7 +434,7 @@ class NodeService : Service() {
                 try {
                     swarmNode.discoverStamps().also { outcome = it }
                 } catch (e: Exception) {
-                    outcome = JSONObject().put("error", e.message ?: "the Swarm node couldn't do that").toString()
+                    outcome = JSONObject().put("error", e.message ?: Strings.get(R.string.node_call_failed)).toString()
                     throw e
                 } finally {
                     stopGate.endDiscover(id, outcome)
@@ -874,10 +882,16 @@ class NodeService : Service() {
     // IPFS status is visible today.
     private fun buildNotification(info: NodeInfo): Notification {
         val text = when (info.status) {
-            NodeStatus.Stopped -> "Stopped"
-            NodeStatus.Starting -> info.errorMessage ?: "Starting…"
-            NodeStatus.Running -> "Running — ${info.connectedPeers} peers"
-            NodeStatus.Error -> "Error: ${info.errorMessage ?: "unknown"}"
+            NodeStatus.Stopped -> getString(R.string.node_status_stopped)
+            NodeStatus.Starting -> info.errorMessage ?: getString(R.string.node_status_starting)
+            NodeStatus.Running -> TextLocale.plural(
+                this,
+                R.plurals.node_notification_running,
+                info.connectedPeers.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                info.connectedPeers,
+            )
+            NodeStatus.Error ->
+                getString(R.string.node_notification_error, info.errorMessage ?: getString(R.string.node_error_unknown))
         }
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.node_notification_title))

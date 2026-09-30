@@ -31,9 +31,16 @@ data class TorInfo(
     val socksPort: Int = 0,
     /** Bootstrap progress, 0–100. */
     val progress: Int = 0,
-    /** Arti's own one-line bootstrap summary, or `""`. */
-    val summary: String = "",
+    /** Arti's own one-line bootstrap summary (or the app's line for a proxy check), or null. */
+    val summaryText: HeldText? = null,
     /** The linked Arti version (e.g. `0.46.0`), or `""` before the library loaded. */
     val version: String = "",
-    val errorMessage: String? = null,
-) : Parcelable
+    /** What went wrong, or null. Kept as a [HeldText], read in the app language when shown. */
+    val error: HeldText? = null,
+) : Parcelable {
+    /** [summaryText] in the app language now, or `""`. */
+    val summary: String get() = summaryText?.text.orEmpty()
+
+    /** [error] in the app language now. */
+    val errorMessage: String? get() = error?.text
+}

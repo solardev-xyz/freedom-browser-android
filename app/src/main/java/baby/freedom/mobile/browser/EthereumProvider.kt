@@ -1,11 +1,13 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.ChainInput
 import baby.freedom.mobile.chains.RpcUrls
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.Eip712
 import baby.freedom.mobile.wallet.GasOracle
@@ -243,6 +245,8 @@ class EthereumProvider(
 
         /** Refused on the Ledger, or the user cancelled waiting for it: nothing sent. */
         data object Rejected : Submitted
+
+        /** Why not, in English: [message] goes to the page as is (#280). */
         data class Failed(val message: String, val hash: String?) : Submitted
     }
 
@@ -522,7 +526,7 @@ class EthereumProvider(
         chainFor(origin)
     } catch (e: ChainUnavailable) {
         if (pinnedChain(origin) != null || runCatching { chains() }.getOrNull() != null) throw e
-        Chain(id = e.id, name = "Custom network", symbol = "", rpcUrls = emptyList())
+        Chain(id = e.id, name = Strings.get(R.string.send_eth_custom_network), symbol = "", rpcUrls = emptyList())
     }
 
     private suspend fun switchChain(origin: String, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
@@ -656,7 +660,7 @@ class EthereumProvider(
                 val hashes = if (account.isLedger) LedgerApdus.blindHashes(data) else null
                 Parsed(data, digest, sheetJson(json), hashes)
             } catch (e: Eip712.Invalid) {
-                throw BadParams("Invalid typed data: ${e.message}")
+                throw BadParams("Invalid typed data: ${e.english}")
             }
         }
         // Too much to show is too much to sign, as desktop signing has it: the sheet
@@ -698,7 +702,8 @@ class EthereumProvider(
             // Refused on the device, or the user cancelled waiting for it: a rejection, as EIP-1193 says it.
             LedgerException.Kind.REJECTED, LedgerException.Kind.CANCELLED ->
                 Reply.Err(USER_REJECTED, "User rejected the request on the Ledger.")
-            else -> Reply.Err(INTERNAL, "Ledger: ${e.message}")
+            // In English, whatever the app language: the page must not learn it (#280).
+            else -> Reply.Err(INTERNAL, "Ledger: ${e.said.english}")
         }
     } catch (e: Exception) {
         Reply.Err(INTERNAL, "Couldn't sign. Nothing was signed.")
@@ -782,11 +787,15 @@ class EthereumProvider(
         "Another transaction from this wallet is still going out or waiting on the wallet page. Nothing was sent.",
     )
 
-    /** The priced [request], or the [Reply] saying why it can't be sent (a [SendException]'s words). */
+    /**
+     * The priced [request], or the [Reply] saying why it can't be sent (a
+     * [SendException]'s words, in English: the page must not learn the
+     * app language, #280).
+     */
     private suspend fun prepare(request: SendRequest): Any = try {
         sends.prepare(request)
     } catch (e: SendException) {
-        Reply.Err(INTERNAL, e.message ?: "Couldn't prepare the transaction")
+        Reply.Err(INTERNAL, e.english)
     }
 
     // ---- Reads ----

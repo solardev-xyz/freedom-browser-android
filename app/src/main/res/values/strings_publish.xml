@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Publishing to Swarm and publisher identities (#118, #280). -->
+<resources>
+    <!-- browser/Publish.kt -->
+    <string name="publish_error_interrupted">Interrupted: Freedom was closed before the upload finished</string>
+    <string name="publish_error_folder_too_deep">The folder is nested too deep to publish</string>
+    <string name="publish_error_folder_unreadable">The folder couldn\'t be read</string>
+    <!-- %1$s: a file's path inside the picked folder. -->
+    <string name="publish_error_path_unreadable">%1$s couldn\'t be read</string>
+    <string name="publish_error_folder_too_many_files">The folder has more than %1$d files</string>
+    <string name="publish_error_folder_empty">The folder has no files</string>
+    <!-- %1$s: the most one publish can upload, e.g. "100 MB". -->
+    <string name="publish_error_folder_too_big">The folder is bigger than %1$s, the most one publish can upload</string>
+    <string name="publish_error_file_too_big">The file is bigger than %1$s, the most one publish can upload</string>
+    <string name="publish_error_too_big">It\'s bigger than %1$s, the most one publish can upload</string>
+    <!-- The history's name for a folder whose own name can't be read. -->
+    <string name="publish_folder_default_name">Folder</string>
+    <!-- The history's name for published text. -->
+    <string name="publish_text_name">Text</string>
+    <string name="publish_error_no_reference">The node\'s answer had no reference</string>
+    <string name="publish_error_http_too_big">It\'s too big for one upload</string>
+    <!-- %1$s: the node's own (English) message. -->
+    <string name="publish_error_http_too_big_detail">It\'s too big for one upload (%1$s)</string>
+    <string name="publish_error_http_stamp_unusable">The postage stamp can\'t be used for this: %1$s</string>
+    <string name="publish_error_http_stamp_unusable_code">The postage stamp can\'t be used for this: HTTP %1$s</string>
+    <string name="publish_error_http_unavailable">The node can\'t upload right now</string>
+    <string name="publish_error_http_unavailable_detail">The node can\'t upload right now: %1$s</string>
+    <string name="publish_error_http_refused_detail">The node refused the upload: %1$s</string>
+    <string name="publish_error_http_refused_code">The node refused the upload (HTTP %1$s)</string>
+    <string name="publish_error_send_failed">Couldn\'t hand the upload to the Swarm node</string>
+    <string name="publish_error_timeout">The Swarm node didn\'t finish the upload in time</string>
+    <string name="publish_error_no_text">There\'s no text to publish</string>
+    <string name="publish_error_text_too_big">The text is bigger than %1$s</string>
+    <string name="publish_error_file_unreadable">The file couldn\'t be read</string>
+    <string name="publish_error_upload_failed">The upload failed</string>
+    <!-- %1$s: the stamp's shortened batch ID; %2$s: the room needed, e.g. "12 MB". -->
+    <string name="publish_error_stamp_too_small">It turned out bigger than the stamp %1$s has room for (%2$s, with a margin). Buy a bigger one under Postage stamps.</string>
+    <string name="publish_error_permission_lost">Freedom may no longer read what you picked; pick it again</string>
+    <string name="publish_error_source_unreadable">What you picked couldn\'t be read</string>
+    <string name="publish_error_node_not_running">The Swarm node isn\'t running</string>
+    <string name="publish_error_node_unreachable">The upload failed: couldn\'t reach the Swarm node</string>
+    <!-- browser/PublishScreen.kt -->
+    <string name="publish_blocked_node_starting">The Swarm node is starting…</string>
+    <string name="publish_blocked_node_off">Turn on the Swarm node to publish.</string>
+    <string name="publish_blocked_needs_light_mode">Publishing needs light mode, which connects the node to Gnosis Chain. Switch it on under Publishing on the node page.</string>
+    <string name="publish_no_stamp_none">Publishing needs a usable postage stamp, and the node has none yet. Buy one, or find the ones this account already owns, under Postage stamps.</string>
+    <string name="publish_no_stamp_full">The node\'s usable postage stamps are full or expired. Buy another one under Postage stamps.</string>
+    <!-- %1$s: the room needed, e.g. "100 kB". -->
+    <string name="publish_no_stamp_room">None of the node\'s usable stamps has room for %1$s (with a margin). Buy a bigger one under Postage stamps.</string>
+    <string name="publish_status_uploading">Uploading…</string>
+    <string name="publish_status_published">Published</string>
+    <!-- %1$s: why the upload failed. -->
+    <string name="publish_status_failed">Failed: %1$s</string>
+    <string name="publish_status_failed_unknown">Failed: the upload failed</string>
+    <string name="publish_title">Publish</string>
+    <string name="publish_on_swarm_title">Publish on Swarm</string>
+    <string name="publish_intro">Upload a file, a folder or some text to the Swarm network. Anyone with its bzz:// link can open it, for as long as its postage stamp is paid for; it can\'t be taken back. A folder with an index.html opens as a website.</string>
+    <string name="publish_set_up">Set up publishing</string>
+    <string name="publish_reading_stamps">Reading the node\'s postage stamps…</string>
+    <string name="publish_postage_stamps">Postage stamps</string>
+    <string name="publish_pick_file">File</string>
+    <string name="publish_pick_folder">Folder</string>
+    <string name="publish_pick_text">Text</string>
+    <string name="publish_reading_source">Reading what you picked…</string>
+    <string name="publish_text_placeholder">Text to publish</string>
+    <string name="publish_text_button">Publish text</string>
+    <string name="publish_history_title">Recent publishes</string>
+    <string name="publish_clear_all">Clear all</string>
+    <string name="publish_history_empty">Nothing published yet.</string>
+    <!-- %1$s: the file's or folder's name. -->
+    <string name="publish_confirm_title">Publish %1$s?</string>
+    <string name="publish_confirm_button">Publish</string>
+    <string name="publish_clear_title">Clear the publish history?</string>
+    <string name="publish_clear_body">This only forgets the list on this device. What was published stays on Swarm, and its links keep working while its stamp is paid for.</string>
+    <string name="publish_clear_button">Clear</string>
+    <string name="publish_stamp_work_note">The node is buying or searching for stamps, which can restart it. Publish once that has finished.</string>
+    <string name="publish_running_waiting">Waiting for the node to finish buying or searching for stamps, which can restart it. The upload starts once that has finished. You can leave this page meanwhile.</string>
+    <string name="publish_running_uploading">The node splits it into chunks, stamps each one and pushes them to the network. The link comes once every chunk is accepted. You can leave this page meanwhile.</string>
+    <string name="publish_another_running_note">Another publish is uploading. Publish this once it\'s done.</string>
+    <!-- %1$d: how many files; %2$s: their total size, e.g. "500 B", or publish_confirm_folder_size_unknown. -->
+    <plurals name="publish_confirm_folder_index">
+        <item quantity="one">%1$d file, %2$s, opening at its index.html</item>
+        <item quantity="other">%1$d files, %2$s, opening at its index.html</item>
+    </plurals>
+    <plurals name="publish_confirm_folder_no_index">
+        <item quantity="one">%1$d file, %2$s, with no index.html</item>
+        <item quantity="other">%1$d files, %2$s, with no index.html</item>
+    </plurals>
+    <string name="publish_confirm_folder_size_unknown">size unknown</string>
+    <string name="publish_confirm_size_unknown">Size unknown</string>
+    <!-- %1$s: the stamp's shortened batch ID; %2$d: percent of it used; %3$s: its time left, e.g. "1 day 1 hour". -->
+    <string name="publish_confirm_stamp">It\'s stamped with %1$s (%2$d%% used, %3$s).</string>
+    <string name="publish_confirm_ttl_unknown">time left unknown</string>
+    <!-- %1$s: what goes out (e.g. "2 files, 500 B, opening at its index.html"); %2$s: the stamp sentence, or empty. -->
+    <string name="publish_confirm_body">%1$s. %2$s Anyone with the link can read it, and it can\'t be deleted from Swarm.</string>
+    <string name="publish_running_title">Publishing</string>
+    <string name="publish_outcome_published">Published</string>
+    <string name="publish_outcome_failed">Didn\'t publish</string>
+    <!-- A history row's stamp; %1$s: its shortened batch ID. -->
+    <string name="publish_history_stamp">stamp %1$s</string>
+    <string name="publish_copy_link">Copy link</string>
+    <!-- browser/PublishSetup.kt -->
+    <string name="publish_setup_blocked_node_off">Turn on the Swarm node to set up publishing.</string>
+    <string name="publish_setup_blocked_node_error">The Swarm node reported an error. Turn it off and on again on the node page.</string>
+    <string name="publish_setup_identity_title">Use your wallet\'s identity</string>
+    <string name="publish_setup_identity_done">The node runs as the Swarm account from your recovery phrase.</string>
+    <string name="publish_setup_identity_todo">Publishing pays from the node\'s own account. Set up a wallet so that account comes from your recovery phrase, and can be restored on another device.</string>
+    <!-- The step's title and its button. -->
+    <string name="publish_setup_light_title">Switch to light mode</string>
+    <string name="publish_setup_light_done">The node is connected to Gnosis Chain.</string>
+    <string name="publish_setup_light_restarting">Restarting the node in light mode…</string>
+    <string name="publish_setup_light_todo">Light mode connects the node to Gnosis Chain, which publishing needs. Browsing works the same in either mode.</string>
+    <string name="publish_setup_fund_title">Fund the node with xDAI</string>
+    <string name="publish_setup_fund_needs_identity">Once the node runs as your wallet\'s identity (step 1), send xDAI on Gnosis Chain to its address. Don\'t fund the node before that: its current key exists only on this device and is replaced when you set up a wallet.</string>
+    <!-- %1$s: the balance, fixed format, e.g. "0.5 xDAI". -->
+    <string name="publish_setup_fund_funded">Funded with %1$s.</string>
+    <string name="publish_setup_fund_chequebook">Funded: the node has deployed its chequebook.</string>
+    <string name="publish_setup_fund_todo">Send xDAI on Gnosis Chain to the node\'s address below. It pays the gas for the chequebook and the postage stamps. Or pay from your wallet in one transaction that funds the node and buys its first stamp.</string>
+    <string name="publish_setup_fund_todo_unavailable">Send xDAI on Gnosis Chain to the node\'s address below. It pays the gas for the chequebook and the postage stamps. Or pay from your wallet in one transaction that funds the node and buys its first stamp. Its balance can\'t be read right now; this updates once it can.</string>
+    <string name="publish_setup_chequebook_title">Chequebook</string>
+    <!-- %1$s: the chequebook's address. -->
+    <string name="publish_setup_chequebook_deployed">Deployed at %1$s.</string>
+    <!-- %1$s: the chequebook's address; %2$s: what it holds, fixed format, e.g. "1.5 BZZ". -->
+    <string name="publish_setup_chequebook_deployed_holds">Deployed at %1$s. Holds %2$s.</string>
+    <string name="publish_setup_chequebook_todo">The chequebook pays other nodes for storing your data. The node deploys it with its first postage stamp.</string>
+    <!-- The step's title and its button. -->
+    <string name="publish_setup_stamp_title">Buy a postage stamp</string>
+    <plurals name="publish_setup_stamp_usable">
+        <item quantity="one">%d usable postage batch.</item>
+        <item quantity="other">%d usable postage batches.</item>
+    </plurals>
+    <string name="publish_setup_stamp_todo">Postage stamps pre-pay the network for storing your data. The node buys one with its xDAI, and deploys its chequebook with the first.</string>
+    <string name="publish_setup_set_up_wallet">Set up wallet</string>
+    <string name="publish_setup_node_address">Node address</string>
+    <string name="publish_setup_balance">Balance</string>
+    <string name="publish_setup_balance_unavailable">Unavailable</string>
+    <string name="publish_setup_balance_checking">Checking…</string>
+    <string name="publish_setup_fund_and_buy">Fund and buy a stamp from your wallet</string>
+    <string name="publish_setup_deposit">Deposit</string>
+    <string name="publish_setup_pay_from_wallet">Pay from your wallet instead</string>
+    <string name="publish_setup_step">Step %1$d</string>
+    <string name="publish_setup_status_pending">Not yet</string>
+    <string name="publish_setup_status_active">To do</string>
+    <string name="publish_setup_status_done">Done</string>
+    <!-- The clipboard entry's label. -->
+    <string name="publish_setup_clip_label">Swarm node address</string>
+    <string name="publish_setup_address_copied">Address copied</string>
+    <!-- browser/PublisherIdentitiesScreen.kt -->
+    <string name="publish_identities_title">Publisher identities</string>
+    <!-- The Wallet page row's line under "Publisher identities" with no site yet. -->
+    <string name="publish_identities_summary_none">The keys sites sign their Swarm feeds with</string>
+    <plurals name="publish_identities_summary_sites">
+        <item quantity="one">%d site</item>
+        <item quantity="other">%d sites</item>
+    </plurals>
+    <!-- %1$s: the identity's name; %2$d: how many identities the site has. -->
+    <plurals name="publish_identities_site_summary">
+        <item quantity="one">Publishes as %1$s · %2$d identity</item>
+        <item quantity="other">Publishes as %1$s · %2$d identities</item>
+    </plurals>
+    <!-- %1$s: the kind of key ("App-scoped"); %2$s: its derivation path. -->
+    <string name="publish_identities_detail">%1$s · %2$s</string>
+    <string name="publish_identities_error_locked">The wallet locked. Unlock it and try again.</string>
+    <!-- What failed, filling "Couldn’t %s: …" (see walletErrorMessage). -->
+    <string name="publish_identities_action_unlock">unlock the wallet</string>
+    <string name="publish_identities_action_switch">switch identity</string>
+    <string name="publish_identities_action_create">create the identity</string>
+    <string name="publish_identities_action_set_up_site">set up the site</string>
+    <string name="publish_identities_intro_title">Publishing on Swarm</string>
+    <string name="publish_identities_intro">A site signs its Swarm feeds with a key from your wallet. Each site gets an app-scoped identity of its own, so its feeds can’t be tied to your other sites or accounts. You can give a site more identities and switch between them, or have it publish as your Ant wallet identity — your Swarm node’s account, which every site using it shares.</string>
+    <string name="publish_identities_intro_not_yet">Sites can’t publish feeds from this browser yet; when they can, they’ll use the identity chosen here.</string>
+    <string name="publish_identities_locked_title">Wallet locked</string>
+    <string name="publish_identities_locked_body">Unlock the wallet to see each identity’s owner address, create identities or switch between them.</string>
+    <string name="publish_identities_unlocking">Unlocking…</string>
+    <string name="publish_identities_unlock">Unlock</string>
+    <string name="publish_identities_this_site">This site</string>
+    <string name="publish_identities_this_site_none">Has no publisher identity yet. Setting one up gives it a new app-scoped identity.</string>
+    <string name="publish_identities_set_up">Set up a publisher identity</string>
+    <string name="publish_identities_sites">Sites</string>
+    <string name="publish_identities_sites_empty">No site has a publisher identity yet. Open a site, then come back here to set one up for it.</string>
+    <string name="publish_identities_site">Site</string>
+    <string name="publish_identities_site_body">Its Swarm feeds are signed by the identity chosen below. Feeds belong to the key that signs them, so after a switch the site publishes under another owner address; what it published before stays with the old one.</string>
+    <string name="publish_identities_site_locked_body">Unlock the wallet to see owner addresses and switch identities.</string>
+    <string name="publish_identities_publishes_as">Publishes as</string>
+    <string name="publish_identities_create_new">Create new identity</string>
+    <!-- %1$s: the identity's name. -->
+    <string name="publish_identities_label_active">%1$s (active)</string>
+    <string name="publish_identities_owner_working">Working out the address…</string>
+    <string name="publish_identities_owner_locked">Unlock to see its address</string>
+    <string name="publish_identities_new_title">New publisher identity</string>
+    <string name="publish_identities_new_body">A new app-scoped key for this site, with an owner address of its own. It becomes the identity the site publishes as.</string>
+    <string name="publish_identities_name">Name</string>
+    <string name="publish_identities_creating">Creating…</string>
+    <string name="publish_identities_create">Create</string>
+
+    <!-- wallet/PublisherIdentities.kt -->
+    <!-- What kind of key an identity is, under its name. -->
+    <string name="publish_identity_kind_app_scoped">App-scoped</string>
+    <string name="publish_identity_kind_ant_wallet">Ant wallet</string>
+    <string name="publish_identity_ant_wallet_label">Ant wallet identity</string>
+    <!-- The name a new app-scoped identity gets when none is given; %1$d: its number. -->
+    <string name="publish_identity_default_label">App-scoped identity %1$d</string>
+    <string name="publish_identity_label_empty">Enter a name for this identity.</string>
+    <string name="publish_identity_label_too_long">Keep the name to %1$d bytes or fewer.</string>
+    <string name="publish_identity_label_control_chars">The name can’t contain line breaks or control characters.</string>
+    <string name="publish_identity_error_no_site">no publisher identities for this site</string>
+    <string name="publish_identity_error_not_this_site">not one of this site\'s identities</string>
+</resources>

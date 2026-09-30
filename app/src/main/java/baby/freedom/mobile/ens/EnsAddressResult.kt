@@ -1,5 +1,8 @@
 package baby.freedom.mobile.ens
 
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
+
 /**
  * Outcome of [EnsResolver.resolveAddress] (#277): the account a name
  * names on one chain, for the wallet to send to. Every answer carries
@@ -43,7 +46,7 @@ sealed class EnsAddressResult {
             is EnsResult.Ok -> if (result.protocol == EnsResolver.ADDRESS_PROTOCOL) {
                 Ok(result.name, result.uri, result.trust)
             } else {
-                Error(result.name, "RESOLUTION_ERROR", "not an address record", retryable = false)
+                Error(result.name, "RESOLUTION_ERROR", Strings.get(R.string.names_error_not_an_address), retryable = false)
             }
             is EnsResult.NotFound -> NoAddress(result.name, result.reason, result.trust)
             is EnsResult.Conflict -> Conflict(result.name, result.subject, result.groups, result.block)
@@ -51,7 +54,7 @@ sealed class EnsAddressResult {
                 "CHAIN_UNSUPPORTED", "UNSUPPORTED_SYSTEM" -> NoAddress(result.name, result.reason, null)
                 else -> Error(result.name, result.reason, result.error, result.retryable)
             }
-            is EnsResult.Unsupported -> Error(result.name, "RESOLUTION_ERROR", "not an address record", retryable = false)
+            is EnsResult.Unsupported -> Error(result.name, "RESOLUTION_ERROR", Strings.get(R.string.names_error_not_an_address), retryable = false)
         }
     }
 }

@@ -46,12 +46,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.ChainInput
 import baby.freedom.mobile.chains.Chainlist
@@ -65,7 +67,10 @@ import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.ens.EnsRpcConfig
+import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.l10n.pluralText
 import java.io.IOException
+import java.text.NumberFormat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -78,8 +83,8 @@ import kotlinx.coroutines.launch
  * which the user reviews before adding.
  */
 
-internal const val SECTION_CHAINS = "Chains"
-private const val ROW_ADD_CHAIN = "Add chain"
+internal val SECTION_CHAINS: String get() = Strings.get(R.string.names_section_chains)
+private val ROW_ADD_CHAIN: String get() = Strings.get(R.string.names_add_chain)
 private const val ADD_CHAIN_KEY = "add-chain"
 
 /** Which Chains sub-page Settings shows in place of its list, if any. */
@@ -93,21 +98,30 @@ internal sealed interface ChainPage {
     data class Detail(val chainId: Long) : ChainPage
 }
 
-internal fun chainSubtitle(chain: Chain) = "Chain ID ${chain.id} · ${chain.symbol}"
+// The chain ID is an identifier (typed, searched, pasted), so its digits stay as they are.
+internal fun chainSubtitle(chain: Chain) = Strings.get(R.string.names_chain_subtitle, chain.id.toString(), chain.symbol)
 
-internal fun rpcCountLabel(count: Int) =
-    if (count == 1) "1 RPC endpoint" else "$count RPC endpoints"
+internal fun rpcCountLabel(count: Int) = Strings.plural(R.plurals.names_rpc_endpoints, count, count)
+
+private fun builtInLabel(chain: Chain) =
+    Strings.get(if (chain.builtIn) R.string.names_chain_built_in else R.string.names_chain_custom)
 
 private fun chainThirdLine(chain: Chain) = listOfNotNull(
     rpcCountLabel(chain.rpcUrls.size),
-    "Testnet".takeIf { chain.isTestnet },
-    if (chain.builtIn) "Built in" else "Custom",
+    Strings.get(R.string.names_chain_testnet).takeIf { chain.isTestnet },
+    builtInLabel(chain),
 ).joinToString(" · ")
 
 /** Settings search index: each chain by name, ID and currency, and the Add row. */
 internal fun chainSettingsRows(chains: List<Chain>) = chains.map { chain ->
     settingsRow(chain.id, chain.name, chainSubtitle(chain), chainThirdLine(chain), chain.hexId)
-} + settingsRow(ADD_CHAIN_KEY, ROW_ADD_CHAIN, "chainlist.org", "Custom chain", "Network")
+} + settingsRow(
+    ADD_CHAIN_KEY,
+    ROW_ADD_CHAIN,
+    "chainlist.org",
+    Strings.get(R.string.names_search_custom_chain),
+    Strings.get(R.string.names_search_network),
+)
 
 @Composable
 internal fun ChainsSection(
@@ -132,7 +146,7 @@ internal fun ChainsSection(
                         IconButton(onClick = { onRemove(chain) }) {
                             Icon(
                                 Icons.Filled.DeleteOutline,
-                                contentDescription = "Remove ${chain.name}",
+                                contentDescription = stringResource(R.string.names_remove_item, chain.name),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -143,7 +157,7 @@ internal fun ChainsSection(
         if (ADD_CHAIN_KEY in visible) {
             PageRow(
                 title = ROW_ADD_CHAIN,
-                subtitle = "Search chainlist.org or enter one yourself",
+                subtitle = stringResource(R.string.names_add_chain_subtitle),
                 style = PageRowStyle.Inset,
                 leadingIcon = Icons.Filled.Add,
                 onClick = onAdd,
@@ -163,16 +177,21 @@ private sealed interface ReadCheck {
 /** Why [ChainStore.addUserRpc] didn't add a URL, as the chain page says it; `null` once added. */
 internal fun userRpcAddError(result: ChainStore.RpcAddResult, url: String = ""): String? = when (result) {
     ChainStore.RpcAddResult.ADDED -> null
-    ChainStore.RpcAddResult.INVALID -> "Not a usable RPC URL."
-    ChainStore.RpcAddResult.DUPLICATE -> "That RPC is already in your list."
-    ChainStore.RpcAddResult.PUBLIC -> "That's already one of this chain's public RPCs."
+    ChainStore.RpcAddResult.INVALID -> Strings.get(R.string.names_rpc_add_invalid)
+    ChainStore.RpcAddResult.DUPLICATE -> Strings.get(R.string.names_rpc_add_duplicate)
+    ChainStore.RpcAddResult.PUBLIC -> Strings.get(R.string.names_rpc_add_public)
     ChainStore.RpcAddResult.NAME_RESOLUTION_PUBLIC ->
         (RpcUrls.normalize(url) ?: url).let(EnsRpcConfig::publicEndpointHost)
-            .let { host -> if (host != null) "Already provided by $host" else "That server is already provided" } +
-            ", one of name resolution's public RPCs, asked under its own switch there — it can't be one of yours."
-    ChainStore.RpcAddResult.FULL -> "At most ${Chain.MAX_USER_RPC_URLS} of your own RPCs per chain."
-    ChainStore.RpcAddResult.NO_CHAIN -> "This chain was removed."
-    ChainStore.RpcAddResult.FAILED -> "Couldn't save the RPC. Try again."
+            .let { host ->
+                if (host != null) {
+                    Strings.get(R.string.names_rpc_add_name_resolution_public_host, host)
+                } else {
+                    Strings.get(R.string.names_rpc_add_name_resolution_public)
+                }
+            }
+    ChainStore.RpcAddResult.FULL -> Strings.get(R.string.names_rpc_add_full, Chain.MAX_USER_RPC_URLS)
+    ChainStore.RpcAddResult.NO_CHAIN -> Strings.get(R.string.names_rpc_add_no_chain)
+    ChainStore.RpcAddResult.FAILED -> Strings.get(R.string.names_rpc_add_failed)
 }
 
 /**
@@ -184,23 +203,26 @@ internal fun readSteps(chain: Chain, policy: ChainAccessPolicy, wired: (ChainSou
     val providers = ChainDataRouter.quorumMembers(pool).size
     val members = ChainDataRouter.quorumMembers(pool, policy.quorumK)
     val mine = members.count { it in chain.userRpcUrls }
-    val whose = when {
-        mine == 0 -> ""
-        mine == members.size -> ", all of them yours"
-        else -> ", yours among them"
+    val quorumStep = when {
+        mine == 0 -> R.plurals.names_read_step_quorum
+        mine == members.size -> R.plurals.names_read_step_quorum_all_yours
+        else -> R.plurals.names_read_step_quorum_yours_among
     }
     return policy.readOrder.filter(wired).map { source ->
         when (source) {
-            ChainSource.MYOTIS, ChainSource.COLIBRI -> "${source.label}: a proof checked on this device"
+            ChainSource.MYOTIS, ChainSource.COLIBRI -> Strings.get(R.string.names_read_step_proof, source.label)
             ChainSource.QUORUM -> if (providers >= policy.quorumM) {
-                "${source.label}: ${policy.quorumM} of the first ${members.size} RPCs " +
-                    "(each from a different provider$whose) must give the same answer — verified"
+                Strings.plural(quorumStep, members.size, source.label, policy.quorumM, members.size)
             } else {
-                "${source.label}: skipped, needs RPCs from at least ${policy.quorumM} providers " +
-                    "(this chain has $providers)"
+                Strings.plural(
+                    R.plurals.names_read_step_quorum_skipped,
+                    policy.quorumM,
+                    source.label,
+                    policy.quorumM,
+                    providers,
+                )
             }
-            ChainSource.DIRECT -> "${source.label}: otherwise the first RPC that answers — unverified, " +
-                "or marked as yours if it's one of your RPCs"
+            ChainSource.DIRECT -> Strings.get(R.string.names_read_step_direct, source.label)
         }
     }
 }
@@ -208,15 +230,23 @@ internal fun readSteps(chain: Chain, policy: ChainAccessPolicy, wired: (ChainSou
 /** How a read was checked, in a line: who agreed, who didn't. Hosts only. */
 internal fun trustSummary(trust: ChainTrust): String {
     val dissent = if (trust.dissented.isEmpty()) "" else
-        " · ${trust.dissented.joinToString(", ")} answered differently"
+        " · " + Strings.get(R.string.names_trust_dissent, trust.dissented.joinToString(", "))
     return when (trust.level) {
         ChainTrust.Level.VERIFIED -> if (trust.source == ChainSource.QUORUM) {
-            "Verified: ${trust.agreed.size} of ${trust.k} RPCs agreed (${trust.agreed.joinToString(", ")})$dissent"
+            Strings.plural(
+                R.plurals.names_trust_verified_quorum,
+                trust.k,
+                trust.agreed.size,
+                trust.k,
+                trust.agreed.joinToString(", "),
+            ) + dissent
         } else {
-            "Verified by the ${trust.source.label}"
+            Strings.get(R.string.names_trust_verified_by, trust.source.label)
         }
-        ChainTrust.Level.USER_CONFIGURED -> "From your RPC ${trust.agreed.firstOrNull().orEmpty()}$dissent"
-        ChainTrust.Level.UNVERIFIED -> "Unverified: only ${trust.agreed.joinToString(", ")}'s word$dissent"
+        ChainTrust.Level.USER_CONFIGURED ->
+            Strings.get(R.string.names_trust_your_rpc, trust.agreed.firstOrNull().orEmpty()) + dissent
+        ChainTrust.Level.UNVERIFIED ->
+            Strings.get(R.string.names_trust_unverified, trust.agreed.joinToString(", ")) + dissent
     }
 }
 
@@ -233,40 +263,35 @@ internal fun trustSummary(trust: ChainTrust): String {
  * falls short.
  */
 internal fun userRpcsNote(chain: Chain, policy: ChainAccessPolicy): String {
-    val lead = "Your own node or provider for this chain. "
-    val tail = "An answer only your RPC gave is marked as yours rather than unverified."
+    val lead = Strings.get(R.string.names_user_rpcs_note_lead)
+    val tail = Strings.get(R.string.names_user_rpcs_note_tail)
     val k = policy.quorumK
     val pool = (chain.userRpcUrls + chain.rpcUrls).distinct()
     val providers = ChainDataRouter.quorumMembers(pool).size
     if (ChainSource.QUORUM !in policy.readOrder || providers < policy.quorumM) {
-        val order = when (chain.userRpcUrls.size) {
-            0 -> "One you add is asked before the public RPCs. "
-            1 -> "It's asked before the public RPCs. "
-            else -> "They're asked before the public RPCs. "
-        }
-        return lead + order + tail
+        val order = Strings.get(
+            when (chain.userRpcUrls.size) {
+                0 -> R.string.names_user_rpcs_note_order_none
+                1 -> R.string.names_user_rpcs_note_order_one
+                else -> R.string.names_user_rpcs_note_order_many
+            },
+        )
+        return listOf(lead, order, tail).joinToString(" ")
     }
     val members = ChainDataRouter.quorumMembers(pool, k)
     val seats = members.count { it in chain.userRpcUrls }
     val publicSeats = members.size - seats
-    val howReadsGo = "Each read goes to up to $k RPCs from different providers at the same time. "
+    val howReadsGo = Strings.plural(R.plurals.names_user_rpcs_note_reads, k, k)
     val who = when {
-        seats == 0 -> "Until you add one, those are all the chain's public RPCs; " +
-            "one you add takes a seat ahead of them. "
-        publicSeats == 0 -> "Your RPCs fill every seat, so the quorum is only yours: " +
-            "a public RPC is asked only if it falls short. "
-        else -> "Yours ${if (seats == 1) "takes a seat" else "take seats"} ahead of public RPCs, so ${if (seats == 1) "it's" else "they're"} in the quorum, but not alone: " +
-            "public RPCs fill ${if (publicSeats == 1) "the other seat" else "the other $publicSeats seats"} and see the same read. "
+        seats == 0 -> Strings.get(R.string.names_user_rpcs_note_no_seats)
+        publicSeats == 0 -> Strings.get(R.string.names_user_rpcs_note_all_seats)
+        seats == 1 -> Strings.plural(R.plurals.names_user_rpcs_note_one_seat, publicSeats, publicSeats)
+        else -> Strings.plural(R.plurals.names_user_rpcs_note_seats, publicSeats, publicSeats)
     }
     val spare = chain.userRpcUrls.size - seats
-    val spareNote = if (spare <= 0) "" else
-        "${plural(spare, "RPC")} of yours ${if (spare == 1) "isn't" else "aren't"} in the quorum — " +
-            "it takes one per provider (this device counts as one) and $k at most — " +
-            "so ${if (spare == 1) "it's" else "they're"} asked only if it falls short. "
-    return lead + howReadsGo + who + spareNote + tail
+    val spareNote = if (spare <= 0) null else Strings.plural(R.plurals.names_user_rpcs_note_spare, spare, spare, k)
+    return listOfNotNull(lead, howReadsGo, who, spareNote, tail).joinToString(" ")
 }
-
-private fun plural(n: Int, word: String) = if (n == 1) "1 $word" else "$n ${word}s"
 
 /**
  * A chain's page (#107, #108): what it is, the user's own RPCs ("Your
@@ -316,7 +341,7 @@ internal fun ChainDetailPage(
         trailing = {
             if (!chain.builtIn) {
                 TextButton(onClick = onRemove) {
-                    Text("Remove", color = MaterialTheme.colorScheme.error)
+                    Text(stringResource(R.string.common_remove), color = MaterialTheme.colorScheme.error)
                 }
             }
         },
@@ -328,16 +353,28 @@ internal fun ChainDetailPage(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
-            SectionCard(title = "Chain") {
-                DetailLine("Chain ID", "${chain.id} (${chain.hexId})")
-                DetailLine("Currency", "${chain.currencyName} (${chain.symbol}), ${chain.decimals} decimals")
-                DetailLine("Block explorer", chain.explorerUrl ?: "None")
-                DetailLine("Type", listOfNotNull(
-                    if (chain.builtIn) "Built in" else "Custom",
-                    "Testnet".takeIf { chain.isTestnet },
+            SectionCard(title = stringResource(R.string.names_chain_section)) {
+                DetailLine(stringResource(R.string.names_chain_id), "${chain.id} (${chain.hexId})")
+                DetailLine(
+                    stringResource(R.string.names_currency),
+                    pluralText(
+                        R.plurals.names_currency_detail,
+                        chain.decimals,
+                        chain.currencyName,
+                        chain.symbol,
+                        chain.decimals,
+                    ),
+                )
+                DetailLine(
+                    stringResource(R.string.names_block_explorer),
+                    chain.explorerUrl ?: stringResource(R.string.names_block_explorer_none),
+                )
+                DetailLine(stringResource(R.string.names_chain_type), listOfNotNull(
+                    builtInLabel(chain),
+                    stringResource(R.string.names_chain_testnet).takeIf { chain.isTestnet },
                 ).joinToString(", "))
             }
-            SectionCard(title = "Your RPCs") {
+            SectionCard(title = stringResource(R.string.names_your_rpcs)) {
                 Text(
                     userRpcsNote(chain, router.policy(chain)),
                     style = MaterialTheme.typography.bodySmall,
@@ -358,7 +395,7 @@ internal fun ChainDetailPage(
                         }) {
                             Icon(
                                 Icons.Filled.Close,
-                                contentDescription = "Remove $url",
+                                contentDescription = stringResource(R.string.names_remove_item, url),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -370,7 +407,7 @@ internal fun ChainDetailPage(
                             FormField(
                                 value = newRpc,
                                 onValueChange = { newRpc = it; rpcError = null },
-                                label = "RPC URL",
+                                label = stringResource(R.string.names_rpc_url),
                                 placeholder = "https://rpc.example.org",
                                 hint = rpcError ?: newRpcCheck.rejection
                                     ?.takeIf { newRpc.isNotBlank() }
@@ -381,14 +418,14 @@ internal fun ChainDetailPage(
                             )
                         }
                         IconButton(onClick = { addRpc() }, enabled = newRpcCheck.url != null && !saving) {
-                            Icon(Icons.Filled.Add, contentDescription = "Add your RPC")
+                            Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.names_add_your_rpc))
                         }
                     }
                 } else rpcError?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
             }
-            SectionCard(title = "Public RPCs") {
+            SectionCard(title = stringResource(R.string.names_public_rpcs)) {
                 Text(
                     rpcCountLabel(chain.publicRpcUrls.size),
                     style = MaterialTheme.typography.labelLarge,
@@ -402,17 +439,16 @@ internal fun ChainDetailPage(
                     )
                 }
             }
-            SectionCard(title = "How reads are checked") {
+            SectionCard(title = stringResource(R.string.names_how_reads_are_checked)) {
                 val steps = readSteps(chain, router.policy(chain)) { router.isWired(it, chain.id) }
                 steps.forEachIndexed { i, step ->
-                    Text("${i + 1}. $step", style = MaterialTheme.typography.bodyMedium)
+                    Text(stringResource(R.string.names_read_step_numbered, i + 1, step), style = MaterialTheme.typography.bodyMedium)
                 }
                 if (chain.id in ChainAccessPolicy.LIGHT_CLIENT_CHAIN_IDS &&
                     !router.isWired(ChainSource.MYOTIS, chain.id)
                 ) {
                     Text(
-                        "The P2P light client and the Colibri prover, which verify ${chain.name} " +
-                            "reads with a proof, aren't in this version yet.",
+                        stringResource(R.string.names_proof_tiers_missing, chain.name),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -427,11 +463,11 @@ internal fun ChainDetailPage(
                                     val r = WalletRpc(router).blockNumber(chain.id)
                                     ReadCheck.Done(r.value, r.trust)
                                 } catch (e: ChainRpcException) {
-                                    ReadCheck.Failed(e.message ?: "No answer")
+                                    ReadCheck.Failed(readCheckFailure(e) ?: Strings.get(R.string.names_check_no_answer))
                                 }
                             }
                         },
-                    ) { Text("Check latest block") }
+                    ) { Text(stringResource(R.string.names_check_latest_block)) }
                     if (check == ReadCheck.Running) {
                         CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                     }
@@ -439,7 +475,10 @@ internal fun ChainDetailPage(
                 when (val c = check) {
                     is ReadCheck.Done -> {
                         Text(
-                            "Block %,d".format(c.block),
+                            stringResource(
+                                R.string.names_check_block,
+                                NumberFormat.getIntegerInstance().format(c.block),
+                            ),
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Medium,
                         )
@@ -462,6 +501,24 @@ internal fun ChainDetailPage(
             Spacer(Modifier.height(8.dp))
         }
     }
+}
+
+/**
+ * What Check says when the read failed: the router's own diagnosis, its
+ * frame in the user's language (the per-source details stay as the
+ * router wrote them). `null` when the exception has no message.
+ */
+private fun readCheckFailure(e: ChainRpcException): String? = when (e) {
+    is ChainRpcException.UnknownChain -> Strings.get(R.string.names_check_unknown_chain, e.chainId.toString())
+    is ChainRpcException.Rpc -> Strings.get(R.string.names_check_rpc_error, e.code, e.rpcMessage)
+    is ChainRpcException.AllSourcesFailed -> e.nodeError?.let { node ->
+        Strings.get(
+            R.string.names_check_no_source_node_error,
+            e.failures.joinToString("; "),
+            readCheckFailure(node) ?: node.message.orEmpty(),
+        )
+    } ?: Strings.get(R.string.names_check_no_source, e.failures.joinToString("; "))
+    else -> e.message
 }
 
 @Composable
@@ -525,12 +582,12 @@ internal fun ChainlistPage(
             OutlinedTextField(
                 value = query,
                 onValueChange = onQueryChange,
-                placeholder = { Text("Name or chain ID") },
+                placeholder = { Text(stringResource(R.string.names_chainlist_search_placeholder)) },
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 trailingIcon = if (query.isNotEmpty()) {
                     {
                         IconButton(onClick = { onQueryChange("") }) {
-                            Icon(Icons.Filled.Close, contentDescription = "Clear search")
+                            Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.names_clear_search))
                         }
                     }
                 } else null,
@@ -549,16 +606,15 @@ internal fun ChainlistPage(
             ) {
                 item("manual") {
                     PageRow(
-                        title = "Enter manually",
-                        subtitle = "Chain ID, currency and RPC endpoints",
+                        title = stringResource(R.string.names_enter_manually),
+                        subtitle = stringResource(R.string.names_enter_manually_subtitle),
                         leadingIcon = Icons.Filled.Edit,
                         onClick = onManual,
                     )
                 }
                 item("note") {
                     Text(
-                        "From chainlist.org, refreshed daily. Only RPC endpoints that need " +
-                            "no API key and aren't marked as tracking are kept.",
+                        stringResource(R.string.names_chainlist_note),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
@@ -572,23 +628,22 @@ internal fun ChainlistPage(
                         ) {
                             CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.size(12.dp))
-                            Text("Loading chainlist.org…", style = MaterialTheme.typography.bodyMedium)
+                            Text(stringResource(R.string.names_chainlist_loading), style = MaterialTheme.typography.bodyMedium)
                         }
                     }
                     CatalogState.Failed -> item("failed") {
                         Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 16.dp)) {
                             Text(
-                                "Couldn't load chainlist.org. Check your connection and try again, " +
-                                    "or enter the chain manually.",
+                                stringResource(R.string.names_chainlist_failed),
                                 style = MaterialTheme.typography.bodyMedium,
                             )
-                            TextButton(onClick = { attempt++ }) { Text("Retry") }
+                            TextButton(onClick = { attempt++ }) { Text(stringResource(R.string.common_retry)) }
                         }
                     }
                     is CatalogState.Loaded -> {
                         if (results.isNullOrEmpty()) item("none") {
                             Text(
-                                "No chains match “${query.trim()}”",
+                                stringResource(R.string.names_chainlist_no_match, query.trim()),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 16.dp),
@@ -597,7 +652,7 @@ internal fun ChainlistPage(
                             val added = entry.id in existingIds
                             PageRow(
                                 title = entry.name,
-                                subtitle = "Chain ID ${entry.id} · ${entry.symbol}",
+                                subtitle = stringResource(R.string.names_chain_subtitle, entry.id.toString(), entry.symbol),
                                 thirdLine = catalogThirdLine(entry, added),
                                 enabled = !added,
                                 onClick = { onPick(entry) },
@@ -611,13 +666,12 @@ internal fun ChainlistPage(
 }
 
 internal fun catalogThirdLine(entry: Chainlist.Entry, added: Boolean) = listOfNotNull(
-    if (added) "Already added" else null,
+    if (added) Strings.get(R.string.names_catalog_already_added) else null,
     when (val n = entry.rpcUrls.size) {
-        0 -> "No key-free RPC endpoint — you'd add your own"
-        1 -> "1 key-free RPC endpoint"
-        else -> "$n key-free RPC endpoints"
+        0 -> Strings.get(R.string.names_catalog_no_key_free_rpc)
+        else -> Strings.plural(R.plurals.names_catalog_key_free_rpcs, n, n)
     },
-    "Testnet".takeIf { entry.isTestnet },
+    Strings.get(R.string.names_chain_testnet).takeIf { entry.isTestnet },
 ).joinToString(" · ")
 
 /**
@@ -635,13 +689,13 @@ internal fun rpcsWithPending(committed: List<String>, pending: String): List<Str
 
 /** What to fix, for each reason [RpcUrls.validate] refuses a URL. */
 internal fun rpcUrlHint(rejection: RpcUrls.Rejection): String = when (rejection) {
-    RpcUrls.Rejection.EMPTY, RpcUrls.Rejection.NOT_A_URL -> "Not a URL: e.g. https://rpc.example.org"
-    RpcUrls.Rejection.TOO_LONG -> "Too long: at most 2048 characters"
-    RpcUrls.Rejection.NON_ASCII -> "Use the xn-- form of an international domain name"
-    RpcUrls.Rejection.SCHEME -> "Needs https:// (http:// only to localhost, 127.0.0.1 or [::1])"
-    RpcUrls.Rejection.CREDENTIALS -> "Remove the user name or password before the host"
-    RpcUrls.Rejection.PLACEHOLDER -> "Replace the {API_KEY} placeholder: only key-free RPCs are supported"
-    RpcUrls.Rejection.INTERNAL_HOST -> "Needs a public host name, not a local network address"
+    RpcUrls.Rejection.EMPTY, RpcUrls.Rejection.NOT_A_URL -> Strings.get(R.string.names_rpc_hint_not_a_url)
+    RpcUrls.Rejection.TOO_LONG -> Strings.get(R.string.names_rpc_hint_too_long)
+    RpcUrls.Rejection.NON_ASCII -> Strings.get(R.string.names_rpc_hint_non_ascii)
+    RpcUrls.Rejection.SCHEME -> Strings.get(R.string.names_rpc_hint_scheme)
+    RpcUrls.Rejection.CREDENTIALS -> Strings.get(R.string.names_rpc_hint_credentials)
+    RpcUrls.Rejection.PLACEHOLDER -> Strings.get(R.string.names_rpc_hint_placeholder)
+    RpcUrls.Rejection.INTERNAL_HOST -> Strings.get(R.string.names_rpc_hint_internal_host)
 }
 
 /**
@@ -707,10 +761,11 @@ internal fun AddChainPage(
             saving = false
             when (result) {
                 ChainStore.AddResult.ADDED -> onAdded()
-                ChainStore.AddResult.BUILT_IN -> error = "Chain ID ${c.id} is built in already."
+                ChainStore.AddResult.BUILT_IN ->
+                    error = Strings.get(R.string.names_add_chain_built_in, c.id.toString())
                 ChainStore.AddResult.DUPLICATE ->
-                    error = "A chain with ID ${c.id} is already added. Remove it first to replace it."
-                ChainStore.AddResult.FAILED -> error = "Couldn't save the chain. Try again."
+                    error = Strings.get(R.string.names_add_chain_duplicate, c.id.toString())
+                ChainStore.AddResult.FAILED -> error = Strings.get(R.string.names_add_chain_failed)
             }
         }
     }
@@ -723,7 +778,9 @@ internal fun AddChainPage(
         title = ROW_ADD_CHAIN,
         onDismiss = onBack,
         trailing = {
-            TextButton(onClick = { submit() }, enabled = chain != null && !saving) { Text("Add") }
+            TextButton(onClick = { submit() }, enabled = chain != null && !saving) {
+                Text(stringResource(R.string.common_add))
+            }
         },
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -744,55 +801,61 @@ internal fun AddChainPage(
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             ) {
-                SectionCard(title = "Chain") {
+                SectionCard(title = stringResource(R.string.names_chain_section)) {
                     FormField(
-                        value = id, onValueChange = { id = it; error = null }, label = "Chain ID",
+                        value = id, onValueChange = { id = it; error = null },
+                        label = stringResource(R.string.names_chain_id),
                         placeholder = "137",
                         hint = if (id.isNotBlank() && ChainInput.parseId(id) == null) {
-                            "A whole number from 1 to ${Chain.MAX_ID} (or 0x hex)"
+                            stringResource(R.string.names_chain_id_hint, Chain.MAX_ID)
                         } else null,
                         keyboardType = KeyboardType.Ascii,
                         literal = true,
                     )
                     FormField(
-                        value = name, onValueChange = { name = it }, label = "Name",
+                        value = name, onValueChange = { name = it }, label = stringResource(R.string.names_chain_name),
                         placeholder = "Polygon",
                         hint = if (name.isNotEmpty() && ChainInput.parseName(name) == null) {
-                            "1 to ${Chain.MAX_NAME_LENGTH} characters"
+                            stringResource(R.string.names_chain_name_hint, Chain.MAX_NAME_LENGTH)
                         } else null,
                     )
                 }
-                SectionCard(title = "Currency") {
+                SectionCard(title = stringResource(R.string.names_currency)) {
                     FormField(
-                        value = symbol, onValueChange = { symbol = it }, label = "Symbol",
+                        value = symbol, onValueChange = { symbol = it },
+                        label = stringResource(R.string.names_currency_symbol),
                         placeholder = "POL",
                         hint = if (symbol.isNotEmpty() && ChainInput.parseSymbol(symbol) == null) {
-                            "1 to ${Chain.MAX_SYMBOL_LENGTH} characters, no spaces"
+                            stringResource(R.string.names_currency_symbol_hint, Chain.MAX_SYMBOL_LENGTH)
                         } else null,
                         literal = true,
                     )
                     FormField(
-                        value = decimals, onValueChange = { decimals = it }, label = "Decimals",
+                        value = decimals, onValueChange = { decimals = it },
+                        label = stringResource(R.string.names_currency_decimals),
                         placeholder = "18",
-                        hint = if (ChainInput.parseDecimals(decimals) == null) "0 to 36" else null,
+                        hint = if (ChainInput.parseDecimals(decimals) == null) {
+                            stringResource(R.string.names_currency_decimals_hint)
+                        } else null,
                         keyboardType = KeyboardType.Number,
                         literal = true,
                     )
                 }
-                SectionCard(title = "Block explorer") {
+                SectionCard(title = stringResource(R.string.names_block_explorer)) {
                     FormField(
-                        value = explorer, onValueChange = { explorer = it }, label = "URL (optional)",
+                        value = explorer, onValueChange = { explorer = it },
+                        label = stringResource(R.string.names_block_explorer_url),
                         placeholder = "https://polygonscan.com",
                         hint = if (explorer.isNotBlank() && ChainInput.normalizeExplorer(explorer) == null) {
-                            "Needs https:// and a host name"
+                            stringResource(R.string.names_block_explorer_hint)
                         } else null,
                         url = true,
                     )
                 }
-                SectionCard(title = "RPC endpoints") {
+                SectionCard(title = stringResource(R.string.names_rpc_endpoints_section)) {
                     if (rpcs.isEmpty()) {
                         Text(
-                            "Add at least one.",
+                            stringResource(R.string.names_rpc_endpoints_empty),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -808,7 +871,7 @@ internal fun AddChainPage(
                             IconButton(onClick = { setRpcs(rpcs - url) }) {
                                 Icon(
                                     Icons.Filled.Close,
-                                    contentDescription = "Remove $url",
+                                    contentDescription = stringResource(R.string.names_remove_item, url),
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
@@ -818,7 +881,8 @@ internal fun AddChainPage(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(modifier = Modifier.weight(1f)) {
                                 FormField(
-                                    value = newRpc, onValueChange = { newRpc = it }, label = "RPC URL",
+                                    value = newRpc, onValueChange = { newRpc = it },
+                                    label = stringResource(R.string.names_rpc_url),
                                     placeholder = "https://rpc.example.org",
                                     hint = newRpcCheck.rejection
                                         ?.takeIf { newRpc.isNotBlank() }
@@ -829,7 +893,7 @@ internal fun AddChainPage(
                                 )
                             }
                             IconButton(onClick = { addRpc() }, enabled = newRpcCheck.url != null) {
-                                Icon(Icons.Filled.Add, contentDescription = "Add RPC endpoint")
+                                Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.names_add_rpc_endpoint))
                             }
                         }
                     }

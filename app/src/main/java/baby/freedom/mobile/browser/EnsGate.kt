@@ -1,8 +1,10 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.ens.EnsQuorum
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.EnsTrust
+import baby.freedom.mobile.l10n.Strings
 import java.security.SecureRandom
 
 /**
@@ -56,9 +58,11 @@ internal class EnsGate(
          * user is deciding whether to trust exactly that answer.
          */
         fun unverifiedDetail(result: EnsResult.Ok): String = buildList {
-            add("Answer: ${result.uri}")
-            if (result.trust.agreed.isNotEmpty()) add("From: ${result.trust.agreed.joinToString(", ")}")
-            add("Block: " + (result.trust.block?.let { "#$it" } ?: "latest"))
+            add(Strings.get(R.string.names_gate_answer, result.uri))
+            if (result.trust.agreed.isNotEmpty()) {
+                add(Strings.get(R.string.names_gate_from, result.trust.shownAgreed.joinToString(", ")))
+            }
+            add(Strings.get(R.string.names_gate_block, blockLabel(result.trust)))
             tooFewNote(result.trust)?.let(::add)
         }.joinToString("\n")
 
@@ -71,9 +75,12 @@ internal class EnsGate(
             if (trust.verified || !trust.tooFewServers) {
                 null
             } else {
-                "Fewer than ${EnsQuorum.MIN_PROVIDERS} RPC endpoints are enabled in " +
-                    "Settings → RPC providers, so no answer can be cross-checked."
+                Strings.get(R.string.names_gate_too_few, EnsQuorum.MIN_PROVIDERS)
             }
+
+        /** `#123` for an answer's block, or "latest". */
+        private fun blockLabel(trust: EnsTrust): String =
+            trust.block?.let { "#$it" } ?: Strings.get(R.string.names_gate_block_latest)
 
         /**
          * [detail] for a "nothing to load" answer, plus a note when only
@@ -82,9 +89,9 @@ internal class EnsGate(
          */
         fun withTrustNote(detail: String, trust: EnsTrust): String {
             if (trust.verified) return detail
-            val from = trust.agreed.takeIf { it.isNotEmpty() }?.joinToString(", ") ?: "one RPC server"
-            val block = trust.block?.let { "#$it" } ?: "latest"
-            val note = "$detail\nNot cross-checked: only $from answered (block $block)"
+            val from = trust.shownAgreed.takeIf { it.isNotEmpty() }?.joinToString(", ")
+                ?: Strings.get(R.string.names_trust_one_rpc_server)
+            val note = detail + "\n" + Strings.get(R.string.names_gate_not_cross_checked, from, blockLabel(trust))
             return tooFewNote(trust)?.let { "$note\n$it" } ?: note
         }
 
@@ -108,18 +115,18 @@ internal class EnsGate(
 
         /** Each distinct answer and the servers that gave it. */
         fun conflictDetail(result: EnsResult.Conflict): String = buildList {
-            val block = result.block?.let { "#$it" } ?: "the anchor block"
+            val block = result.block?.let { "#$it" } ?: Strings.get(R.string.names_conflict_anchor_block)
             add(
                 when (result.subject) {
-                    EnsResult.Conflict.Subject.RECORD -> "Answers at block $block:"
-                    EnsResult.Conflict.Subject.BLOCK -> "Hashes reported for block $block:"
-                    EnsResult.Conflict.Subject.HEAD -> "Chain heads reported:"
+                    EnsResult.Conflict.Subject.RECORD -> Strings.get(R.string.names_conflict_answers, block)
+                    EnsResult.Conflict.Subject.BLOCK -> Strings.get(R.string.names_conflict_hashes, block)
+                    EnsResult.Conflict.Subject.HEAD -> Strings.get(R.string.names_conflict_heads)
                 },
             )
             for (group in result.groups) {
                 add("")
                 add(group.answer)
-                add("  from ${group.hosts.joinToString(", ")}")
+                add("  " + Strings.get(R.string.names_conflict_from, group.hosts.joinToString(", ")))
             }
         }.joinToString("\n")
     }

@@ -1,5 +1,8 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.l10n.PseudoLanguage
+import baby.freedom.mobile.l10n.inPseudoLanguage
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -53,6 +56,21 @@ class NodeApiGuardTest {
         }
         for (path in listOf("/pss", "/gsoc", "/health", "/readiness")) {
             assertTrue(path, path in NodeApiGuard.READ_REFUSAL)
+        }
+    }
+
+    @Test
+    fun `every refusal a page can read stays English in another app language`() {
+        val cases = listOf(
+            "POST" to "http://127.0.0.1:1633/stamps/1/17",
+            "GET" to "http://127.0.0.1:1633/addresses",
+            "GET" to "http://nas.lan:1633/addresses",
+        )
+        val english = cases.map { (m, u) -> NodeApiGuard.refusalText(m, u) }
+        val pseudo = inPseudoLanguage { cases.map { (m, u) -> NodeApiGuard.refusalText(m, u) } }
+        assertEquals(english, pseudo)
+        for (text in pseudo) {
+            assertTrue(text, text!!.isNotEmpty() && !text.contains(PseudoLanguage.MARK.trim()))
         }
     }
 

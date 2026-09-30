@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -38,8 +39,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainTrust
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.TokenAmounts
@@ -57,31 +60,53 @@ import baby.freedom.mobile.wallet.WalletAccountStore
  * through.
  */
 internal fun nonceDetail(quote: SendQuote): String =
-    quote.replaces?.let { "${trustLabel(quote.nonceTrust)} · ${replacesNote(it)}" } ?: trustLabel(quote.nonceTrust)
+    quote.replaces?.let { Strings.get(R.string.wallet_accounts_nonce_detail_replaces, trustLabel(quote.nonceTrust), it) }
+        ?: trustLabel(quote.nonceTrust)
 
 /** [SendQuote.replaces] in words: the stopped send [hash] this one outbids. */
 internal fun replacesNote(hash: String): String =
-    "replaces the send you stopped tracking ($hash), at a higher fee: only one of the two can go through"
+    Strings.get(R.string.wallet_accounts_replaces_note, hash)
 
 /** How a balance was checked, in a word or two under the amount (#104). */
 internal fun trustLabel(trust: ChainTrust): String = when (trust.level) {
     ChainTrust.Level.VERIFIED -> if (trust.source == baby.freedom.mobile.chains.rpc.ChainSource.QUORUM) {
-        "Verified · ${trust.agreed.size} of ${trust.k} RPCs agreed"
+        Strings.plural(R.plurals.wallet_accounts_trust_verified_quorum, trust.k, trust.agreed.size, trust.k)
     } else {
-        "Verified · ${trust.source.label}"
+        Strings.get(R.string.wallet_accounts_trust_verified_source, trust.source.label)
     }
-    ChainTrust.Level.USER_CONFIGURED -> "From your RPC"
-    ChainTrust.Level.UNVERIFIED -> "Unverified · one RPC’s word"
+    ChainTrust.Level.USER_CONFIGURED -> Strings.get(R.string.wallet_accounts_trust_user_configured)
+    ChainTrust.Level.UNVERIFIED -> Strings.get(R.string.wallet_accounts_trust_unverified)
 }
 
 /** An account's name as lists show it, with where its key is when that's a Ledger and the name doesn't say so (#142). */
 internal fun accountLabel(account: WalletAccount): String =
-    if (account.ledger != null && !account.name.contains("Ledger", ignoreCase = true)) "${account.name} · Ledger" else account.name
+    if (account.ledger != null && !namesLedger(account.name)) {
+        Strings.get(R.string.wallet_accounts_label_ledger, account.name)
+    } else {
+        account.name
+    }
+
+/**
+ * Whether [name] already says its key is on a Ledger: it has the brand
+ * in it, or it's the default Ledger-account name ("Ledger 2") in the app
+ * language, which a translation may write in its own script (#313 R1-M4).
+ */
+private fun namesLedger(name: String): Boolean {
+    if (name.contains("Ledger", ignoreCase = true)) return true
+    val sample = Strings.get(R.string.wallet_account_default_ledger_name, DEFAULT_NAME_SAMPLE)
+    val number = Regex("\\p{Nd}+").findAll(sample).maxByOrNull { it.value.length } ?: return false
+    val pattern = Regex.escape(sample.substring(0, number.range.first)) + "\\p{Nd}+" +
+        Regex.escape(sample.substring(number.range.last + 1))
+    return Regex(pattern).matches(name.trim())
+}
+
+/** A number no default name has, to find where the number goes in one. */
+private const val DEFAULT_NAME_SAMPLE = 987654321
 
 /** Where [account]'s key is and at which path — the line under its address. */
 internal fun accountPathLine(account: WalletAccount): String = account.ledger?.let {
-    "On Ledger ${it.deviceName.removePrefix("Ledger ")} · ${account.path}"
-} ?: "Derivation path ${account.path}"
+    Strings.get(R.string.wallet_accounts_path_ledger, it.deviceName.removePrefix("Ledger "), account.path)
+} ?: Strings.get(R.string.wallet_accounts_path_derivation, account.path)
 
 /**
  * What a balance row shows: the amount (null when there's none to show)
@@ -90,7 +115,11 @@ internal fun accountPathLine(account: WalletAccount): String = account.ledger?.l
 internal data class BalanceText(val amount: String?, val detail: String, val warn: Boolean)
 
 internal fun balanceText(balance: TokenBalance?, decimals: Int, refreshing: Boolean): BalanceText = when (balance) {
-    null -> BalanceText(null, if (refreshing) "Reading…" else "Not read yet", warn = false)
+    null -> BalanceText(
+        null,
+        Strings.get(if (refreshing) R.string.wallet_accounts_balance_reading else R.string.wallet_accounts_balance_not_read),
+        warn = false,
+    )
     is TokenBalance.Known -> BalanceText(
         TokenAmounts.format(balance.raw, decimals),
         trustLabel(balance.trust),
@@ -101,11 +130,11 @@ internal fun balanceText(balance: TokenBalance?, decimals: Int, refreshing: Bool
         if (previous != null) {
             BalanceText(
                 TokenAmounts.format(previous.raw, decimals),
-                "Not updated: ${balance.reason}",
+                Strings.get(R.string.wallet_accounts_balance_not_updated, balance.reason),
                 warn = true,
             )
         } else {
-            BalanceText(null, "Couldn’t read: ${balance.reason}", warn = true)
+            BalanceText(null, Strings.get(R.string.wallet_accounts_balance_read_failed, balance.reason), warn = true)
         }
     }
 }
@@ -131,7 +160,7 @@ internal fun AccountsSection(
 ) {
     val context = LocalContext.current
     val active = list.active
-    SectionCard(title = "Account") {
+    SectionCard(title = stringResource(R.string.wallet_accounts_account_title)) {
         Text(accountLabel(active), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
         SelectionContainer {
             AddressText(
@@ -148,15 +177,17 @@ internal fun AccountsSection(
         )
         // Wraps a whole button to the next line at a large font size, never a label inside one.
         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            if (active.isLedger) TextButton(onClick = { onRemoveLedger(active) }, enabled = !busy) { Text("Remove") }
-            TextButton(onClick = onReceive) { Text("Show QR code") }
-            TextButton(onClick = { copyToClipboard(context, active.address) }) { Text("Copy address") }
+            if (active.isLedger) TextButton(onClick = { onRemoveLedger(active) }, enabled = !busy) { Text(stringResource(R.string.common_remove)) }
+            TextButton(onClick = onReceive) { Text(stringResource(R.string.wallet_accounts_show_qr)) }
+            TextButton(onClick = { copyToClipboard(context, active.address) }) {
+                Text(stringResource(R.string.common_copy_address))
+            }
         }
         if (list.accounts.size > 1) {
             HorizontalDivider()
             Spacer(Modifier.height(4.dp))
             Text(
-                "Switch account",
+                stringResource(R.string.wallet_accounts_switch),
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -192,9 +223,9 @@ internal fun AccountsSection(
             OutlinedButton(onClick = onAdd, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
                 Text(
                     when {
-                        busy -> "Working…"
-                        locked -> "Unlock to add an account"
-                        else -> "Add account"
+                        busy -> stringResource(R.string.wallet_accounts_working)
+                        locked -> stringResource(R.string.wallet_accounts_unlock_to_add)
+                        else -> stringResource(R.string.wallet_accounts_add)
                     },
                 )
             }
@@ -203,7 +234,7 @@ internal fun AccountsSection(
                 onClick = onConnectLedger,
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth().testTag("wallet-connect-ledger"),
-            ) { Text("Connect a Ledger") }
+            ) { Text(stringResource(R.string.wallet_accounts_connect_ledger)) }
         }
     }
 }
@@ -269,18 +300,20 @@ internal const val MIN_ADDRESS_SCALE = 0.85f
  */
 @Composable
 internal fun AccountsLockedSection(locked: Boolean, failed: Boolean, busy: Boolean, onRetry: () -> Unit) {
-    SectionCard(title = "Account") {
+    SectionCard(title = stringResource(R.string.wallet_accounts_account_title)) {
         Text(
             when {
-                locked -> "Unlock the wallet to see its accounts and their balances."
-                failed -> "Couldn’t set up this wallet’s accounts. The phone may be out of storage."
-                else -> "Finding your accounts…"
+                locked -> stringResource(R.string.wallet_accounts_locked_unlock)
+                failed -> stringResource(R.string.wallet_accounts_locked_failed)
+                else -> stringResource(R.string.wallet_accounts_locked_finding)
             },
             style = MaterialTheme.typography.bodyMedium,
         )
         if (!locked && failed) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = onRetry, enabled = !busy) { Text(if (busy) "Working…" else "Try again") }
+                TextButton(onClick = onRetry, enabled = !busy) {
+                    Text(stringResource(if (busy) R.string.wallet_accounts_working else R.string.common_try_again))
+                }
             }
         }
     }
@@ -299,10 +332,12 @@ internal fun BalancesSection(
     refreshing: Boolean,
     onRefresh: () -> Unit,
 ) {
-    SectionCard(title = "Balances") {
+    SectionCard(title = stringResource(R.string.wallet_accounts_balances_title)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Text(
-                if (refreshing) "Reading from the chains…" else "Read through each chain’s RPCs",
+                stringResource(
+                    if (refreshing) R.string.wallet_accounts_balances_reading else R.string.wallet_accounts_balances_source,
+                ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
@@ -310,7 +345,7 @@ internal fun BalancesSection(
             if (refreshing) {
                 CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
             } else {
-                TextButton(onClick = onRefresh) { Text("Refresh") }
+                TextButton(onClick = onRefresh) { Text(stringResource(R.string.wallet_accounts_refresh)) }
             }
         }
         for (id in TokenRegistry.WALLET_CHAIN_IDS) {

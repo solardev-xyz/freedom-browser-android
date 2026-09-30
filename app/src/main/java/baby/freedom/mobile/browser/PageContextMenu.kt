@@ -24,8 +24,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -326,7 +328,7 @@ internal fun PageContextMenuSheet(
     val link = target.linkUrl
     val image = target.imageUrl
     val linkDisplay = link?.let(displayUrl)
-    val header = linkDisplay ?: image?.let { if (isOpenableImage(it)) displayUrl(it) else "Image" }
+    val header = linkDisplay ?: image?.let { if (isOpenableImage(it)) displayUrl(it) else stringResource(R.string.browser_menu_image) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -359,10 +361,10 @@ internal fun PageContextMenuSheet(
                 HorizontalDivider(modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
             }
             if (link != null && linkDisplay != null) {
-                SheetItem("Open in new tab", Icons.AutoMirrored.Filled.OpenInNew, act { onOpenInNewTab(link) })
-                SheetItem("Copy link address", Icons.Filled.Link, act { onCopyLink(linkDisplay) })
+                SheetItem(stringResource(R.string.browser_menu_open_in_new_tab), Icons.AutoMirrored.Filled.OpenInNew, act { onOpenInNewTab(link) })
+                SheetItem(stringResource(R.string.browser_menu_copy_link_address), Icons.Filled.Link, act { onCopyLink(linkDisplay) })
                 SheetItem(
-                    "Share link",
+                    stringResource(R.string.browser_menu_share_link),
                     Icons.Filled.Share,
                     act { onShareLink(linkDisplay, target.linkText.orEmpty()) },
                 )
@@ -370,11 +372,11 @@ internal fun PageContextMenuSheet(
             if (image != null) {
                 if (link != null) HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                 if (isOpenableImage(image)) {
-                    SheetItem("Open image in new tab", Icons.Filled.Image, act { onOpenImage(image) })
+                    SheetItem(stringResource(R.string.browser_menu_open_image_in_new_tab), Icons.Filled.Image, act { onOpenImage(image) })
                 }
-                SheetItem("Copy image", Icons.Filled.ContentCopy, act { onCopyImage(image) })
-                SheetItem("Save image", Icons.Filled.Download, act { onSaveImage(image) })
-                SheetItem("Share image", Icons.Filled.Share, act { onShareImage(image) })
+                SheetItem(stringResource(R.string.browser_menu_copy_image), Icons.Filled.ContentCopy, act { onCopyImage(image) })
+                SheetItem(stringResource(R.string.browser_menu_save_image), Icons.Filled.Download, act { onSaveImage(image) })
+                SheetItem(stringResource(R.string.browser_menu_share_image), Icons.Filled.Share, act { onShareImage(image) })
             }
         }
     }

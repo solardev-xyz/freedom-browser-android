@@ -1,5 +1,7 @@
 package baby.freedom.mobile.node
 
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 
@@ -225,6 +227,6 @@ internal fun reportedNodeInfo(info: NodeInfo, doomed: Boolean): NodeInfo =
         info
     }
 
-internal const val WAITING_FOR_SPEND_NOTE =
-    "Waiting for a payment (a postage stamp or a chequebook deposit) to finish; the node starts once it's done"
+internal val WAITING_FOR_SPEND_NOTE: String
+    get() = Strings.get(R.string.node_waiting_for_spend)
 

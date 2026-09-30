@@ -24,12 +24,15 @@ import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BookmarkEditResult
 import baby.freedom.mobile.data.BookmarkEntry
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.l10n.Strings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -117,17 +120,18 @@ private fun BookmarkEditor(
             when (result) {
                 BookmarkEditResult.Saved -> onDismiss()
                 is BookmarkEditResult.Duplicate ->
-                    saveError = "Already bookmarked" +
-                        (result.title.takeIf { it.isNotBlank() }?.let { " as “$it”" } ?: "")
-                BookmarkEditResult.Gone -> saveError = "This bookmark has been removed"
-                BookmarkEditResult.Failed -> saveError = "Couldn't save the bookmark. Try again."
+                    saveError = result.title.takeIf { it.isNotBlank() }
+                        ?.let { Strings.get(R.string.library_bookmark_already_bookmarked_as, it) }
+                        ?: Strings.get(R.string.library_bookmark_already_bookmarked)
+                BookmarkEditResult.Gone -> saveError = Strings.get(R.string.library_bookmark_removed)
+                BookmarkEditResult.Failed -> saveError = Strings.get(R.string.library_bookmark_save_failed)
             }
         }
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Edit bookmark") },
+        title = { Text(stringResource(R.string.library_bookmark_edit_title)) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -140,7 +144,7 @@ private fun BookmarkEditor(
                             title = it
                             saveError = null
                         },
-                        label = { Text("Name") },
+                        label = { Text(stringResource(R.string.library_bookmark_name)) },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.Sentences,
@@ -157,7 +161,7 @@ private fun BookmarkEditor(
                                 address = it
                                 saveError = null
                             },
-                            label = { Text("Address") },
+                            label = { Text(stringResource(R.string.library_bookmark_address)) },
                             singleLine = true,
                             isError = saveError != null || (!unchanged && parsed is BookmarkAddress.Invalid),
                             // The address it saves as, when that's not
@@ -168,7 +172,7 @@ private fun BookmarkEditor(
                                     null -> null
                                     is BookmarkAddress.Invalid -> p.reason
                                     is BookmarkAddress.Ok ->
-                                        if (p.url != address.trim()) "Saves as ${p.url}" else null
+                                        if (p.url != address.trim()) stringResource(R.string.library_bookmark_saves_as, p.url) else null
                                 }
                                 if (note != null) Text(note)
                             },
@@ -186,10 +190,10 @@ private fun BookmarkEditor(
             TextButton(
                 onClick = save,
                 enabled = canSave,
-            ) { Text("Save") }
+            ) { Text(stringResource(R.string.common_save)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }

@@ -1,5 +1,7 @@
 package baby.freedom.mobile.wallet
 
+import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.R
 import android.content.Context
 import com.google.android.gms.auth.blockstore.Blockstore
 import com.google.android.gms.auth.blockstore.DeleteBytesRequest
@@ -35,26 +37,26 @@ open class BackupUnavailableException(message: String) : Exception(message)
  * about the call itself: a `Task` can't be cancelled, so a write may still
  * land after this was thrown (#244 R1-M2).
  */
-class BackupNoAnswerException(message: String = "Google Play services didn’t answer") : BackupUnavailableException(message)
+class BackupNoAnswerException(message: String = Strings.get(R.string.wallet_gms_no_answer)) : BackupUnavailableException(message)
 
 /**
  * Block Store can't end-to-end encrypt a cloud backup on this phone (no
  * screen lock, or no Google account), so nothing is stored.
  */
-class BackupNotEncryptedException : Exception("Google can’t end-to-end encrypt the backup on this phone")
+class BackupNotEncryptedException : Exception(Strings.get(R.string.wallet_gms_not_encrypted))
 
 /**
  * The Block Store entry isn't one this app wrote. Deliberately carries no
  * cause: a JSON parser's message quotes the text it choked on, which here
  * would be the recovery phrase.
  */
-class BackupUnreadableException : Exception("the Google backup can’t be read")
+class BackupUnreadableException : Exception(Strings.get(R.string.wallet_gms_backup_unreadable))
 
 /** A restore found no Block Store entry (deleted meanwhile). */
-class BackupMissingException : Exception("there’s no Google backup on this phone")
+class BackupMissingException : Exception(Strings.get(R.string.wallet_gms_backup_missing))
 
 /** Restoring needs a screen lock: the restored wallet's key must require the user. */
-class RestoreNeedsScreenLockException : Exception("set a screen lock first")
+class RestoreNeedsScreenLockException : Exception(Strings.get(R.string.wallet_gms_restore_needs_screen_lock))
 
 /**
  * The few Block Store calls [PhraseBackup] makes, so the logic above them
@@ -564,7 +566,7 @@ class GmsBlockStore(context: Context) : BlockStorePort {
         // call made then has Play services' own library post a heads-up "Freedom won't
         // work unless you enable Google Play services" notification, on every foreground
         // reconcile (#244 R4-F1), though the app works fine without it.
-        if (!playServicesUsable(app)) throw BackupUnavailableException("Google Play services isn’t available")
+        if (!playServicesUsable(app)) throw BackupUnavailableException(Strings.get(R.string.wallet_gms_unavailable))
         // One deadline for waiting on an earlier call and for this one's own answer, so
         // no call takes longer than [TIMEOUT_MS] in all (#244 R2-M3).
         withTimeout(TIMEOUT_MS) { order.submit(start).await() }
@@ -576,8 +578,8 @@ class GmsBlockStore(context: Context) : BlockStorePort {
         throw e
     } catch (e: Exception) {
         throw BackupUnavailableException(
-            (e as? com.google.android.gms.common.api.ApiException)?.let { "Google Play services: ${it.statusCode}" }
-                ?: "Google Play services isn’t available",
+            (e as? com.google.android.gms.common.api.ApiException)?.let { Strings.get(R.string.wallet_gms_status, it.statusCode) }
+                ?: Strings.get(R.string.wallet_gms_unavailable),
         )
     }
 
@@ -585,8 +587,8 @@ class GmsBlockStore(context: Context) : BlockStorePort {
         addOnCompleteListener({ it.run() }) { t ->
             when {
                 t.isSuccessful -> cont.resume(t.result)
-                t.isCanceled -> cont.resumeWithException(BackupUnavailableException("Google Play services cancelled the call"))
-                else -> cont.resumeWithException(t.exception ?: BackupUnavailableException("Google Play services failed"))
+                t.isCanceled -> cont.resumeWithException(BackupUnavailableException(Strings.get(R.string.wallet_gms_cancelled)))
+                else -> cont.resumeWithException(t.exception ?: BackupUnavailableException(Strings.get(R.string.wallet_gms_failed)))
             }
         }
     }

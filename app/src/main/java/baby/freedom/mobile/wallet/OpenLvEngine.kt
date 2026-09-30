@@ -15,6 +15,8 @@ import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import java.io.ByteArrayInputStream
 import org.json.JSONArray
 import org.json.JSONException
@@ -104,7 +106,7 @@ internal sealed interface OpenLvShimMessage {
                         "connecting" -> OpenLvLink.Connecting
                         "connected" -> OpenLvLink.Connected
                         "disconnected" -> OpenLvLink.Disconnected
-                        "failed" -> OpenLvLink.Failed(o.optString("message").take(300).ifBlank { "The connection failed." })
+                        "failed" -> OpenLvLink.Failed(o.optString("message").take(300).ifBlank { Strings.get(R.string.signing_openlv_connection_failed) })
                         else -> return null
                     }
                     Link(sid, link)
@@ -158,12 +160,15 @@ class WebViewOpenLvEngine(context: Context) : OpenLvEngine {
 
     /** The session the page is in, or was last asked to join. */
     private var currentSid = -1
-    private val bootTimeout = Runnable { bootFailed("The signing page didn’t start.") }
+    private val bootTimeout = Runnable { bootFailed(Strings.get(R.string.signing_openlv_page_did_not_start)) }
 
     override fun start(sid: Int, uri: String) {
         currentSid = sid
         if (ready) {
-            post(JSONObject().put("type", "start").put("sid", sid).put("uri", uri).put("max", OpenLvShimMessage.MAX_MESSAGE))
+            post(
+                JSONObject().put("type", "start").put("sid", sid).put("uri", uri).put("max", OpenLvShimMessage.MAX_MESSAGE)
+                    .put("strings", shimStrings()),
+            )
             return
         }
         queued = sid to uri
@@ -192,7 +197,7 @@ class WebViewOpenLvEngine(context: Context) : OpenLvEngine {
     @SuppressLint("SetJavaScriptEnabled")
     private fun boot() {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
-            bootFailed("This phone’s Android System WebView is too old to connect with a pairing code. Update it and try again.")
+            bootFailed(Strings.get(R.string.signing_openlv_webview_too_old))
             return
         }
         val view = WebView(app)
@@ -223,7 +228,7 @@ class WebViewOpenLvEngine(context: Context) : OpenLvEngine {
                 if (v === webView) {
                     Log.w(TAG, "signing page's renderer went away")
                     teardown() // destroys v
-                    listener?.onLink(currentSid, OpenLvLink.Failed("The connection stopped unexpectedly. Scan the code again."))
+                    listener?.onLink(currentSid, OpenLvLink.Failed(Strings.get(R.string.signing_openlv_connection_stopped)))
                 } else {
                     v.destroy()
                 }
@@ -263,6 +268,19 @@ class WebViewOpenLvEngine(context: Context) : OpenLvEngine {
                 respond(message.sid, message.id, OpenLvResponse.Error(INVALID_REQUEST, "The phone couldn’t read this request."))
         }
     }
+
+    /**
+     * The text shim.js shows the user (why a pairing code can't be used, as
+     * the failed status's message), in the app's language (#280): handed
+     * over with each `start`, so the shim carries no English of its own.
+     * `%1$s` in a value is filled in by the shim.
+     */
+    private fun shimStrings(): JSONObject = JSONObject()
+        .put("codeUnreadable", Strings.get(R.string.signing_openlv_code_unreadable))
+        .put("unsupportedProtocol", Strings.get(R.string.signing_openlv_unsupported_protocol))
+        .put("serverUnreadable", Strings.get(R.string.signing_openlv_server_unreadable))
+        .put("serverUnencrypted", Strings.get(R.string.signing_openlv_server_unencrypted))
+        .put("serverScheme", Strings.get(R.string.signing_openlv_server_scheme))
 
     private fun bootFailed(message: String) {
         val sid = queued?.first ?: currentSid

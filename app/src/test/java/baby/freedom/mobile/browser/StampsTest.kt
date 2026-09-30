@@ -125,7 +125,7 @@ class StampsTest {
     @Test
     fun `a search the page stopped waiting for stays running until the node says it ended`() {
         fun ok(running: Boolean) = StampClient.Answer.Ok(JSONObject().put("running", running))
-        val timedOut = StampClient.Answer.Failed(StampClient.TIMED_OUT)
+        val timedOut = StampClient.Answer.Failed(StampClient.TIMED_OUT, timedOut = true)
         assertTrue(StampClient.nodeWorkStillRunning(ok(true)))
         // Busy, not gone: keep holding a publish back.
         assertTrue(StampClient.nodeWorkStillRunning(timedOut))
@@ -145,7 +145,7 @@ class StampsTest {
         assertEquals(ok(false).json.toString(), (end as StampClient.Answer.Ok).json.toString())
 
         val overran = StampClient.Discovery.Finished(
-            ACCOUNT_A, Result.failure(IllegalStateException(StampClient.DISCOVER_OVERRAN)),
+            ACCOUNT_A, Result.failure(StampClient.DiscoverOverran()),
         )
         assertEquals(StampClient.DISCOVER_OVERRAN, discoverStatusText(overran))
     }

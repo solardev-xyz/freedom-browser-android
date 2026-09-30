@@ -1,6 +1,10 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.l10n.ResourceXmlStrings
+import baby.freedom.mobile.l10n.StringSource
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.ledger.Ledger
 import baby.freedom.mobile.wallet.ledger.LedgerKey
@@ -22,6 +26,28 @@ class LedgerUiTest {
         assertEquals("On Ledger Nano X 1A2B · m/44'/60'/0'/0/0", accountPathLine(ledger))
         assertEquals("On Ledger Stax 9F · m/44'/60'/0'/0/0", accountPathLine(ledger.copy(ledger = key.copy(deviceName = "Ledger Stax 9F"))))
         assertEquals("Derivation path m/44'/60'/0'/0/0", accountPathLine(software))
+    }
+
+    @Test
+    fun `a translation that writes Ledger its own way still says it once`() {
+        // A build whose default Ledger name and suffix aren't in Latin letters (#313 R1-M4).
+        val english = ResourceXmlStrings()
+        Strings.useForTest(object : StringSource {
+            override fun string(id: Int, vararg args: Any?): String = when (id) {
+                R.string.wallet_account_default_ledger_name -> "Леджер %1\$d".format(*args)
+                R.string.wallet_accounts_label_ledger -> "%1\$s · Леджер".format(*args)
+                else -> english.string(id, *args)
+            }
+            override fun plural(id: Int, count: Int, vararg args: Any?): String = english.plural(id, count, *args)
+        })
+        try {
+            assertEquals("Леджер 2", accountLabel(ledger.copy(name = "Леджер 2")))
+            assertEquals("Ledger 1", accountLabel(ledger.copy(name = "Ledger 1")))
+            assertEquals("Cold · Леджер", accountLabel(ledger))
+            assertEquals("Леджер 2 Cold · Леджер", accountLabel(ledger.copy(name = "Леджер 2 Cold")))
+        } finally {
+            Strings.useForTest(null)
+        }
     }
 
     @Test

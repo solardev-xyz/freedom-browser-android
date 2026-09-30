@@ -102,7 +102,7 @@ class TorNodeTest {
         val node = node(ops)
         node.start()
         val s = awaitState(node, "error") { it.status == TorStatus.Error }
-        assertEquals(TorNode.UNAVAILABLE, s.errorMessage)
+        assertEquals(TorNode.UNAVAILABLE.text, s.errorMessage)
         assertTrue(ops.calls.isEmpty())
         runBlocking { node.shutdown() }
     }

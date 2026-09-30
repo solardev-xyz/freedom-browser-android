@@ -1,6 +1,8 @@
 package baby.freedom.mobile.wallet
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.l10n.Strings
 import java.math.BigInteger
 import java.util.Base64
 import org.json.JSONArray
@@ -147,12 +149,12 @@ object X402 {
         for (i in 0 until minOf(accepts.length(), MAX_OFFERS)) {
             val entry = accepts.opt(i) as? JSONObject
             if (entry == null) {
-                unusable += "Offer ${i + 1}: not an offer"
+                unusable += Strings.get(R.string.signing_x402_offer_line, i + 1, Strings.get(R.string.signing_x402_why_not_an_offer))
                 continue
             }
             when (val r = offer(i, entry, version)) {
                 is OfferResult.Ok -> offers += r.offer
-                is OfferResult.No -> unusable += "Offer ${i + 1}: ${r.why}"
+                is OfferResult.No -> unusable += Strings.get(R.string.signing_x402_offer_line, i + 1, r.why)
             }
         }
         if (offers.isEmpty() && unusable.isEmpty()) return null
@@ -217,39 +219,39 @@ object X402 {
 
     private fun offer(index: Int, o: JSONObject, version: Int): OfferResult {
         val scheme = o.opt("scheme") as? String
-        if (scheme != "exact") return OfferResult.No("scheme ${printable(scheme)} isn't supported")
-        val network = o.opt("network") as? String ?: return OfferResult.No("no network")
+        if (scheme != "exact") return OfferResult.No(Strings.get(R.string.signing_x402_why_scheme, printable(scheme)))
+        val network = o.opt("network") as? String ?: return OfferResult.No(Strings.get(R.string.signing_x402_why_no_network))
         val chainId = when (version) {
             2 -> CAIP2_EIP155.matchEntire(network)?.groupValues?.get(1)?.toLongOrNull()
             else -> V1_NETWORKS[network]
-        }?.takeIf { it in 1..MAX_CHAIN_ID } ?: return OfferResult.No("network ${printable(network)} isn't supported")
+        }?.takeIf { it in 1..MAX_CHAIN_ID } ?: return OfferResult.No(Strings.get(R.string.signing_x402_why_network, printable(network)))
         val extra = o.opt("extra") as? JSONObject
         val method = extra?.opt("assetTransferMethod")
         if (method != null && method != JSONObject.NULL && method != "eip3009") {
-            return OfferResult.No("only EIP-3009 transfers are supported, not ${printable(method as? String)}")
+            return OfferResult.No(Strings.get(R.string.signing_x402_why_transfer_method, printable(method as? String)))
         }
         val amountText = o.opt(if (version == 2) "amount" else "maxAmountRequired") as? String
         val amount = amountText?.takeIf { DIGITS.matches(it) }?.let(::BigInteger)
-            ?.takeIf { it.signum() > 0 && it <= UINT256_MAX } ?: return OfferResult.No("no valid amount")
-        val asset = (o.opt("asset") as? String)?.let(::checksummedOrNull) ?: return OfferResult.No("no valid token address")
-        val payTo = (o.opt("payTo") as? String)?.let(::checksummedOrNull) ?: return OfferResult.No("no valid address to pay")
-        if (payTo.drop(2).all { it == '0' }) return OfferResult.No("it pays the zero address")
-        if (payTo.equals(asset, ignoreCase = true)) return OfferResult.No("it pays the token contract itself")
+            ?.takeIf { it.signum() > 0 && it <= UINT256_MAX } ?: return OfferResult.No(Strings.get(R.string.signing_x402_why_no_amount))
+        val asset = (o.opt("asset") as? String)?.let(::checksummedOrNull) ?: return OfferResult.No(Strings.get(R.string.signing_x402_why_no_token))
+        val payTo = (o.opt("payTo") as? String)?.let(::checksummedOrNull) ?: return OfferResult.No(Strings.get(R.string.signing_x402_why_no_pay_to))
+        if (payTo.drop(2).all { it == '0' }) return OfferResult.No(Strings.get(R.string.signing_x402_why_zero_address))
+        if (payTo.equals(asset, ignoreCase = true)) return OfferResult.No(Strings.get(R.string.signing_x402_why_pays_token))
         val timeout = (o.opt("maxTimeoutSeconds") as? Number)?.toLong()?.takeIf { it > 0 }
-            ?: return OfferResult.No("no valid time limit")
+            ?: return OfferResult.No(Strings.get(R.string.signing_x402_why_no_time_limit))
         if (timeout < MIN_TIMEOUT_SECONDS) {
-            return OfferResult.No("its time limit ($timeout s) is too short to pay in; at least $MIN_TIMEOUT_SECONDS s is needed")
+            return OfferResult.No(Strings.get(R.string.signing_x402_why_time_limit_short, timeout, MIN_TIMEOUT_SECONDS))
         }
         val name = (extra?.opt("name") as? String)?.takeIf { it.isNotEmpty() && it.length <= 128 }
         val domainVersion = (extra?.opt("version") as? String)?.takeIf { it.isNotEmpty() && it.length <= 32 }
-        if (name == null || domainVersion == null) return OfferResult.No("the token's signing domain isn't named")
+        if (name == null || domainVersion == null) return OfferResult.No(Strings.get(R.string.signing_x402_why_domain_unnamed))
         return OfferResult.Ok(Offer(index, o, network, chainId, asset, amount, payTo, timeout, name, domainVersion))
     }
 
     private const val MAX_CHAIN_ID = (1L shl 53) - 1
 
     private fun printable(s: String?): String =
-        s?.filter { it.code in 0x20..0x7e }?.take(40)?.ifEmpty { null }?.let { "“$it”" } ?: "(none)"
+        s?.filter { it.code in 0x20..0x7e }?.take(40)?.ifEmpty { null }?.let { Strings.get(R.string.signing_x402_quoted, it) } ?: Strings.get(R.string.signing_x402_none)
 
     /** EIP-55 form of [address], or null if it isn't one (or is mixed case with a wrong checksum). */
     internal fun checksummedOrNull(address: String): String? {
