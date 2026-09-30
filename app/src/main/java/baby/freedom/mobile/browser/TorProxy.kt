@@ -476,12 +476,27 @@ object TorProxy {
      * plain code is no grace, no "Tor answers" copy and no fast re-checks
      * (R4-M1); for one that passed within the window, [afterCheck] reads
      * it as Tor that can't get through (R5-F1) — a plain proxy that took
-     * the port in the 20 s between checks gets onion for at most one
-     * [RETRY_MS] grace check more, the price of not unrouting Orbot on
-     * every flaky descriptor fetch.
+     * the port in the 20 s between checks keeps getting onion until the
+     * grace check *finishes*: [RETRY_MS] later, plus up to that check's
+     * own deadlines ([HANDSHAKE_TIMEOUT_MS] per connection,
+     * [CANARY_TIMEOUT_MS], [ONION_TIMEOUT_MS] per probe onion) — about
+     * 2 min at worst, typically a few seconds (R6-M1). That's the price
+     * of not unrouting Orbot on every flaky descriptor fetch.
      */
     internal fun unreachedByTor(result: Probe): Boolean =
         result is Probe.NoOnion && (result.code < 0 || result.code in 0xF0..0xF7)
+
+    /**
+     * The loop's state once the Activity stops (MainActivity's `finally`):
+     * nothing checks meanwhile, so not routed, no grace and no "Tor
+     * answers" carried over — and no [Watch.confirmedAtMs] either, so the
+     * [FAST_RETRY_WINDOW_MS] never covers time spent in the background: a
+     * plain proxy that took the port meanwhile isn't read as "Tor that
+     * can't get through" (copy, no back-off) on return (R6-M2). The
+     * back-off is kept.
+     */
+    fun afterStop(watch: Watch): Watch =
+        watch.copy(confirmed = false, graceUsed = false, unreached = false, confirmedAtMs = null)
 
     /**
      * A nudge to check sooner arrived at the loop in state [watch]: the

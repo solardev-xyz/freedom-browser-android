@@ -395,6 +395,30 @@ class TorProxyTest {
     }
 
     @Test
+    fun `the fast-retry window doesn't span time the Activity was stopped`() {
+        // R6-M2: Orbot passes, Freedom goes to the background, a plain
+        // SOCKS5 proxy takes the port; back within the window, its plain
+        // `04` must not read as "Tor that can't get through".
+        val tor = TorProxy.Probe.Tor
+        val plain = TorProxy.Probe.NoOnion(4)
+        var watch = TorProxy.afterCheck(TorProxy.Watch(), tor, tor, nowMs = 0).watch
+        watch = TorProxy.afterStop(watch)
+        assertFalse(watch.confirmed)
+        assertFalse(watch.graceUsed)
+        assertFalse(watch.unreached)
+        assertNull(watch.confirmedAtMs)
+        val next = TorProxy.afterCheck(watch, tor, plain, nowMs = 60_000)
+        assertFalse(next.watch.confirmed)
+        assertFalse(next.watch.unreached)
+        assertEquals(10_000L, next.waitMs)
+        assertNull(TorProxy.afterNudge(next.watch, byUser = false))
+        // A timeout is still "Tor that can't get through", window or not.
+        assertTrue(TorProxy.afterCheck(watch, tor, TorProxy.Probe.NoOnion(-1), 60_000).watch.unreached)
+        // The back-off survives a stop.
+        assertEquals(next.watch.backoffMs, TorProxy.afterStop(next.watch).backoffMs)
+    }
+
+    @Test
     fun `a page's nudge doesn't cut a back-off short, the user's does`() {
         // R4-M2: a page adding onion iframes (or reloading the refusal page)
         // in a loop must not have a proxy that isn't Tor probed every

@@ -986,7 +986,9 @@ class MainActivity : ComponentActivity() {
      * the background, or another app taking its port, gets no onion
      * requests from background tabs), the refusal page doesn't promise a
      * check that isn't coming (R4-M3), and on return it's routed again
-     * only once a full probe passes (R1-M1, R2-F1). Status goes through
+     * only once a full probe passes (R1-M1, R2-F1) — the last pass is
+     * forgotten, so a plain error on return isn't read as Tor that can't
+     * get through ([TorProxy.afterStop], R6-M2). Status goes through
      * [torInfoFlow] like the embedded client's.
      */
     private fun startExternalTor(proxy: SocksEndpoint) {
@@ -1070,10 +1072,12 @@ class MainActivity : ComponentActivity() {
                     // (no grace carried over). Nor "Tor answers but can't
                     // get through" on the refusal page, whose "Freedom is
                     // checking again" nothing would keep meanwhile (R4-M3).
+                    // The last pass is forgotten too, so the 10 min
+                    // fast-retry window doesn't span background time (R6-M2).
                     if (watch.confirmed || watch.unreached) {
                         publishExternalTor(proxy, externalTorChecking(proxy), confirmed = false, unreached = false)
                     }
-                    watch = watch.copy(confirmed = false, graceUsed = false, unreached = false)
+                    watch = TorProxy.afterStop(watch)
                 }
             }
         }
