@@ -23,7 +23,9 @@ import java.util.concurrent.atomic.AtomicReference
  * leaves the others' in place ([MyotisBindings]). Ready means a binding
  * that is running with Ethereum mainnet
  * [baby.freedom.swarm.MyotisChainStatus.ready] — the same gate the node
- * screen's "serving" state uses. Each time that flips (or a different
+ * screen's "serving" state uses. With Ethereum switched off and only
+ * Gnosis running (#274) that is never, so the resolver goes straight to
+ * its next tier, as with the light client off. Each time that flips (or a different
  * binding takes over) there's a new [readyGeneration].
  */
 object MyotisLink : EnsLightClient {

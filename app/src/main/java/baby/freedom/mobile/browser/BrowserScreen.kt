@@ -90,6 +90,7 @@ import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.TezosDomainsResolver
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.MyotisInfo
+import baby.freedom.swarm.MyotisNetwork
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
@@ -435,8 +436,9 @@ fun BrowserScreen(
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
     myotisInfo: MyotisInfo = MyotisInfo(),
-    myotisEnabled: Boolean = false,
-    onToggleMyotis: (Boolean) -> Unit = {},
+    /** The light client's chains switched on (#274); null until the launch choice is read. */
+    myotisRunning: Set<MyotisNetwork>? = emptySet(),
+    onRunMyotisChain: (MyotisNetwork, Boolean) -> Unit = { _, _ -> },
     /** A light-client chain's Retry (`repair = false`) or Repair sync data (`true`), by chain id. */
     onMyotisRecovery: (chainId: Long, repair: Boolean) -> Unit = { _, _ -> },
     onEnsureIpfsStarted: () -> Unit,
@@ -2181,8 +2183,8 @@ fun BrowserScreen(
             runNodeEnabled = runNodeEnabled,
             onToggleRunNode = onToggleRunNode,
             myotisInfo = myotisInfo,
-            myotisEnabled = myotisEnabled,
-            onToggleMyotis = onToggleMyotis,
+            myotisRunning = myotisRunning,
+            onRunMyotisChain = onRunMyotisChain,
             tor = tor,
             onMyotisRecovery = onMyotisRecovery,
             // Publish setup's identity step (#114): the wallet page opens

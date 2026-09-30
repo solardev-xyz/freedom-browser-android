@@ -16,6 +16,7 @@ import baby.freedom.mobile.browser.SearchEngines
 import baby.freedom.mobile.browser.normalizeAllowlistHost
 import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ui.Appearance
+import baby.freedom.swarm.MyotisNetwork
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -157,17 +158,23 @@ class NodeSettings private constructor(
     }
 
     /**
-     * Whether the embedded Myotis Ethereum / Gnosis light client runs
-     * (#72). Off by default — opt-in, as on desktop; switched on the node
-     * page. `MainActivity` binds [baby.freedom.mobile.node.MyotisService]
-     * while it's on.
+     * The Myotis light client's chains that start at launch (#274), each
+     * chosen on its own on the node page, as desktop's Settings → Startup
+     * does. Off by default — opt-in, as on desktop. Once running, a chain
+     * follows its switch on the node page ([baby.freedom.mobile.node.MyotisChains]).
+     *
+     * Before #274 one switch (`myotis_enabled`, #72) ran both chains, and
+     * was on at every launch while on: a chain with no choice of its own
+     * yet keeps that value.
      */
-    val myotisEnabled: Flow<Boolean> = store.data.map { prefs ->
-        prefs[Keys.MYOTIS_ENABLED] ?: false
+    val myotisStartOnLaunch: Flow<Set<MyotisNetwork>> = store.data.map { prefs ->
+        MyotisNetwork.entries.filterTo(LinkedHashSet()) { network ->
+            prefs[Keys.myotisStartOnLaunch(network)] ?: prefs[Keys.LEGACY_MYOTIS_ENABLED] ?: false
+        }
     }
 
-    suspend fun setMyotisEnabled(enabled: Boolean) {
-        store.edit { it[Keys.MYOTIS_ENABLED] = enabled }
+    suspend fun setMyotisStartOnLaunch(network: MyotisNetwork, enabled: Boolean) {
+        store.edit { it[Keys.myotisStartOnLaunch(network)] = enabled }
     }
 
     /**
@@ -638,7 +645,12 @@ class NodeSettings private constructor(
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SWARM_NODE_MODE = stringPreferencesKey("swarm_node_mode")
-        val MYOTIS_ENABLED = booleanPreferencesKey("myotis_enabled")
+        /** Both chains' start at launch before #274; see [myotisStartOnLaunch]. */
+        val LEGACY_MYOTIS_ENABLED = booleanPreferencesKey("myotis_enabled")
+        private val MYOTIS_START_ON_LAUNCH = MyotisNetwork.entries.associateWith {
+            booleanPreferencesKey("myotis_${it.engineName}_start_on_launch")
+        }
+        fun myotisStartOnLaunch(network: MyotisNetwork) = MYOTIS_START_ON_LAUNCH.getValue(network)
         val TOR_ENABLED = booleanPreferencesKey("tor_enabled")
         val TOR_START_ON_LAUNCH = booleanPreferencesKey("tor_start_on_launch")
         val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
