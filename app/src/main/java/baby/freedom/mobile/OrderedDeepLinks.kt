@@ -7,8 +7,8 @@ import kotlinx.coroutines.withContext
 import kotlin.coroutines.CoroutineContext
 
 /**
- * Publishes App Links that arrive while the app is running in the
- * order they arrived, even though some of them have to be parsed off
+ * Publishes links from other apps (#268) in the order they arrived —
+ * the cold-start one first, then each [MainActivity.onNewIntent] — even though some of them have to be parsed off
  * the main thread.
  *
  * A Unicode ENS link (`xn--…` host) tapped during the ENSIP-15
@@ -22,10 +22,10 @@ import kotlin.coroutines.CoroutineContext
  * [submit] must be called from [scope]'s (main) thread; [publish] runs
  * there too.
  */
-internal class OrderedDeepLinks(
+internal class OrderedDeepLinks<T : Any>(
     private val scope: CoroutineScope,
     private val background: CoroutineContext,
-    private val publish: (String) -> Unit,
+    private val publish: (T) -> Unit,
 ) {
     private var tail: Job? = null
 
@@ -33,17 +33,22 @@ internal class OrderedDeepLinks(
      * Resolve and publish one link. [slow] says [resolve] must not run
      * on the calling thread; a `null` result is dropped (not one of our
      * origins) but still keeps its place in the order.
+     *
+     * Returns the job that publishes it, or null when it was published
+     * before returning.
      */
-    fun submit(slow: Boolean, resolve: () -> String?) {
+    fun submit(slow: Boolean, resolve: () -> T?): Job? {
         val previous = tail?.takeIf { it.isActive }
         if (!slow && previous == null) {
             resolve()?.let(publish)
-            return
+            return null
         }
-        tail = scope.launch {
+        val job = scope.launch {
             previous?.join()
             val url = if (slow) withContext(background) { resolve() } else resolve()
             url?.let(publish)
         }
+        tail = job
+        return job
     }
 }

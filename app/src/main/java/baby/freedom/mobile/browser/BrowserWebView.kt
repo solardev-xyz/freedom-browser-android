@@ -2504,7 +2504,17 @@ private fun buildRefreshableWebView(
                 return
             }
             sitePermissions.onExternalLink(tab, origin, launch.scheme) {
-                if (startExternalApp(view.context, launch)) return@onExternalLink
+                val result = startExternalApp(view.context, launch)
+                if (result == ExternalLaunchResult.LAUNCHED) return@onExternalLink
+                // Freedom is the default for this web link: it's a page
+                // load like any other, in this tab, not an External tab.
+                val selfWebUrl = launch.intent.dataString
+                    ?.takeIf { result == ExternalLaunchResult.SELF }
+                    ?.takeIf { schemeOf(it) == "http" || schemeOf(it) == "https" }
+                if (selfWebUrl != null) {
+                    onSubmitUrl(tab, selfWebUrl)
+                    return@onExternalLink
+                }
                 val fallback = launch.fallbackUrl
                 if (fallback != null) {
                     onSubmitUrl(tab, fallback)

@@ -5,11 +5,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
-/** One App Link waiting for its own tab; [id] tells repeats of a URL apart. */
-data class DeepLink(val id: Long, val url: String)
+/**
+ * One link from another app waiting for its own tab; [id] tells repeats
+ * of a URL apart. [url] is its address-bar form, or the text to search
+ * for when [search] (#268).
+ */
+data class DeepLink(val id: Long, val url: String, val search: Boolean = false)
 
 /**
- * App Links that arrived while the app was running and haven't been
+ * Links, shares and searches from other apps (#268) that haven't been
  * opened in a tab yet, oldest first.
  *
  * A single-slot holder isn't enough: several links can be published
@@ -28,8 +32,8 @@ class DeepLinkQueue {
     val pending: StateFlow<List<DeepLink>> = queue.asStateFlow()
 
     /** Enqueue [url] behind every link still pending. Main thread only. */
-    fun offer(url: String) {
-        val link = DeepLink(nextId++, url)
+    fun offer(url: String, search: Boolean = false) {
+        val link = DeepLink(nextId++, url, search)
         queue.update { it + link }
     }
 

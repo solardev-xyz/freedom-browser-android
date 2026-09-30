@@ -5,4 +5,6 @@
     <string name="node_stop_after_spend">The Swarm node stops once the payment it is sending (a postage stamp or a chequebook deposit) has finished.</string>
     <string name="node_channel_description">Keeps the embedded Swarm node alive in the background.</string>
     <string name="node_notification_title">Freedom — Swarm node</string>
+    <!-- The text-selection menu entry in other apps (#268). -->
+    <string name="search_with_app">Search with Freedom</string>
 </resources>

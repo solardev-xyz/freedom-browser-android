@@ -92,9 +92,11 @@ import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -150,7 +152,7 @@ private enum class NodeReadyOutcome { Running, Unrecoverable, TimedOut }
  * rest on the destination *before* it commits.
  *
  * [User] is the user naming the destination themselves (typed URL,
- * suggestion, bookmark, history, home, deep link). The pill echoes it
+ * suggestion, bookmark, history, home). The pill echoes it
  * straight away, the way Chrome's omnibox shows a typed URL while the
  * previous page is still on screen: the user supplied the string, so
  * reading it back vouches for nobody.
@@ -166,8 +168,23 @@ private enum class NodeReadyOutcome { Running, Unrecoverable, TimedOut }
  * actually looking at, and flips at navigation commit
  * (`onPageStarted`) — exactly like every renderer-initiated navigation
  * the WebView handles without us.
+ *
+ * [External] is another app handing us a link, share or search (#268),
+ * always into a tab of its own. The pill echoes it as for [User] — there
+ * is no other page in that tab for it to be mistaken for — but it is not
+ * a gesture in this browser: its load gets none of a user-named load's
+ * credit (an app link at the end of its redirects, #173; a site's x402
+ * allowance, #218), and it lifts no block a declined prompt left.
  */
-internal enum class SubmitSource { User, Renderer }
+internal enum class SubmitSource { User, Renderer, External }
+
+/**
+ * Whether [this] source names the destination itself, rather than a page
+ * asking for it ([SubmitSource.Renderer]): the pill may show it before it
+ * commits, and its probe isn't the page's to cancel.
+ */
+internal val SubmitSource.namesDestination: Boolean
+    get() = this != SubmitSource.Renderer
 
 /**
  * What a tab's committed address ([BrowserState.addressBarText], which
@@ -182,7 +199,7 @@ internal fun pendingAddressBarText(
     submitted: String,
     source: SubmitSource,
 ): String = when (source) {
-    SubmitSource.User -> submitted
+    SubmitSource.User, SubmitSource.External -> submitted
     SubmitSource.Renderer -> current
 }
 
@@ -191,9 +208,11 @@ internal fun pendingAddressBarText(
  * the keyboard, drops the field's focus (which re-seeds its buffer from
  * the tab's committed address) and clears the "user has typed" latch.
  *
- * Only the user's own submit does. The teardown exists because the user
- * just hit Go: the destination is settled and the editor has done its
- * job. A *page* submitting through `shouldOverrideUrlLoading`
+ * Only a submit that names its destination does: the user's own, or a
+ * link from another app ([SubmitSource.External]) opening in its own tab,
+ * which the user just switched to. The teardown exists because the user
+ * just hit Go (or opened the link): the destination is settled and the
+ * editor has done its job. A *page* submitting through `shouldOverrideUrlLoading`
  * ([SubmitSource.Renderer]) settles nothing about the editor — the user
  * may be halfway through typing somewhere else entirely, and throwing
  * their keyboard, focus and half-typed URL away on a `location.href`
@@ -201,7 +220,7 @@ internal fun pendingAddressBarText(
  * wipes every keystroke as it lands (#35).
  */
 internal fun submitEndsAddressEditing(source: SubmitSource): Boolean =
-    source == SubmitSource.User
+    source.namesDestination
 
 /**
  * Whether a submit from [incoming] may cancel the probe already in
@@ -217,12 +236,14 @@ internal fun submitEndsAddressEditing(source: SubmitSource): Boolean =
  * each of those ticks cancelled the user's probe, the typed navigation
  * away from the page would never complete and the user would be pinned
  * there (#35). So a renderer submit waits its turn; a user submit
- * always wins, including over their own earlier one.
+ * always wins, including over their own earlier one. Another app's link
+ * ([SubmitSource.External]) counts as the user's here: it too names its
+ * destination, and a page must not cancel it.
  */
 internal fun submitSupersedesPendingProbe(
     pending: SubmitSource?,
     incoming: SubmitSource,
-): Boolean = pending != SubmitSource.User || incoming == SubmitSource.User
+): Boolean = pending?.namesDestination != true || incoming.namesDestination
 
 /**
  * A tab's committed address ([BrowserState.addressBarText]) after the
@@ -421,7 +442,6 @@ fun BrowserScreen(
     onIpfsToggle: (Boolean) -> Unit,
     radicle: RadicleControls = RadicleControls(),
     tor: TorControls = TorControls(),
-    initialUrl: String = HOME_URL,
     deepLink: DeepLink? = null,
     onDeepLinkHandled: (DeepLink) -> Unit = {},
     onRecoverNodes: () -> Unit = {},
@@ -432,7 +452,7 @@ fun BrowserScreen(
 ) {
     // Outside composition, so the tabs survive an Activity relaunch
     // (#183, see [TabsSession]).
-    val tabs = viewModel { TabsSession(initialUrl, createSavedStateHandle()) }.tabs
+    val tabs = viewModel { TabsSession(HOME_URL, createSavedStateHandle()) }.tabs
     // Shared with the request interceptor (which resolves
     // `<name>.ens.…` virtual hosts) so both sides use one cache.
     val ensResolver = Gateways.ensResolver
@@ -1319,32 +1339,62 @@ fun BrowserScreen(
         }
     }
 
-    // Kick off the homepage on the initial tab as soon as we're composed.
-    // The home page is now a native Compose overlay (see [HomeScreen]),
-    // so this just primes the tab state without actually loading
-    // anything over the network. We deliberately don't auto-focus the
-    // address bar here — the home surface should be the first thing
-    // the user sees, not an already-open keyboard.
-    LaunchedEffect(Unit) {
-        // Once per tab list ([TabsState.initialLoadDone]): not again
-        // into the active tab of tabs that outlived a relaunch (#183).
+    // A link, share or search from another app (#268, see
+    // IncomingLinkActivity), as its address-bar form or the search URL
+    // for the engine chosen in Settings — read from the store rather than
+    // [searchTemplate], which on a cold start is still its initial value.
+    // Submitted as [SubmitSource.External]: the pill shows it, but it
+    // earns none of a user-named load's gesture credit.
+    suspend fun deepLinkUrl(link: DeepLink): String =
+        if (link.search) {
+            val template = try {
+                NodeSettings.get(context).searchTemplate.first()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                searchTemplate
+            }
+            UrlParser.searchUrl(link.url, template)
+        } else {
+            link.url
+        }
+
+    // The first load of the tab list, then every link from another app
+    // (MainActivity queues them all, the one the app was cold-started
+    // from included — even while the nodes are still starting, which
+    // [submit]'s probes wait out). [deepLink] is the head of that queue
+    // (several links can arrive in one frame); [onDeepLinkHandled] pops it
+    // so a config change doesn't re-open it and the next link gets its
+    // turn.
+    LaunchedEffect(deepLink) {
+        val link = deepLink
+        // Once per tab list ([TabsState.initialLoadDone]): not again into
+        // the active tab of tabs that outlived a relaunch (#183). The home
+        // page is a native Compose overlay (see [HomeScreen]), so this
+        // just primes the tab without loading anything over the network;
+        // the address bar isn't focused — the home surface should be the
+        // first thing the user sees, not an already-open keyboard. A cold
+        // start from a link opens it in that first tab instead, so no
+        // empty Home tab is left behind it.
+        //
+        // The search engine is read before anything is touched: popping
+        // the link ([onDeepLinkHandled]) restarts this effect, so that
+        // comes last, after the link has its tab.
+        val url = link?.let { deepLinkUrl(it) }
         if (!tabs.initialLoadDone) {
             tabs.initialLoadDone = true
-            submit(tabs.active, tabs.homepageUrl)
+            if (link == null || url == null) {
+                submit(tabs.active, tabs.homepageUrl)
+            } else {
+                submit(tabs.active, url, SubmitSource.External)
+                onDeepLinkHandled(link)
+            }
+            return@LaunchedEffect
         }
-    }
-
-    // An App Link that arrives while we're already running (see
-    // MainActivity.onNewIntent). Cold start doesn't come through here —
-    // it's the [initialUrl] above — so a link tapped now is a second
-    // destination and gets its own tab rather than replacing whatever
-    // the user was reading. [deepLink] is the head of a queue (several
-    // links can arrive in one frame); [onDeepLinkHandled] pops it so a
-    // config change doesn't re-open it and the next link gets its turn.
-    LaunchedEffect(deepLink) {
-        val link = deepLink ?: return@LaunchedEffect
-        // Whatever full-screen overlay was up would otherwise hide the
-        // tab we just opened.
+        if (link == null || url == null) return@LaunchedEffect
+        // Arriving while we're running: a second destination, so it gets
+        // its own tab rather than replacing whatever the user was reading.
+        // Whatever full-screen overlay was up would otherwise hide it.
         showSettings = false
         showNode = false
         showRadicle = false
@@ -1353,7 +1403,7 @@ fun BrowserScreen(
         showHistory = false
         showBookmarks = false
         showDownloads = false
-        submit(tabs.newTab(), link.url)
+        submit(tabs.newTab(), url, SubmitSource.External)
         onDeepLinkHandled(link)
     }
 
