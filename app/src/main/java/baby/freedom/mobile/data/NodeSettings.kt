@@ -64,6 +64,12 @@ import org.json.JSONObject
  * the system. `MainActivity` applies it as the app's night mode
  * ([Appearance.apply]).
  *
+ * ## Introduction key
+ *
+ * `intro_dismissed` is set once the home page's first-run introduction
+ * (#278) is dismissed, or on first start found the install already in use;
+ * see [introDismissed].
+ *
  * ## Name resolution keys (#102)
  *
  * `ens_rpc_disabled_public` (the built-in public endpoints switched
@@ -301,6 +307,48 @@ class NodeSettings private constructor(
 
     suspend fun setAppearance(appearance: Appearance) {
         store.edit { it[Keys.APPEARANCE] = appearance.key }
+    }
+
+    /**
+     * Whether the home page's first-run introduction (#278) is done with:
+     * `false` shows it, `true` never again, `null` while not yet decided.
+     *
+     * [settleIntro] decides it once, at the app's first start with this
+     * build; Got it ([dismissIntro]) sets it to `true`. Nothing but clearing
+     * the app's data removes the key — Clear cookies & site data leaves it.
+     *
+     * A read error doesn't end the flow (same reasoning and back-off as
+     * [appearance]); the home page shows the card only once a read has said
+     * `false`, so an unreadable file never shows it again to someone who
+     * already dismissed it.
+     */
+    val introDismissed: Flow<Boolean?> = store.data
+        .map { prefs -> prefs[Keys.INTRO_DISMISSED] }
+        .retryWhen { cause, attempt ->
+            if (cause is CancellationException) return@retryWhen false
+            Log.w(TAG, "reading the introduction setting failed (${cause.javaClass.simpleName}); retrying")
+            delay((APPEARANCE_RETRY_FIRST_MS shl attempt.coerceAtMost(5L).toInt()).coerceAtMost(APPEARANCE_RETRY_MAX_MS))
+            true
+        }
+
+    /**
+     * Decide [introDismissed] if nothing has yet: a first launch shows the
+     * introduction, but someone updating from a build that predates it
+     * isn't on one. Either this store already holds a setting (only the
+     * user's own choices write one, so a fresh install's is empty), or
+     * [usedBefore] (the install already has pages, bookmarks or a wallet)
+     * says so; either counts as already dismissed. Asked only while
+     * undecided.
+     */
+    suspend fun settleIntro(usedBefore: suspend () -> Boolean) {
+        val prefs = store.data.first()
+        if (prefs[Keys.INTRO_DISMISSED] != null) return
+        val used = prefs.asMap().keys.any { it != Keys.INTRO_DISMISSED } || usedBefore()
+        store.edit { if (it[Keys.INTRO_DISMISSED] == null) it[Keys.INTRO_DISMISSED] = used }
+    }
+
+    suspend fun dismissIntro() {
+        store.edit { it[Keys.INTRO_DISMISSED] = true }
     }
 
     private val chainStore: ChainStore by lazy(chains)
@@ -648,6 +696,7 @@ class NodeSettings private constructor(
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val SEARCH_CUSTOM_TEMPLATE = stringPreferencesKey("search_custom_template")
         val APPEARANCE = stringPreferencesKey("appearance")
+        val INTRO_DISMISSED = booleanPreferencesKey("intro_dismissed")
         /** Moved onto Ethereum mainnet's own RPCs in [ChainStore]; see [migrateEnsRpc]. */
         val LEGACY_ENS_RPC_CUSTOM = stringPreferencesKey("ens_rpc_custom_endpoints")
         val ENS_RPC_DISABLED_PUBLIC = stringSetPreferencesKey("ens_rpc_disabled_public")

@@ -1811,6 +1811,9 @@ fun BrowserScreen(
                 HomeScreen(
                     repo = repo,
                     onOpen = { submit(state, it) },
+                    nodeInfo = nodeInfo,
+                    runNodeEnabled = runNodeEnabled,
+                    onOpenNode = { showNode = true },
                     bottomContentPadding = capsuleOverlap,
                     modifier = Modifier.fillMaxSize(),
                 )

@@ -67,6 +67,7 @@ import baby.freedom.mobile.node.TorService
 import baby.freedom.mobile.ui.Appearance
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.ui.isLight
+import baby.freedom.mobile.wallet.KeystoreVaultStore
 import baby.freedom.mobile.wallet.NodeIdentitySync
 import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.WalletSender
@@ -375,6 +376,27 @@ class MainActivity : ComponentActivity() {
             settings.appearance
                 .distinctUntilChanged()
                 .collect { Appearance.apply(this@MainActivity, it) }
+        }
+
+        // The home page's first-run introduction (#278): decided once, at
+        // the first start with this build, before a page of this session
+        // can land in history — an install that already has pages,
+        // bookmarks, a wallet or a changed setting predates the
+        // introduction and isn't on a first launch.
+        lifecycleScope.launch {
+            try {
+                val repo = baby.freedom.mobile.data.BrowsingRepository.get(this@MainActivity)
+                settings.settleIntro {
+                    repo.bookmarks.first().isNotEmpty() ||
+                        repo.recentDistinct(1).first().isNotEmpty() ||
+                        withContext(Dispatchers.IO) { KeystoreVaultStore(this@MainActivity).exists() }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Stays undecided, so not shown; asked again next start.
+                android.util.Log.w("MainActivity", "deciding the introduction failed (${e.javaClass.simpleName})")
+            }
         }
 
         // Honor the persisted preference on cold start. If the user had

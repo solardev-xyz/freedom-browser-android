@@ -1,6 +1,29 @@
 package baby.freedom.mobile.browser
 
 import android.graphics.BitmapFactory
+import android.util.Log
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Surface
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.swarm.NodeInfo
+import baby.freedom.swarm.NodeStatus
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -54,19 +77,28 @@ import baby.freedom.mobile.ui.isLight
  * tab is on [HOME_URL] (i.e. [BrowserState.url] is empty). Renders:
  *
  *  - Hero: Freedom wordmark + tagline (mirrors the old home.html).
+ *  - Introduction (#278): on a first launch only, one card saying what
+ *    Freedom opens, that its nodes run on the phone, and that no wallet
+ *    is needed, with one tap to a curated dweb site. Got it dismisses it
+ *    for good ([NodeSettings.introDismissed]).
+ *  - Swarm warm-up (#278): a status line, until the Swarm node has
+ *    peers ([swarmWarmUp]); tapping it opens the node page.
  *  - Bookmarks: horizontal row of tiles, up to what fits; tapping
  *    submits the bookmark URL through the browser's standard submit
  *    pipeline (so `bzz://` / `ens://` still take the probe-gated path).
  *  - Recent pages: vertical list of the 8 most-recent distinct URLs.
+ *  - Explore: the curated dweb sites ([EXPLORE_CURATED], iOS's list),
+ *    always shown, so a first launch has something to tap.
  *
- * Empty bookmarks / empty history each simply hide their section —
- * when both are empty the screen is just the hero, which matches what
- * users saw before we replaced the HTML home.
+ * Empty bookmarks / empty history each simply hide their section.
  */
 @Composable
 fun HomeScreen(
     repo: BrowsingRepository,
     onOpen: (String) -> Unit,
+    nodeInfo: NodeInfo,
+    runNodeEnabled: Boolean,
+    onOpenNode: () -> Unit,
     /**
      * Footprint of the floating chrome capsule, which overlays the
      * bottom of this surface — added to the scrolling column's bottom
@@ -79,6 +111,31 @@ fun HomeScreen(
     val bookmarks by remember { repo.bookmarks }.collectAsState(initial = emptyList())
     val recent by remember { repo.recentDistinct(RECENT_LIMIT) }
         .collectAsState(initial = emptyList())
+    val context = LocalContext.current
+    val settings = remember(context) { NodeSettings.get(context) }
+    // `null` until read and decided: the card only appears once the store
+    // has said `false`, so it never flashes up for everyone else.
+    val introDismissed by remember(settings) { settings.introDismissed }
+        .collectAsState(initial = null)
+    // Hidden at once on Got it, whether or not the write then lands.
+    var introClosed by remember { mutableStateOf(false) }
+    val showIntro = introDismissed == false && !introClosed
+    val scope = rememberCoroutineScope()
+    val externalSwarm by Gateways.externalSwarmBaseFlow.collectAsState()
+    // `null` until the store has been read: [runNodeEnabled] arrives with
+    // an optimistic `true` before then, and Gateways' external endpoint as
+    // `""`, so for someone who switched the node off (or points Swarm at
+    // their own node) the line would flash up on a cold start.
+    val nodeSettings by remember(settings) {
+        settings.runNodeEnabled
+            .combine(settings.externalSwarmEndpoint) { run, ext -> run to ext.isNotEmpty() }
+            .catch { Log.w("HomeScreen", "reading the node settings failed (${it.javaClass.simpleName})") }
+    }.collectAsState(initial = null)
+    val warmUp = swarmWarmUp(
+        nodeInfo,
+        runNodeEnabled = nodeSettings?.let { it.first && runNodeEnabled },
+        external = nodeSettings?.second == true || externalSwarm.isNotEmpty(),
+    )
 
     Box(
         modifier = modifier.background(MaterialTheme.colorScheme.background),
@@ -111,8 +168,44 @@ fun HomeScreen(
         ) {
             HomeHero(modifier = Modifier.padding(horizontal = 24.dp))
 
+            if (showIntro) {
+                Spacer(Modifier.height(24.dp))
+                IntroCard(
+                    onTry = { onOpen(EXPLORE_CURATED.first().address) },
+                    onDismiss = {
+                        introClosed = true
+                        scope.launch {
+                            try {
+                                settings.dismissIntro()
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                // Hidden for this session regardless; it
+                                // comes back on a later launch only if the
+                                // write never reached the disk.
+                                Log.w("HomeScreen", "saving the introduction's dismissal failed (${e.javaClass.simpleName})")
+                            }
+                        }
+                    },
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
+
+            if (warmUp != null) {
+                Spacer(Modifier.height(if (showIntro) 12.dp else 24.dp))
+                WarmUpRow(
+                    warmUp = warmUp,
+                    onClick = onOpenNode,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
+
+            // The hero keeps its tall, empty backdrop above the first list
+            // while nothing else sits under it.
+            val firstGap = if (showIntro || warmUp != null) 32.dp else 96.dp
+
             if (bookmarks.isNotEmpty()) {
-                Spacer(Modifier.height(96.dp))
+                Spacer(Modifier.height(firstGap))
                 SectionHeader(
                     "Bookmarks",
                     modifier = Modifier.padding(horizontal = 24.dp),
@@ -122,7 +215,7 @@ fun HomeScreen(
             }
 
             if (recent.isNotEmpty()) {
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(if (bookmarks.isEmpty()) firstGap else 16.dp))
                 SectionHeader(
                     "Recent",
                     modifier = Modifier.padding(horizontal = 24.dp),
@@ -131,12 +224,186 @@ fun HomeScreen(
                 RecentList(entries = recent, onOpen = onOpen)
             }
 
+            Spacer(Modifier.height(if (bookmarks.isEmpty() && recent.isEmpty()) firstGap else 16.dp))
+            SectionHeader(
+                "Explore",
+                modifier = Modifier.padding(horizontal = 24.dp),
+            )
+            Spacer(Modifier.height(8.dp))
+            ExploreList(onOpen = onOpen)
+
             Spacer(Modifier.height(24.dp))
         }
     }
 }
 
 private const val RECENT_LIMIT = 8
+
+/** A curated dweb site on the home page's Explore row. */
+internal data class ExploreEntry(
+    val title: String,
+    val subtitle: String,
+    /** Submitted through the address bar's pipeline, like a typed address. */
+    val address: String,
+)
+
+/** iOS's `ExploreEntry.mainnetCurated`, the same list on both platforms. */
+internal val EXPLORE_CURATED: List<ExploreEntry> = listOf(
+    ExploreEntry(
+        title = "Swarmit",
+        subtitle = "Decentralized social feed on Swarm",
+        address = "app.swarmit.eth",
+    ),
+)
+
+/** What the home page says about the Swarm node while it has no peers yet (#278). */
+internal enum class SwarmWarmUp { Starting, Connecting, Failed }
+
+/**
+ * The Swarm warm-up line's state, or `null` once there is nothing to say:
+ * the node has peers (the menu's "N peers"), the user switched it off, or
+ * an external Swarm endpoint (#125) stands in for it. [runNodeEnabled] is
+ * `null` while the setting hasn't been read yet, which says nothing either.
+ */
+internal fun swarmWarmUp(info: NodeInfo, runNodeEnabled: Boolean?, external: Boolean): SwarmWarmUp? {
+    if (runNodeEnabled != true || external) return null
+    return when (info.status) {
+        // Enabled but not yet up: the service is on its way.
+        NodeStatus.Stopped, NodeStatus.Starting -> SwarmWarmUp.Starting
+        NodeStatus.Running -> if (info.connectedPeers > 0) null else SwarmWarmUp.Connecting
+        NodeStatus.Error -> SwarmWarmUp.Failed
+    }
+}
+
+@Composable
+private fun IntroCard(
+    onTry: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val body = MaterialTheme.typography.bodyMedium
+    val bodyColor = MaterialTheme.colorScheme.onSurfaceVariant
+    Surface(
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp)) {
+            Text(
+                text = "Welcome to Freedom",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.semantics { heading() },
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "Freedom opens the web you know and the decentralized web: sites " +
+                    "stored on Swarm (bzz://) and IPFS (ipfs://), and ENS names such as " +
+                    "app.swarmit.eth.",
+                style = body,
+                color = bodyColor,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "It reaches them through its own nodes, running on this phone and " +
+                    "talking straight to peers. The nodes use data and battery while they " +
+                    "run; the peers row in the menu shows them and can switch them off.",
+                style = body,
+                color = bodyColor,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "You don't need a wallet to browse. If you want one later, it's in Settings.",
+                style = body,
+                color = bodyColor,
+            )
+            Spacer(Modifier.height(8.dp))
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                TextButton(onClick = onDismiss) { Text("Got it") }
+                Button(onClick = onTry) { Text("Try ${EXPLORE_CURATED.first().title}") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WarmUpRow(
+    warmUp: SwarmWarmUp,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val (title, detail) = when (warmUp) {
+        SwarmWarmUp.Starting -> "Starting your Swarm node…" to
+            "Swarm sites open once it has found peers."
+        SwarmWarmUp.Connecting -> "Your Swarm node is looking for peers…" to
+            "Swarm sites open once it has found some."
+        // Any error, not only one at start: a node that was running can
+        // fail later too, so this doesn't claim it never started.
+        SwarmWarmUp.Failed -> "Your Swarm node ran into a problem" to
+            "Tap for details and to try again."
+    }
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.medium)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable(onClickLabel = "Open node details", onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            // Read out as it changes, so TalkBack hears when the node is up.
+            .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (warmUp == SwarmWarmUp.Failed) {
+            Icon(
+                imageVector = Icons.Filled.ErrorOutline,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(20.dp),
+            )
+        } else {
+            CircularProgressIndicator(
+                strokeWidth = 2.dp,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ExploreList(onOpen: (String) -> Unit) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp),
+    ) {
+        for (entry in EXPLORE_CURATED) {
+            PageRow(
+                title = entry.title,
+                subtitle = entry.address,
+                thirdLine = entry.subtitle,
+                onClick = { onOpen(entry.address) },
+            )
+        }
+    }
+}
 
 @Composable
 private fun HomeHero(modifier: Modifier = Modifier) {
