@@ -698,10 +698,13 @@ internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when 
 }
 
 /**
- * What the UI knows about the embedded Tor client (#143) and what it can
- * ask of it: its state as broadcast from `:tor`, Settings → Tor, whether
- * the user has it running (the node page's switch), and whether this
- * WebView can route only `.onion` through it.
+ * What the UI knows about the Tor client (#143) and what it can ask of
+ * it: its state as broadcast from `:tor` (or, for an external proxy, as
+ * [TorProxy.probe] found it), Settings → Tor, whether the user has it
+ * running (the node page's switch), and whether this WebView can route
+ * only `.onion` through it. [proxy] is Settings → Tor's external SOCKS
+ * proxy (#275), `null` for the embedded client; with Orbot installed
+ * and not answering, the card offers to start it.
  */
 data class TorControls(
     val info: TorInfo = TorInfo(),
@@ -709,6 +712,10 @@ data class TorControls(
     val running: Boolean = false,
     val supported: Boolean = true,
     val onRun: (Boolean) -> Unit = {},
+    val proxy: SocksEndpoint? = null,
+    val orbotInstalled: Boolean = false,
+    val onStartOrbot: () -> Unit = {},
+    val onOpenOrbot: () -> Unit = {},
 )
 
 @Composable
@@ -742,21 +749,54 @@ private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
                 enabled = tor.enabled && tor.supported,
             )
         }
-        if (info.version.isNotBlank()) DetailRow("Version", "Arti ${info.version}", mono = true)
+        val proxy = tor.proxy
+        if (proxy == null && info.version.isNotBlank()) DetailRow("Version", "Arti ${info.version}", mono = true)
         if (info.status == TorStatus.Starting && info.summary.isNotBlank()) {
-            DetailRow("Bootstrap", info.summary, singleLine = false)
+            DetailRow(if (proxy == null) "Bootstrap" else "Check", info.summary, singleLine = false)
         }
-        if (info.socksPort > 0) DetailRow("SOCKS proxy", "127.0.0.1:${info.socksPort}", mono = true)
+        if (proxy != null) {
+            DetailRow("External proxy", proxy.authority, mono = true)
+        } else if (info.socksPort > 0) {
+            DetailRow("SOCKS proxy", "127.0.0.1:${info.socksPort}", mono = true)
+        }
         val err = info.errorMessage
         if (!err.isNullOrBlank()) DetailRow("Error", err, singleLine = false)
+        if (showStartOrbot(tor, info)) {
+            Text(
+                ORBOT_START_NOTE,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(top = 4.dp),
+            ) {
+                OutlinedButton(onClick = tor.onStartOrbot) { Text("Start Orbot") }
+                TextButton(onClick = tor.onOpenOrbot) { Text("Open Orbot") }
+            }
+        }
         LogsButton(onOpenLogs)
     }
 }
+
+internal const val ORBOT_START_NOTE =
+    "Orbot starts in the background only with its Allow background starts option on; " +
+        "otherwise open it and tap Connect."
+
+/**
+ * Whether the Tor card offers Start Orbot (#275): an external proxy in
+ * use, Tor switched on, Orbot installed, and no Tor client answering.
+ */
+internal fun showStartOrbot(tor: TorControls, info: TorInfo): Boolean =
+    tor.proxy != null && tor.enabled && tor.running && tor.orbotInstalled && info.status == TorStatus.Error
 
 /** The line under the Tor status: what it does, or why it can't be switched on. */
 internal fun torSubtitle(tor: TorControls): String = when {
     !tor.supported -> "This WebView can't route only .onion sites through Tor; update Android System WebView"
     !tor.enabled -> "Turn on Tor in Settings to open .onion sites"
+    tor.proxy != null ->
+        "Opens .onion sites through the external Tor proxy (e.g. Orbot). Every other site connects directly."
     else -> "Opens .onion sites over Tor (Arti). Every other site connects directly."
 }
 

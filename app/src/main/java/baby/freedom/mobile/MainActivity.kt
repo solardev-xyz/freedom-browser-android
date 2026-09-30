@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.KeyboardShortcutGroup
 import android.view.Menu
@@ -27,6 +28,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Modifier
@@ -34,6 +36,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import baby.freedom.mobile.browser.BrowserScreen
 import baby.freedom.mobile.browser.IncomingLinks
 import baby.freedom.mobile.browser.KeyboardShortcutRouter
@@ -56,6 +59,8 @@ import baby.freedom.mobile.browser.RadicleProviders
 import baby.freedom.mobile.browser.SwarmProviders
 import baby.freedom.mobile.browser.RadicleControls
 import baby.freedom.mobile.browser.TorControls
+import baby.freedom.mobile.browser.SocksEndpoint
+import baby.freedom.mobile.browser.TorProxy
 import baby.freedom.mobile.browser.TorRouting
 import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.statusBarIconsDark
@@ -101,6 +106,9 @@ import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -149,6 +157,37 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     private val radicleRelay = Mutex()
     private val myotisInfoFlow = MutableStateFlow(MyotisInfo())
     private val torInfoFlow = MutableStateFlow(TorInfo())
+
+    /**
+     * Settings → Tor's external SOCKS proxy (#275), or `null` for the
+     * embedded client — [torProxyState] for the UI. Main thread.
+     */
+    private var torProxy: SocksEndpoint? = null
+        set(value) {
+            field = value
+            torProxyState = value
+        }
+    private var torProxyState by mutableStateOf<SocksEndpoint?>(null)
+
+    /** [startExternalTor]'s checking loop, while the external client is in use. */
+    private var externalTorJob: Job? = null
+
+    /** Wakes that loop early (after Start Orbot, or a failed onion load). */
+    private val externalTorNudge = Channel<Unit>(Channel.CONFLATED)
+
+    /**
+     * Whether a pending [externalTorNudge] came from the user (Start
+     * Orbot) rather than a page, so a page's nudge conflated after it
+     * doesn't downgrade it ([TorProxy.afterNudge]).
+     */
+    private val externalTorNudgeByUser = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * [TorRouting.externalFailed] / the refusal page shown: re-check the
+     * proxy sooner (R1-M1, R3-F1) — page-driven, so not while backing off
+     * (R4-M2). Any thread.
+     */
+    private val externalTorFailed: () -> Unit = { externalTorNudge.trySend(Unit) }
     private lateinit var settings: NodeSettings
 
     /**
@@ -472,12 +511,35 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         // loads, refusing onion hosts until Tor listens. Settings → Tor is
         // followed live (off stops Tor); Tor itself starts at launch only
         // with "Start Tor at launch", else from the node page.
+        // Settings → Tor → Tor client (#275) picks the embedded Arti or an
+        // external SOCKS proxy (Orbot); switching it while Tor runs stops
+        // the one and starts the other.
+        // Until the settings are applied (Tor on, its client, and the
+        // external check started if Tor starts at launch), an onion request
+        // waits for them, so a link that cold-starts the app isn't refused
+        // as "Tor is off" by the defaults and gets the first check's
+        // verdict instead (#305 R3-M2).
         TorRouting.init(this)
+        TorRouting.expectSettings()
+        TorRouting.setOnExternalFailure(externalTorFailed)
         lifecycleScope.launch {
-            if (settings.torEnabled.first() && settings.torStartOnLaunch.first()) bindTor()
+            try {
+                torProxy = externalTorProxyOf(settings.torExternalProxy.first())
+                TorRouting.setExternal(this@MainActivity, torProxy, confirmed = false)
+                val enabled = settings.torEnabled.first()
+                TorRouting.setEnabled(this@MainActivity, enabled)
+                if (enabled && settings.torStartOnLaunch.first()) startTor()
+            } finally {
+                TorRouting.settingsLoaded()
+            }
+            launch {
+                settings.torExternalProxy.map(::externalTorProxyOf).collect { proxy ->
+                    if (proxy != torProxy) switchTorClient(proxy)
+                }
+            }
             settings.torEnabled.distinctUntilChanged().collect { enabled ->
                 TorRouting.setEnabled(this@MainActivity, enabled)
-                if (!enabled) unbindTor()
+                if (!enabled) stopTor()
             }
         }
 
@@ -622,6 +684,9 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                     val pendingLinks by incomingSession.queue.pending.collectAsState()
                     val torInfo by torInfoFlow.collectAsState()
                     val torEnabled by settings.torEnabled.collectAsState(initial = false)
+                    val orbotInstalled = remember(torProxyState, torInfo.status) {
+                        torProxyState != null && TorProxy.orbotInstalled(this)
+                    }
                     BrowserScreen(
                         nodeInfo = info,
                         ipfsInfo = ipfsInfo,
@@ -648,6 +713,10 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                             running = torRunning,
                             supported = TorRouting.supported != false,
                             onRun = ::onToggleTor,
+                            proxy = torProxyState,
+                            orbotInstalled = orbotInstalled,
+                            onStartOrbot = ::onStartOrbot,
+                            onOpenOrbot = { TorProxy.openOrbot(this) },
                         ),
                         deepLink = pendingLinks.firstOrNull(),
                         onDeepLinkHandled = incomingSession.queue::handled,
@@ -844,7 +913,8 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         NodeIdentitySync.get(this).clearOnChanged(identityChanged)
         unbindFromService()
         unbindMyotis()
-        unbindTor()
+        stopTor()
+        TorRouting.clearOnExternalFailure(externalTorFailed)
         super.onDestroy()
     }
 
@@ -962,9 +1032,252 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
      */
     private fun onToggleTor(run: Boolean) {
         if (run) {
-            lifecycleScope.launch { if (settings.torEnabled.first()) bindTor() }
+            lifecycleScope.launch { if (settings.torEnabled.first()) startTor() }
         } else {
-            unbindTor()
+            stopTor()
+        }
+    }
+
+    /** Start the Tor client Settings → Tor picks: [torProxy] if set, else the embedded one. */
+    private fun startTor() {
+        val proxy = torProxy
+        if (proxy != null) startExternalTor(proxy) else bindTor()
+    }
+
+    /** Stop whichever Tor client runs. */
+    private fun stopTor() {
+        unbindTor()
+        stopExternalTor()
+    }
+
+    /**
+     * Settings → Tor → Tor client changed (#275): stop the one running
+     * (the embedded one's port is let go only once the WebView routes
+     * `.onion` elsewhere, as [unbindTor] waits for) and start the new one
+     * if Tor was running.
+     */
+    private fun switchTorClient(proxy: SocksEndpoint?) {
+        val wasRunning = torRunning
+        stopTor()
+        torProxy = proxy
+        TorRouting.setExternal(this, proxy, confirmed = false)
+        if (wasRunning) lifecycleScope.launch { if (settings.torEnabled.first()) startTor() }
+    }
+
+    /**
+     * Use the external Tor SOCKS proxy at [proxy] (#275). Nothing runs
+     * here: [TorProxy.probe] checks that a Tor client answers there (it
+     * refuses a `.onion` name that can't exist and connects a real one),
+     * and only then does [TorRouting] send `.onion` to it. While the
+     * Activity is started it keeps checking:
+     *  - confirmed: the same full [TorProxy.probe] (the impossible onion
+     *    refused, a real one connected) every [TorProxy.RECHECK_MS], and
+     *    at once when a routed onion page fails to load
+     *    ([TorRouting.externalFailed]); gone or no longer Tor → refused
+     *    again at once. The canary alone isn't enough: a plain SOCKS5 proxy
+     *    that took the port refuses it too (R2-F1). One exception
+     *    ([TorProxy.afterCheck]): a check where the canary is still refused
+     *    as Tor does but neither probe onion was reached keeps it routed
+     *    for one more check [TorProxy.RETRY_MS] later — a slow circuit on a
+     *    flaky link isn't a gone proxy; a second one in a row refuses it
+     *    (R3-F1).
+     *  - not confirmed: the check again [TorProxy.RETRY_MS] after nothing
+     *    listened, so starting Orbot later is picked up without a tap;
+     *    after Tor that answers but couldn't reach an onion, within
+     *    [TorProxy.FAST_RETRY_WINDOW_MS] of its last pass, every
+     *    [TorProxy.RECHECK_MS] (R3-F1); after a proxy that listens but
+     *    isn't (or can't reach) Tor otherwise, backing off to
+     *    [TorProxy.RETRY_MAX_MS] ([TorProxy.nextCheckMs]), as each full
+     *    probe has that proxy look up the probe onions (R1-M2). The
+     *    refusal page being shown in a top-level document checks sooner
+     *    too while not backing off (no sooner than [TorProxy.RETRY_MS]
+     *    after the last check), so trying an onion site again soon finds
+     *    it routed once it passes (R3-F1); a page can't cut a back-off
+     *    short (R4-M2, [TorProxy.afterNudge]). "Can't reach an onion" is
+     *    a timeout or one of Tor's own onion errors
+     *    ([TorProxy.unreachedByTor]), or any SOCKS error within
+     *    [TorProxy.FAST_RETRY_WINDOW_MS] of a pass — Orbot's Tor has no
+     *    ExtendedErrors and answers a plain `04` (R5-F1); from a proxy
+     *    never confirmed, a plain error is a plain proxy (R4-M1).
+     *
+     * While the Activity is stopped nothing checks, so `.onion` isn't
+     * routed to the proxy meanwhile (fail closed: a proxy that dies in
+     * the background, or another app taking its port, gets no onion
+     * requests from background tabs), the refusal page doesn't promise a
+     * check that isn't coming (R4-M3), and on return it's routed again
+     * only once a full probe passes (R1-M1, R2-F1) — the last pass is
+     * forgotten, so a plain error on return isn't read as Tor that can't
+     * get through ([TorProxy.afterStop], R6-M2). Meanwhile, and until
+     * the first check after starting (or returning) answers, an onion
+     * request waits for that verdict ([TorRouting.awaitExternalVerdict],
+     * up to [TorRouting.HOLD_MS]) rather than being refused at once, so a
+     * link opened from another app, or a form posted on return from an
+     * authenticator, loads once the proxy passes (R1-F1). Status goes
+     * through [torInfoFlow] like the embedded client's.
+     */
+    private fun startExternalTor(proxy: SocksEndpoint) {
+        externalTorJob?.cancel()
+        torRunning = true
+        // Idle until the loop below runs, if the Activity isn't started (R3-M1).
+        publishExternalTor(
+            proxy,
+            externalTorChecking(proxy),
+            confirmed = false,
+            pending = true,
+            idle = !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
+        )
+        externalTorJob = lifecycleScope.launch {
+            var watch = TorProxy.Watch()
+            var lastCheckAt = 0L
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                // The first check since (re)starting: onion requests wait
+                // for its verdict instead of being refused (R1-F1), and a
+                // document refused meanwhile hears it's being checked,
+                // which it now is (R3-M1).
+                var pending = true
+                publishExternalTor(proxy, externalTorChecking(proxy), confirmed = false, pending = true)
+                try {
+                    while (true) {
+                        // Always the full check, a real onion included, even
+                        // for a proxy already confirmed: the canary alone
+                        // passes a plain SOCKS5 proxy that took the port
+                        // meanwhile (R2-F1). The canary once, then the onions
+                        // (not probe(), which would send it again, R3-M1).
+                        val canary = TorProxy.recheck(proxy)
+                        val result = if (canary == TorProxy.Probe.Tor) {
+                            if (!watch.confirmed) {
+                                publishExternalTor(
+                                    proxy,
+                                    TorInfo(
+                                        status = TorStatus.Starting,
+                                        socksPort = proxy.port,
+                                        summary = "Reaching a .onion site through $proxy…",
+                                    ),
+                                    confirmed = false,
+                                    unreached = watch.unreached,
+                                    pending = pending,
+                                )
+                            }
+                            TorProxy.reachOnion(proxy)
+                        } else {
+                            canary
+                        }
+                        lastCheckAt = SystemClock.elapsedRealtime()
+                        val next = TorProxy.afterCheck(watch, canary, result, lastCheckAt)
+                        watch = next.watch
+                        publishExternalTor(
+                            proxy,
+                            when {
+                                result == TorProxy.Probe.Tor ->
+                                    TorInfo(status = TorStatus.Running, progress = 100, socksPort = proxy.port)
+                                // Kept routed for one quick check more (R3-F1).
+                                watch.confirmed -> TorInfo(
+                                    status = TorStatus.Running,
+                                    progress = 100,
+                                    socksPort = proxy.port,
+                                    summary = "Didn't reach a .onion site just now; checking again…",
+                                )
+                                else -> externalTorError(proxy, result, watch.unreached)
+                            },
+                            watch.confirmed,
+                            watch.unreached,
+                        )
+                        pending = false
+                        // A nudge checks sooner: Start Orbot always, and
+                        // starts the back-off over; a page's (a failed onion
+                        // load, the refusal page in a top-level document)
+                        // only while not backing off, so onion frames added
+                        // in a loop can't skip the back-off (R4-M2,
+                        // TorProxy.afterNudge). Never within RETRY_MS of the
+                        // last check, so nothing can make it probe back to
+                        // back.
+                        val due = lastCheckAt + next.waitMs
+                        while (true) {
+                            val left = due - SystemClock.elapsedRealtime()
+                            if (left <= 0) break
+                            withTimeoutOrNull(left) { externalTorNudge.receive() } ?: break
+                            val byUser = externalTorNudgeByUser.getAndSet(false)
+                            watch = TorProxy.afterNudge(watch, byUser) ?: continue
+                            val gap = lastCheckAt + TorProxy.RETRY_MS - SystemClock.elapsedRealtime()
+                            if (gap > 0) delay(gap)
+                            break
+                        }
+                    }
+                } finally {
+                    // Stopped (or Tor stopped / switched, where this drops
+                    // out in publishExternalTor): nothing checks until the
+                    // Activity is back, so stop routing onion here meanwhile,
+                    // and on return it's routed only once a check passes
+                    // (no grace carried over). Nor "Tor answers but can't
+                    // get through" on the refusal page, whose "Freedom is
+                    // checking again" nothing would keep meanwhile (R4-M3).
+                    // The last pass is forgotten too, so the 10 min
+                    // fast-retry window doesn't span background time (R6-M2).
+                    // Onion requests meanwhile wait (bounded, TorRouting.HOLD_MS)
+                    // for the check on return rather than being refused at
+                    // once: a link from another app or a form posted on return
+                    // from an authenticator arrives with the start, before any
+                    // check can have passed (R1-F1). Nothing is sent to the
+                    // proxy before that check passes. A document refused
+                    // meanwhile (the hold ran out in the background) hears
+                    // that nothing checks until Freedom is back, and doesn't
+                    // ask again by itself in a loop (idle, R3-M1).
+                    publishExternalTor(
+                        proxy,
+                        externalTorChecking(proxy),
+                        confirmed = false,
+                        unreached = false,
+                        pending = true,
+                        idle = true,
+                    )
+                    watch = TorProxy.afterStop(watch)
+                }
+            }
+        }
+    }
+
+    private fun externalTorChecking(proxy: SocksEndpoint) =
+        TorInfo(status = TorStatus.Starting, socksPort = proxy.port, summary = "Checking $proxy…")
+
+    private fun externalTorError(proxy: SocksEndpoint, result: TorProxy.Probe, unreached: Boolean = false) =
+        TorInfo(
+            status = TorStatus.Error,
+            socksPort = proxy.port,
+            errorMessage = TorProxy.describe(result, proxy) +
+                if (unreached) " Checking again shortly." else "",
+        )
+
+    /** Main thread; a state for a proxy no longer in use, or after Tor stopped, is dropped. */
+    private fun publishExternalTor(
+        proxy: SocksEndpoint,
+        info: TorInfo,
+        confirmed: Boolean,
+        unreached: Boolean = false,
+        pending: Boolean = false,
+        idle: Boolean = false,
+    ) {
+        if (proxy != torProxy || !torRunning) return
+        torInfoFlow.value = info
+        TorRouting.setExternal(this, proxy, confirmed, unreached, pending, idle, running = true)
+    }
+
+    private fun stopExternalTor() {
+        val job = externalTorJob ?: return
+        externalTorJob = null
+        job.cancel()
+        torRunning = false
+        TorRouting.setExternal(this, torProxy, confirmed = false)
+        torInfoFlow.value = TorInfo()
+    }
+
+    /** The Nodes page's Start Orbot (#275): ask it to start, then check again soon. */
+    private fun onStartOrbot() {
+        TorProxy.requestOrbotStart(this)
+        lifecycleScope.launch {
+            // Orbot needs a moment to open its SOCKS port.
+            delay(ORBOT_START_GRACE_MS)
+            externalTorNudgeByUser.set(true)
+            externalTorNudge.trySend(Unit)
         }
     }
 
@@ -1120,6 +1433,13 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
  * `.onion` is refused before letting `:tor` stop regardless.
  */
 private const val TOR_UNBIND_TIMEOUT_MS = 2_000L
+
+/** After Start Orbot: when to look for its SOCKS port. */
+private const val ORBOT_START_GRACE_MS = 3_000L
+
+/** Settings → Tor's stored proxy (`""` = embedded) as an endpoint, or `null`. */
+private fun externalTorProxyOf(stored: String): SocksEndpoint? =
+    if (stored.isBlank()) null else TorProxy.stored(stored)
 
 /**
  * How long [MainActivity] waits, below Android 12, for the stored
