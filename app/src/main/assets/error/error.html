@@ -257,10 +257,18 @@
         }
       }
 
+      // The address as the page prints it: every bidi control shown as
+      // U+FFFD, as the address bar's label does (AddressLabel.resting).
+      // A name ENSIP-15 refuses reaches this page as given, and one RLO
+      // in it (`ens://%E2%80%AEmoc.lapyap.eth`) printed `hte.paypal.com`.
+      function shown(text) {
+        return text.replace(/\p{Bidi_Control}/gu, '\uFFFD');
+      }
+
       async function displayError() {
         const parts = [];
-        if (protocolUrl) parts.push(protocolUrl);
-        else if (url) parts.push(url);
+        if (protocolUrl) parts.push(shown(protocolUrl));
+        else if (url) parts.push(shown(url));
 
         if (error === 'ens_not_found') {
           titleEl.textContent = fmt('ens_not_found_title', nameLabel);
@@ -357,7 +365,7 @@
           const describe =
             CERT_DESCRIPTIONS[error] || ((b) => fmtNodes('cert_description_invalid', b));
           const host =
-            (url || '').replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split(/[\/?#]/)[0] || url || '';
+            shown((url || '').replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split(/[\/?#]/)[0] || url || '');
           titleEl.textContent = fmt('cert_title');
           descriptionEl.textContent = '';
           descriptionEl.append(

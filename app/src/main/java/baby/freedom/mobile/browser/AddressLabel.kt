@@ -69,7 +69,30 @@ object AddressLabel {
      * `""` for a blank URL (the home tab), which lets the caller fall
      * back to the "Search or type URL" placeholder.
      */
-    fun resting(displayUrl: String): String {
+    fun resting(displayUrl: String): String = restingUnmarked(displayUrl).let(::markBidiControls)
+
+    /**
+     * [label] with every bidi control (the LRE…RLO embeddings and
+     * overrides, the LRI…PDI isolates, LRM/RLM/ALM) shown as U+FFFD.
+     *
+     * A name ENSIP-15 refuses is still put in the bar as given, for its
+     * resolver refusal to name it — and a refused name can carry any of
+     * these (`ens://%E2%80%AEmoc.lapyap.eth`, from another app's link or
+     * a page's own navigation). Such a name isn't host-shaped, so it
+     * reaches the label whole, and one RLO in it reverses the rest of
+     * the capsule: the label read `hte.paypal.com`. Marked rather than
+     * dropped, so the label says the name is not what it seems instead
+     * of printing a cleaned-up spelling nobody typed.
+     */
+    private fun markBidiControls(label: String): String =
+        if (label.none(::isBidiControl)) label
+        else String(CharArray(label.length) { i -> label[i].let { if (isBidiControl(it)) '\uFFFD' else it } })
+
+    /** Unicode's `Bidi_Control` property: the characters that reorder the text after them. */
+    private fun isBidiControl(c: Char): Boolean =
+        c == '\u061C' || c == '\u200E' || c == '\u200F' || c in '\u202A'..'\u202E' || c in '\u2066'..'\u2069'
+
+    private fun restingUnmarked(displayUrl: String): String {
         val raw = displayUrl.trim()
         if (raw.isEmpty()) return ""
 

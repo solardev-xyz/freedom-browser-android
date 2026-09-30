@@ -320,22 +320,35 @@ private fun RowLayout(
  * Returns a plain [androidx.compose.ui.text.AnnotatedString] we can
  * drop straight into a [Text] composable.
  */
-private fun highlightedText(text: String, needle: String): AnnotatedString {
-    if (needle.isEmpty()) return AnnotatedString(text)
-    return buildAnnotatedString {
+private fun highlightedText(text: String, needle: String): AnnotatedString =
+    buildAnnotatedString {
         append(text)
-        val haystack = text.lowercase()
-        val q = needle.lowercase()
-        var i = 0
-        while (i <= haystack.length - q.length) {
-            val found = haystack.indexOf(q, i)
-            if (found < 0) break
-            addStyle(
-                SpanStyle(fontWeight = FontWeight.Bold),
-                found,
-                found + q.length,
-            )
-            i = found + q.length
+        for ((start, end) in highlightRanges(text, needle)) {
+            addStyle(SpanStyle(fontWeight = FontWeight.Bold), start, end)
         }
     }
+
+/**
+ * Where [highlightedText] bolds [needle] in [text]: `(start, end)`
+ * offsets into [text] itself, so always inside it.
+ *
+ * Matched char by char on [text] rather than found in `text.lowercase()`:
+ * lower-casing can lengthen a string (`İ` becomes `i̇`, two chars), so
+ * offsets found there ran past the end of a page-chosen title like
+ * `İİİİİİ Loginpage`, and Android's `setSpan` threw — every keystroke
+ * matching that history entry crashed the app, every tab with it.
+ */
+internal fun highlightRanges(text: String, needle: String): List<Pair<Int, Int>> {
+    if (needle.isEmpty()) return emptyList()
+    val ranges = mutableListOf<Pair<Int, Int>>()
+    var i = 0
+    while (i <= text.length - needle.length) {
+        if (text.regionMatches(i, needle, 0, needle.length, ignoreCase = true)) {
+            ranges += i to i + needle.length
+            i += needle.length
+        } else {
+            i++
+        }
+    }
+    return ranges
 }

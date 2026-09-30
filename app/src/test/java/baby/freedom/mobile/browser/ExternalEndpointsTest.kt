@@ -54,6 +54,10 @@ class ExternalEndpointsTest {
         assertEquals("http://my_node:1633", ExternalEndpoints.normalize("my_node:1633"))
         assertEquals("https://my_node.lan/api", ExternalEndpoints.normalize("https://My_Node.lan/api/"))
         assertEquals(Rejection.NOT_A_URL, rejection("my_node:99999"))
+        // A plain host name goes through `URI`, which takes the port as is.
+        assertEquals(Rejection.NOT_A_URL, rejection("nas:99999"))
+        assertEquals(Rejection.NOT_A_URL, rejection("https://gw.example:65536"))
+        assertEquals("http://nas:65535", ExternalEndpoints.normalize("nas:65535"))
         assertEquals(Rejection.CREDENTIALS, rejection("http://me@my_node:1633"))
     }
 
