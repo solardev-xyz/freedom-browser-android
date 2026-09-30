@@ -15,7 +15,8 @@ import baby.freedom.mobile.data.BrowsingRepository
  *    `http://localhost:8080/`, a `.onion` host → `http://…`;
  *  - either way it is saved in the spelling the page itself reports
  *    ([BookmarkUrls.canonical]: `ens://X.eth` → `x.eth`, a `/` path, a
- *    lowercase host), so the star shows it as bookmarked and re-adding
+ *    lowercase host, a CIDv0 `ipfs://Qm…` as its base36 `ipfs://k…`
+ *    form, no fragment on a dweb address), so the star shows it as bookmarked and re-adding
  *    the page finds it (#296 R1-F1);
  *  - text Enter would search the web for is refused (a bookmark is an
  *    address, not a search), and so is a page history and bookmarks

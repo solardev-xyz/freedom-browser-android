@@ -30,19 +30,37 @@ internal object BookmarkUrls {
 
     fun canonical(url: String): String {
         val trimmed = url.trim()
-        EnsInput.parse(trimmed)?.let { return it.name + tail(it.suffix) }
-        EnsInput.parseConstrained(trimmed)?.let { return "${it.protocol}://${it.name}${tail(it.suffix)}" }
+        EnsInput.parse(trimmed)?.let { return dweb("ens://${it.name}${it.suffix}") ?: (it.name + tail(it.suffix)) }
+        EnsInput.parseConstrained(trimmed)?.let {
+            return "${it.protocol}://${it.name}${tail(it.suffix.substringBefore('#'))}"
+        }
         RadUrl.parse(trimmed)?.let { (rid, rest) -> return "${RadUrl.SCHEME}://$rid$rest" }
         contentSchemes.firstOrNull { trimmed.startsWith("$it://", ignoreCase = true) }?.let { scheme ->
             val rest = trimmed.substring(scheme.length + 3)
+            dweb("$scheme://$rest")?.let { return it }
+            // An id the virtual origin can't take (the page won't open
+            // either): kept as typed, a Swarm reference (hex) lowercased.
             val end = rest.indexOfFirst { it == '/' || it == '?' || it == '#' }
             val id = if (end < 0) rest else rest.substring(0, end)
-            // A Swarm reference is hex (case-free); CIDs and IPNS keys
-            // can be case-sensitive, so they stay as typed.
             val root = if (scheme == "bzz") id.lowercase() else id
             return "$scheme://$root${tail(if (end < 0) "" else rest.substring(end))}"
         }
         return web(trimmed) ?: trimmed
+    }
+
+    /**
+     * A dweb address the way its page's address bar will show it (#296
+     * R4-F1): the page is loaded as [VirtualOrigin.toVirtualUrl], the
+     * WebView reports that URL as Chromium serialises it ([web]), and the
+     * bar shows [VirtualOrigin.displayUrlFor] of that — which re-encodes
+     * a CIDv0/base58 CID and a base58 PeerID as base36, lowercases an
+     * IPNS DNS name and drops the fragment. Going the same way here keeps
+     * an edited `ipfs://Qm…/#x` one bookmark with the `ipfs://k2j…` page
+     * it opens. Null for an id the virtual origin refuses.
+     */
+    private fun dweb(contentUrl: String): String? {
+        val virtual = VirtualOrigin.toVirtualUrl(contentUrl) ?: return null
+        return VirtualOrigin.displayUrlFor(web(virtual) ?: return null)
     }
 
     fun key(url: String): String {

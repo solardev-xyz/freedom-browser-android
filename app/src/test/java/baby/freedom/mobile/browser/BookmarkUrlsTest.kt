@@ -48,7 +48,37 @@ class BookmarkUrlsTest {
         val hash = "ab".repeat(32)
         same("bzz://$hash/", "BZZ://${hash.uppercase()}")
         same("rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5", "rad://z3gqcJUoA1n9HaHKufZs5FCSGazv5/")
-        differ("ipns://k51Abc", "ipns://k51abc")
+        // Not a key the page can tell apart: both open ipns://k51abc.
+        same("ipns://k51Abc", "ipns://k51abc")
+        differ("ipfs://bafyabc", "ipfs://bafyabd")
+    }
+
+    /** The page's own address for each typed dweb address (#296 R4-F1). */
+    private val dwebPages = listOf(
+        "ipfs://QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG/" to
+            "ipfs://k2jmtxvacy5p64u708sn9oawhfsizpcwgk1g59ckse0h1r7a2j7d0tlr",
+        "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/a#x" to
+            "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/a",
+        "ipns://Docs.IPFS.tech/x?q=1#frag" to "ipns://docs.ipfs.tech/x?q=1",
+        "bzz://" + "AB".repeat(32) + "/p#f" to "bzz://" + "ab".repeat(32) + "/p",
+        "vitalik.eth/#section" to "vitalik.eth",
+        "ens://Vitalik.eth/a#b" to "vitalik.eth/a",
+        "ipfs://vitalik.eth/p#b" to "ipfs://vitalik.eth/p",
+    )
+
+    @Test
+    fun `an edited dweb address is saved the way its page reports it`() {
+        for ((typed, page) in dwebPages) {
+            assertEquals(typed, page, BookmarkUrls.canonical(typed))
+            same(typed, page)
+        }
+        val qm = "ipfs://QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
+        same(qm, VirtualOrigin.displayUrlFor(VirtualOrigin.toVirtualUrl(qm)!!)!!)
+        val peer = "ipns://12D3KooWD3eckifWpRn9wQpMG9R9hX3sD158z7EqHWmweQAJU5SA/"
+        val shown = VirtualOrigin.displayUrlFor(VirtualOrigin.toVirtualUrl(peer)!!)!!
+        assertEquals(true, shown.startsWith("ipns://k51"))
+        same(peer, shown)
+        assertEquals(shown, BookmarkUrls.canonical(peer))
     }
 
     @Test
