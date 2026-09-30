@@ -68,7 +68,7 @@ internal object NodeApiGuard {
      * probes (`/health` — the error page asks it whether the node is up —
      * and `/readiness`), which say nothing about the user.
      */
-    private val DAPP_PATHS = setOf(
+    internal val DAPP_PATHS = setOf(
         "bzz", "bytes", "chunks", "soc", "feeds", "pss", "gsoc", "health", "readiness",
     )
 
@@ -237,9 +237,11 @@ internal object NodeApiGuard {
         "Freedom doesn't let web pages spend the Swarm node's funds. " +
             "Postage stamps and the chequebook are managed in the app."
 
-    private const val READ_REFUSAL =
+    /** Lists every path in [DAPP_PATHS], so the text can't drift from what's allowed. */
+    internal val READ_REFUSAL =
         "Freedom doesn't let web pages use the Swarm node's own API. " +
-            "Pages can upload and read content (/bzz, /bytes, /chunks, /soc, /feeds); " +
+            "Pages can upload and read content, send messages and check the node is up (" +
+            DAPP_PATHS.joinToString(", ") { "/$it" } + "); " +
             "the node's wallet, stamps and addresses are shown in the app."
 
     /**

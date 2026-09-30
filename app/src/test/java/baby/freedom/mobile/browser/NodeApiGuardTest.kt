@@ -47,6 +47,16 @@ class NodeApiGuardTest {
     }
 
     @Test
+    fun `the refusal names every path a page may use`() {
+        for (path in NodeApiGuard.DAPP_PATHS) {
+            assertTrue(path, "/$path" in NodeApiGuard.READ_REFUSAL)
+        }
+        for (path in listOf("/pss", "/gsoc", "/health", "/readiness")) {
+            assertTrue(path, path in NodeApiGuard.READ_REFUSAL)
+        }
+    }
+
+    @Test
     fun `the dapp surface stays open`() {
         for ((method, path) in listOf(
             "GET" to "/bzz/ab/index.html",
