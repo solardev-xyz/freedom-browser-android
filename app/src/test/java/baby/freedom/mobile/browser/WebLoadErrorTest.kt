@@ -97,4 +97,18 @@ class WebLoadErrorTest {
         assertEquals("cert_untrusted", certErrorCode(facts(SSL_UNTRUSTED), now))
         assertEquals("cert_invalid", certErrorCode(facts(5), now))
     }
+
+    @Test
+    fun `a refused load's finish gets the certificate page whatever the WebView reports`() {
+        val bad = "https://expired.badssl.com/"
+        // A popup the page opened: `getUrl()` is still null (R1-F1).
+        assertTrue(finishedLoadIsCurrent(bad, null))
+        assertTrue(certErrorEndsLoad(bad, bad))
+        // A Reload of the page on screen: `getUrl()` is the same URL (R1-F2).
+        assertTrue(finishedLoadIsCurrent(bad, bad))
+        assertTrue(certErrorEndsLoad(bad, bad))
+        // Any other page's finish is not the refused load.
+        assertFalse(certErrorEndsLoad("https://example.com/", bad))
+        assertFalse(certErrorEndsLoad(null, bad))
+    }
 }

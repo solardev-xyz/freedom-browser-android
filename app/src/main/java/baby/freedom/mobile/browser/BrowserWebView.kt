@@ -553,6 +553,23 @@ internal fun finishedLoadIsCurrent(finishedUrl: String?, currentUrl: String?): B
     finishedUrl == null || currentUrl == null || finishedUrl == currentUrl
 
 /**
+ * Does an `onPageFinished` for [finishedUrl] end the navigation that a
+ * certificate error for [certErrorUrl] cancelled (#259)?
+ *
+ * Only the URL decides. `WebView.getUrl()` is no help here: in a popup
+ * the page opened (`target=_blank`, `window.open`) it is still `null`
+ * when the refused load's finish arrives, and on a Reload or any other
+ * navigation to the address already on screen it names that same
+ * address — both are refused loads that must get the warning page, yet
+ * [finishedLoadIsCurrent] calls them current. A subresource's
+ * certificate error gets no finish of its own, and a committed page
+ * clears the pending error at `onPageStarted`, so a matching finish is
+ * the cancelled main-frame load.
+ */
+internal fun certErrorEndsLoad(finishedUrl: String?, certErrorUrl: String): Boolean =
+    finishedUrl == certErrorUrl
+
+/**
  * Does a main-frame commit of [committedUrl] end the tab's pending
  * probe — the one asked for by [probeSource], aimed at [probeTarget]?
  *
@@ -2841,13 +2858,12 @@ private fun buildRefreshableWebView(
                 // A certificate error's cancelled navigation ends here,
                 // committing nothing: without a page of our own the
                 // previous document would stay on screen under no
-                // warning at all (#259).
-                if (view != null && url != null && !finishedLoadIsCurrent(url, view.url)) {
-                    val cert = pendingCertError
-                    if (cert != null && cert.first == url) {
-                        pendingCertError = null
-                        showCertErrorPage(view, url, cert.second)
-                    }
+                // warning at all (#259). Matched by URL alone, never
+                // against `view.url` ([certErrorEndsLoad]).
+                val cert = pendingCertError
+                if (view != null && cert != null && certErrorEndsLoad(url, cert.first)) {
+                    pendingCertError = null
+                    showCertErrorPage(view, cert.first, cert.second)
                 }
                 // Chromium's synthetic finish for a navigation that never
                 // committed (a 204, Stop, superseded): the page on screen
