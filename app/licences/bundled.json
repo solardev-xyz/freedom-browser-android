@@ -1,0 +1,142 @@
+{
+  "own": [
+    "adblock/README.md",
+    "error/error.html",
+    "openlv/shell.html",
+    "openlv/shim.js",
+    "rad/viewer.css",
+    "rad/viewer.html",
+    "rad/viewer.js",
+    "wallet/provider-icon.png"
+  ],
+  "components": [
+    {
+      "name": "Colibri (colibri-stateless)",
+      "version": "3.0.0",
+      "colibri": "self",
+      "section": "native",
+      "licence": "MIT",
+      "url": "https://github.com/corpus-core/colibri-stateless",
+      "texts": ["bundled/colibri-stateless.txt"]
+    },
+    {
+      "name": "trezor-crypto (in Colibri)",
+      "version": "",
+      "colibri": "crypto",
+      "section": "native",
+      "licence": "MIT",
+      "url": "https://github.com/corpus-core/colibri-stateless/tree/main/libs/crypto",
+      "texts": ["bundled/trezor-crypto.txt"]
+    },
+    {
+      "name": "blst",
+      "version": "0.3.13",
+      "colibri": "blst",
+      "section": "native",
+      "licence": "Apache-2.0",
+      "url": "https://github.com/supranational/blst",
+      "texts": ["bundled/blst.txt"]
+    },
+    {
+      "name": "evmone",
+      "version": "0.23.0",
+      "colibri": "evmone",
+      "section": "native",
+      "licence": "Apache-2.0",
+      "url": "https://github.com/ipsilon/evmone",
+      "texts": ["texts/Apache-2.0.txt"]
+    },
+    {
+      "name": "intx",
+      "version": "0.15.0",
+      "colibri": "intx",
+      "section": "native",
+      "licence": "Apache-2.0",
+      "url": "https://github.com/chfast/intx",
+      "texts": ["texts/Apache-2.0.txt"]
+    },
+    {
+      "name": "Zstandard (zstd)",
+      "version": "1.5.6",
+      "colibri": "zstd",
+      "section": "native",
+      "licence": "BSD-3-Clause OR GPL-2.0-only (used under BSD-3-Clause)",
+      "url": "https://github.com/facebook/zstd",
+      "texts": ["bundled/zstd.txt"]
+    },
+    {
+      "name": "OpenLV (@openlv/core, @openlv/session, @openlv/signaling, @openlv/transport)",
+      "version": "0.2.0",
+      "section": "data",
+      "licence": "LGPL-3.0-only",
+      "url": "https://github.com/open-lavatory/open-lavatory",
+      "notice": "Copyright (c) Open-Lavatory contributors. Shipped unmodified in the separate, replaceable file assets/openlv/openlv.esm.js inside the APK (built by desktop Freedom's scripts/bundle-openlv.js from the published npm packages), so it can be exchanged for a modified version as the LGPL allows. The LGPL-3.0 adds its terms to those of the GNU GPL 3.0, whose text follows it.",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["texts/LGPL-3.0.txt", "texts/GPL-3.0.txt"]
+    },
+    {
+      "name": "websocket-mqtt (in the OpenLV bundle)",
+      "version": "0.0.7",
+      "section": "data",
+      "licence": "LGPL-3.0",
+      "url": "https://github.com/v3xlabs/websocket-mqtt",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["texts/LGPL-3.0.txt", "texts/GPL-3.0.txt"]
+    },
+    {
+      "name": "@noble/ciphers (in the OpenLV bundle)",
+      "version": "1.3.0",
+      "section": "data",
+      "licence": "MIT",
+      "url": "https://github.com/paulmillr/noble-ciphers",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["bundled/noble-ciphers.txt"]
+    },
+    {
+      "name": "@noble/curves (in the OpenLV bundle)",
+      "version": "1.9.7",
+      "section": "data",
+      "licence": "MIT",
+      "url": "https://github.com/paulmillr/noble-curves",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["bundled/noble-hashes-curves.txt"]
+    },
+    {
+      "name": "@noble/hashes (in the OpenLV bundle)",
+      "version": "1.8.0",
+      "section": "data",
+      "licence": "MIT",
+      "url": "https://github.com/paulmillr/noble-hashes",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["bundled/noble-hashes-curves.txt"]
+    },
+    {
+      "name": "eventemitter3 (in the OpenLV bundle)",
+      "version": "5.0.4",
+      "section": "data",
+      "licence": "MIT",
+      "url": "https://github.com/primus/eventemitter3",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["bundled/eventemitter3.txt"]
+    },
+    {
+      "name": "ts-pattern (in the OpenLV bundle)",
+      "version": "5.9.0",
+      "section": "data",
+      "licence": "MIT",
+      "url": "https://github.com/gvergnaud/ts-pattern",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["bundled/ts-pattern.txt"]
+    },
+    {
+      "name": "EasyList, EasyPrivacy, Fanboy's Cookiemonster and Fanboy's Annoyance List",
+      "version": "",
+      "section": "data",
+      "licence": "GPL-3.0-or-later OR CC-BY-SA-3.0 (redistributed under CC-BY-SA-3.0)",
+      "url": "https://easylist.to/",
+      "notice": "The filter lists are © The EasyList authors (https://easylist.to/), dual-licensed under the GNU General Public License v3 or later and the Creative Commons Attribution-ShareAlike 3.0 Unported licence (or later). Freedom redistributes them, unmodified, under CC BY-SA 3.0. The copies built into the app are assets/adblock/*.txt.",
+      "files": ["adblock/easylist.txt", "adblock/easyprivacy.txt", "adblock/fanboy-annoyance.txt", "adblock/fanboy-cookiemonster.txt"],
+      "texts": ["texts/CC-BY-SA-3.0.txt"]
+    }
+  ]
+}
