@@ -12,7 +12,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,7 +24,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 private const val TAG = "AppUpdates"
@@ -136,6 +134,8 @@ internal val STORE_INSTALLERS: Map<String, String> = mapOf(
     "com.android.vending" to "Google Play",
     "org.fdroid.fdroid" to "F-Droid",
     "org.fdroid.fdroid.privileged" to "F-Droid",
+    "org.fdroid.basic" to "F-Droid",
+    "com.aurora.store" to "Aurora Store",
     "app.accrescent.client" to "Accrescent",
     "com.amazon.venezia" to "the Amazon Appstore",
     "com.sec.android.app.samsungapps" to "Galaxy Store",
@@ -340,12 +340,11 @@ internal object AppUpdates {
     }
 
     /**
-     * The latest-release JSON. Bounded as a whole by [TOTAL_TIMEOUT_MS]:
-     * the blocking read runs on its own coroutine, and on the deadline
-     * the connection is closed from another thread than the one stuck
-     * in the read.
+     * The latest-release JSON. Bounded as a whole by [TOTAL_TIMEOUT_MS]
+     * through [withHardDeadline]: on the deadline the connection is
+     * closed from another thread than the one stuck in the read.
      */
-    private suspend fun fetch(): Fetched {
+    private suspend fun fetch(): Fetched = withHardDeadline(TOTAL_TIMEOUT_MS) { guard ->
         val conn = URL(LATEST_API).openConnection() as HttpsURLConnection
         conn.connectTimeout = CONNECT_TIMEOUT_MS
         conn.readTimeout = READ_TIMEOUT_MS
@@ -354,43 +353,33 @@ internal object AppUpdates {
         conn.setRequestProperty("User-Agent", "Freedom")
         conn.setRequestProperty("Accept", "application/vnd.github+json")
         conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-        val read = scope.async {
-            try {
-                val code = conn.responseCode
-                if (code != HttpURLConnection.HTTP_OK) {
-                    return@async Fetched.Error(
-                        if (code == 403 || code == 429) "GitHub is limiting requests; try again later"
-                        else "GitHub answered HTTP $code",
-                    )
-                }
-                val bytes = conn.inputStream.use { input ->
-                    val out = java.io.ByteArrayOutputStream()
-                    val buf = ByteArray(8192)
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        out.write(buf, 0, n)
-                        if (out.size() > MAX_BODY_BYTES) throw IOException("answer too large")
-                    }
-                    out.toByteArray()
-                }
-                Fetched.Body(bytes.toString(Charsets.UTF_8))
-            } catch (e: IOException) {
-                Fetched.Error("couldn't reach GitHub")
-            } finally {
-                conn.disconnect()
+        if (!guard.register { conn.disconnect() }) return@withHardDeadline null
+        try {
+            val code = conn.responseCode
+            if (code != HttpURLConnection.HTTP_OK) {
+                return@withHardDeadline Fetched.Error(
+                    if (code == 403 || code == 429) "GitHub is limiting requests; try again later"
+                    else "GitHub answered HTTP $code",
+                )
             }
-        }
-        val result = try {
-            withTimeoutOrNull(TOTAL_TIMEOUT_MS) { read.await() }
+            val bytes = conn.inputStream.use { input ->
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(8192)
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                    if (out.size() > MAX_BODY_BYTES) throw IOException("answer too large")
+                }
+                out.toByteArray()
+            }
+            Fetched.Body(bytes.toString(Charsets.UTF_8))
+        } catch (e: IOException) {
+            Fetched.Error("couldn't reach GitHub")
         } finally {
-            if (!read.isCompleted) {
-                read.cancel()
-                Thread { conn.disconnect() }.start()
-            }
+            conn.disconnect()
         }
-        return result ?: Fetched.Error("GitHub took too long to answer")
-    }
+    } ?: Fetched.Error("GitHub took too long to answer")
 
     private class Saved(val checkedAt: Long?, val latest: LatestRelease?, val dismissed: String?)
 
@@ -404,23 +393,34 @@ internal object AppUpdates {
         )
     }.getOrElse { Saved(null, null, null) }
 
-    private val saveLock = Any()
-
     /** The state's persisted part, atomically (tmp + rename); a failure only costs the stamp. */
     private suspend fun save() = withContext(Dispatchers.IO) {
         val f = file ?: return@withContext
-        val s = _state.value
+        runCatching { saveAppUpdateState(f) { _state.value } }
+            .onFailure { Log.w(TAG, "couldn't save update state", it) }
+    }
+}
+
+/** Serializes [saveAppUpdateState]'s writes, process-wide. */
+private val appUpdateSaveLock = Any()
+
+/**
+ * Write [current]'s persisted part to [f], atomically (tmp + rename).
+ * The snapshot is taken inside the lock, so of two overlapping saves the
+ * one that renames last also read the state last: a save holding an
+ * older snapshot (say, from before a dismissal) can never land on top
+ * of a newer one. Throws on failure.
+ */
+internal fun saveAppUpdateState(f: File, current: () -> AppUpdateState) {
+    synchronized(appUpdateSaveLock) {
+        val s = current()
         val json = JSONObject()
         s.lastCheckedAt?.let { json.put("checkedAt", it) }
         s.latest?.let { json.put("tag", it.tag) }
         s.dismissedTag?.let { json.put("dismissed", it) }
-        synchronized(saveLock) {
-            runCatching {
-                f.parentFile?.mkdirs()
-                val tmp = File(f.parentFile, f.name + ".tmp")
-                tmp.writeText(json.toString())
-                if (!tmp.renameTo(f)) throw IOException("rename failed")
-            }.onFailure { Log.w(TAG, "couldn't save update state", it) }
-        }
+        f.parentFile?.mkdirs()
+        val tmp = File(f.parentFile, f.name + ".tmp")
+        tmp.writeText(json.toString())
+        if (!tmp.renameTo(f)) throw IOException("rename failed")
     }
 }

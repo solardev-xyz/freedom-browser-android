@@ -5,6 +5,12 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.json.JSONObject
+import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 class AppUpdatesTest {
     private fun v(s: String) = checkNotNull(ReleaseVersion.parse(s)) { s }
@@ -128,6 +134,8 @@ class AppUpdatesTest {
     fun `only app stores count as a store install`() {
         assertEquals("Google Play", storeFor("com.android.vending"))
         assertEquals("F-Droid", storeFor("org.fdroid.fdroid"))
+        assertEquals("F-Droid", storeFor("org.fdroid.basic"))
+        assertEquals("Aurora Store", storeFor("com.aurora.store"))
         assertNull(storeFor(null))
         assertNull(storeFor("com.google.android.packageinstaller"))
         assertNull(storeFor("com.android.packageinstaller"))
@@ -187,5 +195,48 @@ class AppUpdatesTest {
             appUpdateStoreLine(base.copy(store = "F-Droid")),
         )
         assertNull(appUpdateStoreLine(base))
+    }
+
+    @Test
+    fun `of two overlapping saves, the one that writes last read the state last`() {
+        val dir = Files.createTempDirectory("app-update").toFile()
+        try {
+            val f = java.io.File(dir, "state.json")
+            val state = AtomicReference(AppUpdateState(lastCheckedAt = 1_000L, latest = release("v0.7.0")))
+            val firstInside = CountDownLatch(1)
+            val releaseFirst = CountDownLatch(1)
+            val secondSawFirstWrite = AtomicBoolean(false)
+            // The check's save: snapshots the state, then stalls before writing it.
+            val first = Thread {
+                saveAppUpdateState(f) {
+                    val s = state.get()
+                    firstInside.countDown()
+                    releaseFirst.await(5, TimeUnit.SECONDS)
+                    s
+                }
+            }.apply { start() }
+            assertTrue(firstInside.await(5, TimeUnit.SECONDS))
+            // The user closes the notice meanwhile, and that save starts.
+            state.set(state.get().copy(dismissedTag = "v0.7.0"))
+            val second = Thread {
+                saveAppUpdateState(f) {
+                    secondSawFirstWrite.set(f.exists())
+                    state.get()
+                }
+            }.apply { start() }
+            Thread.sleep(200)
+            releaseFirst.countDown()
+            first.join(5_000)
+            second.join(5_000)
+            // The dismissal's snapshot was taken only once the older write had landed…
+            assertTrue(secondSawFirstWrite.get())
+            // …so the file holds it, not the check's older state.
+            val json = JSONObject(f.readText())
+            assertEquals("v0.7.0", json.getString("dismissed"))
+            assertEquals("v0.7.0", json.getString("tag"))
+            assertEquals(1_000L, json.getLong("checkedAt"))
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 }
