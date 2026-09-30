@@ -61,17 +61,26 @@ class BookmarksScreenTest {
         rule.setContent { MaterialTheme { BookmarksScreen(repo, private = false, onDismiss = {}, onOpen = {}) } }
         rule.waitForIdle()
 
-        // First row: only down-moves.
-        assertEquals(setOf("Move down", "Move to bottom"), actions("A").keys)
+        // First row: only down-moves, between the row menu's Edit and Remove (#279).
+        assertEquals(setOf("Edit", "Move down", "Move to bottom", "Remove"), actions("A").keys)
         rule.runOnUiThread { actions("A").getValue("Move down").action() }
         awaitTitles(listOf("B", "A", "C"))
         rule.waitForIdle()
-        assertEquals(setOf("Move up", "Move down"), actions("A").keys)
+        assertEquals(setOf("Edit", "Move up", "Move down", "Remove"), actions("A").keys)
 
         rule.runOnUiThread { actions("C").getValue("Move to top").action() }
         awaitTitles(listOf("C", "B", "A"))
         rule.waitForIdle()
-        assertEquals(setOf("Move up", "Move to top"), actions("A").keys)
+        assertEquals(setOf("Edit", "Move up", "Move to top", "Remove"), actions("A").keys)
+    }
+
+    @Test
+    fun talkBackRemoveActionRemovesTheRow() {
+        runBlocking { for (t in listOf("B", "A")) repo.bookmark("https://$t.example/", t).await() }
+        rule.setContent { MaterialTheme { BookmarksScreen(repo, private = false, onDismiss = {}, onOpen = {}) } }
+        rule.waitForIdle()
+        rule.runOnUiThread { actions("A").getValue("Remove").action() }
+        awaitTitles(listOf("B"))
     }
 
     @Test

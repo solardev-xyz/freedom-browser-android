@@ -289,9 +289,9 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
                 }
                 Spacer(Modifier.height(16.dp))
                 ObscuredTapNotice(tap)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    OutlinedButton(onClick = reject, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Reject") }
-                    Button(onClick = approve, enabled = armed && !busy, modifier = Modifier.weight(1f).protectedPress(tap)) {
+                SheetButtonRow {
+                    OutlinedButton(onClick = reject, enabled = !busy) { Text("Reject") }
+                    Button(onClick = approve, enabled = armed && !busy, modifier = Modifier.protectedPress(tap)) {
                         if (busy) {
                             CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                         } else {

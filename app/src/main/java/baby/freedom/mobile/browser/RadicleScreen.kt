@@ -175,6 +175,7 @@ private fun RadicleStatusSection(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .switchRow(checked = enabled, onCheckedChange = onToggle, label = "Radicle node")
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -197,7 +198,7 @@ private fun RadicleStatusSection(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Switch(checked = enabled, onCheckedChange = onToggle)
+            Switch(checked = enabled, onCheckedChange = null)
         }
         val err = info.errorMessage
         if (enabled && !err.isNullOrBlank()) {

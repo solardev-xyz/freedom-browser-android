@@ -569,9 +569,9 @@ private fun FundReview(
         held?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         ObscuredTapNotice(tap)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(onClick = onCancel, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Cancel") }
-            Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy && confirmable, modifier = Modifier.weight(1f).protectedPress(tap)) {
+        SheetButtonRow {
+            OutlinedButton(onClick = onCancel, enabled = !busy) { Text("Cancel") }
+            Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy && confirmable, modifier = Modifier.protectedPress(tap)) {
                 if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Confirm and send")
             }
         }
