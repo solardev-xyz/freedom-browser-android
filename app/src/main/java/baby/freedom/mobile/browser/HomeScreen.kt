@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,7 +20,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -64,7 +69,7 @@ import baby.freedom.mobile.ui.isLight
  * users saw before we replaced the HTML home.
  */
 @Composable
-fun HomeScreen(
+internal fun HomeScreen(
     repo: BrowsingRepository,
     onOpen: (String) -> Unit,
     /**
@@ -75,6 +80,10 @@ fun HomeScreen(
      */
     bottomContentPadding: Dp = 0.dp,
     modifier: Modifier = Modifier,
+    /** A newer Freedom release to announce (#272), or `null`. */
+    update: LatestRelease? = null,
+    /** Closes [update]'s notice; a later release shows again. */
+    onDismissUpdate: (LatestRelease) -> Unit = {},
 ) {
     val bookmarks by remember { repo.bookmarks }.collectAsState(initial = emptyList())
     val recent by remember { repo.recentDistinct(RECENT_LIMIT) }
@@ -111,6 +120,16 @@ fun HomeScreen(
         ) {
             HomeHero(modifier = Modifier.padding(horizontal = 24.dp))
 
+            if (update != null) {
+                Spacer(Modifier.height(24.dp))
+                UpdateNotice(
+                    release = update,
+                    onOpen = { onOpen(update.url) },
+                    onDismiss = { onDismissUpdate(update) },
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
+
             if (bookmarks.isNotEmpty()) {
                 Spacer(Modifier.height(96.dp))
                 SectionHeader(
@@ -137,6 +156,61 @@ fun HomeScreen(
 }
 
 private const val RECENT_LIMIT = 8
+
+/** "Freedom 0.6.11 is available", as the home notice (and Settings) says it. */
+internal fun updateNoticeTitle(release: LatestRelease): String = "Freedom ${release.version} is available"
+
+/**
+ * The home screen's notice of a newer release (#272): its version, a
+ * link to its release page, and × to close it. Every string wraps.
+ */
+@Composable
+private fun UpdateNotice(
+    release: LatestRelease,
+    onOpen: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.medium)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(start = 16.dp, top = 12.dp, bottom = 4.dp, end = 4.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Icon(
+            Icons.Filled.NewReleases,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                updateNoticeTitle(release),
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "A newer version of this browser is out. Its release page has the APK and what changed.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(onClick = onOpen, contentPadding = PaddingValues(horizontal = 0.dp)) {
+                Text("View release")
+            }
+        }
+        IconButton(onClick = onDismiss) {
+            Icon(
+                Icons.Filled.Close,
+                contentDescription = "Close the notice for Freedom ${release.version}",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
 
 @Composable
 private fun HomeHero(modifier: Modifier = Modifier) {

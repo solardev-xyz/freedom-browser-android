@@ -635,6 +635,18 @@ class NodeSettings private constructor(
         store.edit { it[Keys.ADBLOCK_AUTO_UPDATE] = enabled }
     }
 
+    /**
+     * Whether the app checks GitHub for a newer Freedom release (#272),
+     * at most daily; on by default ([baby.freedom.mobile.browser.AppUpdates]).
+     */
+    val checkForUpdates: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.CHECK_FOR_UPDATES] ?: true
+    }
+
+    suspend fun setCheckForUpdates(enabled: Boolean) {
+        store.edit { it[Keys.CHECK_FOR_UPDATES] = enabled }
+    }
+
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SWARM_NODE_MODE = stringPreferencesKey("swarm_node_mode")
@@ -657,6 +669,7 @@ class NodeSettings private constructor(
         val EXTERNAL_IPFS_GATEWAY = stringPreferencesKey("external_ipfs_gateway")
         val ADBLOCK_ALLOWLIST = stringSetPreferencesKey("adblock_allowlist")
         val ADBLOCK_AUTO_UPDATE = booleanPreferencesKey("adblock_auto_update")
+        val CHECK_FOR_UPDATES = booleanPreferencesKey("check_for_updates")
         private val ADBLOCK = AdblockCategory.entries.associateWith { booleanPreferencesKey("adblock_${it.key}") }
         fun adblock(category: AdblockCategory) = ADBLOCK.getValue(category)
     }

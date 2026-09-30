@@ -34,6 +34,7 @@ import baby.freedom.mobile.browser.EthereumProviders
 import baby.freedom.mobile.browser.X402Payments
 import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.Adblock
+import baby.freedom.mobile.browser.AppUpdates
 import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.browser.OnchainApps
 import baby.freedom.mobile.browser.PhraseClipboard
@@ -479,6 +480,10 @@ class MainActivity : ComponentActivity() {
         // Until the first build lands, requests wait for it (bounded,
         // see [FirstBuildGate]) — a restored tab loads straight away.
         Adblock.start(this)
+
+        // A newer Freedom release (#272): checked on GitHub at most daily
+        // while Settings → About → Check for updates is on.
+        AppUpdates.start(this)
 
         // A cold start from a link (#268) opens straight at it instead of
         // the home surface: queued before the first composition, which
