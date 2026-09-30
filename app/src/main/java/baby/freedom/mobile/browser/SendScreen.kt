@@ -200,6 +200,11 @@ internal fun SendPage(
     var quote by remember { mutableStateOf<SendQuote?>(null) }
     var lookup by remember { mutableStateOf<NameLookup?>(null) }
     var lookupAttempt by remember { mutableStateOf(0) }
+    // Set by Try again, taken by the lookup it restarts (#277): a retry
+    // asks the servers again past the cache, so a disagreement cached a
+    // moment ago isn't simply shown again. Any other restart (an edit, a
+    // chain switch) finds it already taken.
+    var retryFresh by remember { mutableStateOf(false) }
     // The user's explicit OK for an answer only one server gave (#277);
     // any change to the name, the chain or the answer takes it back.
     var unverifiedAccepted by remember { mutableStateOf(false) }
@@ -222,6 +227,8 @@ internal fun SendPage(
     val typedName = (parsedRecipient as? Recipients.Parsed.Name)?.name
     LaunchedEffect(typedName, fieldChain?.id, lookupAttempt) {
         unverifiedAccepted = false
+        val fresh = retryFresh
+        retryFresh = false
         val seeded = seededLookup
         seededLookup = null
         if (typedName == null || fieldChain == null) {
@@ -235,7 +242,7 @@ internal fun SendPage(
         lookup = NameLookup(typedName, fieldChain.id, null)
         delay(NAME_LOOKUP_DEBOUNCE_MS)
         val result = try {
-            Gateways.ensResolver.resolveAddress(typedName, fieldChain.id)
+            Gateways.ensResolver.resolveAddress(typedName, fieldChain.id, fresh = fresh)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -477,7 +484,10 @@ internal fun SendPage(
                                     unverifiedAccepted = unverifiedAccepted,
                                     enabled = !busy,
                                     onAcceptUnverified = { unverifiedAccepted = it },
-                                    onRetry = { lookupAttempt++ },
+                                    onRetry = {
+                                        retryFresh = true
+                                        lookupAttempt++
+                                    },
                                 )
                                 parsed is Recipients.Parsed.Ok && parsed.address.equals(account.address, ignoreCase = true) ->
                                     FieldNote("That’s this account’s own address: only the fee leaves it.", error = false)

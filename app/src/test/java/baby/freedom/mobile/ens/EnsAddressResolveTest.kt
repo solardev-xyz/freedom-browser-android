@@ -269,6 +269,32 @@ class EnsAddressResolveTest {
     }
 
     @Test
+    fun `a cached conflict is served again, but a fresh lookup (the field's Try again) asks the servers`() {
+        // R3-M1: Try again on a conflict must not just read the conflict
+        // back out of the cache for its 10 s.
+        var agree = false
+        val servers = Servers(urls(3)) { url, asked ->
+            when (url) {
+                "https://rpc1.test/" -> reply(encoded(asked, alice))
+                "https://rpc2.test/" -> reply(encoded(asked, if (agree) alice else bob))
+                else -> null
+            }
+        }
+        val resolver = EnsResolver(servers.urls, servers)
+
+        assertTrue(resolve(servers, servers.urls, "alice.eth", 1, resolver) is EnsAddressResult.Conflict)
+        val askedOnce = servers.asked.size
+        agree = true
+        assertTrue(resolve(servers, servers.urls, "alice.eth", 1, resolver) is EnsAddressResult.Conflict)
+        assertEquals(askedOnce, servers.asked.size)
+
+        val retried = runBlocking { resolver.resolveAddress("alice.eth", 1, fresh = true) }
+        require(retried is EnsAddressResult.Ok) { "got $retried" }
+        assertEquals(alice, retried.address)
+        assertTrue(servers.asked.size > askedOnce)
+    }
+
+    @Test
     fun `addresses are cached per chain and apart from contenthash, and a fresh lookup asks again`() {
         var current = alice
         val servers = Servers(urls(1), answering { encoded(it, current) })
