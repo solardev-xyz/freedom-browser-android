@@ -50,9 +50,10 @@ import java.util.Locale
  * every couple of seconds while the page is open, one node at a time, and
  * Share after a warning. Opened from a node's card at that node.
  *
- * [read] asks the node's process for its lines; null when that process
- * isn't running (the node is off), which also means there are none — they
- * live only as long as it does.
+ * [read] asks the node's process for its lines; null when the node itself
+ * is off — its process may be gone, or (Swarm, IPFS and Radicle share
+ * `:node`) still running another node, in which case earlier lines of this
+ * one aren't shown.
  */
 @Composable
 fun NodeLogsScreen(
@@ -180,8 +181,8 @@ internal fun nodeLogLines(text: String): List<String> =
     if (text.isEmpty()) emptyList() else text.split('\n')
 
 internal fun notRunningNote(source: NodeLogSource): String =
-    "${source.title} isn't running, so there are no logs. They're kept in memory only while it runs, " +
-        "and go when it stops."
+    "${source.title} isn't running, so there are no logs to show. They're shown only while it runs, " +
+        "and kept in memory only, never written to storage."
 
 internal const val SHARE_WARNING =
     "Logs can contain this device's node addresses and peer IDs, the addresses of the peers and " +

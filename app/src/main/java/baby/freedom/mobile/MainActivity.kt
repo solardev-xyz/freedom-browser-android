@@ -74,10 +74,13 @@ import baby.freedom.mobile.wallet.PhraseBackup
 import baby.freedom.mobile.wallet.PhraseBackupJob
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.swarm.IpfsInfo
+import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
+import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.RadicleInfo
+import baby.freedom.swarm.RadicleStatus
 import baby.freedom.swarm.SwarmNode
 import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
@@ -757,9 +760,18 @@ class MainActivity : ComponentActivity() {
 
     /**
      * A node's recent log lines (#276) from the process it runs in, or null
-     * while that process isn't bound (the node is off). Blocking binder call.
+     * while the node is off: its process isn't bound, or — Swarm, IPFS and
+     * Radicle share `:node` — the process runs for another node but this
+     * one is stopped. Blocking binder call.
      */
     private fun readNodeLogs(source: NodeLogSource): String? = runCatching {
+        val off = when (source) {
+            NodeLogSource.Swarm -> infoFlow.value.status == NodeStatus.Stopped
+            NodeLogSource.Ipfs -> ipfsInfoFlow.value.status == IpfsStatus.Stopped
+            NodeLogSource.Radicle -> radicleInfoFlow.value.status == RadicleStatus.Stopped
+            NodeLogSource.Tor, NodeLogSource.LightClient -> false
+        }
+        if (off) return@runCatching null
         when (source) {
             NodeLogSource.Swarm, NodeLogSource.Ipfs, NodeLogSource.Radicle -> binder?.getLogs(source.ordinal)
             NodeLogSource.Tor -> torBinder?.logs

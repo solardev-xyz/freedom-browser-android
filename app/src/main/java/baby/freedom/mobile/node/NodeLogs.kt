@@ -80,14 +80,17 @@ class LogRing(
  * scrubbed before it reaches a [LogRing], not when it's shown or shared.
  *
  * Kept: peer IDs, overlay and account addresses (`0x…`), multiaddrs,
- * Radicle repository IDs — what the share warning names.
+ * Radicle repository and node IDs — what the share warning names. A
+ * legacy `Qm…` peer ID looks exactly like a CIDv0, so it's kept only where
+ * the line names it as a peer (`peer_id=`, `/p2p/`); anywhere else it's
+ * taken out as the content ID it may be.
  */
 object LogScrub {
     private const val REDACTED = "<redacted>"
 
     /** `key=value` fields that carry a page's address or content ID. */
     private val FIELD = Regex(
-        """\b(path|top_level_path|unixfs_path|url|uri|href|referer|referrer|host|hostname|cid|file_cid|root_cid|reference)=("[^"]*"|[^\s,}]*)""",
+        """\b(path|top_level_path|unixfs_path|url|uri|href|referer|referrer|host|hostname|cid|cids|file_cid|root_cid|reference)=("[^"]*"|\[[^\]]*]|[^\s,}]*)""",
     )
 
     /** Anything with a scheme: `https://…`, `bzz://…`, `ipfs://…`, `rad://…`. */
@@ -99,8 +102,21 @@ object LogScrub {
     /** A Swarm reference (32 bytes, or 64 encrypted) — not a `0x` overlay or account. */
     private val SWARM_REF = Regex("""(?<![0-9A-Fa-fXx])[0-9A-Fa-f]{64}(?:[0-9A-Fa-f]{64})?(?![0-9A-Fa-f])""")
 
-    /** A CIDv1 in base32 (`bafy…`, `bafk…`) or an IPNS key in base36 (`k51…`). */
-    private val CID = Regex("""\b(?:b[a-z2-7]{50,}|k[0-9a-z]{50,})\b""")
+    /**
+     * A CIDv1 in base32 (`bafy…`, `bafk…`) or base16 (`f01…`), or an IPNS
+     * key in base36 (`k51…`).
+     */
+    private val CID = Regex("""\b(?:b[a-z2-7]{50,}|k[0-9a-z]{50,}|f01[0-9a-f]{60,})\b""")
+
+    /**
+     * A base58btc content ID: a CIDv0 (`Qm…`, 46 characters) or a CIDv1
+     * (`z…`). Not a Radicle node ID (`z6Mk…`, a did:key) or repository ID
+     * (`rad:z…`, too short to match).
+     */
+    private val CID_B58 = Regex("""(?<![1-9A-HJ-NP-Za-km-z])(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|z(?!6M)[1-9A-HJ-NP-Za-km-z]{44,})(?![1-9A-HJ-NP-Za-km-z])""")
+
+    /** What a `Qm…` peer ID follows: a peer field, or a multiaddr's `/p2p/`. */
+    private val PEER_CONTEXT = Regex("""(?:peer\w*[=:]\s*"?|/p2p/)$""")
 
     /** A v3 onion service name. */
     private val ONION = Regex("""\b[a-z2-7]{56}\.onion\b""")
@@ -112,6 +128,12 @@ object LogScrub {
         s = GATEWAY_PATH.replace(s) { "/${it.groupValues[1]}/$REDACTED" }
         s = SWARM_REF.replace(s, "<ref>")
         s = CID.replace(s, "<cid>")
+        val b58 = s
+        s = CID_B58.replace(b58) { m ->
+            val peer = m.value.startsWith("Qm") &&
+                PEER_CONTEXT.containsMatchIn(b58.substring(maxOf(0, m.range.first - 24), m.range.first))
+            if (peer) m.value else "<cid>"
+        }
         s = ONION.replace(s, "<onion>")
         return s
     }

@@ -83,6 +83,44 @@ class NodeLogsTest {
     }
 
     @Test
+    fun `a cids list and base58 cids are taken out`() {
+        val root = "QmT5NvUtoM5nWFfrQdVrFtvGfKFmG7AHE8P34isapyhCxX"
+        val block = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
+        val v1 = "zdj7WWeQ43G6JJvLWQWZpyHuAMq6uYWRjkBXFad11vE2LHhQ7"
+        for (line in listOf(
+            """phase="bitswap_dial_plan" cid=$root cids=$root,$block peers=3""",
+            """phase="bitswap_dial_plan" cids=["$root", "$block"] peers=3""",
+            """phase="bitswap_dial_plan" cids="$root,$block" peers=3""",
+            "fetching block $block for $root, then $v1",
+        )) {
+            val out = LogScrub.scrub(line)
+            assertFalse(out, "Qm" in out)
+            assertFalse(out, v1 in out)
+        }
+        assertEquals(
+            "fetching block <cid> for <cid>, then <cid>",
+            LogScrub.scrub("fetching block $block for $root, then $v1"),
+        )
+        assertEquals(
+            "phase=\"bitswap_dial_plan\" cids=<redacted> peers=3",
+            LogScrub.scrub("phase=\"bitswap_dial_plan\" cids=[\"$root\", \"$block\"] peers=3"),
+        )
+    }
+
+    @Test
+    fun `a qm peer id named as a peer is kept, radicle node ids too`() {
+        val peer = "QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN"
+        val lines = listOf(
+            "INFO ant_p2p: libp2p connected peer_id=$peer",
+            "INFO freedom_ipfs: dial peer=\"$peer\" ok",
+            "dial /dnsaddr/bootstrap.libp2p.io/p2p/$peer",
+            "INFO freedom_ipfs: dial peer_id=12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "I RadicleNode: node id z6MksFqXN3Yhqk8pTJdUGLwATkRfQvwZXPqR2qMEhbS9wzpT",
+        )
+        for (l in lines) assertEquals(l, LogScrub.scrub(l))
+    }
+
+    @Test
     fun `urls of every scheme are taken out`() {
         val out = LogScrub.scrub(
             "fetch https://example.com/private?q=1 and bzz://site.eth/page and ipfs://bafy/x and rad://z3gq/tree",
