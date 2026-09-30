@@ -1064,6 +1064,10 @@ private fun SafeRequestPage(
     var liveAbandoned by remember(p.abandonedExecs) { mutableStateOf(p.abandonedExecs) }
     val cameraPermission = rememberCameraPermissionState()
     val share = remember(p.id) { p.shareText() }
+    // The owners' Sign buttons produce a signature (maybe the one that completes the threshold):
+    // guarded like co-sign's Sign. Re-armed whenever a signature lands, since the rows' labels
+    // and buttons change under the finger then.
+    val tap = rememberArmedTapGuard(p.id to p.collected, PromptTapGuard.SPEND_PROTECTION_MS)
 
     fun act(action: String, block: suspend () -> Unit) {
         if (busy) return
@@ -1166,6 +1170,7 @@ private fun SafeRequestPage(
             }
             item("owners") {
                 SectionCard(title = "${p.collected} of ${p.threshold} signatures") {
+                    ObscuredTapNotice(tap)
                     safe.owners.forEach { owner ->
                         val signed = p.hasSigned(owner)
                         val mine = accounts.firstOrNull { it.address.equals(owner, ignoreCase = true) }
@@ -1196,12 +1201,14 @@ private fun SafeRequestPage(
                             if (!signed && mine != null && !p.ready && !p.superseded) {
                                 TextButton(
                                     onClick = {
+                                        if (!tap.guard.accepts()) return@TextButton
                                         act("sign") {
                                             if (!mine.isLedger && !vault.unlockedNow()) vault.unlock(auth)
                                             safes.signWith(p.id, mine)
                                         }
                                     },
-                                    enabled = !busy,
+                                    enabled = tap.armed && !busy,
+                                    modifier = Modifier.protectedPress(tap),
                                 ) { Text("Sign") }
                             }
                         }
@@ -1452,21 +1459,37 @@ internal fun SafeCoSignPage(
     var snapshot by remember { mutableStateOf<SafeChain.Snapshot?>(null) }
     var guardSupported by remember { mutableStateOf<Boolean?>(null) }
     var readError by remember { mutableStateOf<String?>(null) }
+    // Every read below has come back (or failed), so the page has stopped changing under Sign.
+    var readsDone by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var signature by remember { mutableStateOf<Pair<WalletAccount, String>?>(null) }
-    val tap = rememberArmedTapGuard(raw, PromptTapGuard.SPEND_PROTECTION_MS)
-    val guard = tap.guard
-    val armed = tap.armed
     // A call from the Safe to itself changes the Safe (owners, threshold, modules, guard,
     // fallback handler): decoded and warned about, and signed only once acknowledged.
     val selfCall = request?.let(::safeSelfCall)
     var selfCallAcknowledged by remember(raw) { mutableStateOf(false) }
     // One predicate for both the Sign buttons' enabled state and their click guard.
     val selfCallCleared = safeSelfCallCleared(selfCall, selfCallAcknowledged)
+    val mine = owners?.let { list -> accounts.filter { a -> list.any { it.equals(a.address, ignoreCase = true) } } }.orEmpty()
+    val outdated = request is SafeProtocol.Request.Tx && safeTxOutdated(selfCall, snapshot, nonce, request.tx.nonce)
+    val stage = safeCoSignStage(
+        signed = signature != null,
+        chainKnown = chain != null,
+        readFailed = readError != null,
+        readsDone = readsDone,
+        ownsIt = mine.isNotEmpty(),
+        outdated = outdated,
+    )
+    // Sign and the acknowledgement tick only appear once the reads are back, so the guard is
+    // keyed to their showing, not the page's: it arms from their first frame, and a tap aimed
+    // at "Checking the Safe's owners…" can't land on a live Sign that replaced it (#287 R1-M2).
+    val tap = rememberArmedTapGuard(raw to (stage == SafeCoSignStage.SIGN), PromptTapGuard.SPEND_PROTECTION_MS)
+    val guard = tap.guard
+    val armed = tap.armed
     LaunchedEffect(request, chain) {
         val r = request ?: return@LaunchedEffect
         val c = chain ?: return@LaunchedEffect
+        readsDone = false
         try {
             if (!chainReads.deployed(c.id, r.safe)) {
                 readError = "This Safe isn’t active on ${c.name}, so who owns it can’t be checked. Freedom only co-signs for active Safes."
@@ -1478,6 +1501,7 @@ internal fun SafeCoSignPage(
             throw e
         } catch (e: Exception) {
             readError = safeErrorMessage(e, "read the Safe", phraseBackedUp)
+            readsDone = true
             return@LaunchedEffect
         }
         // None of these is a reason to refuse: an unread value only leaves out the note it would give.
@@ -1499,6 +1523,7 @@ internal fun SafeCoSignPage(
             } catch (_: Exception) {
             }
         }
+        readsDone = true
     }
 
     BackHandler(onBack = onBack)
@@ -1581,12 +1606,9 @@ internal fun SafeCoSignPage(
             }
             item("sign") {
                 SectionCard(title = "Sign") {
-                    val ownersNow = owners
-                    val mine = ownersNow?.let { list -> accounts.filter { a -> list.any { it.equals(a.address, ignoreCase = true) } } }.orEmpty()
-                    val outdated = request is SafeProtocol.Request.Tx && safeTxOutdated(selfCall, snapshot, nonce, request.tx.nonce)
                     val s = signature
-                    when {
-                        s != null -> {
+                    when (stage) {
+                        SafeCoSignStage.SIGNED -> if (s != null) {
                             Text("Signed with ${s.first.name}. Show this to the owner collecting signatures, or copy it to them:", style = MaterialTheme.typography.bodyMedium)
                             Spacer(Modifier.height(8.dp))
                             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -1597,12 +1619,12 @@ internal fun SafeCoSignPage(
                                 TextButton(onClick = { copyToClipboard(context, s.second) }) { Text("Copy signature") }
                             }
                         }
-                        chain == null -> Text("Freedom co-signs Safes on your networks only.", style = MaterialTheme.typography.bodyMedium)
-                        readError != null -> FieldText(readError!!, error = true)
-                        ownersNow == null -> Text("Checking the Safe’s owners…", style = MaterialTheme.typography.bodyMedium)
-                        mine.isEmpty() -> Text("None of this wallet’s accounts owns this Safe, so it can’t sign for it.", style = MaterialTheme.typography.bodyMedium)
-                        outdated -> Text("This transaction can no longer execute, so there’s nothing to sign.", style = MaterialTheme.typography.bodyMedium)
-                        else -> {
+                        SafeCoSignStage.NO_CHAIN -> Text("Freedom co-signs Safes on your networks only.", style = MaterialTheme.typography.bodyMedium)
+                        SafeCoSignStage.READ_FAILED -> FieldText(readError.orEmpty(), error = true)
+                        SafeCoSignStage.CHECKING -> Text("Checking the Safe’s owners…", style = MaterialTheme.typography.bodyMedium)
+                        SafeCoSignStage.NOT_OWNER -> Text("None of this wallet’s accounts owns this Safe, so it can’t sign for it.", style = MaterialTheme.typography.bodyMedium)
+                        SafeCoSignStage.OUTDATED -> Text("This transaction can no longer execute, so there’s nothing to sign.", style = MaterialTheme.typography.bodyMedium)
+                        SafeCoSignStage.SIGN -> {
                             error?.let { FieldText(it, error = true) }
                             ObscuredTapNotice(tap)
                             if (selfCall.needsAcknowledgement) {
@@ -1651,6 +1673,32 @@ internal fun SafeCoSignPage(
             }
         }
     }
+}
+
+/** What a co-sign request's Sign card shows, in order of precedence. */
+internal enum class SafeCoSignStage { SIGNED, NO_CHAIN, READ_FAILED, CHECKING, NOT_OWNER, OUTDATED, SIGN }
+
+/**
+ * The co-sign Sign card's stage. [SafeCoSignStage.SIGN] (the Sign buttons and the self-call
+ * tick) only once every read is back ([readsDone]), not just the owners: a later read (the
+ * nonce, the self-call snapshot) adds rows above Sign that would move a live button under the
+ * finger, and the tap guard is keyed to this stage so it arms from Sign's own first frame.
+ */
+internal fun safeCoSignStage(
+    signed: Boolean,
+    chainKnown: Boolean,
+    readFailed: Boolean,
+    readsDone: Boolean,
+    ownsIt: Boolean,
+    outdated: Boolean,
+): SafeCoSignStage = when {
+    signed -> SafeCoSignStage.SIGNED
+    !chainKnown -> SafeCoSignStage.NO_CHAIN
+    readFailed -> SafeCoSignStage.READ_FAILED
+    !readsDone -> SafeCoSignStage.CHECKING
+    !ownsIt -> SafeCoSignStage.NOT_OWNER
+    outdated -> SafeCoSignStage.OUTDATED
+    else -> SafeCoSignStage.SIGN
 }
 
 /** The red box on top of a co-sign request that changes the Safe itself: what it changes, and what that can cost. */
