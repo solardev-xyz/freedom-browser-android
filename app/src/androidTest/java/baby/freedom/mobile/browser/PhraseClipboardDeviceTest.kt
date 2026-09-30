@@ -77,6 +77,24 @@ class PhraseClipboardDeviceTest {
     }
 
     @Test
+    fun aCopiedPrivateKeyIsSensitiveAndClearedAtTheDeadline() = withFocus { a ->
+        val key = "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727"
+        val now = SystemClock.elapsedRealtime()
+        PhraseClipboard.copyKey(a, key, now)
+        val desc = clipboard(a).primaryClipDescription!!
+        assertEquals(PhraseClipboard.KEY_CLIP_LABEL, desc.label)
+        assertTrue(desc.extras!!.getBoolean(PhraseClipboard.EXTRA_IS_SENSITIVE))
+        assertEquals(key, clipboard(a).primaryClip!!.getItemAt(0).text.toString())
+        // The key page's button, not the phrase page's, reads "Copied" (#323).
+        assertEquals(PhraseClipboard.KEY_CLIP_LABEL, PhraseClipboard.copiedLabel.value)
+        PhraseClipboard.clearIfDue(a, now + PhraseClipboard.TTL_MS - 1)
+        assertTrue(clipboard(a).hasPrimaryClip())
+        PhraseClipboard.clearIfDue(a, now + PhraseClipboard.TTL_MS)
+        assertFalse(clipboard(a).hasPrimaryClip())
+        assertEquals(null, PhraseClipboard.copiedLabel.value)
+    }
+
+    @Test
     fun anotherClipCopiedSinceIsLeftAlone() = withFocus { a ->
         val now = SystemClock.elapsedRealtime()
         PhraseClipboard.copy(a, words, now)

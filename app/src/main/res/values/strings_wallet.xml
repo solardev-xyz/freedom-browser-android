@@ -46,6 +46,8 @@
     <string name="wallet_auth_unlock_subtitle">Confirm it’s you to open your wallet</string>
     <string name="wallet_auth_reveal_title">Show recovery phrase</string>
     <string name="wallet_auth_reveal_subtitle">Confirm it’s you to see your recovery phrase</string>
+    <string name="wallet_auth_export_key_title">Show private key</string>
+    <string name="wallet_auth_export_key_subtitle">Confirm it’s you to see this account’s private key</string>
     <string name="wallet_auth_backup_title">Back up with Google</string>
     <string name="wallet_auth_backup_subtitle">Confirm it’s you to back up your recovery phrase</string>
     <string name="wallet_auth_restore_title">Restore your wallet</string>
@@ -139,6 +141,7 @@
     <string name="wallet_error_advice_never_shown">Its recovery phrase was never shown, so it can’t be restored: remove it and set up a new wallet.</string>
     <!-- What was being done, for "Couldn’t …" (wallet_error_couldnt_*). -->
     <string name="wallet_action_show_phrase">show the recovery phrase</string>
+    <string name="wallet_action_show_key">show the private key</string>
     <string name="wallet_action_import">import the wallet</string>
     <string name="wallet_action_restore">restore the wallet</string>
     <string name="wallet_action_create">create the wallet</string>
@@ -229,6 +232,22 @@
     <string name="wallet_hide">Hide</string>
     <string name="wallet_copy">Copy</string>
     <string name="wallet_copied">Copied</string>
+
+    <!-- Show private key (#323): one account's key, for importing it into another wallet. -->
+    <string name="wallet_key_title">Private key</string>
+    <string name="wallet_key_keep_secret_title">Keep it secret</string>
+    <!-- %s: the account's name, e.g. "Account 2". -->
+    <string name="wallet_key_keep_secret">Anyone with this key can take everything in %s, on every network, from any device, and sign in to sites and sign messages as it. Never share it or type it into a website — no one legitimate will ask. It opens this one account only: not your other accounts, your recovery phrase or your node and publisher identities.</string>
+    <string name="wallet_key_account">Account</string>
+    <string name="wallet_key_hidden">Hidden</string>
+    <string name="wallet_key_reveal_asks">Make sure no one can see your screen. You’ll be asked for your fingerprint, face or screen lock.</string>
+    <string name="wallet_key_reveal_no_screen_lock">Make sure no one can see your screen. This phone has no screen lock, so it shows without asking.</string>
+    <string name="wallet_key_show">Show private key</string>
+    <string name="wallet_key_shown">This account’s private key</string>
+    <plurals name="wallet_key_copy_note">
+        <item quantity="one">Copying puts the key on the clipboard, where other apps can read it. It’s taken off again after %d minute. If Freedom is in the background by then, usually up to a minute later, but battery saving can hold it back until you next open Freedom.</item>
+        <item quantity="other">Copying puts the key on the clipboard, where other apps can read it. It’s taken off again after %d minutes. If Freedom is in the background by then, usually up to a minute later, but battery saving can hold it back until you next open Freedom.</item>
+    </plurals>
 
     <!-- WalletAccountsUi.kt -->
     <string name="wallet_accounts_nonce_detail_replaces">%1$s · replaces the send you stopped tracking (%2$s), at a higher fee: only one of the two can go through</string>

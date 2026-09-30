@@ -320,6 +320,22 @@ class WalletScreenTest {
     }
 
     @Test
+    fun `a copied private key is taken off like the phrase (#323)`() {
+        val key = "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727"
+        // copyKey hashes it as a one-word "phrase" under its own label.
+        val hash = PhraseClipboard.phraseHash(listOf(key))
+        val label = PhraseClipboard.KEY_CLIP_LABEL
+        assertTrue(label != PhraseClipboard.CLIP_LABEL)
+        assertTrue(PhraseClipboard.clipIsPhrase(key, hash))
+        assertTrue(PhraseClipboard.clipIsPhrase(" $key\n", hash))
+        assertTrue(PhraseClipboard.shouldClear(true, label, { listOf(key) }, hash))
+        assertFalse(PhraseClipboard.shouldClear(true, label, { listOf("0x" + "00".repeat(32)) }, hash))
+        assertTrue(PhraseClipboard.shouldClear(true, label, { error("no hash to compare") }, null))
+        assertTrue(PhraseClipboard.shouldClear(false, null, { error("unreadable") }, hash))
+        assertTrue(KEY_COPY_NOTE.contains("after 1 minute"))
+    }
+
+    @Test
     fun `another app's clip is left alone without being read`() {
         val hash = PhraseClipboard.phraseHash(twelve.split(" "))
         // Reading it would show Android 12+'s paste toast and could open a

@@ -9,6 +9,7 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -65,6 +66,31 @@ class WalletAccountsTest {
             assertEquals(legalAddresses[i], EthAccounts.address(seedL, i))
         }
         assertEquals("m/44'/60'/1'/0/0", WalletAccount.pathFor(1))
+    }
+
+    @Test
+    fun `an account's private key derives its address (#323)`() {
+        val seedA = abandon12.seed()
+        // ethers v6 HDNodeWallet.fromPhrase(abandon…about, "", "m/44'/60'/0'/0/0").privateKey.
+        val key = EthAccounts.privateKey(seedA, 0)
+        assertEquals("1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727", key.joinToString("") { "%02x".format(it) })
+        for (i in 0..2) {
+            assertEquals(abandonAddresses[i], EthAccounts.addressOf(EthAccounts.privateKey(seedA, i)))
+            assertEquals(legalAddresses[i], EthAccounts.addressOf(EthAccounts.privateKey(legal12.seed(), i)))
+        }
+        // The well-known "test … junk" development phrase (Hardhat/Anvil account 0).
+        val junk = Mnemonic.parse("test test test test test test test test test test test junk").seed()
+        val k = EthAccounts.privateKey(junk, 0)
+        assertEquals("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80", k.joinToString("") { "%02x".format(it) })
+        assertEquals("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", EthAccounts.addressOf(k))
+    }
+
+    @Test
+    fun `only an account derived here has a key to show (#323)`() {
+        assertTrue(WalletAccount(0, "Account 1", abandonAddresses[0]).hasLocalKey)
+        assertTrue(WalletAccount(4, "Account 5", abandonAddresses[0]).hasLocalKey)
+        val ledger = WalletAccount(-1, "Ledger", abandonAddresses[0], baby.freedom.mobile.wallet.ledger.LedgerKey("44'/60'/0'/0/0", "AA:BB", "Nano X"))
+        assertFalse(ledger.hasLocalKey)
     }
 
     @Test

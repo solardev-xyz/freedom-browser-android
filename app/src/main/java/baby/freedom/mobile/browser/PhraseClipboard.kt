@@ -66,6 +66,12 @@ import java.security.MessageDigest
  * since. Only a SHA-256 of the phrase is
  * kept to recognise it — never the words — and only in memory; a
  * process that lost it clears outright. Main thread only.
+ *
+ * One account's private key (#323) goes the same way ([copyKey]), under
+ * its own label ([KEY_CLIP_LABEL]) so each page's button follows only
+ * its own secret ([copiedLabel]). Only one secret is owed a clear at a
+ * time: copying another replaces the one before on the clipboard and
+ * takes over its deadline.
  */
 internal object PhraseClipboard {
     const val TTL_MS = 60_000L
@@ -73,16 +79,23 @@ internal object PhraseClipboard {
     /** The label our clip carries; how a readable clipboard is told to be ours without reading it. */
     internal const val CLIP_LABEL = "Recovery phrase"
 
+    /** The label a copied private key (#323) carries. */
+    internal const val KEY_CLIP_LABEL = "Private key"
+
+    private val LABELS = setOf(CLIP_LABEL, KEY_CLIP_LABEL)
+
     /** `ClipDescription.EXTRA_IS_SENSITIVE`, a plain string key, so it's set on every API level. */
     internal const val EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE"
     private const val PREFS = "phrase_clipboard"
     private const val KEY_DUE_AT = "due_at_elapsed"
     private const val KEY_BOOT = "due_at_boot"
+    private const val KEY_LABEL = "label"
 
     private val main = Handler(Looper.getMainLooper())
     private var pendingHash: ByteArray? = null
 
     private val _copied = MutableStateFlow(false)
+    private val _copiedLabel = MutableStateFlow<String?>(null)
 
     /**
      * Whether a copied phrase is still owed its clear: true from [copy]
@@ -96,6 +109,17 @@ internal object PhraseClipboard {
     val copied: StateFlow<Boolean> = _copied.asStateFlow()
 
     /**
+     * Which secret [copied] is about: [CLIP_LABEL] (the phrase) or
+     * [KEY_CLIP_LABEL] (a private key); null when nothing is owed a clear.
+     */
+    val copiedLabel: StateFlow<String?> = _copiedLabel.asStateFlow()
+
+    private fun setCopied(label: String?) {
+        _copied.value = label != null
+        _copiedLabel.value = label
+    }
+
+    /**
      * Flags [clip] as sensitive ([EXTRA_IS_SENSITIVE]), keeping whatever
      * else its description carries: on API 33+ the system's copy preview
      * then shows dots instead of the text, and keyboards that honour the
@@ -107,16 +131,26 @@ internal object PhraseClipboard {
         clip.description.extras = extras
     }
 
-    fun copy(context: Context, words: List<String>, now: Long = SystemClock.elapsedRealtime()) {
+    /** One account's private key (#323), `0x…`, with the phrase's protections. */
+    fun copyKey(context: Context, key: String, now: Long = SystemClock.elapsedRealtime()) =
+        copy(context, listOf(key), now, KEY_CLIP_LABEL)
+
+    fun copy(
+        context: Context,
+        words: List<String>,
+        now: Long = SystemClock.elapsedRealtime(),
+        label: String = CLIP_LABEL,
+    ) {
+        require(label in LABELS)
         val app = context.applicationContext
         val clipboard = app.getSystemService(ClipboardManager::class.java) ?: return
-        val clip = ClipData.newPlainText(CLIP_LABEL, words.joinToString(" "))
+        val clip = ClipData.newPlainText(label, words.joinToString(" "))
         markSensitive(clip)
         clipboard.setPrimaryClip(clip)
         pendingHash = phraseHash(words)
-        _copied.value = true
+        setCopied(label)
         val dueAt = now + TTL_MS
-        prefs(app).edit().putLong(KEY_DUE_AT, dueAt).putInt(KEY_BOOT, bootCount(app)).commit()
+        prefs(app).edit().putLong(KEY_DUE_AT, dueAt).putInt(KEY_BOOT, bootCount(app)).putString(KEY_LABEL, label).commit()
         main.removeCallbacksAndMessages(null)
         main.postDelayed({ clearIfDue(app) }, TTL_MS)
         runCatching {
@@ -149,7 +183,7 @@ internal object PhraseClipboard {
                 // Recents and reopened within the minute): the button reads
                 // "Copied" again, and this process's own Handler brings it
                 // back to "Copy" on time rather than the inexact alarm.
-                _copied.value = true
+                setCopied(prefs.getString(KEY_LABEL, null)?.takeIf { it in LABELS } ?: CLIP_LABEL)
                 main.removeCallbacksAndMessages(null)
                 main.postDelayed({ clearIfDue(app) }, dueAt - now)
                 return
@@ -200,9 +234,9 @@ internal object PhraseClipboard {
 
     private fun forget(app: Context) {
         pendingHash = null
-        _copied.value = false
+        setCopied(null)
         main.removeCallbacksAndMessages(null)
-        prefs(app).edit().remove(KEY_DUE_AT).commit()
+        prefs(app).edit().remove(KEY_DUE_AT).remove(KEY_LABEL).commit()
         runCatching { app.getSystemService(AlarmManager::class.java).cancel(alarmIntent(app)) }
     }
 
@@ -219,7 +253,8 @@ internal object PhraseClipboard {
      * Whether to clear the clipboard at the deadline.
      * - Not [readable] (no focus, which Android can't tell apart from
      *   empty): clear — the words must not outlive the minute.
-     * - Readable, but its [label] isn't our [CLIP_LABEL]: someone else's
+     * - Readable, but its [label] is neither our [CLIP_LABEL] nor
+     *   [KEY_CLIP_LABEL]: someone else's
      *   clip, left alone and never read ([readTexts] isn't called).
      * - Ours, and this process knows the phrase's [hash]: clear only if
      *   an item still hashes to it (the label alone could be a lookalike
@@ -233,7 +268,7 @@ internal object PhraseClipboard {
         hash: ByteArray?,
     ): Boolean {
         if (!readable) return true
-        if (label?.toString() != CLIP_LABEL) return false
+        if (label?.toString() !in LABELS) return false
         if (hash == null) return true
         return readTexts().any { clipIsPhrase(it, hash) }
     }
