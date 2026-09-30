@@ -14,6 +14,7 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.net.Uri
+import android.net.http.SslError
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -37,6 +38,7 @@ import android.webkit.MimeTypeMap
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
@@ -371,10 +373,16 @@ internal fun nameResolutionRefusalHtml(
  * A self-contained error page served *as* a refused document's own
  * response (no script, nothing fetched): [title], [descriptionHtml], and
  * [detailsHtml] in the details box (both already escaped), with a
- * Try again link that reloads the entry. [nameResolutionRefusal]'s and
- * [TorRouting]'s refusals.
+ * Try again link that reloads the entry — or goes to [retryHref]
+ * (escaped) instead. [nameResolutionRefusal]'s and [TorRouting]'s
+ * refusals, and a failed web load's page ([netErrorPageHtml]).
  */
-internal fun inPlaceErrorPageHtml(title: String, descriptionHtml: String, detailsHtml: String): String =
+internal fun inPlaceErrorPageHtml(
+    title: String,
+    descriptionHtml: String,
+    detailsHtml: String,
+    retryHref: String = "",
+): String =
     """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
@@ -392,7 +400,7 @@ border-radius:8px;font-size:15px;text-decoration:none}
 @media (prefers-color-scheme:light){body{background:#fff;color:#24292f}h1{color:#cf222e}
 p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-color:#d0d7de;color:#24292f}}
 </style></head><body><div class="c"><h1>$title</h1><p>$descriptionHtml</p>
-<div class="d">$detailsHtml</div><a href="">Try again</a></div></body></html>"""
+<div class="d">$detailsHtml</div><a href="$retryHref">Try again</a></div></body></html>"""
 
 /** Where [nameWebRecordNavigation] sends a request for [pathAndQuery] on the name's origin. */
 internal fun webRecordTarget(result: EnsResult.Ok, pathAndQuery: String): String =
@@ -516,6 +524,20 @@ internal fun encodePngBytes(bitmap: Bitmap): ByteArray? {
 }
 
 /**
+ * The web page on screen is a failed load of [url] (#259): [post] if it
+ * was a form POST, whose retry is a GET; [script] swaps its document for
+ * Freedom's error page ([netErrorPageScript]).
+ */
+internal data class FailedLoad(val url: String, val post: Boolean, val script: String)
+
+/** Does the device have a network with internet at all? `true` when it can't tell. */
+internal fun isOnline(context: Context): Boolean {
+    val cm = context.getSystemService(android.net.ConnectivityManager::class.java) ?: return true
+    val caps = cm.getNetworkCapabilities(cm.activeNetwork ?: return false) ?: return false
+    return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+}
+
+/**
  * Does an `onPageFinished` for [finishedUrl] describe the document the
  * WebView is actually showing ([currentUrl], i.e. `WebView.getUrl()`)?
  *
@@ -534,6 +556,23 @@ internal fun encodePngBytes(bitmap: Bitmap): ByteArray? {
  */
 internal fun finishedLoadIsCurrent(finishedUrl: String?, currentUrl: String?): Boolean =
     finishedUrl == null || currentUrl == null || finishedUrl == currentUrl
+
+/**
+ * Does an `onPageFinished` for [finishedUrl] end the navigation that a
+ * certificate error for [certErrorUrl] cancelled (#259)?
+ *
+ * Only the URL decides. `WebView.getUrl()` is no help here: in a popup
+ * the page opened (`target=_blank`, `window.open`) it is still `null`
+ * when the refused load's finish arrives, and on a Reload or any other
+ * navigation to the address already on screen it names that same
+ * address — both are refused loads that must get the warning page, yet
+ * [finishedLoadIsCurrent] calls them current. A subresource's
+ * certificate error gets no finish of its own, and a committed page
+ * clears the pending error at `onPageStarted`, so a matching finish is
+ * the cancelled main-frame load.
+ */
+internal fun certErrorEndsLoad(finishedUrl: String?, certErrorUrl: String): Boolean =
+    finishedUrl == certErrorUrl
 
 /**
  * Does a main-frame commit of [committedUrl] end the tab's pending
@@ -1733,6 +1772,86 @@ private fun buildRefreshableWebView(
     // recover again.
     var autoRecoveredUrl: String? = null
 
+    // The web page on screen is a failed load of this URL, its
+    // document swapped for Freedom's error page (#259, [WebLoadError]):
+    // kept out of history, and the swap re-run by the later load
+    // callbacks in case the first one landed early. Set by the main
+    // frame's `onReceivedError`, cleared by the next `onPageStarted`.
+    var failedLoad: FailedLoad? = null
+
+    // Certificate errors the main frame may be about to die of, by URL
+    // (a subresource's lands here too, and must not displace the main
+    // frame's — R4-F1): the cancelled navigation's synthetic
+    // `onPageFinished` for one of these URLs turns it into the
+    // "connection isn't secure" page (#259), issued on the redirect
+    // chain's entry ([MainFrameChain], R2-F1).
+    val pendingCertErrors = PendingCertErrors()
+
+    // The main-frame navigation in flight, from its start through each
+    // redirect hop (#259 R2-F1, [certPageReissue]).
+    val mainFrameChain = MainFrameChain()
+
+    // The certificate page the interceptor answers the refused load's
+    // re-issue with, in that load's own entry (#259, [CertRefusalSlot]).
+    val certRefusal = CertRefusalSlot()
+
+    /**
+     * Swap the failed load's document for Freedom's page, if [url] is
+     * the failed load ([failedLoad]). Run from `onReceivedError` and
+     * again from the commit/finish callbacks: the script only touches
+     * Chromium's own error document, and only once.
+     */
+    fun showFailedLoadPage(view: WebView?, url: String?) {
+        val failed = failedLoad ?: return
+        if (view == null || url != failed.url) return
+        view.evaluateJavascript(failed.script, null)
+    }
+
+    /**
+     * The "connection isn't secure" page for [url] (#259), in the entry
+     * the refused load was for: the load is issued again — the same
+     * Back/Forward step if the list holds [url] or the URL its
+     * redirect chain started at ([certPageReissue]), a load of that
+     * start if not — and the interceptor answers that with the
+     * page ([certRefusal]). So a refused Back or Forward keeps every
+     * entry on both sides, Back from the page is the one before it, and
+     * Try again and Reload ask for [url] again.
+     *
+     * Should the re-issue itself be refused (it never reached the
+     * interceptor), the page goes up as [ErrorPage] on top instead,
+     * rather than leave the previous page on screen with no warning.
+     */
+    fun showCertErrorPage(view: WebView, cert: PendingCertError) {
+        val url = cert.url
+        val facts = cert.facts
+        val host = Uri.parse(url).host.orEmpty().ifEmpty { url }
+        val now = System.currentTimeMillis()
+        state.clearEnsOverride()
+        val list = view.copyBackForwardList()
+        val reissue = certPageReissue(
+            (0 until list.size).map { list.getItemAtIndex(it)?.url },
+            list.currentIndex,
+            cert.chain,
+            steppedTo = (view as? PageWebView)?.historyStepTarget(list.currentIndex),
+        )
+        if (certRefusal.arm(reissue.url, certErrorPageHtml(url, host, facts, now, retryUrl = reissue.url))) {
+            Log.i(LOG_TAG, "certificate error for $url → page in place on ${reissue.url} (step ${reissue.step})")
+            when (reissue.step) {
+                null, 0 -> view.loadUrl(reissue.url)
+                else -> view.goBackOrForward(reissue.step)
+            }
+            return
+        }
+        val page = ErrorPage.url(
+            errorCode = certErrorCode(facts, now),
+            displayUrl = url,
+            retryUrl = reissue.url,
+            detail = certErrorDetail(facts, host, now),
+        )
+        Log.i(LOG_TAG, "certificate error for $url again → error page")
+        view.loadUrl(page)
+    }
+
     // A private tab's pickers and `<select>` lists open in windows of
     // their own, built on this context: [PrivateWindowContext] makes
     // them FLAG_SECURE like the Activity window (#86).
@@ -2645,6 +2764,14 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                // A new document: not (yet) a failed load, and whatever
+                // certificate error was pending belonged to another
+                // navigation (#259).
+                failedLoad = null
+                pendingCertErrors.clear()
+                certRefusal.committed(url)
+                mainFrameChain.committed()
+                (view as? PageWebView)?.historyStepCommitted()
                 // Ad blocking judges requests against it from here on
                 // (a page back from the back/forward cache made none).
                 url?.let(adblockPage::committed)
@@ -2866,6 +2993,7 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageCommitVisible(view: WebView?, url: String?) {
+                showFailedLoadPage(view, url)
                 // The document has laid out and painted, so its root
                 // styles are real: this is the earliest the #56 probe
                 // can answer, and pages are touchable from here on.
@@ -2900,6 +3028,20 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                showFailedLoadPage(view, url)
+                // A certificate error's cancelled navigation ends here,
+                // committing nothing: without a page of our own the
+                // previous document would stay on screen under no
+                // warning at all (#259). Matched by URL alone, never
+                // against `view.url` ([certErrorEndsLoad]).
+                val cert = if (view != null) pendingCertErrors.takeFor(url) else null
+                if (view != null && cert != null) {
+                    // Posted: issued from here, the load would already
+                    // be the WebView's `getUrl()` for the rest of this
+                    // finish, which would record the refused address
+                    // under the old page's title.
+                    view.post { showCertErrorPage(view, cert) }
+                }
                 // Chromium's synthetic finish for a navigation that never
                 // committed (a 204, Stop, superseded): the page on screen
                 // stays, and ad blocking goes on judging against it.
@@ -3079,6 +3221,12 @@ private fun buildRefreshableWebView(
                 if (display.isNotBlank() &&
                     !ErrorPage.isErrorPage(url) &&
                     !nameRefusal.isRefused(url) &&
+                    // …nor the certificate page in a refused load's entry
+                    // (#259, [CertRefusalSlot]).
+                    !certRefusal.isServed(url) &&
+                    // …nor a failed web load, under Chromium's "Webpage
+                    // not available" title (#259).
+                    failedLoad?.url != url &&
                     isCurrent
                 ) {
                     if (visitGate.isCommitted) {
@@ -3341,6 +3489,10 @@ private fun buildRefreshableWebView(
                 // A hop of the user's named load the WebView now follows:
                 // its answer is the next one that may be an app link.
                 if (request.isForMainFrame && request.isRedirect) userNamedChain.redirected(target)
+                // Where a certificate refusal's entry started (#259 R2-F1).
+                if (request.isForMainFrame) {
+                    if (request.isRedirect) mainFrameChain.redirected(target) else mainFrameChain.started(target)
+                }
                 // x402 (#140): a paid request's redirect hop may be where
                 // its answer comes from; the page's own navigation is not
                 // its answer, nor a 402's commit (#218 R2).
@@ -3375,6 +3527,7 @@ private fun buildRefreshableWebView(
                 if (mainFrame) {
                     request!!.url?.toString()?.let {
                         pendingNavigationUrls.add(it)
+                        mainFrameChain.requested(it)
                         // Not a hop of the user's named load: the page's
                         // own navigation (R1-F1). Nor of the user's
                         // navigation, for the user agent (#180, R2-F1).
@@ -3442,8 +3595,13 @@ private fun buildRefreshableWebView(
                         return Adblock.blockedResponse()
                     }
                 }
+                // A certificate-refused load issued again: its page, in
+                // its own entry, never reaching the network (#259).
+                val certPage = if (mainFrame) request!!.url?.toString()?.let(certRefusal::take) else null
                 val work = state.gatewayWork.start(generation)
-                val response = if (heldBack) heldBackResponse() else try {
+                val response = if (heldBack) heldBackResponse() else if (certPage != null) {
+                    certPageResponse(certPage)
+                } else try {
                     interceptVirtualRequest(
                         request, ensPins, view, state::assertedProtocolFor, state.onchain,
                     ) { served ->
@@ -3507,7 +3665,27 @@ private fun buildRefreshableWebView(
                     }
                     return
                 }
-                if (!isDwebPageUrl(failed)) return
+                if (!isDwebPageUrl(failed)) {
+                    // An ordinary web load (#259): Freedom's page in
+                    // place of Chromium's, in the failed entry itself.
+                    val scheme = req.url?.scheme?.lowercase()
+                    if (view == null || (scheme != "http" && scheme != "https")) return
+                    val failure = netFailureFor(
+                        error?.description?.toString(),
+                        error?.errorCode ?: 0,
+                        isOnline(view.context),
+                    )
+                    Log.i(LOG_TAG, "main-frame ${error?.description} for $failed → $failure page")
+                    val html = netErrorPageHtml(
+                        url = failed,
+                        host = req.url?.host.orEmpty().ifEmpty { failed },
+                        failure = failure,
+                        rawError = error?.description?.toString(),
+                    )
+                    failedLoad = FailedLoad(failed, req.method.equals("POST", ignoreCase = true), netErrorPageScript(html))
+                    showFailedLoadPage(view, failed)
+                    return
+                }
 
                 if (autoRecoveredUrl != failed && view != null) {
                     autoRecoveredUrl = failed
@@ -3527,6 +3705,33 @@ private fun buildRefreshableWebView(
                 )
                 state.clearEnsOverride()
                 view?.loadUrl(page)
+            }
+
+            // A certificate error (#259). Always refused — there is no
+            // proceed-anyway — and never silently: the navigation it
+            // cancels ends in a synthetic `onPageFinished` for [error]'s
+            // URL, which puts up the "connection isn't secure" page
+            // (a subresource's error gets no such finish and so no page).
+            override fun onReceivedSslError(
+                view: WebView?,
+                handler: SslErrorHandler?,
+                error: SslError?,
+            ) {
+                handler?.cancel()
+                val url = error?.url ?: return
+                val cert = error.certificate
+                val facts = CertFacts(
+                    errors = (0..5).filter { error.hasError(it) }.toSet(),
+                    notBeforeMs = cert?.validNotBeforeDate?.time,
+                    notAfterMs = cert?.validNotAfterDate?.time,
+                    issuedTo = cert?.issuedTo?.cName,
+                    issuedBy = cert?.issuedBy?.let { it.cName.ifBlank { it.oName } },
+                )
+                Log.i(LOG_TAG, "SSL error ${facts.errors} for $url → refused")
+                pendingCertErrors.record(
+                    PendingCertError(url, facts, mainFrameChain.endingAt(url)),
+                    inFlight = mainFrameChain.reaches(url),
+                )
             }
 
             override fun onReceivedHttpError(
@@ -3825,7 +4030,19 @@ private fun buildRefreshableWebView(
         EthereumProviders.allowPrompts(state.id)
         RadicleProviders.allowPrompts(state.id)
         SwarmProviders.allowPrompts(state.id)
-        webView.reloadByUser()
+        // A failed form POST is retried as a GET: reloading its entry
+        // would only ask to resend, answered "don't" (#259). The
+        // certificate page retries its site, not itself.
+        val failed = failedLoad
+        val certRetry = ErrorPage.paramFor(webView.url, "retry")
+            ?.takeIf { ErrorPage.paramFor(webView.url, "error")?.startsWith("cert_") == true }
+        if (failed != null && failed.post && failed.url == webView.url) {
+            webView.loadUrl(failed.url)
+        } else if (certRetry != null) {
+            webView.loadUrl(certRetry)
+        } else {
+            webView.reloadByUser()
+        }
     }
     // Who owns a downward drag — the refresh spinner or the page.
     //
@@ -4369,6 +4586,7 @@ internal class PageWebView(context: Context) : WebView(context) {
     // [TabDocuments.navigationStarted]); the page's own go through
     // `shouldOverrideUrlLoading`.
     override fun loadUrl(url: String) {
+        noteHistoryStep(url)
         matchUserAgentTo(url)
         // A `javascript:` URL runs in the page: no load, no entry.
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
@@ -4378,6 +4596,7 @@ internal class PageWebView(context: Context) : WebView(context) {
     }
 
     override fun loadUrl(url: String, additionalHttpHeaders: MutableMap<String, String>) {
+        noteHistoryStep(url)
         matchUserAgentTo(url)
         // A `javascript:` URL runs in the page: no load, no entry.
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
@@ -4387,6 +4606,7 @@ internal class PageWebView(context: Context) : WebView(context) {
     }
 
     override fun postUrl(url: String, postData: ByteArray) {
+        pendingHistoryStep = null
         matchUserAgentTo(url)
         // A `javascript:` URL runs in the page: no load, no entry.
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
@@ -4408,6 +4628,7 @@ internal class PageWebView(context: Context) : WebView(context) {
     }
 
     override fun reload() {
+        pendingHistoryStep = null
         matchUserAgentTo(url)
         url?.let(documents::navigationStarted)
         browserInitiatedLoad()
@@ -4432,7 +4653,42 @@ internal class PageWebView(context: Context) : WebView(context) {
         super.goBackOrForward(steps)
     }
 
+    /**
+     * The history step the app last asked for, as `(from, to)` indexes
+     * of the back/forward list — the chrome's Back / Forward, a
+     * [goBackOrForward] — until a document commits or the app starts a
+     * load of another kind. What tells a refused Back from a refused
+     * Forward when the entries on both sides hold the refused URL
+     * ([certPageReissue], #259 R3-F1); a step the page takes itself
+     * (`history.back()`) goes unrecorded.
+     */
+    private var pendingHistoryStep: Pair<Int, Int>? = null
+
+    /** The index [pendingHistoryStep] was headed for, if it set out from [currentIndex]. */
+    fun historyStepTarget(currentIndex: Int): Int? =
+        pendingHistoryStep?.takeIf { it.first == currentIndex }?.second
+
+    /** A document committed: no history step in flight. */
+    fun historyStepCommitted() {
+        pendingHistoryStep = null
+    }
+
+    private fun noteHistoryStep(url: String) {
+        when (url) {
+            HISTORY_BACK_JS -> recordHistoryStep(-1)
+            HISTORY_FORWARD_JS -> recordHistoryStep(1)
+            // Any other `javascript:` URL runs in the page: no load.
+            else -> if (!url.startsWith("javascript:", ignoreCase = true)) pendingHistoryStep = null
+        }
+    }
+
+    private fun recordHistoryStep(steps: Int) {
+        val from = copyBackForwardList().currentIndex
+        pendingHistoryStep = from to from + steps
+    }
+
     private fun historyStepStarting(steps: Int) {
+        recordHistoryStep(steps)
         val url = historyEntryUrl(steps) ?: return
         // The entry is fetched again with whatever user agent is in
         // place: the one its site asks for now (#180).
@@ -5854,6 +6110,13 @@ internal fun servedFromIpfs(served: ContentRoot?): Boolean = when (served) {
  */
 internal fun mainFrameNoteApplies(requestGeneration: Int, currentGeneration: Int): Boolean =
     requestGeneration == currentGeneration
+
+/** The interceptor's answer carrying a certificate page ([certErrorPageHtml]). */
+internal fun certPageResponse(html: String): WebResourceResponse =
+    WebResourceResponse(
+        "text/html", "utf-8", 200, "OK", mapOf("Cache-Control" to "no-store"),
+        java.io.ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
+    )
 
 /**
  * The answer to a main-frame request held back for the page to re-issue
