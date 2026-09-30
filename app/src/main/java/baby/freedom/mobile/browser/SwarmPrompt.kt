@@ -251,7 +251,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                error = walletErrorMessage(e, "unlock the wallet", phraseBackedUp = true)
+                error = walletErrorMessage(e, Strings.get(R.string.wallet_action_unlock), phraseBackedUp = true)
             } finally {
                 busy = false
             }

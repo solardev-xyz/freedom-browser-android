@@ -440,7 +440,7 @@ internal fun SendPage(
                                     } catch (e: CancellationException) {
                                         throw e
                                     } catch (e: Exception) {
-                                        error = walletErrorMessage(e, "unlock the wallet", phraseBackedUp)
+                                        error = walletErrorMessage(e, Strings.get(R.string.wallet_action_unlock), phraseBackedUp)
                                     } finally {
                                         busy = false
                                     }

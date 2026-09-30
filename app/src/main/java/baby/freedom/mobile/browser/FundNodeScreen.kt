@@ -324,7 +324,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                error = safeErrorMessage(e, "price the transaction", phraseBackedUp)
+                error = safeErrorMessage(e, Strings.get(R.string.stamps_action_price_transaction), phraseBackedUp)
             } finally {
                 busy = false
             }
@@ -427,7 +427,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                                 } catch (e: CancellationException) {
                                     throw e
                                 } catch (e: Exception) {
-                                    error = safeErrorMessage(e, "unlock the wallet", phraseBackedUp)
+                                    error = safeErrorMessage(e, Strings.get(R.string.wallet_action_unlock), phraseBackedUp)
                                 } finally {
                                     busy = false
                                 }

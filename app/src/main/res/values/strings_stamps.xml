@@ -240,4 +240,6 @@
     <string name="stamps_chequebook_searching">The node is searching for your stamps. Deposit once it has finished.</string>
     <!-- %1$s: the amount. -->
     <string name="stamps_chequebook_deposit_title">Deposit %1$s?</string>
+    <!-- An action for the wallet's "Couldn’t %1$s…" error sentences. -->
+    <string name="stamps_action_price_transaction">price the transaction</string>
 </resources>
