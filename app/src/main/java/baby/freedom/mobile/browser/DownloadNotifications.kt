@@ -30,10 +30,13 @@ private const val UPDATE_INTERVAL_MS = 1_000L
 private const val ACTION_PAUSE = "baby.freedom.mobile.download.PAUSE"
 private const val ACTION_RESUME = "baby.freedom.mobile.download.RESUME"
 private const val ACTION_CANCEL = "baby.freedom.mobile.download.CANCEL"
+private const val ACTION_DISMISSED = "baby.freedom.mobile.download.DISMISSED"
 private const val EXTRA_ID = "id"
+private const val EXTRA_STATUS = "status"
 
 private const val PREFS = "downloads"
 private const val PREF_ASKED_NOTIFICATIONS = "askedNotifications"
+private const val PREF_DISMISSED = "dismissedNotifications"
 
 /**
  * One notification per running or paused download (#265), with its
@@ -44,6 +47,12 @@ private const val PREF_ASKED_NOTIFICATIONS = "askedNotifications"
  *
  * Notifications of a previous process (which died with its downloads
  * running) are withdrawn on start; the paused rows it left get new ones.
+ *
+ * One the user swipes away stays away while its download stays in the
+ * state it was dismissed in — across restarts too (the dismissal is
+ * kept by [dismissalKey]); it comes back once the download is resumed
+ * or paused. And a paused one is only posted again when what it shows
+ * changes, not on every progress tick of another download.
  */
 internal class DownloadNotifications(
     context: Context,
@@ -68,16 +77,30 @@ internal class DownloadNotifications(
         }.onFailure { Log.w(LOG_TAG, "download notifications unavailable", it) }
         scope.launch {
             var shown = emptySet<Long>()
+            // The row each paused notification was last posted from.
+            val postedPaused = HashMap<Long, DownloadEntry>()
             combine(downloads, progress) { list, live -> list to live }
                 .conflate()
                 .collect { (list, live) ->
-                    val want = list.filter {
+                    val active = list.filter {
                         it.id > 0 && (it.status == DownloadStatus.RUNNING || it.status == DownloadStatus.PAUSED)
                     }
                     runCatching {
-                        for (entry in want) mgr.notify(TAG, notificationId(entry.id), build(entry, live[entry.id]))
+                        // Dismissals of a state the download has left are over.
+                        val dismissed = keepDismissals(appContext, active.mapTo(HashSet(), ::dismissalKey))
+                        val want = active.filter { dismissalKey(it) !in dismissed }
+                        for (entry in want) {
+                            if (entry.status == DownloadStatus.PAUSED) {
+                                if (postedPaused[entry.id] == entry) continue
+                                postedPaused[entry.id] = entry
+                            } else {
+                                postedPaused -= entry.id
+                            }
+                            mgr.notify(TAG, notificationId(entry.id), build(entry, live[entry.id]))
+                        }
                         val ids = want.mapTo(HashSet()) { it.id }
                         for (gone in shown - ids) mgr.cancel(TAG, notificationId(gone))
+                        postedPaused.keys.retainAll(ids)
                         shown = ids
                     }.onFailure { Log.w(LOG_TAG, "couldn't update download notifications", it) }
                     delay(UPDATE_INTERVAL_MS)
@@ -114,24 +137,34 @@ internal class DownloadNotifications(
             builder.addAction(action(entry.id, ACTION_RESUME, "Resume", android.R.drawable.ic_media_play))
         }
         builder.addAction(action(entry.id, ACTION_CANCEL, "Cancel", android.R.drawable.ic_menu_close_clear_cancel))
+        builder.setDeleteIntent(
+            PendingIntent.getBroadcast(
+                appContext,
+                0,
+                receiverIntent(entry.id, ACTION_DISMISSED).putExtra(EXTRA_STATUS, entry.status),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            ),
+        )
         return builder.build()
     }
 
     private fun action(id: Long, action: String, label: String, icon: Int): Notification.Action {
-        val intent = Intent(appContext, DownloadActionReceiver::class.java)
+        val pending = PendingIntent.getBroadcast(
+            appContext,
+            0,
+            receiverIntent(id, action),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        return Notification.Action.Builder(Icon.createWithResource(appContext, icon), label, pending).build()
+    }
+
+    private fun receiverIntent(id: Long, action: String): Intent =
+        Intent(appContext, DownloadActionReceiver::class.java)
             .setAction(action)
             // The data makes each download's intent its own PendingIntent
             // (extras don't count when PendingIntents are matched).
             .setData(Uri.parse("freedom-download:$id"))
             .putExtra(EXTRA_ID, id)
-        val pending = PendingIntent.getBroadcast(
-            appContext,
-            0,
-            intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        return Notification.Action.Builder(Icon.createWithResource(appContext, icon), label, pending).build()
-    }
 
     private fun notificationId(id: Long): Int = (id % Int.MAX_VALUE).toInt()
 
@@ -144,6 +177,32 @@ internal class DownloadNotifications(
         fun askedForPermission(context: Context): Boolean =
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(PREF_ASKED_NOTIFICATIONS, false)
 
+        private val dismissalsLock = Any()
+
+        /** A dismissal holds for this download in this state only. */
+        internal fun dismissalKey(entry: DownloadEntry): String = dismissalKey(entry.id, entry.status)
+
+        private fun dismissalKey(id: Long, status: String): String = "$id:$status"
+
+        /** The user swiped away [id]'s notification while it was [status]. */
+        internal fun noteDismissed(context: Context, id: Long, status: String) = synchronized(dismissalsLock) {
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val kept = prefs.getStringSet(PREF_DISMISSED, emptySet()).orEmpty()
+            prefs.edit().putStringSet(PREF_DISMISSED, kept + dismissalKey(id, status)).apply()
+        }
+
+        /**
+         * The dismissals still in force: those of [current] states.
+         * The rest are dropped. Returns what's kept.
+         */
+        internal fun keepDismissals(context: Context, current: Set<String>): Set<String> = synchronized(dismissalsLock) {
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val all = prefs.getStringSet(PREF_DISMISSED, emptySet()).orEmpty()
+            val kept = all.filterTo(HashSet()) { it in current }
+            if (kept.size != all.size) prefs.edit().putStringSet(PREF_DISMISSED, kept).apply()
+            kept
+        }
+
         fun markAskedForPermission(context: Context) {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                 .putBoolean(PREF_ASKED_NOTIFICATIONS, true)
@@ -152,12 +211,27 @@ internal class DownloadNotifications(
     }
 }
 
-/** The download notifications' Pause / Resume / Cancel buttons. Not exported. */
+/**
+ * The download notifications' Pause / Resume / Cancel buttons, and the
+ * note that one was swiped away. Not exported.
+ *
+ * Downloads run in the app's own process, with no foreground service:
+ * a Resume tapped while the app is in the background starts the job,
+ * but once this returns the process is a cached one again, which the
+ * system can freeze (and so stall the download, its notification
+ * showing it running at the last progress it reached) or kill (the
+ * next start finds it paused, as *interrupted*). It goes on once the
+ * app is in the foreground again.
+ */
 class DownloadActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val id = intent.getLongExtra(EXTRA_ID, 0L)
         // Private downloads have no notification, so no button of one.
         if (id <= 0) return
+        if (intent.action == ACTION_DISMISSED) {
+            intent.getStringExtra(EXTRA_STATUS)?.let { DownloadNotifications.noteDismissed(context, id, it) }
+            return
+        }
         val downloads = DownloadManager.get(context)
         when (intent.action) {
             ACTION_PAUSE -> downloads.pause(id)

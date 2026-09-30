@@ -728,8 +728,13 @@ class DownloadManager private constructor(context: Context) {
                 }
             }
             fetching = false
-            currentCoroutineContext().ensureActive()
+            afterFetchForTest?.invoke(id)
+            // Before anything can throw: a pause landing now writes the
+            // row from [entry], and must record the length a body with no
+            // Content-Length turned out to have — or the resume can't
+            // tell the partial file is whole, and fetches it again.
             entry = entry.copy(totalBytes = received, receivedBytes = received)
+            currentCoroutineContext().ensureActive()
             dao.update(entry)
             _progress.update { it + (id to DownloadProgress(received, received, saving = true)) }
             // The copy into Downloads needs room for a second copy of
@@ -1296,6 +1301,13 @@ class DownloadManager private constructor(context: Context) {
      * cancel can land in.
      */
     @Volatile internal var afterPublishForTest: ((Long) -> Unit)? = null
+
+    /**
+     * Test hook: runs as soon as every byte of a download is in its
+     * partial file, before its length is written — where a pause can
+     * land on a body that came with no length.
+     */
+    @Volatile internal var afterFetchForTest: ((Long) -> Unit)? = null
 
     /** Test hook: free space on [dir]'s volume, in place of the real answer. */
     @Volatile internal var allocatableForTest: ((dir: File) -> Long?)? = null

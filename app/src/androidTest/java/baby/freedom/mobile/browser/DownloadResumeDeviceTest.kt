@@ -42,6 +42,7 @@ class DownloadResumeDeviceTest {
     @After
     fun cleanUp() {
         manager.allocatableForTest = null
+        manager.afterFetchForTest = null
         DownloadManager.sweepGateForTest = null
         rows.forEach { manager.remove(it) }
         files.forEach { runCatching { resolver.delete(it, null, null) } }
@@ -68,6 +69,8 @@ class DownloadResumeDeviceTest {
         private val wholeAs206: Boolean = false,
         /** Cap a range answer at this many bytes (a 206 that stops short). */
         private val rangeCap: Int? = null,
+        /** Send the whole file chunked, with no Content-Length. */
+        private val chunked: Boolean = false,
     ) : Dispatcher() {
         val requests = CopyOnWriteArrayList<RecordedRequest>()
 
@@ -92,6 +95,8 @@ class DownloadResumeDeviceTest {
                 response.setResponseCode(206)
                     .setHeader("Content-Range", "bytes 0-${bytes.size - 1}/${bytes.size}")
                     .setBody(Buffer().write(bytes))
+            } else if (chunked) {
+                response.setResponseCode(200).setChunkedBody(Buffer().write(bytes), 16 * 1024)
             } else {
                 response.setResponseCode(200).setBody(Buffer().write(bytes))
             }
@@ -390,6 +395,37 @@ class DownloadResumeDeviceTest {
             val done = await(name) { it.status == DownloadStatus.COMPLETED }
             assertArrayEquals(body, savedBytes(done))
             // Saved from what was kept, not fetched again.
+            assertEquals(1, files.requests.size)
+        }
+    }
+
+    /**
+     * A pause landing just after a body with no length is all in keeps
+     * the length it turned out to have, so Resume saves the file it
+     * already has instead of fetching it again.
+     */
+    @Test
+    fun aPauseAfterAChunkedBodyIsInSavesWithoutFetchingAgain() {
+        MockWebServer().use { server ->
+            val files = FileServer({ body }, { etag }, ranges = true, chunked = true)
+            server.dispatcher = files
+            server.start()
+            val name = "chunked-${System.nanoTime()}.bin"
+            manager.afterFetchForTest = { id ->
+                manager.afterFetchForTest = null
+                manager.pause(id)
+                // Long enough for the pause to have stopped the job.
+                Thread.sleep(500)
+            }
+            startAndAccept(server.url("/f.bin").toString(), name)
+            val paused = await(name) { it.status != DownloadStatus.RUNNING }
+            assertEquals(DownloadStatus.PAUSED, paused.status)
+            assertEquals(body.size.toLong(), paused.totalBytes)
+            assertEquals(body.size.toLong(), partialOf(paused.id).length())
+
+            manager.resume(paused.id)
+            val done = await(name) { it.status == DownloadStatus.COMPLETED }
+            assertArrayEquals(body, savedBytes(done))
             assertEquals(1, files.requests.size)
         }
     }
