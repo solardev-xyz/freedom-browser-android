@@ -73,18 +73,30 @@ block). CORS preflights to the node origin are answered by the app;
 response-side CORS headers are the node's job (status tracked in
 `docs/virtual-origins-hardening.md`).
 
-The node's **on-chain** writes are not part of it: a page's non-GET
-request to `/stamps…`, `/chequebook…`, `/stake…`, `/wallet…` or
-`/transactions…` on the gateway port (any host, since any name can
-resolve to loopback) is answered `403` by the app and never reaches the
-node (#114, `NodeChainWrites`) — in light mode those endpoints would sign
-and send transactions from the user's funded node account with no
-prompt. The interceptor can't see every such request (a navigation's
-redirect is followed inside Chromium, and other apps reach the port
-directly), so the node itself also refuses to broadcast any transaction
-(`ant_jni.c`'s chain transport): an on-chain write that gets past the
-interceptor fails at the node instead. Buying stamps and funding the
-chequebook go through the app.
+Only the dapp surface is part of it: `/bzz`, `/bytes`, `/chunks`,
+`/soc`, `/feeds`, `/pss`, `/gsoc`, plus the `/health` and `/readiness`
+probes. Every other request a page makes to the gateway port (any
+method, any host, since any name can resolve to loopback) is answered
+`403` by the app and never reaches the node (#114, #283,
+`NodeApiGuard`): that's bee's node API, which in light mode signs and
+sends transactions from the user's funded node account with no prompt
+(`/stamps…`, `/chequebook…`, `/stake…`, `/wallet…`, `/transactions…`)
+and otherwise reads what the node knows about the user (`/addresses`,
+`/wallet`, `/stamps`, `/chequebook`, `/balances`, `/settlements`,
+`/peers`, `/topology`, `/node`, `/pins`, `/tags`, …). It's an
+allowlist, so an endpoint a later ant adds stays closed. Buying stamps,
+funding the chequebook and the node's details go through the app.
+
+The interceptor can't see every such request: a redirect a CORS fetch
+follows after an earlier cross-origin hop, or a navigation's redirect,
+is followed inside Chromium, and other apps reach the port directly. So
+the node itself also refuses to broadcast any transaction (`ant_jni.c`'s
+chain transport): an on-chain write that gets past the interceptor
+fails at the node instead. The reads have no such backstop yet: ant's
+gateway answers `Origin: null` — which a fetch carries after a
+cross-origin redirect — with `Access-Control-Allow-Origin: null`, so a
+page can still read them through a redirector until ant stops doing
+that (see `docs/virtual-origins-hardening.md`).
 
 ## Explicitly unsupported
 

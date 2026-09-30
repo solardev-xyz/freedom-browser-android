@@ -77,3 +77,15 @@ Status:
   Same check applies to the freedom-ipfs API. Until then, reads work
   everywhere; browser-`fetch` writes from dweb pages will be
   CORS-blocked on the response leg.
+- **`Origin: null` is a leak, not just a mismatch** (#283): the same
+  pinned `null` lets any opaque-origin context read the node's private
+  API (`/wallet`, `/addresses`, `/stamps`, …) — and a CORS fetch carries
+  `Origin: null` after any cross-origin redirect, so an ordinary page
+  can too, through a redirector. `NodeApiGuard` refuses every page
+  request to the gateway outside the dapp surface, but WebView never
+  asks the interceptor about such a redirect hop, and other browsers
+  and apps don't pass through it at all. The fix belongs in the node:
+  let the FFI host choose the gateway's CORS origins
+  (https://github.com/freedom-hq/ant/issues/101) and start it with none
+  (or only the virtual suffixes) — tracked in
+  https://github.com/solardev-xyz/freedom-browser-android/issues/284.

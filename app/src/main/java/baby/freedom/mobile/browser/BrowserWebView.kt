@@ -4784,7 +4784,8 @@ private fun syntheticResponse(
  *    the submit flow.)
  *
  * Everything else — external https, and direct `http://127.0.0.1`
- * gateway calls (the sanctioned write path for dapps) — passes through
+ * gateway calls to the dapp surface (the sanctioned write path for
+ * dapps; the node's own API is refused, [NodeApiGuard]) — passes through
  * to Chromium's own network stack untouched.
  *
  * Error contract: the interceptor always answers for virtual hosts. A
@@ -4835,9 +4836,10 @@ internal fun interceptVirtualRequest(
     // A `.onion` request with no Tor port routed is refused before
     // anything else looks at it (#143, fail closed).
     TorRouting.refusalFor(req)?.let { return it }
-    // A page's on-chain write to the Swarm node — buying stamps, funding
-    // the chequebook — is refused outright (#114, fail closed).
-    NodeChainWrites.refusalFor(req)?.let { return it }
+    // A page's request to the Swarm node's own API — buying stamps,
+    // funding the chequebook, reading its wallet or addresses — is refused
+    // outright; only the dapp surface stays open (#114, #283, fail closed).
+    NodeApiGuard.refusalFor(req)?.let { return it }
     val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
     // A contract-hosted app's origin (#123) is answered by its own rules.
     // Then an origin an unverified external IPFS gateway served before

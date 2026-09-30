@@ -4,8 +4,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class NodeChainWritesTest {
-    private fun refused(method: String, url: String) = NodeChainWrites.refuses(method, url)
+class NodeApiGuardTest {
+    private fun refused(method: String, url: String) = NodeApiGuard.refuses(method, url)
 
     @Test
     fun `every on-chain write to the node is refused`() {
@@ -30,17 +30,45 @@ class NodeChainWritesTest {
     }
 
     @Test
-    fun `reads and the upload write path stay open`() {
-        assertFalse(refused("GET", "http://127.0.0.1:1633/stamps"))
-        assertFalse(refused("HEAD", "http://127.0.0.1:1633/wallet"))
-        assertFalse(refused("GET", "http://127.0.0.1:1633/chequebook/address"))
-        assertFalse(refused("POST", "http://127.0.0.1:1633/bzz?name=a.txt"))
-        assertFalse(refused("POST", "http://127.0.0.1:1633/bytes"))
-        assertFalse(refused("POST", "http://127.0.0.1:1633/soc/ab/cd"))
-        assertFalse(refused("POST", "http://127.0.0.1:1633/feeds/ab/cd"))
-        assertFalse(refused("OPTIONS", "http://127.0.0.1:1633/bzz"))
-        assertFalse(refused("POST", "http://127.0.0.1:1633/"))
-        assertFalse(refused("POST", "http://127.0.0.1:1633"))
+    fun `the node's own API is refused for reads too`() {
+        for (path in listOf(
+            "/addresses", "/wallet", "/stamps", "/stamps/abc", "/stamps/abc/buckets",
+            "/chequebook/address", "/chequebook/balance", "/chequebook/cheque",
+            "/balances", "/balances/ab", "/consumed", "/settlements", "/timesettlements",
+            "/peers", "/topology", "/node", "/status", "/chainstate", "/batches",
+            "/pins", "/pins/check", "/tags", "/tags/1", "/grantee/ab", "/envelope/ab",
+            "/v0/manifest/ab", "/", "", "?x=1", "#bzz", "/some-future-endpoint",
+        )) {
+            for (method in listOf("GET", "HEAD", "OPTIONS")) {
+                assertTrue("$method $path", refused(method, "http://127.0.0.1:1633$path"))
+            }
+        }
+    }
+
+    @Test
+    fun `the dapp surface stays open`() {
+        for ((method, path) in listOf(
+            "GET" to "/bzz/ab/index.html",
+            "HEAD" to "/bzz/ab",
+            "POST" to "/bzz?name=a.txt",
+            "OPTIONS" to "/bzz",
+            "GET" to "/bytes/ab",
+            "POST" to "/bytes",
+            "GET" to "/chunks/ab",
+            "POST" to "/chunks",
+            "GET" to "/soc/ab/cd",
+            "POST" to "/soc/ab/cd",
+            "GET" to "/feeds/ab/cd",
+            "POST" to "/feeds/ab/cd",
+            "POST" to "/pss/send/ab/cd",
+            "GET" to "/gsoc/subscribe/ab",
+            "GET" to "/health",
+            "GET" to "/readiness",
+            "GET" to "/BZZ/ab",
+            "GET" to "//bytes/ab",
+        )) {
+            assertFalse("$method $path", refused(method, "http://127.0.0.1:1633$path"))
+        }
     }
 
     @Test
@@ -50,6 +78,8 @@ class NodeChainWritesTest {
             "127.0.0.1.nip.io", "anything.example", "user:pw@127.0.0.1",
         )) {
             assertTrue(host, refused("POST", "http://$host:1633/stamps/1/17"))
+            assertTrue(host, refused("GET", "http://$host:1633/wallet"))
+            assertFalse(host, refused("GET", "http://$host:1633/bzz/ab"))
         }
         assertTrue(refused("POST", "https://127.0.0.1:1633/stamps/1/17"))
         assertTrue(refused("POST", "http://127.0.0.1:01633/stamps/1/17"))
@@ -61,6 +91,8 @@ class NodeChainWritesTest {
         assertFalse(refused("POST", "http://127.0.0.1:1634/stamps/1/17"))
         assertFalse(refused("POST", "https://bee.example/stamps/1/17"))
         assertFalse(refused("POST", "http://127.0.0.1:16330/stamps/1/17"))
+        assertFalse(refused("GET", "http://127.0.0.1:5001/api/v0/id"))
+        assertFalse(refused("GET", "https://bee.example/wallet"))
         assertFalse(refused("POST", "http://127.0.0.1:99999999999999/stamps/1/17"))
         assertFalse(refused("POST", "ws://127.0.0.1:1633/stamps/1/17"))
         assertFalse(refused("POST", "not a url"))
@@ -77,8 +109,12 @@ class NodeChainWritesTest {
         )) {
             assertTrue(path, refused("POST", "http://127.0.0.1:1633$path"))
         }
-        // Broken escapes decode as themselves.
-        assertFalse(refused("POST", "http://127.0.0.1:1633/%zzstamps"))
-        assertFalse(refused("POST", "http://127.0.0.1:1633/%"))
+        for (path in listOf("/%61ddresses", "/WALLET", "//addresses", "/./wallet", "/%2e%2e/addresses")) {
+            assertTrue(path, refused("GET", "http://127.0.0.1:1633$path"))
+        }
+        // Broken escapes decode as themselves, which isn't the dapp surface either.
+        assertTrue(refused("POST", "http://127.0.0.1:1633/%zzstamps"))
+        assertTrue(refused("POST", "http://127.0.0.1:1633/%"))
+        assertTrue(refused("GET", "http://127.0.0.1:1633/%zzbzz/ab"))
     }
 }
