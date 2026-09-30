@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -18,6 +19,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -50,6 +54,11 @@ internal fun PageRow(
     leadingIcon: ImageVector? = null,
     thirdLine: String? = null,
     enabled: Boolean = true,
+    // Set for a row whose [trailing] is a switch: the row is then one
+    // switch to TalkBack — "Title, subtitle, switch, on" — instead of a
+    // button next to an unlabelled switch (#279). The trailing [Switch]
+    // takes `onCheckedChange = null`; the row's tap flips it via [onClick].
+    checked: Boolean? = null,
     trailing: (@Composable RowScope.() -> Unit)? = null,
 ) {
     val alpha = if (enabled) 1f else 0.45f
@@ -67,7 +76,18 @@ internal fun PageRow(
             .fillMaxWidth()
             .clip(shape)
             .let { if (bgColor != null) it.background(bgColor) else it }
-            .clickable(enabled = enabled, onClick = onClick)
+            .let {
+                if (checked != null) {
+                    it.toggleable(
+                        value = checked,
+                        enabled = enabled,
+                        role = Role.Switch,
+                        onValueChange = { onClick() },
+                    )
+                } else {
+                    it.clickable(enabled = enabled, onClick = onClick)
+                }
+            }
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -79,6 +99,11 @@ internal fun PageRow(
             )
             Spacer(Modifier.width(12.dp))
         }
+        // A listed row (a history entry, a bookmark) is one line per
+        // field, its URL cut short like any browser's. An inset row is a
+        // setting: its name and state wrap instead, so a large font scale
+        // doesn't cut them to "Search en…" / "Not set up · …" (#279).
+        val lines = if (style == PageRowStyle.Listed) 1 else Int.MAX_VALUE
         Column(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -87,14 +112,14 @@ internal fun PageRow(
                 title,
                 fontWeight = FontWeight.Medium,
                 color = onSurface,
-                maxLines = 1,
+                maxLines = lines,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
                 subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = onSurfaceVariant,
-                maxLines = 1,
+                maxLines = lines,
                 overflow = TextOverflow.Ellipsis,
             )
             if (thirdLine != null) {
@@ -111,3 +136,24 @@ internal fun PageRow(
         }
     }
 }
+
+/**
+ * A row holding a label and a [androidx.compose.material3.Switch]: the
+ * whole row is the switch, so TalkBack reads the label, the role and the
+ * state as one control, and the row's tap toggles it (#279). Put the
+ * [androidx.compose.material3.Switch] inside with `onCheckedChange = null`.
+ *
+ * [label] names the switch where the row's own text is a status ("Running")
+ * rather than what the switch turns on and off.
+ */
+internal fun Modifier.switchRow(
+    checked: Boolean,
+    onCheckedChange: ((Boolean) -> Unit)?,
+    enabled: Boolean = true,
+    label: String? = null,
+): Modifier = toggleable(
+    value = checked,
+    enabled = enabled && onCheckedChange != null,
+    role = Role.Switch,
+    onValueChange = { onCheckedChange?.invoke(it) },
+).let { if (label != null) it.semantics { contentDescription = label } else it }

@@ -688,12 +688,12 @@ private fun SendReviewSection(
         Spacer(Modifier.height(8.dp))
     }
     ObscuredTapNotice(tap)
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        OutlinedButton(onClick = onEdit, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Edit") }
+    SheetButtonRow {
+        OutlinedButton(onClick = onEdit, enabled = !busy) { Text("Edit") }
         Button(
             onClick = { if (guard.accepts()) onConfirm() },
             enabled = armed && !busy,
-            modifier = Modifier.weight(1f).protectedPress(tap),
+            modifier = Modifier.protectedPress(tap),
         ) {
             if (busy) {
                 CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))

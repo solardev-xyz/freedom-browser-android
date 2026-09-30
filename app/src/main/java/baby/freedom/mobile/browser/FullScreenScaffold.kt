@@ -22,6 +22,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
@@ -64,7 +66,10 @@ internal fun FullScreenScaffold(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier
                     .weight(1f)
-                    .padding(start = 8.dp),
+                    .padding(start = 8.dp)
+                    // The page's name: TalkBack's heading navigation
+                    // starts here (#279).
+                    .semantics { heading() },
             )
             trailing()
             IconButton(onClick = onDismiss, shapes = IconButtonDefaults.shapes()) {

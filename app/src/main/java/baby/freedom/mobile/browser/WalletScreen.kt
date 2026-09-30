@@ -2042,18 +2042,17 @@ private fun RecoveryPhrasePage(
                     } else {
                         PhraseGrid(shown)
                         Spacer(Modifier.height(12.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        SheetButtonRow {
                             OutlinedButton(
                                 onClick = {
                                     PhraseClipboard.copy(context, shown)
                                 },
-                                modifier = Modifier.weight(1f),
                             ) {
                                 Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
                                 Text(if (copied) "Copied" else "Copy")
                             }
-                            OutlinedButton(onClick = hide, modifier = Modifier.weight(1f)) {
+                            OutlinedButton(onClick = hide) {
                                 Icon(Icons.Filled.VisibilityOff, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
                                 Text("Hide")

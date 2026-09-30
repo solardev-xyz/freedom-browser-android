@@ -196,13 +196,22 @@ private fun BookmarkRow(
         subtitle = entry.url,
         onClick = onClick,
         // The drag has no TalkBack equivalent, so its moves are offered
-        // as accessibility actions (the ⋮ menu has them too).
+        // as accessibility actions (the ⋮ menu has them too) — with Edit
+        // and Remove, so the whole menu is on the row itself (#279).
         modifier = modifier.semantics {
-            customActions = moves.map { (label, afterId) ->
+            customActions = listOf(
+                CustomAccessibilityAction("Edit") {
+                    onEdit()
+                    true
+                },
+            ) + moves.map { (label, afterId) ->
                 CustomAccessibilityAction(label) {
                     onMove(afterId)
                     true
                 }
+            } + CustomAccessibilityAction("Remove") {
+                onRemove()
+                true
             }
         },
         // The drag handle: pressing here and dragging moves the row
@@ -210,10 +219,10 @@ private fun BookmarkRow(
         leadingIcon = Icons.Filled.DragIndicator,
         trailing = {
             Box {
+                // Material's own size: a full 48 dp target (#279).
                 IconButton(
                     onClick = { menuOpen = true },
                     shapes = IconButtonDefaults.shapes(),
-                    modifier = Modifier.size(36.dp),
                 ) {
                     Icon(
                         Icons.Filled.MoreVert,

@@ -369,16 +369,16 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
             }
             Spacer(Modifier.height(16.dp))
             ObscuredTapNotice(tap)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            SheetButtonRow {
                 OutlinedButton(
                     onClick = ::reject,
                     enabled = armed && !busy,
-                    modifier = Modifier.weight(1f).testTag("swarm-reject"),
+                    modifier = Modifier.testTag("swarm-reject"),
                 ) { Text("Reject") }
                 Button(
                     onClick = ::approve,
                     enabled = armed && !busy,
-                    modifier = Modifier.weight(1f).protectedPress(tap).testTag("swarm-approve"),
+                    modifier = Modifier.protectedPress(tap).testTag("swarm-approve"),
                 ) {
                     if (busy) {
                         CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))

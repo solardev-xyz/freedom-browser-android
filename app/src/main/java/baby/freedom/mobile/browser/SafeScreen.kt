@@ -782,9 +782,9 @@ private fun SafeCallReview(
     notice?.let { FieldText(it, error = false) }
     error?.let { FieldText(it, error = true) }
     ObscuredTapNotice(tap)
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        OutlinedButton(onClick = onCancel, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Cancel") }
-        Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy, modifier = Modifier.weight(1f).protectedPress(tap)) {
+    SheetButtonRow {
+        OutlinedButton(onClick = onCancel, enabled = !busy) { Text("Cancel") }
+        Button(onClick = { if (guard.accepts()) onConfirm() }, enabled = armed && !busy, modifier = Modifier.protectedPress(tap)) {
             if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Confirm and send")
         }
     }

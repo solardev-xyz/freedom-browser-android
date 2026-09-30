@@ -30,9 +30,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.TextAutoSize
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
@@ -118,6 +121,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.semantics.traversalIndex
 import androidx.compose.ui.state.ToggleableState
@@ -2144,6 +2148,9 @@ internal fun CapsuleLoadTrace(state: BrowserState, modifier: Modifier = Modifier
     val sweep: State<Float>? = if (state.resolving) rememberCapsuleSweep() else null
     val progressColor = MaterialTheme.colorScheme.primary
     val progressStrokePx = with(LocalDensity.current) { CapsuleProgressStroke.toPx() }
+    // No semantics of its own: TalkBack hears the load on the address
+    // bar ([capsuleLoadStateDescription]). A node here, drawn over the
+    // field, would hide the field and its controls from accessibility.
     Box(
         modifier = modifier.drawWithCache {
             // The outline only changes when the capsule's size does, so
@@ -2309,6 +2316,11 @@ private fun AddressField(
     val focusRequester = remember { FocusRequester() }
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    // In tens of percent — coarse on purpose, so a ticking load
+    // recomposes this a handful of times while the trace itself still
+    // redraws on every tick (#279).
+    val loadTenths by remember(state) { derivedStateOf { state.progress.coerceIn(0, 100) / 10 } }
+    val loadState = if (loading) capsuleLoadStateDescription(state.resolving, loadTenths) else null
     // Focus asked for from the keyboard (Ctrl+L): the same as the tap
     // that opens the editor below.
     LaunchedEffect(focusRequested) {
@@ -2632,11 +2644,8 @@ private fun AddressField(
                                 innerTextField()
                             }
                             if (showPlaceholder) {
-                                Text(
-                                    text = "Search or type URL",
+                                AddressPlaceholder(
                                     color = colors.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
                                     // Centred while resting, for the same
                                     // reason the domain it stands in for is:
                                     // the split bar's field is symmetric, and
@@ -2732,6 +2741,20 @@ private fun AddressField(
             Box(
                 modifier = Modifier
                     .matchParentSize()
+                    // The surface is what TalkBack lands on for the
+                    // field, and it has no text of its own: name it, say
+                    // a private tab (the sighted user has the tint), and
+                    // on the home tab carry the placeholder the sighted
+                    // user reads (#279). The domain is its own node,
+                    // read just before (see [CapsuleOrderLabel]).
+                    .semantics {
+                        contentDescription = addressBarDescription(
+                            private = state.private,
+                            empty = restingLabel.isEmpty(),
+                        )
+                        // The progress the trace draws on the outline.
+                        loadState?.let { stateDescription = it }
+                    }
                     .combinedClickable(
                         interactionSource = pillInteractionSource,
                         // No ripple: the pill is a painted bubble, and a
@@ -3033,9 +3056,14 @@ private fun OverflowMenuButton(
                     // its widest child's natural width. Without
                     // this, [DropdownMenuItem] uses fillMaxWidth
                     // internally and the popup grows to the window.
+                    // Scrolls: at a large font scale and display size
+                    // the menu is taller than the space above the bar,
+                    // and its last rows (Settings, Nodes) were cut off
+                    // with no way to reach them (#279).
                     Column(
                         modifier = Modifier
                             .width(IntrinsicSize.Max)
+                            .verticalScroll(rememberScrollState())
                             .padding(vertical = 8.dp),
                     ) {
                         // How the page's name was checked (#97) — the
@@ -3272,12 +3300,12 @@ private fun OverflowMenuButton(
                                 onOpenSettings()
                             },
                         )
+                        val peersLabel = if (peerCount == 1L) "1 peer" else "$peerCount peers"
                         DropdownMenuItem(
-                            text = {
-                                MenuItemLabel(
-                                    if (peerCount == 1L) "1 peer" else "$peerCount peers",
-                                )
-                            },
+                            text = { MenuItemLabel(peersLabel) },
+                            // The row's text is only the count; say where
+                            // it goes (#279).
+                            modifier = Modifier.semantics { contentDescription = "Nodes, $peersLabel" },
                             leadingIcon = {
                                 Icon(
                                     painter = painterResource(baby.freedom.mobile.R.drawable.ic_nodes),
@@ -3327,18 +3355,30 @@ private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
                 .let { if (enabled) it else it.copy(alpha = disabledAlpha) },
         )
         Spacer(Modifier.width(12.dp))
+        // Takes what − / level / + leave, and steps its type down (not
+        // below 10 dp) rather than squeezing the controls out of their 48 dp
+        // when a large font meets a large display size (#279).
+        val labelStyle = MaterialTheme.typography.labelLarge
+        val labelFloor = with(LocalDensity.current) { 10.dp.toSp() }
         Text(
             text = "Zoom",
-            style = MaterialTheme.typography.labelLarge,
+            style = labelStyle,
             color = MaterialTheme.colorScheme.onSurface
                 .let { if (enabled) it else it.copy(alpha = disabledAlpha) },
-            modifier = Modifier.padding(end = 16.dp),
+            maxLines = 1,
+            autoSize = TextAutoSize.StepBased(
+                minFontSize = if (labelFloor.value < labelStyle.fontSize.value) labelFloor else labelStyle.fontSize,
+                maxFontSize = labelStyle.fontSize,
+            ),
+            modifier = Modifier
+                .weight(1f)
+                .padding(end = 16.dp),
         )
-        Spacer(Modifier.weight(1f))
+        // − and + take Material's full 48 dp target (#279).
         IconButton(
             onClick = { onZoom(ZoomAction.Out) },
             enabled = enabled && shown > PageZoomLevels.MIN,
-            modifier = Modifier.size(40.dp),
+            modifier = Modifier.size(48.dp),
         ) {
             Icon(Icons.Filled.Remove, contentDescription = "Zoom out")
         }
@@ -3386,7 +3426,7 @@ private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
         IconButton(
             onClick = { onZoom(ZoomAction.In) },
             enabled = enabled && shown < PageZoomLevels.MAX,
-            modifier = Modifier.size(40.dp),
+            modifier = Modifier.size(48.dp),
         ) {
             Icon(Icons.Filled.Add, contentDescription = "Zoom in")
         }
@@ -3438,5 +3478,73 @@ internal class AnchoredAboveProvider(
         val y = (anchor.top - gapPx - popupContentSize.height)
             .coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))
         return IntOffset(x, y)
+    }
+}
+
+/**
+ * What TalkBack says of a load on the address bar (#279): the phase the
+ * capsule's trace draws — the name still resolving, or a percentage in
+ * tens.
+ */
+internal fun capsuleLoadStateDescription(resolving: Boolean, tenths: Int): String =
+    if (resolving) "Resolving name" else "Loading, ${tenths * 10}%"
+
+/** TalkBack's name for the address bar's tap surface (#279). */
+internal fun addressBarDescription(private: Boolean, empty: Boolean): String =
+    listOfNotNull(
+        "Address bar",
+        "private tab".takeIf { private },
+        "search or type URL".takeIf { empty },
+    ).joinToString(", ")
+
+/** The address bar's placeholder, longest first: [AddressPlaceholder] shows the longest that fits. */
+internal val AddressPlaceholders = listOf("Search or type URL", "Search or URL", "Search")
+
+/**
+ * The smallest the placeholder's type goes before a shorter wording
+ * takes over — in dp, so it holds at every font scale.
+ */
+private val AddressPlaceholderMinSize = 12.dp
+
+/**
+ * The empty address bar's placeholder, readable at any font scale (#279).
+ *
+ * The field's box is only as wide as the bar leaves it, and at a large
+ * font scale the whole wording used to be cut to "Search o…" — the one
+ * word that says what the field is for gone. So the type steps down
+ * (not below [AddressPlaceholderMinSize]) until the wording fits, and
+ * where even that is too wide, a shorter wording from
+ * [AddressPlaceholders] is used instead of an ellipsis. TalkBack reads
+ * the whole wording off the address bar's own description either way.
+ */
+@Composable
+private fun AddressPlaceholder(
+    color: Color,
+    textAlign: TextAlign,
+    modifier: Modifier = Modifier,
+) {
+    BoxWithConstraints(modifier) {
+        val measurer = rememberTextMeasurer()
+        val style = LocalTextStyle.current
+        val density = LocalDensity.current
+        val floor = with(density) { AddressPlaceholderMinSize.toSp() }
+        val largest = if (style.fontSize.isSp) style.fontSize else floor
+        val smallest = if (floor.value < largest.value) floor else largest
+        val available = constraints.maxWidth
+        val text = remember(available, style, smallest, density) {
+            val atFloor = style.copy(fontSize = smallest)
+            AddressPlaceholders.firstOrNull {
+                measurer.measure(it, atFloor, maxLines = 1, softWrap = false).size.width <= available
+            } ?: AddressPlaceholders.last()
+        }
+        Text(
+            text = text,
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = textAlign,
+            autoSize = TextAutoSize.StepBased(minFontSize = smallest, maxFontSize = largest),
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }

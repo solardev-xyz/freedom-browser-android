@@ -41,6 +41,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -322,8 +324,15 @@ internal fun RpcProvidersSection(
                 // Switching off the last endpoint would leave nothing
                 // to resolve with.
                 val locked = on && !config.canDisablePublic(url)
+                val onToggle: (Boolean) -> Unit = { enable ->
+                    scope.launch {
+                        report(settings.setPublicEnsRpcEnabled(url, enable))
+                    }
+                }
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .switchRow(checked = on, onCheckedChange = onToggle, enabled = !locked),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
@@ -351,11 +360,7 @@ internal fun RpcProvidersSection(
                     Switch(
                         checked = on,
                         enabled = !locked,
-                        onCheckedChange = { enable ->
-                            scope.launch {
-                                report(settings.setPublicEnsRpcEnabled(url, enable))
-                            }
-                        },
+                        onCheckedChange = null,
                     )
                 }
             }
@@ -435,7 +440,7 @@ private fun WarningText(text: String) {
 
 @Composable
 private fun SubHeader(text: String) {
-    Text(text, fontWeight = FontWeight.Medium)
+    Text(text, fontWeight = FontWeight.Medium, modifier = Modifier.semantics { heading() })
 }
 
 @Composable
@@ -456,7 +461,9 @@ private fun SwitchRow(
     onCheckedChange: (Boolean) -> Unit,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .switchRow(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
@@ -464,7 +471,7 @@ private fun SwitchRow(
             HelpText(help)
         }
         Spacer(Modifier.width(8.dp))
-        Switch(checked = checked, enabled = enabled, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, enabled = enabled, onCheckedChange = null)
     }
 }
 

@@ -233,6 +233,32 @@ class ApprovalTapjackDeviceTest {
         assertTrue(answered(request, withinMs = 2_000) is EthAnswer.Approved)
     }
 
+    /**
+     * TalkBack's double-tap: no touch reaches the app, only an
+     * `ACTION_CLICK` on the button's accessibility node (#279, the #160
+     * lesson). Returns whether the node took the action.
+     */
+    private fun accessibilityClick(label: String): Boolean {
+        val roots = automation.windows.mapNotNull { it.root } + listOfNotNull(automation.rootInActiveWindow)
+        val button = roots.firstNotNullOfOrNull { find(it, label) }?.parent
+            ?: throw AssertionError("no \"$label\" button on screen")
+        return button.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
+    @Test
+    fun aTalkBackClickBeforeTheSheetArmsDoesNotSign() = showing(signAsk()) { request ->
+        val label = ethApprovalCopy(signAsk()).approve
+        assertTrue(onScreen(label))
+        // Well inside Sign's protection period: the button is still disabled
+        // to accessibility too, so the click is refused rather than queued.
+        accessibilityClick(label)
+        assertEquals(null, answered(request, withinMs = 300))
+        // Armed, the same double-tap signs.
+        SystemClock.sleep(PromptTapGuard.SPEND_PROTECTION_MS * 2)
+        assertTrue(accessibilityClick(label))
+        assertTrue(answered(request, withinMs = 2_000) is EthAnswer.Approved)
+    }
+
     @Test
     fun aSignSheetSignsOnceItHasBeenUpAndLeftAlone() = showing(signAsk()) { request ->
         at(1_600)
