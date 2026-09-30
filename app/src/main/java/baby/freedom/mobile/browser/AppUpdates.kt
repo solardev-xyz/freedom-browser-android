@@ -12,6 +12,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -19,11 +20,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 private const val TAG = "AppUpdates"
@@ -124,6 +127,38 @@ internal fun updateCheckDue(lastCheck: Long?, now: Long, period: Long = AppUpdat
     lastCheck == null || (now - lastCheck) !in 0 until period
 
 /**
+ * How long the schedule sleeps before it looks at the wall clock again,
+ * with the last check at [lastCheck] and not yet due at [now]: until it
+ * is due, but never more than [poll]. A coroutine `delay` runs on the
+ * monotonic clock, which stops while the phone is in deep sleep, so one
+ * long delay for "the rest of the day" could last days of wall-clock
+ * time on a mostly-asleep phone; waking every [poll] of awake time (and
+ * whenever the app comes to the foreground, [AppUpdates.onAppForeground])
+ * re-reads the wall clock instead.
+ */
+internal fun updateCheckWaitMs(
+    lastCheck: Long,
+    now: Long,
+    period: Long = AppUpdates.CHECK_PERIOD_MS,
+    poll: Long = AppUpdates.POLL_MS,
+): Long = (period - (now - lastCheck)).coerceIn(1L, poll)
+
+/**
+ * Claim the single check slot for a check about to start: `true`, with
+ * [AppUpdateState.checking] already set, unless a check is already
+ * running (or claimed) or the build is a store install. Set in the same
+ * atomic step as the test, so two quick taps on **Check now**, before a
+ * recomposition disables the button, start one check, not two.
+ */
+internal fun MutableStateFlow<AppUpdateState>.claimCheck(): Boolean {
+    while (true) {
+        val s = value
+        if (s.store != null || s.checking) return false
+        if (compareAndSet(s, s.copy(checking = true))) return true
+    }
+}
+
+/**
  * The installers that are app stores: an install from one of these is
  * kept up to date by the store, so the app doesn't check GitHub
  * (Freedom isn't in any today; these are the ones it could come from).
@@ -208,6 +243,12 @@ internal object AppUpdates {
     /** At most one scheduled check a day. */
     const val CHECK_PERIOD_MS = 24 * 60 * 60_000L
 
+    /**
+     * The longest the schedule sleeps (in awake time) before re-reading
+     * the wall clock ([updateCheckWaitMs]).
+     */
+    const val POLL_MS = 60 * 60_000L
+
     /** Let a cold start settle before the first scheduled check. */
     private const val FIRST_DELAY_MS = 30_000L
 
@@ -217,9 +258,6 @@ internal object AppUpdates {
     /** The whole request, however slowly the server answers. */
     private const val TOTAL_TIMEOUT_MS = 20_000L
 
-    /** A release body is a few KB; anything this big isn't one. */
-    private const val MAX_BODY_BYTES = 1 shl 20
-
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _state = MutableStateFlow(AppUpdateState())
@@ -227,6 +265,9 @@ internal object AppUpdates {
 
     /** One check at a time: the scheduled one and Check now share it. */
     private val mutex = Mutex()
+
+    /** Wakes the schedule to re-read the wall clock ([onAppForeground]). */
+    private val wake = Channel<Unit>(Channel.CONFLATED)
 
     @Volatile
     private var file: File? = null
@@ -277,19 +318,35 @@ internal object AppUpdates {
                     val now = System.currentTimeMillis()
                     val last = _state.value.lastCheckedAt
                     if (!updateCheckDue(last, now)) {
-                        delay(CHECK_PERIOD_MS - (now - checkNotNull(last)))
+                        withTimeoutOrNull(updateCheckWaitMs(checkNotNull(last), now)) { wake.receive() }
                         continue
                     }
-                    checkNow()
+                    if (_state.claimCheck()) checkNow()
+                    // Else a Check now is running: it stamps the time, and
+                    // the loop reads that stamp once the check is done.
+                    else _state.first { !it.checking }
                 }
             }
         }
     }
 
-    /** Settings' **Check now**: a check whatever the schedule (not for a store install). */
+    /**
+     * Settings' **Check now**: a check whatever the schedule (not for a
+     * store install). A tap while a check is already running (the button
+     * not yet disabled) starts nothing ([claimCheck]).
+     */
     fun checkForUpdates() {
-        if (_state.value.store != null) return
+        if (!_state.claimCheck()) return
         scope.launch { checkNow() }
+    }
+
+    /**
+     * The app came to the foreground: let the schedule re-read the wall
+     * clock now, so a day that passed while the phone slept (and the
+     * monotonic clock with it) is noticed when the user is back.
+     */
+    fun onAppForeground() {
+        wake.trySend(Unit)
     }
 
     /** Close the home notice for [release]; a later release shows again. */
@@ -298,9 +355,17 @@ internal object AppUpdates {
         scope.launch { save() }
     }
 
-    private suspend fun checkNow(): UpdateCheckOutcome = mutex.withLock {
-        _state.update { it.copy(checking = true) }
-        try {
+    /** One check; the caller has claimed [AppUpdateState.checking] ([claimCheck]). */
+    private suspend fun checkNow(): UpdateCheckOutcome = try {
+        mutex.withLock { runCheck() }
+    } catch (e: CancellationException) {
+        // Also when cancelled still waiting for the lock: release the claim.
+        _state.update { it.copy(checking = false) }
+        throw e
+    }
+
+    private suspend fun runCheck(): UpdateCheckOutcome {
+        return try {
             // Stamped before the request, whatever it answers, so the
             // schedule never asks GitHub more than once a day — a check
             // that failed waits for tomorrow's, or for Check now.
@@ -334,52 +399,18 @@ internal object AppUpdates {
         }
     }
 
-    private sealed interface Fetched {
-        class Body(val text: String) : Fetched
-        class Error(val reason: String) : Fetched
-    }
-
-    /**
-     * The latest-release JSON. Bounded as a whole by [TOTAL_TIMEOUT_MS]
-     * through [withHardDeadline]: on the deadline the connection is
-     * closed from another thread than the one stuck in the read.
-     */
-    private suspend fun fetch(): Fetched = withHardDeadline(TOTAL_TIMEOUT_MS) { guard ->
-        val conn = URL(LATEST_API).openConnection() as HttpsURLConnection
-        conn.connectTimeout = CONNECT_TIMEOUT_MS
-        conn.readTimeout = READ_TIMEOUT_MS
-        conn.instanceFollowRedirects = false
-        conn.useCaches = false
-        conn.setRequestProperty("User-Agent", "Freedom")
-        conn.setRequestProperty("Accept", "application/vnd.github+json")
-        conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-        if (!guard.register { conn.disconnect() }) return@withHardDeadline null
-        try {
-            val code = conn.responseCode
-            if (code != HttpURLConnection.HTTP_OK) {
-                return@withHardDeadline Fetched.Error(
-                    if (code == 403 || code == 429) "GitHub is limiting requests; try again later"
-                    else "GitHub answered HTTP $code",
-                )
-            }
-            val bytes = conn.inputStream.use { input ->
-                val out = java.io.ByteArrayOutputStream()
-                val buf = ByteArray(8192)
-                while (true) {
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    out.write(buf, 0, n)
-                    if (out.size() > MAX_BODY_BYTES) throw IOException("answer too large")
-                }
-                out.toByteArray()
-            }
-            Fetched.Body(bytes.toString(Charsets.UTF_8))
-        } catch (e: IOException) {
-            Fetched.Error("couldn't reach GitHub")
-        } finally {
-            conn.disconnect()
+    /** The latest-release JSON, bounded as a whole by [TOTAL_TIMEOUT_MS] ([fetchLatestRelease]). */
+    private suspend fun fetch(): Fetched = fetchLatestRelease(TOTAL_TIMEOUT_MS) {
+        (URL(LATEST_API).openConnection() as HttpsURLConnection).apply {
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = READ_TIMEOUT_MS
+            instanceFollowRedirects = false
+            useCaches = false
+            setRequestProperty("User-Agent", "Freedom")
+            setRequestProperty("Accept", "application/vnd.github+json")
+            setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
         }
-    } ?: Fetched.Error("GitHub took too long to answer")
+    }
 
     private class Saved(val checkedAt: Long?, val latest: LatestRelease?, val dismissed: String?)
 
@@ -424,3 +455,62 @@ internal fun saveAppUpdateState(f: File, current: () -> AppUpdateState) {
         if (!tmp.renameTo(f)) throw IOException("rename failed")
     }
 }
+
+/** What [fetchLatestRelease] got: the body, or why not (for the Settings row). */
+internal sealed interface Fetched {
+    class Body(val text: String) : Fetched
+    class Error(val reason: String) : Fetched
+}
+
+/** [Fetched.Error]'s reason when the deadline, and only the deadline, ended the request. */
+internal const val FETCH_TIMED_OUT = "GitHub took too long to answer"
+
+/**
+ * GET the connection [open] builds (not yet connected) and read its
+ * body, bounded as a whole by [timeoutMs] through [withHardDeadline]: on
+ * the deadline the connection is closed from another thread than the
+ * one stuck in the read. Every failure inside the request — a refused
+ * connection, a `RuntimeException` from `openConnection()` or
+ * `responseCode` — is answered inside the block as its own
+ * [Fetched.Error], so the only `null` [withHardDeadline] can hand back
+ * is the deadline itself, and only that reads [FETCH_TIMED_OUT].
+ */
+internal suspend fun fetchLatestRelease(timeoutMs: Long, open: () -> HttpURLConnection): Fetched =
+    withHardDeadline(timeoutMs) { guard ->
+        try {
+            val conn = open()
+            // Refused only once the deadline has abandoned the block.
+            if (!guard.register { conn.disconnect() }) return@withHardDeadline null
+            try {
+                val code = conn.responseCode
+                if (code != HttpURLConnection.HTTP_OK) {
+                    return@withHardDeadline Fetched.Error(
+                        if (code == 403 || code == 429) "GitHub is limiting requests; try again later"
+                        else "GitHub answered HTTP $code",
+                    )
+                }
+                val bytes = conn.inputStream.use { input ->
+                    val out = java.io.ByteArrayOutputStream()
+                    val buf = ByteArray(8192)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        if (out.size() > MAX_RELEASE_BODY_BYTES) throw IOException("answer too large")
+                    }
+                    out.toByteArray()
+                }
+                Fetched.Body(bytes.toString(Charsets.UTF_8))
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: IOException) {
+            Fetched.Error("couldn't reach GitHub")
+        } catch (e: Throwable) {
+            Log.w(TAG, "update check request failed", e)
+            Fetched.Error("the request failed (${e.javaClass.simpleName})")
+        }
+    } ?: Fetched.Error(FETCH_TIMED_OUT)
+
+/** A release body is a few KB; anything this big isn't one. */
+private const val MAX_RELEASE_BODY_BYTES = 1 shl 20

@@ -698,6 +698,8 @@ class MainActivity : ComponentActivity() {
         }
         runCatching { binder?.onAppForeground() }
         runCatching { myotisBinder?.onAppForeground() }
+        // A daily update check that fell due while the phone slept (#272).
+        AppUpdates.onAppForeground()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

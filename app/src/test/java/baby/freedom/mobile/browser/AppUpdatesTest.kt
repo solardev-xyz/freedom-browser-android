@@ -4,6 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 import org.json.JSONObject
 import java.nio.file.Files
@@ -238,5 +240,80 @@ class AppUpdatesTest {
         } finally {
             dir.deleteRecursively()
         }
+    }
+
+    /** A connection whose response code and body are whatever the test says. */
+    private class FakeConnection(
+        private val code: () -> Int,
+        private val body: () -> java.io.InputStream = { java.io.ByteArrayInputStream(ByteArray(0)) },
+    ) : java.net.HttpURLConnection(java.net.URL("https://api.github.com/")) {
+        @Volatile var disconnected = false
+        override fun getResponseCode(): Int = code()
+        override fun getInputStream(): java.io.InputStream = body()
+        override fun connect() {}
+        override fun usingProxy() = false
+        override fun disconnect() {
+            disconnected = true
+        }
+    }
+
+    private fun reason(f: Fetched) = (f as Fetched.Error).reason
+
+    @Test
+    fun `only the deadline reads as GitHub taking too long`() = runBlocking {
+        // A RuntimeException out of responseCode fails at once, and says so.
+        val thrown = fetchLatestRelease(5_000) { FakeConnection({ throw IllegalStateException("boom") }) }
+        assertEquals("the request failed (IllegalStateException)", reason(thrown))
+        // As does one out of opening the connection, before anything is registered.
+        val openFailed = fetchLatestRelease(5_000) { throw SecurityException("no") }
+        assertEquals("the request failed (SecurityException)", reason(openFailed))
+        // An I/O failure is a network one.
+        val io = fetchLatestRelease(5_000) { FakeConnection({ throw java.io.IOException("refused") }) }
+        assertEquals("couldn't reach GitHub", reason(io))
+        assertEquals("GitHub answered HTTP 500", reason(fetchLatestRelease(5_000) { FakeConnection({ 500 }) }))
+        assertEquals(
+            "GitHub is limiting requests; try again later",
+            reason(fetchLatestRelease(5_000) { FakeConnection({ 403 }) }),
+        )
+        val ok = fetchLatestRelease(5_000) {
+            FakeConnection({ 200 }, { java.io.ByteArrayInputStream(releaseJson().toByteArray()) })
+        }
+        assertEquals("v0.6.10", parseLatestRelease((ok as Fetched.Body).text)?.tag)
+        // A read that never ends: the deadline cuts it off, closing the connection.
+        val stalled = CountDownLatch(1)
+        lateinit var conn: FakeConnection
+        val started = System.nanoTime()
+        val slow = fetchLatestRelease(300) {
+            FakeConnection({ stalled.await(10, TimeUnit.SECONDS); 200 }).also { conn = it }
+        }
+        stalled.countDown()
+        assertEquals(FETCH_TIMED_OUT, reason(slow))
+        assertTrue((System.nanoTime() - started) / 1_000_000 < 5_000)
+        assertTrue(conn.disconnected)
+    }
+
+    @Test
+    fun `the schedule re-reads the wall clock at least hourly`() {
+        val day = AppUpdates.CHECK_PERIOD_MS
+        val hour = AppUpdates.POLL_MS
+        // Just checked: sleep an hour, not the rest of the day.
+        assertEquals(hour, updateCheckWaitMs(lastCheck = 0, now = 0))
+        // Twenty minutes to go: exactly those.
+        assertEquals(20 * 60_000L, updateCheckWaitMs(lastCheck = 0, now = day - 20 * 60_000L))
+        // Never zero or negative.
+        assertEquals(1L, updateCheckWaitMs(lastCheck = 0, now = day))
+    }
+
+    @Test
+    fun `two quick Check now taps claim one check`() {
+        val state = MutableStateFlow(AppUpdateState(installedName = "0.6.10"))
+        assertTrue(state.claimCheck())
+        assertTrue(state.value.checking)
+        // The second tap, before the button is disabled, starts nothing.
+        assertFalse(state.claimCheck())
+        state.value = state.value.copy(checking = false)
+        assertTrue(state.claimCheck())
+        // A store install never checks.
+        assertFalse(MutableStateFlow(AppUpdateState(store = "F-Droid")).claimCheck())
     }
 }
