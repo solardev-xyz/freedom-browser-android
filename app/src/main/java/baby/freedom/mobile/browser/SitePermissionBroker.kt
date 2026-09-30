@@ -52,12 +52,13 @@ class PermissionPrompt internal constructor(
  * Glue between WebView's permission callbacks, the user, Android's
  * runtime permissions, and the stores (#81). One per process.
  *
- * Flow of a request (camera/mic via `onPermissionRequest`, location via
+ * Flow of a request (camera/mic/MIDI SysEx via `onPermissionRequest`, location via
  * `onGeolocationPermissionsShowPrompt`, a link to another app via
  * [onExternalLink]):
  *
  *  1. Key it by the requesting origin ([permissionOriginKey]); a
- *     non-http(s) origin or a capability we don't prompt for is denied.
+ *     non-http(s) origin or a capability we don't prompt for is denied
+ *     — protected media (DRM, #267) with a notice saying why.
  *  2. Look up remembered + session decisions ([planFor]).
  *  3. Undecided → put a [PermissionPrompt] on the tab and wait. One
  *     prompt at a time per tab: requests queue behind a per-tab lock
@@ -127,6 +128,14 @@ class SitePermissionBroker private constructor(
     var onNoAppForLink: ((ExternalScheme) -> Unit)? = null
 
     /**
+     * Installed by [BrowserScreen]: the page on screen asked for protected
+     * media (DRM, #267), which was refused — say why its video won't
+     * play ([PROTECTED_MEDIA_NOTICE]). Once per site per run.
+     */
+    @Volatile
+    var onProtectedMediaRefused: (() -> Unit)? = null
+
+    /**
      * Set by [BrowserScreen]: the tab whose page is what's on screen —
      * the active tab, with no full-screen panel over it — or `null`.
      * Android's runtime-permission dialog names no site, so like the
@@ -163,16 +172,17 @@ class SitePermissionBroker private constructor(
 
     /** `WebChromeClient.onPermissionRequest` for [tab]. */
     fun onMediaRequest(tab: BrowserState, request: PermissionRequest) {
-        val byPermission = request.resources.orEmpty().mapNotNull { r ->
-            when (r) {
-                PermissionRequest.RESOURCE_VIDEO_CAPTURE -> SitePermission.CAMERA to r
-                PermissionRequest.RESOURCE_AUDIO_CAPTURE -> SitePermission.MICROPHONE to r
-                // Protected media (EME) and MIDI SysEx stay denied, as
-                // they were before this broker existed.
-                else -> null
-            }
-        }
+        val resources = request.resources.orEmpty()
+        val byPermission = resources.mapNotNull { r -> mediaResourcePermission(r)?.let { it to r } }
         val origin = permissionOriginKey(request.origin?.toString())
+        if (resources.any(::isProtectedMediaResource)) {
+            // Protected media is denied without a prompt (#267) — and so
+            // is anything asked for along with it, which WebView doesn't
+            // do (each kind comes as its own request).
+            request.deny()
+            noteProtectedMediaRefused(tab, origin)
+            return
+        }
         if (byPermission.isEmpty() || origin == null) {
             request.deny()
             return
@@ -185,6 +195,29 @@ class SitePermissionBroker private constructor(
             grant = { request.grant(byPermission.map { it.second }.toTypedArray()) },
             deny = { request.deny() },
         )
+    }
+
+    /**
+     * Origins already told this run that their protected media was refused
+     * ([onProtectedMediaRefused]), per tier: a streaming site asks on every
+     * video, and the notice needs saying once. The private tier's is
+     * forgotten with the private session ([onPrivateSessionEnded]).
+     */
+    private val protectedMediaNoticed = HashSet<String>()
+    private var privateProtectedMediaNoticed = HashSet<String>()
+
+    private fun noteProtectedMediaRefused(tab: BrowserState, origin: String?) {
+        // Only over the page that asked: a background tab's request isn't
+        // counted, so the notice comes when its page is on screen and asks.
+        if (!isOnScreen(tab.id)) return
+        // With no notice installed (between an Activity's teardown and its
+        // replacement's), nothing is said, so the site isn't counted as told:
+        // its next request, once one is installed, still gets the notice.
+        val notice = onProtectedMediaRefused ?: return
+        val noticed = if (tab.private) privateProtectedMediaNoticed else protectedMediaNoticed
+        // A non-http(s) origin (a `data:` frame, say) is noticed once for all of them.
+        if (!noticed.add(origin ?: "")) return
+        notice()
     }
 
     /** `WebChromeClient.onPermissionRequestCanceled`. */
@@ -268,15 +301,16 @@ class SitePermissionBroker private constructor(
      * What a tab's current document has to do with site permissions:
      * [origins] that asked for something from it (its own, or an
      * embedded frame's), what each of them was granted ([grants]:
-     * camera, microphone, location — per origin, since a frame's grant
+     * camera, microphone, location, MIDI SysEx — per origin, since a frame's grant
      * isn't the page's), and which of those the user has since removed
      * while the document still holds them ([revokedHeld], per origin
      * too) — from any tab's sheet or Settings, not only this tab's own
      * sheet ([noteRemoved]) — until the site is allowed them again, from
      * any tab of the tier ([noteAllowedAgain]). WebView can't take a
-     * grant back from a live document — a camera stream runs on, and a
+     * grant back from a live document — a camera stream runs on, a
      * location grant keeps answering the document's watches and new
-     * requests without asking — so the sheet keeps saying so, and
+     * requests without asking, and a `MIDIAccess` the page was given
+     * keeps working ([stillHeldAfterRemoval]) — so the sheet keeps saying so, and
      * offering a reload, however often it's closed and reopened over
      * this document.
      * [doc] is the tab's document number ([documents]), so a sheet opened
@@ -519,6 +553,7 @@ class SitePermissionBroker private constructor(
     /** The last private tab has closed (#86): forget its answers. */
     fun onPrivateSessionEnded() {
         privateSessionState.value = PermissionSession(embargoes = false)
+        privateProtectedMediaNoticed = HashSet()
     }
 
     // ---------------------------------------------------------------
@@ -765,7 +800,7 @@ class SitePermissionBroker private constructor(
         // Only device capabilities need anything from Android; a link to
         // another app needs nothing.
         val permissions = requested.filterIsInstance<SitePermission>()
-        fun held(p: SitePermission) = p.androidPermissions.any {
+        fun held(p: SitePermission) = androidPermissionsHeld(p) {
             ContextCompat.checkSelfPermission(appContext, it) == PackageManager.PERMISSION_GRANTED
         }
         if (permissions.all(::held)) return true

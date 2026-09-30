@@ -18,6 +18,7 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WebAsset
 import androidx.compose.material3.AlertDialog
@@ -44,6 +45,7 @@ internal fun sitePermissionIcon(capability: SiteCapability): ImageVector = when 
     SitePermission.CAMERA -> Icons.Filled.Videocam
     SitePermission.MICROPHONE -> Icons.Filled.Mic
     SitePermission.LOCATION -> Icons.Filled.LocationOn
+    SitePermission.MIDI -> Icons.Filled.Piano
     SitePermission.POPUPS -> Icons.Filled.WebAsset
     is ExternalScheme -> Icons.AutoMirrored.Filled.OpenInNew
 }
@@ -57,7 +59,7 @@ private val InUseGreen = Color(0xFF34A853)
 /**
  * The page's own **Site permissions** (#266), opened from the page menu
  * or the in-use indicator: every decision the site on screen holds —
- * camera, microphone, location, pop-ups, links to other apps, a
+ * camera, microphone, location, MIDI, pop-ups, links to other apps, a
  * dismissal block — and those of any frame inside the page that asked,
  * each with a × that removes it so the site has to ask again.
  *
@@ -71,8 +73,9 @@ private val InUseGreen = Color(0xFF34A853)
  * lists too.
  *
  * Removing the camera or microphone from a page that is using it, or
- * location from a page that was given it, doesn't take away what the
- * document already holds — WebView has no way to — so the sheet says so
+ * location or MIDI SysEx from a page that was given it (its `MIDIAccess`
+ * keeps working), doesn't take away what the document already holds —
+ * WebView has no way to ([stillHeldAfterRemoval]) — so the sheet says so
  * and offers a reload, which ends it — for as long as that document
  * holds it ([document], kept by the broker per document and per origin,
  * so reopening the sheet still says it).
@@ -89,7 +92,7 @@ fun PageSitePermissionsSheet(
     onDismiss: () -> Unit,
 ) {
     // Camera/microphone removed while the page kept using them, or a
-    // location it was given — kept with the tab's document, not this
+    // location or MIDI SysEx it was given — kept with the tab's document, not this
     // dialog, so it's still said after the sheet is closed and opened
     // again.
     val stillHeld = document?.stillHeld(inUse).orEmpty()

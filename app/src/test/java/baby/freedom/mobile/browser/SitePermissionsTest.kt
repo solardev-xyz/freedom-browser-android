@@ -730,6 +730,72 @@ class SitePermissionsTest {
     }
 
     @Test
+    fun `WebView resources map to camera, microphone and MIDI, protected media to none`() {
+        assertEquals(SitePermission.CAMERA, mediaResourcePermission(android.webkit.PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+        assertEquals(SitePermission.MICROPHONE, mediaResourcePermission(android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+        assertEquals(SitePermission.MIDI, mediaResourcePermission(android.webkit.PermissionRequest.RESOURCE_MIDI_SYSEX))
+        assertEquals(SitePermission.MIDI, mediaResourcePermission("android.webkit.resource.MIDI_SYSEX"))
+        assertNull(mediaResourcePermission(android.webkit.PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID))
+        assertNull(mediaResourcePermission("android.webkit.resource.SOMETHING_NEW"))
+        assertTrue(isProtectedMediaResource("android.webkit.resource.PROTECTED_MEDIA_ID"))
+        assertFalse(isProtectedMediaResource(android.webkit.PermissionRequest.RESOURCE_MIDI_SYSEX))
+    }
+
+    @Test
+    fun `MIDI is keyed like the desktop browser and needs nothing from Android`() {
+        assertEquals("midi", SitePermission.MIDI.key)
+        assertEquals(SitePermission.MIDI, SiteCapability.forKey("midi"))
+        assertEquals("send system-exclusive messages to your MIDI devices", describePermissionRequest(listOf(SitePermission.MIDI)))
+        // Only SysEx is gated — WebView lets any page use MIDI devices
+        // without asking — so the label must not claim the devices.
+        assertEquals("MIDI SysEx", SitePermission.MIDI.label)
+        // Nothing to hold, so never "refused by Android" (which denied it and
+        // raised the Android-settings snackbar before).
+        assertTrue(androidPermissionsHeld(SitePermission.MIDI) { false })
+        assertTrue(androidPermissionsHeld(SitePermission.POPUPS) { false })
+        assertFalse(androidPermissionsHeld(SitePermission.CAMERA) { false })
+        assertTrue(androidPermissionsHeld(SitePermission.LOCATION) { it == android.Manifest.permission.ACCESS_COARSE_LOCATION })
+    }
+
+    @Test
+    fun `MIDI goes through the same tiers and embargo as the camera`() {
+        val origin = "https://synth.example"
+        val session = PermissionSession()
+        assertEquals(
+            PermissionPlan.Ask(listOf(SitePermission.MIDI)),
+            planFor(origin, listOf(SitePermission.MIDI), emptyMap(), session),
+        )
+        assertEquals(
+            PermissionPlan.Grant,
+            planFor(origin, listOf(SitePermission.MIDI), mapOf(SitePermission.MIDI to PermissionDecision.ALLOW), session),
+        )
+        repeat(PermissionSession.DISMISS_EMBARGO_THRESHOLD) { session.dismiss(origin, SitePermission.MIDI) }
+        assertEquals(PermissionPlan.Deny, planFor(origin, listOf(SitePermission.MIDI), emptyMap(), session))
+        session.revoke(origin, SitePermission.MIDI)
+        assertEquals(
+            PermissionPlan.Ask(listOf(SitePermission.MIDI)),
+            planFor(origin, listOf(SitePermission.MIDI), emptyMap(), session),
+        )
+    }
+
+    @Test
+    fun `MIDI removed from a document that was given it stays held until reload`() {
+        val page = "https://synth.example"
+        val revoked = SitePermissionBroker.DocumentPermissions(doc = 1)
+            .granting(page, listOf(SitePermission.MIDI))
+            .revoking(entry(page, SitePermission.MIDI))
+        // The page's MIDIAccess keeps working; WebView can't take it back.
+        assertEquals(setOf(SitePermission.MIDI), revoked.stillHeld(emptySet()))
+        assertEquals("This page can still send system-exclusive messages to your MIDI devices until it's reloaded.", stillHeldNote(revoked.stillHeld(emptySet())))
+        assertEquals("MIDI SysEx kept until reload", sitePermissionsSummary(emptyList(), revoked.stillHeld(emptySet())))
+        assertEquals(
+            "This page keeps your microphone until it stops using it or is reloaded, " +
+                "and can still get your location and send system-exclusive messages to your MIDI devices until it's reloaded.",
+            stillHeldNote(setOf(SitePermission.MIDI, SitePermission.MICROPHONE, SitePermission.LOCATION)),
+        )
+    }
+
+    @Test
     fun `held note names what the page still has`() {
         assertNull(stillHeldNote(emptySet()))
         assertEquals(
