@@ -360,7 +360,7 @@ object EthereumProviders {
         return lock.withLock {
             if (!live()) return@withLock EthAnswer.Rejected
             val reason = Strings.get(
-                if (ask is EthAsk.Payment) R.string.send_eth_setup_reason_pay else R.string.send_eth_setup_reason_connect,
+                if (ask is EthAsk.Payment || ask is EthAsk.SendLink) R.string.send_eth_setup_reason_pay else R.string.send_eth_setup_reason_connect,
                 permissionOriginDisplay(ask.origin),
             )
             val request = EthereumPromptRequest(ask) { setUpWallet(reason) }

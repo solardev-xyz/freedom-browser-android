@@ -632,6 +632,11 @@ private fun lostWalletAdvice(
  * lives in plain `remember` state on either page, never
  * `rememberSaveable`, so it can't end up in the saved-instance-state
  * bundle.
+ *
+ * Opened for a payment link ([sendLink], #317) it starts on the Send
+ * page, filled in from the link, and leaving that page closes the wallet
+ * again, back to the page the link was on. [onSendStarted]: a send from
+ * that page has started.
  */
 @Composable
 fun WalletScreen(
@@ -639,6 +644,8 @@ fun WalletScreen(
     currentSite: String?,
     onOpenUrl: (String) -> Unit,
     onDismiss: () -> Unit,
+    sendLink: SendPrefill? = null,
+    onSendStarted: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val vault = remember(context) { Vault.get(context) }
@@ -647,7 +654,7 @@ fun WalletScreen(
     val scope = rememberCoroutineScope()
     var importing by remember { mutableStateOf(false) }
     var publishing by remember { mutableStateOf(false) }
-    var sending by remember { mutableStateOf(false) }
+    var sending by remember { mutableStateOf(sendLink != null) }
     val sender = remember(context) { WalletSender.get(context) }
     val sendStatus by sender.status.collectAsState()
     // The transaction history (#109) and its two pages: all sends, one send (by hash, so it follows the record).
@@ -863,7 +870,10 @@ fun WalletScreen(
         return
     }
     val sendFrom = accountList?.active
-    if (sending && sendFrom != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
+    // A link's page waits for the networks: its asset is looked up among them.
+    if (sending && sendFrom != null && (state is Vault.State.Locked || state is Vault.State.Unlocked) &&
+        (sendLink == null || walletChains != null)
+    ) {
         SendPage(
             account = sendFrom,
             chains = walletChains.orEmpty(),
@@ -872,7 +882,10 @@ fun WalletScreen(
             auth = auth,
             phraseBackedUp = phraseBackedUp,
             onOpenUrl = onOpenUrl,
-            onBack = { sending = false },
+            // A link's Send page goes back to the page the link was on.
+            onBack = { if (sendLink != null) onDismiss() else sending = false },
+            prefill = sendLink,
+            onStarted = if (sendLink != null) onSendStarted else ({}),
         )
         return
     }
