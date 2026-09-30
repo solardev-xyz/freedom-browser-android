@@ -98,14 +98,33 @@ private const val LOG_TAG = "BrowserWebView"
 // cookies are stripped in both directions (dweb sites get localStorage
 // isolation per root; cookie state would leak through the shared
 // registrable domain until the PSL entry propagates).
-private val HEADERS_TO_STRIP = setOf(
+internal val HEADERS_TO_STRIP = setOf(
     "transfer-encoding", "content-encoding", "connection", "keep-alive",
     "set-cookie", "set-cookie2",
-    // Ours alone to set: a gateway response carrying it would pass for
-    // our own in-place refusal and keep the real error page away (see
-    // [nameResolutionErrorIn]).
+    // Ours alone to set: a gateway response carrying either would pass
+    // for our own in-place refusal and keep the real error page away (see
+    // [nameResolutionErrorIn] and [NodeApiGuard.isRefusal]).
     NAME_RESOLUTION_ERROR_HEADER.lowercase(),
+    NodeApiGuard.REFUSAL_HEADER.lowercase(),
 )
+
+/**
+ * The headers a gateway response is handed to the WebView with: hop-by-hop,
+ * cookie and length headers dropped, our own in-place-refusal markers
+ * dropped (see [HEADERS_TO_STRIP]), and CORS opened for the virtual origin.
+ */
+internal fun gatewayResponseHeaders(fields: Map<String?, List<String>?>): Map<String, String> =
+    fields.asSequence()
+        .mapNotNull { (k, v) ->
+            if (k == null || v == null) null
+            else k to v.joinToString(",")
+        }
+        .filter { (k, _) ->
+            val lk = k.lowercase()
+            lk !in HEADERS_TO_STRIP && lk != "content-length" &&
+                lk != "access-control-allow-origin"
+        }
+        .toMap() + ("Access-Control-Allow-Origin" to "*")
 
 /**
  * Header on the interceptor's refusal of a `<name>.ens.…` document whose
@@ -5444,18 +5463,7 @@ private fun fetchOnce(
             ?.trim('"')
             ?.ifBlank { null }
 
-        val headers = conn.headerFields
-            .asSequence()
-            .mapNotNull { (k, v) ->
-                if (k == null || v == null) null
-                else k to v.joinToString(",")
-            }
-            .filter { (k, _) ->
-                val lk = k.lowercase()
-                lk !in HEADERS_TO_STRIP && lk != "content-length" &&
-                    lk != "access-control-allow-origin"
-            }
-            .toMap() + ("Access-Control-Allow-Origin" to "*")
+        val headers = gatewayResponseHeaders(conn.headerFields)
 
         val body = when {
             status in 200..399 -> conn.inputStream

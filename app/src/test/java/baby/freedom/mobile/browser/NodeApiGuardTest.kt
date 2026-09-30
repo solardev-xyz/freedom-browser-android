@@ -66,6 +66,21 @@ class NodeApiGuardTest {
     }
 
     @Test
+    fun `a gateway response can't pass for the refusal`() {
+        for (name in listOf(NodeApiGuard.REFUSAL_HEADER, "x-node-api-refused", "X-NODE-API-REFUSED")) {
+            val passed = gatewayResponseHeaders(
+                mapOf(null to listOf("HTTP/1.1 404 Not Found"), name to listOf("1"), "Content-Type" to listOf("text/html")),
+            )
+            assertFalse(name, NodeApiGuard.isRefusal(passed))
+            assertFalse(name, nameResolutionErrorIn(passed) != null)
+            assertTrue(passed["Content-Type"] == "text/html")
+        }
+        assertFalse(
+            nameResolutionErrorIn(gatewayResponseHeaders(mapOf(NAME_RESOLUTION_ERROR_HEADER to listOf("ens_not_found")))) != null,
+        )
+    }
+
+    @Test
     fun `the dapp surface stays open`() {
         for ((method, path) in listOf(
             "GET" to "/bzz/ab/index.html",
