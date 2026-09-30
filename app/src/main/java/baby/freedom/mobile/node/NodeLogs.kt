@@ -159,13 +159,18 @@ object LogScrub {
      * the DNSLink / IPNS `name` of the `name_cache` phases) and any a
      * later version adds is covered, not just the ones named here.
      * `etag` holds a file's CID and path. A quoted value runs to its
-     * closing quote, past any `\"` inside it.
+     * closing quote, past any `\"` inside it. A bare value runs to the
+     * next whitespace, not to a `,`: a page's path may hold commas
+     * (`/ipfs/<cid>/a,b.html`, R4-F1) and tracing separates fields with
+     * spaces. Only the `}` closing a span (`path=/ipfs/x}:`, or at the end
+     * of the line) is left out of it — a `}` in a URL path is always
+     * percent-encoded.
      */
     private val FIELD_KEY_ENDS = listOf(
         "path", "paths", "cid", "cids", "name", "names", "target", "targets", "url", "uri", "href",
         "referer", "referrer", "host", "hostname", "domain", "dnslink", "etag", "reference",
     )
-    private val FIELD_VALUE = Regex(""""(?:[^"\\]|\\.)*"|\[[^\]]*]|[^\s,}]*""").toPattern()
+    private val FIELD_VALUE = Regex(""""(?:[^"\\]|\\.)*"|\[[^\]]*]|\S*?(?=\}+:|\}*(?:\s|$))""").toPattern()
 
     /**
      * A DNSLink / IPNS name inside free text — freedom-ipfs's resolver
@@ -505,8 +510,9 @@ object NodeLogs {
         var from = since
         while (!stopped) {
             val gen = generation()
+            var proc: java.lang.Process? = null
             try {
-                val proc = ProcessBuilder("logcat", "-v", "threadtime", "--pid=$pid", "-T", from)
+                proc = ProcessBuilder("logcat", "-v", "threadtime", "--pid=$pid", "-T", from)
                     .redirectErrorStream(true)
                     .start()
                 logcat = proc
@@ -519,10 +525,12 @@ object NodeLogs {
                         if (!keep(gen, source, line.format(), LogRing.kindOf(line.tag, line.message))) return@useLines
                     }
                 }
-                proc.destroy()
             } catch (t: Throwable) {
                 // Not when stop() or clear() destroyed logcat under the reader.
                 if (!stopped && generation() == gen) Log.w(TAG, "logcat reader failed: ${t.javaClass.simpleName}")
+            } finally {
+                // Also when the reader failed: a restart would leave this one running.
+                proc?.destroy()
             }
             if (stopped) break
             val clearedAt = synchronized(lock) { if (generation != gen) clearedAtMs else null }

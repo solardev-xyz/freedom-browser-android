@@ -254,19 +254,42 @@ class NodeLogsTest {
     }
 
     @Test
+    fun `a path with a comma is taken out whole`() {
+        // Opening ipfs://<cid>/alan%2520probe%2520secret,diary%2520entry.html (R4-F1).
+        val cid = "QmT5NvUtoM5nWFfrQdVrFtvGfKFmG7AHE8P34isapyhCxX"
+        val lines = listOf(
+            """INFO gateway_request{request_id=2 path=/ipfs/$cid/alan%20probe%20secret,diary%20entry.html}: """ +
+                """freedom_ipfs_gateway: phase="request_start" path=/ipfs/$cid/alan%20probe%20secret,diary%20entry.html method=GET""",
+            """INFO x: phase="y" top_level_path=/a,b,diary%20entry.html,""",
+            """INFO gateway_request{path=/ipfs/x,diary}""",
+        )
+        for (l in lines) {
+            val out = LogScrub.scrub(l)
+            assertFalse(out, "diary" in out)
+            assertFalse(out, "secret" in out)
+        }
+        assertEquals(
+            """INFO gateway_request{request_id=2 path=<redacted>}: freedom_ipfs_gateway: phase="request_start" path=<redacted> method=GET""",
+            LogScrub.scrub(lines[0]),
+        )
+        assertEquals("""INFO gateway_request{path=<redacted>}""", LogScrub.scrub(lines[2]))
+    }
+
+    @Test
     fun `a field key after a digit is still taken out`() {
         assertEquals("v2path=<redacted> ok", LogScrub.scrub("v2path=/ipfs/secret ok"))
     }
 
     /**
-     * The scrubber before R3-M1 made it cheaper, verbatim: the fast one
-     * must take out everything it did (R3-M1 only skips a regex where it
-     * can't match).
+     * The scrubber before R3-M1 made it cheaper, verbatim but for R4-F1's
+     * bare field value (to the next space, not the first comma): the fast
+     * one must take out everything it did (R3-M1 only skips a regex where
+     * it can't match).
      */
     private object ReferenceScrub {
         const val R = "<redacted>"
         val FIELD = Regex(
-            """\b([A-Za-z_]*(?:path|paths|cid|cids|name|names|target|targets|url|uri|href|referer|referrer|host|hostname|domain|dnslink|etag|reference))=("(?:[^"\\]|\\.)*"|\[[^\]]*]|[^\s,}]*)""",
+            """\b([A-Za-z_]*(?:path|paths|cid|cids|name|names|target|targets|url|uri|href|referer|referrer|host|hostname|domain|dnslink|etag|reference))=("(?:[^"\\]|\\.)*"|\[[^\]]*]|\S*?(?=\}+:|\}*(?:\s|$)))""",
         )
         val NAME_ERROR = Regex(
             """(?i)(dnslink record not found for|invalid dnslink record:|invalid ipns name:|invalid ipns record:|http resolver:)\s*.*?(?=\s+[A-Za-z_]+=|"|$)""",
