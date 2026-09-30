@@ -27,12 +27,13 @@ import kotlin.system.exitProcess
  * Holds the embedded Myotis light client ([MyotisNode]: Ethereum mainnet
  * and Gnosis) for the lifetime of the `:myotis` process (#72).
  *
- * A bound-only service: `MainActivity` binds it while the user has the
- * light client switched on (off by default — Settings is
- * [baby.freedom.mobile.data.NodeSettings.myotisEnabled]) and unbinds when
- * they switch it off or the UI goes away. Creating the service starts the
- * engines; destroying it stops them and exits the process, the same way
- * [NodeService] releases ant's and freedom-ipfs's native state.
+ * A bound-only service: `MainActivity` binds it while the user has at
+ * least one chain switched on (off by default — [MyotisChains]) and
+ * unbinds when they switch the last one off or the UI goes away. The
+ * first [IMyotisService.setNetworks] starts the engines of the chains it
+ * names, later ones start or stop single chains (#274); destroying the
+ * service stops them and exits the process, the same way [NodeService]
+ * releases ant's and freedom-ipfs's native state.
  *
  * Its own process rather than `:node`: the light client is independent of
  * the Swarm toggle (switching Swarm off kills `:node`), and a native fault
@@ -47,6 +48,10 @@ class MyotisService : Service() {
     /** Read from binder threads too ([IMyotisService.ethCall]). */
     @Volatile
     private var node: MyotisNode? = null
+
+    /** Set by the first [IMyotisService.setNetworks]: until then there's no engine to report on. */
+    @Volatile
+    private var configured = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val callbacks = RemoteCallbackList<IMyotisCallback>()
 
@@ -62,6 +67,16 @@ class MyotisService : Service() {
         override fun unregisterCallback(cb: IMyotisCallback?) {
             cb ?: return
             callbacks.unregister(cb)
+        }
+
+        override fun setNetworks(chainIds: LongArray?) {
+            val node = node ?: return
+            val chains = chainIds?.asList().orEmpty().mapNotNull { MyotisNetwork.forChain(it) }.toSet()
+            // One op on the node's queue: the chains are chosen before the
+            // start boots them, and a switch that already retried a failed
+            // start (setEnabled) isn't followed by a second one.
+            node.run(chains)
+            configured = true
         }
 
         override fun onAppForeground() {
@@ -131,10 +146,12 @@ class MyotisService : Service() {
      * service instance created in that window (the user switched the light
      * client straight back on) must not open the same data directories
      * the old engines still hold. It reports Starting; the process exit
-     * disconnects the UI, whose binding brings up a fresh process.
+     * disconnects the UI, whose binding brings up a fresh process. So
+     * does one the UI hasn't yet told which chains to run
+     * ([IMyotisService.setNetworks]): its engines haven't started.
      */
     private fun currentState(): MyotisInfo =
-        node?.state?.value ?: MyotisInfo(status = MyotisStatus.Starting)
+        node?.takeIf { configured }?.state?.value ?: MyotisInfo(status = MyotisStatus.Starting)
 
     override fun onBind(intent: Intent?): IBinder = binder
 
@@ -161,7 +178,6 @@ class MyotisService : Service() {
                 )
             }
             .launchIn(scope)
-        node.start()
     }
 
     override fun onDestroy() {

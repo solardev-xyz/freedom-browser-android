@@ -66,6 +66,9 @@ object Gateways {
     /** External Swarm endpoint base URL, or `""` for the embedded node. */
     val externalSwarmBase: String get() = externalSwarm.value
 
+    /** [externalSwarmBase] as a flow, for UI that must follow a switch. */
+    val externalSwarmBaseFlow: StateFlow<String> = externalSwarm.asStateFlow()
+
     /** External IPFS gateway base URL, or `""` for the embedded node. */
     val externalIpfsBase: String get() = externalIpfs.value
 

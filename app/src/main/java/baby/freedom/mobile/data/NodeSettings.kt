@@ -16,6 +16,7 @@ import baby.freedom.mobile.browser.SearchEngines
 import baby.freedom.mobile.browser.normalizeAllowlistHost
 import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ui.Appearance
+import baby.freedom.swarm.MyotisNetwork
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -63,6 +64,12 @@ import org.json.JSONObject
  * default then stores `system`, so absent and `system` both mean follow
  * the system. `MainActivity` applies it as the app's night mode
  * ([Appearance.apply]).
+ *
+ * ## Introduction key
+ *
+ * `intro_dismissed` is set once the home page's first-run introduction
+ * (#278) is dismissed, or on first start found the install already in use;
+ * see [introDismissed].
  *
  * ## Name resolution keys (#102)
  *
@@ -157,17 +164,23 @@ class NodeSettings private constructor(
     }
 
     /**
-     * Whether the embedded Myotis Ethereum / Gnosis light client runs
-     * (#72). Off by default — opt-in, as on desktop; switched on the node
-     * page. `MainActivity` binds [baby.freedom.mobile.node.MyotisService]
-     * while it's on.
+     * The Myotis light client's chains that start at launch (#274), each
+     * chosen on its own on the node page, as desktop's Settings → Startup
+     * does. Off by default — opt-in, as on desktop. Once running, a chain
+     * follows its switch on the node page ([baby.freedom.mobile.node.MyotisChains]).
+     *
+     * Before #274 one switch (`myotis_enabled`, #72) ran both chains, and
+     * was on at every launch while on: a chain with no choice of its own
+     * yet keeps that value.
      */
-    val myotisEnabled: Flow<Boolean> = store.data.map { prefs ->
-        prefs[Keys.MYOTIS_ENABLED] ?: false
+    val myotisStartOnLaunch: Flow<Set<MyotisNetwork>> = store.data.map { prefs ->
+        MyotisNetwork.entries.filterTo(LinkedHashSet()) { network ->
+            prefs[Keys.myotisStartOnLaunch(network)] ?: prefs[Keys.LEGACY_MYOTIS_ENABLED] ?: false
+        }
     }
 
-    suspend fun setMyotisEnabled(enabled: Boolean) {
-        store.edit { it[Keys.MYOTIS_ENABLED] = enabled }
+    suspend fun setMyotisStartOnLaunch(network: MyotisNetwork, enabled: Boolean) {
+        store.edit { it[Keys.myotisStartOnLaunch(network)] = enabled }
     }
 
     /**
@@ -301,6 +314,48 @@ class NodeSettings private constructor(
 
     suspend fun setAppearance(appearance: Appearance) {
         store.edit { it[Keys.APPEARANCE] = appearance.key }
+    }
+
+    /**
+     * Whether the home page's first-run introduction (#278) is done with:
+     * `false` shows it, `true` never again, `null` while not yet decided.
+     *
+     * [settleIntro] decides it once, at the app's first start with this
+     * build; Got it ([dismissIntro]) sets it to `true`. Nothing but clearing
+     * the app's data removes the key — Clear cookies & site data leaves it.
+     *
+     * A read error doesn't end the flow (same reasoning and back-off as
+     * [appearance]); the home page shows the card only once a read has said
+     * `false`, so an unreadable file never shows it again to someone who
+     * already dismissed it.
+     */
+    val introDismissed: Flow<Boolean?> = store.data
+        .map { prefs -> prefs[Keys.INTRO_DISMISSED] }
+        .retryWhen { cause, attempt ->
+            if (cause is CancellationException) return@retryWhen false
+            Log.w(TAG, "reading the introduction setting failed (${cause.javaClass.simpleName}); retrying")
+            delay((APPEARANCE_RETRY_FIRST_MS shl attempt.coerceAtMost(5L).toInt()).coerceAtMost(APPEARANCE_RETRY_MAX_MS))
+            true
+        }
+
+    /**
+     * Decide [introDismissed] if nothing has yet: a first launch shows the
+     * introduction, but someone updating from a build that predates it
+     * isn't on one. Either this store already holds a setting (only the
+     * user's own choices write one, so a fresh install's is empty), or
+     * [usedBefore] (the install already has pages, bookmarks or a wallet)
+     * says so; either counts as already dismissed. Asked only while
+     * undecided.
+     */
+    suspend fun settleIntro(usedBefore: suspend () -> Boolean) {
+        val prefs = store.data.first()
+        if (prefs[Keys.INTRO_DISMISSED] != null) return
+        val used = prefs.asMap().keys.any { it != Keys.INTRO_DISMISSED } || usedBefore()
+        store.edit { if (it[Keys.INTRO_DISMISSED] == null) it[Keys.INTRO_DISMISSED] = used }
+    }
+
+    suspend fun dismissIntro() {
+        store.edit { it[Keys.INTRO_DISMISSED] = true }
     }
 
     private val chainStore: ChainStore by lazy(chains)
@@ -650,7 +705,12 @@ class NodeSettings private constructor(
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SWARM_NODE_MODE = stringPreferencesKey("swarm_node_mode")
-        val MYOTIS_ENABLED = booleanPreferencesKey("myotis_enabled")
+        /** Both chains' start at launch before #274; see [myotisStartOnLaunch]. */
+        val LEGACY_MYOTIS_ENABLED = booleanPreferencesKey("myotis_enabled")
+        private val MYOTIS_START_ON_LAUNCH = MyotisNetwork.entries.associateWith {
+            booleanPreferencesKey("myotis_${it.engineName}_start_on_launch")
+        }
+        fun myotisStartOnLaunch(network: MyotisNetwork) = MYOTIS_START_ON_LAUNCH.getValue(network)
         val TOR_ENABLED = booleanPreferencesKey("tor_enabled")
         val TOR_START_ON_LAUNCH = booleanPreferencesKey("tor_start_on_launch")
         val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
@@ -660,6 +720,7 @@ class NodeSettings private constructor(
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val SEARCH_CUSTOM_TEMPLATE = stringPreferencesKey("search_custom_template")
         val APPEARANCE = stringPreferencesKey("appearance")
+        val INTRO_DISMISSED = booleanPreferencesKey("intro_dismissed")
         /** Moved onto Ethereum mainnet's own RPCs in [ChainStore]; see [migrateEnsRpc]. */
         val LEGACY_ENS_RPC_CUSTOM = stringPreferencesKey("ens_rpc_custom_endpoints")
         val ENS_RPC_DISABLED_PUBLIC = stringSetPreferencesKey("ens_rpc_disabled_public")
