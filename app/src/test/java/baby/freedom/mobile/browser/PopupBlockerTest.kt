@@ -189,4 +189,20 @@ class PopupBlockerTest {
         assertFalse(isOpenableInTab("data:text/html,hi"))
         assertFalse(isOpenableInTab("intent://x#Intent;end"))
     }
+
+    @Test
+    fun `an address is split so its host is never the part that gets cut`() {
+        // #292 R4-F1: a padded host keeps its registrable domain on screen.
+        val long = "https://accounts.google.com.secure-login-verify." + "x".repeat(11) + ".evil.example/signin?next=" + "a".repeat(400)
+        val address = PopupAddress.of(long)
+        assertEquals("https://accounts.google.com.secure-login-verify.xxxxxxxxxxx.evil.example", address.site)
+        assertTrue(address.rest.startsWith("/signin?next="))
+        assertEquals(PopupAddress("pay.example", "/checkout"), PopupAddress.of("pay.example/checkout"))
+        assertEquals(PopupAddress("https://b.example:8443", "?q=1#x"), PopupAddress.of("https://b.example:8443?q=1#x"))
+        assertEquals(PopupAddress("bzz://abc", ""), PopupAddress.of("bzz://abc"))
+        // Userinfo padding is capped from the front: the host stays.
+        val padded = PopupAddress.of("https://" + "u".repeat(1000) + "@evil.example/")
+        assertEquals(PopupAddress.MAX_SITE + 1, padded.site.length)
+        assertTrue(padded.site.startsWith("…") && padded.site.endsWith("@evil.example"))
+    }
 }

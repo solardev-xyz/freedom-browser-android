@@ -39,9 +39,10 @@ import androidx.compose.ui.unit.dp
  * so a tap aimed at the page can't land on "Always allow".
  *
  * The site is named in full (wrapping, never ellipsised: a host's tail is
- * the part a spoof would hide). An address is cut after a few lines — a
- * page chooses it, and could make it a screenful — with its start, the
- * scheme and host, always shown.
+ * the part a spoof would hide). So is each address's scheme and host
+ * ([PopupAddress.site]), on its own; only the path and query after it —
+ * a page chooses them, and could make them a screenful — are cut after a
+ * few lines.
  */
 @Composable
 fun BlockedPopupNotice(
@@ -100,18 +101,16 @@ fun BlockedPopupNotice(
                 // different request than the page made: named only.
                 val openable = shown != null && !entry.posted && isOpenableInTab(shown)
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        blockedPopupLabel(entry, shown),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (shown != null) {
-                            MaterialTheme.colorScheme.onSurface
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
+                    if (shown != null) {
+                        PopupAddressLabel(shown, posted = entry.posted, modifier = Modifier.weight(1f))
+                    } else {
+                        Text(
+                            blockedPopupLabel(entry, null),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                     Spacer(Modifier.width(8.dp))
                     if (openable) {
                         TextButton(
@@ -149,6 +148,39 @@ fun BlockedPopupNotice(
                 }
             }
             ObscuredTapNotice(tap, modifier = Modifier.padding(end = 12.dp))
+        }
+    }
+}
+
+/**
+ * A blocked pop-up's address: its [PopupAddress.site] in full (wrapping,
+ * never ellipsised — #292 R4-F1), then its path/query, cut after two
+ * lines. A [posted] form's address says so, on a line of its own that no
+ * cut can take away.
+ */
+@Composable
+private fun PopupAddressLabel(shown: String, posted: Boolean, modifier: Modifier = Modifier) {
+    val address = PopupAddress.of(shown)
+    Column(modifier = modifier) {
+        Text(
+            if (posted) "A form sent to ${address.site}" else address.site,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+        )
+        if (address.rest.isNotEmpty()) {
+            Text(
+                address.rest,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (posted) {
+            Text(
+                "Its data can't be sent again from here.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

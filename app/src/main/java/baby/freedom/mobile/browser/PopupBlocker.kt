@@ -86,6 +86,34 @@ internal fun blockedPopupLabel(entry: BlockedPopup, shown: String?): String = wh
 }
 
 /**
+ * [shown] split for the notice (#292 R4-F1): [site] — the scheme and
+ * everything up to the path (userinfo, host, port) — which the notice
+ * never cuts, since a host's tail is where its registrable domain is and
+ * a spoof pads the front (`accounts.google.com.….evil.example`); and
+ * [rest], the path, query and fragment, which a page can make a
+ * screenful and the notice may shorten.
+ *
+ * [site] is capped at [MAX_SITE] characters by dropping its *start*
+ * (behind a leading "…"): a real host is at most 253, but userinfo
+ * (`https://<padding>@evil.example`) is not, and the end is the part
+ * that says where it goes.
+ */
+internal data class PopupAddress(val site: String, val rest: String) {
+    companion object {
+        const val MAX_SITE = 300
+
+        fun of(shown: String): PopupAddress {
+            val sep = shown.indexOf("://")
+            val start = if (sep > 0 && shown.substring(0, sep).all { it.isLetterOrDigit() || it in "+.-" }) sep + 3 else 0
+            val end = shown.indexOfAny(charArrayOf('/', '?', '#'), start).let { if (it < 0) shown.length else it }
+            val site = shown.substring(0, end)
+            val capped = if (site.length <= MAX_SITE) site else "…" + site.takeLast(MAX_SITE)
+            return PopupAddress(capped, shown.substring(end))
+        }
+    }
+}
+
+/**
  * Whether a page window opens (as a new tab) rather than being blocked:
  * with the user's gesture, or on a site the user allowed pop-ups.
  */
