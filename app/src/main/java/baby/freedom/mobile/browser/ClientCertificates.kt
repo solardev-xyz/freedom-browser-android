@@ -49,11 +49,11 @@ internal sealed interface ClientCertPlan {
     data object SendNone : ClientCertPlan
 
     /**
-     * The user said not to send one to this server: send none
-     * ([ClientCertRequest.ignore]) without asking. For the requests
-     * already waiting when they said so, and for every later one from a
-     * tab the browser hasn't started a load in since
-     * ([ClientCertChoices.planFor]); a tab's next load asks again
+     * The user said not to send one in this tab: send none
+     * ([ClientCertRequest.ignore]) without asking, to any server. For the
+     * tab's requests already waiting when they said so, and for every
+     * later one while the browser hasn't started a load in the tab since
+     * ([ClientCertChoices.planFor]); the tab's next load asks again
      * ([ClientCertificates.onBrowserLoad]).
      */
     data object Refuse : ClientCertPlan
@@ -66,37 +66,38 @@ internal sealed interface ClientCertPlan {
 }
 
 /**
- * The user's answer per server (host and port) for this app run only
- * (#316). Nothing here is written anywhere, and *Clear cookies & site
- * data* empties it ([clear]).
+ * The user's answers for this app run only (#316). Nothing here is
+ * written anywhere, and *Clear cookies & site data* empties it ([clear]).
  *
- * A picked certificate holds for the rest of the run. A refusal (Deny,
- * Back, or "no certificates" before one is installed) holds until the
- * user loads something: it answers the requests already waiting on that
- * chooser, and every later one from a tab the browser hasn't started a
- * load in since ([loaded]) — a page that keeps connecting to the server
- * (an iframe on a timer, a poll), or a tab it opens itself, doesn't
- * bring the chooser back. The tab's next load — a reload, the address
- * bar, Back/Forward — or a new tab the user opens asks again. So
- * installing the certificate, or taking back an accidental Deny, only
- * needs a reload (which also empties WebView's own record of the
- * refusal, [ClientCertificates.onBrowserLoad]).
+ * A picked certificate holds per server (host and port) for the rest of
+ * the run. A refusal (Deny, Back, or "no certificates" before one is
+ * installed) belongs to the tab whose chooser it came from, and covers
+ * every server, until the user loads something in that tab: it answers
+ * that tab's requests already waiting on the chooser and every later one
+ * the tab makes before its next browser-started load ([loaded]). So a
+ * page that keeps connecting — an iframe on a timer, a poll, and with a
+ * wildcard DNS record a new host or port each time — doesn't bring the
+ * chooser back (#333 R5-F1), and a pop-up it opens meanwhile starts out
+ * refused too ([opened]). Other tabs aren't affected: a link to the same
+ * server in a tab that never saw that chooser asks (#333 R5-M1). The
+ * tab's next load — a reload, the address bar, Back/Forward — asks
+ * again, so installing the certificate, or taking back an accidental
+ * Deny, only needs a reload (which also empties WebView's own record of
+ * the refusal, [ClientCertificates.onBrowserLoad]).
  *
  * A private tab never gets an answer from here: it sends no certificate
  * and is never asked, whatever a normal tab decided for the same server.
  */
 internal class ClientCertChoices {
-    private sealed interface Choice {
-        data class Picked(val alias: String) : Choice
-        /**
-         * Refused when [ticket]s had reached [upTo]: holds for requests
-         * with a ticket up to it, and for any from a tab with no load
-         * since ([loaded]).
-         */
-        data class Declined(val upTo: Long) : Choice
-    }
+    /** Picked aliases per server ([key]). */
+    private val picks = HashMap<String, String>()
 
-    private val choices = HashMap<String, Choice>()
+    /**
+     * Per tab, the [ticket] count when the user last refused a chooser
+     * there: holds for that tab's requests with a ticket up to it, and
+     * for all of them while it has had no load since ([loaded]).
+     */
+    private val declined = HashMap<Long, Long>()
 
     /** The last [ticket] handed out. */
     private var tickets = 0L
@@ -119,6 +120,18 @@ internal class ClientCertChoices {
     /** Tab [tabId] closed. */
     fun tabClosed(tabId: Long) {
         loads.remove(tabId)
+        declined.remove(tabId)
+    }
+
+    /**
+     * The page in tab [openerId] opened pop-up [tabId]: a refusal still
+     * holding in the opener holds there too, until the pop-up's own
+     * next browser-started load, so opening windows doesn't get the
+     * page round it.
+     */
+    fun opened(tabId: Long, openerId: Long) {
+        val d = declined[openerId] ?: return
+        if ((loads[openerId] ?: 0L) <= d) declined[tabId] = d
     }
 
     /**
@@ -130,34 +143,37 @@ internal class ClientCertChoices {
 
     /**
      * What to answer a request from tab [tabId] that got [ticket] on
-     * arrival. A refusal answers the requests that arrived before it was
-     * given (queued behind its chooser) and any from a tab the browser
-     * hasn't started a load in since ([loaded]); a request from a tab
-     * loaded since asks again.
+     * arrival. A refusal in that tab answers its requests that arrived
+     * before it was given (queued behind its chooser) and, whatever the
+     * server, any it makes before the browser next starts a load there
+     * ([loaded]); after that it asks again. A refusal never answers
+     * another tab. Otherwise a server's pick is sent.
      */
     fun planFor(private: Boolean, host: String, port: Int, tabId: Long, ticket: Long = Long.MAX_VALUE): ClientCertPlan {
         if (private) return ClientCertPlan.SendNone
-        return when (val c = choices[key(host, port)]) {
-            is Choice.Picked -> ClientCertPlan.Send(c.alias)
-            is Choice.Declined ->
-                if (ticket <= c.upTo || (loads[tabId] ?: 0L) <= c.upTo) ClientCertPlan.Refuse else ClientCertPlan.Ask
-            null -> ClientCertPlan.Ask
-        }
+        val d = declined[tabId]
+        if (d != null && (ticket <= d || (loads[tabId] ?: 0L) <= d)) return ClientCertPlan.Refuse
+        return picks[key(host, port)]?.let { ClientCertPlan.Send(it) } ?: ClientCertPlan.Ask
     }
 
-    /** Remember the chooser's answer ([alias] `null`: none), if nothing was cleared since [asOf]. */
-    fun answered(host: String, port: Int, alias: String?, asOf: Int) {
+    /**
+     * Remember the answer given in tab [tabId]'s chooser for
+     * [host]:[port] ([alias] `null`: none, which holds for that tab),
+     * if nothing was cleared since [asOf].
+     */
+    fun answered(host: String, port: Int, tabId: Long, alias: String?, asOf: Int) {
         if (asOf != generation) return
-        choices[key(host, port)] = if (alias == null) Choice.Declined(upTo = tickets) else Choice.Picked(alias)
+        if (alias == null) declined[tabId] = tickets else picks[key(host, port)] = alias
     }
 
     /** The picked certificate can't be read any more (removed from the device): ask again next time. */
     fun forget(host: String, port: Int) {
-        choices.remove(key(host, port))
+        picks.remove(key(host, port))
     }
 
     fun clear() {
-        choices.clear()
+        picks.clear()
+        declined.clear()
         generation++
     }
 
@@ -174,9 +190,9 @@ internal class ClientCertChoices {
  *   server (host and port). Picking a certificate sends it, and the pick
  *   holds for that server for the rest of the app run
  *   ([ClientCertChoices]). Dismissing the chooser sends none, to that
- *   request, the ones queued behind it, and every later one from a tab
- *   the browser hasn't started a load in since; that tab's next load
- *   asks again ([onBrowserLoad]).
+ *   request and to every request its tab makes, to any server, until the
+ *   browser next starts a load in that tab ([onBrowserLoad]); other tabs
+ *   still ask.
  * - The chooser only opens over the page that asked: a request from a
  *   background tab, from behind a full-screen panel, while Android's
  *   permission dialog is up or while the app isn't in front waits until
@@ -248,6 +264,14 @@ object ClientCertificates {
         }
     }
 
+    /**
+     * The page in tab [openerId] opened pop-up [tabId]: a Deny still
+     * holding there holds in the pop-up too ([ClientCertChoices.opened]).
+     */
+    fun onPopup(tabId: Long, openerId: Long) {
+        choices.opened(tabId, openerId)
+    }
+
     /** Tab [tabId] closed: what it still had waiting for the chooser sends none. */
     fun onTabClosed(tabId: Long) {
         withdraw(tabId)
@@ -303,8 +327,8 @@ object ClientCertificates {
      * Chromium drops the empty answer as soon as the handshake fails, so
      * each new connection a page opens reaches [onRequest] again. What
      * keeps a Deny from reopening the chooser there is our own
-     * [ClientCertChoices] refusal, which likewise holds for the tab until
-     * this call.
+     * [ClientCertChoices] refusal, which holds for the tab, whatever
+     * server the page connects to next, until this call.
      */
     fun onBrowserLoad(tabId: Long) {
         choices.loaded(tabId)
@@ -470,9 +494,9 @@ internal suspend fun chooseInTurn(
     open: (suspend () -> String?)?,
 ): ClientCertPlan? = lock.withLock turn@{
     if (withdrawn.value) return@turn ClientCertPlan.SendNone
-    // Answered for this server while this request queued ([ticket]: when
-    // it arrived, so a refusal given since answers it too), or refused
-    // since this tab's last load.
+    // Refused in this tab while this request queued ([ticket]: when it
+    // arrived, so a refusal given since answers it too) or since the
+    // tab's last load, or a certificate picked for this server meanwhile.
     val now = choices.planFor(false, host, port, tabId, ticket)
     if (now != ClientCertPlan.Ask) return@turn now
     // Switched away while queued behind another chooser: wait again.
@@ -493,7 +517,7 @@ internal suspend fun chooseInTurn(
         return@turn ClientCertPlan.SendNone
     }
     if (withdrawn.value) return@turn ClientCertPlan.SendNone
-    choices.answered(host, port, alias, asOf)
+    choices.answered(host, port, tabId, alias, asOf)
     if (alias == null) ClientCertPlan.Refuse else ClientCertPlan.Send(alias)
 }
 

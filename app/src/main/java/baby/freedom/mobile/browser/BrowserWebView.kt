@@ -1003,7 +1003,10 @@ fun BrowserWebViewHost(
             // the tab under the user (#292 R1-M3).
             onCreateWindow = { isUserGesture ->
                 val activate = isUserGesture || sitePermissions.isOnScreen(tab.id)
-                attach(tabs.adoptPopup(opener = tab, activate = activate).also { it.beginLoad(inWebView = true) })
+                val popup = tabs.adoptPopup(opener = tab, activate = activate)
+                // A client-certificate Deny in the opener holds here too (#333 R5-F1).
+                ClientCertificates.onPopup(popup.id, tab.id)
+                attach(popup.also { it.beginLoad(inWebView = true) })
             },
             onCloseWindow = { tabs.closePopup(tab) },
             popupsAllowed = { origin -> sitePermissions.popupsAllowed(tab, origin) },
