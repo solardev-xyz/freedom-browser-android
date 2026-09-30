@@ -6,12 +6,14 @@ import android.widget.Toast
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.X402Store
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.Eip712
 import baby.freedom.mobile.wallet.Erc20
 import baby.freedom.mobile.wallet.MessageSigning
@@ -457,7 +459,7 @@ object X402Payments {
                 Log.i(TAG, "not signed on the Ledger: ${e.kind}")
                 // Refused or cancelled there is the user's answer; anything else they're told.
                 if (e.kind != LedgerException.Kind.REJECTED && e.kind != LedgerException.Kind.CANCELLED) {
-                    Toast.makeText(app, "Not paid: ${e.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(app, Strings.get(R.string.signing_x402_not_paid, e.message), Toast.LENGTH_LONG).show()
                 }
                 return Paid.NOT_SENT
             }
@@ -531,9 +533,11 @@ object X402Payments {
      * could be sent (#218 R1-F1): nothing was paid, and reloading asks again.
      */
     internal fun timedOutMessage(ledger: Boolean, offer: X402.Offer): String =
-        "Not paid: the site allows ${X402.confirmSeconds(offer)} s to " +
-            (if (ledger) "confirm a payment on the Ledger" else "sign a payment") +
-            ", and that ran out. Reload the page to try again."
+        if (ledger) {
+            Strings.get(R.string.signing_x402_timed_out_ledger, X402.confirmSeconds(offer))
+        } else {
+            Strings.get(R.string.signing_x402_timed_out, X402.confirmSeconds(offer))
+        }
 
     /**
      * The payable offers of [required] with their chain, token and
@@ -549,15 +553,14 @@ object X402Payments {
         val results = required.offers.map { offer ->
             async {
                 val chain = chains.firstOrNull { it.id == offer.chainId }
-                    ?: return@async null to "Offer ${offer.index + 1}: pays on chain ${offer.chainId}, which isn't in Settings → Chains"
+                    ?: return@async null to Strings.get(R.string.signing_x402_offer_unknown_chain, offer.index + 1, offer.chainId.toString())
                 val known = knownToken(offer.chainId, offer.asset)
                 val (symbol, decimals) = known ?: when (val read = readToken(rpc, chain, offer.asset)) {
                     is TokenRead.Ok -> read.symbol to read.decimals
                     TokenRead.Unverified -> return@async null to
-                        "Offer ${offer.index + 1}: its token on ${chain.name} isn't in the wallet's token list, " +
-                        "and its decimals couldn't be verified, so the amount can't be shown"
+                        Strings.get(R.string.signing_x402_offer_token_unverified, offer.index + 1, chain.name)
                     TokenRead.Unreadable -> return@async null to
-                        "Offer ${offer.index + 1}: its token on ${chain.name} couldn't be read"
+                        Strings.get(R.string.signing_x402_offer_token_unreadable, offer.index + 1, chain.name)
                 }
                 val balance = holder?.let { readBalance(rpc, offer.chainId, offer.asset, it) }
                 X402Option(offer, chain, symbol, decimals, listed = known != null, balance = balance) to null

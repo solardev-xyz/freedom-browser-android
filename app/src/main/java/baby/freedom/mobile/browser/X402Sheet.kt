@@ -25,9 +25,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.annotation.PluralsRes
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.SendAmounts
 import baby.freedom.mobile.wallet.TokenAmounts
 import baby.freedom.mobile.wallet.WalletAccount
@@ -35,10 +39,13 @@ import baby.freedom.mobile.wallet.X402
 import java.math.BigInteger
 
 /** How long an allowance granted on the sheet lasts: the choices, shortest first. */
-internal enum class X402Window(val label: String, val ms: Long) {
-    HOUR("1 hour", 60 * 60 * 1000L),
-    DAY("1 day", 24 * 60 * 60 * 1000L),
-    WEEK("7 days", 7 * 24 * 60 * 60 * 1000L),
+internal enum class X402Window(@PluralsRes private val unitRes: Int, private val count: Int, val ms: Long) {
+    HOUR(R.plurals.signing_x402_window_hours, 1, 60 * 60 * 1000L),
+    DAY(R.plurals.signing_x402_window_days, 1, 24 * 60 * 60 * 1000L),
+    WEEK(R.plurals.signing_x402_window_days, 7, 7 * 24 * 60 * 60 * 1000L),
+    ;
+
+    val label: String get() = Strings.plural(unitRes, count, count)
 }
 
 /**
@@ -57,7 +64,7 @@ internal fun X402Ask.paysFrom(active: WalletAccount?): Boolean =
 internal fun ledgerHurry(offer: X402.Offer): String? {
     val s = X402.confirmSeconds(offer)
     return if (s >= X402.LEDGER_CONFIRM_SECONDS) null
-    else "The site allows only $s s to confirm once the Ledger shows the payment; after that it isn't sent."
+    else Strings.get(R.string.signing_x402_ledger_hurry, s)
 }
 
 /**
@@ -66,12 +73,14 @@ internal fun ledgerHurry(offer: X402.Offer): String? {
  * the payee and the per-payment amount are this payment's (#237).
  */
 internal fun allowanceNote(window: X402Window, o: X402Option, account: String): String =
-    "For ${window.label}, this site's pages are paid for in ${o.symbol} on ${o.chain.name} without asking — " +
-        "each at most ${SendAmounts.exact(o.offer.amount, o.decimals)} ${o.symbol}, to the Pay to address above only — " +
-        "from $account only, up to that total. Only pages you open yourself or reach by tapping on the site, " +
-        "not ones it moves to on its own; and after the site refuses a payment, not until you open or reload it yourself. " +
-        "Only while the wallet is unlocked, never in a private tab. With another account active, you're asked again. " +
-        "Revoke it any time on the wallet page."
+    Strings.get(
+        R.string.signing_x402_allowance_note,
+        window.label,
+        o.symbol,
+        o.chain.name,
+        SendAmounts.exact(o.offer.amount, o.decimals),
+        account,
+    )
 
 /** What the user has picked on an x402 sheet: an offer, and whether (and how much) to allow paying without asking. */
 internal class X402SheetState(val ask: X402Ask) {
@@ -98,8 +107,8 @@ internal class X402SheetState(val ask: X402Ask) {
     fun capProblem(): String? {
         if (!auto || ledger) return null
         val o = option ?: return null
-        val cap = cap() ?: return "Enter an amount of ${o.symbol}"
-        if (cap < o.offer.amount) return "At least this payment: ${SendAmounts.exact(o.offer.amount, o.decimals)} ${o.symbol}"
+        val cap = cap() ?: return Strings.get(R.string.signing_x402_cap_enter_amount, o.symbol)
+        if (cap < o.offer.amount) return Strings.get(R.string.signing_x402_cap_at_least, SendAmounts.exact(o.offer.amount, o.decimals), o.symbol)
         return null
     }
 
@@ -134,23 +143,23 @@ internal fun X402PaymentBody(
     locked: Boolean,
     onSetUp: () -> Unit,
 ) {
-    Row0("Page", sheetText(ask.url, 2048).first, mono = true)
-    ask.description?.let { Row0("The site says", it) }
+    Row0(stringResource(R.string.signing_x402_page), sheetText(ask.url, 2048).first, mono = true)
+    ask.description?.let { Row0(stringResource(R.string.signing_x402_site_says), it) }
     if (noWallet || account == null) {
         Spacer(Modifier.height(8.dp))
-        Text("There's no wallet on this device yet. Set one up to pay — or reject, and keep browsing without paying.")
+        Text(stringResource(R.string.signing_x402_no_wallet))
         Spacer(Modifier.height(12.dp))
-        OutlinedButton(onClick = onSetUp, modifier = Modifier.fillMaxWidth().testTag("x402-setup")) { Text("Set up a wallet") }
+        OutlinedButton(onClick = onSetUp, modifier = Modifier.fillMaxWidth().testTag("x402-setup")) { Text(stringResource(R.string.signing_x402_set_up_wallet)) }
         return
     }
     if (ask.options.isEmpty()) {
         Spacer(Modifier.height(8.dp))
-        Note("This wallet can't make any of the payments the site offers:", warn = true)
-        ask.unusable.forEach { Note("• $it", warn = true) }
+        Note(stringResource(R.string.signing_x402_no_usable_offers), warn = true)
+        ask.unusable.forEach { Note(stringResource(R.string.signing_x402_bullet, it), warn = true) }
         return
     }
     if (ask.options.size > 1) {
-        Label("Pay with")
+        Label(stringResource(R.string.signing_x402_pay_with))
         ask.options.forEachIndexed { i, o ->
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -162,40 +171,40 @@ internal fun X402PaymentBody(
             ) {
                 RadioButton(selected = i == state.selected, onClick = null)
                 Column(Modifier.padding(start = 8.dp)) {
-                    Text("${SendAmounts.exact(o.offer.amount, o.decimals)} ${o.symbol} on ${o.chain.name}")
-                    if (!o.fundable) Note("Not enough ${o.symbol}")
+                    Text(stringResource(R.string.signing_x402_option, SendAmounts.exact(o.offer.amount, o.decimals), o.symbol, o.chain.name))
+                    if (!o.fundable) Note(stringResource(R.string.signing_x402_not_enough, o.symbol))
                 }
             }
         }
     }
     val o = state.option ?: return
     Row0(
-        "Amount",
+        stringResource(R.string.signing_x402_amount),
         "${SendAmounts.exact(o.offer.amount, o.decimals)} ${o.symbol}",
         mono = true,
-        detail = if (o.listed) null else "${o.symbol} isn't in the wallet's token list: its symbol and decimals were read from the contract below, and verified on ${o.chain.name}.",
+        detail = if (o.listed) null else stringResource(R.string.signing_x402_unlisted_token, o.symbol, o.chain.name),
     )
-    Row0("Network", "${o.chain.name} (chain ${o.chain.id})")
-    AddressRow("Pay to", o.offer.payTo)
-    AddressRow("Token contract", o.offer.asset)
-    AccountRow(account, "From")
+    Row0(stringResource(R.string.signing_x402_network), stringResource(R.string.signing_x402_network_value, o.chain.name, o.chain.id.toString()))
+    AddressRow(stringResource(R.string.signing_x402_pay_to), o.offer.payTo)
+    AddressRow(stringResource(R.string.signing_x402_token_contract), o.offer.asset)
+    AccountRow(account, stringResource(R.string.signing_x402_from))
     Row0(
-        "Balance",
-        o.balance?.let { "${TokenAmounts.format(it, o.decimals)} ${o.symbol}" } ?: "Couldn't be read",
-        detail = if (!o.fundable) "Not enough ${o.symbol} for this payment." else null,
+        stringResource(R.string.signing_x402_balance),
+        o.balance?.let { "${TokenAmounts.format(it, o.decimals)} ${o.symbol}" } ?: stringResource(R.string.signing_x402_balance_unreadable),
+        detail = if (!o.fundable) stringResource(R.string.signing_x402_not_enough_for_payment, o.symbol) else null,
     )
     if (ask.allowanceWaitingOnUnlock && locked) {
         Spacer(Modifier.height(8.dp))
-        Note("Your allowance for this site covers this payment, but the wallet is locked, so nothing is paid without you.")
+        Note(stringResource(R.string.signing_x402_allowance_waiting_unlock))
     }
     if (ask.unusable.isNotEmpty()) {
         Spacer(Modifier.height(8.dp))
-        Note("The site's other offers can't be paid:")
-        ask.unusable.forEach { Note("• $it") }
+        Note(stringResource(R.string.signing_x402_other_offers_unusable))
+        ask.unusable.forEach { Note(stringResource(R.string.signing_x402_bullet, it)) }
     }
     Spacer(Modifier.height(8.dp))
     if (state.ledger) {
-        Note("A Ledger account doesn't pay sites automatically: you confirm each payment on the Ledger.")
+        Note(stringResource(R.string.signing_x402_ledger_no_auto))
         ledgerHurry(o.offer)?.let { Note(it, warn = true) }
     } else Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -205,13 +214,13 @@ internal fun X402PaymentBody(
             .testTag("x402-auto"),
     ) {
         Checkbox(checked = state.auto, onCheckedChange = null)
-        Text("Pay this site automatically", modifier = Modifier.padding(start = 8.dp))
+        Text(stringResource(R.string.signing_x402_pay_automatically), modifier = Modifier.padding(start = 8.dp))
     }
     if (state.auto && !state.ledger) {
         OutlinedTextField(
             value = state.capText,
             onValueChange = { state.capText = it },
-            label = { Text("Up to, in all (this payment included)") },
+            label = { Text(stringResource(R.string.signing_x402_cap_label)) },
             suffix = { Text(o.symbol) },
             singleLine = true,
             isError = state.capProblem() != null,
@@ -232,8 +241,5 @@ internal fun X402PaymentBody(
         Note(allowanceNote(state.window, o, accountLabel(account)))
     }
     Spacer(Modifier.height(8.dp))
-    Note(
-        "Paying signs a transfer of exactly this amount to the address above, which the site collects. " +
-            "It can't be undone once the site has it.",
-    )
+    Note(stringResource(R.string.signing_x402_paying_explained))
 }

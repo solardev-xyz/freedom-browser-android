@@ -1,0 +1,277 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Ledger, remote signing (OpenLV) and x402 payments (#280): the signing
+  area's text. Token amounts are passed in already formatted (%1$s) and
+  keep their fixed format.
+-->
+<resources>
+    <!-- wallet/ledger/LedgerErrors.kt -->
+    <string name="signing_ledger_error_bluetooth_off">Bluetooth is off. Turn it on and try again.</string>
+    <string name="signing_ledger_error_bluetooth_unavailable">This phone has no Bluetooth LE, which a Ledger needs.</string>
+    <string name="signing_ledger_error_permission">Freedom needs the Nearby devices permission to reach your Ledger.</string>
+    <string name="signing_ledger_error_not_found">Couldn’t reach your Ledger. Unlock it, keep it close and make sure its Bluetooth is on.</string>
+    <string name="signing_ledger_error_pairing_failed">Pairing with the Ledger didn’t finish. Confirm the code on the Ledger and on the phone, then try again.</string>
+    <string name="signing_ledger_error_locked">Your Ledger is locked. Unlock it with your PIN.</string>
+    <string name="signing_ledger_error_app_not_open">Open the Ethereum app on your Ledger.</string>
+    <string name="signing_ledger_error_rejected">Rejected on the Ledger.</string>
+    <string name="signing_ledger_error_disconnected">The Ledger disconnected. Keep it close and unlocked, and try again.</string>
+    <string name="signing_ledger_error_wrong_device">This Ledger doesn’t hold the selected account. Use the Ledger this account was added from.</string>
+    <string name="signing_ledger_error_blind_signing">The Ledger can’t show all of this in clear, so it only signs it with “Blind signing” on. Turn it on in the Ethereum app’s settings on the Ledger, then try again.</string>
+    <string name="signing_ledger_error_timeout">The Ledger didn’t answer in time. Nothing was signed.</string>
+    <string name="signing_ledger_error_cancelled">Cancelled. Nothing was signed.</string>
+    <string name="signing_ledger_error_mismatch">The Ledger’s signature isn’t for what this phone showed. Nothing was used.</string>
+    <string name="signing_ledger_error_invalid_data">The Ethereum app on the Ledger refused what it was sent as invalid. Nothing was signed.</string>
+    <string name="signing_ledger_error_unsupported">The Ethereum app on this Ledger can’t sign this. Update it with Ledger Live and try again.</string>
+    <string name="signing_ledger_error_unknown">Ledger error. Unlock the Ledger, open the Ethereum app and try again.</string>
+
+    <!-- wallet/ledger/LedgerBleLink.kt -->
+    <string name="signing_ledger_not_a_ble_ledger">This device isn’t a Bluetooth Ledger (Nano X, Stax or Flex).</string>
+
+    <!-- wallet/ledger/Ledger.kt -->
+    <string name="signing_ledger_scheme_live">Ledger Live</string>
+    <string name="signing_ledger_scheme_legacy">Legacy (MEW / MyCrypto)</string>
+    <string name="signing_ledger_purpose_read_accounts">Reading accounts from your Ledger</string>
+    <string name="signing_ledger_purpose_confirm_transaction">Confirm the transaction on your Ledger</string>
+    <string name="signing_ledger_purpose_confirm_message">Confirm the message on your Ledger</string>
+    <string name="signing_ledger_purpose_sign_data">Review and sign the data on your Ledger</string>
+
+    <!-- browser/LedgerUi.kt -->
+    <string name="signing_ledger_connect_title">Connect a Ledger</string>
+    <string name="signing_ledger_before_you_start">Before you start</string>
+    <string name="signing_ledger_before_you_start_body">Unlock your Ledger (Nano X, Stax or Flex), open its Ethereum app and keep it close. The first time, Android asks to pair: check that the same code is on the Ledger and the phone, and confirm it on both.</string>
+    <string name="signing_ledger_keys_never_leave">Your Ledger’s keys never leave it: every transaction and signature is shown and confirmed on the Ledger.</string>
+    <string name="signing_ledger_bluetooth">Bluetooth</string>
+    <string name="signing_ledger_nearby_devices">Nearby devices</string>
+    <string name="signing_ledger_permission_blocked">Android won’t ask again for the permission to find and connect to your Ledger. Turn on Nearby devices for Freedom in Android settings.</string>
+    <string name="signing_ledger_permission_rationale">Freedom needs Android’s permission to find and connect to your Ledger over Bluetooth. It’s used for nothing else.</string>
+    <string name="signing_ledger_turn_on_bluetooth">Turn on Bluetooth</string>
+    <string name="signing_ledger_ledgers">Ledgers</string>
+    <string name="signing_ledger_looking">Looking for Ledgers…</string>
+    <string name="signing_ledger_none_found">No Ledger found. Check that it’s unlocked with Bluetooth on, then look again.</string>
+    <string name="signing_ledger_device_emulator">Emulator (debug build)</string>
+    <string name="signing_ledger_device_paired">Paired with this phone</string>
+    <string name="signing_ledger_device_nearby">Nearby · not paired yet</string>
+    <string name="signing_ledger_look_again">Look again</string>
+    <string name="signing_ledger_layout">Layout</string>
+    <string name="signing_ledger_layout_explained">Ledger Live makes accounts at m/44\'/60\'/n\'/0/0; wallets like MyEtherWallet used m/44\'/60\'/0\'/n.</string>
+    <string name="signing_ledger_accounts_on_ledger">Accounts on this Ledger</string>
+    <!-- %1$s: the derivation path, e.g. 44'/60'/0'/0/0 -->
+    <string name="signing_ledger_path_already_added">m/%1$s · already in this wallet</string>
+    <string name="signing_ledger_reading_accounts">Reading accounts from the Ledger…</string>
+    <string name="signing_ledger_show_more">Show more</string>
+    <string name="signing_ledger_add_to_wallet">Add to the wallet</string>
+    <string name="signing_ledger_name_optional">Name (optional)</string>
+    <string name="signing_ledger_account_already_in_wallet">That account is already in this wallet.</string>
+    <string name="signing_ledger_add_failed">Couldn’t add the account. The phone may be out of storage.</string>
+    <string name="signing_ledger_adding">Adding…</string>
+    <string name="signing_ledger_add_account">Add account</string>
+    <string name="signing_ledger_stage_connecting">Connecting to your Ledger…</string>
+    <string name="signing_ledger_stage_connecting_detail">Keep it unlocked and close to the phone.</string>
+    <string name="signing_ledger_stage_pairing">Pair with your Ledger</string>
+    <string name="signing_ledger_stage_pairing_detail">Check that the same code is on the Ledger and on the phone, then confirm it on both.</string>
+    <string name="signing_ledger_stage_unlock">Unlock your Ledger</string>
+    <string name="signing_ledger_stage_unlock_detail">Enter your PIN on the Ledger. This waits for it.</string>
+    <string name="signing_ledger_stage_open_app">Open the Ethereum app</string>
+    <string name="signing_ledger_stage_open_app_detail">On the Ledger, open the Ethereum app. This waits for it.</string>
+    <string name="signing_ledger_stage_reading">Reading accounts…</string>
+    <string name="signing_ledger_stage_reading_detail">Addresses only: nothing is signed.</string>
+    <string name="signing_ledger_stage_confirm_detail">Check the details on the Ledger’s screen, then approve or reject them there.</string>
+
+    <!-- wallet/OpenLvEngine.kt -->
+    <string name="signing_openlv_connection_failed">The connection failed.</string>
+    <string name="signing_openlv_page_did_not_start">The signing page didn’t start.</string>
+    <string name="signing_openlv_webview_too_old">This phone’s Android System WebView is too old to connect with a pairing code. Update it and try again.</string>
+    <string name="signing_openlv_connection_stopped">The connection stopped unexpectedly. Scan the code again.</string>
+
+    <!-- assets/openlv/shim.js: sent to the page as a table (OpenLvEngine.shimStrings); the page fills in %1$s. -->
+    <string name="signing_openlv_code_unreadable">That pairing code can’t be read. Scan the code on the computer again.</string>
+    <!-- %1$s: the protocol the code names -->
+    <string name="signing_openlv_unsupported_protocol">Unsupported signaling protocol \"%1$s\"</string>
+    <string name="signing_openlv_server_unreadable">That pairing code’s server address can’t be read. Scan the code on the computer again.</string>
+    <string name="signing_openlv_server_unencrypted">That pairing code points at an unencrypted server. Scan the code on the computer again.</string>
+    <!-- %1$s: the server URL's scheme, e.g. http: -->
+    <string name="signing_openlv_server_scheme">That pairing code’s server uses %1$s, but the phone connects over secure WebSockets (wss:) only. Scan the code on the computer again.</string>
+
+    <!-- wallet/OpenLvSession.kt -->
+    <string name="signing_remote_notice_ledger_repriced">The Ledger approval came over three minutes after the fees were worked out, so it wasn’t sent and they’ve been priced again. Check them and confirm again.</string>
+    <string name="signing_remote_notice_repriced">The fees were over a minute old, so they’ve been priced again. Check them and confirm again.</string>
+
+    <!-- browser/RemoteSigningUi.kt -->
+    <string name="signing_hex_none">None</string>
+    <plurals name="signing_hex_lines_scroll">
+        <item quantity="one">%d line: scroll the box to read them all</item>
+        <item quantity="other">%d lines: scroll the box to read them all</item>
+    </plurals>
+    <string name="signing_remote_status_idle">Not connected.</string>
+    <string name="signing_remote_status_connecting">Connecting over the scanned code…</string>
+    <string name="signing_remote_status_connected">Connected. Requests over this code show up here for you to approve.</string>
+    <string name="signing_remote_status_disconnected">Done: the other side closed the connection. Each request on the computer shows a new code to scan.</string>
+    <!-- %1$s: why, e.g. "The connection failed." -->
+    <string name="signing_remote_status_failed">Couldn’t connect: %1$s</string>
+    <string name="signing_remote_connection_title">Signing connection</string>
+    <string name="signing_remote_pairing_explained">This code connects this phone to whatever showed it — Freedom on your computer, if that’s where you scanned it — so the phone can sign for it. Each signature or transaction it asks for is shown here first; nothing is signed without you.</string>
+    <string name="signing_remote_connect_again">Connect again</string>
+    <!-- Fills "Couldn’t %s: …" in the wallet's error messages (walletErrorMessage). -->
+    <string name="signing_remote_action_unlock_wallet">unlock the wallet</string>
+    <string name="signing_remote_title_connect">Connect an account</string>
+    <string name="signing_remote_action_connect">Connect</string>
+    <string name="signing_remote_title_sign_message">Sign a message</string>
+    <string name="signing_remote_action_sign">Sign</string>
+    <string name="signing_remote_title_sign_typed_data">Sign typed data</string>
+    <string name="signing_remote_title_send_transaction">Send a transaction</string>
+    <string name="signing_remote_action_confirm_send">Confirm and send</string>
+    <string name="signing_remote_asked_over_code">Asked for over the code you scanned. Only approve if that code came from Freedom on your own computer.</string>
+    <string name="signing_remote_connect_explained">The code you scanned asks to add an account of this wallet. It learns the account’s address, nothing else; every signature or transaction it asks for later is shown here first.</string>
+    <string name="signing_review_account">Account</string>
+    <string name="signing_review_message">Message</string>
+    <plurals name="signing_review_binary_bytes">
+        <item quantity="one">%d byte that isn’t text</item>
+        <item quantity="other">%d bytes that aren’t text</item>
+    </plurals>
+    <string name="signing_remote_personal_sign_warning">Signing proves this account agreed to the message. It can’t move funds by itself, but only sign messages you understand.</string>
+    <string name="signing_review_network">Network</string>
+    <string name="signing_review_network_any">Any — the signature names no chain</string>
+    <string name="signing_review_network_any_detail">It could be used on any network where this contract accepts it</string>
+    <!-- %1$s: a chain ID (a number, shown as is) -->
+    <string name="signing_review_chain_id">Chain %1$s</string>
+    <string name="signing_review_chain_not_set_up">A chain this phone doesn’t have set up</string>
+    <string name="signing_review_type">Type</string>
+    <string name="signing_review_domain">Domain</string>
+    <string name="signing_remote_typed_data_warning">Typed data can authorise things — a permit to spend your tokens, an order, a multisig transaction. Only sign it if you started this on your computer.</string>
+    <!-- A typed-data field nested deeper than the sheet indents. %1$d: its depth; %2$s: its name -->
+    <string name="signing_typed_level_label">level %1$d · %2$s</string>
+    <string name="signing_review_from">From</string>
+    <string name="signing_review_to">To</string>
+    <string name="signing_review_to_self">This is the sending account itself.</string>
+    <string name="signing_review_value">Value</string>
+    <string name="signing_review_data">Data</string>
+    <plurals name="signing_review_call_bytes">
+        <item quantity="one">%d byte: the contract call it asks to make</item>
+        <item quantity="other">%d bytes: the contract call it asks to make</item>
+    </plurals>
+    <string name="signing_review_plain_transfer">A plain transfer</string>
+    <string name="signing_review_network_fee">Network fee</string>
+    <!-- %1$s: a fee amount with its symbol, fixed format -->
+    <string name="signing_review_up_to">up to %1$s</string>
+    <string name="signing_review_total">Total</string>
+    <string name="signing_review_nonce">Nonce</string>
+    <!-- %1$s: what the fee may still do (a sentence from the send screen) -->
+    <string name="signing_remote_send_footnote">The phone signs and sends this itself and follows it in the wallet. %1$s</string>
+
+    <!-- browser/X402Sheet.kt -->
+    <plurals name="signing_x402_window_hours">
+        <item quantity="one">%d hour</item>
+        <item quantity="other">%d hours</item>
+    </plurals>
+    <plurals name="signing_x402_window_days">
+        <item quantity="one">%d day</item>
+        <item quantity="other">%d days</item>
+    </plurals>
+    <!-- %1$d: seconds -->
+    <string name="signing_x402_ledger_hurry">The site allows only %1$d s to confirm once the Ledger shows the payment; after that it isn\'t sent.</string>
+    <!-- %1$s: how long (e.g. "1 day"); %2$s: token symbol; %3$s: network; %4$s: the amount of one payment (fixed format); %5$s: the account -->
+    <string name="signing_x402_allowance_note">For %1$s, this site\'s pages are paid for in %2$s on %3$s without asking — each at most %4$s %2$s, to the Pay to address above only — from %5$s only, up to that total. Only pages you open yourself or reach by tapping on the site, not ones it moves to on its own; and after the site refuses a payment, not until you open or reload it yourself. Only while the wallet is unlocked, never in a private tab. With another account active, you\'re asked again. Revoke it any time on the wallet page.</string>
+    <string name="signing_x402_cap_enter_amount">Enter an amount of %1$s</string>
+    <!-- %1$s: amount (fixed format); %2$s: token symbol -->
+    <string name="signing_x402_cap_at_least">At least this payment: %1$s %2$s</string>
+    <string name="signing_x402_page">Page</string>
+    <string name="signing_x402_site_says">The site says</string>
+    <string name="signing_x402_no_wallet">There\'s no wallet on this device yet. Set one up to pay — or reject, and keep browsing without paying.</string>
+    <string name="signing_x402_set_up_wallet">Set up a wallet</string>
+    <string name="signing_x402_no_usable_offers">This wallet can\'t make any of the payments the site offers:</string>
+    <!-- A list item: %1$s is why one of the site's offers can't be paid -->
+    <string name="signing_x402_bullet">• %1$s</string>
+    <string name="signing_x402_pay_with">Pay with</string>
+    <!-- %1$s: amount (fixed format); %2$s: token symbol; %3$s: network -->
+    <string name="signing_x402_option">%1$s %2$s on %3$s</string>
+    <string name="signing_x402_not_enough">Not enough %1$s</string>
+    <string name="signing_x402_amount">Amount</string>
+    <!-- %1$s: token symbol; %2$s: network -->
+    <string name="signing_x402_unlisted_token">%1$s isn\'t in the wallet\'s token list: its symbol and decimals were read from the contract below, and verified on %2$s.</string>
+    <string name="signing_x402_network">Network</string>
+    <!-- %1$s: network name; %2$s: its chain ID -->
+    <string name="signing_x402_network_value">%1$s (chain %2$s)</string>
+    <string name="signing_x402_pay_to">Pay to</string>
+    <string name="signing_x402_token_contract">Token contract</string>
+    <string name="signing_x402_from">From</string>
+    <string name="signing_x402_balance">Balance</string>
+    <string name="signing_x402_balance_unreadable">Couldn\'t be read</string>
+    <string name="signing_x402_not_enough_for_payment">Not enough %1$s for this payment.</string>
+    <string name="signing_x402_allowance_waiting_unlock">Your allowance for this site covers this payment, but the wallet is locked, so nothing is paid without you.</string>
+    <string name="signing_x402_other_offers_unusable">The site\'s other offers can\'t be paid:</string>
+    <string name="signing_x402_ledger_no_auto">A Ledger account doesn\'t pay sites automatically: you confirm each payment on the Ledger.</string>
+    <string name="signing_x402_pay_automatically">Pay this site automatically</string>
+    <string name="signing_x402_cap_label">Up to, in all (this payment included)</string>
+    <string name="signing_x402_paying_explained">Paying signs a transfer of exactly this amount to the address above, which the site collects. It can\'t be undone once the site has it.</string>
+
+    <!-- browser/X402Ui.kt -->
+    <string name="signing_x402_section_title">Site payments</string>
+    <string name="signing_x402_status_sent">Sent</string>
+    <string name="signing_x402_status_sent_detail">Signed and sent with the page\'s request; the site hasn\'t answered yet.</string>
+    <string name="signing_x402_status_paid">Paid</string>
+    <string name="signing_x402_status_paid_detail">The site took the payment and showed the page.</string>
+    <string name="signing_x402_status_refused">Refused</string>
+    <string name="signing_x402_status_refused_detail">The site answered the paid request with an error. It may still collect the payment until the authorization runs out.</string>
+    <!-- %1$d: the HTTP status code -->
+    <string name="signing_x402_status_refused_detail_http">The site answered the paid request with an error (HTTP %1$d). It may still collect the payment until the authorization runs out.</string>
+    <string name="signing_x402_status_unconfirmed">Unconfirmed</string>
+    <string name="signing_x402_status_unconfirmed_detail">The site\'s answer to the paid request wasn\'t seen. It may have collected the payment.</string>
+    <string name="signing_x402_approval_automatic">automatic</string>
+    <string name="signing_x402_approval_approved">approved</string>
+    <!-- %1$s: spent; %2$s: the allowance's total; %3$s: token symbol; %4$s: most per payment (amounts fixed format); %5$s: payee; %6$s: network; %7$s: paying account; %8$s: expiry date and time -->
+    <string name="signing_x402_allowance_line">%1$s of %2$s %3$s used · at most %4$s each · to %5$s · %6$s · from %7$s · until %8$s</string>
+    <!-- %1$s: a chain ID -->
+    <string name="signing_x402_chain_fallback">chain %1$s</string>
+    <string name="signing_x402_no_allowances">No site pays automatically. A page that asks to be paid asks you here first.</string>
+    <string name="signing_x402_revoke">Revoke</string>
+    <string name="signing_x402_payment_history">Payment history</string>
+    <string name="signing_x402_no_payments">No payments yet</string>
+    <plurals name="signing_x402_payments">
+        <item quantity="one">%d payment</item>
+        <item quantity="other">%d payments</item>
+    </plurals>
+    <string name="signing_x402_no_payments_sentence">No payments yet.</string>
+    <!-- %1$s: the status (Paid, Refused…); %2$s: the amount with its symbol, fixed format -->
+    <string name="signing_x402_payment_heading">%1$s: %2$s</string>
+    <string name="signing_x402_paid_to">Paid to</string>
+    <string name="signing_x402_token">Token</string>
+    <string name="signing_x402_authorization_nonce">Authorization nonce</string>
+
+    <!-- browser/X402Payments.kt -->
+    <!-- %1$s: why, e.g. "Rejected on the Ledger." -->
+    <string name="signing_x402_not_paid">Not paid: %1$s</string>
+    <!-- %1$d: seconds -->
+    <string name="signing_x402_timed_out_ledger">Not paid: the site allows %1$d s to confirm a payment on the Ledger, and that ran out. Reload the page to try again.</string>
+    <!-- %1$d: seconds -->
+    <string name="signing_x402_timed_out">Not paid: the site allows %1$d s to sign a payment, and that ran out. Reload the page to try again.</string>
+    <!-- %1$d: the offer's number; %2$s: a chain ID -->
+    <string name="signing_x402_offer_unknown_chain">Offer %1$d: pays on chain %2$s, which isn\'t in Settings → Chains</string>
+    <!-- %1$d: the offer's number; %2$s: network -->
+    <string name="signing_x402_offer_token_unverified">Offer %1$d: its token on %2$s isn\'t in the wallet\'s token list, and its decimals couldn\'t be verified, so the amount can\'t be shown</string>
+    <!-- %1$d: the offer's number; %2$s: network -->
+    <string name="signing_x402_offer_token_unreadable">Offer %1$d: its token on %2$s couldn\'t be read</string>
+
+    <!-- wallet/X402.kt: why an offer of the site's can't be paid, listed on the payment sheet -->
+    <!-- %1$d: the offer's number; %2$s: why it can't be paid (one of the signing_x402_why_* strings) -->
+    <string name="signing_x402_offer_line">Offer %1$d: %2$s</string>
+    <string name="signing_x402_why_not_an_offer">not an offer</string>
+    <!-- %1$s: the scheme the site named, quoted (signing_x402_quoted) or signing_x402_none -->
+    <string name="signing_x402_why_scheme">scheme %1$s isn\'t supported</string>
+    <string name="signing_x402_why_no_network">no network</string>
+    <!-- %1$s: the network the site named, quoted -->
+    <string name="signing_x402_why_network">network %1$s isn\'t supported</string>
+    <!-- %1$s: the transfer method the site named, quoted -->
+    <string name="signing_x402_why_transfer_method">only EIP-3009 transfers are supported, not %1$s</string>
+    <string name="signing_x402_why_no_amount">no valid amount</string>
+    <string name="signing_x402_why_no_token">no valid token address</string>
+    <string name="signing_x402_why_no_pay_to">no valid address to pay</string>
+    <string name="signing_x402_why_zero_address">it pays the zero address</string>
+    <string name="signing_x402_why_pays_token">it pays the token contract itself</string>
+    <string name="signing_x402_why_no_time_limit">no valid time limit</string>
+    <!-- %1$d: the site's time limit in seconds; %2$d: the least that's needed, in seconds -->
+    <string name="signing_x402_why_time_limit_short">its time limit (%1$d s) is too short to pay in; at least %2$d s is needed</string>
+    <string name="signing_x402_why_domain_unnamed">the token\'s signing domain isn\'t named</string>
+    <!-- Something the site wrote, quoted as is -->
+    <string name="signing_x402_quoted">“%1$s”</string>
+    <string name="signing_x402_none">(none)</string>
+</resources>

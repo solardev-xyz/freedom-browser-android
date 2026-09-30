@@ -31,36 +31,40 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.data.X402Store
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.SendAmounts
 import java.text.DateFormat
 import java.util.Date
-
-internal const val X402_HISTORY_TITLE = "Site payments"
 
 /** "0.01 USDC": a payment's amount, exactly. */
 internal fun x402Amount(p: X402Store.Payment): String = "${SendAmounts.exact(p.amount, p.decimals)} ${p.symbol}"
 
 /** A payment's status as a heading and the sentence under it. */
 internal fun x402StatusText(p: X402Store.Payment): Pair<String, String> = when (p.status) {
-    X402Store.Status.PENDING -> "Sent" to "Signed and sent with the page's request; the site hasn't answered yet."
-    X402Store.Status.PAID -> "Paid" to "The site took the payment and showed the page."
-    X402Store.Status.REFUSED -> "Refused" to "The site answered the paid request with an error" +
-        (p.httpStatus?.let { " (HTTP $it)" } ?: "") + ". It may still collect the payment until the authorization runs out."
-    X402Store.Status.UNCONFIRMED -> "Unconfirmed" to "The site's answer to the paid request wasn't seen. " +
-        "It may have collected the payment."
+    X402Store.Status.PENDING -> Strings.get(R.string.signing_x402_status_sent) to Strings.get(R.string.signing_x402_status_sent_detail)
+    X402Store.Status.PAID -> Strings.get(R.string.signing_x402_status_paid) to Strings.get(R.string.signing_x402_status_paid_detail)
+    X402Store.Status.REFUSED -> Strings.get(R.string.signing_x402_status_refused) to (
+        p.httpStatus?.let { Strings.get(R.string.signing_x402_status_refused_detail_http, it) }
+            ?: Strings.get(R.string.signing_x402_status_refused_detail)
+        )
+    X402Store.Status.UNCONFIRMED ->
+        Strings.get(R.string.signing_x402_status_unconfirmed) to Strings.get(R.string.signing_x402_status_unconfirmed_detail)
 }
 
 /** A payment's second line: status, how it was approved, network and when. */
 internal fun x402Subtitle(p: X402Store.Payment, chainName: String, format: DateFormat = x402DateFormat()): String =
     listOf(
         x402StatusText(p).first,
-        if (p.auto) "automatic" else "approved",
+        if (p.auto) Strings.get(R.string.signing_x402_approval_automatic) else Strings.get(R.string.signing_x402_approval_approved),
         chainName,
         format.format(Date(p.at)),
     ).joinToString(" · ")
@@ -70,13 +74,21 @@ internal fun x402Subtitle(p: X402Store.Payment, chainName: String, format: DateF
  * an allowance's state, whom it pays and how much at a time (#237), and the account it pays from.
  */
 internal fun x402AllowanceLine(a: X402Store.Allowance, chainName: String, format: DateFormat = x402DateFormat()): String =
-    "${SendAmounts.exact(a.spent, a.decimals)} of ${SendAmounts.exact(a.cap, a.decimals)} ${a.symbol} used · " +
-        "at most ${SendAmounts.exact(a.each, a.decimals)} each · to ${shortAddress(a.payTo)} · " +
-        "$chainName · from ${shortAddress(a.account)} · until ${format.format(Date(a.expires))}"
+    Strings.get(
+        R.string.signing_x402_allowance_line,
+        SendAmounts.exact(a.spent, a.decimals),
+        SendAmounts.exact(a.cap, a.decimals),
+        a.symbol,
+        SendAmounts.exact(a.each, a.decimals),
+        shortAddress(a.payTo),
+        chainName,
+        shortAddress(a.account),
+        format.format(Date(a.expires)),
+    )
 
 private fun x402DateFormat(): DateFormat = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
 
-private fun chainName(chains: List<Chain>, id: Long) = chains.firstOrNull { it.id == id }?.name ?: "chain $id"
+private fun chainName(chains: List<Chain>, id: Long) = chains.firstOrNull { it.id == id }?.name ?: Strings.get(R.string.signing_x402_chain_fallback, id.toString())
 
 /**
  * The wallet page's x402 section (#140): each site allowed to pay
@@ -91,10 +103,10 @@ internal fun X402Section(
     onRevoke: (X402Store.Allowance) -> Unit,
     onOpenHistory: () -> Unit,
 ) {
-    SectionCard(title = X402_HISTORY_TITLE) {
+    SectionCard(title = stringResource(R.string.signing_x402_section_title)) {
         if (allowances.isEmpty()) {
             Text(
-                "No site pays automatically. A page that asks to be paid asks you here first.",
+                stringResource(R.string.signing_x402_no_allowances),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -109,12 +121,12 @@ internal fun X402Section(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                TextButton(onClick = { onRevoke(a) }, modifier = Modifier.testTag("x402-revoke")) { Text("Revoke") }
+                TextButton(onClick = { onRevoke(a) }, modifier = Modifier.testTag("x402-revoke")) { Text(stringResource(R.string.signing_x402_revoke)) }
             }
         }
         PageRow(
-            title = "Payment history",
-            subtitle = if (payments == 0) "No payments yet" else "$payments payment${if (payments == 1) "" else "s"}",
+            title = stringResource(R.string.signing_x402_payment_history),
+            subtitle = if (payments == 0) stringResource(R.string.signing_x402_no_payments) else pluralStringResource(R.plurals.signing_x402_payments, payments, payments),
             style = PageRowStyle.Inset,
             leadingIcon = Icons.Filled.ReceiptLong,
             onClick = onOpenHistory,
@@ -139,7 +151,7 @@ private fun statusIcon(p: X402Store.Payment): Pair<ImageVector, Color> {
 @Composable
 internal fun X402HistoryPage(payments: List<X402Store.Payment>, chains: List<Chain>, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
-    FullScreenScaffold(title = "Payment history", onDismiss = onBack) {
+    FullScreenScaffold(title = stringResource(R.string.signing_x402_payment_history), onDismiss = onBack) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -147,8 +159,8 @@ internal fun X402HistoryPage(payments: List<X402Store.Payment>, chains: List<Cha
         ) {
             if (payments.isEmpty()) {
                 item("empty") {
-                    SectionCard(title = X402_HISTORY_TITLE) {
-                        Text("No payments yet.", style = MaterialTheme.typography.bodyMedium)
+                    SectionCard(title = stringResource(R.string.signing_x402_section_title)) {
+                        Text(stringResource(R.string.signing_x402_no_payments_sentence), style = MaterialTheme.typography.bodyMedium)
                     }
                 }
             }
@@ -166,17 +178,17 @@ private fun X402PaymentCard(p: X402Store.Payment, chainName: String) {
             Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("$title: ${x402Amount(p)}", fontWeight = FontWeight.Medium)
+                Text(stringResource(R.string.signing_x402_payment_heading, title, x402Amount(p)), fontWeight = FontWeight.Medium)
                 Text(x402Subtitle(p, chainName), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(text, style = MaterialTheme.typography.bodySmall)
             }
         }
         HorizontalDivider(Modifier.padding(vertical = 4.dp))
-        Field("Page", p.url)
-        Field("Paid to", p.payTo)
-        Field("From", p.from)
-        Field("Token", p.asset)
-        Field("Authorization nonce", p.nonce)
+        Field(stringResource(R.string.signing_x402_page), p.url)
+        Field(stringResource(R.string.signing_x402_paid_to), p.payTo)
+        Field(stringResource(R.string.signing_x402_from), p.from)
+        Field(stringResource(R.string.signing_x402_token), p.asset)
+        Field(stringResource(R.string.signing_x402_authorization_nonce), p.nonce)
     }
 }
 

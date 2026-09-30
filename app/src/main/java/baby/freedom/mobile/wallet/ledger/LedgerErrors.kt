@@ -1,5 +1,9 @@
 package baby.freedom.mobile.wallet.ledger
 
+import androidx.annotation.StringRes
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
+
 /**
  * Why a Ledger operation didn't finish (#142), in words the wallet shows
  * as they are — desktop's `LEDGER_*` codes (`wallet/ledger/errors.js`),
@@ -7,24 +11,27 @@ package baby.freedom.mobile.wallet.ledger
  * device returned beyond its status word.
  */
 class LedgerException(val kind: Kind, message: String = kind.message, cause: Throwable? = null) : Exception(message, cause) {
-    enum class Kind(val message: String) {
-        BLUETOOTH_OFF("Bluetooth is off. Turn it on and try again."),
-        BLUETOOTH_UNAVAILABLE("This phone has no Bluetooth LE, which a Ledger needs."),
-        PERMISSION("Freedom needs the Nearby devices permission to reach your Ledger."),
-        NOT_FOUND("Couldn’t reach your Ledger. Unlock it, keep it close and make sure its Bluetooth is on."),
-        PAIRING_FAILED("Pairing with the Ledger didn’t finish. Confirm the code on the Ledger and on the phone, then try again."),
-        LOCKED("Your Ledger is locked. Unlock it with your PIN."),
-        APP_NOT_OPEN("Open the Ethereum app on your Ledger."),
-        REJECTED("Rejected on the Ledger."),
-        DISCONNECTED("The Ledger disconnected. Keep it close and unlocked, and try again."),
-        WRONG_DEVICE("This Ledger doesn’t hold the selected account. Use the Ledger this account was added from."),
-        BLIND_SIGNING("The Ledger can’t show all of this in clear, so it only signs it with “Blind signing” on. Turn it on in the Ethereum app’s settings on the Ledger, then try again."),
-        TIMEOUT("The Ledger didn’t answer in time. Nothing was signed."),
-        CANCELLED("Cancelled. Nothing was signed."),
-        MISMATCH("The Ledger’s signature isn’t for what this phone showed. Nothing was used."),
-        INVALID_DATA("The Ethereum app on the Ledger refused what it was sent as invalid. Nothing was signed."),
-        UNSUPPORTED("The Ethereum app on this Ledger can’t sign this. Update it with Ledger Live and try again."),
-        UNKNOWN("Ledger error. Unlock the Ledger, open the Ethereum app and try again."),
+    enum class Kind(@StringRes private val messageRes: Int) {
+        BLUETOOTH_OFF(R.string.signing_ledger_error_bluetooth_off),
+        BLUETOOTH_UNAVAILABLE(R.string.signing_ledger_error_bluetooth_unavailable),
+        PERMISSION(R.string.signing_ledger_error_permission),
+        NOT_FOUND(R.string.signing_ledger_error_not_found),
+        PAIRING_FAILED(R.string.signing_ledger_error_pairing_failed),
+        LOCKED(R.string.signing_ledger_error_locked),
+        APP_NOT_OPEN(R.string.signing_ledger_error_app_not_open),
+        REJECTED(R.string.signing_ledger_error_rejected),
+        DISCONNECTED(R.string.signing_ledger_error_disconnected),
+        WRONG_DEVICE(R.string.signing_ledger_error_wrong_device),
+        BLIND_SIGNING(R.string.signing_ledger_error_blind_signing),
+        TIMEOUT(R.string.signing_ledger_error_timeout),
+        CANCELLED(R.string.signing_ledger_error_cancelled),
+        MISMATCH(R.string.signing_ledger_error_mismatch),
+        INVALID_DATA(R.string.signing_ledger_error_invalid_data),
+        UNSUPPORTED(R.string.signing_ledger_error_unsupported),
+        UNKNOWN(R.string.signing_ledger_error_unknown),
+        ;
+
+        val message: String get() = Strings.get(messageRes)
     }
 
     companion object {
