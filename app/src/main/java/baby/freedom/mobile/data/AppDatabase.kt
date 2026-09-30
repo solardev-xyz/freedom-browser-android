@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         FaviconEntry::class,
         DownloadEntry::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -92,7 +92,23 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        internal val MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+        /**
+         * v4 -> v5: pause and resume for downloads (#265) — the If-Range
+         * validator, whether the server serves ranges, a note, and the
+         * User-Agent the first request sent, which a resume or retry
+         * sends again (#180). Additive; existing rows read as not
+         * resumable, with no note and no recorded User-Agent.
+         */
+        internal val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `validator` TEXT")
+                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `resumable` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `note` TEXT")
+                db.execSQL("ALTER TABLE `downloads` ADD COLUMN `userAgent` TEXT")
+            }
+        }
+
+        internal val MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
 
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {

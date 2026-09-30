@@ -21,7 +21,8 @@ import org.junit.runner.RunWith
 
 /**
  * Bookmarks' `position` column (#264): the v3 -> v4 migration, and the
- * add / edit / move writes on top of it.
+ * add / edit / move writes on top of it. Also the v4 -> v5 downloads
+ * columns (#265), from both a v3 and a v4 database.
  */
 @RunWith(AndroidJUnit4::class)
 class BookmarksDatabaseTest {
@@ -81,8 +82,8 @@ class BookmarksDatabaseTest {
             close()
         }
 
-        // Opening it with the app's migrations runs v3 -> v4, and Room
-        // checks the migrated tables against v4's entities (columns,
+        // Opening it with the app's migrations runs v3 -> v4 -> v5, and
+        // Room checks the migrated tables against the entities (columns,
         // types, defaults, indices) before anything reads them — a
         // mismatch throws here.
         val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
@@ -93,13 +94,53 @@ class BookmarksDatabaseTest {
                 val positions = buildMap { while (c.moveToNext()) put(c.getLong(0), c.getLong(1)) }
                 assertEquals(mapOf(2L to 0L, 4L to 1L, 3L to 2L, 1L to 3L), positions)
             }
-            assertEquals(4, db.openHelper.readableDatabase.version)
+            assertEquals(5, db.openHelper.readableDatabase.version)
             runBlocking {
                 val all = db.bookmarks().all().first()
                 assertEquals(listOf(2L, 4L, 3L, 1L), all.map { it.id })
                 assertEquals(listOf("vitalik.eth", "rad://z3", "bzz://x.eth", "https://a.example/"), all.map { it.url })
                 assertEquals(listOf("V", "R", "X", "A"), all.map { it.title })
                 assertEquals(1, db.history().recent().first().size)
+            }
+        } finally {
+            db.close()
+            context.deleteDatabase(name)
+        }
+    }
+
+    /**
+     * A database a `main` build left at v4 (bookmarks with `position`, no
+     * pause/resume columns): v4 -> v5 adds the downloads columns, keeps
+     * every row, and old downloads read as not resumable.
+     */
+    @Test
+    fun migrationFromFourAddsTheDownloadColumns() {
+        val name = "migration-4-5.db"
+        context.deleteDatabase(name)
+        createDatabase(name, 4).apply {
+            execSQL("INSERT INTO bookmarks (id, url, title, createdAt, position) VALUES (1, 'vitalik.eth', 'V', 100, 0)")
+            execSQL(
+                "INSERT INTO downloads (id, fileName, displayUrl, sourceUrl, mimeType, contentUri, status, " +
+                    "totalBytes, receivedBytes, error, startedAt, finishedAt, refererOrigin) VALUES " +
+                    "(7, 'a.zip', 'https://d.example/a.zip', 'https://d.example/a.zip', 'application/zip', " +
+                    "'content://x/1', 'COMPLETE', 10, 10, NULL, 50, 60, 'https://d.example/')",
+            )
+            close()
+        }
+        val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(*AppDatabase.MIGRATIONS)
+            .build()
+        try {
+            assertEquals(5, db.openHelper.readableDatabase.version)
+            runBlocking {
+                val d = db.downloads().get(7)!!
+                assertEquals("a.zip", d.fileName)
+                assertEquals("https://d.example/", d.refererOrigin)
+                assertNull(d.validator)
+                assertFalse(d.resumable)
+                assertNull(d.note)
+                assertNull(d.userAgent)
+                assertEquals(listOf("vitalik.eth"), db.bookmarks().all().first().map { it.url })
             }
         } finally {
             db.close()

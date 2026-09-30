@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import android.webkit.WebSettings
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -2406,12 +2407,30 @@ fun BrowserScreen(
         }
     }
 
+    // The download notification (#265) carries Pause / Resume; on API
+    // 33+ it needs a permission nothing else asks for, so the first
+    // download the user accepts asks for it — once. Not a private one:
+    // it never gets a notification, so the one ask would be spent on a
+    // download that can't show what it's for.
+    val downloadNotificationPermission = rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { }
     tabOffers.firstOrNull()?.takeIf { promptTurn == PromptTurn.DownloadOffer }?.let { offer ->
         DownloadOfferDialog(
             offer = offer,
             othersWaiting = tabOffers.size - 1,
             dropped = droppedOffers[activeTabId] ?: 0,
-            onAccept = { downloads.accept(offer.key) },
+            onAccept = {
+                downloads.accept(offer.key)
+                if (!offer.private && android.os.Build.VERSION.SDK_INT >= 33 &&
+                    context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+                    android.content.pm.PackageManager.PERMISSION_GRANTED &&
+                    !DownloadNotifications.askedForPermission(context)
+                ) {
+                    DownloadNotifications.markAskedForPermission(context)
+                    downloadNotificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                }
+            },
             onDecline = { downloads.decline(offer.key) },
             onDeclineAll = { downloads.declineAll(activeTabId) },
         )

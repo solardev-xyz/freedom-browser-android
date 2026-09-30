@@ -1413,6 +1413,9 @@ fun BrowserWebViewHost(
             pageZoom.clearAll()
             // …and so are the sites asked for as desktop sites (#180).
             desktopSites.clearAll()
+            // Unfinished downloads keep partial files in app storage
+            // (#265): they stop, and those files go.
+            DownloadManager.get(context).discardUnfinished()
         }
         onDispose {
             tabs.captureActiveThumbnail = null

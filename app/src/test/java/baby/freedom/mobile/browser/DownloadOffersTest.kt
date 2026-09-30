@@ -18,6 +18,15 @@ class DownloadOffersTest {
     }
 
     @Test
+    fun anOfferSaysWhetherItIsPrivate() {
+        // The notification-permission ask skips a private one (#265).
+        val offers = DownloadOffers()
+        offers.offer(1, PAGE, "a.txt", "x", -1) {}
+        offers.offer(2, PAGE, "b.txt", "x", -1, private = true) {}
+        assertEquals(listOf(false, true), offers.pending.value.map { it.private })
+    }
+
+    @Test
     fun acceptStartsOnceAndLeavesTheQueue() {
         val offers = DownloadOffers()
         var started = 0

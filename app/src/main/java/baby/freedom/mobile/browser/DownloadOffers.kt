@@ -35,6 +35,11 @@ class DownloadOffer internal constructor(
     val source: String,
     /** Announced size in bytes; -1 when unknown. */
     val totalBytes: Long,
+    /**
+     * From a private tab (#86): its download gets no notification, so
+     * accepting it is no occasion to ask for that permission (#265).
+     */
+    val private: Boolean = false,
     internal val start: () -> Unit,
 )
 
@@ -84,9 +89,10 @@ internal class DownloadOffers {
         fileName: String,
         source: String,
         totalBytes: Long,
+        private: Boolean = false,
         start: () -> Unit,
     ): Boolean {
-        val offer = DownloadOffer(nextKey.getAndIncrement(), tabId, requestedBy, fileName, source, totalBytes, start)
+        val offer = DownloadOffer(nextKey.getAndIncrement(), tabId, requestedBy, fileName, source, totalBytes, private, start)
         synchronized(this) {
             if (requestedBy != null && tabId in blockedTabs) return false
             if (requestedBy != null &&

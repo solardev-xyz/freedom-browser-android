@@ -71,9 +71,11 @@ data class FaviconEntry(
  * One file the user downloaded (or tried to). The download manager
  * (`browser/Downloads.kt`) owns the rows: it inserts one as
  * [DownloadStatus.RUNNING] when a download starts and moves it to a
- * terminal status when it ends. Live byte counts while it runs are in
- * memory only (see `DownloadManager.progress`); [receivedBytes] is
- * written once, at the end.
+ * terminal status when it ends, or to [DownloadStatus.PAUSED] (#265)
+ * while its partial file waits in app storage for a resume. Live byte
+ * counts while it runs are in memory only (see
+ * `DownloadManager.progress`); [receivedBytes] is written when it
+ * pauses and when it ends.
  *
  * [displayUrl] is the user-facing source (`bzz://…`, `ipfs://…`,
  * `name.eth/…`, `https://…`, or `data:` — truncated for data URIs, whose
@@ -105,6 +107,35 @@ data class DownloadEntry(
      * [baby.freedom.mobile.browser.downloadReferer]. Never a path.
      */
     val refererOrigin: String? = null,
+    /**
+     * The response's validator (#265) — a strong `ETag`, else its
+     * `Last-Modified` — sent back as `If-Range` when a paused download
+     * resumes, so a file that changed on the server restarts instead of
+     * being spliced onto the old bytes. Null: nothing to check against,
+     * so a resume starts over.
+     */
+    val validator: String? = null,
+    /**
+     * Whether the server said it serves byte ranges (`Accept-Ranges:
+     * bytes`) and gave a [validator]: only then does a lost connection
+     * pause the download instead of failing it, and only then is a dweb
+     * download offered Pause at all.
+     */
+    @ColumnInfo(defaultValue = "0")
+    val resumable: Boolean = false,
+    /**
+     * A remark on a running or paused download (#265): why it paused
+     * ("Connection lost"), or that a resume had to start over. Failures
+     * go in [error].
+     */
+    val note: String? = null,
+    /**
+     * The User-Agent the first request sent (#265): the tab's, which is
+     * the desktop one for a site asked for as a desktop site (#180). A
+     * resume or retry sends it again, so a server that gates on it
+     * answers the same way. Null on rows from before v5: the default.
+     */
+    val userAgent: String? = null,
 )
 
 /** Values of [DownloadEntry.status]. Strings, so the column reads in `sqlite3`. */
@@ -113,4 +144,7 @@ object DownloadStatus {
     const val COMPLETED = "completed"
     const val FAILED = "failed"
     const val CANCELLED = "cancelled"
+
+    /** Stopped part-way, its partial file kept for a resume (#265). */
+    const val PAUSED = "paused"
 }
