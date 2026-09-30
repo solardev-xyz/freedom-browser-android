@@ -2676,6 +2676,10 @@ private fun buildRefreshableWebView(
                 // load's, whatever the answer's headers suggested.
                 state.mainFrameKeptPage()
                 adblockPage.kept()
+                // Nor does a Hard reload that became a file: its cache
+                // bypass ends here, or it spills into the page's next
+                // navigation and its subresources (#262, R5-M1).
+                (this as? PageWebView)?.cacheBypass?.stopped()
                 // A 402 that became a file never commits (#218 R2-M2).
                 X402Payments.onNavigationSuperseded(state)
             }
@@ -3401,6 +3405,9 @@ private fun buildRefreshableWebView(
                         pendingNavigationUrls.clear()
                         state.mainFrameKeptPage()
                         adblockPage.kept()
+                        // A Hard reload handed to another app commits
+                        // nothing either: its cache bypass ends (R5-M1).
+                        (view as? PageWebView)?.cacheBypass?.stopped()
                     }
                     val input = gesture
                     val latch = askingView?.userGestures

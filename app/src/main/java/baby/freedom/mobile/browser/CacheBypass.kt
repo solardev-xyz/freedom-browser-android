@@ -24,8 +24,10 @@ import android.webkit.WebSettings
  * - any other load the app starts ([loadStarting] with `bypass` false —
  *   Back, Forward, a submit, Home) and Stop ([stopped]) restore it at
  *   once, so it can't outlive the navigation it was for. A Hard reload
- *   that commits nothing (a `204`) leaves it on until one of those, or
- *   until the next page that commits has finished.
+ *   that becomes a download, or whose redirect is handed to another app,
+ *   commits nothing and ends it the same way ([stopped], R5-M1); one that
+ *   commits nothing otherwise (a `204`) leaves it on until one of those,
+ *   or until the next page that commits has finished.
  *
  * The Hard reload's URL is never loaded with `loadUrl` where that would
  * be a fragment navigation of the page on screen — the same address with
