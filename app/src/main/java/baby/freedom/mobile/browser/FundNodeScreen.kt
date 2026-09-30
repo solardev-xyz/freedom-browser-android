@@ -88,6 +88,12 @@ internal fun fundNodeSummary(plan: SwarmFunder.Plan, days: Long): String =
         "(at least ${formatBzz(plan.minBzz)}), buys the stamp for ${formatBzz(plan.stampCostPlur)}, and sends the node " +
         "${formatXdai(plan.xdaiForNode)} and the xBZZ the stamp doesn't use."
 
+/** What the fund-node review shows beside the quote's own rows. */
+internal data class FundReviewRows(val summary: String, val node: String)
+
+internal fun fundReviewRows(quote: SendQuote, plan: SwarmFunder.Plan, days: Long): FundReviewRows? =
+    FundReviewRows(fundNodeSummary(plan, days), plan.node)
+
 /**
  * Whether a Gnosis Chain read with [trust] may be acted on where a wrong
  * answer costs the user: only a proof or a quorum agreeing, or the user's
@@ -270,10 +276,11 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                     )
                 }
                 q != null && plan != null -> item("review") {
+                    val rows = fundReviewRows(q, plan, days)!!
                     FundReview(
                         quote = q,
-                        summary = fundNodeSummary(plan, days),
-                        node = plan.node,
+                        summary = rows.summary,
+                        node = rows.node,
                         busy = busy,
                         notice = notice,
                         error = error,
