@@ -53,6 +53,61 @@ class NodeLogsTest {
     }
 
     @Test
+    fun `bulk chatter only pushes out its own older lines, rare lines stay`() {
+        // A page load as freedom-ipfs logs it (R3-M2): a request_start and a
+        // name_resolve, then hundreds of per-block lines.
+        val ring = LogRing(maxLines = 1_000, maxChars = 2_000, maxLineChars = 100)
+        ring.add("request_start 1", "request_start")
+        ring.add("name_resolve 1", "name_resolve")
+        repeat(500) { ring.add("block_store_get $it " + "x".repeat(40), "block_store_get") }
+        ring.add("provider_lookup 1", "provider_lookup")
+        repeat(500) { ring.add("block_fetch_total $it " + "y".repeat(40), "block_fetch_total") }
+        val kept = ring.snapshot()
+        assertTrue(ring.totalChars <= 2_000)
+        assertEquals(ring.totalChars, kept.sumOf { it.length })
+        assertEquals(listOf("request_start 1", "name_resolve 1"), kept.take(2))
+        assertTrue("provider_lookup 1" in kept)
+        // Both bulk kinds keep their newest lines, and the order is the order they came in.
+        assertTrue(kept.any { it.startsWith("block_store_get 499 ") })
+        assertTrue(kept.last().startsWith("block_fetch_total 499 "))
+        assertTrue(kept.indexOf("provider_lookup 1") > kept.indexOfLast { it.startsWith("block_store_get") })
+        assertEquals(
+            kept.filter { it.startsWith("block_fetch_total") },
+            kept.filter { it.startsWith("block_fetch_total") }.sortedBy { it.split(' ')[1].toInt() },
+        )
+    }
+
+    @Test
+    fun `the line bound goes by kind too`() {
+        val ring = LogRing(maxLines = 5, maxChars = 10_000, maxLineChars = 100)
+        ring.add("err", "error")
+        repeat(20) { ring.add("chat $it", "chat") }
+        assertEquals(listOf("err", "chat 16", "chat 17", "chat 18", "chat 19"), ring.snapshot())
+        assertEquals(5, ring.size)
+    }
+
+    @Test
+    fun `once the rare kind is the biggest, its own oldest line goes`() {
+        val ring = LogRing(maxLines = 3, maxChars = 10_000, maxLineChars = 100)
+        ring.add("a1", "a")
+        ring.add("a2", "a")
+        ring.add("b1", "b")
+        ring.add("a3", "a")
+        assertEquals(listOf("a2", "b1", "a3"), ring.snapshot())
+    }
+
+    @Test
+    fun `a line's kind is its tracing phase, else its tag`() {
+        assertEquals(
+            "block_store_get",
+            LogRing.kindOf("ant-ffi", """INFO gateway_request{namespace="ipns"}: freedom_ipfs_retrieval: phase="block_store_get" cache_hit=false"""),
+        )
+        assertEquals("ant-ffi", LogRing.kindOf("ant-ffi", "INFO ant_p2p: peer set below floor"))
+        assertEquals("NodeService", LogRing.kindOf("NodeService", "swarm → Running"))
+        assertEquals("ant-ffi", LogRing.kindOf("ant-ffi", "phase=\"unterminated"))
+    }
+
+    @Test
     fun `an empty ring reads as no text`() {
         assertEquals("", LogRing().text())
     }
@@ -198,6 +253,83 @@ class NodeLogsTest {
         for (l in lines) assertEquals(l, LogScrub.scrub(l))
     }
 
+    @Test
+    fun `a field key after a digit is still taken out`() {
+        assertEquals("v2path=<redacted> ok", LogScrub.scrub("v2path=/ipfs/secret ok"))
+    }
+
+    /**
+     * The scrubber before R3-M1 made it cheaper, verbatim: the fast one
+     * must take out everything it did (R3-M1 only skips a regex where it
+     * can't match).
+     */
+    private object ReferenceScrub {
+        const val R = "<redacted>"
+        val FIELD = Regex(
+            """\b([A-Za-z_]*(?:path|paths|cid|cids|name|names|target|targets|url|uri|href|referer|referrer|host|hostname|domain|dnslink|etag|reference))=("(?:[^"\\]|\\.)*"|\[[^\]]*]|[^\s,}]*)""",
+        )
+        val NAME_ERROR = Regex(
+            """(?i)(dnslink record not found for|invalid dnslink record:|invalid ipns name:|invalid ipns record:|http resolver:)\s*.*?(?=\s+[A-Za-z_]+=|"|$)""",
+        )
+        val DNSLINK_NAME = Regex("""(?i)\b_dnslink\.[A-Za-z0-9._-]+""")
+        val URL = Regex("""\b[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'<>]*""")
+        val GATEWAY_PATH = Regex("""/(bzz|bytes|chunks|ipfs|ipns|feeds|soc)/[^\s"'<>]+""")
+        val SWARM_REF = Regex("""(?<![0-9A-Fa-fXx])[0-9A-Fa-f]{64}(?:[0-9A-Fa-f]{64})?(?![0-9A-Fa-f])""")
+        val CID = Regex("""\b(?:b[a-z2-7]{50,}|k[0-9a-z]{50,}|f01[0-9a-f]{60,})\b""")
+        val CID_B58 = Regex("""(?<![1-9A-HJ-NP-Za-km-z])(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|z(?!6M)[1-9A-HJ-NP-Za-km-z]{44,})(?![1-9A-HJ-NP-Za-km-z])""")
+        val PEER_CONTEXT = Regex("""(?:peer\w*[=:]\s*"?|/p2p/)$""")
+        val ONION = Regex("""\b[a-z2-7]{56}\.onion\b""")
+
+        fun scrub(line: String): String {
+            var s = line
+            s = FIELD.replace(s) { "${it.groupValues[1]}=$R" }
+            s = NAME_ERROR.replace(s) { "${it.groupValues[1]} $R" }
+            s = DNSLINK_NAME.replace(s, "_dnslink.$R")
+            s = URL.replace(s, "<url>")
+            s = GATEWAY_PATH.replace(s) { "/${it.groupValues[1]}/$R" }
+            s = SWARM_REF.replace(s, "<ref>")
+            s = CID.replace(s, "<cid>")
+            val b58 = s
+            s = CID_B58.replace(b58) { m ->
+                val peer = m.value.startsWith("Qm") &&
+                    PEER_CONTEXT.containsMatchIn(b58.substring(maxOf(0, m.range.first - 24), m.range.first))
+                if (peer) m.value else "<cid>"
+            }
+            s = ONION.replace(s, "<onion>")
+            return s
+        }
+    }
+
+    @Test
+    fun `the fast scrubber takes out what the regex-only one did`() {
+        val tokens = listOf(
+            "path=", "top_level_path=", "unixfs_path=", "cid=", "cids=", "file_cid=", "name=", "resolved_target=",
+            "etag=", "host=", "url=", "namespace=", "request_id=", "phase=", "error=", "peer_id=", "peer=",
+            "\"", "\\\"", "[", "]", ",", " ", "  ", "}", "{", ":", "=", "/", ".", "-", "_", "1", "v2",
+            "/ipfs/", "/ipns/", "/bzz/", "/p2p/", "https://", "ipfs://", "rad://", "docs.ipfs.tech", "_dnslink.",
+            "dnslink record not found for ", "invalid dnslink record: ", "Invalid IPNS name: ", "http resolver: ",
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            "k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8",
+            "f01701220c3c4733ec8affd06cf9e9ff50ffc6bcd2ec85a6170004bb709669c31de94391a",
+            "QmT5NvUtoM5nWFfrQdVrFtvGfKFmG7AHE8P34isapyhCxX", "zdj7WWeQ43G6JJvLWQWZpyHuAMq6uYWRjkBXFad11vE2LHhQ7",
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "z6MksFqXN3Yhqk8pTJdUGLwATkRfQvwZXPqR2qMEhbS9wzpT",
+            "d1a7ccbfb34e28a2e4c1d1f8ae1f2c1b0b1f4d6e7a8b9c0d1e2f3a4b5c6d7e8f", "0x",
+            "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad", ".onion", "INFO ", "gateway_request",
+        )
+        val rnd = java.util.Random(276)
+        repeat(30_000) {
+            val line = buildString { repeat(1 + rnd.nextInt(14)) { append(tokens[rnd.nextInt(tokens.size)]) } }
+            val want = ReferenceScrub.scrub(line)
+            val got = LogScrub.scrub(line)
+            // The fast one also takes out a key after a digit (`v2path=`),
+            // which the reference let through: compare without those lines.
+            if (!Regex("""[0-9][A-Za-z_]*(?:path|paths|cid|cids|name|names|target|targets|url|uri|href|referer|referrer|host|hostname|domain|dnslink|etag|reference)=""").containsMatchIn(line)) {
+                assertEquals(line, want, got)
+            }
+        }
+    }
+
     // ---- Clear cookies & site data forgets the kept lines ----
 
     @Test
@@ -248,6 +380,41 @@ class NodeLogsTest {
         val line = LogcatLine.parse("09-30 07:13:06.693  3826  3826 W NodeService: stamp call x failed: IOException: boom")
         assertEquals("NodeService", line?.tag)
         assertEquals("stamp call x failed: IOException: boom", line?.message)
+    }
+
+    @Test
+    fun `the hand parser reads lines as the threadtime regex did`() {
+        // The regex LogcatLine.parse replaced (R3-M1), verbatim.
+        val threadtime = Regex("""^\d\d-\d\d (\d\d:\d\d:\d\d\.\d{3})\s+\d+\s+\d+\s+([VDIWEFA])\s+(.*?)\s*: ?(.*)$""")
+        val ansi = Regex("""\u001B\[[0-9;]*[A-Za-z]""")
+        val tracingTime = Regex("""^\d{4}-\d\d-\d\dT[0-9:.]+Z\s+""")
+        fun reference(raw: String): LogcatLine? {
+            val m = threadtime.find(raw) ?: return null
+            val (time, level, tag, message) = m.destructured
+            return LogcatLine(time, level[0], tag.trim(), tracingTime.replace(ansi.replace(message, ""), ""))
+        }
+        val esc = "\u001B"
+        val lines = listOf(
+            "09-30 07:13:07.733  3826  3889 I ant-ffi : ${esc}[2m2026-09-30T05:13:07.733503Z${esc}[0m ${esc}[32m INFO${esc}[0m x",
+            "09-30 07:13:06.693  3826  3826 W NodeService: stamp call x failed: IOException: boom",
+            "09-30 07:13:06.693 13826 13826 E Tag with spaces : m",
+            "09-30 07:13:06.693  1  2 D :empty tag",
+            "09-30 07:13:06.693  1  2 D t:",
+            "09-30 07:13:06.693  1  2 D t:  two spaces",
+            "09-30 07:13:06.693  1  2 X t: bad level",
+            "09-30 07:13:06.693  1  2 II t: level run",
+            "09-30 07:13:06.693  x  2 I t: bad pid",
+            "09-30 07:13:06.693  1  2 I no colon",
+            "09-30 07:13:06.69  1  2 I t: short ms",
+            "--------- beginning of main",
+            "",
+            "09-30 07:13:06.693  1  2 I t: ${esc}[1mbold${esc}[ not an escape ${esc}[12;3mok",
+            "09-30 07:13:06.693  1  2 I t: 2026-09-30T05:13:07Z   after",
+            "09-30 07:13:06.693  1  2 I t: 2026-09-30T05:13:07Z",
+            "09-30 07:13:06.693  1  2 I t: 2026-09-30X05:13:07Z m",
+            "09-30 07:13:06.693  1  2 I t: ${esc}[2m2026-09-30T05:13:07.1Z${esc}[0m\tm",
+        )
+        for (l in lines) assertEquals(l, reference(l), LogcatLine.parse(l))
     }
 
     @Test

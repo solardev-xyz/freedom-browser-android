@@ -28,8 +28,17 @@ enum class NodeLogSource(val title: String) {
 /**
  * A bounded ring of log lines, oldest first: at most [maxLines] lines and
  * [maxChars] characters in all, each line cut to [maxLineChars]. Adding
- * past either bound drops the oldest lines, so it never grows (#276).
+ * past either bound drops an old line, so it never grows (#276).
  * Thread-safe.
+ *
+ * Each line has a kind (its tracing `phase`, or its tag: [kindOf]), and
+ * the line dropped is the oldest of the kind that holds the most — not the
+ * oldest overall. A node's bulk chatter (freedom-ipfs logs a
+ * `block_store_get` / `provider_*` line per block, hundreds a second while
+ * a page loads) then only pushes out its own older lines, and the rare
+ * lines that say what happened — a request's `request_start`,
+ * `name_resolve`, an error — stay until they are themselves the most
+ * (R3-M2). [snapshot] puts the kept lines back in the order they came.
  */
 class LogRing(
     private val maxLines: Int = MAX_LINES,
@@ -40,23 +49,59 @@ class LogRing(
         require(maxLines > 0 && maxChars > 0 && maxLineChars in 1..maxChars)
     }
 
-    private val lines = ArrayDeque<String>()
+    private class Entry(val seq: Long, val text: String)
+
+    private class Kind {
+        val lines = ArrayDeque<Entry>()
+        var chars = 0
+    }
+
+    private val kinds = LinkedHashMap<String, Kind>()
+    private var seq = 0L
+    private var lineCount = 0
     private var chars = 0
 
     @Synchronized
-    fun add(line: String) {
+    fun add(line: String, kind: String = "") {
         val cut = if (line.length <= maxLineChars) line else line.take(maxLineChars - 1) + "…"
-        lines.addLast(cut)
+        val k = kinds.getOrPut(kind) { Kind() }
+        k.lines.addLast(Entry(seq++, cut))
+        k.chars += cut.length
+        lineCount++
         chars += cut.length
-        while (lines.size > maxLines || chars > maxChars) chars -= lines.removeFirst().length
+        while (lineCount > maxLines || chars > maxChars) {
+            val overLines = lineCount > maxLines
+            // The kind holding the most (lines, or characters); on a tie
+            // the one whose oldest line is older.
+            var worst: Map.Entry<String, Kind>? = null
+            for (e in kinds.entries) {
+                val w = worst?.value
+                val more = when {
+                    w == null -> true
+                    overLines -> e.value.lines.size > w.lines.size ||
+                        (e.value.lines.size == w.lines.size && e.value.lines.first().seq < w.lines.first().seq)
+                    else -> e.value.chars > w.chars ||
+                        (e.value.chars == w.chars && e.value.lines.first().seq < w.lines.first().seq)
+                }
+                if (more) worst = e
+            }
+            val victim = worst!!
+            val dropped = victim.value.lines.removeFirst()
+            victim.value.chars -= dropped.text.length
+            lineCount--
+            chars -= dropped.text.length
+            if (victim.value.lines.isEmpty()) kinds.remove(victim.key)
+        }
     }
 
     @Synchronized
-    fun snapshot(): List<String> = lines.toList()
+    fun snapshot(): List<String> =
+        kinds.values.flatMap { it.lines }.sortedBy { it.seq }.map { it.text }
 
     @Synchronized
     fun clear() {
-        lines.clear()
+        kinds.clear()
+        lineCount = 0
         chars = 0
     }
 
@@ -64,7 +109,7 @@ class LogRing(
     fun text(): String = snapshot().joinToString("\n")
 
     @get:Synchronized
-    val size: Int get() = lines.size
+    val size: Int get() = lineCount
 
     @get:Synchronized
     val totalChars: Int get() = chars
@@ -75,6 +120,17 @@ class LogRing(
         /** Keeps [text] well inside a binder transaction and a share intent (~200 KB as UTF-16). */
         const val MAX_CHARS = 96_000
         const val MAX_LINE_CHARS = 800
+
+        /**
+         * A node log line's kind, for which line to drop: a native line's
+         * tracing `phase="…"`, else its logcat [tag].
+         */
+        fun kindOf(tag: String, message: String): String {
+            val at = message.indexOf("phase=\"")
+            if (at < 0) return tag
+            val end = message.indexOf('"', at + 7)
+            return if (end < 0 || end - at > 71) tag else message.substring(at + 7, end)
+        }
     }
 }
 
@@ -105,9 +161,11 @@ object LogScrub {
      * `etag` holds a file's CID and path. A quoted value runs to its
      * closing quote, past any `\"` inside it.
      */
-    private val FIELD = Regex(
-        """\b([A-Za-z_]*(?:path|paths|cid|cids|name|names|target|targets|url|uri|href|referer|referrer|host|hostname|domain|dnslink|etag|reference))=("(?:[^"\\]|\\.)*"|\[[^\]]*]|[^\s,}]*)""",
+    private val FIELD_KEY_ENDS = listOf(
+        "path", "paths", "cid", "cids", "name", "names", "target", "targets", "url", "uri", "href",
+        "referer", "referrer", "host", "hostname", "domain", "dnslink", "etag", "reference",
     )
+    private val FIELD_VALUE = Regex(""""(?:[^"\\]|\\.)*"|\[[^\]]*]|[^\s,}]*""").toPattern()
 
     /**
      * A DNSLink / IPNS name inside free text — freedom-ipfs's resolver
@@ -125,6 +183,7 @@ object LogScrub {
     private val URL = Regex("""\b[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'<>]*""")
 
     /** A gateway path: `/bzz/<ref>/…`, `/ipfs/<cid>/…`. */
+    private val GATEWAY_ROOTS = listOf("/bzz/", "/bytes/", "/chunks/", "/ipfs/", "/ipns/", "/feeds/", "/soc/")
     private val GATEWAY_PATH = Regex("""/(bzz|bytes|chunks|ipfs|ipns|feeds|soc)/[^\s"'<>]+""")
 
     /** A Swarm reference (32 bytes, or 64 encrypted) — not a `0x` overlay or account. */
@@ -149,23 +208,81 @@ object LogScrub {
     /** A v3 onion service name. */
     private val ONION = Regex("""\b[a-z2-7]{56}\.onion\b""")
 
+    /**
+     * A regex runs only where the line has what it could match — a `=`, a
+     * `://`, a run of letters and digits as long as the shortest ID — so
+     * the bulk of a node's lines cost a few scans, not every regex (#276,
+     * R3-M1: the tap runs whether or not Logs is ever opened). The checks
+     * only skip a regex that can't match; what's taken out is the same.
+     */
     fun scrub(line: String): String {
         var s = line
-        s = FIELD.replace(s) { "${it.groupValues[1]}=$REDACTED" }
-        s = NAME_ERROR.replace(s) { "${it.groupValues[1]} $REDACTED" }
-        s = DNSLINK_NAME.replace(s, "_dnslink.$REDACTED")
-        s = URL.replace(s, "<url>")
-        s = GATEWAY_PATH.replace(s) { "/${it.groupValues[1]}/$REDACTED" }
-        s = SWARM_REF.replace(s, "<ref>")
-        s = CID.replace(s, "<cid>")
-        val b58 = s
-        s = CID_B58.replace(b58) { m ->
-            val peer = m.value.startsWith("Qm") &&
-                PEER_CONTEXT.containsMatchIn(b58.substring(maxOf(0, m.range.first - 24), m.range.first))
-            if (peer) m.value else "<cid>"
+        if ('=' in s) {
+            s = redactFields(s)
         }
-        s = ONION.replace(s, "<onion>")
+        val lower = s.lowercase(Locale.ROOT)
+        if ("dnslink" in lower || "invalid ipns" in lower || "resolver:" in lower) {
+            s = NAME_ERROR.replace(s) { "${it.groupValues[1]} $REDACTED" }
+            s = DNSLINK_NAME.replace(s, "_dnslink.$REDACTED")
+        }
+        if ("://" in s) s = URL.replace(s, "<url>")
+        if (GATEWAY_ROOTS.any { it in s }) s = GATEWAY_PATH.replace(s) { "/${it.groupValues[1]}/$REDACTED" }
+        // The shortest ID below is a CIDv0 / base58 CIDv1 (46 / 45 characters).
+        if (longestAlnumRun(s) >= 45) {
+            s = SWARM_REF.replace(s, "<ref>")
+            s = CID.replace(s, "<cid>")
+            val b58 = s
+            s = CID_B58.replace(b58) { m ->
+                val peer = m.value.startsWith("Qm") &&
+                    PEER_CONTEXT.containsMatchIn(b58.substring(maxOf(0, m.range.first - 24), m.range.first))
+                if (peer) m.value else "<cid>"
+            }
+            if (".onion" in s) s = ONION.replace(s, "<onion>")
+        }
         return s
+    }
+
+    /**
+     * Each `key=value` whose key (the run of letters and `_` before the
+     * `=`) ends in one of [FIELD_KEY_ENDS] gets its value replaced — also
+     * after a digit (`v2path=`), which the word-boundary regex this
+     * replaces let through. A scan from each
+     * `=`, not a regex tried at every word: this runs on every line.
+     */
+    private fun redactFields(s: String): String {
+        var out: StringBuilder? = null
+        var value: java.util.regex.Matcher? = null
+        var copied = 0
+        var i = s.indexOf('=')
+        while (i >= 0) {
+            var k = i
+            while (k > 0 && (s[k - 1].let { it == '_' || it in 'a'..'z' || it in 'A'..'Z' })) k--
+            var next = i + 1
+            if (k < i && FIELD_KEY_ENDS.any { it.length <= i - k && s.regionMatches(i - it.length, it, 0, it.length) }) {
+                val m = (value ?: FIELD_VALUE.matcher(s).also { value = it }).region(i + 1, s.length)
+                m.lookingAt()
+                val sb = out ?: StringBuilder(s.length).also { out = it }
+                sb.append(s, copied, i + 1).append(REDACTED)
+                copied = m.end()
+                next = maxOf(m.end(), i + 1)
+            }
+            i = if (next < s.length) s.indexOf('=', next) else -1
+        }
+        return out?.append(s, copied, s.length)?.toString() ?: s
+    }
+
+    /** The longest run of ASCII letters and digits in [s]. */
+    private fun longestAlnumRun(s: String): Int {
+        var best = 0
+        var run = 0
+        for (c in s) {
+            if (c in '0'..'9' || c in 'a'..'z' || c in 'A'..'Z') {
+                if (++run > best) best = run
+            } else {
+                run = 0
+            }
+        }
+        return best
     }
 }
 
@@ -179,15 +296,88 @@ internal data class LogcatLine(val time: String, val level: Char, val tag: Strin
 
     companion object {
         // 09-30 07:13:07.730  3826  3860 I ant-ffi : message
-        private val THREADTIME = Regex("""^\d\d-\d\d (\d\d:\d\d:\d\d\.\d{3})\s+\d+\s+\d+\s+([VDIWEFA])\s+(.*?)\s*: ?(.*)$""")
-        private val ANSI = Regex("""\u001B\[[0-9;]*[A-Za-z]""")
-        private val TRACING_TIME = Regex("""^\d{4}-\d\d-\d\dT[0-9:.]+Z\s+""")
-
+        //
+        // Read by hand, not by regex: this runs on every line a node logs,
+        // hundreds a second while a page loads, whether or not Logs is ever
+        // opened — and Android's regex engine took ~165 us a line here,
+        // most of the reader's CPU (R3-M1).
         fun parse(raw: String): LogcatLine? {
-            val m = THREADTIME.find(raw) ?: return null
-            val (time, level, tag, message) = m.destructured
-            val clean = TRACING_TIME.replace(ANSI.replace(message, ""), "")
-            return LogcatLine(time, level[0], tag.trim(), clean)
+            if (raw.length < 20 || !raw.startsWith(DATE_SHAPE)) return null
+            val time = raw.substring(6, 18)
+            var i = 18
+            i = skipSpaces(raw, i, atLeast = 1) ?: return null
+            i = skipDigits(raw, i) ?: return null // pid
+            i = skipSpaces(raw, i, atLeast = 1) ?: return null
+            i = skipDigits(raw, i) ?: return null // tid
+            i = skipSpaces(raw, i, atLeast = 1) ?: return null
+            val level = raw.getOrNull(i) ?: return null
+            if (level !in "VDIWEFA" || raw.getOrNull(i + 1)?.isWhitespace() != true) return null
+            i = skipSpaces(raw, i + 1, atLeast = 1) ?: return null
+            val colon = raw.indexOf(':', i)
+            if (colon < 0) return null
+            val tag = raw.substring(i, colon).trim()
+            val from = if (raw.getOrNull(colon + 1) == ' ') colon + 2 else colon + 1
+            return LogcatLine(time, level, tag, cleanNative(raw, from))
+        }
+
+        /** `MM-DD HH:MM:SS.mmm`, `d` a digit. */
+        private const val DATE_SHAPE = "dd-dd dd:dd:dd.ddd"
+
+        private fun String.startsWith(shape: String): Boolean {
+            for (k in shape.indices) {
+                val c = this[k]
+                if (if (shape[k] == 'd') c !in '0'..'9' else c != shape[k]) return false
+            }
+            return true
+        }
+
+        private fun skipSpaces(s: String, from: Int, atLeast: Int): Int? {
+            var i = from
+            while (i < s.length && s[i] == ' ') i++
+            return if (i - from >= atLeast) i else null
+        }
+
+        private fun skipDigits(s: String, from: Int): Int? {
+            var i = from
+            while (i < s.length && s[i] in '0'..'9') i++
+            return if (i > from) i else null
+        }
+
+        /**
+         * The message from [from] on, with the terminal colours
+         * (`ESC [ … letter`) and tracing's own leading timestamp
+         * (`2026-09-30T05:13:07.733503Z `) taken out.
+         */
+        private fun cleanNative(raw: String, from: Int): String {
+            val sb = StringBuilder(raw.length - from)
+            var i = from
+            while (i < raw.length) {
+                val c = raw[i]
+                if (c == '\u001B' && raw.getOrNull(i + 1) == '[') {
+                    var j = i + 2
+                    while (j < raw.length && (raw[j] in '0'..'9' || raw[j] == ';')) j++
+                    if (j < raw.length && (raw[j] in 'A'..'Z' || raw[j] in 'a'..'z')) {
+                        i = j + 1
+                        continue
+                    }
+                }
+                sb.append(c)
+                i++
+            }
+            // 2026-09-30T05:13:07.733503Z, then whitespace.
+            val m = sb
+            if (m.length > 11 && (0..3).all { m[it] in '0'..'9' } && m[4] == '-' && m[5] in '0'..'9' &&
+                m[6] in '0'..'9' && m[7] == '-' && m[8] in '0'..'9' && m[9] in '0'..'9' && m[10] == 'T'
+            ) {
+                var j = 11
+                while (j < m.length && (m[j] in '0'..'9' || m[j] == ':' || m[j] == '.')) j++
+                if (j > 11 && j < m.length && m[j] == 'Z' && j + 1 < m.length && m[j + 1].isWhitespace()) {
+                    var k = j + 1
+                    while (k < m.length && m[k].isWhitespace()) k++
+                    return m.substring(k)
+                }
+            }
+            return m.toString()
         }
     }
 }
@@ -216,7 +406,8 @@ private val RADICLE_TARGET = Regex("""\b(?:lib)?radicle[a-z_]*(?:::[a-z_:]+)?:""
  * logcat for this process's own PID only — the native nodes log there —
  * and keeps each node's lines, scrubbed ([LogScrub]), in a [LogRing] in
  * memory. Nothing is written to a file; the lines go when the process
- * exits, or when the user clears cookies & site data ([clear]).
+ * exits, or when the user clears cookies & site data or closes the
+ * last private tab ([clear]).
  */
 object NodeLogs {
     private const val TAG = "NodeLogs"
@@ -295,11 +486,11 @@ object NodeLogs {
      * Keep [line] in [source]'s ring, scrubbed, unless a [clear] has come
      * since [gen] was read: then false, and the reader starts over.
      */
-    internal fun keep(gen: Int, source: NodeLogSource, line: String): Boolean {
+    internal fun keep(gen: Int, source: NodeLogSource, line: String, kind: String = ""): Boolean {
         val scrubbed = LogScrub.scrub(line)
         synchronized(lock) {
             if (gen != generation) return false
-            rings.getValue(source).add(scrubbed)
+            rings.getValue(source).add(scrubbed, kind)
             return true
         }
     }
@@ -325,7 +516,7 @@ object NodeLogs {
                         val line = LogcatLine.parse(raw) ?: continue
                         if (line.tag in NOISE_TAGS || processName.endsWith(line.tag)) continue
                         val source = route(line.tag, line.message) ?: continue
-                        if (!keep(gen, source, line.format())) return@useLines
+                        if (!keep(gen, source, line.format(), LogRing.kindOf(line.tag, line.message))) return@useLines
                     }
                 }
                 proc.destroy()

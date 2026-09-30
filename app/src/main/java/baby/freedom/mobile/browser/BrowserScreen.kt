@@ -1767,6 +1767,8 @@ fun BrowserScreen(
                 tabs = tabs,
                 modifier = Modifier.fillMaxSize(),
                 covered = overlayShown,
+                // Closing the last private tab clears the nodes' logs (#276).
+                onPrivateSessionEnded = clearNodeLogs,
             )
             // Home overlay. Rendered whenever the tab hasn't loaded
             // a real page (fresh tab, or user navigated home). The
