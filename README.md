@@ -13,7 +13,7 @@ Download the latest APK from [GitHub Releases](https://github.com/solardev-xyz/f
 
 1. Bump `versionCode` + `versionName` in `app/build.gradle.kts` (and the version above).
 2. Tag and push: `git tag v0.x.y && git push origin v0.x.y`.
-3. [`release.yml`](.github/workflows/release.yml) builds `libfreedom_mobile_ffi.so` at the pinned `FFI_REF`, assembles signed per-ABI APKs (signing key lives in repo secrets), and publishes them with `SHA256SUMS`. When upgrading the embedded nodes, bump `FFI_REF` together with the vendored headers.
+3. [`release.yml`](.github/workflows/release.yml) builds `libfreedom_mobile_ffi.so` at the pinned `FFI_REF`, assembles signed per-ABI APKs (signing key lives in repo secrets), and publishes them with `SHA256SUMS`. When upgrading the embedded nodes, bump `FFI_REF` together with the vendored headers. The native libraries (`libfreedom_mobile_ffi.so`, `libc4.so`) come from its cache when nothing that shapes them changed since the last build (#309): about 10 min instead of about 40. The cache is filled from `main` (a push that bumps `FFI_REF`/`COLIBRI_REF` or touches a build script, plus a twice-weekly refresh), so a tag pushed right after such a bump builds them from source, one ABI per job. A dry run (Actions → release → Run workflow) builds everything without publishing.
 
 ## Requirements
 
@@ -296,7 +296,7 @@ The `radicle` feature adds the embedded, publish-capable Radicle node (libradicl
 
 ```bash
 scripts/generate-radicle-bindings.sh /tmp/freedom-mobile-ffi           # rewrite the committed file
-scripts/generate-radicle-bindings.sh /tmp/freedom-mobile-ffi --check   # what release.yml runs: fail if stale
+scripts/generate-radicle-bindings.sh /tmp/freedom-mobile-ffi --check   # fail if stale (release.yml does the same with --emit + cmp)
 ```
 
 The `tor` feature adds the Arti Tor client for `.onion` sites (#143; see [Tor](#tor-onion-sites)): freedom-mobile-ffi's own `freedom_tor_*` C surface, driven through `swarmnode/src/main/cpp/tor_jni.c` (header `freedom_tor.h`, vendored from `include/` at `FFI_REF`; refresh it with the `.so`). It adds about 7 MiB per ABI to the library. release.yml checks all five `freedom_tor_*` exports after the build, since `libfreedom_jni.so` links against them. A library built without `tor` fails that link.

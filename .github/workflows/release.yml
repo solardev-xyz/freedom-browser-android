@@ -6,6 +6,32 @@
 # Trigger: push a tag like `v0.4.0`, or run manually via the Actions
 # tab (workflow_dispatch) for a dry run that builds without publishing.
 #
+# Jobs (#309): `ffi` builds libfreedom_mobile_ffi.so, one matrix job per
+# ABI, `colibri` builds libc4.so and `unit-tests` runs the JVM tests, all
+# in parallel; `apk` needs all three, packages what they built, and only
+# then publishes. The two native libraries are cached with actions/cache,
+# keyed on everything that shapes them (see each job's "Cache key" step),
+# and a hit skips their build entirely; the checks after the build run on
+# a hit too (scripts/check-native-libs.sh, and the Radicle bindings
+# compared with the generated copy cached alongside the library), so a
+# stale or wrong artefact still fails the job. A cache miss builds as
+# before, the two ABIs side by side, and caches the result only once
+# those checks pass.
+#
+# Why actions/cache rather than publishing the .so files as assets on
+# the freedom-mobile-ffi release: that needs a token with write access to
+# the other repo, and the assets would have to be keyed on this repo's
+# own build recipe (features, fat LTO) anyway, which isn't that repo's
+# business. The catch with actions/cache is its scoping: a run can only
+# restore caches saved on its own ref or on main, so a cache saved by a
+# tag run is never seen by the next tag. So the cache is filled from
+# main: a push to main that touches the build recipe (an FFI_REF or
+# COLIBRI_REF bump, one of the build scripts) runs just `ffi` and
+# `colibri`, and so does a twice-weekly schedule, which also keeps the
+# entries from being evicted (GitHub drops caches unused for 7 days). A
+# release that still misses (evicted, or tagged within minutes of the
+# bump) just builds from source, in about 25 min instead of about 10.
+#
 # Secrets: KEYSTORE_BASE64 (the release keystore, base64),
 # KEYSTORE_PASSWORD, KEY_ALIAS. APKs are signed with this one key
 # forever — Android ties updates to the signing certificate, so the
@@ -38,18 +64,35 @@ name: release
 on:
   push:
     tags: ["v*"]
+    # Fill the cache on main (see above). Only `ffi` and `colibri` run.
+    branches: [main]
+    paths:
+      - .github/workflows/release.yml
+      - scripts/build-ffi.sh
+      - scripts/enable-ffi-*.sh
+      - scripts/build-colibri.sh
+      - scripts/generate-radicle-bindings.sh
+      - scripts/check-native-libs.sh
+  schedule:
+    - cron: "23 4 * * 1,4"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FFI_REF: v0.12.4
   COLIBRI_REF: v3.0.0
+  # Pinned (not "latest") so it can be part of the ffi cache key.
+  CARGO_NDK_VERSION: 4.1.2
 
 jobs:
-  release:
+  ffi:
+    name: libfreedom_mobile_ffi.so (${{ matrix.abi }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        abi: [arm64-v8a, x86_64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,53 +107,141 @@ jobs:
           ref: ${{ env.FFI_REF }}
           path: freedom-mobile-ffi
 
+      # The library is a function of FFI_REF (sources, Cargo.lock,
+      # build-android.sh and the rust-toolchain.toml channel), of this
+      # repo's build recipe (scripts/build-ffi.sh and the enable-ffi-*.sh
+      # helpers it runs; the bindings generator for the cached bindings),
+      # and of the tools: the exact rustc the channel resolves to today,
+      # the runner's NDK and cargo-ndk. All of them go into the key.
+      - name: Cache key
+        id: key
+        working-directory: freedom-mobile-ffi
+        run: |
+          channel="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$channel" --profile minimal --no-self-update \
+            --target aarch64-linux-android --target x86_64-linux-android
+          rustc="$(rustc +"$channel" --version)"
+          ndk="$(sed -n 's/^Pkg.Revision *= *//p' "$ANDROID_NDK_ROOT/source.properties")"
+          echo "rustc: $rustc; NDK: $ndk; cargo-ndk: $CARGO_NDK_VERSION"
+          tools="$(printf '%s|%s|%s' "$rustc" "$ndk" "$CARGO_NDK_VERSION" | sha256sum | cut -c1-16)"
+          echo "key=ffi-v1-${{ matrix.abi }}-$FFI_REF-$tools-${{ hashFiles('scripts/build-ffi.sh', 'scripts/enable-ffi-*.sh', 'scripts/generate-radicle-bindings.sh') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the built library
+        id: cache
+        uses: actions/cache/restore@v5
+        with:
+          path: native-out
+          key: ${{ steps.key.outputs.key }}
+
       # The ffi crate pins its node deps as ssh:// git URLs (local-dev
       # convenience); all repos are public, so fetch them over https.
       - name: Rewrite ssh git deps to https
+        if: steps.cache.outputs.cache-hit != 'true'
         run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
 
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked
 
       - name: Rust cache
+        if: steps.cache.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: freedom-mobile-ffi
+          key: ${{ matrix.abi }}
 
-      - name: Build libfreedom_mobile_ffi.so (arm64-v8a + x86_64)
+      - name: Build libfreedom_mobile_ffi.so (${{ matrix.abi }})
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           # ANDROID_NDK_ROOT is the runner image's default NDK (r27.x),
           # matching the locally-verified toolchain; LATEST_HOME floats.
           export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
-          cd freedom-mobile-ffi
-          # build-android.sh passes --no-default-features, which drops
-          # `chain` and `radicle` (and `tor` is opt-in). Put `chain` back
-          # (ant's on-chain /wallet, /stamps, /chequebook gateway
-          # surfaces), then extend it to `chain,radicle` (the embedded
-          # Radicle node) and `chain,radicle,tor` (the Arti client for
-          # .onion, #143). The helpers fail the job if the script's cargo
-          # call ever changes shape under a new FFI_REF; they're the same
-          # ones the README's local build uses. enable-ffi-fat-lto.sh
-          # then switches the release-android profile from thin to fat
-          # LTO (~10% smaller .so at the same speed, #230).
-          "$GITHUB_WORKSPACE/scripts/enable-ffi-chain.sh" .
-          "$GITHUB_WORKSPACE/scripts/enable-ffi-radicle.sh" .
-          "$GITHUB_WORKSPACE/scripts/enable-ffi-tor.sh" .
-          "$GITHUB_WORKSPACE/scripts/enable-ffi-fat-lto.sh" .
-          ./scripts/build-android.sh
-          # build-android.sh checks the node exports but not Tor's; the
-          # JNI shim links against these, so fail here, not at link time.
-          NM="$(ls "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-nm | head -1)"
-          for so in target/android/jniLibs/*/libfreedom_mobile_ffi.so; do
-            syms="$("$NM" -D "$so")"
-            for sym in freedom_tor_start freedom_tor_stop freedom_tor_status_json freedom_tor_version freedom_tor_string_free; do
-              grep -q " T $sym\$" <<<"$syms" || { echo "::error::$so is missing $sym"; exit 1; }
-            done
-          done
-          mkdir -p "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs"
-          cp -r target/android/jniLibs/. "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs/"
+          # ant's `chain` feature (on-chain /wallet, /stamps, /chequebook
+          # gateway surfaces), the Radicle node, the Arti client for
+          # .onion (#143) and fat LTO (#230): see scripts/build-ffi.sh and
+          # the enable-ffi-*.sh helpers it runs, the same ones the README's
+          # local build uses. They fail the job if build-android.sh ever
+          # changes shape under a new FFI_REF.
+          scripts/build-ffi.sh freedom-mobile-ffi ${{ matrix.abi }}
+          mkdir -p native-out
+          cp -r freedom-mobile-ffi/target/android/. native-out/
+
+      # The committed Kotlin bindings must match the Radicle surface this
+      # .so was built with (they checksum every call at load). The
+      # generator reads the aarch64 rlib, so the arm64 job makes them, and
+      # they're cached with its library.
+      - name: Generate the Radicle UniFFI bindings
+        if: steps.cache.outputs.cache-hit != 'true' && matrix.abi == 'arm64-v8a'
+        run: scripts/generate-radicle-bindings.sh freedom-mobile-ffi --emit native-out/radicle/libradicle_uniffi.kt
+
+      # From here on, a cache hit is checked like a fresh build.
+      - name: Check the library
+        run: scripts/check-native-libs.sh native-out/jniLibs ${{ matrix.abi }}
+
+      - name: Check the Radicle UniFFI bindings are current
+        if: matrix.abi == 'arm64-v8a'
+        run: |
+          committed=swarmnode/src/main/java/uniffi/libradicle_uniffi/libradicle_uniffi.kt
+          generated=native-out/radicle/libradicle_uniffi.kt
+          [ -f "$generated" ] || { echo "::error::no generated bindings in the build output"; exit 1; }
+          if ! cmp -s "$generated" "$committed"; then
+            echo "::error::$committed is stale for this build; rerun scripts/generate-radicle-bindings.sh and commit it"
+            diff -u "$committed" "$generated" | head -40 || true
+            exit 1
+          fi
+          echo "committed bindings match the build"
+
+      # Only a build that passed the checks is cached.
+      - name: Cache the built library
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: native-out
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Upload the library
+        uses: actions/upload-artifact@v6
+        with:
+          name: ffi-${{ matrix.abi }}
+          path: native-out/jniLibs/
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload native diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: jniLibs-debug-${{ matrix.abi }}
+          path: freedom-mobile-ffi/target/android/
+          if-no-files-found: ignore
+
+  colibri:
+    name: libc4.so
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # libc4.so is a function of COLIBRI_REF (whose CMake pins the
+      # evmone, intx and blst it fetches), scripts/build-colibri.sh, and
+      # the runner's NDK, CMake and Ninja.
+      - name: Cache key
+        id: key
+        run: |
+          ndk="$(sed -n 's/^Pkg.Revision *= *//p' "$ANDROID_NDK_ROOT/source.properties")"
+          tools="NDK $ndk; $(cmake --version | head -1); ninja $(ninja --version)"
+          echo "$tools"
+          echo "key=colibri-v1-$COLIBRI_REF-$(printf '%s' "$tools" | sha256sum | cut -c1-16)-${{ hashFiles('scripts/build-colibri.sh') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the built library
+        id: cache
+        uses: actions/cache/restore@v5
+        with:
+          path: colibri-out
+          key: ${{ steps.key.outputs.key }}
 
       - name: Checkout colibri-stateless
+        if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:
           repository: corpus-core/colibri-stateless
@@ -119,22 +250,79 @@ jobs:
           fetch-depth: 0
 
       - name: Build libc4.so (arm64-v8a + x86_64)
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
-          C4_VERSION="${COLIBRI_REF#v}" scripts/build-colibri.sh colibri-stateless
+          C4_VERSION="${COLIBRI_REF#v}" scripts/build-colibri.sh colibri-stateless colibri-out
 
-      # The committed Kotlin bindings must match the Radicle surface this
-      # .so was built with (they checksum every call at load).
-      - name: Check the Radicle UniFFI bindings are current
-        run: scripts/generate-radicle-bindings.sh freedom-mobile-ffi --check
+      - name: Check the library
+        run: scripts/check-native-libs.sh colibri-out arm64-v8a x86_64 --colibri
 
-      - name: Upload native diagnostics on failure
-        if: failure()
+      - name: Cache the built library
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: colibri-out
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Upload the library
         uses: actions/upload-artifact@v6
         with:
-          name: jniLibs-debug
-          path: freedom-mobile-ffi/target/android/
-          if-no-files-found: ignore
+          name: colibri
+          path: colibri-out/
+          if-no-files-found: error
+          retention-days: 3
+
+  unit-tests:
+    # Not on the cache-filling runs (push to main, schedule).
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      # JVM tests only: nothing here needs the native libraries.
+      - name: Unit tests
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+
+  apk:
+    needs: [ffi, colibri, unit-tests]
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download libfreedom_mobile_ffi.so
+        uses: actions/download-artifact@v7
+        with:
+          pattern: ffi-*
+          path: swarmnode/src/main/jniLibs
+          merge-multiple: true
+
+      - name: Download libc4.so
+        uses: actions/download-artifact@v7
+        with:
+          name: colibri
+          path: swarmnode/src/main/jniLibs
+
+      # Same checks as the jobs that made them, on the combined tree the
+      # APKs are built from.
+      - name: Check the native libraries
+        run: |
+          scripts/check-native-libs.sh swarmnode/src/main/jniLibs arm64-v8a x86_64
+          scripts/check-native-libs.sh swarmnode/src/main/jniLibs arm64-v8a x86_64 --colibri
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -154,7 +342,7 @@ jobs:
           FREEDOM_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
           export FREEDOM_KEYSTORE_FILE="$RUNNER_TEMP/release.keystore"
-          ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease
+          ./gradlew --no-daemon :app:assembleRelease
 
       - name: Every APK carries Colibri
         run: |
@@ -165,9 +353,25 @@ jobs:
             done
           done
 
+      # So a cache-built release can be compared with a source-built one.
+      - name: Native library hashes
+        run: |
+          {
+            echo "### Native libraries"
+            echo
+            echo '```'
+            for apk in app/build/outputs/apk/release/app-*-release.apk; do
+              for entry in $(unzip -Z1 "$apk" 'lib/*.so'); do
+                echo "$(unzip -p "$apk" "$entry" | sha256sum | cut -d' ' -f1)  $(basename "$apk")!$entry"
+              done
+            done
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Stage release assets
         run: |
           VERSION="${GITHUB_REF_NAME:-manual}"
+          VERSION="${VERSION//\//-}"   # a dry run on a branch: alan/x -> alan-x
           mkdir -p dist
           for abi in arm64-v8a x86_64 universal; do
             cp "app/build/outputs/apk/release/app-$abi-release.apk" \
