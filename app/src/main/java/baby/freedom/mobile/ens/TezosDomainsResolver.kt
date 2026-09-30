@@ -121,7 +121,14 @@ class TezosDomainsResolver internal constructor(
     }
 
     private data class Discovery(val recordsId: String, val expiryMapId: String, val recordType: Any?)
-    private data class Timed<T>(val value: T, val expiresAt: Long)
+    /**
+     * [value], stored at [at] for [ttl]. Fresh only from [at] on: one
+     * stored while the clock ran ahead doesn't outlive [ttl] by the
+     * clock's error once it's set right.
+     */
+    private data class Timed<T>(val value: T, val at: Long, val ttl: Long) {
+        fun fresh(now: Long): Boolean = now - at in 0 until ttl
+    }
     /** [timestamp]: the head block's time (epoch ms), `null` if it didn't say. */
     private data class Head(val endpoint: String, val level: Long, val timestamp: Long? = null)
     private data class Anchor(val endpoint: String, val level: Long, val hash: String)
@@ -158,7 +165,7 @@ class TezosDomainsResolver internal constructor(
     internal suspend fun resolveOutcome(name: String): Outcome {
         synchronized(resultCache) {
             val cached = resultCache[name]
-            if (cached != null && cached.expiresAt > now()) return cached.value
+            if (cached != null && cached.fresh(now())) return cached.value
             resultCache.remove(name)
         }
         var mine: Deferred<Outcome>? = null
@@ -323,7 +330,7 @@ class TezosDomainsResolver internal constructor(
             block = anchorLevel,
         )
         synchronized(resultCache) {
-            resultCache[name] = Timed(answer, now() + cacheDuration(answer))
+            resultCache[name] = Timed(answer, now(), cacheDuration(answer))
         }
         return answer
     }
@@ -359,6 +366,13 @@ class TezosDomainsResolver internal constructor(
                     throw e
                 } catch (e: Exception) {
                     Log.w(TAG, "Tezos RPC leg failed: ${e.message}")
+                    null
+                } catch (e: StackOverflowError) {
+                    // The platform's `org.json` recurses once per nesting
+                    // level with no limit, and so does the Micheline walk:
+                    // a provider's deeply nested reply is its leg failing,
+                    // not an `Error` thrown through the lookup.
+                    Log.w(TAG, "Tezos RPC leg failed: nested too deeply")
                     null
                 }
             }
@@ -442,7 +456,7 @@ class TezosDomainsResolver internal constructor(
 
     private fun resolveAtBlock(endpoint: String, block: String, name: String): Leg {
         discoveryCache[endpoint]?.let { cached ->
-            if (cached.expiresAt > now()) {
+            if (cached.fresh(now())) {
                 try {
                     return lookupRecord(endpoint, block, name, cached.value)
                 } catch (e: Exception) {
@@ -453,7 +467,7 @@ class TezosDomainsResolver internal constructor(
             }
         }
         val discovery = discoverRegistry(endpoint, block)
-        discoveryCache[endpoint] = Timed(discovery, now() + DISCOVERY_TTL_MS)
+        discoveryCache[endpoint] = Timed(discovery, now(), DISCOVERY_TTL_MS)
         return lookupRecord(endpoint, block, name, discovery)
     }
 
@@ -495,6 +509,10 @@ class TezosDomainsResolver internal constructor(
             ttl = entries["td:ttl"]?.let(::decodeJsonBytes)?.toString()
         } catch (e: Exception) {
             return Leg(Leg.Type.UNSUPPORTED, reason = Strings.get(R.string.names_tezos_invalid_metadata, e.message.toString()))
+        } catch (e: StackOverflowError) {
+            // The owner's record, nested past what the platform parser
+            // can recurse through (a few KB of `[`): as malformed as any.
+            return Leg(Leg.Type.UNSUPPORTED, reason = Strings.get(R.string.names_tezos_invalid_metadata, "nested too deeply"))
         }
         // Presence, not value, decides precedence: a malformed redirect
         // record is unsupported, not a fallback to the content record.
