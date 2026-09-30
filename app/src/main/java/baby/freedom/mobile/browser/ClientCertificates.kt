@@ -43,9 +43,10 @@ internal sealed interface ClientCertPlan {
 
     /**
      * The user just said not to send one to this server: sent none
-     * ([ClientCertRequest.ignore], which WebView doesn't remember either).
-     * Only for the requests already waiting when they said so
-     * ([ClientCertChoices.planFor]); a later one asks again.
+     * ([ClientCertRequest.ignore]). Only for the requests already waiting
+     * when they said so ([ClientCertChoices.planFor]); a later one asks
+     * again, once the browser starts a load that reaches the server
+     * ([ClientCertificates.onBrowserLoad]).
      */
     data object Refuse : ClientCertPlan
 
@@ -65,7 +66,9 @@ internal sealed interface ClientCertPlan {
  * Back, or "no certificates" before one is installed) doesn't: it
  * answers the requests that were already waiting on that chooser, and
  * the next request — a reload, another tab — asks again. So installing
- * the certificate, or taking back an accidental Deny, only needs a reload.
+ * the certificate, or taking back an accidental Deny, only needs a reload
+ * (which also empties WebView's own record of the refusal,
+ * [ClientCertificates.onBrowserLoad]).
  *
  * A private tab never gets an answer from here: it sends no certificate
  * and is never asked, whatever a normal tab decided for the same server.
@@ -169,6 +172,9 @@ object ClientCertificates {
     /** WebView's own table may hold a certificate a normal tab picked ([send]). */
     private var tableHoldsCertificate = false
 
+    /** WebView's own table may hold a "send none" for some server ([sendNone]). */
+    private var tableHoldsRefusal = false
+
     /**
      * Long enough for the handshake a `proceed` answered to finish
      * before the table is emptied under it — one round trip, normally.
@@ -193,9 +199,9 @@ object ClientCertificates {
         when (val plan = choices.planFor(tab.private, host, port, ticket)) {
             ClientCertPlan.SendNone -> {
                 Log.i(TAG, "private tab: no client certificate for $host:$port")
-                answer(request) { ignore() }
+                sendNone(request)
             }
-            ClientCertPlan.Refuse -> answer(request) { ignore() }
+            ClientCertPlan.Refuse -> sendNone(request)
             is ClientCertPlan.Send -> {
                 val asOf = choices.generation
                 scope.launch { send(appContext, request, plan.alias, asOf) }
@@ -233,6 +239,44 @@ object ClientCertificates {
         emptyWebViewTable()
     }
 
+    /**
+     * The browser is starting a load in some tab (the address bar, a new
+     * tab, Reload, Back/Forward — [PageWebView]'s own loads, not a link
+     * the page follows): if WebView may be holding a "send none" from an
+     * earlier [sendNone], empty its table first, so the load's server
+     * can ask again.
+     *
+     * `ignore()` isn't remembered by WebView's Java side, but Chromium's
+     * network stack still files the empty answer per host and port, for
+     * the whole process, and drops it only when the server then refuses
+     * the handshake. A server that merely *requests* a certificate
+     * (optional client auth) lets the handshake through, so without this
+     * it would never ask again this run: a Deny, a "no certificates"
+     * before one is installed, or a private tab's answer would stick
+     * until *Clear cookies & site data*. Emptying it on every refusal
+     * instead (as after `proceed`, [send]) would have such a server ask
+     * again on each new connection a page opens, a chooser every few
+     * seconds for a page that polls; here it asks again only when the
+     * user loads something.
+     */
+    fun onBrowserLoad() {
+        if (tableHoldsRefusal) emptyWebViewTable()
+    }
+
+    /** Whether the next [onBrowserLoad] empties WebView's table. */
+    internal val emptiesTableOnLoad: Boolean get() = tableHoldsRefusal
+
+    /** Answers [request] with no certificate ([onBrowserLoad]). */
+    private fun sendNone(request: ClientCertRequest) {
+        answer(request) { ignore() }
+        refused()
+    }
+
+    /** WebView filed a "send none" in its table ([onBrowserLoad]). */
+    internal fun refused() {
+        tableHoldsRefusal = true
+    }
+
     private suspend fun ask(
         context: Context,
         tabId: Long,
@@ -245,7 +289,7 @@ object ClientCertificates {
         try {
             while (true) {
                 if (!awaitChooserTurn(broker.onScreenTab, broker.androidDialogUp, tabId, entry.withdrawn)) {
-                    answer(request) { ignore() }
+                    sendNone(request)
                     return
                 }
                 // At or before the chooser opens: a clear after this
@@ -258,7 +302,7 @@ object ClientCertificates {
                     choose?.let { open -> { open(request) } },
                 ) ?: continue
                 when (plan) {
-                    ClientCertPlan.SendNone, ClientCertPlan.Ask, ClientCertPlan.Refuse -> answer(request) { ignore() }
+                    ClientCertPlan.SendNone, ClientCertPlan.Ask, ClientCertPlan.Refuse -> sendNone(request)
                     is ClientCertPlan.Send -> send(context, request, plan.alias, asOf)
                 }
                 return
@@ -290,7 +334,7 @@ object ClientCertificates {
             // Removed from the device since it was picked: send none now,
             // and ask again next time.
             choices.forget(request.host, request.port)
-            answer(request) { ignore() }
+            sendNone(request)
             return
         }
         answer(request) { proceed(material.first, material.second) }
@@ -339,6 +383,7 @@ object ClientCertificates {
     private fun emptyWebViewTable() {
         main.removeCallbacks(emptyTable)
         tableHoldsCertificate = false
+        tableHoldsRefusal = false
         runCatching { WebView.clearClientCertPreferences(null) }
     }
 

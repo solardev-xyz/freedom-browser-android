@@ -4837,6 +4837,8 @@ internal class PageWebView(context: Context) : WebView(context) {
             // `#fragment` ([hardReload]).
             cacheBypass.loadStarting(bypass = loadingBypassingCache)
         }
+        // A server this run answered "send none" asks again (#316).
+        if (!loadsNothing) ClientCertificates.onBrowserLoad()
         val usersStep = if (url == null) reloadingByUser else url == HISTORY_BACK_JS || url == HISTORY_FORWARD_JS
         onBrowserInitiatedLoad(url, url != null && loadingNamedByUser, usersStep, url != null && loadingRedirectCorrection)
     }

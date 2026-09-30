@@ -185,6 +185,24 @@ class ClientCertificatesTest {
     }
 
     @Test
+    fun `a refusal kept by WebView is emptied on the browser's next load, not before`() {
+        ClientCertificates.clear()
+        assertFalse(ClientCertificates.emptiesTableOnLoad)
+        // A Deny, a "no certificates" or a private tab: Chromium files the
+        // empty answer, and a server that only requests one never asks again
+        // on its own. It stays until the user loads something...
+        ClientCertificates.refused()
+        assertTrue(ClientCertificates.emptiesTableOnLoad)
+        // ...which empties the table once.
+        ClientCertificates.onBrowserLoad()
+        assertFalse(ClientCertificates.emptiesTableOnLoad)
+        // Clearing site data empties it too.
+        ClientCertificates.refused()
+        ClientCertificates.clear()
+        assertFalse(ClientCertificates.emptiesTableOnLoad)
+    }
+
+    @Test
     fun `a chooser that never answers doesn't hold the lock once its tab closes`() = runBlocking {
         val c = ClientCertChoices()
         val lock = Mutex()
