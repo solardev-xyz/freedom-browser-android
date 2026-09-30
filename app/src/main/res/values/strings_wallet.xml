@@ -237,7 +237,7 @@
     <string name="wallet_key_title">Private key</string>
     <string name="wallet_key_keep_secret_title">Keep it secret</string>
     <!-- %s: the account's name, e.g. "Account 2". -->
-    <string name="wallet_key_keep_secret">Anyone with this key can take everything in %s, on every network, from any device, and sign in to sites and sign messages as it. Never share it or type it into a website — no one legitimate will ask. It opens this one account only: not your other accounts, your recovery phrase or your node and publisher identities.</string>
+    <string name="wallet_key_keep_secret">Anyone with this key can take everything in %s, on every network, from any device, and sign in to sites and sign messages as it. Never share it or type it into a website — no one legitimate will ask. On its own it opens this one account only: not your other accounts, your recovery phrase or your node and publisher identities.</string>
     <string name="wallet_key_account">Account</string>
     <string name="wallet_key_hidden">Hidden</string>
     <string name="wallet_key_reveal_asks">Make sure no one can see your screen. You’ll be asked for your fingerprint, face or screen lock.</string>

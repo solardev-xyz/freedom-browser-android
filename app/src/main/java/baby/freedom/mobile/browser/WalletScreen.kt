@@ -2086,6 +2086,12 @@ internal val KEY_COPY_NOTE: String get() = (PhraseClipboard.TTL_MS / 1000 / 60).
  * `rememberSaveable`, dropped on Hide, Back and as soon as the app goes
  * to the background; not selectable (a selection's own Copy would skip
  * the timed, sensitive clip); Copy through [PhraseClipboard.copyKey].
+ *
+ * The warning says the key "on its own" opens this account only. Other
+ * accounts sit under their own hardened `{index}'`, but Account 1's
+ * `m/44'/60'/0'/0/0` shares a non-hardened parent with the Swarm node
+ * key ([baby.freedom.mobile.wallet.NodeIdentity.SWARM_PATH]): the claim
+ * holds only while that parent's xpub is never given out.
  */
 @Composable
 private fun PrivateKeyPage(
@@ -2103,6 +2109,7 @@ private fun PrivateKeyPage(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val copiedLabel by PhraseClipboard.copiedLabel.collectAsState()
+    val copiedHash by PhraseClipboard.copiedHash.collectAsState()
     val hide = {
         key = null
     }
@@ -2199,7 +2206,7 @@ private fun PrivateKeyPage(
                             OutlinedButton(onClick = { PhraseClipboard.copyKey(context, shown) }) {
                                 Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                CopyLabel(copiedLabel == PhraseClipboard.KEY_CLIP_LABEL)
+                                CopyLabel(PhraseClipboard.holdsKey(copiedLabel, copiedHash, shown))
                             }
                             OutlinedButton(onClick = hide) {
                                 Icon(Icons.Filled.VisibilityOff, contentDescription = null, modifier = Modifier.size(18.dp))

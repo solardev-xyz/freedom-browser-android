@@ -69,7 +69,8 @@ import java.security.MessageDigest
  *
  * One account's private key (#323) goes the same way ([copyKey]), under
  * its own label ([KEY_CLIP_LABEL]) so each page's button follows only
- * its own secret ([copiedLabel]). Only one secret is owed a clear at a
+ * its own secret ([copiedLabel]; a key page also checks it's *this*
+ * account's key, [holdsKey]). Only one secret is owed a clear at a
  * time: copying another replaces the one before on the clipboard and
  * takes over its deadline.
  */
@@ -92,7 +93,7 @@ internal object PhraseClipboard {
     private const val KEY_LABEL = "label"
 
     private val main = Handler(Looper.getMainLooper())
-    private var pendingHash: ByteArray? = null
+    private val _copiedHash = MutableStateFlow<ByteArray?>(null)
 
     private val _copied = MutableStateFlow(false)
     private val _copiedLabel = MutableStateFlow<String?>(null)
@@ -115,6 +116,25 @@ internal object PhraseClipboard {
      * [KEY_CLIP_LABEL] (a private key); null when nothing is owed a clear.
      */
     val copiedLabel: StateFlow<String?> = _copiedLabel.asStateFlow()
+
+    /**
+     * The SHA-256 ([phraseHash]) of the secret owed a clear, while this
+     * process knows it; null otherwise, including in a process started
+     * after the copy. A page whose label can stand for more than one
+     * secret — the private-key page, one per account — matches it with
+     * [holdsKey], so Account 1's page never reads "Copied" while Account
+     * 2's key is on the clipboard.
+     */
+    val copiedHash: StateFlow<ByteArray?> = _copiedHash.asStateFlow()
+
+    /**
+     * Whether [key] is the private key owed a clear, given [label] and
+     * [hash] as read from [copiedLabel] and [copiedHash]. False when the
+     * hash was lost with the process that did the copy: a "Copied" that
+     * can't be told to be this key's isn't shown.
+     */
+    internal fun holdsKey(label: String?, hash: ByteArray?, key: String): Boolean =
+        label == KEY_CLIP_LABEL && hash != null && MessageDigest.isEqual(hash, phraseHash(listOf(key)))
 
     private fun setCopied(label: String?) {
         _copied.value = label != null
@@ -149,7 +169,7 @@ internal object PhraseClipboard {
         val clip = ClipData.newPlainText(label, words.joinToString(" "))
         markSensitive(clip)
         clipboard.setPrimaryClip(clip)
-        pendingHash = phraseHash(words)
+        _copiedHash.value = phraseHash(words)
         setCopied(label)
         val dueAt = now + TTL_MS
         prefs(app).edit().putLong(KEY_DUE_AT, dueAt).putInt(KEY_BOOT, bootCount(app)).putString(KEY_LABEL, label).commit()
@@ -206,7 +226,7 @@ internal object PhraseClipboard {
                         // `text` only — never `coerceToText`, which opens a `content:` URI.
                         clip?.let { c -> (0 until c.itemCount).map { c.getItemAt(it).text } }.orEmpty()
                     },
-                    hash = pendingHash,
+                    hash = _copiedHash.value,
                 )
                 if (clear) clipboard.clearPrimaryClip()
             }
@@ -235,7 +255,7 @@ internal object PhraseClipboard {
         runCatching { Settings.Global.getInt(app.contentResolver, Settings.Global.BOOT_COUNT, -1) }.getOrDefault(-1)
 
     private fun forget(app: Context) {
-        pendingHash = null
+        _copiedHash.value = null
         setCopied(null)
         main.removeCallbacksAndMessages(null)
         prefs(app).edit().remove(KEY_DUE_AT).remove(KEY_LABEL).commit()

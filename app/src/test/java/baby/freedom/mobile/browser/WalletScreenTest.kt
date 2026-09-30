@@ -336,6 +336,22 @@ class WalletScreenTest {
     }
 
     @Test
+    fun `a key page reads Copied only for its own account's key (#334 R2-F1)`() {
+        val key1 = "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727"
+        val key2 = "0x318470c8" + "00".repeat(28)
+        val label = PhraseClipboard.KEY_CLIP_LABEL
+        val copied2 = PhraseClipboard.phraseHash(listOf(key2))
+        // Account 2's key on the clipboard: its page reads Copied, Account 1's doesn't.
+        assertTrue(PhraseClipboard.holdsKey(label, copied2, key2))
+        assertFalse(PhraseClipboard.holdsKey(label, copied2, key1))
+        // The phrase pending, or nothing: no key page reads Copied.
+        assertFalse(PhraseClipboard.holdsKey(PhraseClipboard.CLIP_LABEL, PhraseClipboard.phraseHash(listOf(key2)), key2))
+        assertFalse(PhraseClipboard.holdsKey(null, null, key2))
+        // A process that lost the hash can't tell whose key it was: no Copied.
+        assertFalse(PhraseClipboard.holdsKey(label, null, key2))
+    }
+
+    @Test
     fun `another app's clip is left alone without being read`() {
         val hash = PhraseClipboard.phraseHash(twelve.split(" "))
         // Reading it would show Android 12+'s paste toast and could open a

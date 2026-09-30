@@ -88,6 +88,15 @@ class NodeIdentity internal constructor(
     override fun toString(): String = "NodeIdentity(swarm=$swarmAddress, peerId=$peerId)"
 
     companion object {
+        /**
+         * Desktop's Swarm key. It shares the non-hardened parent
+         * `m/44'/60'/0'/0` with Account 1 (`…/0/0`), whose private key
+         * can be exported (#323): that key plus the parent's extended
+         * public key (its chain code) gives this one. So the parent's
+         * xpub must never be shown or shared — no watch-only export of
+         * account 0 — or the "doesn't open your node identity" promise
+         * on the private-key page stops holding.
+         */
         const val SWARM_PATH = "m/44'/60'/0'/0/1"
         const val IPFS_PATH = "m/44'/73405'/0'/0'/0'"
         private const val SWARM_NETWORK_ID = 1
