@@ -56,6 +56,11 @@ class ImportPhraseClipboardTest {
         clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
     }
 
+    /** Whether the clip on the clipboard is flagged sensitive (`ClipDescription.EXTRA_IS_SENSITIVE`). */
+    private fun clipIsSensitive(): Boolean = rule.runOnIdle {
+        clipboard.primaryClipDescription?.extras?.getBoolean(PhraseClipboard.EXTRA_IS_SENSITIVE, false) == true
+    }
+
     private fun setClip(text: String) = rule.runOnIdle {
         clipboard.setPrimaryClip(ClipData.newPlainText("Notes", text))
     }
@@ -299,6 +304,8 @@ class ImportPhraseClipboardTest {
         rule.onNode(field).performSemanticsAction(SemanticsActions.CutText)
         rule.waitForIdle()
         assertEquals(twelve, clipText())
+        // R1-M1: no plain-text copy preview, no keyboard clipboard history.
+        assertTrue(clipIsSensitive())
         pressBack()
         assertEquals(null, clipText())
     }
@@ -318,12 +325,21 @@ class ImportPhraseClipboardTest {
     }
 
     @Test
+    fun aClipPutThereByAnotherAppIsNotFlaggedSensitive() {
+        setClip(twelve)
+        paste()
+        assertFalse(clipIsSensitive())
+    }
+
+    @Test
     fun aPastedPhraseCopiedBackOutIsClearedOnBack() {
         setClip(twelve)
         paste()
         selectAll()
         rule.onNode(field).performSemanticsAction(SemanticsActions.CopyText)
         rule.waitForIdle()
+        assertEquals(twelve, clipText())
+        assertTrue(clipIsSensitive())
         pressBack()
         assertEquals(null, clipText())
     }

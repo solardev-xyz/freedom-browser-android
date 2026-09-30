@@ -497,7 +497,11 @@ internal class PastedPhrases {
  * Copy and Cut write through [setClipEntry], so [pastes] hears each where
  * it happens instead of guessing it from the text ([PastedPhrases.committing],
  * [PastedPhrases.copied]). Only the item's plain text is looked at, never
- * coerced from a `content:` URI.
+ * coerced from a `content:` URI. What the field copies or cuts is its
+ * text — a recovery phrase — so it goes on the clipboard flagged sensitive
+ * ([PhraseClipboard.markSensitive]), like the Backup page's Copy: no
+ * plain-text preview in the system's copy overlay, and no copy in a
+ * keyboard's clipboard history that clearing the clipboard can't reach.
  */
 internal class WatchedClipboard(private val inner: Clipboard, private val pastes: PastedPhrases) : Clipboard {
     override val nativeClipboard: ClipboardManager get() = inner.nativeClipboard
@@ -506,6 +510,7 @@ internal class WatchedClipboard(private val inner: Clipboard, private val pastes
         inner.getClipEntry().also { pastes.committing(it?.plainText()) }
 
     override suspend fun setClipEntry(clipEntry: ClipEntry?) {
+        clipEntry?.clipData?.let(PhraseClipboard::markSensitive)
         inner.setClipEntry(clipEntry)
         val stamp = runCatching { nativeClipboard.primaryClipDescription?.timestamp }.getOrNull()
         pastes.copied(clipEntry?.plainText(), stamp)
