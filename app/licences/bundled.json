@@ -241,5 +241,8 @@
     "libdatastore_shared_counter.so": "androidx.datastore:datastore-core",
     "libimage_processing_util_jni.so": "androidx.camera:camera-core (with libyuv, in its notice)",
     "libsurface_util_jni.so": "androidx.camera:camera-core"
+  },
+  "optionalNativeLibraries": {
+    "libc4.so": "colibri"
   }
 }

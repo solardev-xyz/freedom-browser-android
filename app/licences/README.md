@@ -31,7 +31,7 @@ every text comes from this directory.
 `checkLicencedFiles<Variant>` (run before packaging) reads what the APK actually ships, after merging every source set, generated directory and library, and fails when:
 
 - an asset is neither in `own` nor in a component's `files`, or one listed there isn't shipped;
-- a `.so` isn't in `nativeLibraries`, or one listed there isn't shipped.
+- a `.so` isn't in `nativeLibraries`, or one listed there isn't shipped (except one in `optionalNativeLibraries`: `libc4.so`, which a local build may leave out — README step 3; then `generateLicences` leaves the components marked with its key, `colibri`, out of the list, and still checks them against `COLIBRI_REF`).
 
 The `licences` job (`ffi-ref.yml` on every PR and push to `main`; `release.yml`,
 which won't publish without it) goes further with the two external sources:

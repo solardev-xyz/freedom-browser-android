@@ -109,33 +109,78 @@ internal class OpenSourceLicences(
          * and each paragraph's hard-wrapped lines joined into one, so a
          * licence set at 72 columns doesn't break every line in two at a
          * large font scale. A line that starts a list item ("(a)", "1.",
-         * "- ") stays on a line of its own, but only where an item can
-         * start: after a line that ends a sentence or clause (". : ;",
-         * "and", "or"), a heading (no lower-case letters), or a line that
-         * itself started an item. A wrapped sentence whose next line
+         * "- ") or a copyright line stays on a line of its own, but only
+         * where one can start: after a line that ends a sentence or clause
+         * (". : ;", "and", "or"), a heading (no lower-case letters), or a
+         * line that itself started one. A wrapped sentence whose next line
          * happens to begin "2. of the License" is still one sentence.
+         *
+         * Indentation that carries structure is kept, relative to the
+         * paragraph's own: a line starting an item keeps its indent (so a
+         * sub-clause stays nested under its clause), as does a line
+         * indented past one ending in ":" (a quoted block). A paragraph laid
+         * out in columns (a table, an aligned list: a run of three or more
+         * spaces or a tab inside a line, or a rule line of dashes) isn't
+         * reflowed at all, only stripped of the paragraph's common indent.
+         * CRLF line ends (some crates' licence files) count as LF.
          */
         fun paragraphs(text: String): List<String> =
-            text.split(PARAGRAPH_BREAK).mapNotNull { paragraph ->
+            text.replace("\r\n", "\n").split(PARAGRAPH_BREAK).mapNotNull { paragraph ->
+                val lines = paragraph.lines().map { it.trimEnd() }.filter { it.isNotBlank() }
+                if (lines.isEmpty()) return@mapNotNull null
+                val base = lines.minOf(::indentOf)
+                fun relative(line: String) = (indentOf(line) - base).coerceIn(0, MAX_INDENT)
+                if (lines.any { COLUMNS.containsMatchIn(it.trim()) || RULE.matches(it.trim()) }) {
+                    return@mapNotNull lines.joinToString("\n") { " ".repeat(relative(it)) + it.trim() }
+                }
                 val out = StringBuilder()
                 var previous = ""
-                var previousStartedItem = false
-                for (raw in paragraph.lines()) {
+                var lineIndent = 0 // of the output line being built
+                var previousStartedLine = false
+                var previousCopyright = false
+                for (raw in lines) {
                     val line = raw.trim()
-                    if (line.isEmpty()) continue
-                    val startsItem = LIST_ITEM.containsMatchIn(line) &&
-                        (out.isEmpty() || previousStartedItem || CLAUSE_END.containsMatchIn(previous) ||
-                            previous.none { it.isLowerCase() })
-                    if (out.isNotEmpty()) out.append(if (startsItem) '\n' else ' ')
+                    val indent = relative(raw)
+                    val copyright = COPYRIGHT.containsMatchIn(line)
+                    val canStart = out.isEmpty() || previousStartedLine || CLAUSE_END.containsMatchIn(previous) ||
+                        previous.none { it.isLowerCase() }
+                    val startsLine = canStart && (LIST_ITEM.containsMatchIn(line) || copyright) ||
+                        (copyright && previousCopyright) ||
+                        (out.isNotEmpty() && indent > lineIndent && previous.endsWith(':'))
+                    if (out.isNotEmpty()) out.append(if (startsLine) '\n' else ' ')
+                    if (startsLine) out.append(" ".repeat(indent))
+                    if (startsLine || out.isEmpty()) lineIndent = indent
                     out.append(line)
                     previous = line
-                    previousStartedItem = startsItem
+                    previousStartedLine = startsLine
+                    previousCopyright = copyright
                 }
-                out.toString().takeIf { it.isNotEmpty() }
+                out.toString()
             }
 
+        /** What of a search [query] to keep in saved instance state: null (nothing) past the cap. */
+        fun savedQuery(query: String): String? = query.takeIf { it.length <= MAX_SAVED_QUERY }
+
+        const val MAX_SAVED_QUERY = 1024
+
+        private fun indentOf(line: String): Int {
+            var width = 0
+            for (ch in line) {
+                when (ch) {
+                    ' ' -> width++
+                    '\t' -> width = (width / 4 + 1) * 4
+                    else -> return width
+                }
+            }
+            return width
+        }
+
+        private const val MAX_INDENT = 8
         private val PARAGRAPH_BREAK = Regex("\\n[ \\t]*\\n")
         private val LIST_ITEM = Regex("^([-*•]|\\(?([0-9]{1,3}|[A-Za-z]|[ivxIVX]{1,4})[.)])\\s")
+        private val COPYRIGHT = Regex("^(Copyright\\b|\\([cC]\\)\\s|©)")
+        private val COLUMNS = Regex("\\S( {3,}|\\t)\\S")
+        private val RULE = Regex("[-=+|_]{4,}")
         private val CLAUSE_END = Regex("([.:;!?]|\\b(and|or),?)[\"'”’)]*$", RegexOption.IGNORE_CASE)
 
         private fun JSONArray.objects(): List<JSONObject> = List(length()) { getJSONObject(it) }

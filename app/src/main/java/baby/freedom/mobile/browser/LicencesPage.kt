@@ -28,9 +28,11 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -72,7 +74,7 @@ internal fun OpenSourceLicencesPage(onBack: () -> Unit) {
             failed = true
         }
     }
-    var query by rememberSaveable { mutableStateOf("") }
+    var query by rememberSaveable(saver = LicenceQuerySaver) { mutableStateOf("") }
     // The open component, by a key that survives recreation.
     var openKey by rememberSaveable { mutableStateOf<String?>(null) }
     val loaded = licences
@@ -270,3 +272,13 @@ private val Section.title: Int
         Section.Native -> R.string.licences_section_native
         Section.Data -> R.string.licences_section_data
     }
+
+/**
+ * The search text rides in saved instance state only up to
+ * [OpenSourceLicences.MAX_SAVED_QUERY] chars; a longer paste is dropped on
+ * process death rather than risking a bundle past the binder limit (#185).
+ */
+private val LicenceQuerySaver = Saver<MutableState<String>, String>(
+    save = { OpenSourceLicences.savedQuery(it.value) },
+    restore = { mutableStateOf(it) },
+)

@@ -338,6 +338,8 @@ androidComponents {
             gradleLibraries.set(layout.buildDirectory.file("generated/aboutLibraries/${variant.name}/res/raw/aboutlibraries.json"))
             licencesDir.set(layout.projectDirectory.dir("licences"))
             releaseWorkflow.set(rootProject.layout.projectDirectory.file(".github/workflows/release.yml"))
+            // Which optional libraries (libc4.so) this build actually ships.
+            mergedNativeLibs.set(variant.artifacts.get(SingleArtifact.MERGED_NATIVE_LIBS))
         }
         variant.sources.assets?.addGeneratedSourceDirectory(generate, GenerateLicences::outputDir)
         // What the APK actually ships, after merging: not just
@@ -362,6 +364,9 @@ abstract class GenerateLicences : DefaultTask() {
 
     @get:InputFile @get:PathSensitive(PathSensitivity.NONE)
     abstract val releaseWorkflow: RegularFileProperty
+
+    @get:InputDirectory @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val mergedNativeLibs: DirectoryProperty
 
     @get:OutputDirectory
     abstract val outputDir: DirectoryProperty
@@ -479,9 +484,15 @@ abstract class GenerateLicences : DefaultTask() {
         }
 
         // Colibri, the C code in those crates and in JNA, the OpenLV
-        // bundle and the filter lists.
+        // bundle and the filter lists. A component in an optional library
+        // (Colibri's, in libc4.so, which a local build may leave out) is
+        // listed only when this build ships that library, but checked
+        // either way.
+        val so = mergedNativeLibs.get().asFile.walkTopDown().filter { it.isFile && it.name.endsWith(".so") }.mapTo(sortedSetOf()) { it.name }
+        val optional = bundled["optionalNativeLibraries"] as Map<String, String>
         for (c in bundled["components"] as List<Map<String, Any?>>) {
             val name = c["name"] as String
+            val shipped = optional.none { (lib, key) -> c[key] != null && lib !in so }
             val ids = (c["texts"] as List<String>).mapNotNull { path ->
                 // A standard text is titled by its file (texts/GPL-3.0.txt:
                 // "GPL-3.0"), a project's own licence file by the licence.
@@ -499,7 +510,7 @@ abstract class GenerateLicences : DefaultTask() {
             (c["inGradle"] as String?)?.let {
                 if (it !in gradleVersions) problems += "app/licences/bundled.json: $name is in $it, which isn't a dependency at that version: recheck it"
             }
-            component(c["section"] as String, name, name, c["version"] as String, c["licence"] as String,
+            if (shipped) component(c["section"] as String, name, name, c["version"] as String, c["licence"] as String,
                 c["url"] as String, c["notice"] as String?, ids)
         }
 
@@ -558,12 +569,15 @@ abstract class CheckLicencedFiles : DefaultTask() {
         }
 
         val libs = config["nativeLibraries"] as Map<String, String>
+        // A library a local build may leave out (libc4.so: README, step 3).
+        val optional = (config["optionalNativeLibraries"] as Map<String, String>).keys
+        for (lib in optional - libs.keys) problems += "app/licences/bundled.json's optionalNativeLibraries has $lib, which isn't in nativeLibraries"
         val so = mergedNativeLibs.get().asFile.walkTopDown().filter { it.isFile && it.name.endsWith(".so") }.mapTo(sortedSetOf()) { it.name }
         for (lib in so - libs.keys) {
             problems += "$lib is a native library the APK ships that app/licences/bundled.json's nativeLibraries doesn't know: " +
                 "find what's linked into it, list any third-party code under components, and add it to nativeLibraries"
         }
-        for (lib in (libs.keys - so).sorted()) {
+        for (lib in (libs.keys - so - optional).sorted()) {
             problems += "app/licences/bundled.json's nativeLibraries has $lib, which the APK no longer ships: remove it"
         }
 

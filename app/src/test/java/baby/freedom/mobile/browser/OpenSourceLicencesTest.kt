@@ -128,4 +128,61 @@ Inc. and friends
             OpenSourceLicences.paragraphs(text),
         )
     }
+
+    @Test
+    fun `indented sub-clauses keep their nesting and copyright lines their own line`() {
+        val text = """
+            Copyright (c) 2010 Alice
+            Copyright (c) 2012 Bob,
+              and contributors.
+            1. You may:
+               a) copy it, and
+               b) share it.
+            2. Nothing else.
+        """.trimIndent()
+        assertEquals(
+            listOf(
+                "Copyright (c) 2010 Alice\nCopyright (c) 2012 Bob, and contributors.\n" +
+                    "1. You may:\n   a) copy it, and\n   b) share it.\n2. Nothing else.",
+            ),
+            OpenSourceLicences.paragraphs(text),
+        )
+    }
+
+    @Test
+    fun `a line indented under a colon keeps its line, a table isn't reflowed`() {
+        val text = """
+            The notice reads as follows:
+                THE SOFTWARE IS PROVIDED AS IS
+                WITHOUT WARRANTY.
+
+              Name       Licence
+              ------     -------
+              foo        MIT
+                bar      BSD
+        """.trimIndent()
+        assertEquals(
+            listOf(
+                "The notice reads as follows:\n    THE SOFTWARE IS PROVIDED AS IS WITHOUT WARRANTY.",
+                "Name       Licence\n------     -------\nfoo        MIT\n  bar      BSD",
+            ),
+            OpenSourceLicences.paragraphs(text),
+        )
+    }
+
+    @Test
+    fun `a long search query isn't saved`() {
+        assertEquals("mit", OpenSourceLicences.savedQuery("mit"))
+        assertEquals(null, OpenSourceLicences.savedQuery("x".repeat(OpenSourceLicences.MAX_SAVED_QUERY + 1)))
+    }
+
+    @Test
+    fun `CRLF text splits into paragraphs too`() {
+        assertEquals(
+            listOf("The MIT License (MIT)", "Copyright (c) 2015 Someone", "Permission is hereby granted, free of charge."),
+            OpenSourceLicences.paragraphs(
+                "The MIT License (MIT)\r\n\r\nCopyright (c) 2015 Someone\r\n\r\nPermission is hereby\r\ngranted, free of charge.\r\n",
+            ),
+        )
+    }
 }
