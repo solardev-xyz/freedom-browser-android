@@ -2758,7 +2758,10 @@ fun BrowserScreen(
                 if (tabs.pageContextMenu === request) tabs.pageContextMenu = null
             }
         } else if (owner != null && promptTurn == PromptTurn.ContextMenu) {
-            fun withImage(url: String, action: suspend (FetchedImage) -> Boolean, @androidx.annotation.StringRes failure: Int) {
+            fun withImage(url: String, action: suspend (FetchedImage, Long) -> Boolean, @androidx.annotation.StringRes failure: Int) {
+                // Taken now, not once the fetch is back: a private image
+                // fetched after its session ended is dropped (#86).
+                val session = privateImageSession()
                 scope.launch {
                     // The sheet is already gone: a refetch that isn't back
                     // almost at once says so, rather than leaving the user
@@ -2773,7 +2776,7 @@ fun BrowserScreen(
                     } finally {
                         progress.cancel()
                     }
-                    val ok = image != null && action(image)
+                    val ok = image != null && action(image, session)
                     if (!ok) Toast.makeText(context, failure, Toast.LENGTH_SHORT).show()
                 }
             }
@@ -2786,10 +2789,10 @@ fun BrowserScreen(
                     onShareLink = { url, title -> shareUrl(context, url, title) },
                     onOpenImage = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true, owner.private) },
                     onCopyImage = { url ->
-                        withImage(url, { copyImageToClipboard(context, it, url) }, R.string.browser_image_copy_failed)
+                        withImage(url, { image, session -> copyImageToClipboard(context, image, url, owner.private, session) }, R.string.browser_image_copy_failed)
                     },
                     onSaveImage = { url ->
-                        withImage(url, { image ->
+                        withImage(url, { image, _ ->
                             saveImage(context, image, url).also { saved ->
                                 if (saved) {
                                     Toast.makeText(context, R.string.browser_image_saved, Toast.LENGTH_SHORT).show()
@@ -2798,7 +2801,7 @@ fun BrowserScreen(
                         }, R.string.browser_image_save_failed)
                     },
                     onShareImage = { url ->
-                        withImage(url, { shareImage(context, it, url) }, R.string.browser_image_share_failed)
+                        withImage(url, { image, session -> shareImage(context, image, url, owner.private, session) }, R.string.browser_image_share_failed)
                     },
                     onDismiss = {
                         if (tabs.pageContextMenu === request) tabs.pageContextMenu = null
