@@ -1279,6 +1279,10 @@ class DownloadManager private constructor(context: Context) {
                     setRequestProperty("Swarm-Redundancy-Fallback-Mode", "true")
                     rangeHeaders.forEach { (k, v) -> setRequestProperty(k, v) }
                 }
+            } catch (_: TorRouting.RedirectRefusedException) {
+                // The gateway answered, with a redirect onto this device:
+                // not a stopped node, and refused again on every retry.
+                throw DownloadFailure(DownloadNote.of(R.string.library_download_redirect_refused))
             } catch (_: java.net.ConnectException) {
                 throw DownloadFailure(DownloadNote.of(R.string.library_download_node_not_running), retriable = true)
             } catch (e: IOException) {

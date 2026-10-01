@@ -15,6 +15,7 @@ import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.IDN
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.URL
@@ -635,12 +636,61 @@ object TorRouting {
      * device — and for one onto another origin on a loopback or
      * unspecified host (`127.0.0.0/8`, `0.0.0.0`, `[::1]`, `localhost`),
      * judged the way the WHATWG parser reads it (`127.1`, `0x7f000001`
-     * and `127.0.0.%31` are all `127.0.0.1` to the resolver too). A hop
-     * within the same origin is the server's own business.
+     * and `127.0.0.%31` are all `127.0.0.1` to the resolver too), or onto
+     * a DNS name that resolves to one (`localtest.me`, `127.0.0.1.nip.io`
+     * on any port: [resolvesToLoopback]). A hop within the same origin is
+     * the server's own business.
      */
     internal fun hopRefused(from: URL, to: URL, method: String): Boolean =
         NodeApiGuard.refuses(method, to.toString()) ||
-            (!sameOrigin(from, to) && NodeApiGuard.mayBeLoopback(to.toString()))
+            (!sameOrigin(from, to) && (NodeApiGuard.mayBeLoopback(to.toString()) || resolvesToLoopback(to)))
+
+    /**
+     * Does [url]'s host, a name, resolve to this device — any address
+     * [isDeviceAddress] calls loopback or unspecified? A name that doesn't
+     * resolve counts as yes (fail closed: a lookup that fails here and
+     * answers loopback a moment later is a rebinding trick). An onion
+     * host is never looked up — it goes to Tor, not the system DNS — and
+     * neither is an IP literal ([NodeApiGuard.mayBeLoopback] judges those).
+     *
+     * The answer is the one the connection then dials: the HTTP stack
+     * resolves through the same [java.net.InetAddress] cache, which
+     * holds an answer for a couple of seconds, so a name can't be
+     * rebound between this check and the hop's own lookup.
+     */
+    internal fun resolvesToLoopback(url: URL): Boolean {
+        if (fetchMayReachOnion(url)) return false
+        val host = WhatwgHost.parse(url.toString())?.hostname?.trimEnd('.') ?: return true
+        if (host.startsWith("[") || host.split('.').let { p -> p.size == 4 && p.all { o -> o.isNotEmpty() && o.all { it in '0'..'9' } } }) {
+            return false
+        }
+        val addresses = try {
+            resolve(host)
+        } catch (_: Exception) {
+            return true
+        }
+        return addresses.isEmpty() || addresses.any { isDeviceAddress(it) }
+    }
+
+    /** The system resolver; swapped in tests. */
+    @Volatile
+    internal var resolve: (String) -> Array<InetAddress> = { InetAddress.getAllByName(it) }
+
+    /**
+     * Is [address] this device: IPv4 `127.0.0.0/8` or `0.0.0.0/8`, or an
+     * IPv6 address whose first 80 bits are zero (`::1`, `::`, a v4-mapped
+     * or v4-compatible address, whatever it embeds) — the same set
+     * [NodeApiGuard.mayBeLoopback] reads in a literal.
+     */
+    internal fun isDeviceAddress(address: InetAddress): Boolean {
+        val b = address.address
+        if (address.isLoopbackAddress || address.isAnyLocalAddress) return true
+        return when (b.size) {
+            4 -> b[0].toInt() == 127 || b[0].toInt() == 0
+            16 -> (0 until 10).all { b[it].toInt() == 0 }
+            else -> true
+        }
+    }
 
     /**
      * [openFollowingRedirects]'s refusal of a hop onto this device

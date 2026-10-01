@@ -228,7 +228,9 @@ class TorRoutingTest {
     }
 
     @Test
-    fun `a redirect onto this device is refused, whatever spells the host`() {
+    fun `a redirect onto this device is refused, whatever spells the host`() = withResolver(
+        "gateway.example" to "203.0.113.5", "other.example" to "198.51.100.7", "127.tracker.example" to "198.51.100.8",
+    ) {
         val gateway = URL("http://gateway.example/ipfs/bafyroot/")
         fun refused(location: String, method: String = "GET") =
             TorRouting.hopRefused(gateway, URL(gateway, location), method)
@@ -248,6 +250,15 @@ class TorRoutingTest {
         )) {
             assertTrue(location, refused(location))
         }
+        // A public name that resolves to the device, on any port (R1-F1):
+        // the HTTP stack would dial loopback just the same. One that doesn't
+        // resolve at all is refused too — it could resolve to loopback next.
+        for (location in listOf(
+            "http://localtest.me:8080/secret", "http://127.0.0.1.nip.io:45123/", "https://loop6.example/",
+            "http://mapped.example:631/", "http://mixed.example/", "http://unresolvable.example:9000/",
+        )) {
+            assertTrue(location, refused(location))
+        }
         // Elsewhere, or on the same origin: followed as before.
         for (location in listOf(
             "/ipfs/bafyroot/index.html", "http://gateway.example/ipfs/bafyother/",
@@ -263,6 +274,39 @@ class TorRoutingTest {
         val node = URL("http://127.0.0.1:1633/bzz/abc")
         assertFalse(TorRouting.hopRefused(node, URL(node, "/bzz/abc/"), "GET"))
         assertTrue(TorRouting.hopRefused(node, URL(node, "/addresses"), "GET"))
+    }
+
+    @Test
+    fun `an onion or IP-literal hop is never looked up`() = withResolver {
+        val looked = mutableListOf<String>()
+        val real = TorRouting.resolve
+        TorRouting.resolve = { looked += it; real(it) }
+        val gateway = URL("http://gateway.example/ipfs/bafyroot/")
+        assertFalse(TorRouting.resolvesToLoopback(URL(gateway, "http://${"a".repeat(56)}.onion/")))
+        assertFalse(TorRouting.resolvesToLoopback(URL(gateway, "http://192.168.1.20:8080/")))
+        assertFalse(TorRouting.resolvesToLoopback(URL(gateway, "http://[2001:db8::1]/")))
+        assertEquals(emptyList<String>(), looked)
+    }
+
+    /** Run [block] with [TorRouting.resolve] answering from [names] (anything else unresolvable). */
+    private fun <T> withResolver(vararg names: Pair<String, String>, block: () -> T): T {
+        val table = mapOf(
+            "localtest.me" to listOf("127.0.0.1"),
+            "127.0.0.1.nip.io" to listOf("127.0.0.1"),
+            "loop6.example" to listOf("::1"),
+            "mapped.example" to listOf("::ffff:7f00:1"),
+            "mixed.example" to listOf("198.51.100.9", "127.0.0.2"),
+        ) + names.associate { (k, v) -> k to listOf(v) }
+        val real = TorRouting.resolve
+        TorRouting.resolve = { host ->
+            table[host]?.map { java.net.InetAddress.getByName(it) }?.toTypedArray()
+                ?: throw java.net.UnknownHostException(host)
+        }
+        try {
+            return block()
+        } finally {
+            TorRouting.resolve = real
+        }
     }
 
     @Test
