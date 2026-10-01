@@ -326,8 +326,7 @@ class Ledger internal constructor(private val context: Context) {
         turn: Turn,
         before: () -> Unit = {},
     ) {
-        holding(address, turn::stage) { turn.apdu { app.address(key.path) } }
-        turn.claim()
+        claimHolding(address, turn) { turn.apdu { app.address(key.path) } }
         before()
         turn.stage(Stage.CONFIRM)
     }
@@ -734,6 +733,26 @@ class Ledger internal constructor(private val context: Context) {
                 throw NotThisLedger(e)
             }
             if (!got.equals(address, ignoreCase = true)) throw NotThisLedger(LedgerException(LedgerException.Kind.WRONG_DEVICE))
+        }
+
+        /**
+         * [holding], then [Turn.claim] for the Ledger found to hold
+         * [address]. It's said to be reading as soon as it's checked: it
+         * no longer waits on the user, and [Turn.claim] can take up to an
+         * APDU timeout and a link close for a Ledger it lets go — the
+         * dialog mustn't go on saying "Unlock your Ledger" for one that's
+         * unlocked meanwhile (#350 R5-M1).
+         */
+        internal suspend fun claimHolding(
+            address: String,
+            turn: Turn,
+            readyMs: Long = READY_MS,
+            pollMs: Long = POLL_MS,
+            read: suspend () -> String,
+        ) {
+            holding(address, turn::stage, readyMs, pollMs, read)
+            turn.stage(Stage.READING)
+            turn.claim()
         }
 
         /**

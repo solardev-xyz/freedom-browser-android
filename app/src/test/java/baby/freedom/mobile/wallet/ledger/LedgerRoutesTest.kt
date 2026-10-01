@@ -316,6 +316,49 @@ class LedgerRoutesTest {
     }
 
     @Test
+    fun `a Ledger unlocked and checked no longer says Unlock while another Ledger is let go`() = runBlocking(Dispatchers.Default) {
+        // R5-M1: the cable Nano X is locked; the radio route's address read stalls. The user unlocks the cable one,
+        // which is checked and claims while the radio read is still out.
+        val outer = this
+        val shown = java.util.Collections.synchronizedList(ArrayList<Pair<String, Ledger.Stage>>())
+        val radioSent = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val radioAnswer = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var shownWhileClaiming: Pair<String, Ledger.Stage>? = null
+        val got = kotlinx.coroutines.withTimeout(20_000) { Ledger.inTurn(listOf(nanoXCable, nanoXRadio), show = { n, s -> shown += n to s }) { r, turn ->
+            if (r == nanoXCable) {
+                turn.stage(Ledger.Stage.UNLOCK) // locked: lets the radio route start
+                var reads = 0
+                Ledger.claimHolding(account, turn, readyMs = 5_000, pollMs = 10) {
+                    if (reads++ == 0) {
+                        radioSent.await()
+                        throw ex(LedgerException.Kind.LOCKED)
+                    }
+                    // Unlocked: the radio read answers only well after this one's been checked.
+                    outer.launch {
+                        delay(300)
+                        shownWhileClaiming = shown.last()
+                        radioAnswer.complete(Unit)
+                    }
+                    account
+                }
+                r
+            } else {
+                turn.stage(Ledger.Stage.CONNECTING)
+                turn.apdu {
+                    radioSent.complete(Unit)
+                    radioAnswer.await()
+                    other
+                }
+                delay(60_000)
+                r
+            }
+        } }
+        assertEquals(nanoXCable, got)
+        assertTrue(shown.any { it == nanoXCable.name to Ledger.Stage.UNLOCK })
+        assertEquals(nanoXCable.name to Ledger.Stage.READING, shownWhileClaiming)
+    }
+
+    @Test
     fun `Cancel ends a Ledger's APDU at once`() = runBlocking(Dispatchers.Default) {
         val started = System.currentTimeMillis()
         val run = async {
