@@ -653,6 +653,17 @@ object TorRouting {
      * host is never looked up — it goes to Tor, not the system DNS — and
      * neither is an IP literal ([NodeApiGuard.mayBeLoopback] judges those).
      *
+     * Every reading of the host is looked up, not just the WHATWG one:
+     * `HttpURLConnection` (OkHttp inside) dials the host it reads itself
+     * ([dialedHosts]) — percent-decoded and mapped with IDNA2003
+     * ([IDN.toASCII]), which deletes code points UTS-46 keeps and
+     * punycodes (U+1806, ZWJ/ZWNJ) and maps `ß` to `ss`. So
+     * `127.0.0.1%E1%A0%86.8.8.8.8.nip.io` is `127.0.0.xn--1-f3j.8.8.8.8.nip.io`
+     * (a public address) to the WHATWG parser but `127.0.0.1.8.8.8.8.nip.io`
+     * (loopback) to the connection; either reading reaching this device
+     * refuses the hop. A reading that is an IP literal is judged as one,
+     * with no lookup.
+     *
      * The answer is the one the connection then dials: the HTTP stack
      * resolves through the same [java.net.InetAddress] cache, which
      * holds an answer for a couple of seconds, so a name can't be
@@ -660,9 +671,51 @@ object TorRouting {
      */
     internal fun resolvesToLoopback(url: URL): Boolean {
         if (fetchMayReachOnion(url)) return false
-        val host = WhatwgHost.parse(url.toString())?.hostname?.trimEnd('.') ?: return true
-        if (host.startsWith("[") || host.split('.').let { p -> p.size == 4 && p.all { o -> o.isNotEmpty() && o.all { it in '0'..'9' } } }) {
-            return false
+        val whatwg = WhatwgHost.parse(url.toString())?.hostname?.lowercase()?.trimEnd('.') ?: return true
+        return (linkedSetOf(whatwg) + dialedHosts(url)).any { hostReachesDevice(it) }
+    }
+
+    /**
+     * The hosts `HttpURLConnection` may dial for [url]: OkHttp's own
+     * authority ([okHttpHost]) and [URL.getHost], each percent-decoded
+     * and mapped with IDNA2003 the way OkHttp's `HttpUrl` does (with and
+     * without unassigned code points allowed), lower-cased, trailing dots
+     * dropped. A reading IDNA2003 refuses outright is one the connection
+     * refuses too, so it isn't listed.
+     */
+    internal fun dialedHosts(url: URL): Set<String> {
+        val out = linkedSetOf<String>()
+        for (raw in listOfNotNull(okHttpHost(url.toString()), url.host)) {
+            if (raw.isEmpty()) continue
+            if (raw.startsWith("[")) {
+                out += raw.lowercase()
+                continue
+            }
+            val decoded = percentDecodeUtf8(raw)
+            for (flags in intArrayOf(0, IDN.ALLOW_UNASSIGNED)) {
+                runCatching { IDN.toASCII(decoded, flags) }.getOrNull()
+                    ?.lowercase()?.trimEnd('.')?.takeIf { it.isNotEmpty() }
+                    ?.let { out += it }
+            }
+        }
+        return out
+    }
+
+    /**
+     * Does [host] (canonical: ASCII, lower-case) reach this device? An IP
+     * literal is judged as written ([isDeviceAddress]); a name is looked
+     * up, and one that doesn't resolve counts as yes.
+     */
+    private fun hostReachesDevice(host: String): Boolean {
+        if (host.startsWith("[")) {
+            val inner = host.removePrefix("[").substringBefore(']')
+            if (inner.isEmpty() || !inner.all { it == ':' || it == '.' || it in '0'..'9' || it in 'a'..'f' }) return true
+            return runCatching { isDeviceAddress(InetAddress.getByName(inner)) }.getOrDefault(true)
+        }
+        if (host.split('.').let { p -> p.size == 4 && p.all { o -> o.isNotEmpty() && o.length <= 3 && o.all { it in '0'..'9' } } }) {
+            val octets = host.split('.').map { it.toInt() }
+            if (octets.any { it > 255 }) return true
+            return isDeviceAddress(InetAddress.getByAddress(octets.map { it.toByte() }.toByteArray()))
         }
         val addresses = try {
             resolve(host)
@@ -938,7 +991,7 @@ internal fun hostMayBeOnion(rawHost: String?): Boolean {
 }
 
 /** `%XX` escapes decoded as UTF-8 bytes; a malformed escape is kept as is. */
-private fun percentDecodeUtf8(s: String): String {
+internal fun percentDecodeUtf8(s: String): String {
     val out = java.io.ByteArrayOutputStream()
     val bytes = s.toByteArray(Charsets.UTF_8)
     var i = 0

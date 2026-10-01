@@ -288,6 +288,37 @@ class TorRoutingTest {
         assertEquals(emptyList<String>(), looked)
     }
 
+    @Test
+    fun `a hop is judged on the host the connection dials, not only the WHATWG one`() = withResolver(
+        // UTS-46 keeps and punycodes U+1806; IDNA2003 (what HttpURLConnection maps with) deletes it.
+        "127.0.0.xn--1-f3j.8.8.8.8.nip.io" to "8.8.8.8",
+        "127.0.0.1.8.8.8.8.nip.io" to "127.0.0.1",
+        "strasse.example" to "127.0.0.1",
+        "xn--strae-oqa.example" to "198.51.100.9",
+        "public.example" to "198.51.100.9",
+    ) {
+        val was = WhatwgHost.uts46
+        WhatwgHost.uts46 = Icu4jUts46
+        try {
+            dialedHostChecks()
+        } finally {
+            WhatwgHost.uts46 = was
+        }
+    }
+
+    private fun dialedHostChecks() {
+        val gateway = URL("http://gateway.example/ipfs/bafyroot/")
+        val todo = URL("http://127.0.0.1%E1%A0%86.8.8.8.8.nip.io:8712/secret.html")
+        assertTrue("127.0.0.1.8.8.8.8.nip.io" in TorRouting.dialedHosts(todo))
+        assertTrue(TorRouting.resolvesToLoopback(todo))
+        assertTrue(TorRouting.hopRefused(gateway, todo, "GET"))
+        // ß: IDNA2003 maps it to ss, UTS-46 nontransitional keeps it.
+        assertTrue(TorRouting.resolvesToLoopback(URL("http://stra%C3%9Fe.example/")))
+        // A literal the connection would read out of a name is judged as one.
+        assertTrue(TorRouting.resolvesToLoopback(URL("http://127.0.0.1%E1%A0%86/")))
+        assertFalse(TorRouting.resolvesToLoopback(URL("http://public.example/")))
+    }
+
     /** Run [block] with [TorRouting.resolve] answering from [names] (anything else unresolvable). */
     private fun <T> withResolver(vararg names: Pair<String, String>, block: () -> T): T {
         val table = mapOf(
