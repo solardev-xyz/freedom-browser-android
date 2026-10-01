@@ -354,6 +354,22 @@ class OnchainAppTest {
     }
 
     @Test
+    fun `the warning details give the chain ID its own line ahead of a site-chosen name`() {
+        // #370 R4-M1: a site can add chain 666 named "Ethereum (chain 1) Neee…t".
+        val name = "Ethereum (chain 1) N" + "e".repeat(40) + "t"
+        val app = OnchainAppRef(zswapLower, 666)
+        for (level in listOf(ChainTrust.Level.UNVERIFIED, ChainTrust.Level.VERIFIED)) {
+            val doc = OnchainDocument(app, "<p>hi</p>", "0x00", trust(level, dissented = listOf("b.example")), name)
+            val detail = if (doc.conflict) doc.conflictDetail() else doc.unverifiedDetail()
+            val lines = detail.lines()
+            assertEquals("Chain ID: 666", lines[0])
+            assertEquals("Network: $name", lines[1])
+            // The ID appears only on its own line, never inside the name's.
+            assertFalse(lines[1].contains("666"))
+        }
+    }
+
+    @Test
     fun `loader failures map to their error pages`() = runBlocking {
         val app = OnchainAppRef(zswapLower, 1)
         assertEquals(

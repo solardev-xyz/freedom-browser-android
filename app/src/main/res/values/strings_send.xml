@@ -232,8 +232,8 @@
     <string name="send_eth_message_whole">The signature covers the whole message.</string>
     <string name="send_eth_message_hex">This message isn\'t readable text; it\'s shown as hex bytes.</string>
     <string name="send_eth_message_note">A signature can authorise actions off-chain, such as a login or an order. Only sign if you trust the site.</string>
-    <!-- %1$s: the network's name; %2$s: its chain ID. -->
-    <string name="send_eth_chain_with_id">%1$s (chain %2$s)</string>
+    <!-- Under a network's name, on a line of its own; %1$s: its chain ID. -->
+    <string name="send_eth_chain_id_line">Chain ID %1$s</string>
     <string name="send_eth_any_chain">Any — the signature names no chain</string>
     <string name="send_eth_application">Application</string>
     <string name="send_eth_type">Type</string>
