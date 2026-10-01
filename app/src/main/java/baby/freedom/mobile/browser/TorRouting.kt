@@ -817,11 +817,38 @@ object TorRouting {
      * name (R4-F2). The route is passed to the connection explicitly, so
      * it can't fall back from a failed proxy to dialing directly, past
      * both checks.
+     *
+     * The selector is asked about [selectorUri]'s reading of the hop, which
+     * holds for a `Location` `java.net.URI` rejects as written (a `|`, `{`,
+     * a space — the connection itself sends those, percent-encoded); a hop
+     * the selector can't be asked about, or that it fails on, is refused
+     * ([RedirectRefusedException]) rather than dialed directly past a proxy
+     * the user set (R5-F1).
      */
     internal fun hopRoute(url: URL): Proxy? {
         if (fetchMayReachOnion(url)) return null
-        val proxies = runCatching { proxiesFor(url.toURI()) }.getOrNull().orEmpty()
+        val uri = selectorUri(url) ?: throw RedirectRefusedException(url)
+        val proxies = try {
+            proxiesFor(uri)
+        } catch (_: Exception) {
+            throw RedirectRefusedException(url)
+        }
         return proxies.firstOrNull { it.type() != Proxy.Type.DIRECT } ?: Proxy.NO_PROXY
+    }
+
+    /**
+     * [url] as a `java.net.URI` for the proxy selector, which reads only its
+     * scheme, host and port: the URL as written if `URI` takes it, else with
+     * its path, query and fragment quoted, else just scheme, the host the
+     * connection dials ([okHttpHost], percent-decoded, IDNA2003) and port.
+     * `null` if none of those parse.
+     */
+    internal fun selectorUri(url: URL): URI? {
+        runCatching { return url.toURI() }
+        runCatching { return URI(url.protocol, url.userInfo, url.host, url.port, url.path, url.query, url.ref) }
+        val raw = okHttpHost(url.toString())?.takeIf { it.isNotEmpty() } ?: return null
+        val host = if (raw.startsWith("[")) raw else runCatching { IDN.toASCII(percentDecodeUtf8(raw)) }.getOrNull() ?: return null
+        return runCatching { URI(url.protocol, null, host, url.port, null, null, null) }.getOrNull()
     }
 
     /** The system proxy selector's choice for a URI; swapped in tests. */

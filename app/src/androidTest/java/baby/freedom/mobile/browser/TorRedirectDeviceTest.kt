@@ -127,6 +127,25 @@ class TorRedirectDeviceTest {
     }
 
     /**
+     * #359 R5-F1: a hop whose Location `java.net.URI` rejects as written (a
+     * `|`) still goes through the system proxy, not straight from here.
+     */
+    @Test
+    fun aHopJavaNetUriRejectsStillGoesThroughTheProxy() {
+        server.enqueue(MockResponse().setResponseCode(302).setHeader("Location", "http://other.test/ipfs/y|z"))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("ok"))
+        withProxyAndNames("other.test" to "198.51.100.7") {
+            val conn = TorRouting.openFollowingRedirects(URL("http://gateway.test/ipfs/x")) { }
+            assertEquals(200, conn.responseCode)
+            conn.disconnect()
+        }
+        assertEquals("GET http://gateway.test/ipfs/x HTTP/1.1", server.takeRequest().requestLine)
+        val hop = server.takeRequest()
+        assertEquals("other.test", hop.getHeader("Host"))
+        assertTrue(hop.requestLine, hop.requestLine.startsWith("GET http://other.test/ipfs/y"))
+    }
+
+    /**
      * A hop through a system proxy that can't be reached isn't retried
      * straight from here (HttpURLConnection's own fallback), where its
      * name would be looked up afresh past the hop's checks.

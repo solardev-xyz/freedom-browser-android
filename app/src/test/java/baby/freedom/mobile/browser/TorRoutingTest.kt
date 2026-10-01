@@ -364,9 +364,22 @@ class TorRoutingTest {
             assertEquals(http, TorRouting.hopRoute(URL("http://gw.example/ipfs/x")))
             TorRouting.proxiesFor = { listOf(java.net.Proxy.NO_PROXY, socks) }
             assertEquals(socks, TorRouting.hopRoute(URL("https://gw.example/ipfs/x")))
-            // A selector that fails or answers nothing is read as direct, so the checks still run.
+            // A Location java.net.URI rejects as written still goes through the proxy (R5-F1).
+            val asked = mutableListOf<java.net.URI>()
+            TorRouting.proxiesFor = { asked += it; listOf(http) }
+            for (odd in listOf("http://other.test/ipfs/y|z", "http://other.test/a b?q={x}^\"", "https://other.test:8443/p#a|b")) {
+                assertEquals(odd, http, TorRouting.hopRoute(URL(odd)))
+            }
+            assertEquals(listOf("other.test"), asked.map { it.host }.distinct())
+            assertEquals(listOf(-1, -1, 8443), asked.map { it.port })
+            // A selector that fails is refused, never dialed directly past a proxy it may name.
             TorRouting.proxiesFor = { throw IllegalArgumentException("bad uri") }
-            assertEquals(java.net.Proxy.NO_PROXY, TorRouting.hopRoute(URL("https://gw.example/ipfs/x")))
+            try {
+                TorRouting.hopRoute(URL("https://gw.example/ipfs/x"))
+                fail("dialed a hop the proxy selector failed on")
+            } catch (_: TorRouting.RedirectRefusedException) {
+            }
+            // One that answers nothing is read as direct, so the checks still run.
             TorRouting.proxiesFor = { emptyList() }
             assertEquals(java.net.Proxy.NO_PROXY, TorRouting.hopRoute(URL("https://gw.example/ipfs/x")))
         } finally {
