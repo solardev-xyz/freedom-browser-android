@@ -62,7 +62,7 @@ class MediaBufferBudgetTest {
                             decided.incrementAndGet()
                         }
                     }
-                    when (val r = readBounded(stream, 32 * 1024 * 1024, size.toLong(), reserve, buffer::release)) {
+                    when (val r = readBounded(stream, 32 * 1024 * 1024, size.toLong(), reserve, buffer::release, buffer::reserveFree)) {
                         is BoundedRead.Bytes -> r.body
                         BoundedRead.NoRoom -> noRoom
                         BoundedRead.TooLarge -> tooLarge

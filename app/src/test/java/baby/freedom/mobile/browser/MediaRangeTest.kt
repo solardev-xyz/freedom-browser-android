@@ -7,7 +7,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 
-/** [byteRangeFor] and [readAtMost]: a page-chosen Range header never throws (#355). */
+/**
+ * [byteRangeFor]: a page-chosen Range header never throws; [readBounded]:
+ * a buffered body stays inside the shared byte budget (#355).
+ */
 class MediaRangeTest {
     private fun partial(start: Long, end: Long) = ByteRangeAnswer.Partial(start, end)
 
@@ -67,10 +70,17 @@ class MediaRangeTest {
             return true
         }
         fun release(n: Long) { used -= n }
+        var freeReserves = 0
+        // Like MediaBodyBuffer.reserveFree: never evicts (counted, so a
+        // test can tell which reserve the trim went through).
+        fun reserveFree(n: Long): Boolean {
+            freeReserves++
+            return reserve(n)
+        }
     }
 
     private fun read(body: ByteArray, limit: Int, expected: Long, budget: Budget) =
-        readBounded(ByteArrayInputStream(body), limit, expected, budget::reserve, budget::release)
+        readBounded(ByteArrayInputStream(body), limit, expected, budget::reserve, budget::release, budget::reserveFree)
 
     @Test
     fun `readBounded holds exactly the body it returns`() {
@@ -132,6 +142,49 @@ class MediaRangeTest {
     }
 
     @Test
+    fun `a chunked body ending on a chunk boundary is kept with no room for one more (R3-M1)`() {
+        for (k in 0..4) {
+            val body = ByteArray(k * 64 * 1024) { (it * 3).toByte() }
+            val full = Budget(4L * 64 * 1024)
+            val got = (read(body, 1_000_000, -1, full) as BoundedRead.Bytes).body
+            assertArrayEquals(body, got.toByteArray())
+            assertEquals(k * 64L * 1024, got.held)
+            assertEquals(got.held, full.used)
+        }
+        // One byte more than fits is still refused, holding nothing...
+        val over = Budget(4L * 64 * 1024)
+        assertEquals(BoundedRead.NoRoom, read(ByteArray(4 * 64 * 1024 + 1), 1_000_000, -1, over))
+        assertEquals(0L, over.used)
+        // ...and past the limit it is TooLarge, not NoRoom.
+        val atLimit = Budget(2L * 64 * 1024)
+        assertEquals(BoundedRead.TooLarge, read(ByteArray(2 * 64 * 1024 + 1), 2 * 64 * 1024, -1, atLimit))
+        assertEquals(0L, atLimit.used)
+    }
+
+    @Test
+    fun `the last-chunk trim never evicts a buffered body (R3-M2)`() {
+        // A buffered two-chunk body fills the budget but for one chunk.
+        val buffer = MediaBodyBuffer<MediaBytes>(maxBytes = 3L * 64 * 1024, sizeOf = { it.held })
+        val a = buffer.load("a", fresh = false) {
+            (readBounded(ByteArrayInputStream(ByteArray(2 * 64 * 1024)), 1_000_000, -1, buffer::reserve, buffer::release, buffer::reserveFree) as BoundedRead.Bytes).body
+        }!!
+        assertEquals(2L * 64 * 1024, buffer.usedBytes)
+        // A 100-byte chunked read takes the free chunk; trimming it would
+        // need 100 more, which only evicting `a` could make room for.
+        val small = buffer.load("b", fresh = false) {
+            (readBounded(ByteArrayInputStream(ByteArray(100)), 1_000_000, -1, buffer::reserve, buffer::release, buffer::reserveFree) as BoundedRead.Bytes).body
+        }!!
+        assertEquals(64L * 1024, small.held) // kept untrimmed
+        assertEquals(100L, small.size)
+        assertTrue(a === buffer.load("a", fresh = false) { error("a was evicted") })
+        assertEquals(3L * 64 * 1024, buffer.usedBytes)
+        // With free room the trim still happens, through reserveFree.
+        val roomy = Budget(Long.MAX_VALUE)
+        assertEquals(100L, (read(ByteArray(100), 1_000_000, -1, roomy) as BoundedRead.Bytes).body.held)
+        assertEquals(1, roomy.freeReserves)
+    }
+
+    @Test
     fun `a body that isn't the announced length`() {
         val budget = Budget(Long.MAX_VALUE)
         // Longer: never worth buffering, so remembered and streamed (R2-M1).
@@ -177,7 +230,7 @@ class MediaRangeTest {
             failing.n = 0
             val budget = Budget(Long.MAX_VALUE)
             try {
-                readBounded(failing, 200_000, expected, budget::reserve, budget::release)
+                readBounded(failing, 200_000, expected, budget::reserve, budget::release, budget::reserveFree)
                 fail("expected IOException")
             } catch (_: java.io.IOException) {
             }

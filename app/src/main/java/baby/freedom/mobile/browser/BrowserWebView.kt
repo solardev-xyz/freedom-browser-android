@@ -6124,6 +6124,7 @@ private fun tryLoadMediaBody(
                 conn.contentLengthLong,
                 mediaBodies::reserve,
                 mediaBodies::release,
+                mediaBodies::reserveFree,
             )
         }
         val bytes = when (read) {

@@ -81,7 +81,19 @@ internal class MediaBodyBuffer<B : Any>(
         return true
     }
 
-    /** Give back [bytes] taken by [reserve]. */
+    /**
+     * Reserve [bytes] only if they fit beside what is already held,
+     * evicting nothing: for an optional allocation (trimming a body's last
+     * chunk) whose saving is worth less than any buffered body (R3-M2).
+     */
+    @Synchronized
+    fun reserveFree(bytes: Long): Boolean {
+        if (bytes < 0 || used + bytes > maxBytes) return false
+        used += bytes
+        return true
+    }
+
+    /** Give back [bytes] taken by [reserve] or [reserveFree]. */
     @Synchronized
     fun release(bytes: Long) {
         used = (used - bytes).coerceAtLeast(0)

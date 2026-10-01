@@ -131,8 +131,14 @@ private const val READ_CHUNK = 64 * 1024
  *   [BoundedRead.TooLarge];
  * - an unknown length is read in [READ_CHUNK]s, each reserved first, and
  *   kept as those chunks ([MediaBytes]), so nothing has to be reserved
- *   once the end is reached (only the last chunk is trimmed, if there's
- *   room for its copy); it gives up one chunk past [limit].
+ *   once the end is reached; it gives up one chunk past [limit]. When a
+ *   full chunk's successor can't be reserved, one byte is read to tell
+ *   "more to come" ([BoundedRead.NoRoom]) from "that was the end" (the
+ *   body, with no reservation needed — R3-M1: a body that is an exact
+ *   multiple of [READ_CHUNK] would otherwise be thrown away whole). The
+ *   last chunk is trimmed only if [reserveFree] — which must never evict
+ *   a buffered body — has room for its copy (R3-M2): saving under one
+ *   chunk is never worth a body that would then be downloaded again.
  *
  * So a body read to its end is never thrown away for want of room (R2-M1):
  * that would leave it unbuffered, and every later Range request for it
@@ -149,6 +155,7 @@ internal fun readBounded(
     expected: Long,
     reserve: (Long) -> Boolean,
     release: (Long) -> Unit,
+    reserveFree: (Long) -> Boolean,
 ): BoundedRead {
     if (expected > limit) return BoundedRead.TooLarge
     var held = 0L
@@ -184,9 +191,13 @@ internal fun readBounded(
             }
             if (lastFill == READ_CHUNK) {
                 if (!reserve(READ_CHUNK.toLong())) {
+                    // The chunks so far are full: the body may end right
+                    // here, and then it is whole with nothing more to hold.
+                    val next = input.read()
+                    if (next < 0) break
                     release(held)
                     held = 0
-                    return BoundedRead.NoRoom
+                    return if (total + 1 > limit) BoundedRead.TooLarge else BoundedRead.NoRoom
                 }
                 held += READ_CHUNK
                 chunks += ByteArray(READ_CHUNK)
@@ -198,13 +209,15 @@ internal fun readBounded(
             lastFill += r
             total += r
         }
-        // The last chunk is never full here: drop it if empty, else trim
-        // it when there's room for the copy (keeping it whole otherwise).
+        // The last chunk is full only when the body ended on a boundary
+        // with no room for another (nothing to trim). Otherwise drop it if
+        // empty, else trim it when there's free room for the copy (keeping
+        // it whole otherwise; never evicting for it).
         if (lastFill == 0) {
             chunks.removeAt(chunks.size - 1)
             release(READ_CHUNK.toLong())
             held -= READ_CHUNK
-        } else if (reserve(lastFill.toLong())) {
+        } else if (lastFill < READ_CHUNK && reserveFree(lastFill.toLong())) {
             chunks[chunks.size - 1] = chunks.last().copyOf(lastFill)
             release(READ_CHUNK.toLong())
             held += lastFill - READ_CHUNK
