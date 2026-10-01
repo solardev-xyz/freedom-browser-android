@@ -433,7 +433,8 @@ class LedgerRoutesTest {
         val got = Ledger.awaitReady({ stages += it }, readyMs = 5_000, pollMs = 10, follow = { follows.incrementAndGet(); true }, read = reads(LedgerException.Kind.APP_NOT_OPEN, LedgerException.Kind.DISCONNECTED, account))
         assertEquals(account, got)
         assertEquals(1, follows.get())
-        assertEquals(listOf(Ledger.Stage.OPEN_APP), stages)
+        // Said to be connecting while it's followed, not still "Open the Ethereum app" (#350 R2-M2).
+        assertEquals(listOf(Ledger.Stage.OPEN_APP, Ledger.Stage.CONNECTING), stages)
         // Through holding too, and twice over (quitting another app, then opening this one).
         assertEquals(null, try {
             Ledger.holding(account, {}, readyMs = 5_000, pollMs = 10, follow = { true }, read = reads(LedgerException.Kind.LOCKED, LedgerException.Kind.DISCONNECTED, LedgerException.Kind.APP_NOT_OPEN, LedgerException.Kind.DISCONNECTED, account))
@@ -477,9 +478,56 @@ class LedgerRoutesTest {
         val a = "/dev/bus/usb/001/002"
         val b = "/dev/bus/usb/001/003"
         val back = "/dev/bus/usb/001/005"
-        assertEquals(back, Ledger.reappeared(setOf(a, b), listOf(b, back)))
+        assertEquals(back, Ledger.reappeared(setOf(a, b), emptySet(), listOf(b, back)))
         // Not back yet; another Ledger plugged in already is its own route.
-        assertEquals(null, Ledger.reappeared(setOf(a, b), listOf(b)))
+        assertEquals(null, Ledger.reappeared(setOf(a, b), emptySet(), listOf(b)))
+    }
+
+    /**
+     * Two Nano S Plus on a hub (#350 R2-F1): the Ethereum app is opened on
+     * B, then on A. B came back as B' while A was still answering, so A's
+     * route knows B' isn't A, and takes A' — not B', the first by path.
+     */
+    @Test
+    fun `a same-model Ledger that re-enumerated meanwhile is never taken for this one`() {
+        val a = "/dev/bus/usb/001/002"
+        val b = "/dev/bus/usb/001/003"
+        val bBack = "/dev/bus/usb/001/005"
+        val aBack = "/dev/bus/usb/001/006"
+        // Listed when A last answered (alive): B had come back as B' by then.
+        val known = setOf(a, bBack)
+        assertEquals(aBack, Ledger.reappeared(known, emptySet(), listOf(bBack, aBack)))
+        // Not seen while A answered, but B's route has it open: still not A's.
+        assertEquals(aBack, Ledger.reappeared(setOf(a, b), setOf(bBack), listOf(bBack, aBack)))
+        // Both came back within one poll and neither is held yet: no guess at all.
+        assertEquals(null, Ledger.reappeared(setOf(a, b), emptySet(), listOf(bBack, aBack)))
+        // Once B's route has taken its own, A's is the one left.
+        assertEquals(aBack, Ledger.reappeared(setOf(a, b), setOf(bBack), listOf(aBack, bBack)))
+    }
+
+    @Test
+    fun `every answer while it's waited on is reported, so what's plugged in then is known`() = runBlocking {
+        val alive = AtomicInteger()
+        Ledger.awaitReady({}, readyMs = 5_000, pollMs = 1, alive = { alive.incrementAndGet() }, read = reads(LedgerException.Kind.LOCKED, LedgerException.Kind.APP_NOT_OPEN, account))
+        assertEquals(2, alive.get())
+    }
+
+    /**
+     * Following counts against the wait for unlocking (#350 R2-M1): a
+     * Ledger that drops out near the end, whose follow (the wait for it to
+     * come back, Android's USB prompt) runs past it, ends there — as left
+     * on another app, as it was last seen.
+     */
+    @Test
+    fun `a follow that runs past the wait for unlocking ends at it`() = runBlocking {
+        val start = System.nanoTime()
+        try {
+            Ledger.awaitReady({}, readyMs = 200, pollMs = 10, follow = { kotlinx.coroutines.delay(10_000); true }, read = reads(LedgerException.Kind.APP_NOT_OPEN, LedgerException.Kind.DISCONNECTED, account))
+            fail("followed")
+        } catch (e: LedgerException) {
+            assertEquals(LedgerException.Kind.APP_NOT_OPEN, e.kind)
+        }
+        assertTrue((System.nanoTime() - start) / 1_000_000 < 2_000)
     }
 
     @Test

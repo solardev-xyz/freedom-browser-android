@@ -51,6 +51,7 @@ import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Where a Ledger account's key lives (#142): its path in the device's
@@ -131,6 +132,13 @@ class Ledger internal constructor(private val context: Context) {
     val activity: StateFlow<Activity?> = _activity.asStateFlow()
 
     private val conversation = Mutex()
+
+    /**
+     * The USB paths a route's link has open, or is opening: a route
+     * following its own Ledger after it re-enumerated never takes one of
+     * these, which another route's Ledger came back under (#350 R2-F1).
+     */
+    private val usbHeld = HashMap<String, Int>()
 
     private val adapter: BluetoothAdapter?
         get() = context.getSystemService(BluetoothManager::class.java)?.adapter
@@ -256,7 +264,7 @@ class Ledger internal constructor(private val context: Context) {
     suspend fun accounts(device: LedgerDevice, scheme: LedgerScheme, start: Int, count: Int): List<Pair<String, String>> =
         session({ deviceRoutes(device) }, Strings.get(R.string.signing_ledger_purpose_read_accounts)) { app, turn ->
             val first = scheme.path(start)
-            awaitReady(turn::stage, follow = { turn.follow() }) { app.address(first) }
+            awaitReady(turn::stage, follow = { turn.follow() }, alive = { turn.alive() }) { app.address(first) }
             turn.stage(Stage.READING)
             (start until start + count).map { i -> scheme.path(i).let { it to app.address(it) } }
         }
@@ -431,28 +439,53 @@ class Ledger internal constructor(private val context: Context) {
         block: suspend (LedgerEthApp, Turn) -> T,
     ): T {
         turn.stage(Stage.CONNECTING)
-        val link = try {
-            if (isUsbId(route.id)) {
-                val manager = usbManager ?: throw LedgerUsbLink.unplugged()
-                val listed = LedgerUsbLink.devices(manager)
-                val usb = listed.firstOrNull { USB_PREFIX + it.deviceName == route.id } ?: throw LedgerUsbLink.unplugged()
-                val opened = LedgerUsbLink.open(context, manager, usb, onPermission = { turn.stage(Stage.USB_PERMISSION) })
-                turn.stage(Stage.CONNECTING)
-                FollowingLink(opened).also { link ->
-                    var known = listed.map { it.deviceName }.toSet()
-                    turn.follow = { followUsb(manager, link, LedgerUsbLink.name(usb), known, turn)?.let { known = it } != null }
+        // The USB path this route's link has open, if any ([usbHeld]).
+        var held: String? = null
+        try {
+            val link = try {
+                if (isUsbId(route.id)) {
+                    val manager = usbManager ?: throw LedgerUsbLink.unplugged()
+                    val listed = LedgerUsbLink.devices(manager)
+                    val usb = listed.firstOrNull { USB_PREFIX + it.deviceName == route.id } ?: throw LedgerUsbLink.unplugged()
+                    hold(usb.deviceName)
+                    held = usb.deviceName
+                    val opened = LedgerUsbLink.open(context, manager, usb, onPermission = { turn.stage(Stage.USB_PERMISSION) })
+                    turn.stage(Stage.CONNECTING)
+                    FollowingLink(opened).also { link ->
+                        // Every path listed while this route's Ledger is still at its own: none
+                        // of them is where it comes back. Brought up to date each time it answers
+                        // while it's waited on, so a same-model Ledger that re-enumerated (or was
+                        // plugged in) meanwhile is never taken for it (#350 R2-F1).
+                        var known = listed.map { it.deviceName }.toSet()
+                        turn.alive = { known = LedgerUsbLink.devices(manager).map { it.deviceName }.toSet() }
+                        turn.follow = {
+                            followUsb(manager, link, LedgerUsbLink.name(usb), known, turn) { path ->
+                                held?.let(::release)
+                                held = path
+                            }?.let { known = it } != null
+                        }
+                    }
+                } else {
+                    open(route.id, onPairing = { turn.stage(Stage.PAIRING) }, onPaired = { turn.stage(Stage.CONNECTING) })
                 }
-            } else {
-                open(route.id, onPairing = { turn.stage(Stage.PAIRING) }, onPaired = { turn.stage(Stage.CONNECTING) })
+            } catch (e: LedgerException) {
+                throw NotThisLedger(e)
             }
-        } catch (e: LedgerException) {
-            throw NotThisLedger(e)
-        }
-        return try {
-            block(LedgerEthApp(link), turn)
+            return try {
+                block(LedgerEthApp(link), turn)
+            } finally {
+                link.close()
+            }
         } finally {
-            link.close()
+            held?.let(::release)
         }
+    }
+
+    private fun hold(path: String) = synchronized(usbHeld) { usbHeld[path] = (usbHeld[path] ?: 0) + 1 }
+
+    private fun release(path: String) = synchronized(usbHeld) {
+        val n = (usbHeld[path] ?: 0) - 1
+        if (n > 0) usbHeld[path] = n else usbHeld.remove(path)
     }
 
     /**
@@ -460,25 +493,42 @@ class Ledger internal constructor(private val context: Context) {
      * or on the dashboard or another app), followed to where it came back:
      * opening or quitting an app re-enumerates a Ledger over USB, under a
      * new device path (#350 R1-F1). The Ledger that comes back is the one
-     * plugged in that wasn't listed when the link last opened ([before])
-     * — never another Ledger already plugged in, which is a route of its
-     * own, nor one of another [model]. Android asks for access again (a
-     * grant ends when a device leaves the bus); with "Open Freedom when a
-     * Ledger is plugged in" on, Android may offer to open Freedom too,
-     * as for any plug-in. Returns what's listed once it's followed, for
-     * the next time; null if none comes back within [FOLLOW_MS]: it was
-     * unplugged.
+     * of its [model] plugged in that isn't [before] — what was listed the
+     * last time this route's Ledger answered — nor held by another
+     * route's link ([usbHeld]): a same-model Ledger that re-enumerated or
+     * was plugged in meanwhile is never taken for it (#350 R2-F1). With
+     * two such paths (two Ledgers of one model re-enumerating within a
+     * poll of each other) there's no telling which is this one's: none is
+     * taken until the other route has taken its own. The path taken is
+     * held ([picked]) before it's opened, so no other route takes it too.
+     * Android asks for access again (a grant ends when a device leaves the
+     * bus); with "Open Freedom when a Ledger is plugged in" on, Android
+     * may offer to open Freedom too, as for any plug-in. Returns what's
+     * listed once it's followed, for the next time; null if none comes
+     * back within [FOLLOW_MS]: it was unplugged.
      */
-    private suspend fun followUsb(manager: UsbManager, link: FollowingLink, model: String, before: Set<String>, turn: Turn): Set<String>? {
+    private suspend fun followUsb(
+        manager: UsbManager,
+        link: FollowingLink,
+        model: String,
+        before: Set<String>,
+        turn: Turn,
+        picked: (String) -> Unit,
+    ): Set<String>? {
         val deadline = monotonicMs() + FOLLOW_MS
         while (true) {
             val now = LedgerUsbLink.devices(manager)
-            val path = reappeared(before, now.filter { LedgerUsbLink.name(it) == model }.map { it.deviceName })
-            val device = path?.let { p -> now.firstOrNull { it.deviceName == p } }
+            val device = synchronized(usbHeld) {
+                reappeared(before, usbHeld.keys, now.filter { LedgerUsbLink.name(it) == model }.map { it.deviceName })
+                    ?.let { p -> now.firstOrNull { it.deviceName == p } }
+                    ?.also { hold(it.deviceName) }
+            }
             if (device != null) {
+                picked(device.deviceName)
                 Log.i(TAG, "a Ledger came back over USB after re-enumerating")
                 turn.stage(Stage.CONNECTING)
                 val opened = LedgerUsbLink.open(context, manager, device, onPermission = { turn.stage(Stage.USB_PERMISSION) })
+                turn.stage(Stage.CONNECTING)
                 link.replace(opened)
                 return now.map { it.deviceName }.toSet()
             }
@@ -586,6 +636,14 @@ class Ledger internal constructor(private val context: Context) {
              */
             @Volatile
             var follow: suspend () -> Boolean = { false }
+
+            /**
+             * Called each time this route's Ledger answers while it's
+             * waited on ([awaitReady]): it's still where it was, so what's
+             * plugged in now isn't where it'll come back ([follow]).
+             */
+            @Volatile
+            var alive: () -> Unit = {}
 
             /**
              * [block], an exchange with this route's Ledger, finished
@@ -765,20 +823,27 @@ class Ledger internal constructor(private val context: Context) {
         /**
          * The address [read] gives once the Ledger is unlocked with the
          * Ethereum app open: while it's locked or on another app, [stage]
-         * says so and it's read again every [pollMs], up to [readyMs]. A
-         * Ledger that drops out while it's waited on is [follow]ed, if its
-         * link can, and read again where it came back.
+         * says so (and [alive] is told it answered) and it's read again
+         * every [pollMs], up to [readyMs]. A Ledger that drops out while
+         * it's waited on is [follow]ed, if its link can, and read again
+         * where it came back; the dialog says it's connecting meanwhile
+         * (#350 R2-M2). Following counts against [readyMs] like the rest
+         * of the wait — the wait for it to come back and Android's USB
+         * prompt included (#350 R2-M1): run out while it's followed, the
+         * Ledger is taken as left locked or on another app, as it was last
+         * seen; dropped out after it's run out, it's taken as unplugged.
          */
         internal suspend fun awaitReady(
             stage: (Stage) -> Unit,
             readyMs: Long = READY_MS,
             pollMs: Long = POLL_MS,
             follow: suspend () -> Boolean = { false },
+            alive: () -> Unit = {},
             read: suspend () -> String,
         ): String {
             // Monotonic: a wall-clock step can't cut the wait short or stretch it (#350 R1-M1).
             val deadline = monotonicMs() + readyMs
-            var waited = false
+            var waitedOn: LedgerException? = null
             while (true) {
                 try {
                     return read()
@@ -789,10 +854,21 @@ class Ledger internal constructor(private val context: Context) {
                         // Opening (or quitting) an app on a Ledger over USB drops it off the
                         // bus and brings it back under a new path: followed there, it's read
                         // again rather than taken as unplugged (#350 R1-F1).
-                        LedgerException.Kind.DISCONNECTED -> if (waited && monotonicMs() < deadline && follow()) continue else throw e
+                        LedgerException.Kind.DISCONNECTED -> {
+                            val last = waitedOn ?: throw e
+                            val left = deadline - monotonicMs()
+                            if (left <= 0) throw e
+                            stage(Stage.CONNECTING)
+                            when (withTimeoutOrNull(left) { follow() }) {
+                                true -> continue
+                                false -> throw e
+                                null -> throw last
+                            }
+                        }
                         else -> throw e
                     }
-                    waited = true
+                    waitedOn = e
+                    alive()
                     if (monotonicMs() >= deadline) throw e
                     stage(waiting)
                     delay(pollMs)
@@ -813,10 +889,11 @@ class Ledger internal constructor(private val context: Context) {
             readyMs: Long = READY_MS,
             pollMs: Long = POLL_MS,
             follow: suspend () -> Boolean = { false },
+            alive: () -> Unit = {},
             read: suspend () -> String,
         ) {
             val got = try {
-                awaitReady(stage, readyMs, pollMs, follow, read)
+                awaitReady(stage, readyMs, pollMs, follow, alive, read)
             } catch (e: LedgerException) {
                 throw NotThisLedger(e)
             }
@@ -838,7 +915,7 @@ class Ledger internal constructor(private val context: Context) {
             pollMs: Long = POLL_MS,
             read: suspend () -> String,
         ) {
-            holding(address, turn::stage, readyMs, pollMs, { turn.follow() }, read)
+            holding(address, turn::stage, readyMs, pollMs, { turn.follow() }, { turn.alive() }, read)
             turn.stage(Stage.READING)
             turn.claim()
         }
@@ -893,9 +970,12 @@ class Ledger internal constructor(private val context: Context) {
 
         /**
          * The USB device path a Ledger that re-enumerated came back under:
-         * one listed [now] that wasn't [before], the first by path.
+         * the one listed [now] that wasn't [before] and isn't [held] by
+         * another route's link. Two or more such paths: there's no telling
+         * which is this Ledger's, so none (#350 R2-F1).
          */
-        internal fun reappeared(before: Set<String>, now: List<String>): String? = now.sorted().firstOrNull { it !in before }
+        internal fun reappeared(before: Set<String>, held: Set<String>, now: List<String>): String? =
+            now.filter { it !in before && it !in held }.distinct().singleOrNull()
 
         @Volatile
         private var instance: Ledger? = null
