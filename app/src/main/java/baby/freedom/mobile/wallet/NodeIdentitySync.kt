@@ -89,6 +89,16 @@ class NodeIdentitySync internal constructor(
 
         /** The wallet is gone; the nodes are back to their own identities. */
         data object Dropped : Change
+
+        /**
+         * The wallet unlocked and its keys were already in place: nothing
+         * changed, and nothing is returned or noticed. But `:node`'s Swarm
+         * launch may have failed on a read that has since cleared (#357),
+         * and no other change would come to retry it — so the listener is
+         * still told, and has it reload; that restarts only a node that's
+         * up as another identity, or whose boot failed.
+         */
+        data object Unchanged : Change
     }
 
     /**
@@ -143,7 +153,10 @@ class NodeIdentitySync internal constructor(
             // Never the keys: only what went wrong.
             Log.w(TAG, "node identity sync failed: ${t.javaClass.simpleName}")
             null
-        } ?: return null
+        } ?: run {
+            if (state is Vault.State.Unlocked) runCatching { onChanged.get()?.invoke(Change.Unchanged) }
+            return null
+        }
         runCatching { onChanged.get()?.invoke(change) }
         // Nothing to tell about the same identities sealed again.
         if (change != Change.Resealed) _notices.trySend(change)

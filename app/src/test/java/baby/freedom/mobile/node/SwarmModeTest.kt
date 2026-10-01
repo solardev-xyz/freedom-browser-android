@@ -87,17 +87,21 @@ class SwarmModeTest {
         var restarts = 0
         val light = SwarmNode.Mode.light("https://rpc.example")
         boot.boot { swarmBootKey("0xabc", light) to null }
+        assertFalse(boot.failedRead())
         // A reload whose read fails can't tell: the node stays as the wallet's.
         assertFalse(boot.restartIfStale({ null }, { true }, { restarts++ }))
         assertEquals(0, restarts)
         // A launch whose read fails fails with it...
         val failure = IllegalStateException("unreadable")
         assertEquals(failure, runCatching { boot.boot<ByteArray?> { throw failure } }.exceptionOrNull())
+        // (so the app coming back to the foreground retries it)
+        assertTrue(boot.failedRead())
         // ...is kept while reads keep failing...
         assertFalse(boot.restartIfStale({ null }, { true }, { restarts++ }))
         // ...and restarts once one reads, as the wallet's or as ant's own.
         assertTrue(boot.restartIfStale({ swarmBootKey("0xabc", light) }, { true }, { restarts++ }))
         assertEquals(1, restarts)
+        assertFalse(boot.failedRead())
         runCatching { boot.boot<ByteArray?> { throw failure } }
         assertTrue(boot.restartIfStale({ swarmBootKey("", light) }, { true }, { restarts++ }))
         assertEquals(2, restarts)

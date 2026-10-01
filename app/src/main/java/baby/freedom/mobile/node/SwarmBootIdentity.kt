@@ -16,8 +16,9 @@ package baby.freedom.mobile.node
  * A launch whose read threw (#357: the wallet's keys are there but
  * couldn't be read) fails rather than boot as ant's own key, and is
  * tracked as [UNREADABLE] — a key no read gives — so the next reload
- * that reads the store again restarts it. A reload whose own read fails
- * can't tell what the node should be, and keeps it as it is.
+ * that reads the store again restarts it — a bind, an unlock, or the app
+ * coming back to the foreground ([failedRead]). A reload whose own read
+ * fails can't tell what the node should be, and keeps it as it is.
  *
  * Thread-safe: both calls run under one lock, the second holding it
  * across the caller's restart so the two can't interleave.
@@ -58,6 +59,13 @@ internal class SwarmBootIdentity {
             restart()
             true
         }
+
+    /**
+     * True while the current launch is one whose read failed ([UNREADABLE]):
+     * the node is in Error and nothing else (no wallet change, no bind)
+     * may come to retry it, so the app coming back to the foreground does.
+     */
+    fun failedRead(): Boolean = synchronized(lock) { bootedAs == UNREADABLE }
 
     private companion object {
         /** A launch whose read failed: never a [swarmBootKey], which always holds a `|`. */

@@ -216,6 +216,12 @@ class NodeService : Service() {
             scope.launch {
                 Log.i(TAG, "app foreground → resume nodes")
                 swarmNode.resume()
+                // A launch that couldn't read the wallet's identity (#357)
+                // sits in Error; resume() doesn't touch it, so reopening the
+                // app reads the store again and restarts it once it reads.
+                if (bootIdentity.failedRead()) {
+                    launch(Dispatchers.IO) { restartSwarmIfStale("app foreground after an unreadable identity") }
+                }
                 ipfsNode?.enterForeground()
                 repromoteForegroundIfDemoted()
             }
@@ -677,7 +683,7 @@ class NodeService : Service() {
                 // When the wallet's keys are there but can't be read (#357),
                 // the launch fails with an error the Nodes page shows rather
                 // than boot as ant's own key; the next reload (a bind, an
-                // unlock) tries again.
+                // unlock, the app coming back to the foreground) tries again.
                 identity = {
                     bootIdentity.boot {
                         val boot = try {

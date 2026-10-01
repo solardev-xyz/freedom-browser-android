@@ -101,7 +101,9 @@ class NodeIdentitySyncTest {
         vault.unlock(auth)
         assertNull(reconcile())
         assertEquals(before, file.readText())
-        assertEquals(1, changes.size)
+        // Only a reload for `:node` (#357), no change.
+        assertEquals(listOf(NodeIdentitySync.Change.Unchanged), changes.drop(1))
+        assertTrue(changes.first() is NodeIdentitySync.Change.Adopted)
     }
 
     @Test
@@ -170,6 +172,16 @@ class NodeIdentitySyncTest {
         val healed = store.read(vault.identityTag()!!)!!
         assertEquals("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", healed.swarmAddress)
         assertEquals(ABANDON_DID, healed.radicleDid)
+        // Unlocked again with the keys readable: nothing changed, nothing
+        // noticed — but `:node`, whose launch may have failed a read that
+        // has since cleared, is still told to reload (#357).
+        vault.lock()
+        assertNull(withGrants.reconcile(vault.state.value))
+        vault.unlock(auth)
+        assertNull(withGrants.reconcile(vault.state.value))
+        assertEquals(listOf(NodeIdentitySync.Change.Resealed, NodeIdentitySync.Change.Unchanged), told)
+        assertNull(nodeIdentityNotice(NodeIdentitySync.Change.Unchanged, restarting = true, radicleOn = true, radicleRestarting = true))
+        assertNull(withTimeoutOrNull(100) { withGrants.notices.first() })
     }
 
     @Test
