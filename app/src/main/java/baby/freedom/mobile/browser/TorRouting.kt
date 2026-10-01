@@ -616,9 +616,17 @@ object TorRouting {
             // address it was judged on (pinned), not whatever a fresh
             // lookup answers a moment later, or, on https, has its
             // connected peer checked. An onion hop goes to Tor's proxy.
-            val route = if (sameOrigin(url, current) || sameLoopbackServer(url, current)) null else hopRoute(current)
-            val direct = route?.type() == Proxy.Type.DIRECT
-            val pinned = if (direct) pin(current) else null
+            // A hop to another localhost name on the gateway's own port
+            // ([sameLoopbackServer]) is dialed on this device, never through
+            // a network lookup of the name (#359 R2-F1).
+            val local = !sameOrigin(url, current) && sameLoopbackServer(url, current)
+            val route = when {
+                local -> Proxy.NO_PROXY
+                sameOrigin(url, current) || sameLoopbackServer(url, current) -> null
+                else -> hopRoute(current)
+            }
+            val direct = !local && route?.type() == Proxy.Type.DIRECT
+            val pinned = if (local) pinLocalhost(current) else if (direct) pin(current) else null
             val candidates = pinned?.urls ?: listOf(current)
             var conn: HttpURLConnection? = null
             var keep = false
@@ -631,6 +639,9 @@ object TorRouting {
                     pinned?.hostHeader?.let { c.setRequestProperty("Host", it) }
                     if (direct && pinned == null && c is HttpsURLConnection) {
                         c.sslSocketFactory = DevicePeerRefusingFactory(c.sslSocketFactory, current)
+                    }
+                    if (local && pinned == null && c is HttpsURLConnection) {
+                        c.sslSocketFactory = DevicePeerRefusingFactory(c.sslSocketFactory, current, requireDevice = true)
                     }
                     method?.let { c.requestMethod = it }
                     c.instanceFollowRedirects = false
@@ -711,16 +722,26 @@ object TorRouting {
     /**
      * Is [to] the same server as [start], a gateway the caller chose on
      * this device: both `localhost` or `*.localhost` as written (no lookup;
-     * the WHATWG reading, and every reading [to]'s connection dials), with the same scheme and port? Those names are
-     * the device's loopback by definition, so that's the one listener on
-     * that port, and a hop between them stays with the server the caller
-     * asked for. A loopback literal isn't matched to a different one
-     * (`127.0.0.1` and `[::1]` or `127.0.0.2` can be different listeners). A local
-     * Kubo's default subdomain redirect (`http://localhost:8080/ipfs/<cid>`
-     * → `http://<cidv1>.ipfs.localhost:8080/`) is one such hop (#359 R1-F1);
-     * it goes straight to the device, never through a proxy or a pin. The
-     * node's own API is still refused on any host ([NodeApiGuard.refuses]),
-     * and a hop onto another loopback port still is too.
+     * the WHATWG reading, and every reading [to]'s connection dials), with
+     * the same scheme and port? RFC 6761 reserves those names for loopback
+     * and Chromium answers them so itself, so a hop between them stays with
+     * the server the caller asked for. A loopback literal isn't matched to a
+     * different one (`127.0.0.1` and `[::1]` or `127.0.0.2` can be different
+     * listeners). A local Kubo's default subdomain redirect
+     * (`http://localhost:8080/ipfs/<cid>` → `http://<cidv1>.ipfs.localhost:8080/`)
+     * is one such hop (#359 R1-F1).
+     *
+     * Android's resolver doesn't honour that reservation, though: only
+     * `localhost` itself is in the hosts file, and `<x>.localhost` goes to
+     * the network's DNS, which can answer NXDOMAIN or any address it likes.
+     * So [openFollowingRedirects] doesn't let such a hop's connection look
+     * its name up: an http hop is dialed at the addresses `localhost`
+     * resolves to ([pinLocalhost]), with no proxy, and an https one (whose
+     * certificate needs the name in the URL) is refused unless its
+     * connected peer is this device ([DevicePeerRefusingFactory]) — the
+     * one listener on that port (#359 R2-F1). The node's own API is still
+     * refused on any host ([NodeApiGuard.refuses]), and a hop onto another
+     * loopback port still is too.
      */
     internal fun sameLoopbackServer(start: URL, to: URL): Boolean =
         start.protocol.equals(to.protocol, ignoreCase = true) &&
@@ -965,19 +986,46 @@ object TorRouting {
     }
 
     /**
+     * Pin [hop], a hop [sameLoopbackServer] keeps with a gateway on
+     * `localhost`, to this device: the addresses `localhost` itself resolves
+     * to (the hosts file, not the network), all of which must be this
+     * device ([isDeviceAddress]), with [hop]'s own host in
+     * [Pin.hostHeader] so the gateway still sees the subdomain. `null` for
+     * https, whose connected peer is checked instead
+     * ([DevicePeerRefusingFactory] with `requireDevice`). Refused
+     * ([RedirectRefusedException]) if `localhost` answers nothing, or
+     * anything that isn't this device (#359 R2-F1).
+     */
+    internal fun pinLocalhost(hop: URL): Pin? {
+        if (!hop.protocol.equals("http", ignoreCase = true)) return null
+        val addresses = runCatching { resolve("localhost") }.getOrNull().orEmpty()
+        if (addresses.isEmpty() || !addresses.all { isDeviceAddress(it) }) throw RedirectRefusedException(hop)
+        val host = WhatwgHost.parse(hop.toString())?.hostname?.lowercase() ?: throw RedirectRefusedException(hop)
+        val urls = addresses.map { it.hostAddress.orEmpty().substringBefore('%') }.distinct()
+            .map { URL(hop.protocol, it, hop.port, hop.file) }
+        val hostHeader = if (hop.port == -1 || hop.port == hop.defaultPort) host else "$host:${hop.port}"
+        return Pin(urls, hostHeader)
+    }
+
+    /**
      * An https hop's [SSLSocketFactory] that refuses the connection
      * ([RedirectRefusedException]) if the socket it's handed is connected
      * to this device ([isDeviceAddress]) — before the handshake, so not a
      * byte of the request is sent. The check is on the address actually
      * dialed, so no lookup can answer it differently ([pin]'s job on http).
+     * With `requireDevice`, the other way round: refused unless the peer
+     * is this device ([sameLoopbackServer]'s `*.localhost` hops, whose name
+     * Android looks up on the network, #359 R2-F1).
      */
     private class DevicePeerRefusingFactory(
         private val delegate: SSLSocketFactory,
         private val hop: URL,
+        /** Refuse a peer that *isn't* this device instead ([sameLoopbackServer]'s hops, #359 R2-F1). */
+        private val requireDevice: Boolean = false,
     ) : SSLSocketFactory() {
         private fun checked(socket: Socket): Socket {
             val peer = socket.inetAddress
-            if (peer == null || isDeviceAddress(peer)) {
+            if (peer == null || isDeviceAddress(peer) != requireDevice) {
                 runCatching { socket.close() }
                 throw RedirectRefusedException(hop)
             }

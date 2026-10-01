@@ -324,6 +324,62 @@ class TorRoutingTest {
     }
 
     @Test
+    fun `a local Kubo's subdomain hop is dialed on this device, never by a network lookup of its name`() {
+        val cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        val paths = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        val port = server.address.port
+        server.createContext("/") { ex ->
+            paths += ex.requestURI.path
+            val code = if (ex.requestURI.path.startsWith("/ipfs/")) 301 else 200
+            if (code == 301) ex.responseHeaders.add("Location", "http://$cid.ipfs.localhost:$port/")
+            val out = "ok".toByteArray()
+            ex.sendResponseHeaders(code, out.size.toLong())
+            ex.responseBody.use { it.write(out) }
+        }
+        server.start()
+        // Android sends `<x>.localhost` to the network's DNS, which may answer
+        // anything (#359 R2-F1): here a public address. Only `localhost`
+        // itself (the hosts file) may decide where the hop goes.
+        val looked = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val real = TorRouting.resolve
+        TorRouting.resolve = { host ->
+            looked += host
+            when (host) {
+                "localhost" -> arrayOf(java.net.InetAddress.getByName("127.0.0.1"))
+                else -> arrayOf(java.net.InetAddress.getByName("198.51.100.7"))
+            }
+        }
+        try {
+            val conn = TorRouting.openFollowingRedirects(URL("http://localhost:$port/ipfs/$cid/")) {}
+            assertEquals(200, conn.responseCode)
+            conn.disconnect()
+            // Both hops reached the gateway on 127.0.0.1 (the JVM's
+            // HttpURLConnection drops a set `Host`; Android's sends it, so
+            // there the gateway sees the subdomain: [Pin.hostHeader] below).
+            assertEquals(listOf("/ipfs/$cid/", "/"), paths.toList())
+            assertEquals(listOf("localhost"), looked.toList())
+
+            val pin = TorRouting.pinLocalhost(URL("http://$cid.ipfs.localhost:$port/"))!!
+            assertEquals(listOf("http://127.0.0.1:$port/"), pin.urls.map { it.toString() })
+            assertEquals("$cid.ipfs.localhost:$port", pin.hostHeader)
+            // https keeps its name (the certificate needs it) and has its peer checked instead.
+            assertEquals(null, TorRouting.pinLocalhost(URL("https://$cid.ipfs.localhost:$port/")))
+
+            // A `localhost` that isn't this device isn't dialed.
+            TorRouting.resolve = { arrayOf(java.net.InetAddress.getByName("198.51.100.7")) }
+            try {
+                TorRouting.pinLocalhost(URL("http://$cid.ipfs.localhost:$port/"))
+                fail("pinned a localhost hop off this device")
+            } catch (_: TorRouting.RedirectRefusedException) {
+            }
+        } finally {
+            TorRouting.resolve = real
+            server.stop(0)
+        }
+    }
+
+    @Test
     fun `a hop within a redirected-to origin is resolved again, so a rebinding name is refused`() {
         val gateway = URL("http://gateway.example/ipfs/bafyroot/")
         val first = URL("http://rb.evil.example:8711/a")
