@@ -467,7 +467,12 @@ internal fun parseTopDocumentInput(data: String?): TopDocumentInput? {
  * page didn't cancel it), which Chromium fires only for a navigation
  * the top document's own origin started — never for one a cross-origin
  * iframe starts by setting `top.location` (#348 R5-F1, see
- * [UserGestureLatch.onTopDocumentNavigate]).
+ * [UserGestureLatch.onTopDocumentNavigate]). Only a cross-document
+ * `push`/`replace` is reported: never a same-document one (`pushState`,
+ * `replaceState`, a fragment, one the page `intercept()`ed), a reload or
+ * a Back/Forward, none of which reaches `shouldOverrideUrlLoading` to
+ * claim it, so its word would vouch for a cross-origin frame's later
+ * load of the same URL (#348 R6-F1).
  */
 internal const val TOP_DOCUMENT_NAVIGATE = "navigate"
 
@@ -861,16 +866,38 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   // A navigation of the top frame its own origin started (#348 R5-F1):
   // Chromium fires `navigate` for no navigation a cross-origin frame
   // starts. Said a task later, once the page's own listeners have had
-  // their chance to cancel it.
-  var NAV = w.navigation, navDest = prop(proto(w.NavigateEvent), 'destination'),
-      destUrl = prop(proto(w.NavigationDestination), 'url');
-  if (NAV && onEl && w.NavigateEvent && w.NavigationDestination) {
+  // their chance to cancel it. Only a cross-document load of a new entry
+  // is said (#348 R6-F1): Kotlin matches the word to the next
+  // `shouldOverrideUrlLoading` for its URL, which a same-document one
+  // (pushState, replaceState, a fragment, one the page intercept()ed), a
+  // reload or a Back/Forward never reaches, so its word would be left
+  // over for a cross-origin frame's load of that URL to claim.
+  var NAV = w.navigation, NEP = proto(w.NavigateEvent), NDP = proto(w.NavigationDestination),
+      navDest = prop(NEP, 'destination'), navType = prop(NEP, 'navigationType'), navHash = prop(NEP, 'hashChange'),
+      destUrl = prop(NDP, 'url'), destSame = prop(NDP, 'sameDocument'),
+      navTransition = prop(proto(w.Navigation), 'transition'), entryChanges = 0;
+  if (NAV && onEl && NEP && NDP) {
+    // A same-document commit (an intercept()ed navigation's included)
+    // changes the current entry; a cross-document one doesn't before its
+    // new document replaces this one.
+    onEl(NAV, 'currententrychange', function () { entryChanges++; });
     onEl(NAV, 'navigate', function (e) {
       if (!e.isTrusted) return;
-      var u = null;
-      try { u = destUrl(navDest(e)); } catch (x) { return; }
+      var u = null, seen = entryChanges;
+      try {
+        var dest = navDest(e), ty = navType(e);
+        if (destSame(dest) !== false || navHash(e) !== false || (ty !== 'push' && ty !== 'replace')) return;
+        u = destUrl(dest);
+      } catch (x) { return; }
       if (typeof u !== 'string' || u.length > $TOP_DOCUMENT_NAVIGATE_MAX) return;
-      setT(function () { if (!evPrevented(e)) port.postMessage('$TOP_DOCUMENT_NAVIGATE ' + u); }, 0);
+      setT(function () {
+        if (evPrevented(e) || entryChanges !== seen) return;
+        // An intercept()ed navigation whose commit is still held back.
+        var tr = 1;
+        try { tr = navTransition(NAV); } catch (x) { return; }
+        if (tr != null) return;
+        port.postMessage('$TOP_DOCUMENT_NAVIGATE ' + u);
+      }, 0);
     });
   }
   var T = null, started = false, SYNC = /^$INPUT_SYNC ([0-9]{1,9}) ([0-9]{1,4})$/, ASK = /^probe ([0-9a-f]{1,64})$/, THEME_ASK = /^theme ([0-9a-f]{1,64})$/,

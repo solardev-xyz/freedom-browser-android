@@ -636,7 +636,12 @@ internal class UserGestureLatch(private val clock: () -> Long) {
      * no `navigate` for a navigation a cross-origin frame starts, such as
      * an iframe setting `top.location` or following a `target=_top` link
      * (#348 R5-F1). Vouches for one [topDocumentGesture] to [url], asked
-     * within [CONFIRM_MS] either side.
+     * within [CONFIRM_MS] either side. The detector says it only for a
+     * cross-document `push`/`replace`, the kind that reaches
+     * `shouldOverrideUrlLoading` and so asks for it: a word for a
+     * same-document navigation, a reload or a Back/Forward would sit
+     * unclaimed, for a cross-origin frame's load of the same URL to take
+     * (#348 R6-F1).
      */
     fun onTopDocumentNavigate(url: String) {
         val now = clock()

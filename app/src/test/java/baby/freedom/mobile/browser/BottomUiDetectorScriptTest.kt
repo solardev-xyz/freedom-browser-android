@@ -117,17 +117,31 @@ class BottomUiDetectorScriptTest {
         // the destination's URL, read through native getters.
         function NavigateEvent() {}
         Object.defineProperty(NavigateEvent.prototype, 'destination', { configurable: true, get: function () { return this._d; } });
+        Object.defineProperty(NavigateEvent.prototype, 'navigationType', { configurable: true, get: function () { return this._ty; } });
+        Object.defineProperty(NavigateEvent.prototype, 'hashChange', { configurable: true, get: function () { return this._h; } });
         function NavigationDestination() {}
         Object.defineProperty(NavigationDestination.prototype, 'url', { configurable: true, get: function () { return this._u; } });
-        var navigation = new EventTarget();
+        Object.defineProperty(NavigationDestination.prototype, 'sameDocument', { configurable: true, get: function () { return this._s; } });
+        function Navigation() {}
+        Navigation.prototype = new EventTarget();
+        Object.defineProperty(Navigation.prototype, 'transition', { configurable: true, get: function () { return this._t; } });
+        var navigation = new Navigation(); navigation._t = null;
+        function navFire(t, e) { var ls = navigation.ls || []; for (var i = 0; i < ls.length; i++) if (ls[i].t === t) ls[i].f(e); }
         // A navigation of this document: our listener, then the page's handlers, then tasks.
-        function navigate(url, trusted, pageCancels) {
-          var dest = new NavigationDestination(); dest._u = url;
+        // o: { type: 'push' (default) | 'replace' | 'reload' | 'traverse', same: a
+        // same-document one (pushState etc.), hash: a fragment change, intercept:
+        // 'now' (the page intercept()s it, committed at once) | 'held' (its commit waits) }.
+        function navigate(url, trusted, pageCancels, o) {
+          o = o || {};
+          var dest = new NavigationDestination(); dest._u = url; dest._s = !!(o.same || o.hash);
           var e = new NavigateEvent(); e._d = dest; e.isTrusted = trusted; e.defaultPrevented = false;
-          var ls = navigation.ls || [];
-          for (var i = 0; i < ls.length; i++) if (ls[i].t === 'navigate') ls[i].f(e);
+          e._ty = o.type || 'push'; e._h = !!o.hash;
+          navFire('navigate', e);
           if (pageCancels) e.defaultPrevented = true;
+          if (dest._s || o.intercept === 'now') navFire('currententrychange', {});
+          if (o.intercept === 'held') navigation._t = {};
           flushTimers();
+          navigation._t = null;
         }
         var mutationObs = null;
         function mutationCbOpts() { return mutationObs.opts; }
@@ -522,6 +536,41 @@ class BottomUiDetectorScriptTest {
         // One the page cancelled, or a synthetic event, isn't.
         eval("navigate('http://localhost:8710/b', true, true); navigate('http://localhost:8710/c', false, false)")
         assertEquals("navigate http://localhost:8710/priced?a=1#x", navigations())
+    }
+
+    @Test
+    fun `a same-document navigation, a reload or a Back-Forward is never reported (R6-F1)`() = page {
+        documentStart()
+        // pushState / replaceState, a fragment, and one the page intercept()ed
+        // (committed at once, or with its commit held back) never reach
+        // shouldOverrideUrlLoading to claim their word.
+        eval("navigate('http://localhost:8710/priced', true, false, { same: true })")
+        eval("navigate('http://localhost:8710/priced', true, false, { type: 'replace', same: true })")
+        eval("navigate('http://localhost:8710/#x', true, false, { hash: true })")
+        eval("navigate('http://localhost:8710/priced', true, false, { intercept: 'now' })")
+        eval("navigate('http://localhost:8710/priced', true, false, { intercept: 'held' })")
+        // Nor do a reload or a traversal.
+        eval("navigate('http://localhost:8710/priced', true, false, { type: 'reload' })")
+        eval("navigate('http://localhost:8710/priced', true, false, { type: 'traverse' })")
+        assertEquals("", navigations())
+        // A cross-document push or replace still is.
+        eval("navigate('http://localhost:8710/a', true, false, { type: 'replace' })")
+        eval("navigate('http://localhost:8710/b', true, false)")
+        assertEquals("navigate http://localhost:8710/a|navigate http://localhost:8710/b", navigations())
+    }
+
+    @Test
+    fun `a page that replaces the navigation getters later can't make a same-document one reported`() = page {
+        documentStart()
+        eval(
+            "Object.defineProperty(NavigationDestination.prototype, 'sameDocument', { get: function () { return false; } });" +
+                "Object.defineProperty(NavigateEvent.prototype, 'navigationType', { get: function () { return 'push'; } });" +
+                "Object.defineProperty(Navigation.prototype, 'transition', { get: function () { return null; } })",
+        )
+        eval("navigate('http://localhost:8710/priced', true, false, { same: true, type: 'replace' })")
+        eval("navigate('http://localhost:8710/priced', true, false, { type: 'reload' })")
+        eval("navigate('http://localhost:8710/priced', true, false, { intercept: 'held' })")
+        assertEquals("", navigations())
     }
 
     @Test
