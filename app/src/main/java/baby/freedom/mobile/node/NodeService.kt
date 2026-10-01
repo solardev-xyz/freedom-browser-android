@@ -52,7 +52,9 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlin.system.exitProcess
 import java.math.BigInteger
@@ -116,6 +118,18 @@ class NodeService : Service() {
      */
     private lateinit var chainBridge: AntChainBridge
     private var ipfsNode: IpfsNode? = null
+
+    /**
+     * Serializes [maybeStartIpfs] and [maybeStopIpfs]. A start suspends on
+     * two DataStore reads between its `ipfsNode == null` check and setting
+     * [ipfsNode], so two overlapping starts (two IPFS navigations, or one
+     * plus the Settings toggle) would otherwise both build an [IpfsNode]:
+     * the first would be orphaned, keep its node (and the data dir's
+     * process-wide lease) after IPFS off, and leave every later start
+     * blocked in Starting. A stop queued behind a pending start then
+     * disposes the instance that start made rather than finding nothing.
+     */
+    private val ipfsLifecycle = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /** Holds a stop back while a postage spend runs inside ant (#116); see [INodeService.stopWhenIdle]. */
@@ -733,8 +747,8 @@ class NodeService : Service() {
      * has no live-reconfig path, so changing them in Settings only
      * takes effect on the next start cycle (off → on).
      */
-    private suspend fun maybeStartIpfs() {
-        if (ipfsNode != null) return
+    private suspend fun maybeStartIpfs(): Unit = ipfsLifecycle.withLock {
+        if (ipfsNode != null) return@withLock
         val settings = NodeSettings.get(this)
         val lowPower = settings.ipfsLowPower.first()
         val routingMode = settings.ipfsRoutingMode.first()
@@ -767,8 +781,8 @@ class NodeService : Service() {
      * deliberately left alone — stopping IPFS shouldn't close
      * `bzz://` pages the user currently has open.
      */
-    private fun maybeStopIpfs() {
-        val node = ipfsNode ?: return
+    private suspend fun maybeStopIpfs(): Unit = ipfsLifecycle.withLock {
+        val node = ipfsNode ?: return@withLock
         ipfsObserver?.cancel()
         ipfsObserver = null
         node.dispose()

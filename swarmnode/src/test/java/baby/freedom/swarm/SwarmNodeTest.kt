@@ -65,7 +65,27 @@ class SwarmNodeTest {
             gatewayModes += if (lightMode) "light:$gnosisRpc" else "ultra-light:$gnosisRpc"
         }
         override fun agentString(handle: Long) = "ant-test"
-        override fun peerCount(handle: Long) = 0
+        /** What [peerCount] does before answering 0; nothing by default. */
+        @Volatile var onPeerCount: () -> Unit = {}
+        override fun peerCount(handle: Long): Int {
+            onPeerCount()
+            return 0
+        }
+        val resumeEntered = CountDownLatch(1)
+        /** [resume] blocks until this opens; open by default. */
+        @Volatile var releaseResume = CountDownLatch(0)
+        override fun resume(handle: Long) {
+            calls += "resume:$handle"
+            resumeEntered.countDown()
+            releaseResume.await(5, TimeUnit.SECONDS)
+            calls += "resumed:$handle"
+        }
+        override fun wake(handle: Long) {
+            calls += "wake:$handle"
+        }
+        override fun suspend(handle: Long) {
+            calls += "suspend:$handle"
+        }
         /** What a chain read got from [AntChainTransport] while [stopGateway]/[shutdown] ran. */
         val readsWhileStopping: MutableList<String> = Collections.synchronizedList(mutableListOf())
         private fun probeChainRead() {
@@ -156,6 +176,73 @@ class SwarmNodeTest {
         node.start()
         awaitStatus(node, NodeStatus.Running)
         assertEquals("ant-test", node.state.value.clientVersion)
+        node.dispose()
+    }
+
+    @Test
+    fun aStopWaitsForAResumeStillInsideAntBeforeShuttingItDown() {
+        // ant_resume re-dials the bootnodes: a stop landing meanwhile must
+        // not shut the node down (free its handle) under it.
+        val ops = FakeOps().apply {
+            releaseSeed.countDown()
+            releaseInit.countDown()
+            releaseResume = CountDownLatch(1)
+        }
+        val node = SwarmNode(config, ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        node.resume()
+        assertTrue(ops.resumeEntered.await(5, TimeUnit.SECONDS))
+        node.stop()
+        Thread.sleep(300)
+        assertTrue(ops.calls.toString(), ops.calls.none { it.startsWith("stopGateway:") || it.startsWith("shutdown:") })
+        ops.releaseResume.countDown()
+        assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
+        val calls = ops.calls.toList()
+        assertTrue(calls.toString(), calls.indexOf("resumed:1") < calls.indexOf("stopGateway:1"))
+        node.dispose()
+    }
+
+    @Test
+    fun aStopWaitsForAPeerCountStillInsideAnt() {
+        val counting = CountDownLatch(1)
+        val releaseCount = CountDownLatch(1)
+        val ops = FakeOps().apply {
+            releaseSeed.countDown()
+            releaseInit.countDown()
+        }
+        val node = SwarmNode(config, ops)
+        ops.onPeerCount = {
+            ops.calls += "peerCount"
+            counting.countDown()
+            releaseCount.await(5, TimeUnit.SECONDS)
+            ops.calls += "counted"
+        }
+        node.start()
+        assertTrue(counting.await(5, TimeUnit.SECONDS))
+        node.stop()
+        Thread.sleep(300)
+        assertTrue(ops.calls.toString(), ops.calls.none { it.startsWith("shutdown:") })
+        releaseCount.countDown()
+        assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
+        val calls = ops.calls.toList()
+        assertTrue(calls.toString(), calls.indexOf("counted") < calls.indexOf("stopGateway:1"))
+        node.dispose()
+    }
+
+    @Test
+    fun aLifecycleCallAfterStopNeverReachesAnt() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        node.stop()
+        node.resume()
+        node.suspend()
+        node.onNetworkChanged()
+        assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
+        Thread.sleep(200)
+        assertTrue(ops.calls.toString(), ops.calls.none { it.startsWith("resume") || it.startsWith("suspend") || it.startsWith("wake") })
         node.dispose()
     }
 
