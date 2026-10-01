@@ -228,6 +228,77 @@ class TorRoutingTest {
     }
 
     @Test
+    fun `a redirect onto this device is refused, whatever spells the host`() {
+        val gateway = URL("http://gateway.example/ipfs/bafyroot/")
+        fun refused(location: String, method: String = "GET") =
+            TorRouting.hopRefused(gateway, URL(gateway, location), method)
+        // The node's own API, on any host that may be the device.
+        for (location in listOf(
+            "http://127.0.0.1:1633/addresses", "http://127.0.0.1:1633/wallet", "http://localhost:1633/stamps",
+            "http://127.1:1633/addresses", "http://2130706433:1633/addresses", "http://0x7f000001:1633/peers",
+            "http://127.0.0.%31:1633/addresses", "http://[::1]:1633/addresses", "http://[::ffff:127.0.0.1]:1633/balances",
+            "http://0.0.0.0:1633/addresses", "http://127.0.0.1.nip.io:1633/addresses", "http://localhost.:1633/wallet",
+        )) {
+            assertTrue(location, refused(location))
+        }
+        // Any other loopback service on another origin, even the content surface.
+        for (location in listOf(
+            "http://127.0.0.1:1633/bzz/abc/", "http://127.0.0.1:45123/ipfs/bafyother/", "http://localhost/",
+            "http://app.localhost:8080/", "http://[::1]:9050/", "http://0177.0.0.1:631/", "http://0:8080/",
+        )) {
+            assertTrue(location, refused(location))
+        }
+        // Elsewhere, or on the same origin: followed as before.
+        for (location in listOf(
+            "/ipfs/bafyroot/index.html", "http://gateway.example/ipfs/bafyother/",
+            "http://other.example/ipfs/bafyroot/", "http://192.168.1.20:8080/ipfs/bafyroot/",
+            "http://127.tracker.example/x",
+        )) {
+            assertFalse(location, refused(location))
+        }
+        // A loopback gateway may redirect within itself, but not onto the node's API.
+        val local = URL("http://127.0.0.1:45123/ipfs/bafyroot")
+        assertFalse(TorRouting.hopRefused(local, URL(local, "/ipfs/bafyroot/"), "GET"))
+        assertTrue(TorRouting.hopRefused(local, URL("http://127.0.0.1:1633/addresses"), "GET"))
+        val node = URL("http://127.0.0.1:1633/bzz/abc")
+        assertFalse(TorRouting.hopRefused(node, URL(node, "/bzz/abc/"), "GET"))
+        assertTrue(TorRouting.hopRefused(node, URL(node, "/addresses"), "GET"))
+    }
+
+    @Test
+    fun `a gateway's redirect to another loopback service is never opened`() {
+        val hits = java.util.concurrent.atomic.AtomicInteger()
+        val victim = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        victim.createContext("/") { ex ->
+            hits.incrementAndGet()
+            val out = """{"ethereum":"0xsecret"}""".toByteArray()
+            ex.sendResponseHeaders(200, out.size.toLong())
+            ex.responseBody.use { it.write(out) }
+        }
+        val gateway = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        gateway.createContext("/") { ex ->
+            ex.responseHeaders.add("Location", "http://localhost:${victim.address.port}/addresses")
+            ex.sendResponseHeaders(302, -1)
+            ex.close()
+        }
+        victim.start()
+        gateway.start()
+        try {
+            try {
+                TorRouting.openFollowingRedirects(URL("http://127.0.0.1:${gateway.address.port}/ipfs/bafyroot/")) {}
+                fail("followed a gateway's redirect onto another loopback service")
+            } catch (e: TorRouting.RedirectRefusedException) {
+                // Unreachable to the gateway interceptor, so it isn't retried.
+                assertTrue(e is java.net.ConnectException)
+            }
+            assertEquals(0, hits.get())
+        } finally {
+            gateway.stop(0)
+            victim.stop(0)
+        }
+    }
+
+    @Test
     fun `an override that fails is retried on the next state update`() {
         val context = android.content.ContextWrapper(null)
         val real = TorRouting.setOverride

@@ -167,6 +167,8 @@
     <!-- A native fetch's redirect failures; also end up in a download's "Network error: …". %1$s is the URL. -->
     <string name="node_fetch_not_http">Not an HTTP URL: %1$s</string>
     <string name="node_fetch_too_many_redirects">Too many redirects</string>
+    <!-- A redirect from a server to this device's own services (the Swarm node's API, another loopback port), refused. %1$s is the URL. -->
+    <string name="node_fetch_redirect_refused">Redirect to this device refused: %1$s</string>
     <!-- The refusal page for an onion site Freedom can't open. The descriptions are HTML
          (&lt;code>, &lt;em>, &amp;rarr;); %1$s is the external Tor proxy (host:port). -->
     <string name="node_tor_proxy_not_set">(not set)</string>

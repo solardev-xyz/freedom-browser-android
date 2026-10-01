@@ -185,6 +185,12 @@ internal object NodeApiGuard {
     }
 
     /**
+     * Does [url]'s host (as the WHATWG parser reads it) name the device
+     * itself ([isLoopbackLiteral])? Unparsable counts as yes.
+     */
+    internal fun mayBeLoopback(url: String): Boolean = isLoopbackLiteral(WhatwgHost.parse(url)?.hostname)
+
+    /**
      * Does [host] (WHATWG-serialised) name the device itself: `localhost`
      * and `*.localhost`, IPv4 `127.0.0.0/8` or `0.0.0.0/8` (connecting to
      * `0.0.0.0` reaches loopback on Linux), or an IPv6 address whose first

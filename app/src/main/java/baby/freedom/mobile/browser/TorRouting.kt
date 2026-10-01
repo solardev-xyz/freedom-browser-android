@@ -573,6 +573,17 @@ object TorRouting {
      * first hop. Redirects are followed the way `HttpURLConnection` would
      * ([redirectFor]). Returns the final connection with its response
      * status read; every earlier hop is disconnected.
+     *
+     * A hop onto this device is refused ([hopRefused], with a
+     * [RedirectRefusedException]) before it's opened: the caller asked
+     * for [url], and a server it names mustn't turn the fetch into one of
+     * the node's API or another loopback service. The gateway
+     * interceptor serves what it fetches here to the page, readable
+     * (`Access-Control-Allow-Origin: *`), so an external gateway's `302
+     * Location: http://127.0.0.1:1633/addresses` would otherwise hand a
+     * page the node's addresses and wallet — past [NodeApiGuard], which
+     * sees only the page's own request, and past the gateway's empty CORS
+     * list, since the read happens on the page's own origin.
      */
     fun openFollowingRedirects(
         url: URL,
@@ -600,6 +611,11 @@ object TorRouting {
                     keep = true
                     return conn
                 }
+                val nextMethod = if (next.toGet) "GET" else conn.requestMethod
+                if (hopRefused(current, next.url, nextMethod)) {
+                    Log.w(TAG, "refused a redirect onto this device: $nextMethod ${next.url.protocol}://${next.url.authority}")
+                    throw RedirectRefusedException(next.url)
+                }
                 current = next.url
                 if (next.toGet) {
                     method = "GET"
@@ -611,6 +627,28 @@ object TorRouting {
         }
         throw IOException(Strings.get(R.string.node_fetch_too_many_redirects))
     }
+
+    /**
+     * May [openFollowingRedirects] not follow a redirect from [from] to
+     * [to] (sent as [method])? Yes for any hop [NodeApiGuard] would
+     * refuse a page — the node's own API, on any name that may be this
+     * device — and for one onto another origin on a loopback or
+     * unspecified host (`127.0.0.0/8`, `0.0.0.0`, `[::1]`, `localhost`),
+     * judged the way the WHATWG parser reads it (`127.1`, `0x7f000001`
+     * and `127.0.0.%31` are all `127.0.0.1` to the resolver too). A hop
+     * within the same origin is the server's own business.
+     */
+    internal fun hopRefused(from: URL, to: URL, method: String): Boolean =
+        NodeApiGuard.refuses(method, to.toString()) ||
+            (!sameOrigin(from, to) && NodeApiGuard.mayBeLoopback(to.toString()))
+
+    /**
+     * [openFollowingRedirects]'s refusal of a hop onto this device
+     * ([hopRefused]). A [java.net.ConnectException], so a caller treats
+     * it as the server being unreachable, not as worth retrying.
+     */
+    class RedirectRefusedException(to: URL) :
+        java.net.ConnectException(Strings.get(R.string.node_fetch_redirect_refused, "${to.protocol}://${to.authority}"))
 
     /** [openConnection]'s refusal of an onion URL while no Tor port is routed. */
     class RefusedException : IOException(Strings.get(R.string.node_tor_refused_fetch))
