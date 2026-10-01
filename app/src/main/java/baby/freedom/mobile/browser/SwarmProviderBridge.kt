@@ -845,7 +845,15 @@ internal object GatewayHttp : SwarmProvider.Http {
         timeoutMs: Int,
     ): SwarmProvider.Http.Answer = requestAt(SwarmNode.GATEWAY_URL, method, path, headers, body, timeoutMs)
 
-    /** [request] against [base] (tests point it at a local server). */
+    /**
+     * [request] against [base] (tests point it at a local server), which
+     * manifest discovery also uses for the external Swarm endpoint — an
+     * onion one included. The connection is opened through
+     * [TorRouting.openConnection], so an onion [base] goes to the routed
+     * Tor proxy, or is refused with [TorRouting.RefusedException] before
+     * anything is dialed — its name is never looked up in DNS (#356).
+     * Redirects aren't followed, so no hop can bypass that.
+     */
     internal fun requestAt(
         base: String,
         method: String,
@@ -858,7 +866,8 @@ internal object GatewayHttp : SwarmProvider.Http {
         /** The most of the answer's body that is read: past it the call fails with [AnswerTooLarge]. */
         maxBytes: Int = MAX_ANSWER_BYTES,
     ): SwarmProvider.Http.Answer {
-        val conn = URL(base + path).openConnection() as HttpURLConnection
+        val conn = TorRouting.openConnection(URL(base + path)) as? HttpURLConnection
+            ?: throw IOException("not an http URL: $base")
         // RUNNING until either the answer is read to its end (DONE) or
         // the deadline passes first (EXPIRED) — whichever gets there
         // first decides, so an answer complete in time is never turned

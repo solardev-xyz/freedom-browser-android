@@ -203,6 +203,16 @@ class SwarmManifestsTest {
     }
 
     @Test
+    fun `a manifest on an onion endpoint with no Tor routed is unresolved, not fetched`() {
+        // #356: the external Swarm endpoint can be an onion node; with no Tor route it is refused, not looked up.
+        val result = fetchManifest(
+            "http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion:1633/bzz/abc/freedom-manifest.json",
+            timeoutMs = 5_000,
+        )
+        assertEquals(ManifestDiscovery.Unresolved("RefusedException"), result)
+    }
+
+    @Test
     fun `a body that dies part-way is transient, not invalid`() {
         val (url, t) = serveOnce { out ->
             out.write("HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n{\"schema\":".toByteArray())
