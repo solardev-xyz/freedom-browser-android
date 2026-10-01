@@ -90,6 +90,15 @@ internal data class MediaReply(
  * body is ever held in memory, however large. A `200` of unknown length
  * can't be sliced (there's no total for a `Content-Range`) and is passed
  * on whole, as is every other status.
+ *
+ * Nor is a `200` sliced when the request carried `If-Range` ([ifRange]):
+ * that header went to the gateway too, and a whole `200` is then its
+ * answer that the validator no longer matches — the representation
+ * changed (an ENS name or feed now pointing at new content), so the
+ * client must get the new body whole, not a `206` of new bytes it would
+ * splice onto its old copy (RFC 9110 §13.1.5). Passing it on whole is
+ * right even from a gateway that ignores both headers: a server may
+ * always answer a range with the full `200`.
  */
 internal fun mediaReplyFor(
     rangeHeader: String?,
@@ -97,6 +106,7 @@ internal fun mediaReplyFor(
     reason: String,
     headers: Map<String, String>,
     contentLength: Long,
+    ifRange: Boolean = false,
 ): MediaReply {
     val length = if (contentLength >= 0) contentLength.toString() else null
     return when {
@@ -108,8 +118,10 @@ internal fun mediaReplyFor(
         else -> {
             val total = contentLength
             val whole = headers.with("Accept-Ranges", "bytes")
-            // A Range the gateway answered whole: sliced here.
-            when (val range = if (rangeHeader == null) ByteRangeAnswer.Full else byteRangeFor(rangeHeader, total)) {
+            // A Range the gateway answered whole: sliced here — unless
+            // the whole answer is If-Range's "changed", meant whole.
+            val range = if (rangeHeader == null || ifRange) ByteRangeAnswer.Full else byteRangeFor(rangeHeader, total)
+            when (range) {
                 ByteRangeAnswer.Full -> MediaReply(200, reason, whole.with("Content-Length", total.toString()))
                 is ByteRangeAnswer.Partial -> MediaReply(
                     206, "Partial Content",

@@ -6276,7 +6276,10 @@ private fun fetchOnce(
         // to be cut again (a 206 slice starts at the range, a whole 200 or
         // an error page is meant whole).
         val response = if (media) {
-            val reply = mediaReplyFor(range, status, reason, headers, conn.contentLengthLong)
+            // Forwarded to the gateway with Range: its whole 200 then
+            // means the validator failed, not that Range was ignored.
+            val ifRange = req.requestHeaders?.keys?.any { it.equals("If-Range", ignoreCase = true) } == true
+            val reply = mediaReplyFor(range, status, reason, headers, conn.contentLengthLong, ifRange)
             Log.v(LOG_TAG, "media ${reply.status}: $targetUrl range=$range gateway=$status")
             val data = when {
                 reply.empty -> {

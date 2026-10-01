@@ -127,6 +127,31 @@ class MediaRangeTest {
     }
 
     @Test
+    fun `a whole 200 to a Range with If-Range is passed on whole, not sliced`() {
+        // The gateway got If-Range too: its 200 says the content changed.
+        val reply = mediaReplyFor("bytes=100-199", 200, "OK", gateway, 1000, ifRange = true)
+        assertEquals(200, reply.status)
+        assertNull(reply.header("Content-Range"))
+        assertEquals("1000", reply.header("Content-Length"))
+        assertEquals(0L, reply.skip)
+        assertNull(reply.length)
+        assertFalse(reply.empty)
+
+        // Not a 416 either: a range past the old body may fit the new one.
+        val past = mediaReplyFor("bytes=5000-", 200, "OK", gateway, 1000, ifRange = true)
+        assertEquals(200, past.status)
+        assertFalse(past.empty)
+
+        // A 206 (the validator matched) is still streamed as it is.
+        val matched = mediaReplyFor(
+            "bytes=100-199", 206, "Partial Content",
+            gateway + ("content-range" to "bytes 100-199/1000"), 100, ifRange = true,
+        )
+        assertEquals(206, matched.status)
+        assertEquals("bytes 100-199/1000", matched.header("Content-Range"))
+    }
+
+    @Test
     fun `an ignored Range past the body is a 416 with no body`() {
         val reply = mediaReplyFor("bytes=5000-", 200, "OK", gateway, 1000)
         assertEquals(416, reply.status)
