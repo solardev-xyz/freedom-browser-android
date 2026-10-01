@@ -181,7 +181,7 @@ class NodeIdentitySyncTest {
         keys.key = null
         // The Radicle identity really is new (the node ran as its own key),
         // and so, as far as `:node` knows, is the Swarm one: it couldn't open
-        // the file either, so its Swarm booted as the device's key.
+        // the file either, so its Swarm boot failed (#357).
         assertEquals(
             NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", ABANDON_DID, swarmChanged = true),
             withGrants.reconcile(vault.state.value),
@@ -233,6 +233,39 @@ class NodeIdentitySyncTest {
         // Once the wallet is gone the node runs as its own again.
         vaultStore.record = null
         assertNull(store.radicle(vaultStore))
+    }
+
+    @Test
+    fun `boot throws, rather than answering no wallet, when the wallet's keys can't be opened`() = runBlocking {
+        // #357: a failed read mustn't boot (or restart) Swarm as ant's own key.
+        vault.create(abandon12, auth, imported = false)
+        reconcile()
+        vault.lock()
+        fun unreadable() = runCatching { store.boot(vaultStore) }.exceptionOrNull() is IllegalStateException
+        // The sealing key is gone (a Keystore failure): not "no wallet".
+        val sealing = keys.key
+        keys.key = null
+        assertTrue(unreadable())
+        keys.key = sealing
+        // The file is this vault's but corrupt.
+        val good = file.readText()
+        file.writeText("{not json")
+        assertTrue(unreadable())
+        file.writeText(good)
+        // The vault file is there but can't be read.
+        val record = vaultStore.record
+        vaultStore.record = null
+        vaultStore.fileExists = true
+        assertTrue(unreadable())
+        vaultStore.fileExists = false
+        vaultStore.record = record
+        assertEquals("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", store.boot(vaultStore)!!.swarmAddress)
+        // Keys from another (replaced) wallet, or none yet, are plainly "none".
+        vault.remove()
+        vault.create(legal12, auth, imported = true)
+        assertNull(store.boot(vaultStore))
+        store.wipe()
+        assertNull(store.boot(vaultStore))
     }
 
     @Test

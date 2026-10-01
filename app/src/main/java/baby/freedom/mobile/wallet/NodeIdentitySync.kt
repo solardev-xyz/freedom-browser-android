@@ -80,10 +80,10 @@ class NodeIdentitySync internal constructor(
          * This vault's keys were on disk but couldn't be opened, and are
          * sealed again: the very same identities, so no grants were taken
          * back and there's nothing to tell the user. But `:node` may have
-         * hit the same unreadable file when it booted — Radicle then fails
-         * its boot and Swarm runs as the device's own key — so the
-         * listener still has it reload; it restarts only a node that's up
-         * as another identity, or whose boot failed.
+         * hit the same unreadable file when it booted — Radicle and Swarm
+         * then both fail their boot rather than run as the device's own
+         * key (#357) — so the listener still has it reload; it restarts
+         * only a node that's up as another identity, or whose boot failed.
          */
         data object Resealed : Change
 
@@ -164,8 +164,8 @@ class NodeIdentitySync internal constructor(
         val sameVault = stored == null && store.storedTag() == tag
         val sameRadicle = sameVault && store.storedHasRadicle()
         // Only keys that could be read count as Swarm already adopted: if
-        // they couldn't be, `:node`'s Swarm booted as the device's key and
-        // restarts onto the wallet's account now.
+        // they couldn't be, `:node`'s Swarm boot may have failed on them
+        // (#357) and restarts onto the wallet's account now.
         val hadSwarm = stored != null
         if (stored != null) {
             val complete = stored.radicleKey != null

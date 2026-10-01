@@ -503,14 +503,22 @@ class NodeService : Service() {
     /**
      * Restart the Swarm node if it booted as another identity (#77) or in
      * another mode (#114) than it would boot as now — once, however many
-     * reloads race the change (see [SwarmBootIdentity]).
+     * reloads race the change (see [SwarmBootIdentity]). A store that
+     * can't be read now (#357) says nothing about what the node should be:
+     * the node is kept, not restarted as ant's own key.
      */
     private fun restartSwarmIfStale(reason: String) {
         bootIdentity.restartIfStale(
-            want = {
-                val address = identityStore.boot(vaultStore)?.let { boot ->
-                    boot.antIdentity.fill(0)
-                    boot.swarmAddress
+            want = want@{
+                val boot = try {
+                    identityStore.boot(vaultStore)
+                } catch (e: IllegalStateException) {
+                    Log.w(TAG, "$reason, but the wallet's Swarm identity can't be read; keeping the node as it is: ${e.message}")
+                    return@want null
+                }
+                val address = boot?.let {
+                    it.antIdentity.fill(0)
+                    it.swarmAddress
                 }.orEmpty()
                 swarmBootKey(address, swarmMode())
             },
@@ -666,9 +674,18 @@ class NodeService : Service() {
                 // re-read at every (re)start; ant's own otherwise.
                 // And the mode (#114), read in the same step so the boot
                 // key records the pair this launch really boots as.
+                // When the wallet's keys are there but can't be read (#357),
+                // the launch fails with an error the Nodes page shows rather
+                // than boot as ant's own key; the next reload (a bind, an
+                // unlock) tries again.
                 identity = {
                     bootIdentity.boot {
-                        val boot = identityStore.boot(vaultStore)
+                        val boot = try {
+                            identityStore.boot(vaultStore)
+                        } catch (e: IllegalStateException) {
+                            Log.w(TAG, "swarm identity unreadable: ${e.message}")
+                            throw IllegalStateException(getString(R.string.node_swarm_identity_unreadable), e)
+                        }
                         val mode = swarmMode()
                         launchMode = mode
                         swarmBootKey(boot?.swarmAddress.orEmpty(), mode) to boot?.antIdentity

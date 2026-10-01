@@ -81,6 +81,33 @@ class SwarmModeTest {
     }
 
     @Test
+    fun `a failed identity read keeps a running node, and a failed launch restarts once it reads`() {
+        // #357: an unreadable store is never taken for "no wallet".
+        val boot = SwarmBootIdentity()
+        var restarts = 0
+        val light = SwarmNode.Mode.light("https://rpc.example")
+        boot.boot { swarmBootKey("0xabc", light) to null }
+        // A reload whose read fails can't tell: the node stays as the wallet's.
+        assertFalse(boot.restartIfStale({ null }, { true }, { restarts++ }))
+        assertEquals(0, restarts)
+        // A launch whose read fails fails with it...
+        val failure = IllegalStateException("unreadable")
+        assertEquals(failure, runCatching { boot.boot<ByteArray?> { throw failure } }.exceptionOrNull())
+        // ...is kept while reads keep failing...
+        assertFalse(boot.restartIfStale({ null }, { true }, { restarts++ }))
+        // ...and restarts once one reads, as the wallet's or as ant's own.
+        assertTrue(boot.restartIfStale({ swarmBootKey("0xabc", light) }, { true }, { restarts++ }))
+        assertEquals(1, restarts)
+        runCatching { boot.boot<ByteArray?> { throw failure } }
+        assertTrue(boot.restartIfStale({ swarmBootKey("", light) }, { true }, { restarts++ }))
+        assertEquals(2, restarts)
+        // A failed launch the user has since stopped isn't started again.
+        runCatching { boot.boot<ByteArray?> { throw failure } }
+        assertFalse(boot.restartIfStale({ swarmBootKey("0xabc", light) }, { false }, { restarts++ }))
+        assertEquals(2, restarts)
+    }
+
+    @Test
     fun `a chain store read error relays nothing new, so the user's Gnosis RPC isn't dropped`() = runBlocking {
         val mine = BuiltInChains.ALL.map {
             if (it.id == 100L) it.copy(userRpcUrls = listOf("https://my.gnosis.example/k")) else it
