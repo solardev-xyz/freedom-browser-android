@@ -598,6 +598,49 @@ class RadicleProviderTest {
     }
 
     @Test
+    fun `a fetch another site just asked for is busy before its seed line reaches the app`() {
+        grants.map[site] = ""
+        val siteB = "https://b.example"
+        grants.map[siteB] = ""
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        // B's prompt is up while A's seed is allowed; A's line hasn't arrived over IPC.
+        val r = runBlocking {
+            provider.request(siteB, "radicle_seed", JSONObject().put("rid", other)) {
+                val a = provider.request(site, "radicle_seed", JSONObject().put("rid", rid)) { true }
+                assertTrue((ok(a) as JSONObject).getBoolean("seeded"))
+                true
+            }
+        }
+        assertEquals("busy", err(r).reason)
+        assertEquals(listOf(rid), node.seeds)
+        // Asked straight out, too — and sync is held back the same way.
+        assertEquals("busy", err(req("radicle_seed", JSONObject().put("rid", other), origin = siteB)).reason)
+        node.seeded = JSONArray().put(JSONObject().put("rid", other))
+        assertEquals("busy", err(req("radicle_sync", JSONObject().put("rid", other), origin = siteB)).reason)
+        assertEquals(listOf(rid), node.seeds)
+        // The node never moved its line: the claim lapses with the pending window.
+        now += RadicleProvider.PENDING_MS
+        assertTrue((ok(req("radicle_seed", JSONObject().put("rid", other), origin = siteB)) as JSONObject).getBoolean("seeded"))
+        assertEquals(listOf(rid, other), node.seeds)
+    }
+
+    @Test
+    fun `a seed the node refused doesn't hold other repositories back`() {
+        grants.map[site] = ""
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        val failing = object : RadicleProvider.Node by node {
+            override fun seed(rid: String) = false
+        }
+        val p = RadicleProvider(grants, failing, clock = { now }, io = Dispatchers.Unconfined)
+        val r = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", rid)) { true } }
+        assertEquals("seed_failed", err(r).reason)
+        val r2 = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", other)) { true } }
+        assertEquals("seed_failed", err(r2).reason)
+        val status = runBlocking { p.request(site, "radicle_getSeedStatus", JSONObject().put("rid", rid)) { true } }
+        assertEquals(0, (ok(status) as JSONObject).getInt("attemptCount"))
+    }
+
+    @Test
     fun `a prompt left unanswered is refused before the page's own timer, without blocking the tab`() {
         assertTrue(RadicleProviders.PROMPT_WAIT_MS + RadicleClient.READ_TIMEOUT_MS + RadicleClient.WRITE_TIMEOUT_MS < 300_000L)
         val tab = BrowserState(9_500L)

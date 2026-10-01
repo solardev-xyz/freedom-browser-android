@@ -283,28 +283,53 @@ class RadicleProvider(
         else -> Reply.Err(UNSUPPORTED, "Unknown method: $method")
     }
 
-    /** A fetch of another repository is running: the node takes one at a time. */
-    private fun busy(rid: String): Reply? {
+    /**
+     * A fetch of another repository is running, or was just asked of the
+     * node and its seed line hasn't reached the app yet: the node takes one
+     * at a time and skips a second seed without a word (#349 R4-M1).
+     */
+    private fun busy(rid: String): Reply? = if (synchronized(lock) { otherFetch(rid) }) busyReply() else null
+
+    /** Caller holds [lock]. */
+    private fun otherFetch(rid: String): Boolean {
         val line = node.state.value.seed
-        if (line != null && line.active && line.rid != rid) {
-            return Reply.Err(INTERNAL, "Another repository is being fetched; try again when it's done", "busy")
-        }
-        return null
+        if (line != null && line.active && line.rid != rid) return true
+        val now = clock()
+        return tracks.any { (other, track) -> other != rid && track.pendingSince?.let { now - it < PENDING_MS } == true }
     }
+
+    private fun busyReply() =
+        Reply.Err(INTERNAL, "Another repository is being fetched; try again when it's done", "busy")
 
     private fun startFetch(origin: String, rid: String): Reply? {
         follow(origin, rid)
-        val line = node.state.value.seed
-        // Already fetching this one: report on that fetch.
-        if (line != null && line.active && line.rid == rid) return null
-        if (!node.seed(rid)) return Reply.Err(INTERNAL, "seed failed", "seed_failed")
         val now = clock()
-        synchronized(lock) {
+        // Check and claim in one step, so two sites' prompts answered at
+        // once can't both reach the node.
+        val claimed = synchronized(lock) {
+            if (otherFetch(rid)) return busyReply()
+            val line = node.state.value.seed
+            // Already fetching this one: report on that fetch.
+            if (line != null && line.active && line.rid == rid) return null
+            val fresh = rid !in tracks
             val track = tracks.getOrPut(rid) { Track(now, 0) }
+            val previous = track.pendingSince
+            track.pendingSince = now
+            Triple(track, previous, fresh)
+        }
+        if (!node.seed(rid)) {
+            synchronized(lock) {
+                val (track, previous, fresh) = claimed
+                if (track.pendingSince == now) track.pendingSince = previous
+                if (fresh && tracks[rid] === track) tracks.remove(rid)
+            }
+            return Reply.Err(INTERNAL, "seed failed", "seed_failed")
+        }
+        synchronized(lock) {
+            val track = claimed.first
             track.startedAt = now
             track.attemptCount++
             track.finishedAt = null
-            track.pendingSince = now
             track.recentAttempts.clear()
         }
         return null
