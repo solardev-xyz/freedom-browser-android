@@ -302,10 +302,10 @@ class TorRoutingTest {
         "rb.evil.example" to "198.51.100.7", "loop.example" to "127.0.0.1", "v6.example" to "2001:db8::7",
     ) {
         val pin = TorRouting.pin(URL("http://rb.evil.example:8711/b?x=1"))!!
-        assertEquals("http://198.51.100.7:8711/b?x=1", pin.url.toString())
+        assertEquals(listOf("http://198.51.100.7:8711/b?x=1"), pin.urls.map { it.toString() })
         assertEquals("rb.evil.example:8711", pin.hostHeader)
         assertEquals("rb.evil.example", TorRouting.pin(URL("http://RB.evil.example/"))!!.hostHeader)
-        assertEquals("http://[2001:db8:0:0:0:0:0:7]/", TorRouting.pin(URL("http://v6.example/"))!!.url.toString())
+        assertEquals(listOf("http://[2001:db8:0:0:0:0:0:7]/"), TorRouting.pin(URL("http://v6.example/"))!!.urls.map { it.toString() })
         // Resolving to the device, or not at all: refused at the dial too.
         for (hop in listOf("http://loop.example:8711/b", "http://unresolvable.example/", "http://localtest.me/")) {
             try {
@@ -319,6 +319,59 @@ class TorRoutingTest {
         assertEquals(null, TorRouting.pin(URL("http://${"a".repeat(56)}.onion/")))
         assertEquals(null, TorRouting.pin(URL("http://192.168.1.20:8080/")))
         assertEquals(null, TorRouting.pin(URL("http://[2001:db8::1]/")))
+    }
+
+    @Test
+    fun `a pinned hop keeps every address its name resolved to, in order, for fallback`() = withResolver {
+        val real = TorRouting.resolve
+        TorRouting.resolve = { host ->
+            if (host == "multi.example") {
+                arrayOf("2001:db8::7", "198.51.100.7", "198.51.100.8", "198.51.100.7").map { java.net.InetAddress.getByName(it) }.toTypedArray()
+            } else {
+                real(host)
+            }
+        }
+        val pin = TorRouting.pin(URL("http://multi.example:8080/p"))!!
+        assertEquals(
+            listOf("http://[2001:db8:0:0:0:0:0:7]:8080/p", "http://198.51.100.7:8080/p", "http://198.51.100.8:8080/p"),
+            pin.urls.map { it.toString() },
+        )
+        assertEquals("multi.example:8080", pin.hostHeader)
+        // Any one of them on this device refuses the whole hop.
+        try {
+            TorRouting.pin(URL("http://mixed.example/"))
+            fail("pinned a name with a loopback address")
+        } catch (_: TorRouting.RedirectRefusedException) {
+        }
+    }
+
+    @Test
+    fun `a hop is pinned or peer-checked only when the app dials it itself`() {
+        val real = TorRouting.proxiesFor
+        val http = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress.createUnresolved("127.0.0.1", 8080))
+        val socks = java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress.createUnresolved("127.0.0.1", 1080))
+        try {
+            TorRouting.proxiesFor = { listOf(java.net.Proxy.NO_PROXY) }
+            assertEquals(java.net.Proxy.NO_PROXY, TorRouting.hopRoute(URL("https://gw.example/ipfs/x")))
+            assertEquals(java.net.Proxy.NO_PROXY, TorRouting.hopRoute(URL("http://gw.example/ipfs/x")))
+            // Onion goes through Tor's SOCKS proxy: its socket's peer is unknown (R4-F1).
+            assertEquals(null, TorRouting.hopRoute(URL("https://${"a".repeat(56)}.onion/x")))
+            assertEquals(null, TorRouting.hopRoute(URL("http://${"a".repeat(56)}%2eonion/x")))
+            // A system proxy (a Wi-Fi proxy on 127.0.0.1, or SOCKS) owns the socket and the
+            // lookup; it's the only route, with no direct fallback past the checks.
+            TorRouting.proxiesFor = { listOf(http, java.net.Proxy.NO_PROXY) }
+            assertEquals(http, TorRouting.hopRoute(URL("https://gw.example/ipfs/x")))
+            assertEquals(http, TorRouting.hopRoute(URL("http://gw.example/ipfs/x")))
+            TorRouting.proxiesFor = { listOf(java.net.Proxy.NO_PROXY, socks) }
+            assertEquals(socks, TorRouting.hopRoute(URL("https://gw.example/ipfs/x")))
+            // A selector that fails or answers nothing is read as direct, so the checks still run.
+            TorRouting.proxiesFor = { throw IllegalArgumentException("bad uri") }
+            assertEquals(java.net.Proxy.NO_PROXY, TorRouting.hopRoute(URL("https://gw.example/ipfs/x")))
+            TorRouting.proxiesFor = { emptyList() }
+            assertEquals(java.net.Proxy.NO_PROXY, TorRouting.hopRoute(URL("https://gw.example/ipfs/x")))
+        } finally {
+            TorRouting.proxiesFor = real
+        }
     }
 
     @Test

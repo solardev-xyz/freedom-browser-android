@@ -18,7 +18,9 @@ import java.net.IDN
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.net.ProxySelector
 import java.net.Socket
+import java.net.URI
 import java.net.URL
 import java.net.URLConnection
 import java.text.Normalizer
@@ -558,8 +560,14 @@ object TorRouting {
      * Don't let the connection follow redirects itself — each hop has to
      * come back through here. Use [openFollowingRedirects] for that.
      */
-    fun openConnection(url: URL): URLConnection {
-        if (!fetchMayReachOnion(url)) return url.openConnection()
+    fun openConnection(url: URL): URLConnection = openConnection(url, null)
+
+    /**
+     * [openConnection], through [route] (the system proxy selector's
+     * choice when `null`) for a non-onion URL.
+     */
+    private fun openConnection(url: URL, route: Proxy?): URLConnection {
+        if (!fetchMayReachOnion(url)) return if (route == null) url.openConnection() else url.openConnection(route)
         val endpoint = routed ?: throw RefusedException()
         // By address (a literal, no lookup), where the listener binds:
         // Android's InetAddress.getLoopbackAddress() is ::1.
@@ -598,31 +606,54 @@ object TorRouting {
         var method: String? = null
         var payload = body
         repeat(MAX_REDIRECTS + 1) {
-            // A hop off the caller's origin dials the address it was judged
-            // on, not whatever a fresh lookup answers a moment later (pinned).
-            val pinned = if (sameOrigin(url, current)) null else pin(current)
-            val conn = openConnection(pinned?.url ?: current) as? HttpURLConnection
-                ?: throw IOException(Strings.get(R.string.node_fetch_not_http, current))
+            // A hop off the caller's origin goes one fixed way (R4-F1):
+            // through the system proxy, if one is set, and nothing else —
+            // Android's HttpURLConnection otherwise retries a failed proxy
+            // route directly — or straight from here, where it dials the
+            // address it was judged on (pinned), not whatever a fresh
+            // lookup answers a moment later, or, on https, has its
+            // connected peer checked. An onion hop goes to Tor's proxy.
+            val route = if (sameOrigin(url, current)) null else hopRoute(current)
+            val direct = route?.type() == Proxy.Type.DIRECT
+            val pinned = if (direct) pin(current) else null
+            val candidates = pinned?.urls ?: listOf(current)
+            var conn: HttpURLConnection? = null
             var keep = false
             try {
-                conn.configure(current)
-                pinned?.hostHeader?.let { conn.setRequestProperty("Host", it) }
-                if (pinned == null && !sameOrigin(url, current) && conn is HttpsURLConnection) {
-                    conn.sslSocketFactory = DevicePeerRefusingFactory(conn.sslSocketFactory, current)
+                for ((i, candidate) in candidates.withIndex()) {
+                    val c = openConnection(candidate, route) as? HttpURLConnection
+                        ?: throw IOException(Strings.get(R.string.node_fetch_not_http, current))
+                    conn = c
+                    c.configure(current)
+                    pinned?.hostHeader?.let { c.setRequestProperty("Host", it) }
+                    if (direct && pinned == null && c is HttpsURLConnection) {
+                        c.sslSocketFactory = DevicePeerRefusingFactory(c.sslSocketFactory, current)
+                    }
+                    method?.let { c.requestMethod = it }
+                    c.instanceFollowRedirects = false
+                    if (payload != null) c.doOutput = true
+                    if (i == candidates.lastIndex) break
+                    // Not the last address the name resolved to: one that
+                    // can't be reached falls back to the next, as the
+                    // connection's own lookup would have (R4-F2).
+                    try {
+                        c.connect()
+                        break
+                    } catch (e: IOException) {
+                        Log.w(TAG, "pinned address ${candidate.host} unreachable, trying the next: $e")
+                        runCatching { c.disconnect() }
+                        conn = null
+                    }
                 }
-                method?.let { conn.requestMethod = it }
-                conn.instanceFollowRedirects = false
-                payload?.let { bytes ->
-                    conn.doOutput = true
-                    conn.outputStream.use { it.write(bytes) }
-                }
-                val code = conn.responseCode
-                val next = redirectFor(current, code, conn.requestMethod, conn.getHeaderField("Location"))
+                val c = conn ?: throw IOException(Strings.get(R.string.node_fetch_not_http, current))
+                payload?.let { bytes -> c.outputStream.use { it.write(bytes) } }
+                val code = c.responseCode
+                val next = redirectFor(current, code, c.requestMethod, c.getHeaderField("Location"))
                 if (next == null) {
                     keep = true
-                    return conn
+                    return c
                 }
-                val nextMethod = if (next.toGet) "GET" else conn.requestMethod
+                val nextMethod = if (next.toGet) "GET" else c.requestMethod
                 if (hopRefused(url, next.url, nextMethod)) {
                     Log.w(TAG, "refused a redirect onto this device: $nextMethod ${next.url.protocol}://${next.url.authority}")
                     throw RedirectRefusedException(next.url)
@@ -633,7 +664,7 @@ object TorRouting {
                     payload = null
                 }
             } finally {
-                if (!keep) runCatching { conn.disconnect() }
+                if (!keep) runCatching { conn?.disconnect() }
             }
         }
         throw IOException(Strings.get(R.string.node_fetch_too_many_redirects))
@@ -764,22 +795,55 @@ object TorRouting {
     }
 
     /**
-     * A hop [openFollowingRedirects] dials by address: [url], with the
-     * host the connection would have sent as [hostHeader].
+     * A hop [openFollowingRedirects] dials by address: [urls], one per
+     * address its name resolved to, in the resolver's order (the next is
+     * tried if one can't be connected to), with the host the connection
+     * would have sent as [hostHeader].
      */
-    internal class Pin(val url: URL, val hostHeader: String)
+    internal class Pin(val urls: List<URL>, val hostHeader: String)
 
     /**
-     * Pin [hop], a redirect off the caller's origin, to the address its
-     * name resolves to now, so the connection can't look the name up
-     * again and get another answer: a name the redirect chain reached is
-     * the server's, and its DNS can answer a public address to
-     * [hopRefused]'s lookup and `127.0.0.1` to the connection's (TTL 0,
-     * or a cached answer that expires in between). `null` for a hop
-     * nothing resolves for — an onion host (Tor's), an IP literal — and
-     * for https, whose peer [DevicePeerRefusingFactory] checks on the
-     * connected socket instead (an address in the URL would break SNI
-     * and the certificate check).
+     * The one route [openFollowingRedirects] opens [url], a hop off the
+     * caller's origin, through: `null` for an onion host ([openConnection]
+     * sends it to Tor's SOCKS proxy), the system proxy's first non-direct
+     * choice ([proxiesFor], e.g. a Wi-Fi proxy), else [Proxy.NO_PROXY].
+     *
+     * Only a [Proxy.Type.DIRECT] hop is pinned ([pin]) or peer-checked
+     * ([DevicePeerRefusingFactory]): through a proxy the socket is the
+     * proxy's (a SOCKS socket's peer is unknown, a CONNECT tunnel's is
+     * the proxy, often `127.0.0.1`) and the proxy resolves the name, so
+     * [hopRefused]'s lookup is all there is (R4-F1), and pinning would
+     * put the address in the absolute-form request line in place of the
+     * name (R4-F2). The route is passed to the connection explicitly, so
+     * it can't fall back from a failed proxy to dialing directly, past
+     * both checks.
+     */
+    internal fun hopRoute(url: URL): Proxy? {
+        if (fetchMayReachOnion(url)) return null
+        val proxies = runCatching { proxiesFor(url.toURI()) }.getOrNull().orEmpty()
+        return proxies.firstOrNull { it.type() != Proxy.Type.DIRECT } ?: Proxy.NO_PROXY
+    }
+
+    /** The system proxy selector's choice for a URI; swapped in tests. */
+    @Volatile
+    internal var proxiesFor: (URI) -> List<Proxy> = { uri ->
+        ProxySelector.getDefault()?.select(uri).orEmpty().ifEmpty { listOf(Proxy.NO_PROXY) }
+    }
+
+    /**
+     * Pin [hop], a redirect off the caller's origin dialed directly
+     * ([hopRoute] direct), to the addresses its name resolves to now, so the
+     * connection can't look the name up again and get another answer: a
+     * name the redirect chain reached is the server's, and its DNS can
+     * answer a public address to [hopRefused]'s lookup and `127.0.0.1` to
+     * the connection's (TTL 0, or a cached answer that expires in
+     * between). `null` for a hop nothing resolves for — an onion host
+     * (Tor's), an IP literal — and for https, whose peer
+     * [DevicePeerRefusingFactory] checks on the connected socket instead
+     * (an address in the URL would break SNI and the certificate check).
+     * Only called with no proxy in between, so the request line is
+     * origin-form and the server sees the name in [Pin.hostHeader], not
+     * the address.
      *
      * The name looked up is the one `HttpURLConnection` would dial
      * ([okHttpHost], percent-decoded, IDNA2003); it's refused
@@ -799,11 +863,11 @@ object TorRouting {
         } catch (_: Exception) {
             throw RedirectRefusedException(hop)
         }
-        val address = addresses.firstOrNull()
-        if (address == null || addresses.any { isDeviceAddress(it) }) throw RedirectRefusedException(hop)
-        val literal = address.hostAddress.orEmpty().substringBefore('%')
+        if (addresses.isEmpty() || addresses.any { isDeviceAddress(it) }) throw RedirectRefusedException(hop)
+        val urls = addresses.map { it.hostAddress.orEmpty().substringBefore('%') }.distinct()
+            .map { URL(hop.protocol, it, hop.port, hop.file) }
         val hostHeader = if (hop.port == -1 || hop.port == hop.defaultPort) host else "$host:${hop.port}"
-        return Pin(URL(hop.protocol, literal, hop.port, hop.file), hostHeader)
+        return Pin(urls, hostHeader)
     }
 
     /**
