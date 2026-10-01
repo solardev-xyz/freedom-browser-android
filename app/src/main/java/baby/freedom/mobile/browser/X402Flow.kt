@@ -113,7 +113,12 @@ internal class X402Flow<D : Any>(
          * page started on its own (#237) — and it never left [origin] on
          * the way: a redirect through another origin is that origin's say,
          * not the starter's (#218 R5-M1). Never while [origin] is held
-         * after a Refused payment (#237).
+         * after a Refused payment (#237) — as the hold stood at the
+         * commit: a 402 that commits before [restore] (the first moments
+         * after launch) counts every site the user hasn't gone to as held,
+         * and keeps that answer even if the read-back then finds no hold,
+         * so it asks once where it might not have. Fails closed on purpose:
+         * the sheet, never a silent payment (#347 R1-M2).
          */
         fun allowanceMayPay(origin: String): Boolean =
             !held(origin) && (byUser || (fromOrigin == origin && gesture)) && hopOrigins.all { it == origin }
@@ -258,7 +263,12 @@ internal class X402Flow<D : Any>(
      */
     fun holds(origin: String): Boolean = origin in held || (!restored || heldUnknown) && origin !in lifted
 
-    /** [holds] as it is now, not as it will be. */
+    /**
+     * [holds] as it is now, not as it will be: frozen into a 402's
+     * [Committed], so one committed before [restore] stays "held" for
+     * every site the user hasn't gone to, whatever the read-back finds
+     * (#347 R1-M2).
+     */
     private fun heldNow(): (String) -> Boolean {
         val held = held.toSet()
         val unknown = !restored || heldUnknown

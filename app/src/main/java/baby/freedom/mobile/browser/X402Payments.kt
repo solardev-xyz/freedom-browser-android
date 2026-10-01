@@ -34,7 +34,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -141,13 +140,28 @@ object X402Payments {
     private val flow = X402Flow<Detection>(
         settle = { id, status, httpStatus -> settle(id, status, httpStatus) },
         originOf = ::providerOriginKey,
-        onHold = { holdWrites.trySend(it to true) },
-        onLift = { holdWrites.trySend(it to false) },
+        onHold = { holdWrites.send(it, held = true) },
+        onLift = { holdWrites.send(it, held = false) },
     )
     private val random = SecureRandom()
 
-    /** Holds to keep (true) or lift (false), written one at a time, in order (#347). */
-    private val holdWrites = Channel<Pair<String, Boolean>>(Channel.UNLIMITED)
+    /** The store [init] opened. */
+    private var store: X402Store? = null
+
+    /**
+     * Holds to keep or lift, written in order and retried until they land
+     * (#347, R1-M1) — from [init] on; any taken before wait for it.
+     */
+    private val holdWrites = X402HoldWrites(
+        write = { origin, held ->
+            val store = checkNotNull(store)
+            if (held) store.hold(origin) else store.lift(origin)
+        },
+        era = { store?.clearCount ?: 0L },
+        onFailed = { held ->
+            Log.w(TAG, if (held) "keeping an x402 hold failed; trying again" else "lifting a kept x402 hold failed; trying again")
+        },
+    )
 
     /** The holds an earlier run kept are read back into [flow] (#347). */
     private val holdsRestored = CompletableDeferred<Unit>()
@@ -157,6 +171,8 @@ object X402Payments {
         val app = context.applicationContext
         this.context = app
         val store = X402Store.get(app)
+        this.store = store
+        scope.launch { holdWrites.run() }
         // Paid requests an earlier run never saw answered.
         scope.launch { store.settleStale() }
         // Sites an earlier run held after a Refused paid request stay held (#347).
@@ -165,12 +181,6 @@ object X402Payments {
             if (kept == null) Log.w(TAG, "x402 holds unreadable: every site's allowance asks until the user navigates to it")
             flow.restore(kept)
             holdsRestored.complete(Unit)
-        }
-        scope.launch {
-            for ((origin, held) in holdWrites) {
-                val written = if (held) store.hold(origin) else store.lift(origin)
-                if (!written) Log.w(TAG, if (held) "keeping an x402 hold failed" else "lifting a kept x402 hold failed")
-            }
         }
     }
 

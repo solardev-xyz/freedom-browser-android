@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import java.io.IOException
 import java.math.BigInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -367,7 +368,18 @@ class X402Store internal constructor(
     suspend fun lift(origin: String): Boolean = write { it.remove(heldKey(origin)) }
 
     /** Forget every allowance, payment and hold (the wallet was removed); `false` if it couldn't be written. */
-    suspend fun clear(): Boolean = write { it.clear() }
+    suspend fun clear(): Boolean {
+        clears.incrementAndGet()
+        return write { it.clear() }
+    }
+
+    /**
+     * How many times [clear] was called: a hold queued (or retried) before
+     * the latest clear isn't written back after it (#347 R1-M1).
+     */
+    val clearCount: Long get() = clears.get()
+
+    private val clears = AtomicLong()
 
     private fun dropDead(prefs: MutablePreferences, now: Long) {
         prefs.asMap().forEach { (k, v) ->
