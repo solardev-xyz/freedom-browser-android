@@ -51,4 +51,38 @@ class ChainInputTest {
         assertNull(without(rpcs = listOf("http://polygon-rpc.com")))
         assertNull(without(rpcs = List(Chain.MAX_RPC_URLS + 1) { "https://r$it.example" }))
     }
+
+    /**
+     * A site names the chain it adds (`wallet_addEthereumChain`) and the
+     * sheets show the name as is: nothing that reorders the row (a bidi
+     * override or isolate), splits it (U+2028/U+2029) or hides (a BOM, a
+     * soft hyphen) gets in — emoji joiners and flag tags still do.
+     */
+    @Test
+    fun namesAndSymbolsCantReorderOrSplitTheSheetsTheyAreShownOn() {
+        fun build(name: String, symbol: String = "TST", currencyName: String? = null) = ChainInput.build(
+            id = "1337", name = name, symbol = symbol, decimals = "18", explorer = "",
+            rpcUrls = listOf("https://rpc.example.org"), currencyName = currencyName,
+        )
+        for (bad in listOf("Ethereum (chain 1)\u2028\u2028Testnet", "Eth\u2029ereum", "\u202Eeroc", "Gnosis\u2066x\u2069", "Base\uFEFF", "Ba\u00ADse")) {
+            assertNull(bad, ChainInput.parseName(bad))
+            assertNull(bad, build(bad))
+            assertNull(bad, ChainInput.parseSymbol(bad.take(10)))
+        }
+        assertNull(build("Test", symbol = "ETH\u202E"))
+        // A bad currency name falls back to the symbol, as an invalid one always has.
+        assertEquals("TST", build("Test", currencyName = "Ether\u2028x")!!.currencyName)
+        // Emoji built from joiners and tag characters are names like any other.
+        val family = "Chain \uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67"
+        val scotland = "Chain \uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74\uDB40\uDC7F"
+        assertEquals(family, build(family)!!.name)
+        assertEquals(scotland, build(scotland)!!.name)
+        // A chain stored before this rule still reads back: it mustn't vanish on upgrade.
+        val old = ChainInput.build(
+            id = "1337", name = "Old\u202Ename", symbol = "TST", decimals = "18", explorer = "",
+            rpcUrls = listOf("https://rpc.example.org"), stored = true,
+        )
+        assertEquals("Old\u202Ename", old!!.name)
+    }
 }
+

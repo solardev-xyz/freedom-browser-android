@@ -116,6 +116,13 @@ class ChainStoreTest {
     }
 
     @Test
+    fun aChainStoredBeforeNamesRefusedFormatCharactersStillReadsBack() {
+        // ChainInput.parseName refuses a bidi override now; one already stored stays.
+        val old = polygon.copy(name = "Poly\u202Egon")
+        assertEquals(old, ChainStore.decode(ChainStore.encode(old, 7))!!.first)
+    }
+
+    @Test
     fun storageTroubleNeverThrows() = runBlocking {
         val store = ChainStore(BrokenStore(CorruptionException("bad")), backOff = {})
         assertEquals(BuiltInChains.ALL, store.chains.first())

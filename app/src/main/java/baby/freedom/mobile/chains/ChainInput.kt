@@ -1,6 +1,7 @@
 package baby.freedom.mobile.chains
 
 import baby.freedom.mobile.browser.WhatwgHost
+import baby.freedom.mobile.wallet.PublisherIdentity
 
 /**
  * The Add chain form's rules (#107), one function per field so the form
@@ -19,13 +20,30 @@ object ChainInput {
         return id?.takeIf { it in 1..Chain.MAX_ID }
     }
 
-    fun parseName(raw: String): String? =
-        raw.trim().takeIf { it.isNotEmpty() && it.length <= Chain.MAX_NAME_LENGTH && it.none(Char::isISOControl) }
+    /**
+     * A chain or currency name: no control, line/paragraph separator or
+     * invisible format character ([PublisherIdentity.isRefusedInLabel],
+     * emoji joiners allowed). A site names the chain it adds, and the
+     * approval sheets show it as is: a bidi override would reorder the
+     * row, and a U+2028 would push the Switch sheet's real chain ID off
+     * its line under a name like "Ethereum (chain 1)".
+     */
+    fun parseName(raw: String): String? = parseName(raw, strict = true)
 
-    fun parseSymbol(raw: String): String? =
+    private fun parseName(raw: String, strict: Boolean): String? =
         raw.trim().takeIf {
-            it.isNotEmpty() && it.length <= Chain.MAX_SYMBOL_LENGTH && it.none { c -> c.isWhitespace() || c.isISOControl() }
+            it.isNotEmpty() && it.length <= Chain.MAX_NAME_LENGTH && it.none(Char::isISOControl) && (!strict || shownAsIs(it))
         }
+
+    fun parseSymbol(raw: String): String? = parseSymbol(raw, strict = true)
+
+    private fun parseSymbol(raw: String, strict: Boolean): String? =
+        raw.trim().takeIf {
+            it.isNotEmpty() && it.length <= Chain.MAX_SYMBOL_LENGTH && it.none { c -> c.isWhitespace() || c.isISOControl() } &&
+                (!strict || shownAsIs(it))
+        }
+
+    private fun shownAsIs(s: String): Boolean = s.codePoints().noneMatch(PublisherIdentity::isRefusedInLabel)
 
     fun parseDecimals(raw: String): Int? = raw.trim().toIntOrNull()?.takeIf { it in Chain.DECIMALS_RANGE }
 
@@ -49,6 +67,10 @@ object ChainInput {
      * missing or invalid. [explorer] is optional (blank = none);
      * [rpcUrls] needs at least one entry, each already accepted by
      * [RpcUrls.validate] (duplicates collapse).
+     *
+     * [stored]: a chain read back from storage, whose name and symbol are
+     * held only to the rules they were added under — a chain added before
+     * [parseName] refused format characters mustn't vanish on upgrade.
      */
     fun build(
         id: String,
@@ -59,10 +81,11 @@ object ChainInput {
         rpcUrls: List<String>,
         currencyName: String? = null,
         isTestnet: Boolean = false,
+        stored: Boolean = false,
     ): Chain? {
         val chainId = parseId(id) ?: return null
-        val chainName = parseName(name) ?: return null
-        val sym = parseSymbol(symbol) ?: return null
+        val chainName = parseName(name, strict = !stored) ?: return null
+        val sym = parseSymbol(symbol, strict = !stored) ?: return null
         val dec = parseDecimals(decimals) ?: return null
         val exp = if (explorer.isBlank()) null else normalizeExplorer(explorer) ?: return null
         val rpcs = rpcUrls.map { RpcUrls.normalize(it) ?: return null }.distinct()
@@ -71,7 +94,7 @@ object ChainInput {
             id = chainId,
             name = chainName,
             symbol = sym,
-            currencyName = currencyName?.let(::parseName) ?: sym,
+            currencyName = currencyName?.let { parseName(it, strict = !stored) } ?: sym,
             decimals = dec,
             explorerUrl = exp,
             rpcUrls = rpcs,
