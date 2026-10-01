@@ -321,6 +321,39 @@ internal fun externalLinkKeepsPage(
 ): Boolean = isForMainFrame && isRedirect && !popupFirstNavigation
 
 /**
+ * The site an app or payment link tapped on [tab]'s page (#85, #317) is
+ * offered for, and [doc], the tab's document at the tap
+ * ([EthereumProviders.currentDocument]): the origin [tab] committed
+ * ([BrowserState.permissionOrigin], set at `onPageStarted`). Never
+ * `WebView.getUrl()`: for a load the browser started itself (an
+ * address-bar submit, a bookmark) that already names the pending
+ * address while the old page is still on screen taking taps, and the
+ * offer would be asked for — and an "always" answer remembered for — a
+ * site that asked for nothing (#342). Null: nobody to ask for.
+ */
+internal fun externalLinkAsker(tab: BrowserState): ExternalLinkAsker? =
+    tab.permissionOrigin?.let { ExternalLinkAsker(it, EthereumProviders.currentDocument(tab.id)) }
+
+/**
+ * Who an app or payment link is offered for ([externalLinkAsker]): the
+ * page's [origin], as the tab's document [doc]. The offer is dropped if
+ * the tab has moved on to another document by the time it runs.
+ */
+internal data class ExternalLinkAsker(val origin: String, val doc: Int)
+
+/**
+ * Whether the page a page's app or payment link was tapped on — [origin]
+ * as document [doc] ([externalLinkAsker]) — is still [tab]'s. The offer
+ * can run a moment after the tap ([UserGestureLatch]); a page committed
+ * meanwhile never asked, and mustn't be asked for (#342). The origin is
+ * checked as well as the document number: Back/Forward onto Home's blank
+ * entry fires no `onPageStarted`, so it doesn't bump the document, but
+ * its `onPageFinished` does clear [BrowserState.permissionOrigin].
+ */
+internal fun externalLinkPageCurrent(tab: BrowserState, origin: String?, doc: Int): Boolean =
+    doc == EthereumProviders.currentDocument(tab.id) && origin == tab.permissionOrigin
+
+/**
  * The tab's own record of user input, standing in for the "one tap buys
  * one launch" half of Chromium's user activation. WebView's
  * `WebResourceRequest.hasGesture()` says a navigation was started with
