@@ -616,7 +616,7 @@ object TorRouting {
             // address it was judged on (pinned), not whatever a fresh
             // lookup answers a moment later, or, on https, has its
             // connected peer checked. An onion hop goes to Tor's proxy.
-            val route = if (sameOrigin(url, current)) null else hopRoute(current)
+            val route = if (sameOrigin(url, current) || sameLoopbackServer(url, current)) null else hopRoute(current)
             val direct = route?.type() == Proxy.Type.DIRECT
             val pinned = if (direct) pin(current) else null
             val candidates = pinned?.urls ?: listOf(current)
@@ -705,7 +705,35 @@ object TorRouting {
      */
     internal fun hopRefused(start: URL, to: URL, method: String): Boolean =
         NodeApiGuard.refuses(method, to.toString()) ||
-            (!sameOrigin(start, to) && (NodeApiGuard.mayBeLoopback(to.toString()) || resolvesToLoopback(to)))
+            (!sameOrigin(start, to) && !sameLoopbackServer(start, to) &&
+                (NodeApiGuard.mayBeLoopback(to.toString()) || resolvesToLoopback(to)))
+
+    /**
+     * Is [to] the same server as [start], a gateway the caller chose on
+     * this device: both `localhost` or `*.localhost` as written (no lookup;
+     * the WHATWG reading, and every reading [to]'s connection dials), with the same scheme and port? Those names are
+     * the device's loopback by definition, so that's the one listener on
+     * that port, and a hop between them stays with the server the caller
+     * asked for. A loopback literal isn't matched to a different one
+     * (`127.0.0.1` and `[::1]` or `127.0.0.2` can be different listeners). A local
+     * Kubo's default subdomain redirect (`http://localhost:8080/ipfs/<cid>`
+     * → `http://<cidv1>.ipfs.localhost:8080/`) is one such hop (#359 R1-F1);
+     * it goes straight to the device, never through a proxy or a pin. The
+     * node's own API is still refused on any host ([NodeApiGuard.refuses]),
+     * and a hop onto another loopback port still is too.
+     */
+    internal fun sameLoopbackServer(start: URL, to: URL): Boolean =
+        start.protocol.equals(to.protocol, ignoreCase = true) &&
+            (if (start.port == -1) start.defaultPort else start.port) == (if (to.port == -1) to.defaultPort else to.port) &&
+            isLocalhostName(WhatwgHost.parse(start.toString())?.hostname) &&
+            isLocalhostName(WhatwgHost.parse(to.toString())?.hostname) &&
+            // And so is every reading the connection may dial ([dialedHosts]).
+            dialedHosts(to).let { d -> d.isNotEmpty() && d.all(::isLocalhostName) }
+
+    private fun isLocalhostName(host: String?): Boolean {
+        val h = host?.lowercase()?.trimEnd('.') ?: return false
+        return h == "localhost" || (h.endsWith(".localhost") && !h.startsWith("."))
+    }
 
     /**
      * Does [url]'s host, a name, resolve to this device — any address
@@ -738,14 +766,20 @@ object TorRouting {
     internal fun resolvesToLoopback(url: URL): Boolean {
         if (fetchMayReachOnion(url)) return false
         val whatwg = WhatwgHost.parse(url.toString())?.hostname?.lowercase()?.trimEnd('.') ?: return true
+        val dialed = dialedHosts(url)
         // A reading that reaches the device refuses the hop even if another
         // reading didn't resolve: that one's verdict is final, not retried.
+        // Only a reading a connection dials can leave the hop unresolved: the
+        // WHATWG one, when it's not among them, is checked for reaching the
+        // device but no connection ever looks it up, so its failing to resolve
+        // says nothing about the hop (#359 R1-F2: `straße.example` is dialed
+        // as `strasse.example`, whatever `xn--strae-oqa.example` answers).
         var unresolved: RedirectUnresolvedException? = null
-        for (host in linkedSetOf(whatwg) + dialedHosts(url)) {
+        for (host in linkedSetOf(whatwg) + dialed) {
             try {
                 if (hostReachesDevice(host, url)) return true
             } catch (e: RedirectUnresolvedException) {
-                unresolved = e
+                if (host in dialed) unresolved = e
             }
         }
         unresolved?.let { throw it }
@@ -851,17 +885,18 @@ object TorRouting {
      * The selector is asked about [selectorUri]'s reading of the hop, which
      * holds for a `Location` `java.net.URI` rejects as written (a `|`, `{`,
      * a space — the connection itself sends those, percent-encoded); a hop
-     * the selector can't be asked about, or that it fails on, is refused
-     * ([RedirectRefusedException]) rather than dialed directly past a proxy
-     * the user set (R5-F1).
+     * the selector can't be asked about, or that it fails on, isn't followed
+     * ([RedirectRouteException]) rather than dialed directly past a proxy
+     * the user set (R5-F1). That isn't a redirect onto this device, so it
+     * isn't reported as one (#359 R1-F4).
      */
     internal fun hopRoute(url: URL): Proxy? {
         if (fetchMayReachOnion(url)) return null
-        val uri = selectorUri(url) ?: throw RedirectRefusedException(url)
+        val uri = selectorUri(url) ?: throw RedirectRouteException(url)
         val proxies = try {
             proxiesFor(uri)
         } catch (_: Exception) {
-            throw RedirectRefusedException(url)
+            throw RedirectRouteException(url)
         }
         return proxies.firstOrNull { it.type() != Proxy.Type.DIRECT } ?: Proxy.NO_PROXY
     }
@@ -980,6 +1015,15 @@ object TorRouting {
      */
     class RedirectUnresolvedException(to: URL) :
         java.net.UnknownHostException(Strings.get(R.string.node_fetch_redirect_unresolved, "${to.protocol}://${to.authority}"))
+
+    /**
+     * [openFollowingRedirects] not following a hop the system proxy selector
+     * couldn't be asked about, or failed on ([hopRoute]): not dialed
+     * directly past a proxy the user may have set. A plain [IOException] —
+     * neither a redirect onto this device nor an unreachable server (#359 R1-F4).
+     */
+    class RedirectRouteException(to: URL) :
+        IOException(Strings.get(R.string.node_fetch_redirect_no_route, "${to.protocol}://${to.authority}"))
 
     /** [openConnection]'s refusal of an onion URL while no Tor port is routed. */
     class RefusedException : IOException(Strings.get(R.string.node_tor_refused_fetch))
