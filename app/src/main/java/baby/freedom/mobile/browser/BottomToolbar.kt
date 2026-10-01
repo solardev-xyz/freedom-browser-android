@@ -128,10 +128,14 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.semantics.traversalIndex
 import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -2373,11 +2377,19 @@ private fun AddressField(
     // next composition pass once the `LaunchedEffect` below ran — which
     // briefly rendered the stale URL inside the newly-active tab's
     // pill.
+    //
+    // Seeded with the address's bidi controls marked
+    // ([BidiControls.marked]), as the resting label shows them: tapping
+    // the capsule must not unmask an RLO the label just flagged (a
+    // refused `ens://%E2%80%AEmoc.lapyap.eth` read `hte.paypal.com` in
+    // the open field), and what the field shows is what its own Copy
+    // and Go hand on.
+    val shownAddress = remember(state.addressBarText) { BidiControls.marked(state.addressBarText) }
     var fieldValue by remember(state.id) {
         mutableStateOf(
             TextFieldValue(
-                text = state.addressBarText,
-                selection = TextRange(state.addressBarText.length),
+                text = shownAddress,
+                selection = TextRange(shownAddress.length),
             ),
         )
     }
@@ -2393,14 +2405,14 @@ private fun AddressField(
         // Never clobber an in-progress edit: a page that happens to
         // finish loading while the user is typing updates the committed
         // address, and the buffer picks that up when the edit ends.
-        if (!addressFocused && fieldValue.text != state.addressBarText) {
+        if (!addressFocused && fieldValue.text != shownAddress) {
             // Park the cursor at position 0 so long URLs horizontally
             // scroll to their *start* rather than their tail — the
             // domain is what the user cares about, so keeping e.g.
             // `https://example.com/...` visible beats showing the end
             // of a deep query string with the scheme pushed off-screen.
             fieldValue = TextFieldValue(
-                text = state.addressBarText,
+                text = shownAddress,
                 selection = TextRange.Zero,
             )
         }
@@ -2426,7 +2438,7 @@ private fun AddressField(
             if (fieldValue.text.isEmpty()) fieldValue
             else fieldValue.copy(selection = TextRange(0, fieldValue.text.length))
         } else {
-            TextFieldValue(text = state.addressBarText, selection = TextRange.Zero)
+            TextFieldValue(text = shownAddress, selection = TextRange.Zero)
         }
     }
 
@@ -2526,6 +2538,10 @@ private fun AddressField(
                     }
                 },
                 singleLine = true,
+                // Text typed or pasted into the field gets the same
+                // marking as the seeded address, drawn only (the buffer
+                // keeps what the user entered).
+                visualTransformation = BidiMarkingTransformation,
                 textStyle = textStyle,
                 cursorBrush = SolidColor(colors.primary),
                 modifier = Modifier
@@ -3598,6 +3614,20 @@ private fun AddressPlaceholder(
             textAlign = textAlign,
             autoSize = TextAutoSize.StepBased(minFontSize = smallest, maxFontSize = largest),
             modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+/**
+ * Draws every bidi control in the edit field as U+FFFD
+ * ([BidiControls.marked]) — one character for one, so offsets map 1:1.
+ */
+private object BidiMarkingTransformation : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText {
+        val marked = BidiControls.marked(text.text)
+        return TransformedText(
+            if (marked === text.text) text else AnnotatedString(marked, text.spanStyles, text.paragraphStyles),
+            OffsetMapping.Identity,
         )
     }
 }

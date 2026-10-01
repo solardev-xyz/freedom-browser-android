@@ -257,8 +257,9 @@
         }
       }
 
-      // The address as the page prints it: every bidi control shown as
-      // U+FFFD, as the address bar's label does (AddressLabel.resting).
+      // The address (and the resolver's detail line) as the page prints
+      // it: every bidi control shown as U+FFFD, as the address bar does
+      // (BidiControls.kt, the same Bidi_Control list).
       // A name ENSIP-15 refuses reaches this page as given, and one RLO
       // in it (`ens://%E2%80%AEmoc.lapyap.eth`) printed `hte.paypal.com`.
       function shown(text) {
@@ -398,7 +399,7 @@
         }
 
         if (detail) {
-          parts.push(detail);
+          parts.push(shown(detail));
         }
 
         detailsEl.textContent = parts.join('\n') || fmt('page_unknown_error');

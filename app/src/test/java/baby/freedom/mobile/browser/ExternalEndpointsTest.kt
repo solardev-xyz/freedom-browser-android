@@ -58,6 +58,11 @@ class ExternalEndpointsTest {
         assertEquals(Rejection.NOT_A_URL, rejection("nas:99999"))
         assertEquals(Rejection.NOT_A_URL, rejection("https://gw.example:65536"))
         assertEquals("http://nas:65535", ExternalEndpoints.normalize("nas:65535"))
+        // Port 0 can't be connected to either, on either branch.
+        assertEquals(Rejection.NOT_A_URL, rejection("nas:0"))
+        assertEquals(Rejection.NOT_A_URL, rejection("https://gw.example:0"))
+        assertEquals(Rejection.NOT_A_URL, rejection("my_node:0"))
+        assertEquals("http://nas:1", ExternalEndpoints.normalize("nas:1"))
         assertEquals(Rejection.CREDENTIALS, rejection("http://me@my_node:1633"))
     }
 
