@@ -26,12 +26,70 @@ import java.util.concurrent.ExecutionException
  * it starts, and buffers its body only if the epoch is unchanged when it
  * ends and no fresh fetch started since then was forgotten ([epochs] is
  * bounded). Thread-safe: called on the interceptor's threads.
+ *
+ * Memory (#355): the buffer also keeps one byte budget, [maxBytes], for
+ * every body it holds *and* every body still being read — a fetch
+ * [reserve]s the bytes it is about to allocate before allocating them, so
+ * any number of parallel loads together stay inside the budget. A body
+ * [fetch] returns owns a reservation of exactly [sizeOf] it; the buffer
+ * takes that over when it keeps the body and [release]s it when it
+ * evicts, replaces or doesn't keep it. Bodies of size 0 (a "too large to
+ * buffer" marker) count only toward [maxEntries], which is set well
+ * above the number of real bodies the byte budget allows, so a marker
+ * doesn't push a real body out. A body [keep] refuses is handed back to
+ * its request but never buffered.
  */
 internal class MediaBodyBuffer<B : Any>(
-    maxEntries: Int = 4,
+    private val maxEntries: Int = 64,
     private val maxEpochs: Int = 64,
+    private val maxBytes: Long = Long.MAX_VALUE,
+    private val sizeOf: (B) -> Long = { 0L },
+    private val keep: (B) -> Boolean = { true },
 ) {
-    private val bodies = lru<B>(maxEntries)
+    // Bytes held by buffered bodies plus every outstanding reservation.
+    private var used = 0L
+
+    private val bodies = object : java.util.LinkedHashMap<String, B>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, B>?): Boolean {
+            if (size <= maxEntries) return false
+            if (eldest != null) used -= sizeOf(eldest.value)
+            return true
+        }
+    }
+
+    /**
+     * Reserve [bytes] of the budget for a body being read, evicting the
+     * least recently used buffered bodies to make room. False (nothing
+     * reserved) if even an empty buffer couldn't fit them alongside the
+     * other reads in flight: the caller should not buffer then.
+     */
+    @Synchronized
+    fun reserve(bytes: Long): Boolean {
+        if (bytes < 0) return false
+        if (used + bytes > maxBytes) {
+            val it = bodies.entries.iterator()
+            while (used + bytes > maxBytes && it.hasNext()) {
+                val size = sizeOf(it.next().value)
+                if (size > 0) {
+                    it.remove()
+                    used -= size
+                }
+            }
+        }
+        if (used + bytes > maxBytes) return false
+        used += bytes
+        return true
+    }
+
+    /** Give back [bytes] taken by [reserve]. */
+    @Synchronized
+    fun release(bytes: Long) {
+        used = (used - bytes).coerceAtLeast(0)
+    }
+
+    /** Bytes held by buffered bodies and reads in flight (for tests). */
+    @get:Synchronized
+    val usedBytes: Long get() = used
 
     // The epoch of the last fresh fetch started per URL. Values never
     // recur. Evicting an entry would make a fetch that started before that
@@ -64,7 +122,7 @@ internal class MediaBodyBuffer<B : Any>(
         synchronized(this) {
             startedAt = nextEpoch
             if (fresh) {
-                bodies.remove(url)
+                bodies.remove(url)?.let { used -= sizeOf(it) }
                 epoch = ++nextEpoch
                 epochs[url] = epoch
                 mine = CompletableFuture()
@@ -95,7 +153,13 @@ internal class MediaBodyBuffer<B : Any>(
                 synchronized(this) {
                     val current = epochs[url]
                     val unchanged = current == epoch && (epoch != null || evictedUpTo <= startedAt)
-                    if (unchanged) bodies[url] = body
+                    if (unchanged && keep(body)) {
+                        // A parallel non-fresh fetch of the same URL may
+                        // have buffered first: its body goes, with its bytes.
+                        bodies.put(url, body)?.let { if (it !== body) used -= sizeOf(it) }
+                    } else {
+                        used -= sizeOf(body)
+                    }
                 }
             }
         } finally {
@@ -105,13 +169,5 @@ internal class MediaBodyBuffer<B : Any>(
             }
         }
         return body
-    }
-
-    private companion object {
-        fun <V> lru(max: Int): MutableMap<String, V> =
-            object : java.util.LinkedHashMap<String, V>(8, 0.75f, true) {
-                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, V>?) =
-                    size > max
-            }
     }
 }

@@ -5994,21 +5994,36 @@ internal fun sweptOrigins(
 // Fully-buffered media bodies keyed by gateway URL, so successive Range
 // requests for the same file don't re-fetch it (see [MediaBodyBuffer]).
 // A body past [MEDIA_BUFFER_MAX_BYTES] is remembered as [MediaBody.TooLarge]
-// instead, and streamed from the gateway on every request (#355).
+// instead, and streamed from the gateway on every request (#355). A body
+// the shared budget had no room for is [MediaBody.Unbuffered]: streamed
+// for this request only, and tried again for the next.
 private sealed class MediaBody {
     class Bytes(val bytes: ByteArray, val mime: String) : MediaBody()
     object TooLarge : MediaBody()
+    object Unbuffered : MediaBody()
 }
 
 /**
- * The largest media body buffered in memory (#355). With up to four
- * buffered at once that bounds the buffer near 128 MiB; a larger file —
- * a page's long `<video>` — is proxied as a stream with its Range header
- * passed to the gateway, so it can't drive the app out of memory.
+ * The largest media body buffered in memory (#355). A larger file — a
+ * page's long `<video>` — is proxied as a stream with its Range header
+ * passed to the gateway instead.
  */
 private const val MEDIA_BUFFER_MAX_BYTES = 32 * 1024 * 1024
 
-private val mediaBodies = MediaBodyBuffer<MediaBody>()
+/**
+ * All the memory media buffering may hold at once (#355): every buffered
+ * body plus every body still being read, however many a page loads in
+ * parallel. A load that doesn't fit, after evicting buffered bodies, is
+ * streamed instead, so a page fetching many media files at once can't
+ * drive the app out of memory.
+ */
+private const val MEDIA_BUFFER_BUDGET_BYTES = 64L * 1024 * 1024
+
+private val mediaBodies = MediaBodyBuffer<MediaBody>(
+    maxBytes = MEDIA_BUFFER_BUDGET_BYTES,
+    sizeOf = { (it as? MediaBody.Bytes)?.bytes?.size?.toLong() ?: 0L },
+    keep = { it !is MediaBody.Unbuffered },
+)
 
 private fun loadMediaBody(
     req: WebResourceRequest,
@@ -6077,7 +6092,7 @@ private fun tryLoadMediaBody(
         conn = TorRouting.openFollowingRedirects(target) { hop ->
             requestMethod = "GET"
             connectTimeout = 5_000
-            readTimeout = 60_000
+            readTimeout = MEDIA_READ_TIMEOUT_MS
             forwardProxiedHeaders(
                 req,
                 stripRange = true,
@@ -6098,13 +6113,28 @@ private fun tryLoadMediaBody(
             Log.i(LOG_TAG, "media too large to buffer: $targetUrl bytes=${conn.contentLengthLong}")
             return MediaLoadResult.Ok(MediaBody.TooLarge)
         }
-        // No length (chunked), or a decoded body larger than announced:
-        // bounded all the same.
-        val bytes = conn.inputStream.use { readAtMost(it, MEDIA_BUFFER_MAX_BYTES) }
-            ?: run {
+        // Every array is reserved against the shared budget before it is
+        // allocated; no length (chunked) is read in bounded chunks.
+        val read = conn.inputStream.use {
+            readBounded(
+                it,
+                MEDIA_BUFFER_MAX_BYTES,
+                conn.contentLengthLong,
+                mediaBodies::reserve,
+                mediaBodies::release,
+            )
+        }
+        val bytes = when (read) {
+            is BoundedRead.Bytes -> read.bytes
+            BoundedRead.TooLarge -> {
                 Log.i(LOG_TAG, "media too large to buffer: $targetUrl")
                 return MediaLoadResult.Ok(MediaBody.TooLarge)
             }
+            BoundedRead.NoRoom -> {
+                Log.i(LOG_TAG, "media buffer full, streaming: $targetUrl")
+                return MediaLoadResult.Ok(MediaBody.Unbuffered)
+            }
+        }
         val rawCt = conn.contentType
         val mime = rawCt
             ?.substringBefore(';')
@@ -6156,8 +6186,10 @@ private fun fetchMediaWithRangeSupport(
 ): WebResourceResponse? {
     val body = when (val loaded = loadMediaBody(req, targetUrl, fresh) ?: return null) {
         is MediaBody.Bytes -> loaded
-        // Streamed instead; a Hard reload's still past the gateway's cache.
-        MediaBody.TooLarge -> return fetchWithRetry(req, targetUrl, originalUrl, fresh)
+        // Streamed instead; a Hard reload's still past the gateway's cache,
+        // with the media path's longer read timeout for slow chunks.
+        MediaBody.TooLarge, MediaBody.Unbuffered ->
+            return fetchWithRetry(req, targetUrl, originalUrl, fresh, MEDIA_READ_TIMEOUT_MS)
     }
     val total = body.bytes.size
     // Page-controlled: [byteRangeFor] never throws, whatever it says.
@@ -6220,11 +6252,15 @@ private sealed class FetchAttempt {
     object Unreachable : FetchAttempt()
 }
 
+/** Media reads: a Swarm chunk can take well past the subresource 10 s. */
+private const val MEDIA_READ_TIMEOUT_MS = 60_000
+
 private fun fetchWithRetry(
     req: WebResourceRequest,
     targetUrl: String,
     originalUrl: String,
     fresh: Boolean = false,
+    readTimeoutMs: Int = 10_000,
 ): WebResourceResponse? {
     var lastResponse: WebResourceResponse? = null
     for ((index, delayMs) in ESCAPE_RETRY_DELAYS_MS.withIndex()) {
@@ -6237,7 +6273,7 @@ private fun fetchWithRetry(
             }
         }
 
-        when (val attempt = fetchOnce(req, targetUrl, fresh)) {
+        when (val attempt = fetchOnce(req, targetUrl, fresh, readTimeoutMs)) {
             is FetchAttempt.Response -> {
                 // The earlier transient answer is superseded: close its
                 // body (and with it the connection) before dropping it.
@@ -6262,6 +6298,7 @@ private fun fetchOnce(
     req: WebResourceRequest,
     targetUrl: String,
     fresh: Boolean = false,
+    readTimeoutMs: Int = 10_000,
 ): FetchAttempt {
     return try {
         val target = URL(targetUrl)
@@ -6269,7 +6306,7 @@ private fun fetchOnce(
         val conn = TorRouting.openFollowingRedirects(target) { hop ->
             requestMethod = if (req.method == "HEAD") "HEAD" else "GET"
             connectTimeout = 5_000
-            readTimeout = 10_000
+            readTimeout = readTimeoutMs
             forwardProxiedHeaders(req, crossOrigin = !TorRouting.sameOrigin(hop, target), noCache = fresh)
         }
         val status = conn.responseCode
