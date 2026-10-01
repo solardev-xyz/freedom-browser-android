@@ -574,10 +574,11 @@ class RadicleNode internal constructor(
      */
     fun seed(input: String) {
         if (_state.value.status != RadicleStatus.Running) return
+        val fetch = nextFetchId()
         val rid = normalizeRid(input)
         if (rid == null) {
             _state.update {
-                it.copy(seed = RadicleSeed.ofKey(input.trim(), PHASE_FAILED, RadicleSeed.DETAIL_INVALID_RID, active = false))
+                it.copy(seed = RadicleSeed.ofKey(input.trim(), PHASE_FAILED, RadicleSeed.DETAIL_INVALID_RID, active = false).copy(fetch = fetch))
             }
             return
         }
@@ -588,7 +589,7 @@ class RadicleNode internal constructor(
             if (current != null && current.epoch == nodeEpoch.get() && !current.dismissed) return
             if (liveFetches.any { it.rid == rid }) {
                 _state.update {
-                    it.copy(seed = RadicleSeed.ofKey(rid, PHASE_FAILED, RadicleSeed.DETAIL_STALE_FETCH, active = false))
+                    it.copy(seed = RadicleSeed.ofKey(rid, PHASE_FAILED, RadicleSeed.DETAIL_STALE_FETCH, active = false).copy(fetch = fetch))
                 }
                 return
             }
@@ -596,7 +597,7 @@ class RadicleNode internal constructor(
             liveFetches += run
             seedRun.set(run)
             lastRun = run
-            _state.update { it.copy(seed = RadicleSeed(rid, PHASE_RESOLVING)) }
+            _state.update { it.copy(seed = RadicleSeed(rid, PHASE_RESOLVING, fetch = fetch)) }
             generation.get() to run
         }
         run.job = scope.launch(start = CoroutineStart.LAZY) {
@@ -617,7 +618,7 @@ class RadicleNode internal constructor(
                         ops.cloneRepoWithProgress(rid, SEED_TIMEOUT_MS) { event ->
                             val parsed = json(event) ?: return@cloneRepoWithProgress
                             run.fetching = parsed.optString("phase") == PHASE_FETCHING
-                            val progress = progressLine(rid, parsed)
+                            val progress = progressLine(rid, parsed).copy(fetch = fetch)
                             _state.update { if (gen == generation.get() && !run.dismissed) it.copy(seed = progress) else it }
                         },
                     )
@@ -633,7 +634,7 @@ class RadicleNode internal constructor(
                     result.optBoolean("ok") -> RadicleSeed(rid, PHASE_DONE, active = false)
                     result.optBoolean("cancelled") -> RadicleSeed(rid, PHASE_CANCELLED, active = false)
                     else -> RadicleSeed(rid, PHASE_FAILED, result.optString("error"), active = false)
-                }
+                }.copy(fetch = fetch)
                 Log.i(TAG, "seed $rid → ${settled.phase} ${settled.detail}")
                 // Roll back only on the node instance the fetch ran against; one
                 // that has since been shut down is rolled back at its next boot.
@@ -848,6 +849,16 @@ class RadicleNode internal constructor(
     }
 
     companion object {
+        /**
+         * Seed request ids ([RadicleSeed.fetch]). Started from the monotonic
+         * clock, which every process on the device shares, so a restarted
+         * node process never hands out an id the app already saw from the
+         * previous one.
+         */
+        private val fetchIds = AtomicLong(System.nanoTime())
+
+        internal fun nextFetchId(): Long = fetchIds.incrementAndGet()
+
         private const val TAG = "RadicleNode"
         const val DEFAULT_ALIAS = "freedom-android"
 

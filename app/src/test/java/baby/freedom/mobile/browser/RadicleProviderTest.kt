@@ -630,7 +630,7 @@ class RadicleProviderTest {
         val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
         // MainActivity.onRadicleSeed, through RadicleProviders.userSeeding,
         // before it asks the node; the line is still in flight over IPC.
-        provider.userSeeding(other)
+        provider.userSeeding(other) { true }
         assertEquals("busy", err(req("radicle_seed", JSONObject().put("rid", rid))).reason)
         assertTrue(node.seeds.isEmpty())
         val status = ok(req("radicle_getSeedStatus", JSONObject().put("rid", other))) as JSONObject
@@ -665,6 +665,54 @@ class RadicleProviderTest {
                 .getJSONObject("progress").getString("phase"))
             node.state.value = node.state.value.copy(seed = RadicleSeed(rid, "done", "", active = false))
             assertEquals("fetched", (ok(req("radicle_getSeedStatus", JSONObject().put("rid", rid))) as JSONObject).getString("state"))
+            assertTrue((ok(req("radicle_seed", JSONObject().put("rid", other))) as JSONObject).getBoolean("seeded"))
+            scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        }
+    }
+
+    @Test
+    fun `a user seed that never reached the node, or that the node skips, claims nothing`() {
+        grants.map[site] = ""
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        // The binder call threw (a dead :node): the claim is given back.
+        runCatching { provider.userSeeding(other) { throw IllegalStateException("dead binder") } }
+        assertEquals("idle", (ok(req("radicle_getSeedStatus", JSONObject().put("rid", other))) as JSONObject).getString("state"))
+        // Or said it didn't get there.
+        provider.userSeeding(other) { false }
+        assertEquals("idle", (ok(req("radicle_getSeedStatus", JSONObject().put("rid", other))) as JSONObject).getString("state"))
+        assertTrue((ok(req("radicle_seed", JSONObject().put("rid", rid))) as JSONObject).getBoolean("seeded"))
+        // A site's fetch of rid is claimed: the user's seed of other still
+        // goes to the node, which skips it, so it makes no claim of its own.
+        var asked = false
+        provider.userSeeding(other) { asked = true; true }
+        assertTrue(asked)
+        assertEquals("idle", (ok(req("radicle_getSeedStatus", JSONObject().put("rid", other))) as JSONObject).getString("state"))
+        // Once rid's claim lapses, nothing of other's holds rid back.
+        now += RadicleProvider.PENDING_MS
+        assertTrue((ok(req("radicle_seed", JSONObject().put("rid", rid))) as JSONObject).getBoolean("seeded"))
+    }
+
+    @Test
+    fun `a new fetch that ends on the same line as the last one still ends its claim and is heard`() {
+        grants.map[site] = ""
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        val events = mutableListOf<JSONObject>()
+        provider.events = RadicleProvider.Events { _, e, d -> if (e == "seedStatus") events += d as JSONObject }
+        runBlocking {
+            val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined)
+            provider.start(scope)
+            val first = RadicleSeed(rid, "failed", "no seeds found", active = false, fetch = 1)
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = first)
+            node.seeded = JSONArray().put(JSONObject().put("rid", rid))
+            ok(req("radicle_sync", JSONObject().put("rid", rid)))
+            // A repeat of the earlier line (an unrelated push) still doesn't end the claim.
+            node.state.value = node.state.value.copy(connectedPeers = 3)
+            assertEquals("fetching", (ok(req("radicle_getSeedStatus", JSONObject().put("rid", rid))) as JSONObject).getString("state"))
+            assertTrue(events.isEmpty())
+            // The new fetch fails the same way before the collector saw any line in between.
+            node.state.value = node.state.value.copy(seed = first.copy(fetch = 2))
+            assertEquals(listOf("failed"), events.map { it.getString("state") })
+            assertEquals("failed", (ok(req("radicle_getSeedStatus", JSONObject().put("rid", rid))) as JSONObject).getString("state"))
             assertTrue((ok(req("radicle_seed", JSONObject().put("rid", other))) as JSONObject).getBoolean("seeded"))
             scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
         }

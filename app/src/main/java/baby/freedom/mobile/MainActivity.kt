@@ -1390,8 +1390,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     /** Seed-by-RID from the Radicle page; progress comes back on the callback. */
     private fun onRadicleSeed(rid: String) {
         val node = binder ?: return
-        RadicleProviders.userSeeding(rid)
-        runCatching { node.seedRadicleRepo(rid) }
+        RadicleProviders.userSeeding(rid) { runCatching { node.seedRadicleRepo(rid) }.isSuccess }
     }
 
     private fun startAndBindService() {

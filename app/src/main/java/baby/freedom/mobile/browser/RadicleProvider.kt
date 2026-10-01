@@ -324,10 +324,23 @@ class RadicleProvider(
      * site's prompt answered before its seed line reaches the app reads the
      * node as busy instead of being told `{seeded:true}` for a seed the node
      * skips (#349 R5-M1).
+     *
+     * [ask] hands the seed to the node and says whether it got there. The
+     * user's seed always goes to the node; it only claims when no other
+     * fetch is running or claimed (the node skips it then, so it would be a
+     * claim for nothing), and a seed that never reached the node gives its
+     * claim back, so neither holds other sites' seeds `busy` (#349 R6-M2).
      */
-    fun userSeeding(rid: String) {
+    fun userSeeding(rid: String, ask: () -> Boolean) {
         val now = clock()
-        synchronized(lock) { claimLocked(rid, now)?.started() }
+        val claim = synchronized(lock) { if (otherFetch(rid)) null else claimLocked(rid, now) }
+        val asked = try {
+            ask()
+        } catch (t: Throwable) {
+            synchronized(lock) { claim?.giveBack() }
+            throw t
+        }
+        synchronized(lock) { if (asked) claim?.started() else claim?.giveBack() }
     }
 
     /** A fetch of [rid] just asked of the node; [giveBack] if the node refused it. */

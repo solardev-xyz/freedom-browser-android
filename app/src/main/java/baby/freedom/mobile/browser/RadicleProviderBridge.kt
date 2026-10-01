@@ -140,10 +140,12 @@ object RadicleProviders {
     /**
      * The user is seeding [rid] from the Radicle page: a site's seed
      * prompt answered before that fetch's line arrives reads the node as
-     * busy (#349 R5-M1). Call before asking the node.
+     * busy (#349 R5-M1). [ask] hands it to the node and says whether it
+     * got there; it runs whether or not a provider exists.
      */
-    fun userSeeding(rid: String) {
-        provider?.userSeeding(rid)
+    fun userSeeding(rid: String, ask: () -> Boolean) {
+        val provider = provider
+        if (provider != null) provider.userSeeding(rid, ask) else ask()
     }
 
     /**

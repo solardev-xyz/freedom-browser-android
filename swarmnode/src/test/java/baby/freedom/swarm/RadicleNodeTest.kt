@@ -1,5 +1,6 @@
 package baby.freedom.swarm
 
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -678,6 +679,35 @@ class RadicleNodeTest {
         // The policy the failed fetch added is taken back, so the RID
         // doesn't linger as "Awaiting first fetch".
         await("rolled back", node) { "unseed:$rid" in ops.calls && it.seededRepos.isEmpty() }
+        node.dispose()
+    }
+
+    @Test
+    fun eachSeedRequestStampsItsOwnLines() {
+        val ops = FakeOps().apply {
+            cloneResult = """{"error":"no seeds found"}"""
+            releaseClone.countDown()
+        }
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        val seen = java.util.Collections.synchronizedList(mutableListOf<RadicleSeed>())
+        val watcher = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined).launch {
+            node.state.collect { it.seed?.let(seen::add) }
+        }
+        node.seed(rid)
+        await("failed", node) { it.seed?.phase == "failed" }
+        val first = node.state.value.seed!!
+        await("rolled back", node) { "unseed:$rid" in ops.calls && it.seededRepos.isEmpty() }
+        node.seed(rid)
+        await("failed again", node) { it.seed?.phase == "failed" && it.seed?.fetch != first.fetch }
+        val second = node.state.value.seed!!
+        watcher.cancel()
+        // The same outcome twice, and still two different lines (#349 R6-M1).
+        assertEquals(first.copy(fetch = second.fetch), second)
+        assertTrue(first.fetch != 0L && second.fetch > first.fetch)
+        // Every line a request made, progress included, carries that request's id.
+        assertTrue(seen.toList().all { it.fetch == first.fetch || it.fetch == second.fetch })
         node.dispose()
     }
 
