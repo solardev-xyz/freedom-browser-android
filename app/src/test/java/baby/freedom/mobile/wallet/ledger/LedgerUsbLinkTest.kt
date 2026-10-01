@@ -201,4 +201,13 @@ class LedgerUsbLinkTest {
         val ms = (System.nanoTime() - started) / 1_000_000
         assertTrue("took $ms ms", ms in 250..1_500)
     }
+
+    @Test
+    fun `every USB access request has its own broadcast, so answering one prompt never ends another's wait`() {
+        // R4-F1: two prompts up at once (two Ledgers tried together) mustn't share a pending intent.
+        val a = LedgerUsbLink.permissionAction("baby.freedom.mobile", 1)
+        val b = LedgerUsbLink.permissionAction("baby.freedom.mobile", 2)
+        assertTrue(a != b)
+        assertTrue(a.startsWith("baby.freedom.mobile.") && b.startsWith("baby.freedom.mobile."))
+    }
 }

@@ -5,7 +5,9 @@ import baby.freedom.mobile.wallet.ledger.Ledger.Companion.Route
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -20,7 +22,8 @@ import org.junit.Test
  * one that can't be reached or doesn't hold it, before anything is shown
  * on it — including one that's unplugged, or never unlocked. Ledgers
  * waiting on the user are waited on at once, so none holds up another
- * (PR #350 R2-F1, R3-F1, R3-M1); anything else (a refusal on the device, Cancel,
+ * (PR #350 R2-F1, R3-F1, R3-M1), and one let go with an APDU out is let
+ * go once it's answered (R4-M2); anything else (a refusal on the device, Cancel,
  * a confirmation timing out) ends it there.
  */
 class LedgerRoutesTest {
@@ -261,7 +264,10 @@ class LedgerRoutesTest {
         val a = Route("a", "A")
         val b = Route("b", "B")
         assertEquals("A" to Ledger.Stage.UNLOCK, Ledger.shown(listOf(a, b), listOf(Ledger.Stage.UNLOCK, Ledger.Stage.CONNECTING)))
-        assertEquals("B" to Ledger.Stage.USB_PERMISSION, Ledger.shown(listOf(a, b), listOf(Ledger.Stage.UNLOCK, Ledger.Stage.USB_PERMISSION)))
+        // R4-M1: Android's own prompt is on screen anyway; unlocking is only ever said in the dialog.
+        assertEquals("A" to Ledger.Stage.UNLOCK, Ledger.shown(listOf(a, b), listOf(Ledger.Stage.UNLOCK, Ledger.Stage.USB_PERMISSION)))
+        assertEquals("B" to Ledger.Stage.OPEN_APP, Ledger.shown(listOf(a, b), listOf(Ledger.Stage.USB_PERMISSION, Ledger.Stage.OPEN_APP)))
+        assertEquals("B" to Ledger.Stage.USB_PERMISSION, Ledger.shown(listOf(a, b), listOf(Ledger.Stage.CONNECTING, Ledger.Stage.USB_PERMISSION)))
         assertEquals("A · B" to Ledger.Stage.OPEN_APP, Ledger.shown(listOf(a, b), listOf(Ledger.Stage.OPEN_APP, Ledger.Stage.OPEN_APP)))
         assertEquals(null, Ledger.shown(listOf(a, b), listOf(null, null)))
         // Once B holds the account, A's stage no longer shows.
@@ -274,6 +280,72 @@ class LedgerRoutesTest {
         race.stage(1, Ledger.Stage.CONFIRM)
         assertEquals(listOf("A" to Ledger.Stage.UNLOCK, "A" to Ledger.Stage.UNLOCK, "B" to Ledger.Stage.CONNECTING, "B" to Ledger.Stage.CONFIRM), shown)
         assertFalse(race.claim(0))
+    }
+
+    @Test
+    fun `a Ledger let go with an APDU out is let go once it's answered, before the one that holds the account goes on`() = runBlocking(Dispatchers.Default) {
+        // R4-M2: one Nano X on a cable and over Bluetooth; the cable route's address read is still out when the radio one claims.
+        val events = java.util.Collections.synchronizedList(ArrayList<String>())
+        val cableSent = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val cableAnswer = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val got = Ledger.inTurn(listOf(nanoXCable, nanoXRadio)) { r, turn ->
+            try {
+                if (r == nanoXCable) {
+                    turn.stage(Ledger.Stage.UNLOCK) // lets the radio route start
+                    turn.apdu {
+                        cableSent.complete(Unit)
+                        cableAnswer.await()
+                        events += "cable answered"
+                    }
+                    delay(60_000)
+                    r
+                } else {
+                    cableSent.await()
+                    launch { delay(300); cableAnswer.complete(Unit) }
+                    turn.apdu { account }
+                    turn.claim()
+                    events += "radio signs"
+                    r
+                }
+            } finally {
+                if (r == nanoXCable) events += "cable closed"
+            }
+        }
+        assertEquals(nanoXRadio, got)
+        assertEquals(listOf("cable answered", "cable closed", "radio signs"), events)
+    }
+
+    @Test
+    fun `Cancel ends a Ledger's APDU at once`() = runBlocking(Dispatchers.Default) {
+        val started = System.currentTimeMillis()
+        val run = async {
+            Ledger.inTurn(listOf(nanoXCable)) { r, turn ->
+                turn.apdu { delay(60_000) }
+                r
+            }
+        }
+        delay(100)
+        run.cancel()
+        try {
+            run.await()
+            fail("not cancelled")
+        } catch (_: CancellationException) {
+        }
+        assertTrue(System.currentTimeMillis() - started < 2_000)
+    }
+
+    @Test
+    fun `a Ledger started just as another takes the conversation sends nothing`() {
+        val race = Ledger.Companion.Race(listOf(nanoXCable, nanoXRadio), show = { _, _ -> })
+        assertTrue(race.claim(0))
+        val job = kotlinx.coroutines.Job()
+        race.started(1, job)
+        assertTrue(job.isCancelled)
+        try {
+            race.exchanging(1)
+            fail("an APDU went out")
+        } catch (_: CancellationException) {
+        }
     }
 
     @Test

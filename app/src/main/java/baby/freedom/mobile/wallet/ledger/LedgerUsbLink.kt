@@ -15,6 +15,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlinx.coroutines.CompletableDeferred
@@ -188,13 +189,19 @@ internal class LedgerUsbLink(private val pipe: Pipe) : LedgerLink {
          * Android's prompt for [device] alone, waited for up to
          * [PERMISSION_MS]. The answer is taken from [UsbManager.hasPermission],
          * not from the broadcast (the pending intent is immutable, so it
-         * carries nothing, and it's ours: only its arrival counts).
+         * carries nothing, and it's ours: only its arrival counts). Each
+         * request has its own action ([permissionAction]), so its own
+         * pending intent: with two prompts up at once (two Ledgers tried
+         * together), answering one ends only its own wait, never the
+         * other's, which would read as refused while its prompt is still
+         * on screen (#350 R4-F1).
          * Refused, it's a [LedgerException.Kind.PERMISSION]; unplugged
          * meanwhile, DISCONNECTED — as soon as it's unplugged ([awaitAnswer]),
          * not once the prompt is answered.
          */
         private suspend fun requestPermission(context: Context, manager: UsbManager, device: UsbDevice) {
-            val action = context.packageName + ACTION_PERMISSION_SUFFIX
+            val n = requests.incrementAndGet()
+            val action = permissionAction(context.packageName, n)
             val answered = CompletableDeferred<Unit>()
             val receiver = object : BroadcastReceiver() {
                 override fun onReceive(c: Context, intent: Intent) {
@@ -203,17 +210,19 @@ internal class LedgerUsbLink(private val pipe: Pipe) : LedgerLink {
             }
             // The pending intent is ours, so its broadcast comes as this app: a non-exported receiver gets it.
             ContextCompat.registerReceiver(context, receiver, IntentFilter(action), ContextCompat.RECEIVER_NOT_EXPORTED)
+            val pending = PendingIntent.getBroadcast(
+                context,
+                n,
+                Intent(action).setPackage(context.packageName),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
             try {
-                val pending = PendingIntent.getBroadcast(
-                    context,
-                    0,
-                    Intent(action).setPackage(context.packageName),
-                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-                )
                 manager.requestPermission(device, pending)
                 awaitAnswer(answered, PERMISSION_MS, PERMISSION_POLL_MS) { attached(manager, device) }
             } finally {
                 runCatching { context.unregisterReceiver(receiver) }
+                // A prompt answered after this wait is over sends nothing (Android keeps the grant itself).
+                runCatching { pending.cancel() }
             }
             if (manager.hasPermission(device)) return
             throw if (!attached(manager, device)) {
@@ -261,6 +270,12 @@ internal class LedgerUsbLink(private val pipe: Pipe) : LedgerLink {
         }
 
         private const val ACTION_PERMISSION_SUFFIX = ".LEDGER_USB_PERMISSION"
+
+        /** Numbers each permission request, for its own action and pending intent. */
+        private val requests = AtomicInteger()
+
+        /** The broadcast action of permission request [n]: one per request, never shared by two prompts. */
+        internal fun permissionAction(packageName: String, n: Int): String = "$packageName$ACTION_PERMISSION_SUFFIX.$n"
 
         fun unplugged() = LedgerException(LedgerException.Kind.DISCONNECTED, Strings.said(R.string.signing_ledger_usb_unplugged))
 

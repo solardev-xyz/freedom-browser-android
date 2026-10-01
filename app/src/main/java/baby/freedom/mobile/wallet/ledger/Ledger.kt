@@ -326,7 +326,7 @@ class Ledger internal constructor(private val context: Context) {
         turn: Turn,
         before: () -> Unit = {},
     ) {
-        holding(address, turn::stage) { app.address(key.path) }
+        holding(address, turn::stage) { turn.apdu { app.address(key.path) } }
         turn.claim()
         before()
         turn.stage(Stage.CONFIRM)
@@ -475,16 +475,23 @@ class Ledger internal constructor(private val context: Context) {
         /** A route that couldn't be used — not reachable, or not the Ledger holding the account — with why. */
         internal class NotThisLedger(val reason: LedgerException) : Exception(reason)
 
-        /** The stages where a Ledger waits on the user, in the order the dialog puts them first. */
-        private val WAITING_ON_USER = listOf(Stage.PAIRING, Stage.USB_PERMISSION, Stage.UNLOCK, Stage.OPEN_APP)
+        /**
+         * The stages where a Ledger waits on the user, in the order the
+         * dialog puts them first. Android's USB prompt comes after
+         * unlocking and opening the app: it's on screen in its own window
+         * whatever the dialog says, while "Unlock your Ledger" is only ever
+         * said in the dialog — an unrelated Ledger's prompt mustn't hide
+         * it for the account's own (#350 R4-M1).
+         */
+        private val WAITING_ON_USER = listOf(Stage.PAIRING, Stage.UNLOCK, Stage.OPEN_APP, Stage.USB_PERMISSION)
 
         /**
          * What the dialog shows while several Ledgers are tried at once:
-         * the stage that most needs the user (pairing or Android's USB
-         * prompt, then unlocking, then opening the app, then confirming,
-         * reading, connecting), with the name of every Ledger at that
-         * stage. [stages] is each route's current stage, null once it's
-         * been let go.
+         * the stage that most needs the user (pairing, then unlocking,
+         * then opening the app, then Android's USB prompt, then
+         * confirming, reading, connecting), with the name of every Ledger
+         * at that stage. [stages] is each route's current stage, null once
+         * it's been let go.
          */
         internal fun shown(routes: List<Route>, stages: List<Stage?>): Pair<String, Stage>? {
             val order = WAITING_ON_USER + listOf(Stage.CONFIRM, Stage.READING, Stage.CONNECTING)
@@ -496,15 +503,39 @@ class Ledger internal constructor(private val context: Context) {
         /**
          * One route's part in [inTurn]: [stage] says what it's doing (and
          * that it's waiting on the user, which lets the next route start);
-         * [claim] takes the conversation for it once it's been checked to
-         * hold the account — every other route still being tried is let
-         * go, and the one that comes second is let go too.
+         * every APDU sent before [claim] goes through [apdu]; [claim]
+         * takes the conversation for it once it's been checked to hold the
+         * account — every other route still being tried is let go, and the
+         * one that comes second is let go too.
          */
         internal class Turn internal constructor(private val index: Int, private val race: Race) {
             fun stage(s: Stage) = race.stage(index, s)
 
-            fun claim() {
+            /**
+             * [block], an exchange with this route's Ledger, finished
+             * even if another route claims the conversation meanwhile:
+             * this one is let go once its answer is in, not with an APDU
+             * still out (two routes can be one Nano X, on a cable and over
+             * Bluetooth — #350 R4-M2). Cancel still ends it at once.
+             */
+            suspend fun <R> apdu(block: suspend () -> R): R {
+                race.exchanging(index)
+                try {
+                    return block()
+                } finally {
+                    race.exchanged(index)
+                }
+            }
+
+            /**
+             * Takes the conversation, and returns once every other route
+             * has been let go: its last APDU answered and its link
+             * closed, so nothing else is said to any Ledger while this
+             * one is asked to sign.
+             */
+            suspend fun claim() {
                 if (!race.claim(index)) throw CancellationException("another Ledger holds the account")
+                race.others(index).joinAll()
             }
         }
 
@@ -512,13 +543,34 @@ class Ledger internal constructor(private val context: Context) {
         internal class Race(private val routes: List<Route>, private val show: (String, Stage) -> Unit) {
             private val stages = arrayOfNulls<Stage>(routes.size)
             private val jobs = arrayOfNulls<Job>(routes.size)
+            private val busy = BooleanArray(routes.size)
+            private val letGo = BooleanArray(routes.size)
             val waiting = List(routes.size) { CompletableDeferred<Unit>() }
             private var winner = -1
 
             @Synchronized
             fun started(i: Int, job: Job) {
                 jobs[i] = job
+                // Started just as another took the conversation: it never runs.
+                if (winner >= 0 && winner != i) job.cancel()
             }
+
+            /** Route [i] is sending an APDU: it's let go only once that's answered ([exchanged]). */
+            @Synchronized
+            fun exchanging(i: Int) {
+                if (winner >= 0 && winner != i) throw CancellationException("another Ledger holds the account")
+                busy[i] = true
+            }
+
+            @Synchronized
+            fun exchanged(i: Int) {
+                busy[i] = false
+                if (letGo[i]) jobs[i]?.cancel()
+            }
+
+            /** The jobs of every route but [i]. */
+            @Synchronized
+            fun others(i: Int): List<Job> = jobs.indices.filter { it != i }.mapNotNull { jobs[it] }
 
             @Synchronized
             fun stage(i: Int, s: Stage) {
@@ -543,7 +595,8 @@ class Ledger internal constructor(private val context: Context) {
                 for (j in routes.indices) {
                     if (j == i) continue
                     stages[j] = null
-                    jobs[j]?.cancel()
+                    // One with an APDU out is let go once it's answered ([exchanged]).
+                    if (busy[j]) letGo[j] = true else jobs[j]?.cancel()
                 }
                 publish()
                 return true
