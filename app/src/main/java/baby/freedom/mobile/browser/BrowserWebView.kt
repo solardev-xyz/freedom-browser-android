@@ -16,6 +16,7 @@ import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Bundle
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
@@ -28,6 +29,8 @@ import android.view.PixelCopy
 import android.view.KeyEvent
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputConnectionWrapper
+import android.view.inputmethod.TextAttribute
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -52,6 +55,7 @@ import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -1933,6 +1937,22 @@ private fun buildRefreshableWebView(
         if (state.private) PrivateWindowContext.of(context) else context,
     ).apply {
         privateTab = state.private
+        // An input ended: a moment later, ask the top document's detector
+        // to echo once the renderer is past it (#348). The echo bounds
+        // when an iframe that held the thread in its own handlers got
+        // that input's activation ([UserGestureLatch.onRendererCaughtUp]).
+        // No detector, no echo: the input keeps counting, fail closed.
+        // The echo waits out a tap held back for a double tap, whose
+        // click can renew an iframe's activation ([inputSyncSettleMs]).
+        if (bottomUiSupported) {
+            val settleMs = inputSyncSettleMs(ViewConfiguration.getDoubleTapTimeout())
+            onInputEnded = { id ->
+                postDelayed({
+                    val request = inputSyncRequest(id, settleMs)
+                    for (reply in bottomUiChannels.targets) runCatching { reply.postMessage(request) }
+                }, INPUT_SYNC_DELAY_MS)
+            }
+        }
         // A private tab's WebView goes on the private session's profile
         // (#86) before anything else touches it: Chromium only takes a
         // profile change on a WebView that has never been used.
@@ -2497,6 +2517,18 @@ private fun buildRefreshableWebView(
                 // vouch for a tap on itself ([UserGestureLatch]).
                 parseTopDocumentInput(message.data)?.let { input ->
                     if (isMainFrame) userGestures.onTopDocumentInput(input.ageMs, input.isClick)
+                    return@WebMessageListener
+                }
+                // A navigation the top document itself started (#348
+                // R5-F1): only the main frame's word counts.
+                parseTopDocumentNavigate(message.data)?.let { url ->
+                    if (isMainFrame) userGestures.onTopDocumentNavigate(url)
+                    return@WebMessageListener
+                }
+                // The renderer is past an input (#348): the top
+                // document's echo of the sync sent after it ended.
+                parseInputSynced(message.data)?.let { id ->
+                    if (isMainFrame) userGestures.onRendererCaughtUp(id)
                     return@WebMessageListener
                 }
                 // The page's say on a long-press (#84): any frame, since
@@ -3660,9 +3692,25 @@ private fun buildRefreshableWebView(
                         // Started by the page on screen: only that site's
                         // own allowance may pay for it (#218 R4-M3), and
                         // only on the user's tap, not the page's own
-                        // script chaining 402s (#237).
+                        // script chaining 402s (#237) — a tap the top
+                        // document says it received, not one on a
+                        // cross-origin iframe that navigates the top
+                        // frame with it (#348), and a navigation the top
+                        // document says it started itself, not one an
+                        // iframe started during the user's tap on the top
+                        // page (R5-F1). Without a PageWebView's latch,
+                        // nothing confirms it: fail closed.
+                        val gesture = if (request.hasGesture()) {
+                            (view as? PageWebView)?.userGestures?.topDocumentGesture(target) ?: TopDocumentGesture { false }
+                        } else {
+                            // Still takes the top document's word on it, or a
+                            // cross-origin frame's gestured load of the same
+                            // URL just after could claim it (#382 R1-M1).
+                            (view as? PageWebView)?.userGestures?.onTopNavigationWithoutGesture(target)
+                            null
+                        }
                         X402Payments.onNavigationStarted(
-                            state, byUser = false, pageUrl = committedPageUrl, url = target, gesture = request.hasGesture(),
+                            state, byUser = false, pageUrl = committedPageUrl, url = target, gesture = gesture,
                         )
                     }
                 }
@@ -4322,11 +4370,13 @@ private const val REVEAL_HANDOVER_TIMEOUT_MS = 1_000L
 private class GestureArmingNodeProvider(
     private val inner: AccessibilityNodeProvider,
     private val latch: UserGestureLatch,
+    private val armed: () -> Unit,
 ) : AccessibilityNodeProvider() {
     override fun performAction(virtualViewId: Int, action: Int, arguments: Bundle?): Boolean {
         if (accessibilityActionArmsGestureLatch(action)) {
             latch.onInputStart(untilConfirmed = true)
             latch.onInput()
+            armed()
         }
         return inner.performAction(virtualViewId, action, arguments)
     }
@@ -4375,7 +4425,62 @@ internal class PageWebView(context: Context) : WebView(context) {
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? =
         super.onCreateInputConnection(outAttrs).also {
             outAttrs.imeOptions = tabImeOptions(outAttrs.imeOptions, privateTab)
+        }?.let { KeyboardEditRecorder(it, ::keyboardEdit) }
+
+    /**
+     * One edit from the on-screen keyboard ([KeyboardEditRecorder]),
+     * [send] handing it to Chromium — recorded as an input of
+     * [userGestures] like a key press (#348 R3-F1). Chromium turns each
+     * such edit into a trusted `keydown` (key code 229, or the key an
+     * editor action sends) in whichever frame has focus, and that keydown
+     * gives the frame a fresh activation — an iframe's text field
+     * included — yet it never passes through [dispatchKeyEvent]. Unrecorded,
+     * a user typing in a cross-origin iframe for longer than
+     * [UserGestureLatch.WINDOW_MS] would leave the latch with nothing but
+     * the tap into its field, long aged out, and the iframe could then
+     * navigate the top frame on the user's next tap of the top page as
+     * if that page had.
+     *
+     * Edits arrive on Chromium's keyboard thread, which posts each to the
+     * main thread for the renderer: the input is recorded by a task
+     * posted *ahead* of that one, so it is on record before the renderer
+     * can see the keydown, and its end by one posted after, so it covers
+     * the keydown's timestamp — which the top document's detector reports
+     * like any other ([TOP_DOCUMENT_INPUT]), confirming a keystroke in
+     * the top document's own field. Not one launch's worth for an app
+     * link ([UserGestureLatch.onInput]): typing doesn't open apps.
+     */
+    private fun keyboardEdit(send: () -> Boolean): Boolean {
+        val at = SystemClock.uptimeMillis()
+        val id = IntArray(1)
+        onMainThread {
+            userGestures.onInputStart(at)
+            id[0] = userGestures.latestInputId
         }
+        val result = send()
+        onMainThread {
+            userGestures.onInputContinues(SystemClock.uptimeMillis(), id[0])
+            inputEnded(id[0])
+        }
+        return result
+    }
+
+    private fun onMainThread(task: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) task() else mainHandler.post(task)
+    }
+
+    /**
+     * Input [id] ended: the renderer sync for it ([onInputEnded]) — unless
+     * a finger is still down. That touch's own activation comes with its
+     * lift, still ahead of the renderer; an echo now would mark it handled
+     * too early. Its `ACTION_UP` syncs the latest input, this one included.
+     */
+    private fun inputEnded(id: Int) {
+        if (!touching) onInputEnded?.invoke(id)
+    }
+
+    /** A finger is down on the page (#348 R3-F1, [inputEnded]). */
+    private var touching = false
 
     /**
      * This tab's scriptlets (#318), set by the tab: every load the app
@@ -4706,36 +4811,52 @@ internal class PageWebView(context: Context) : WebView(context) {
      */
     val userGestures = UserGestureLatch(SystemClock::uptimeMillis)
 
+    /** An input ended (or an accessibility click began): its id, for the renderer sync (#348). */
+    var onInputEnded: ((Int) -> Unit)? = null
+
     /** Only a tap counts: not the lift at the end of a scroll or fling. */
     private val taps = TapTracker(ViewConfiguration.get(context).scaledTouchSlop.toFloat())
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                touching = true
                 userGestures.onInputStart(event.eventTime)
                 taps.onDown(event.x, event.y)
             }
             MotionEvent.ACTION_MOVE -> taps.onMove(event.x, event.y)
-            MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> taps.onCancel()
+            MotionEvent.ACTION_POINTER_DOWN -> taps.onCancel()
+            MotionEvent.ACTION_CANCEL -> {
+                touching = false
+                taps.onCancel()
+                onInputEnded?.invoke(userGestures.latestInputId)
+            }
             MotionEvent.ACTION_UP -> {
+                touching = false
                 userGestures.onInputContinues(event.eventTime)
                 if (taps.onUp(event.x, event.y)) userGestures.onInput()
+                onInputEnded?.invoke(userGestures.latestInputId)
             }
         }
         return super.dispatchTouchEvent(event)
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (keyArmsGestureLatch(
+        // Every press and auto-repeat is recorded — each gives the focused
+        // frame a fresh activation (#348 R4-F1), a media key's included
+        // (R5-F2) — but only a fresh press of a page key buys an app-link
+        // launch.
+        if (keyIsPageInput(
                 action = event.action,
-                repeatCount = event.repeatCount,
-                isSystem = event.isSystem,
                 isModifier = KeyEvent.isModifierKey(event.keyCode),
             )
         ) {
-            userGestures.onInputStart(event.eventTime)
+            userGestures.onInputStart(event.eventTime, key = true)
             userGestures.onInputContinues(SystemClock.uptimeMillis())
-            userGestures.onInput()
+            if (keyArmsGestureLatch(event.action, event.repeatCount, event.isSystem, KeyEvent.isModifierKey(event.keyCode))) {
+                userGestures.onInput()
+            }
+            inputEnded(userGestures.latestInputId)
         }
         return super.dispatchKeyEvent(event)
     }
@@ -4747,6 +4868,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (accessibilityActionArmsGestureLatch(action)) {
             userGestures.onInputStart(untilConfirmed = true)
             userGestures.onInput()
+            onInputEnded?.invoke(userGestures.latestInputId)
         }
         return super.performAccessibilityAction(action, arguments)
     }
@@ -4756,7 +4878,8 @@ internal class PageWebView(context: Context) : WebView(context) {
     override fun getAccessibilityNodeProvider(): AccessibilityNodeProvider? {
         val inner = super.getAccessibilityNodeProvider() ?: return null
         a11yProvider?.let { (wrapped, wrapper) -> if (wrapped === inner) return wrapper }
-        return GestureArmingNodeProvider(inner, userGestures).also { a11yProvider = inner to it }
+        return GestureArmingNodeProvider(inner, userGestures) { onInputEnded?.invoke(userGestures.latestInputId) }
+            .also { a11yProvider = inner to it }
     }
 
     /**
@@ -6737,4 +6860,62 @@ internal class CloseNotifyingInputStream(
 private fun errorPageStrings(view: WebView?, url: String?) {
     if (view == null || !ErrorPage.isErrorPage(url) || !ErrorPage.isErrorPage(view.url)) return
     view.evaluateJavascript(ErrorPage.stringsScript(), null)
+}
+
+/**
+ * The on-screen keyboard's connection to a page ([PageWebView]), passing
+ * every call on to Chromium's — through [edit] for the ones Chromium
+ * turns into a trusted `keydown` in the focused frame (#348 R3-F1):
+ * text committed, composed or deleted, a key the keyboard sends, an
+ * editor action (Enter / Go / Next). Not a selection or composing-region
+ * change, a read, or a batch edit's bounds: those make no keydown.
+ */
+private class KeyboardEditRecorder(
+    target: InputConnection,
+    private val edit: (send: () -> Boolean) -> Boolean,
+) : InputConnectionWrapper(target, false) {
+    override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean =
+        edit { super.commitText(text, newCursorPosition) }
+
+    override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean =
+        edit { super.setComposingText(text, newCursorPosition) }
+
+    // The keyboard's API 33+ forms: the wrapper hands these to Chromium
+    // directly, not through the two above.
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    override fun commitText(text: CharSequence, newCursorPosition: Int, textAttribute: TextAttribute?): Boolean =
+        edit { super.commitText(text, newCursorPosition, textAttribute) }
+
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    override fun setComposingText(text: CharSequence, newCursorPosition: Int, textAttribute: TextAttribute?): Boolean =
+        edit { super.setComposingText(text, newCursorPosition, textAttribute) }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    override fun replaceText(
+        start: Int,
+        end: Int,
+        text: CharSequence,
+        newCursorPosition: Int,
+        textAttribute: TextAttribute?,
+    ): Boolean = edit { super.replaceText(start, end, text, newCursorPosition, textAttribute) }
+
+    override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean =
+        edit { super.deleteSurroundingText(beforeLength, afterLength) }
+
+    override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean =
+        edit { super.deleteSurroundingTextInCodePoints(beforeLength, afterLength) }
+
+    override fun performEditorAction(editorAction: Int): Boolean =
+        edit { super.performEditorAction(editorAction) }
+
+    override fun sendKeyEvent(event: KeyEvent): Boolean =
+        if (keyIsPageInput(
+                action = event.action,
+                isModifier = KeyEvent.isModifierKey(event.keyCode),
+            )
+        ) {
+            edit { super.sendKeyEvent(event) }
+        } else {
+            super.sendKeyEvent(event)
+        }
 }

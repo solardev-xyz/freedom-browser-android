@@ -52,8 +52,18 @@ import java.util.concurrent.ConcurrentHashMap
  * (`hasGesture`) — never one it starts on its own: a paid page setting
  * `location.href` to the next 402, and that one's to the next, would
  * otherwise spend the whole allowance in seconds, one silent payment a
- * hop (#237). And once a paid request of a site's is answered Refused,
- * that site's allowance pays nothing silently — in any tab — until the
+ * hop (#237). And the tap has to have been on the site's own page: a
+ * cross-origin iframe the user tapped (an ad allowed
+ * `allow-top-navigation-by-user-activation`) can set `top.location` to
+ * the site's priced URL, and WebView reports that as a main-frame
+ * navigation with a gesture, like the page's own link. Nothing native
+ * says which frame started it, so the top document says which input it
+ * received ([TopDocumentGesture], the #160 technique), and the gesture
+ * counts only when every input that could have lent the navigation its
+ * activation was the top document's own (#348).
+ *
+ * And once a paid request of a site's is answered Refused, that site's
+ * allowance pays nothing silently — in any tab — until the
  * user navigates to it themselves: their address on that site
  * ([navigationStarted] `byUser`), or their own Reload or Back/Forward on
  * its page ([usersStep]) — as the server may keep a refused payment's
@@ -97,7 +107,7 @@ internal class X402Flow<D : Any>(
      * URL it has been at — its start's, if known, and each server
      * redirect's (#218 R5-M1).
      */
-    private class Initiator(val byUser: Boolean, val fromOrigin: String?, val post: Boolean, val gesture: Boolean) {
+    private class Initiator(val byUser: Boolean, val fromOrigin: String?, val post: Boolean, val gesture: TopDocumentGesture?) {
         val hopOrigins = mutableListOf<String?>()
     }
 
@@ -106,7 +116,7 @@ internal class X402Flow<D : Any>(
         val value: D,
         private val byUser: Boolean,
         private val fromOrigin: String?,
-        private val gesture: Boolean,
+        private val gesture: TopDocumentGesture?,
         private val hopOrigins: List<String?>,
         /** Whether an origin was held as the 402 committed ([holds]). */
         private val held: (String) -> Boolean,
@@ -114,7 +124,11 @@ internal class X402Flow<D : Any>(
         /**
          * An allowance of [origin]'s may pay this without asking: the user
          * named the load, or [origin]'s own page started it on the user's
-         * tap (#237) — not another site's link, script or popup, nor a
+         * tap (#237), one the top document confirms it received, on a
+         * navigation it says it started itself — not a cross-origin
+         * iframe's tap navigating the top frame, nor an iframe navigating
+         * it during the user's tap on the page (#348, R5-F1) — not
+         * another site's link, script or popup, nor a
          * navigation nobody was seen starting (#218 R4-M3), nor one the
          * page started on its own (#237) — and it never left [origin] on
          * the way: a redirect through another origin is that origin's say,
@@ -124,10 +138,14 @@ internal class X402Flow<D : Any>(
          * after launch) counts every site the user hasn't gone to as held,
          * and keeps that answer even if the read-back then finds no hold,
          * so it asks once where it might not have. Fails closed on purpose:
-         * the sheet, never a silent payment (#347 R1-M2).
+         * the sheet, never a silent payment (#347 R1-M2). Suspends only
+         * while the top document's word on the tap may still come — at
+         * most [UserGestureLatch.CONFIRM_MS] from the navigation's start,
+         * which has usually passed by the commit (#348).
          */
-        fun allowanceMayPay(origin: String): Boolean =
-            !held(origin) && (byUser || (fromOrigin == origin && gesture)) && hopOrigins.all { it == origin }
+        suspend fun allowanceMayPay(origin: String): Boolean =
+            !held(origin) && hopOrigins.all { it == origin } &&
+                (byUser || (fromOrigin == origin && gesture?.confirmed() == true))
     }
 
     private val detections = HashMap<Long, Detection<D>>()
@@ -233,8 +251,9 @@ internal class X402Flow<D : Any>(
      * of an entry already in the tab's history) began, [byUser] (their
      * address, or their own pull-to-refresh Reload) or from the page of
      * [fromOrigin] on screen (its link, script or form) — with the
-     * user's [gesture] (`hasGesture`: their tap, or script run from it)
-     * or on its own; [post]: it's a form POST (or other non-GET), whose
+     * user's [gesture] (`hasGesture`: their tap, or script run from it;
+     * whether the tap was the top document's, not an iframe's, #348)
+     * or on its own (null); [post]: it's a form POST (or other non-GET), whose
      * 307/308 redirects no callback shows. Called after [superseded].
      * The user's address on a site held after a Refused payment lets its
      * allowance pay again (#237); their Reload or Back/Forward does
@@ -246,7 +265,7 @@ internal class X402Flow<D : Any>(
         fromOrigin: String?,
         url: String?,
         post: Boolean = false,
-        gesture: Boolean = false,
+        gesture: TopDocumentGesture? = null,
         lifts: Boolean = true,
     ) {
         if (lifts && byUser && url != null) originOf(url)?.let(::lift)
@@ -391,7 +410,7 @@ internal class X402Flow<D : Any>(
             detection.value,
             initiator?.byUser == true,
             initiator?.fromOrigin,
-            initiator?.gesture == true,
+            initiator?.gesture,
             initiator?.hopOrigins.orEmpty(),
             heldNow(),
         )
@@ -402,4 +421,17 @@ internal class X402Flow<D : Any>(
         epochs.remove(tab)
         pages.remove(tab)
     }
+}
+
+/**
+ * Whether the user's input behind a page's own navigation — one WebView
+ * reports with a gesture — was the top document's, as the top document
+ * itself says ([UserGestureLatch.topDocumentGesture]): not a tap in a
+ * cross-origin iframe that navigates the top frame (#348), nor the
+ * user's tap on the top page lent to a navigation an iframe started
+ * during it (R5-F1).
+ */
+internal fun interface TopDocumentGesture {
+    /** True once confirmed; false when it can't be, or isn't in time. */
+    suspend fun confirmed(): Boolean
 }

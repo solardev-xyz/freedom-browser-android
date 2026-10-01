@@ -462,6 +462,77 @@ internal fun parseTopDocumentInput(data: String?): TopDocumentInput? {
 }
 
 /**
+ * The top document's detector saw a navigation of the top frame begin
+ * (`navigate <url>`, the Navigation API's `navigate` event, and the
+ * page didn't cancel it), which Chromium fires only for a navigation
+ * the top document's own origin started — never for one a cross-origin
+ * iframe starts by setting `top.location` (#348 R5-F1, see
+ * [UserGestureLatch.onTopDocumentNavigate]). Only a cross-document
+ * `push`/`replace` is reported: never a same-document one (`pushState`,
+ * `replaceState`, a fragment, one the page `intercept()`ed), a reload or
+ * a Back/Forward, none of which reaches `shouldOverrideUrlLoading` to
+ * claim it, so its word would vouch for a cross-origin frame's later
+ * load of the same URL (#348 R6-F1).
+ */
+internal const val TOP_DOCUMENT_NAVIGATE = "navigate"
+
+/** The longest URL a [TOP_DOCUMENT_NAVIGATE] report carries; a longer one isn't reported (fail closed). */
+internal const val TOP_DOCUMENT_NAVIGATE_MAX = 8192
+
+private val TOP_DOCUMENT_NAVIGATE_RE = Regex("^$TOP_DOCUMENT_NAVIGATE (https?://\\S{1,$TOP_DOCUMENT_NAVIGATE_MAX})$")
+
+/** The URL a [TOP_DOCUMENT_NAVIGATE] report names, or `null` when [data] isn't one. */
+internal fun parseTopDocumentNavigate(data: String?): String? =
+    TOP_DOCUMENT_NAVIGATE_RE.matchEntire(data ?: return null)?.groupValues?.get(1)
+        ?.takeIf { it.length <= TOP_DOCUMENT_NAVIGATE_MAX }
+
+/**
+ * Kotlin's ask to the top document's detector, sent a moment after an
+ * input ended (`sync <id> <settleMs>`), and the detector's echo
+ * (`synced <id>`) (#348). The page's renderer thread handles input
+ * ahead of the message and ahead of a task posted after it, so a task
+ * later the renderer is past the input's own events. But not
+ * necessarily past its tap: with double-tap zoom on (a page without a
+ * `width=device-width` viewport) Chromium holds a tap's `GestureTap` —
+ * the click, which renews a frame's activation — for up to the
+ * double-tap timeout after the touch went down, counted from when the
+ * renderer acknowledged it. So the detector waits [settleMs] more
+ * (the double-tap timeout plus margin, [inputSyncSettleMs]) before it
+ * echoes: a held-back click reaches the renderer by then, and a timer
+ * that comes due runs after input already queued. The echo then says
+ * the renderer is past input `<id>` — and past any activation it gave
+ * an iframe, however long that iframe's own handlers held the thread
+ * ([UserGestureLatch.onRendererCaughtUp]).
+ */
+internal const val INPUT_SYNC = "sync"
+internal const val INPUT_SYNCED = "synced"
+
+internal fun inputSyncRequest(id: Int, settleMs: Long): String = "$INPUT_SYNC $id $settleMs"
+
+/**
+ * How long after an input ends its [INPUT_SYNC] is sent: margin for the
+ * input's last events to reach the renderer thread ahead of it, over
+ * their own pipe.
+ */
+internal const val INPUT_SYNC_DELAY_MS = 100L
+
+/**
+ * How long the detector waits, once the renderer is past an input's own
+ * events, before it echoes [INPUT_SYNCED]: Chromium's double-tap timeout
+ * ([doubleTapTimeoutMs], `ViewConfiguration.getDoubleTapTimeout()`, what
+ * its gesture detector holds a tap for) plus [INPUT_SYNC_DELAY_MS] for the
+ * held-back click to reach the renderer.
+ */
+internal fun inputSyncSettleMs(doubleTapTimeoutMs: Int): Long =
+    doubleTapTimeoutMs.toLong().coerceIn(0L, 5_000L) + INPUT_SYNC_DELAY_MS
+
+private val INPUT_SYNCED_RE = Regex("^$INPUT_SYNCED (\\d{1,9})$")
+
+/** The input id an [INPUT_SYNCED] echo names, or `null` when [data] isn't one. */
+internal fun parseInputSynced(data: String?): Int? =
+    INPUT_SYNCED_RE.matchEntire(data ?: return null)?.groupValues?.get(1)?.toIntOrNull()
+
+/**
  * A frame's report that media in its document is now audible (#91):
  * playing, not muted by the page, volume above zero. Sent on a change
  * only; [AUDIO_SILENT] when that stops. See [TabAudioFrames].
@@ -576,6 +647,13 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * an iframe is dispatched in the iframe's document only, so this is how
  * Kotlin tells a tap on the top page from one on an embedded frame that
  * navigates the top frame ([UserGestureLatch]).
+ *
+ * **Renderer sync** (#348): in the main frame, a `sync <id>` ask
+ * ([INPUT_SYNC]), sent by Kotlin just after an input ends, is echoed as
+ * `synced <id>` a task and then `<settleMs>` later (the double-tap
+ * timeout a held-back tap waits out), before first paint too — the earliest the
+ * renderer is known to be past that input, and so past any activation
+ * it gave an iframe ([UserGestureLatch.onRendererCaughtUp]).
  *
  * **Dormant until first paint.** In the main frame it posts
  * [BOTTOM_UI_READY] (so Kotlin holds a reply channel for the document)
@@ -785,7 +863,48 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   said('pointerdown');
   said('keydown');
   said('click');
-  var T = null, started = false, ASK = /^probe ([0-9a-f]{1,64})$/, THEME_ASK = /^theme ([0-9a-f]{1,64})$/,
+  // A navigation of the top frame its own origin started (#348 R5-F1):
+  // Chromium fires `navigate` for no navigation a cross-origin frame
+  // starts. Said a task later, once the page's own listeners have had
+  // their chance to cancel it. Only a cross-document load of a new entry
+  // is said (#348 R6-F1): Kotlin matches the word to the next
+  // `shouldOverrideUrlLoading` for its URL, which a same-document one
+  // (pushState, replaceState, a fragment, one the page intercept()ed), a
+  // reload or a Back/Forward never reaches, so its word would be left
+  // over for a cross-origin frame's load of that URL to claim. Nor is a
+  // POST form's submission (`formData` set, #382 R1-M1): WebView never
+  // calls `shouldOverrideUrlLoading` for a POST navigation either.
+  var NAV = w.navigation, NEP = proto(w.NavigateEvent), NDP = proto(w.NavigationDestination),
+      navDest = prop(NEP, 'destination'), navType = prop(NEP, 'navigationType'), navHash = prop(NEP, 'hashChange'),
+      navForm = prop(NEP, 'formData'),
+      destUrl = prop(NDP, 'url'), destSame = prop(NDP, 'sameDocument'),
+      navTransition = prop(proto(w.Navigation), 'transition'), entryChanges = 0;
+  if (NAV && onEl && NEP && NDP) {
+    // A same-document commit (an intercept()ed navigation's included)
+    // changes the current entry; a cross-document one doesn't before its
+    // new document replaces this one.
+    onEl(NAV, 'currententrychange', function () { entryChanges++; });
+    onEl(NAV, 'navigate', function (e) {
+      if (!e.isTrusted) return;
+      var u = null, seen = entryChanges;
+      try {
+        var dest = navDest(e), ty = navType(e);
+        if (destSame(dest) !== false || navHash(e) !== false || (ty !== 'push' && ty !== 'replace')) return;
+        if (navForm(e) != null) return;
+        u = destUrl(dest);
+      } catch (x) { return; }
+      if (typeof u !== 'string' || u.length > $TOP_DOCUMENT_NAVIGATE_MAX) return;
+      setT(function () {
+        if (evPrevented(e) || entryChanges !== seen) return;
+        // An intercept()ed navigation whose commit is still held back.
+        var tr = 1;
+        try { tr = navTransition(NAV); } catch (x) { return; }
+        if (tr != null) return;
+        port.postMessage('$TOP_DOCUMENT_NAVIGATE ' + u);
+      }, 0);
+    });
+  }
+  var T = null, started = false, SYNC = /^$INPUT_SYNC ([0-9]{1,9}) ([0-9]{1,4})$/, ASK = /^probe ([0-9a-f]{1,64})$/, THEME_ASK = /^theme ([0-9a-f]{1,64})$/,
       GO = /^$PAGE_REISSUE_PREFIX([0-9a-f]{1,64}) (https?:\/\/\S+)$/i, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
   var gcs = w.getComputedStyle, MO = w.MutationObserver,
       RO = w.ResizeObserver, IO = w.IntersectionObserver;
@@ -980,6 +1099,15 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     var data = null;
     try { var own = e ? gopd(e, 'data') : null; data = own ? own.value : e ? dom.data(e) : null; } catch (x) {}
     if (typeof data !== 'string') return;
+    var y = tc.exec(SYNC, data);
+    if (y) {
+      // A task later, input the renderer already had has run (#348);
+      // then wait out a tap Chromium holds back for a double tap, so its
+      // click (queued input, ahead of a timer) has run too.
+      var id = y[1], settle = +y[2];
+      setT(function () { setT(function () { port.postMessage('$INPUT_SYNCED ' + id); }, settle); }, 0);
+      return;
+    }
     var g = go ? tc.exec(GO, data) : null;
     if (g) {
       if (started && g[1] === T) {

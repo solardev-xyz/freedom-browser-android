@@ -234,13 +234,15 @@ object X402Payments {
      * [tab] began a navigation to [url] (null: a reload or history step)
      * (after [onNavigationSuperseded]): [byUser] — the address they
      * named, their pull-to-refresh Reload — or the page on screen's, at
-     * [pageUrl], with the user's [gesture] or on its own. Only these may
-     * let a site's allowance pay without asking (#218 R4-M3) — the page's
-     * only with the user's gesture (#237) — and only while its redirects
+     * [pageUrl], with the user's [gesture] or on its own (null). Only these
+     * may let a site's allowance pay without asking (#218 R4-M3) — the
+     * page's only with the user's gesture (#237), and only one the top
+     * document confirms was its own, not a tapped iframe's (#348) — and
+     * only while its redirects
      * stay on that site (#218 R5-M1). A private tab's never lifts a hold:
      * it doesn't write the x402 store (#347).
      */
-    fun onNavigationStarted(tab: BrowserState, byUser: Boolean, pageUrl: String?, url: String?, gesture: Boolean = false) =
+    internal fun onNavigationStarted(tab: BrowserState, byUser: Boolean, pageUrl: String?, url: String?, gesture: TopDocumentGesture? = null) =
         flow.navigationStarted(
             tab.id, byUser, if (byUser) null else pageUrl?.let(::providerOriginKey), url,
             gesture = gesture, lifts = !tab.private,
@@ -282,12 +284,14 @@ object X402Payments {
         val committed = flow.committed(tab.id, url) ?: return
         if (url == null || view == null || tab.private) return
         val detection = committed.value
-        // Another site's link, script or popup can't spend this site's allowance (#218 R4-M3).
-        val allowanceMayPay = committed.allowanceMayPay(detection.origin)
         val doc = EthereumProviders.currentDocument(tab.id)
         val webView = WeakReference(view)
         scope.launch {
             try {
+                // Another site's link, script or popup can't spend this site's allowance (#218
+                // R4-M3), nor a tapped iframe's navigation of the top frame: may wait, briefly, for
+                // the top document to confirm the tap was its own (#348).
+                val allowanceMayPay = committed.allowanceMayPay(detection.origin)
                 handle(tab, doc, webView, detection, allowanceMayPay)
             } catch (e: CancellationException) {
                 throw e
