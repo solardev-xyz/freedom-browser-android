@@ -405,6 +405,8 @@ internal class TabScriptlets(
     webView: WebView,
     private val private: Boolean,
     private val source: ScriptletSource = AdblockScriptletSource,
+    private val maxHosts: Int = MAX_HOSTS,
+    private val maxChars: Int = MAX_CHARS,
 ) {
     private val view = WeakReference(webView)
     private val main = Handler(Looper.getMainLooper())
@@ -437,19 +439,17 @@ internal class TabScriptlets(
         val generation = source.generation
         // The twin first, so the host asked for is the most recently
         // needed one if the tab's budget runs out.
-        val hosts = listOfNotNull(scriptletRedirectTwin(host), host).filter { h ->
-            // Nothing to register: no rules for the host (or blocking off).
-            current[h] != generation && (current[h] != null || source.hasScriptlets(h))
-        }
-        if (hosts.isEmpty()) return
+        val hosts = listOfNotNull(scriptletRedirectTwin(host), host)
+        // Nothing to do if both are in place, or have no rules (or blocking is off).
+        if (hosts.none { h -> current[h] != generation && (current[h] != null || source.hasScriptlets(h)) }) return
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            hosts.forEach(::ensureHost)
+            ensureHosts(hosts)
             return
         }
         val done = CountDownLatch(1)
         main.post {
             try {
-                hosts.forEach(::ensureHost)
+                ensureHosts(hosts)
             } finally {
                 done.countDown()
             }
@@ -465,30 +465,42 @@ internal class TabScriptlets(
     fun ensure(url: String?) {
         if (closed || url == null) return
         val host = scriptletHostOf(url) ?: return
-        scriptletRedirectTwin(host)?.let(::ensureHost)
-        ensureHost(host)
+        ensureHosts(listOfNotNull(scriptletRedirectTwin(host), host))
     }
 
     /**
-     * From `shouldInterceptRequest`, for a frame's subresource: its
-     * `Referer` names a document already live in this tab. If that host
-     * has rules but no script here, its document arrived by a route
-     * nothing saw — a frame redirected to another host (WebView doesn't
-     * ask `shouldInterceptRequest` about a redirect hop, nor
+     * Main thread: register [hosts] — a host and its twin, the one asked
+     * for last — none of them dropped to make room for another (R2-F1).
+     * One already registered is marked as needed now first, so it isn't
+     * the least recently needed entry when its twin is added.
+     */
+    private fun ensureHosts(hosts: List<String>) {
+        val keep = hosts.toSet()
+        hosts.forEach { registered[it] }
+        hosts.forEach { ensureHost(it, keep) }
+    }
+
+    /**
+     * From `shouldInterceptRequest`, for a subresource with [headers]: if
+     * its `Referer` names a document (see [refererNamesDocument] — not a
+     * stylesheet's font or image, whose `Referer` is the stylesheet)
+     * whose host has rules but no script here, that document arrived by
+     * a route nothing saw — a frame redirected to another host (WebView
+     * doesn't ask `shouldInterceptRequest` about a redirect hop, nor
      * `shouldOverrideUrlLoading` about a subframe's) — so register it
      * now, for its next load: a reload, or the frame loading again.
      * Doesn't wait.
      */
-    fun noteReferer(referer: String?) {
-        if (closed || referer == null || source.firstBuildPending) return
-        val host = scriptletHostOf(referer) ?: return
+    fun noteReferer(headers: Map<String, String>?) {
+        if (closed || source.firstBuildPending || !refererNamesDocument(headers)) return
+        val host = refererOf(headers)?.let(::scriptletHostOf) ?: return
         val generation = source.generation
         if (current[host] == generation) return
         if (current[host] == null && !source.hasScriptlets(host)) return
-        main.post { ensureHost(host) }
+        main.post { ensureHost(host, setOf(host)) }
     }
 
-    private fun ensureHost(host: String) {
+    private fun ensureHost(host: String, keep: Set<String>) {
         val webView = view.get() ?: return
         if (closed) return
         val generation = source.generation
@@ -517,15 +529,15 @@ internal class TabScriptlets(
         have?.handler?.let { runCatching { it.remove() } }
         registered[host] = Registration(handler, script, generation)
         current[host] = generation
-        trim(host)
+        trim(keep)
     }
 
-    private fun trim(keep: String) {
+    private fun trim(keep: Set<String>) {
         var chars = registered.values.sumOf { it.script.length }
         val it = registered.entries.iterator()
-        while ((registered.size > MAX_HOSTS || chars > MAX_CHARS) && it.hasNext()) {
+        while ((registered.size > maxHosts || chars > maxChars) && it.hasNext()) {
             val e = it.next()
-            if (e.key == keep) continue
+            if (e.key in keep) continue
             chars -= e.value.script.length
             runCatching { e.value.handler.remove() }
             current.remove(e.key)
@@ -543,7 +555,7 @@ internal class TabScriptlets(
         if (closed) return
         val hosts = registered.keys.toList() + waiting
         waiting.clear()
-        for (host in hosts) ensureHost(host)
+        for (host in hosts) ensureHost(host, setOf(host))
     }
 
     /** The WebView is going: forget it. Main thread. */
@@ -623,6 +635,27 @@ internal object AdblockScriptletSource : ScriptletSource {
     override val firstBuildPending: Boolean get() = Adblock.firstBuildPending
     override fun awaitFirstBuild() = Adblock.awaitFirstBuildBlocking()
 }
+
+/**
+ * Does a subresource request's `Referer` name the document that made it
+ * ([TabScriptlets.noteReferer])? Only for the `Sec-Fetch-Dest` kinds a
+ * document's own elements and scripts fetch. Not `font`, `image` or
+ * `style`: CSS fetches those too (`@font-face`, `background`,
+ * `@import`), and their `Referer` is then the stylesheet's URL — often
+ * a CDN's, not a document's. A worker's own fetches name the worker's
+ * script, which is same-origin with the document that started it. No
+ * `Sec-Fetch-Dest` at all: not trusted.
+ */
+internal fun refererNamesDocument(headers: Map<String, String>?): Boolean {
+    val dest = headers?.entries?.firstOrNull { it.key.equals("Sec-Fetch-Dest", ignoreCase = true) }
+        ?.value?.trim()?.lowercase() ?: return false
+    return dest in REFERER_DOCUMENT_DESTS
+}
+
+private val REFERER_DOCUMENT_DESTS = setOf(
+    "script", "empty", "iframe", "frame", "embed", "object", "audio", "video", "track",
+    "manifest", "worker", "sharedworker", "serviceworker",
+)
 
 /**
  * The host a document asked for on [host] most often lands on instead

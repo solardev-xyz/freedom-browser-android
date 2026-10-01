@@ -3718,8 +3718,9 @@ private fun buildRefreshableWebView(
                     }
                     // A document live in the tab whose host never got its
                     // scriptlets (a frame redirected there): in place for
-                    // its next load (#318).
-                    scriptlets?.noteReferer(refererOf(request.requestHeaders))
+                    // its next load (#318). Only a request the document
+                    // itself made names it (see [refererNamesDocument]).
+                    scriptlets?.noteReferer(request.requestHeaders)
                     if (url != null &&
                         Adblock.shouldBlock(
                             url,

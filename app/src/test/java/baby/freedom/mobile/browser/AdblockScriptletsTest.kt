@@ -356,6 +356,24 @@ class AdblockScriptletsTest {
     }
 
     /**
+     * Only a request the document itself made has the document as its
+     * `Referer` (R2-M1): a stylesheet's font, image or `@import` names
+     * the stylesheet, and a request with no `Sec-Fetch-Dest` proves
+     * nothing.
+     */
+    @Test
+    fun `a Referer names a document only for what the document fetches`() {
+        for (dest in listOf("script", "empty", "iframe", "video", "worker", "Script")) {
+            assertTrue(dest, refererNamesDocument(mapOf("sec-fetch-dest" to dest, "Referer" to "https://a.example/")))
+        }
+        for (dest in listOf("font", "image", "style", "")) {
+            assertFalse(dest, refererNamesDocument(mapOf("Sec-Fetch-Dest" to dest, "Referer" to "https://cdn.example/a.css")))
+        }
+        assertFalse(refererNamesDocument(mapOf("Referer" to "https://a.example/")))
+        assertFalse(refererNamesDocument(null))
+    }
+
+    /**
      * The lists the app ships: uBlock's YouTube rules come through, in
      * the calls the ad-pruning needs, and none are left to an untrusted
      * list. Prints the counts and how long the build takes here.

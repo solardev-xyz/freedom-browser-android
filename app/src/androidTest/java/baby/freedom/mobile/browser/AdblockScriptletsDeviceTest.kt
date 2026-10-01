@@ -204,7 +204,8 @@ class AdblockScriptletsDeviceTest {
         assertEquals("true", frame.getString("flag"))
         assertEquals("{\"keep\":2}", frame.getString("pruned"))
         assertEquals("{\"no\":true}", frame.getString("fetched"))
-        assertEquals(setOf("a.test", "b.test"), tab.hosts)
+        // Each with its www. twin (a.test's rules cover its subdomains).
+        assertEquals(setOf("a.test", "www.a.test", "b.test", "www.b.test"), tab.hosts)
     }
 
     @Test
@@ -235,5 +236,34 @@ class AdblockScriptletsDeviceTest {
         load("http://b.test/")
         assertEquals("\"b:true\"", js("document.title"))
         assertNotNull(tab.hosts)
+    }
+
+    /**
+     * A tab at its budget (here 3 hosts) whose oldest entry is the host
+     * a document is now asked for, its twin already dropped: adding the
+     * twin back must not push that host out (R2-F1). Asked for from a
+     * network thread, as the interceptor does.
+     */
+    @Test
+    fun aDocumentRequestNeverDropsItsOwnHostForItsTwin() {
+        val every = object : ScriptletSource {
+            override val generation = 0
+            override fun hasScriptlets(host: String) = true
+            override fun script(host: String, private: Boolean) = "/* $host */"
+        }
+        lateinit var small: TabScriptlets
+        instrumentation.runOnMainSync {
+            small = TabScriptlets(webView, private = false, source = every, maxHosts = 3)
+            small.ensure("http://h1.test/")
+            small.ensure("http://h2.test/")
+        }
+        // www.h1.test, the oldest, made room for h2.test's pair.
+        assertEquals(setOf("h1.test", "www.h2.test", "h2.test"), small.hosts)
+        small.ensureFromNetworkThread("http://h1.test/")
+        val hosts = small.hosts
+        assertTrue("h1.test in $hosts", "h1.test" in hosts)
+        assertTrue("www.h1.test in $hosts", "www.h1.test" in hosts)
+        assertEquals(3, hosts.size)
+        instrumentation.runOnMainSync { small.close() }
     }
 }
