@@ -517,4 +517,53 @@ class DownloadResumeDeviceTest {
         assertEquals(DownloadStatus.CANCELLED, over.status)
         assertFalse(partialOf(id).exists())
     }
+    /**
+     * A row paused under a version that kept bidi/format characters in
+     * names (`x<U+202E>fdp.bin` reads as `xnib.pdf`) is cleaned when a
+     * new process sweeps it, and resumes — and is saved — under the
+     * cleaned name, not the disguised one.
+     */
+    @Test
+    fun aPausedRowFromBeforeNamesWereCleanedResumesUnderACleanName() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = FileServer({ body }, { etag }, ranges = true)
+            server.start()
+            val url = server.url("/f.bin").toString()
+            val dao = baby.freedom.mobile.data.AppDatabase.get(context).downloads()
+            val stem = "legacy-${System.nanoTime()}"
+            val id = dao.insert(
+                DownloadEntry(
+                    fileName = "$stem\u202Efdp.bin",
+                    displayUrl = url,
+                    sourceUrl = url,
+                    mimeType = "application/octet-stream",
+                    contentUri = null,
+                    status = DownloadStatus.PAUSED,
+                    totalBytes = body.size.toLong(),
+                    receivedBytes = 1000,
+                    error = null,
+                    startedAt = System.currentTimeMillis(),
+                    finishedAt = null,
+                    validator = etag,
+                    resumable = true,
+                ),
+            )
+            rows += id
+            partialOf(id).apply { parentFile!!.mkdirs() }.writeBytes(body.copyOf(1000))
+
+            val fresh = DownloadManager.newProcessForTest(context)
+            val swept = await("$stem.x") { it.id == id && it.fileName == "${stem}_fdp.bin" }
+            assertEquals(DownloadStatus.PAUSED, swept.status)
+            fresh.resume(id)
+            val done = await("$stem.x") { it.id == id && it.status == DownloadStatus.COMPLETED }
+            assertEquals("${stem}_fdp.bin", done.fileName)
+            assertArrayEquals(body, savedBytes(done))
+            val shown = resolver.query(
+                Uri.parse(done.contentUri!!),
+                arrayOf(android.provider.MediaStore.MediaColumns.DISPLAY_NAME), null, null, null,
+            )!!.use { it.moveToFirst(); it.getString(0) }
+            assertFalse(shown, shown.contains('\u202E'))
+            assertTrue(shown, shown.startsWith("${stem}_fdp"))
+        }
+    }
 }

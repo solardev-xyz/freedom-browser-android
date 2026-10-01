@@ -258,14 +258,7 @@ private fun lastPathSegment(url: String): String? {
  */
 internal fun sanitizeFileName(raw: String): String {
     val base = raw.substringAfterLast('/').substringAfterLast('\\')
-    val out = StringBuilder(base.length)
-    var i = 0
-    while (i < base.length) {
-        val cp = base.codePointAt(i)
-        i += Character.charCount(cp)
-        if (fileNameCharIsHidden(cp)) out.append('_') else out.appendCodePoint(cp)
-    }
-    return out.toString()
+    return cleanStoredFileName(base)
         .trim()
         .trimStart('.')
         .trim()
@@ -296,11 +289,80 @@ private fun clampFileName(name: String): String {
     if (name.length <= MAX_FILE_NAME_CHARS) return name
     val dot = name.lastIndexOf('.')
     val ext = if (dot > 0 && name.length - dot <= 16) name.substring(dot) else ""
-    // Never cut between the two halves of a surrogate pair: a lone one
-    // can't be encoded, and the name would get a `?` where an emoji was.
-    var keep = MAX_FILE_NAME_CHARS - ext.length
-    if (keep > 0 && name[keep - 1].isHighSurrogate()) keep--
-    return name.take(keep) + ext
+    return name.take(clusterSafeCut(name, MAX_FILE_NAME_CHARS - ext.length)) + ext
+}
+
+/**
+ * [at], moved back so cutting [s] there splits no character a reader
+ * sees as one: not the two halves of a surrogate pair (a lone one can't
+ * be encoded, and the name would get a `?` where an emoji was), and not
+ * a cluster — a ZWJ sequence (👨‍👩‍👧 keeping only 👨‍), a base and its
+ * combining marks, variation selector, skin tone or emoji tags (🏴 with
+ * its subdivision tags cut off is a plain black flag), or a flag's two
+ * regional indicators. By hand rather than with `BreakIterator`, whose
+ * JDK version knows nothing of emoji sequences. If the whole kept part
+ * is one cluster, only the surrogate rule holds: a name is never cut to
+ * nothing (or to a bare `.ext`, a hidden file).
+ */
+internal fun clusterSafeCut(s: String, at: Int): Int {
+    if (at <= 0 || at >= s.length) return at.coerceIn(0, s.length)
+    val pairSafe = if (s[at - 1].isHighSurrogate() && s[at].isLowSurrogate()) at - 1 else at
+    var k = pairSafe
+    while (k > 0) {
+        val next = s.codePointAt(k)
+        val prev = s.codePointBefore(k)
+        val inside = continuesCluster(next) || prev == ZWJ ||
+            isRegionalIndicator(next) && regionalIndicatorsBefore(s, k) % 2 == 1
+        if (!inside) break
+        k -= Character.charCount(prev)
+    }
+    return if (k > 0) k else pairSafe
+}
+
+private const val ZWJ = 0x200D
+
+/** Does [cp] attach to the character before it (grapheme `Extend`-like)? */
+private fun continuesCluster(cp: Int): Boolean =
+    cp == ZWJ || cp == 0x200C ||
+        cp in 0xFE00..0xFE0F || cp in 0xE0100..0xE01EF || // variation selectors
+        cp in 0x1F3FB..0x1F3FF || // skin tones
+        cp in 0xE0020..0xE007F || // emoji tags
+        when (Character.getType(cp).toByte()) {
+            Character.NON_SPACING_MARK, Character.ENCLOSING_MARK, Character.COMBINING_SPACING_MARK -> true
+            else -> false
+        }
+
+private fun isRegionalIndicator(cp: Int) = cp in 0x1F1E6..0x1F1FF
+
+/** How many regional indicators run back from just before [end]. */
+private fun regionalIndicatorsBefore(s: String, end: Int): Int {
+    var n = 0
+    var i = end
+    while (i > 0) {
+        val cp = s.codePointBefore(i)
+        if (!isRegionalIndicator(cp)) break
+        n++
+        i -= Character.charCount(cp)
+    }
+    return n
+}
+
+/**
+ * [name] with every [fileNameCharIsHidden] character replaced by `_`
+ * and nothing else changed — [sanitizeFileName]'s core, and how a name
+ * stored before it replaced format characters (a paused row from an
+ * older version) is cleaned when that row is loaded again, without
+ * touching a name the user picked any further.
+ */
+internal fun cleanStoredFileName(name: String): String {
+    val out = StringBuilder(name.length)
+    var i = 0
+    while (i < name.length) {
+        val cp = name.codePointAt(i)
+        i += Character.charCount(cp)
+        if (fileNameCharIsHidden(cp)) out.append('_') else out.appendCodePoint(cp)
+    }
+    return out.toString()
 }
 
 /** "1.4 MB" — the unit ladder the downloads list shows sizes in. */

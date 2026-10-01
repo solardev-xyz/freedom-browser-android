@@ -286,7 +286,13 @@ class DownloadManager private constructor(context: Context) {
                 )
             }
         }
-        val pausedRows = dao.withStatus(DownloadStatus.PAUSED)
+        // A paused row from before names were cleaned of bidi/format
+        // characters keeps the name it was listed under — and is saved
+        // under it on resume — so it is cleaned here, before either.
+        val pausedRows = dao.withStatus(DownloadStatus.PAUSED).map { row ->
+            val clean = cleanStoredFileName(row.fileName)
+            if (clean == row.fileName) row else row.copy(fileName = clean).also { dao.update(it) }
+        }
         val paused = pausedRows.mapTo(HashSet()) { it.id }
         for (file in partialDir.listFiles().orEmpty()) {
             val id = file.name.removeSuffix(PARTIAL_SUFFIX).toLongOrNull()
@@ -834,6 +840,12 @@ class DownloadManager private constructor(context: Context) {
     ) {
         val dao = daoFor(id)
         var entry = dao.get(id) ?: return
+        if (resuming) {
+            // The startup sweep cleaned every paused row it found; this
+            // one too, should one have slipped past it.
+            val clean = cleanStoredFileName(entry.fileName)
+            if (clean != entry.fileName) entry = entry.copy(fileName = clean).also { dao.update(it) }
+        }
         val partial = partialFile(id)
         var pending: Uri? = null
         // Set once the file is public: from then on it's the user's

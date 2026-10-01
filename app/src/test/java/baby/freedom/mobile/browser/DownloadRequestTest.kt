@@ -200,6 +200,40 @@ class DownloadRequestTest {
     }
 
     @Test
+    fun `clamping never splits a grapheme cluster`() {
+        // 116 chars are kept before ".txt"; each case puts the cut inside a cluster.
+        fun clamp(prefix: Int, cluster: String) =
+            downloadFileName(null, "https://x.com/" + "a".repeat(prefix) + cluster + "b".repeat(200) + ".txt", null)
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67" // 👨‍👩‍👧, 8 chars
+        for (prefix in 109..115) assertEquals("a".repeat(prefix) + ".txt", clamp(prefix, family))
+        assertEquals("a".repeat(108) + family + ".txt", clamp(108, family))
+        val scotland = "\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74\uDB40\uDC7F"
+        for (prefix in 103..115) assertEquals("a".repeat(prefix) + ".txt", clamp(prefix, scotland))
+        val thumbs = "\uD83D\uDC4D\uD83C\uDFFD" // 👍🏽
+        assertEquals("a".repeat(114) + ".txt", clamp(114, thumbs))
+        // Two flags back to back: the cut lands between the halves of the second.
+        val flags = "\uD83C\uDDE9\uD83C\uDDEA\uD83C\uDDEB\uD83C\uDDF7" // 🇩🇪🇫🇷
+        assertEquals("a".repeat(110) + "\uD83C\uDDE9\uD83C\uDDEA.txt", clamp(110, flags))
+        val accented = "e\u0301\u0301" // é with two marks
+        assertEquals("a".repeat(114) + ".txt", clamp(114, accented))
+    }
+
+    @Test
+    fun `a name that is one long cluster is still cut, never emptied`() {
+        val name = downloadFileName(null, "https://x.com/e" + "\u0301".repeat(300) + ".txt", null)
+        assertEquals("e" + "\u0301".repeat(115) + ".txt", name)
+    }
+
+    @Test
+    fun `a stored name is cleaned of hidden characters and nothing else`() {
+        assertEquals("invoice_fdp.apk", cleanStoredFileName("invoice\u202Efdp.apk"))
+        // What a picker named stays as it was otherwise: leading dot, spaces.
+        assertEquals(".notes _x .txt", cleanStoredFileName(".notes \u200Bx .txt"))
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67.png"
+        assertEquals(family, cleanStoredFileName(family))
+    }
+
+    @Test
     fun `overlong names are clamped keeping the extension`() {
         val name = downloadFileName(null, "https://x.com/" + "a".repeat(300) + ".tar.gz", null)
         assertEquals(120, name.length)
