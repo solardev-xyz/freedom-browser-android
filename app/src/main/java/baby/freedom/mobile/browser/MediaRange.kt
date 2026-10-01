@@ -1,12 +1,12 @@
 package baby.freedom.mobile.browser
 
-import java.io.IOException
 import java.io.InputStream
 
 /**
  * How the interceptor answers a media request's `Range` header against a
- * buffered body of [total] bytes (#355). The header is page-controlled —
- * any `fetch()` from a dweb page can set it — so nothing here may throw.
+ * body of [total] bytes when the gateway ignored the header and sent the
+ * whole body ([mediaReplyFor]). The header is page-controlled — any
+ * `fetch()` from a dweb page can set it — so nothing here may throw.
  */
 internal sealed class ByteRangeAnswer {
     /** No usable range: the whole body, `200`. */
@@ -61,196 +61,228 @@ internal fun byteRangeFor(header: String?, total: Long): ByteRangeAnswer {
 }
 
 /**
- * A buffered media body (#355): [size] bytes kept as the arrays they were
- * read into, in order, so a body of unknown length never needs a joined
- * copy (which would need its whole size a second time, and could find no
- * room for it after the body was already read). [held] is what the
- * arrays take, at most one partly-filled [READ_CHUNK] more than [size].
+ * How a media request's gateway answer is handed to the WebView: the
+ * status, reason and headers of the reply, and which bytes of the
+ * gateway's body make up its body — [skip] bytes dropped first, then at
+ * most [length] (null: the rest) passed on; none at all when [empty].
  */
-internal class MediaBytes(private val chunks: List<ByteArray>, val size: Long) {
-    val held: Long = chunks.sumOf { it.size.toLong() }
-
-    init {
-        require(size in 0..held)
-    }
-
-    /** Bytes [start] until [start] + [length], both inside the body, as a stream over the arrays. */
-    fun stream(start: Long = 0, length: Long = size - start): InputStream {
-        require(start >= 0 && length >= 0 && start + length <= size)
-        val parts = ArrayList<InputStream>()
-        var at = 0L // offset of the current array in the body
-        val end = start + length
-        for (chunk in chunks) {
-            val chunkEnd = minOf(at + chunk.size, size)
-            val from = maxOf(start, at)
-            val to = minOf(end, chunkEnd)
-            if (from < to) {
-                parts += java.io.ByteArrayInputStream(chunk, (from - at).toInt(), (to - from).toInt())
-            }
-            at += chunk.size
-            if (at >= end) break
-        }
-        return java.io.SequenceInputStream(java.util.Collections.enumeration(parts))
-    }
-
-    /** The whole body as one array (a copy, for tests). */
-    fun toByteArray(): ByteArray = stream().readBytes()
-}
-
-/** What [readBounded] made of a body. */
-internal sealed class BoundedRead {
-    /** The whole body; exactly [MediaBytes.held] bytes of the budget are held for it. */
-    class Bytes(val body: MediaBytes) : BoundedRead()
-
-    /**
-     * Never worth buffering: past the limit, or longer than its announced
-     * length (a body that doesn't match its own `Content-Length` will do
-     * so again). Nothing held.
-     */
-    object TooLarge : BoundedRead()
-
-    /**
-     * Within the limit, but the budget had no room for it right now. Only
-     * answered when a reservation fails *before* the bytes it was for are
-     * read, never once the whole body is in hand. Nothing held.
-     */
-    object NoRoom : BoundedRead()
-}
-
-private const val READ_CHUNK = 64 * 1024
+internal data class MediaReply(
+    val status: Int,
+    val reason: String,
+    val headers: Map<String, String>,
+    val skip: Long = 0,
+    val length: Long? = null,
+    val empty: Boolean = false,
+)
 
 /**
- * All of [input] if it fits in [limit] bytes and in the memory budget
- * behind [reserve]/[release] (#355). Every byte array is reserved before
- * it is allocated, so parallel reads together can't outgrow the budget:
+ * The reply to a media request that sent [rangeHeader] (null: none), for
+ * the gateway's answer [status]/[reason] with [headers] (already filtered
+ * by `gatewayResponseHeaders`, so without a `Content-Length`) and a body
+ * of [contentLength] bytes (negative: unknown).
  *
- * - [expected] (the announced length, or negative if unknown) within the
- *   limit is reserved up front and read straight into one array of that
- *   size, so there's no growth or copy. A body shorter than announced
- *   keeps that array (holding its unused tail); one longer is
- *   [BoundedRead.TooLarge];
- * - an unknown length is read in [READ_CHUNK]s, each reserved first, and
- *   kept as those chunks ([MediaBytes]), so nothing has to be reserved
- *   once the end is reached; it gives up one chunk past [limit]. When a
- *   full chunk's successor can't be reserved, one byte is read to tell
- *   "more to come" ([BoundedRead.NoRoom]) from "that was the end" (the
- *   body, with no reservation needed — R3-M1: a body that is an exact
- *   multiple of [READ_CHUNK] would otherwise be thrown away whole) —
- *   unless no chunk was read yet, which is [BoundedRead.NoRoom] at once
- *   (R4-M3: the body is streamed rather than waiting on a byte). The
- *   last chunk is trimmed only if [reserveFree] — which must never evict
- *   a buffered body — has room for its copy (R3-M2): saving under one
- *   chunk is never worth a body that would then be downloaded again.
+ * The request's Range header went to the gateway, so its answer is
+ * streamed as it is: a `206` keeps its `Content-Range` and gets its
+ * `Content-Length` back, which Chromium's media loader sizes the resource
+ * by. Only when the gateway ignored the header — a whole-body `200` of a
+ * known length to a ranged request — is the slice cut here, from the
+ * stream itself ([skip]/[length]) rather than from a buffered copy, so no
+ * body is ever held in memory, however large. A `200` of unknown length
+ * can't be sliced (there's no total for a `Content-Range`) and is passed
+ * on whole, as is every other status.
  *
- * So a body read to its end is never thrown away for want of room (R2-M1):
- * that would leave it unbuffered, and every later Range request for it
- * would download it in full again before streaming.
- *
- * On [BoundedRead.Bytes] the reservation left is exactly its
- * [MediaBytes.held]; on any other answer, or a thrown [IOException],
- * nothing is left reserved.
+ * Nor is a `200` sliced when the request carried `If-Range` ([ifRange]):
+ * that header went to the gateway too, and a whole `200` is then its
+ * answer that the validator no longer matches — the representation
+ * changed (an ENS name or feed now pointing at new content), so the
+ * client must get the new body whole, not a `206` of new bytes it would
+ * splice onto its old copy (RFC 9110 §13.1.5). Passing it on whole is
+ * right even from a gateway that ignores both headers: a server may
+ * always answer a range with the full `200`.
  */
-@Throws(IOException::class)
-internal fun readBounded(
-    input: InputStream,
-    limit: Int,
-    expected: Long,
-    reserve: (Long) -> Boolean,
-    release: (Long) -> Unit,
-    reserveFree: (Long) -> Boolean,
-): BoundedRead {
-    if (expected > limit) return BoundedRead.TooLarge
-    var held = 0L
-    try {
-        if (expected >= 0) {
-            if (!reserve(expected)) return BoundedRead.NoRoom
-            held = expected
-            val out = ByteArray(expected.toInt())
-            var n = 0
-            while (n < out.size) {
-                val r = input.read(out, n, out.size - n)
-                if (r < 0) break
-                n += r
+internal fun mediaReplyFor(
+    rangeHeader: String?,
+    status: Int,
+    reason: String,
+    headers: Map<String, String>,
+    contentLength: Long,
+    ifRange: Boolean = false,
+): MediaReply {
+    val length = if (contentLength >= 0) contentLength.toString() else null
+    return when {
+        status == 206 -> MediaReply(
+            status, reason,
+            headers.with("Accept-Ranges", "bytes").let { h -> length?.let { h.with("Content-Length", it) } ?: h },
+        )
+        status != 200 || contentLength < 0 -> MediaReply(status, reason, headers)
+        else -> {
+            val total = contentLength
+            val whole = headers.with("Accept-Ranges", "bytes")
+            // A Range the gateway answered whole: sliced here — unless
+            // the whole answer is If-Range's "changed", meant whole.
+            val range = if (rangeHeader == null || ifRange) ByteRangeAnswer.Full else byteRangeFor(rangeHeader, total)
+            when (range) {
+                ByteRangeAnswer.Full -> MediaReply(200, reason, whole.with("Content-Length", total.toString()))
+                is ByteRangeAnswer.Partial -> MediaReply(
+                    206, "Partial Content",
+                    whole.with("Content-Range", "bytes ${range.start}-${range.end}/$total")
+                        .with("Content-Length", range.length.toString()),
+                    skip = range.start,
+                    length = range.length,
+                )
+                ByteRangeAnswer.Unsatisfiable -> MediaReply(
+                    416, "Range Not Satisfiable",
+                    whole.with("Content-Range", "bytes */$total").with("Content-Length", "0"),
+                    empty = true,
+                )
             }
-            // Longer than announced: streamed, every time.
-            if (n == out.size && input.read() >= 0) {
-                release(held)
-                held = 0
-                return BoundedRead.TooLarge
-            }
-            // Shorter than announced keeps the array: no copy to reserve.
-            held = 0
-            return BoundedRead.Bytes(MediaBytes(listOf(out), n.toLong()))
         }
-        val chunks = ArrayList<ByteArray>()
-        var total = 0L
-        var lastFill = READ_CHUNK
-        while (true) {
-            if (total > limit) {
-                release(held)
-                held = 0
-                return BoundedRead.TooLarge
-            }
-            if (lastFill == READ_CHUNK) {
-                if (!reserve(READ_CHUNK.toLong())) {
-                    // No room for even the first chunk: streamed, without
-                    // waiting on this full GET's first byte to learn
-                    // whether the body is empty (R4-M3).
-                    if (total == 0L) return BoundedRead.NoRoom
-                    // The chunks so far are full: the body may end right
-                    // here, and then it is whole with nothing more to hold.
-                    val next = input.read()
-                    if (next < 0) break
-                    release(held)
-                    held = 0
-                    return if (total + 1 > limit) BoundedRead.TooLarge else BoundedRead.NoRoom
+    }
+}
+
+/** These headers with [name] set to [value], replacing any spelling of it. */
+private fun Map<String, String>.with(name: String, value: String): Map<String, String> =
+    filterKeys { !it.equals(name, ignoreCase = true) } + (name to value)
+
+/**
+ * [input] with its first [skip] bytes dropped and at most [length] (null:
+ * all the rest) passed on — a slice of a body streamed straight through,
+ * never buffered. The skip happens on the first read, on the reader's
+ * thread rather than the interceptor's; a body that ends early just ends
+ * the slice early. Closing closes [input].
+ */
+internal class SlicedInputStream(
+    private val input: InputStream,
+    private var skip: Long,
+    length: Long?,
+) : InputStream() {
+    private var left: Long = length ?: Long.MAX_VALUE
+
+    private fun skipped(): Boolean {
+        if (skip > 0) {
+            val scratch = ByteArray(SKIP_CHUNK)
+            while (skip > 0) {
+                // InputStream.skip may skip nothing short of the end: read instead.
+                val r = input.read(scratch, 0, minOf(skip, SKIP_CHUNK.toLong()).toInt())
+                if (r < 0) {
+                    left = 0
+                    skip = 0
+                    return false
                 }
-                held += READ_CHUNK
-                chunks += ByteArray(READ_CHUNK)
-                lastFill = 0
+                skip -= r
             }
-            val chunk = chunks.last()
-            val r = input.read(chunk, lastFill, READ_CHUNK - lastFill)
-            if (r < 0) break
-            lastFill += r
-            total += r
         }
-        // The last chunk is full only when the body ended on a boundary
-        // with no room for another (nothing to trim). Otherwise drop it if
-        // empty, else trim it when there's free room for the copy (keeping
-        // it whole otherwise; never evicting for it).
-        if (lastFill == 0) {
-            chunks.removeAt(chunks.size - 1)
-            release(READ_CHUNK.toLong())
-            held -= READ_CHUNK
-        } else if (lastFill < READ_CHUNK && reserveFree(lastFill.toLong())) {
-            chunks[chunks.size - 1] = chunks.last().copyOf(lastFill)
-            release(READ_CHUNK.toLong())
-            held += lastFill - READ_CHUNK
-        }
-        held = 0
-        return BoundedRead.Bytes(MediaBytes(chunks, total))
-    } catch (t: Throwable) {
-        release(held)
-        throw t
+        return left > 0
     }
+
+    override fun read(): Int {
+        if (!skipped()) return -1
+        val b = input.read()
+        if (b < 0) left = 0 else left--
+        return b
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        if (len == 0) return 0
+        if (!skipped()) return -1
+        val r = input.read(b, off, minOf(len.toLong(), left).toInt())
+        if (r < 0) left = 0 else left -= r
+        return r
+    }
+
+    override fun available(): Int =
+        if (skip > 0 || left <= 0) 0 else minOf(input.available().toLong(), left).toInt()
+
+    override fun close() = input.close()
+}
+
+private const val SKIP_CHUNK = 64 * 1024
+
+/**
+ * The bytes WebView itself skips at the start of an intercepted response's
+ * body for a request that sent [rangeHeader]: Chromium's
+ * `AndroidStreamReaderURLLoader` parses a single `bytes=<first>-…` range
+ * and, whatever status the response has, seeks the stream to `<first>`
+ * (`InputStreamReader::Seek`) — a body made for a `200` of the whole
+ * file. Several ranges, or none: nothing. A suffix range (`bytes=-n`) is
+ * not a fixed skip, so it isn't counted here, but WebView does seek for
+ * it too: `ComputeBounds` takes the first byte as `available()` minus
+ * `min(available(), n)`, so a body that reports more than `n` bytes
+ * already buffered would lose the difference — [webViewSeekProof] covers
+ * it by reporting nothing buffered ([isWebViewSuffixRange]).
+ */
+internal fun webViewSkipFor(rangeHeader: String?): Long {
+    val match = rangeHeader?.let { WEBVIEW_RANGE_REGEX.matchEntire(it.trim()) } ?: return 0
+    return match.groupValues[1].toLongOrNull() ?: 0
+}
+
+private val WEBVIEW_RANGE_REGEX = Regex("""^bytes\s*=\s*(\d+)\s*-\s*\d*$""", RegexOption.IGNORE_CASE)
+
+/**
+ * Whether [rangeHeader] is a single suffix range (`bytes=-n`), for which
+ * WebView seeks a body to `available() - min(available(), n)`
+ * ([webViewSkipFor]): harmless only while the body reports nothing
+ * buffered.
+ */
+internal fun isWebViewSuffixRange(rangeHeader: String?): Boolean =
+    rangeHeader?.let { WEBVIEW_SUFFIX_REGEX.matches(it.trim()) } ?: false
+
+private val WEBVIEW_SUFFIX_REGEX = Regex("""^bytes\s*=\s*-\s*\d+$""", RegexOption.IGNORE_CASE)
+
+/**
+ * [body], the whole answer to a request that sent [rangeHeader], protected
+ * from WebView's own seek ([webViewSkipFor]) whatever the response's
+ * status: a `206` body already starts at the range, and a whole `200`
+ * (a gateway that ignored Range) or an error page (`416`, …) is meant
+ * whole, so no answer the proxy hands back may be cut by WebView again —
+ * for a suffix range (`bytes=-n`) too, whose seek WebView derives from
+ * the body's `available()`.
+ */
+internal fun webViewSeekProof(body: InputStream, rangeHeader: String?): InputStream {
+    val skip = webViewSkipFor(rangeHeader)
+    // A suffix range: no fixed skip, but WebView's seek is computed from
+    // available(), which a SeekAbsorbingInputStream reports as 0, so it
+    // seeks to the start and skips nothing.
+    return if (skip > 0 || isWebViewSuffixRange(rangeHeader)) SeekAbsorbingInputStream(body, skip) else body
 }
 
 /**
- * [block]'s answer on [input], which is then closed. A failure to close
- * is ignored rather than thrown (R4-M4): the body is already in hand, and
- * throwing would lose it together with the budget it holds — a
- * [BoundedRead.Bytes]' reservation would never be given back. A failure
- * in [block] itself is thrown as ever.
+ * [input], a body that already starts at the requested range ([skip] =
+ * [webViewSkipFor]), made proof against WebView's own seek: the first
+ * [skip] bytes it skips are skipped without reading anything, and
+ * [available] is 0, so WebView doesn't check the range against what's
+ * buffered (`VerifyRequestedRange`) either. Without this a gateway's `206`
+ * for a seek past the start fails in WebView with no request to the
+ * gateway ever failing: the skip runs past the end of the slice, or the
+ * range is "unsatisfiable" against the bytes buffered so far, and the
+ * media element ends on `MEDIA_ERR_NETWORK`. Once anything is read, every
+ * skip is a real one.
  */
-internal inline fun <T> readThenClose(input: InputStream, block: (InputStream) -> T): T {
-    try {
-        return block(input)
-    } finally {
-        try {
-            input.close()
-        } catch (_: IOException) {
-        } catch (_: RuntimeException) {
+internal class SeekAbsorbingInputStream(
+    private val input: InputStream,
+    private var skip: Long,
+) : InputStream() {
+    override fun skip(n: Long): Long {
+        if (n <= 0) return 0
+        if (skip > 0) {
+            val absorbed = minOf(n, skip)
+            skip -= absorbed
+            return absorbed
         }
+        return input.skip(n)
     }
+
+    override fun available(): Int = 0
+
+    override fun read(): Int {
+        skip = 0
+        return input.read()
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        skip = 0
+        return input.read(b, off, len)
+    }
+
+    override fun close() = input.close()
 }
