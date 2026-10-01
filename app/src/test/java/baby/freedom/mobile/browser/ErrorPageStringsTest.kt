@@ -80,4 +80,14 @@ class ErrorPageStringsTest {
             ),
         )
     }
+
+    @Test
+    fun `the page prints the address with its bidi controls marked`() {
+        // A refused ENS name reaches the page as given; one RLO in it
+        // printed `ens://\u202Emoc.lapyap.eth` as `hte.paypal.com`.
+        assertTrue(page.contains("""replace(/\p{Bidi_Control}/gu, '\uFFFD')"""))
+        assertTrue(page.contains("parts.push(shown(protocolUrl))"))
+        assertTrue(page.contains("else if (url) parts.push(shown(url))"))
+        assertFalse(Regex("""parts\.push\((?:url|protocolUrl)\)""").containsMatchIn(page))
+    }
 }
