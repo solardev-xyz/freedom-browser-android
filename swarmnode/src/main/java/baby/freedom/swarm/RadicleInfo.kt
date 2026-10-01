@@ -47,6 +47,15 @@ data class RadicleSeed(
     val detailKey: String = "",
     /** [detailKey]'s argument: a candidate count or a node ID. */
     val detailArg: String = "",
+    /**
+     * Which seed request this line belongs to: every [RadicleNode.seed]
+     * call stamps its own lines with a fresh id, so two fetches of one
+     * repository that land on the same phase and detail (the same
+     * `failed` reason, say) still read as different lines, while a line
+     * merely pushed again with unrelated node state stays equal to itself
+     * (#349 R6-M1). 0 for a line no seed request made.
+     */
+    val fetch: Long = 0,
 ) : Parcelable {
     /** [detail] for the user, in the app language as it is now. */
     val shown: String get() = detailText(detailKey, detailArg, english = false) ?: detail
