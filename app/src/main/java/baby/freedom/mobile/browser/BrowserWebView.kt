@@ -26,6 +26,8 @@ import android.view.Menu
 import android.view.MenuItem
 import android.view.PixelCopy
 import android.view.KeyEvent
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -852,6 +854,8 @@ fun BrowserWebViewHost(
         // A private session a dead process left behind (#86) goes
         // before any page — private or not — can load.
         PrivateProfile.discardLeftovers()
+        // …and so do the images its tabs copied or shared.
+        if (!PrivateProfile.isLive()) discardPrivateImageShares(context)
         Unit
     }
 
@@ -924,6 +928,7 @@ fun BrowserWebViewHost(
      */
     fun endPrivateSession() {
         PrivateProfile.discard()
+        discardPrivateImageShares(context)
         sitePermissions.onPrivateSessionEnded()
         Adblock.onPrivateSessionEnded()
         pageZoom.clearPrivate()
@@ -1921,6 +1926,7 @@ private fun buildRefreshableWebView(
     // them FLAG_SECURE like the Activity window (#86).
     val webView = PageWebView(
         if (state.private) PrivateWindowContext.of(context) else context,
+        private = state.private,
     ).apply {
         // A private tab's WebView goes on the private session's profile
         // (#86) before anything else touches it: Chromium only takes a
@@ -3731,6 +3737,7 @@ private fun buildRefreshableWebView(
                         // the interceptor's caches — this tab's, this
                         // document's only (#262).
                         freshFetch = { target -> state.takeFreshFetch(generation, target) },
+                        private = state.private,
                     ) { served ->
                         noteMainFrameContentLoad(view, state, generation, served)
                     }
@@ -4303,7 +4310,11 @@ private class GestureArmingNodeProvider(
  * The tab's WebView. A subclass only for what `WebView` keeps
  * protected: Chromium's unconsumed overscroll, and the scroll range.
  */
-internal class PageWebView(context: Context) : WebView(context) {
+internal class PageWebView(
+    context: Context,
+    /** A private tab's (#86): the page's own text fields ask the keyboard not to learn. */
+    private val private: Boolean = false,
+) : WebView(context) {
     /** [destroy] has been called: nothing may be asked of this WebView any more. */
     var destroyed = false
         private set
@@ -4312,6 +4323,20 @@ internal class PageWebView(context: Context) : WebView(context) {
         destroyed = true
         super.destroy()
     }
+
+    /**
+     * A page's own `<input>`/`<textarea>`/`contenteditable` in a private
+     * tab gets [EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING], like the
+     * address and find bars ([tabImeOptions]). Chromium sets it only for
+     * an off-the-record profile, and a WebView profile never is one — so
+     * without this, whatever is typed into a private page (a search box,
+     * a login name) goes into the keyboard's dictionary and comes back as
+     * a suggestion in other apps, outliving the private session.
+     */
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? =
+        super.onCreateInputConnection(outAttrs).also {
+            outAttrs.imeOptions = tabImeOptions(outAttrs.imeOptions, private)
+        }
 
     /**
      * Virtual origins this tab may have a live document on — the main
@@ -5566,6 +5591,8 @@ internal fun interceptVirtualRequest(
     assertedProtocol: (name: String) -> String? = { null },
     onchain: OnchainAppTab? = null,
     freshFetch: (target: String) -> Boolean = { false },
+    /** Asked for by a private tab (#86) — or its profile's service workers. */
+    private: Boolean = false,
     onMainFrameRoot: (ContentRoot?) -> Unit = {},
 ): WebResourceResponse? {
     val req = request ?: return null
@@ -5587,7 +5614,7 @@ internal fun interceptVirtualRequest(
     val response = RadApi.intercept(req, url)
         ?: interceptOnchainAppRequest(req, url, onchain)
         ?: siteDataCleanupFor(req, url, tab)
-        ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, onMainFrameRoot)
+        ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, onMainFrameRoot, private)
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
     ) {
@@ -5702,6 +5729,7 @@ private fun interceptVirtualRequestFor(
     assertedProtocol: (name: String) -> String?,
     freshFetch: (target: String) -> Boolean,
     onMainFrameRoot: (ContentRoot?) -> Unit,
+    private: Boolean,
 ): WebResourceResponse? {
     val uri = req.url ?: return null
     val url = uri.toString()
@@ -5815,7 +5843,8 @@ private fun interceptVirtualRequestFor(
             val origin = VirtualOrigin.originFor(root)
             if (origin != null) {
                 // Swept away from since `target` was resolved: resolve again.
-                token = UnverifiedOrigins.record(external, origin) ?: return@repeat
+                // A private tab's origin isn't written to disk (#86).
+                token = UnverifiedOrigins.record(external, origin, private) ?: return@repeat
             }
             if (isServiceWorkerScript(req.requestHeaders)) {
                 return syntheticResponse(

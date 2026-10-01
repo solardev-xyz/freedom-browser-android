@@ -2786,7 +2786,7 @@ fun BrowserScreen(
                     onShareLink = { url, title -> shareUrl(context, url, title) },
                     onOpenImage = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true, owner.private) },
                     onCopyImage = { url ->
-                        withImage(url, { copyImageToClipboard(context, it, url) }, R.string.browser_image_copy_failed)
+                        withImage(url, { copyImageToClipboard(context, it, url, owner.private) }, R.string.browser_image_copy_failed)
                     },
                     onSaveImage = { url ->
                         withImage(url, { image ->
@@ -2798,7 +2798,7 @@ fun BrowserScreen(
                         }, R.string.browser_image_save_failed)
                     },
                     onShareImage = { url ->
-                        withImage(url, { shareImage(context, it, url) }, R.string.browser_image_share_failed)
+                        withImage(url, { shareImage(context, it, url, owner.private) }, R.string.browser_image_share_failed)
                     },
                     onDismiss = {
                         if (tabs.pageContextMenu === request) tabs.pageContextMenu = null

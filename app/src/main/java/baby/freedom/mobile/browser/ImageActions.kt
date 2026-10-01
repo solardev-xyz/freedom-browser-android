@@ -26,6 +26,7 @@ import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import kotlin.concurrent.thread
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -63,7 +64,7 @@ internal suspend fun fetchImage(
 ): FetchedImage? =
     withHardDeadline(IMAGE_FETCH_DEADLINE_MS) { guard ->
         if (url.startsWith("data:", ignoreCase = true)) return@withHardDeadline decodeDataUrl(url)
-        interceptVirtualRequest(GetRequest(url))?.let { response ->
+        interceptVirtualRequest(GetRequest(url), private = private)?.let { response ->
             val data = response.data ?: return@withHardDeadline null
             if (!guard.register(data)) return@withHardDeadline null
             data.use {
@@ -425,11 +426,16 @@ internal suspend fun saveImage(context: Context, image: FetchedImage, url: Strin
  * returning its `content://` URI. Files there older than a day are
  * pruned on the way in: a copy or share needs its file only while the
  * receiving app reads it, and the cache would otherwise grow per image.
+ *
+ * A private tab's (#86) image goes in a directory of its own
+ * ([PRIVATE_SHARED_DIR]), which [discardPrivateImageShares] empties when
+ * the private session ends and at the next start: a picture from a
+ * private page must not sit in the app's storage after it.
  */
-private suspend fun shareableUri(context: Context, image: FetchedImage, url: String): Uri? =
+private suspend fun shareableUri(context: Context, image: FetchedImage, url: String, private: Boolean): Uri? =
     withContext(Dispatchers.IO) {
         runCatching {
-            val root = File(context.cacheDir, SHARED_DIR)
+            val root = if (private) privateSharesDir(context) else File(context.cacheDir, SHARED_DIR)
             val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
             root.listFiles()?.forEach { dir -> if (dir.lastModified() < cutoff) dir.deleteRecursively() }
             // A directory per image keeps the natural file name (which the
@@ -444,9 +450,26 @@ private suspend fun shareableUri(context: Context, image: FetchedImage, url: Str
 /** Subdirectory of `cacheDir`; must match `res/xml/file_paths.xml`. */
 private const val SHARED_DIR = "shared"
 
+/** Private tabs' shared images (#86), inside [SHARED_DIR] so the FileProvider serves them. */
+private const val PRIVATE_SHARED_DIR = "private"
+
+private fun privateSharesDir(context: Context) = File(File(context.cacheDir, SHARED_DIR), PRIVATE_SHARED_DIR)
+
+/**
+ * Delete every image a private tab copied or shared (#86): the private
+ * session has ended, or an earlier process died with one open. On a
+ * thread of its own, so the caller (the main thread) does no file I/O.
+ * An app still reading one it was handed loses it, as in Chrome when
+ * the incognito tabs close.
+ */
+internal fun discardPrivateImageShares(context: Context) {
+    val dir = privateSharesDir(context.applicationContext)
+    thread(name = "private-shares") { runCatching { dir.deleteRecursively() } }
+}
+
 /** Put [image] on the clipboard as a `content://` image clip. */
-internal suspend fun copyImageToClipboard(context: Context, image: FetchedImage, url: String): Boolean {
-    val uri = shareableUri(context, image, url) ?: return false
+internal suspend fun copyImageToClipboard(context: Context, image: FetchedImage, url: String, private: Boolean): Boolean {
+    val uri = shareableUri(context, image, url, private) ?: return false
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return false
     clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "Image", uri))
     // Same rule as [copyUrlToClipboard]: Android 13+ confirms copies itself.
@@ -457,8 +480,8 @@ internal suspend fun copyImageToClipboard(context: Context, image: FetchedImage,
 }
 
 /** Hand [image] to the system share sheet as a file. */
-internal suspend fun shareImage(context: Context, image: FetchedImage, url: String): Boolean {
-    val uri = shareableUri(context, image, url) ?: return false
+internal suspend fun shareImage(context: Context, image: FetchedImage, url: String, private: Boolean): Boolean {
+    val uri = shareableUri(context, image, url, private) ?: return false
     val send = Intent(Intent.ACTION_SEND).apply {
         type = image.mime
         putExtra(Intent.EXTRA_STREAM, uri)

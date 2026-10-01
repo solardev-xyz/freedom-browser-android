@@ -42,6 +42,42 @@ class UnverifiedOriginsTest {
     }
 
     @Test
+    fun `an origin only a private tab was served is swept but never written to disk`() {
+        val tab = Any()
+        UnverifiedOrigins.onSweep = { swept -> UnverifiedOrigins.hold(tab, swept) }
+        UnverifiedOrigins.record("https://gw.example", a, private = true)
+        UnverifiedOrigins.record("https://gw.example", b)
+        // Known to this process, so a switch still sweeps it…
+        assertEquals(setOf(a, b), UnverifiedOrigins.snapshot())
+        // …but the CID a private tab opened isn't in the persisted list (#86).
+        assertEquals(setOf(b) to emptySet<String>(), UnverifiedOrigins.persistedSnapshot())
+
+        val wiped = mutableSetOf<String>()
+        UnverifiedOrigins.sweep("") { wiped += it }
+        assertEquals(setOf(a, b), wiped)
+        assertEquals(setOf(a, b), UnverifiedOrigins.pendingClears())
+        assertEquals(emptySet<String>() to setOf(b), UnverifiedOrigins.persistedSnapshot())
+        // Its cleanup taken, then the held tab released: queued again,
+        // still in memory only.
+        assertTrue(UnverifiedOrigins.takeClearFor(a))
+        UnverifiedOrigins.release(tab)
+        assertTrue(a in UnverifiedOrigins.pendingClears())
+        assertFalse(a in UnverifiedOrigins.persistedSnapshot().second)
+    }
+
+    @Test
+    fun `a normal tab served a private tab's origin makes it a persisted one`() {
+        UnverifiedOrigins.record("https://gw.example", a, private = true)
+        UnverifiedOrigins.record("https://gw.example", a, private = true)
+        assertEquals(emptySet<String>() to emptySet<String>(), UnverifiedOrigins.persistedSnapshot())
+        UnverifiedOrigins.record("https://gw.example", a)
+        assertEquals(setOf(a) to emptySet<String>(), UnverifiedOrigins.persistedSnapshot())
+        // A private tab served it again afterwards doesn't take it back.
+        UnverifiedOrigins.record("https://gw.example", a, private = true)
+        assertEquals(setOf(a) to emptySet<String>(), UnverifiedOrigins.persistedSnapshot())
+    }
+
+    @Test
     fun `another external gateway wipes the previous one's origins too`() {
         UnverifiedOrigins.record("https://gw.example", a)
         val wiped = mutableSetOf<String>()
