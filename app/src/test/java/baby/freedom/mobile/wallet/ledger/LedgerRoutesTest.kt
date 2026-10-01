@@ -473,14 +473,20 @@ class LedgerRoutesTest {
         assertEquals(1, follows.get())
     }
 
+    /** A [LedgerUsbTrail] on a hand-driven clock. */
+    private class Clock { var ms = 0L }
+
+    private fun trail(own: String, listed: List<String>, clock: Clock) = LedgerUsbTrail(own, listed, goneMs = 10_000, clock = { clock.ms })
+
     @Test
     fun `the path a Ledger comes back under is one that wasn't listed before`() {
         val a = "/dev/bus/usb/001/002"
         val b = "/dev/bus/usb/001/003"
         val back = "/dev/bus/usb/001/005"
-        assertEquals(back, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(b, back)))
+        val t = trail(a, listOf(a, b), Clock())
+        assertEquals(LedgerUsbTrail.Back(back, unsure = false), t.reappeared(emptySet(), listOf(b, back)))
         // Not back yet; another Ledger plugged in already is its own route.
-        assertEquals(null, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(b)))
+        assertEquals(LedgerUsbTrail.Back(null, unsure = false), t.reappeared(emptySet(), listOf(b)))
     }
 
     /**
@@ -494,15 +500,23 @@ class LedgerRoutesTest {
         val b = "/dev/bus/usb/001/003"
         val bBack = "/dev/bus/usb/001/005"
         val aBack = "/dev/bus/usb/001/006"
-        // Listed when A last answered (alive): B had come back as B' by then.
-        val known = setOf(a, bBack)
-        assertEquals(aBack, Ledger.reappeared(known, a, emptySet(), listOf(bBack, aBack)))
+        val clock = Clock()
+        val t = trail(a, listOf(a, b), clock)
+        clock.ms = 1_500
+        t.answered(listOf(a))
+        clock.ms = 3_000
+        // A answered with B' listed: B' isn't A's.
+        t.answered(listOf(a, bBack))
+        // B' answered for B: B isn't waited for, however soon A drops out.
+        assertEquals(LedgerUsbTrail.Back(aBack, unsure = false), t.reappeared(emptySet(), listOf(bBack, aBack)))
+
         // Not seen while A answered, but B's route has it open: still not A's.
-        assertEquals(aBack, Ledger.reappeared(setOf(a, b), a, setOf(bBack), listOf(bBack, aBack)))
+        val u = trail(a, listOf(a, b), Clock())
+        assertEquals(LedgerUsbTrail.Back(aBack, unsure = false), u.reappeared(setOf(bBack), listOf(bBack, aBack)))
         // Both came back within one poll and neither is held yet: no guess at all.
-        assertEquals(null, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(bBack, aBack)))
+        assertEquals(LedgerUsbTrail.Back(null, unsure = true), u.reappeared(emptySet(), listOf(bBack, aBack)))
         // Once B's route has taken its own, A's is the one left.
-        assertEquals(aBack, Ledger.reappeared(setOf(a, b), a, setOf(bBack), listOf(aBack, bBack)))
+        assertEquals(LedgerUsbTrail.Back(aBack, unsure = false), u.reappeared(setOf(bBack), listOf(aBack, bBack)))
     }
 
     /**
@@ -519,13 +533,77 @@ class LedgerRoutesTest {
         val b = "/dev/bus/usb/001/003"
         val bBack = "/dev/bus/usb/001/005"
         val aBack = "/dev/bus/usb/001/006"
-        assertEquals(null, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(bBack)))
-        assertEquals(null, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(bBack, aBack)))
-        assertEquals(aBack, Ledger.reappeared(setOf(a, b), a, setOf(bBack), listOf(bBack, aBack)))
+        val t = trail(a, listOf(a, b), Clock())
+        assertEquals(LedgerUsbTrail.Back(null, unsure = true), t.reappeared(emptySet(), listOf(bBack)))
+        assertEquals(LedgerUsbTrail.Back(null, unsure = true), t.reappeared(emptySet(), listOf(bBack, aBack)))
+        assertEquals(LedgerUsbTrail.Back(aBack, unsure = false), t.reappeared(setOf(bBack), listOf(bBack, aBack)))
         // A Ledger unplugged meanwhile is as good as one that may come back: no guess.
-        assertEquals(null, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(aBack)))
+        assertEquals(LedgerUsbTrail.Back(null, unsure = true), t.reappeared(emptySet(), listOf(aBack)))
         // Only A gone: the one new path is A's, however soon after the last answer it appeared.
-        assertEquals(aBack, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(b, aBack)))
+        assertEquals(LedgerUsbTrail.Back(aBack, unsure = false), t.reappeared(emptySet(), listOf(b, aBack)))
+        // Nothing new at all: nothing to be unsure of — it's unplugged if it stays so.
+        assertEquals(LedgerUsbTrail.Back(null, unsure = false), t.reappeared(emptySet(), listOf(b)))
+    }
+
+    /**
+     * Two Nano S Plus, A tapped and B not (#350 R4-F1): B is off the bus
+     * re-enumerating when A answers, so it isn't listed then — B is still
+     * remembered as gone, and B' (back after that answer) isn't taken for
+     * A once A drops out.
+     */
+    @Test
+    fun `a same-model Ledger off the bus when this one answered is still waited for`() {
+        val a = "/dev/bus/usb/001/002"
+        val b = "/dev/bus/usb/001/003"
+        val bBack = "/dev/bus/usb/001/005"
+        val aBack = "/dev/bus/usb/001/006"
+        val clock = Clock()
+        val t = trail(a, listOf(a, b), clock)
+        clock.ms = 1_500
+        // A answers APP_NOT_OPEN while B is off the bus.
+        t.answered(listOf(a))
+        // B came back as B', then A dropped out before its next answer.
+        assertEquals(LedgerUsbTrail.Back(null, unsure = true), t.reappeared(emptySet(), listOf(bBack)))
+        assertEquals(LedgerUsbTrail.Back(null, unsure = true), t.reappeared(emptySet(), listOf(bBack, aBack)))
+        // B's route holds B': A' is A's.
+        assertEquals(LedgerUsbTrail.Back(aBack, unsure = false), t.reappeared(setOf(bBack), listOf(bBack, aBack)))
+        // Several answers with B still off the bus, not yet long enough to be taken as unplugged.
+        clock.ms = 9_000
+        t.answered(listOf(a))
+        assertEquals(LedgerUsbTrail.Back(null, unsure = true), t.reappeared(emptySet(), listOf(bBack)))
+    }
+
+    /**
+     * A same-model Ledger off the bus for longer than one is given to
+     * come back, while this one answered, was unplugged: it's no longer
+     * waited for, so this one is followed.
+     */
+    @Test
+    fun `a same-model Ledger away long enough is taken as unplugged`() {
+        val a = "/dev/bus/usb/001/002"
+        val b = "/dev/bus/usb/001/003"
+        val aBack = "/dev/bus/usb/001/006"
+        val clock = Clock()
+        val t = trail(a, listOf(a, b), clock)
+        clock.ms = 1_500
+        t.answered(listOf(a))
+        clock.ms = 11_500
+        t.answered(listOf(a))
+        assertEquals(LedgerUsbTrail.Back(aBack, unsure = false), t.reappeared(emptySet(), listOf(aBack)))
+    }
+
+    /** Followed once, its new path is its own, and the old ones are never taken for it on the next follow. */
+    @Test
+    fun `a Ledger followed once is followed again from its new path`() {
+        val a = "/dev/bus/usb/001/002"
+        val b = "/dev/bus/usb/001/003"
+        val aBack = "/dev/bus/usb/001/006"
+        val aAgain = "/dev/bus/usb/001/007"
+        val t = trail(a, listOf(a, b), Clock())
+        assertEquals(LedgerUsbTrail.Back(aBack, unsure = false), t.reappeared(emptySet(), listOf(b, aBack)))
+        t.followed(aBack, listOf(b, aBack))
+        assertEquals(LedgerUsbTrail.Back(aAgain, unsure = false), t.reappeared(emptySet(), listOf(b, aAgain)))
+        assertEquals(LedgerUsbTrail.Back(null, unsure = false), t.reappeared(emptySet(), listOf(b)))
     }
 
     @Test
@@ -560,21 +638,53 @@ class LedgerRoutesTest {
      */
     @Test
     fun `a follow that runs out on the USB prompt ends as access not given`() = runBlocking {
-        var asking = false
+        var stuck: LedgerException? = null
         try {
             Ledger.awaitReady(
                 {}, readyMs = 200, pollMs = 10,
                 follow = {
-                    asking = true
+                    stuck = LedgerUsbLink.accessNotGiven()
                     kotlinx.coroutines.delay(10_000)
                     true
                 },
-                asking = { asking },
+                stuck = { stuck },
                 read = reads(LedgerException.Kind.APP_NOT_OPEN, LedgerException.Kind.DISCONNECTED, account),
             )
             fail("followed")
         } catch (e: LedgerException) {
             assertEquals(LedgerException.Kind.PERMISSION, e.kind)
+        }
+    }
+
+    /**
+     * A follow held back because where the Ledger came back can't be told
+     * from another same-model Ledger's (#350 R4-M1) ends saying so —
+     * whether the follow gives up itself or the wait for unlocking runs
+     * out on it — not that the Ledger was unplugged.
+     */
+    @Test
+    fun `a follow held back by another same-model Ledger says so`() = runBlocking {
+        try {
+            Ledger.awaitReady({}, readyMs = 5_000, pollMs = 10, follow = { throw Ledger.cannotTell() }, read = reads(LedgerException.Kind.APP_NOT_OPEN, LedgerException.Kind.DISCONNECTED, account))
+            fail("followed")
+        } catch (e: LedgerException) {
+            assertEquals(Ledger.cannotTell().message, e.message)
+        }
+        var stuck: LedgerException? = null
+        try {
+            Ledger.awaitReady(
+                {}, readyMs = 200, pollMs = 10,
+                follow = {
+                    stuck = Ledger.cannotTell()
+                    kotlinx.coroutines.delay(10_000)
+                    true
+                },
+                stuck = { stuck },
+                read = reads(LedgerException.Kind.APP_NOT_OPEN, LedgerException.Kind.DISCONNECTED, account),
+            )
+            fail("followed")
+        } catch (e: LedgerException) {
+            assertEquals(Ledger.cannotTell().message, e.message)
         }
     }
 
