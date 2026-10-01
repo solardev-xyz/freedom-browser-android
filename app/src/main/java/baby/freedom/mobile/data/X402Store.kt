@@ -16,6 +16,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.transformLatest
 import org.json.JSONArray
@@ -29,6 +30,7 @@ import org.json.JSONObject
  *     "allow:<origin> <chainId> <asset> <account>" → {"cap": "…", "spent": "…", "each": "…", "payTo": "0x…",
  *                                           "created": ms, "expires": ms, "symbol": "USDC", "decimals": 6}
  *     "history" → [{…}, …] newest first, at most [MAX_HISTORY]
+ *     "held:<origin>" → ms: the site is held after a Refused paid request (#237, #347)
  *
  * An allowance is keyed by the site's origin (the provider origin key),
  * the chain, the token and the paying account: "1 USDC for example.com
@@ -44,6 +46,11 @@ import org.json.JSONObject
  * over one window, never renewed by itself: when [Allowance.expires]
  * passes or [Allowance.spent] reaches [Allowance.cap], the site asks again.
  * Amounts are base-unit integers in text.
+ *
+ * A site whose paid request was answered Refused is held ([hold]): its
+ * allowances pay nothing silently until the user navigates to it
+ * themselves ([lift]) — however long that is, across restarts, as the
+ * server may keep the refused authorization and collect it anyway (#347).
  *
  * Public data only — addresses, amounts, sites — never a key or a
  * signature. A private tab never reads or writes here. Never throws for
@@ -346,8 +353,58 @@ class X402Store internal constructor(
         prefs[HISTORY] = encodeHistory(list.map { if (it.status == Status.PENDING) it.copy(status = Status.UNCONFIRMED) else it })
     }
 
-    /** Forget every allowance and payment (the wallet was removed); `false` if it couldn't be written. */
-    suspend fun clear(): Boolean = write { it.clear() }
+    /**
+     * Every site held after a Refused paid request ([hold]), or null if
+     * they couldn't be read — not "none": any site may be held (#347).
+     */
+    suspend fun holds(): Set<String>? = data().first()?.asMap()?.keys
+        ?.mapNotNullTo(HashSet()) { k -> k.name.takeIf { it.startsWith(HELD) }?.removePrefix(HELD)?.ifEmpty { null } }
+
+    /** Hold [origin] after a Refused paid request (#237, #347); `false` if it couldn't be written. */
+    suspend fun hold(origin: String): Boolean = write { it[heldKey(origin)] = clock().toString() }
+
+    /** Lift [origin]'s hold, if it has one (#347); `false` if it couldn't be written. */
+    suspend fun lift(origin: String): Boolean = write { it.remove(heldKey(origin)) }
+
+    /** Forget every allowance, payment and hold (the wallet was removed); `false` if it couldn't be written. */
+    suspend fun clear(): Boolean {
+        val n = synchronized(clears) { (++clearsStarted).also { clearsWriting += it } }
+        var landed = false
+        try {
+            landed = write { it.clear() }
+            return landed
+        } finally {
+            synchronized(clears) {
+                clearsWriting -= n
+                if (landed && n > clearLanded) clearLanded = n
+            }
+        }
+    }
+
+    /**
+     * Tag for a hold queued now: [clearedSince] it later tells whether
+     * the store was cleared after it (#347 R1-M1, R2-M1).
+     */
+    val clearEra: Long get() = synchronized(clears) { clearsStarted }
+
+    /**
+     * Whether a [clear] begun after [era] ([clearEra]) has landed (true),
+     * is still being written (null: wait and ask again), or none did —
+     * a clear that failed to write counts as none: what it would have
+     * removed is still on disk (#347 R2-M1).
+     */
+    fun clearedSince(era: Long): Boolean? = synchronized(clears) {
+        when {
+            clearLanded > era -> true
+            clearsWriting.any { it > era } -> null
+            else -> false
+        }
+    }
+
+    private val clears = Any()
+    private var clearsStarted = 0L
+    private var clearLanded = 0L
+    private val clearsWriting = HashSet<Long>()
 
     private fun dropDead(prefs: MutablePreferences, now: Long) {
         prefs.asMap().forEach { (k, v) ->
@@ -368,6 +425,7 @@ class X402Store internal constructor(
     companion object {
         private const val TAG = "X402Store"
         private const val ALLOW = "allow:"
+        private const val HELD = "held:"
         private val HISTORY = stringPreferencesKey("history")
 
         /** The newest payments kept. */
@@ -384,6 +442,8 @@ class X402Store internal constructor(
 
         private val ADDRESS = Regex("^0x[0-9a-fA-F]{40}$")
         private val DIGITS = Regex("^[0-9]{1,78}$")
+
+        private fun heldKey(origin: String) = stringPreferencesKey("$HELD$origin")
 
         private fun allowKey(origin: String, chainId: Long, asset: String, account: String) =
             stringPreferencesKey("$ALLOW$origin $chainId ${asset.lowercase()} ${account.lowercase()}")
