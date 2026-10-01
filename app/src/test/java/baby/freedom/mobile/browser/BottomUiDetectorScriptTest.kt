@@ -458,18 +458,31 @@ class BottomUiDetectorScriptTest {
     private fun Page.synced(): String = Context.toString(eval("sent.filter(function (s) { return /^synced /.test(s); }).join('|')"))
 
     @Test
-    fun `a sync is echoed a task later, before first paint too, and only in the top document`() = page {
+    fun `a sync is echoed a task and the settle time later, before first paint too`() = page {
         documentStart()
-        eval("kotlinSays('${inputSyncRequest(7)}')")
+        eval("kotlinSays('${inputSyncRequest(7, 400)}')")
         assertEquals("", synced()) // not at once: input queued ahead of it runs first
+        assertEquals(1, flush())
+        // Then it waits out a tap held back for a double tap (R2-F1).
+        assertEquals("", synced())
+        assertEquals(1, timers)
+        assertEquals(400, num("timers[0].ms"))
         flush()
         assertEquals("synced 7", synced())
         assertEquals(7, parseInputSynced(synced()))
         // Anything else in that shape isn't echoed.
-        eval("kotlinSays('sync x'); kotlinSays('sync 1234567890')")
+        eval("kotlinSays('sync x 1'); kotlinSays('sync 1234567890 1'); kotlinSays('sync 7'); kotlinSays('sync 7 12345')")
+        flush()
         flush()
         assertEquals("synced 7", synced())
         assertEquals(null, parseInputSynced("synced 7 "))
+    }
+
+    @Test
+    fun `the settle time is the double-tap timeout plus margin`() {
+        assertEquals(300 + INPUT_SYNC_DELAY_MS, inputSyncSettleMs(300))
+        assertEquals(INPUT_SYNC_DELAY_MS, inputSyncSettleMs(-1))
+        assertEquals(5_000 + INPUT_SYNC_DELAY_MS, inputSyncSettleMs(Int.MAX_VALUE))
     }
 
     @Test

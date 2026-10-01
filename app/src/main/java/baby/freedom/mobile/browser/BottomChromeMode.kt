@@ -463,17 +463,26 @@ internal fun parseTopDocumentInput(data: String?): TopDocumentInput? {
 
 /**
  * Kotlin's ask to the top document's detector, sent a moment after an
- * input ended (`sync <id>`), and the detector's echo (`synced <id>`) a
- * task later (#348). The page's renderer thread handles input ahead of
- * the message and ahead of that task, so the echo says it is past input
- * `<id>` — and past any activation it gave an iframe, however long that
- * iframe's own handlers held the thread
+ * input ended (`sync <id> <settleMs>`), and the detector's echo
+ * (`synced <id>`) (#348). The page's renderer thread handles input
+ * ahead of the message and ahead of a task posted after it, so a task
+ * later the renderer is past the input's own events. But not
+ * necessarily past its tap: with double-tap zoom on (a page without a
+ * `width=device-width` viewport) Chromium holds a tap's `GestureTap` —
+ * the click, which renews a frame's activation — for up to the
+ * double-tap timeout after the touch went down, counted from when the
+ * renderer acknowledged it. So the detector waits [settleMs] more
+ * (the double-tap timeout plus margin, [inputSyncSettleMs]) before it
+ * echoes: a held-back click reaches the renderer by then, and a timer
+ * that comes due runs after input already queued. The echo then says
+ * the renderer is past input `<id>` — and past any activation it gave
+ * an iframe, however long that iframe's own handlers held the thread
  * ([UserGestureLatch.onRendererCaughtUp]).
  */
 internal const val INPUT_SYNC = "sync"
 internal const val INPUT_SYNCED = "synced"
 
-internal fun inputSyncRequest(id: Int): String = "$INPUT_SYNC $id"
+internal fun inputSyncRequest(id: Int, settleMs: Long): String = "$INPUT_SYNC $id $settleMs"
 
 /**
  * How long after an input ends its [INPUT_SYNC] is sent: margin for the
@@ -481,6 +490,16 @@ internal fun inputSyncRequest(id: Int): String = "$INPUT_SYNC $id"
  * their own pipe.
  */
 internal const val INPUT_SYNC_DELAY_MS = 100L
+
+/**
+ * How long the detector waits, once the renderer is past an input's own
+ * events, before it echoes [INPUT_SYNCED]: Chromium's double-tap timeout
+ * ([doubleTapTimeoutMs], `ViewConfiguration.getDoubleTapTimeout()`, what
+ * its gesture detector holds a tap for) plus [INPUT_SYNC_DELAY_MS] for the
+ * held-back click to reach the renderer.
+ */
+internal fun inputSyncSettleMs(doubleTapTimeoutMs: Int): Long =
+    doubleTapTimeoutMs.toLong().coerceIn(0L, 5_000L) + INPUT_SYNC_DELAY_MS
 
 private val INPUT_SYNCED_RE = Regex("^$INPUT_SYNCED (\\d{1,9})$")
 
@@ -606,7 +625,8 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  *
  * **Renderer sync** (#348): in the main frame, a `sync <id>` ask
  * ([INPUT_SYNC]), sent by Kotlin just after an input ends, is echoed as
- * `synced <id>` a task later, before first paint too — the earliest the
+ * `synced <id>` a task and then `<settleMs>` later (the double-tap
+ * timeout a held-back tap waits out), before first paint too — the earliest the
  * renderer is known to be past that input, and so past any activation
  * it gave an iframe ([UserGestureLatch.onRendererCaughtUp]).
  *
@@ -818,7 +838,7 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   said('pointerdown');
   said('keydown');
   said('click');
-  var T = null, started = false, SYNC = /^$INPUT_SYNC ([0-9]{1,9})$/, ASK = /^probe ([0-9a-f]{1,64})$/, THEME_ASK = /^theme ([0-9a-f]{1,64})$/,
+  var T = null, started = false, SYNC = /^$INPUT_SYNC ([0-9]{1,9}) ([0-9]{1,4})$/, ASK = /^probe ([0-9a-f]{1,64})$/, THEME_ASK = /^theme ([0-9a-f]{1,64})$/,
       GO = /^$PAGE_REISSUE_PREFIX([0-9a-f]{1,64}) (https?:\/\/\S+)$/i, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
   var gcs = w.getComputedStyle, MO = w.MutationObserver,
       RO = w.ResizeObserver, IO = w.IntersectionObserver;
@@ -1015,9 +1035,11 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     if (typeof data !== 'string') return;
     var y = tc.exec(SYNC, data);
     if (y) {
-      // A task later: input the renderer already had runs first (#348).
-      var id = y[1];
-      setT(function () { port.postMessage('$INPUT_SYNCED ' + id); }, 0);
+      // A task later, input the renderer already had has run (#348);
+      // then wait out a tap Chromium holds back for a double tap, so its
+      // click (queued input, ahead of a timer) has run too.
+      var id = y[1], settle = +y[2];
+      setT(function () { setT(function () { port.postMessage('$INPUT_SYNCED ' + id); }, settle); }, 0);
       return;
     }
     var g = go ? tc.exec(GO, data) : null;

@@ -1938,10 +1938,13 @@ private fun buildRefreshableWebView(
         // when an iframe that held the thread in its own handlers got
         // that input's activation ([UserGestureLatch.onRendererCaughtUp]).
         // No detector, no echo: the input keeps counting, fail closed.
+        // The echo waits out a tap held back for a double tap, whose
+        // click can renew an iframe's activation ([inputSyncSettleMs]).
         if (bottomUiSupported) {
+            val settleMs = inputSyncSettleMs(ViewConfiguration.getDoubleTapTimeout())
             onInputEnded = { id ->
                 postDelayed({
-                    val request = inputSyncRequest(id)
+                    val request = inputSyncRequest(id, settleMs)
                     for (reply in bottomUiChannels.targets) runCatching { reply.postMessage(request) }
                 }, INPUT_SYNC_DELAY_MS)
             }

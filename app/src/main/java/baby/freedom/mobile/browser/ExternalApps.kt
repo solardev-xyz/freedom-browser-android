@@ -406,8 +406,9 @@ internal fun externalLinkPageCurrent(tab: BrowserState, origin: String?, doc: In
  * until [WINDOW_MS] after the renderer is known to have caught up past
  * it ([onRendererCaughtUp]: the top document's echo of a sync sent
  * after the input ended, which the shared renderer thread can only run
- * once it is done with the input's events) — with no such word yet, it
- * counts still.
+ * once it is done with the input's events, and which then waits out the
+ * double-tap timeout so a tap Chromium held back has had its click too,
+ * [inputSyncSettleMs]) — with no such word yet, it counts still.
  *
  * [clock] is a monotonic millisecond clock (`SystemClock.uptimeMillis`).
  * Main thread only.
