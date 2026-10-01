@@ -36,6 +36,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
@@ -139,6 +140,9 @@ object SwarmProviders {
     @Volatile
     private var subscriptions: SwarmSubscriptions? = null
 
+    /** The provider's post-sheet grant writes and [disconnect]'s revoke, one at a time (#349 R1-M3). */
+    private val grantGate = Mutex()
+
     /** Tab → the document its manifest checks ran for, and each origin's shared check (#122). */
     private val manifestChecks = HashMap<Long, Pair<Int, HashMap<String, ManifestCheck>>>()
 
@@ -212,6 +216,7 @@ object SwarmProviders {
             subscriptions = SwarmSubscriptions({ kind, key, onMessage ->
                 NodeSubscriptionSocket.open(SwarmNode.GATEWAY_URL, kind, key, onMessage)
             }).also { subscriptions = it },
+            grantGate = grantGate,
         )
         setUpWallet = { reason -> vault.requireUnlocked(reason) }
         manifests = SwarmManifests(
@@ -233,17 +238,22 @@ object SwarmProviders {
      */
     suspend fun disconnect(context: Context, origin: String): Boolean {
         val app = context.applicationContext
-        val feedsDropped = withContext(Dispatchers.IO) {
-            try {
-                SwarmFeedStore.get(app).revoke(origin)
-                true
-            } catch (e: IOException) {
-                false
-            } catch (e: IllegalStateException) {
-                false
+        // Under the gate: an Allow tapped on a sheet meanwhile either wrote
+        // its grants before this takes them, or finds the site disconnected.
+        val revoked = grantGate.withLock {
+            val feedsDropped = withContext(Dispatchers.IO) {
+                try {
+                    SwarmFeedStore.get(app).revoke(origin)
+                    true
+                } catch (e: IOException) {
+                    false
+                } catch (e: IllegalStateException) {
+                    false
+                }
             }
+            SwarmGrantStore.get(app).revoke(origin) && feedsDropped
         }
-        if (!SwarmGrantStore.get(app).revoke(origin) || !feedsDropped) return false
+        if (!revoked) return false
         // Live subscriptions don't outlive the grant.
         subscriptions?.cancelByOrigin(origin)
         // Manifest tracking goes with it: nothing the manifest granted is left to take back.
@@ -298,7 +308,7 @@ object SwarmProviders {
                     if (!grantStore.connect(origin)) throw IOException("couldn't save the connection")
                     emit(origin, "connect", JSONObject().put("origin", swarmOriginKey(origin)))
                 } else {
-                    if (!grantStore.revoke(origin)) throw IOException("couldn't save the disconnection")
+                    if (!grantGate.withLock { grantStore.revoke(origin) }) throw IOException("couldn't save the disconnection")
                     subscriptions?.cancelByOrigin(origin)
                     emit(origin, "disconnect", JSONObject().put("origin", swarmOriginKey(origin)))
                 }
@@ -388,9 +398,7 @@ object SwarmProviders {
         }
         val request = parseSwarmRequest(message.data) ?: run {
             // Readable enough to answer: the page learns now, not after five minutes.
-            unparsedRequestId(message.data)?.let {
-                answer(reply, it, SwarmProvider.Reply.Err(SwarmProvider.INVALID_PARAMS, "Invalid request"))
-            }
+            unparsedRequestId(message.data)?.let { answer(reply, it, unparsedSwarmRequestError(message.data)) }
             return
         }
         if (!isMainFrame || origin == null) {
@@ -1062,30 +1070,68 @@ internal const val MAX_SWARM_REQUEST_VALUES = 1_100_000
 internal const val MAX_SWARM_REQUEST_CONTAINERS = 10_000
 
 /**
+ * The answer to a request [parseSwarmRequest] refused: why, when it's
+ * the size of its parse (with the caps, so a page can tell it from a
+ * malformed one), or a plain "Invalid request".
+ */
+internal fun unparsedSwarmRequestError(data: String?): SwarmProvider.Reply.Err {
+    val tooComplex = data != null && data.length <= MAX_SWARM_REQUEST_CHARS &&
+        !jsonShapeWithin(data, MAX_SWARM_REQUEST_VALUES, MAX_SWARM_REQUEST_CONTAINERS)
+    if (!tooComplex) return SwarmProvider.Reply.Err(SwarmProvider.INVALID_PARAMS, "Invalid request")
+    return SwarmProvider.Reply.Err(
+        SwarmProvider.INVALID_PARAMS,
+        "Request has more than $MAX_SWARM_REQUEST_VALUES values or $MAX_SWARM_REQUEST_CONTAINERS arrays and objects; " +
+            "send bytes as a Uint8Array or ArrayBuffer",
+        JSONObject().put("reason", "request_too_complex")
+            .put("maxValues", MAX_SWARM_REQUEST_VALUES)
+            .put("maxContainers", MAX_SWARM_REQUEST_CONTAINERS),
+    )
+}
+
+/**
  * Whether [data], read as JSON, has at most [maxValues] values (its
  * commas outside strings, plus one) and [maxContainers] arrays and
  * objects — counted in one pass, without building anything, so a
  * request can be refused before its parse allocates.
+ *
+ * The page script's saved `JSON.stringify` is the only sender today, but
+ * the count mustn't depend on that: Android's org.json is lenient, and
+ * takes `;` as a separator, `'…'` strings, slash-star, `//` and `#`
+ * comments, and unquoted literals that may contain `"`. Each of those
+ * could hide separators from a count that only knows strict JSON, so
+ * anything outside strict JSON's string syntax is refused here: a `'`,
+ * `/`, `#` or `;` outside a string, and a `"` that doesn't open a string
+ * where one can begin (after `[`, `{`, `,`, `:` or at the start).
  */
 internal fun jsonShapeWithin(data: String, maxValues: Int, maxContainers: Int): Boolean {
     var values = 1
     var containers = 0
     var inString = false
     var escaped = false
+    // The last character outside a string that wasn't whitespace.
+    var last = ' '
     for (c in data) {
         if (inString) {
             when {
                 escaped -> escaped = false
                 c == '\\' -> escaped = true
-                c == '"' -> inString = false
+                c == '"' -> {
+                    inString = false
+                    last = '"'
+                }
             }
             continue
         }
         when (c) {
-            '"' -> inString = true
+            '"' -> {
+                if (last != ' ' && last != '[' && last != '{' && last != ',' && last != ':') return false
+                inString = true
+            }
             ',' -> if (++values > maxValues) return false
             '[', '{' -> if (++containers > maxContainers) return false
+            '\'', '/', '#', ';' -> return false
         }
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') last = c
     }
     return true
 }
@@ -1144,12 +1190,27 @@ internal fun swarmProviderJs(channel: String): String {
     }
     return btoa(parts.join(''));
   }
+  // A Node Buffer's JSON form ({type:'Buffer', data:[bytes]}) goes as
+  // base64 too: as an array, a byte costs the app a parsed value, and a
+  // request's values are capped well below the publish limits.
+  function bufferBytes(v) {
+    if (v.type !== 'Buffer' || !isArray(v.data)) return null;
+    var d = v.data, n = d.length, out = new U8(n);
+    for (var i = 0; i < n; i++) {
+      var x = d[i];
+      if (typeof x !== 'number' || x !== (x | 0) || x < 0 || x > 255) return null;
+      out[i] = x;
+    }
+    return out;
+  }
   function encode(v, depth) {
     if (depth > 32) return null;
     if (typeof v === 'bigint') return { '${'$'}bigint': String(v) };
     if (v === null || typeof v !== 'object') return v;
     if (v instanceof AB) return { '${'$'}b64': b64(new U8(v)) };
     if (isView(v)) return { '${'$'}b64': b64(new U8(v.buffer, v.byteOffset, v.byteLength)) };
+    var buf = bufferBytes(v);
+    if (buf) return { '${'$'}b64': b64(buf) };
     if (isArray(v)) {
       var a = [];
       for (var i = 0; i < v.length; i++) a.push(encode(v[i], depth + 1));

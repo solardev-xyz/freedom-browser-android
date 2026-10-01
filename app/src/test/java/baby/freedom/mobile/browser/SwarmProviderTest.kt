@@ -6,6 +6,7 @@ import baby.freedom.mobile.wallet.SitePublisher
 import baby.freedom.mobile.wallet.VaultLockedException
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -1021,6 +1022,14 @@ class SwarmProviderTest {
             assertEquals("swarm_publishData", sent.getString("method"))
             assertEquals("1,2,255,", sent.getJSONObject("params").getJSONObject("data").getString("\$b64"))
             assertEquals("a/b", sent.getJSONObject("params").getString("contentType"))
+            // A Node Buffer's JSON form goes as base64 too: as an array it would cost a value per byte (#349 R1-M1).
+            cx.evaluateString(scope, "window.swarm.publishData({ data: { type: 'Buffer', data: [1, 2, 255] } });", "buffer", 1, null)
+            val buffer = JSONObject(cx.evaluateString(scope, "sent[1]", "sent", 1, null).toString())
+            assertEquals("1,2,255,", buffer.getJSONObject("params").getJSONObject("data").getString("\$b64"))
+            // Not bytes: left as the page wrote it, for the app to refuse.
+            cx.evaluateString(scope, "window.swarm.publishData({ data: { type: 'Buffer', data: [1, 256] } });", "bad", 1, null)
+            val bad = JSONObject(cx.evaluateString(scope, "sent[2]", "sent", 1, null).toString())
+            assertEquals(2, bad.getJSONObject("params").getJSONObject("data").getJSONArray("data").length())
             assertEquals("undefined", cx.evaluateString(scope, "typeof window.abcdefghij", "gone", 1, null).toString())
             assertEquals("true", cx.evaluateString(scope, "String(window.swarm.isFreedomBrowser)", "flag", 1, null).toString())
 
@@ -1519,6 +1528,38 @@ class SwarmProviderTest {
     }
 
     @Test
+    fun `a request refused for its size says why, and a malformed one doesn't`() {
+        val numbers = """{"id":4,"method":"m","params":{"a":[""" + List(MAX_SWARM_REQUEST_VALUES + 1) { "0" }.joinToString(",") + "]}}"
+        val big = unparsedSwarmRequestError(numbers)
+        assertEquals(SwarmProvider.INVALID_PARAMS, big.code)
+        assertEquals("request_too_complex", big.reason)
+        assertEquals(MAX_SWARM_REQUEST_VALUES, big.data!!.getInt("maxValues"))
+        val malformed = unparsedSwarmRequestError("""{"id":4,"method":"m","params":"x"}""")
+        assertEquals("Invalid request", malformed.message)
+        assertNull(malformed.reason)
+    }
+
+    @Test
+    fun `org json's lenient syntax can't hide values from the shape count`() {
+        // Android's org.json takes each of these; every one could hide separators from a strict-JSON count.
+        for (lenient in listOf(
+            """{"a":[0;0;0]}""",
+            """{"a":['x,y']}""",
+            """{"a":[0,/* " */0]}""",
+            """{"a":[0,// """" + "\n0]}",
+            """{"a":[0,# """" + "\n0]}",
+            """{"a":[x",0,0,"]}""",
+        )) {
+            assertFalse(lenient, jsonShapeWithin(lenient, 100, 100))
+        }
+        // What JSON.stringify writes still passes, whatever its strings hold.
+        val strict = JSONObject().put("id", 1).put("s", "a';/#\",\"[{").put("a", org.json.JSONArray(listOf(1, "x", true)))
+            .put("o", JSONObject().put("k", JSONObject.NULL)).toString()
+        assertTrue(strict, jsonShapeWithin(strict, 100, 100))
+        assertTrue(jsonShapeWithin("{ \"a\" : [ \"b\" ,\n\t\"c\" ] }", 100, 100))
+    }
+
+    @Test
     fun `a content type the node's header can't carry is refused before the sheet`() {
         connect()
         for (bad in listOf("text/plain\r\nX-Evil: 1", "text/plän", "t/" + "x".repeat(SwarmProvider.MAX_CONTENT_TYPE_CHARS))) {
@@ -1552,6 +1593,33 @@ class SwarmProviderTest {
         assertEquals("not_connected", publish.reason)
         assertTrue(grants.auto.none { it.first == site })
         assertTrue(node.uploads().isEmpty())
+    }
+
+    @Test
+    fun `a disconnect can't land between the post-sheet check and the grants it lets through`() {
+        connect()
+        val gate = kotlinx.coroutines.sync.Mutex()
+        val gated = SwarmProvider(grants, feeds, publishers, node, clock = { now }, io = Dispatchers.Unconfined, subscriptions = subscriptions, grantGate = gate)
+        val reply = runBlocking {
+            // The app's disconnect holds the gate while it revokes.
+            gate.lock()
+            val r = async {
+                gated.request(site, "swarm_createFeed", JSONObject().put("name", "posts"), {}, page) {
+                    asked += it
+                    SwarmProvider.Answer(true, always = true)
+                }
+            }
+            while (asked.isEmpty()) kotlinx.coroutines.yield()
+            kotlinx.coroutines.yield()
+            grants.connected.remove(site)
+            grants.auto.removeAll { it.first == site }
+            feeds.granted.remove(site)
+            gate.unlock()
+            r.await()
+        }
+        assertEquals("not_connected", err(reply).reason)
+        assertFalse("feed access stays taken away", feeds.granted(site))
+        assertTrue(grants.auto.none { it.first == site })
     }
 
     @Test

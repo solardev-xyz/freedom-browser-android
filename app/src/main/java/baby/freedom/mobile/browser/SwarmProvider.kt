@@ -78,6 +78,13 @@ class SwarmProvider(
     private val clock: () -> Long = System::currentTimeMillis,
     private val io: CoroutineDispatcher = Dispatchers.IO,
     private val subscriptions: SwarmSubscriptions = SwarmSubscriptions({ _, _, _ -> NO_SOCKET }),
+    /**
+     * Held by every grant write that follows a sheet, and by the app's
+     * disconnect ([SwarmProviders.disconnect]) while it revokes: a
+     * disconnect can't land between [stillConnected]'s check and the
+     * feed access or "always allow" it lets through.
+     */
+    private val grantGate: Mutex = Mutex(),
 ) {
     /** Connection and auto-approve grants: [baby.freedom.mobile.data.SwarmGrantStore] in the app. */
     interface Grants {
@@ -450,8 +457,9 @@ class SwarmProvider(
         if (!grants.autoApprove(origin, AutoApprove.Publish)) {
             val answer = calls.ask(what)
             if (!answer.allowed) throw Invalid(rejected())
-            stillConnected(origin)
-            if (answer.always) grants.setAutoApprove(origin, AutoApprove.Publish)
+            whileConnected(origin) {
+                if (answer.always) grants.setAutoApprove(origin, AutoApprove.Publish)
+            }
         }
         calls.committed()
     }
@@ -500,9 +508,10 @@ class SwarmProvider(
             if (!answer.allowed) return rejected()
             if (needsWallet && !publishers.walletExists()) return rejected()
             // Before feed access is given back to a site the user has disconnected since.
-            stillConnected(origin)
-            if (!feeds.granted(origin)) saving("the site's feed access") { feeds.grant(origin) }
-            if (answer.always) grants.setAutoApprove(origin, kind)
+            whileConnected(origin) {
+                if (!feeds.granted(origin)) saving("the site's feed access") { feeds.grant(origin) }
+                if (answer.always) grants.setAutoApprove(origin, kind)
+            }
             // The user's own yes counts as wallet activity (#236).
             publishers.noteActivity()
         }
@@ -803,8 +812,9 @@ class SwarmProvider(
         } else if (what.send != null && !grants.autoApprove(origin, AutoApprove.Messaging)) {
             val answer = calls.ask(what)
             if (!answer.allowed) throw Invalid(rejected())
-            stillConnected(origin)
-            if (answer.always) grants.setAutoApprove(origin, AutoApprove.Messaging)
+            whileConnected(origin) {
+                if (answer.always) grants.setAutoApprove(origin, AutoApprove.Messaging)
+            }
         }
         calls.committed()
     }
@@ -1288,6 +1298,16 @@ class SwarmProvider(
      */
     private suspend fun stillConnected(origin: String) {
         if (!grants.connected(origin)) throw Invalid(notConnected())
+    }
+
+    /**
+     * [stillConnected], and [write] (the grants the Allow gives) with no
+     * disconnect able to land in between: both run under [grantGate],
+     * which the disconnect holds while it revokes.
+     */
+    private suspend fun whileConnected(origin: String, write: suspend () -> Unit) = grantGate.withLock {
+        stillConnected(origin)
+        write()
     }
 
     private fun notAuthorized(reason: String) =

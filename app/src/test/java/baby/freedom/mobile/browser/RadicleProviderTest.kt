@@ -548,6 +548,41 @@ class RadicleProviderTest {
     }
 
     @Test
+    fun `another site asking about many repositories can't drop a site's follow of its own fetch`() {
+        val b = "https://b.example"
+        grants.map[site] = ""
+        grants.map[b] = ""
+        val heard = mutableListOf<Pair<String, String>>()
+        provider.events = RadicleProvider.Events { o, e, d -> if (e == "seedStatus") heard += o to (d as JSONObject).getString("rid") }
+        val alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        fun ridOf(i: Int) = "rad:z" + "1".repeat(20) + alphabet[i / alphabet.length % alphabet.length] + alphabet[i % alphabet.length]
+        runBlocking {
+            val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined)
+            provider.start(scope)
+            req("radicle_seed", JSONObject().put("rid", rid))
+            // b fills far more than the cap with repositories of its own.
+            for (i in 0 until RadicleProvider.MAX_FOLLOWED_REPOS + 100) {
+                req("radicle_getSeedStatus", JSONObject().put("rid", ridOf(i)), origin = b)
+            }
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "connecting", "a (1/3)"))
+            assertEquals(listOf(site to rid), heard)
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "done", active = false))
+            // b's own oldest follow went; its newest stayed.
+            heard.clear()
+            req("radicle_seed", JSONObject().put("rid", ridOf(0)))
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(ridOf(0), "connecting", "a (1/3)"))
+            assertEquals(listOf(site to ridOf(0)), heard)
+            val newest = ridOf(RadicleProvider.MAX_FOLLOWED_REPOS + 99)
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(ridOf(0), "done", active = false))
+            heard.clear()
+            req("radicle_seed", JSONObject().put("rid", newest))
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(newest, "connecting", "a (1/3)"))
+            assertEquals(setOf(site to newest, b to newest), heard.toSet())
+            scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        }
+    }
+
+    @Test
     fun `a fetch started while the seed prompt was up is busy, not a silent no-op`() {
         grants.map[site] = ""
         val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"

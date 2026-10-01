@@ -119,10 +119,15 @@ class RadicleProvider(
      * keeps a listener per repository (`seed-status.js`), so a site never
      * hears what another site (or the user) seeds.
      */
-    private val followers = object : LinkedHashMap<String, MutableSet<String>>() {
-        // A page picks the RIDs it asks about: the oldest repository asked about goes first.
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, MutableSet<String>>?) = size > MAX_FOLLOWED_REPOS
-    }
+    private val followers = HashMap<String, MutableSet<String>>()
+
+    /**
+     * origin → the repositories it follows, least recently asked about
+     * first. The cap is per site: a page picks the RIDs it asks about, so
+     * one site asking about thousands of them only ever drops its own
+     * oldest follows, never another site's (#349 R1-F1).
+     */
+    private val followed = HashMap<String, LinkedHashSet<String>>()
     private val tracks = HashMap<String, Track>()
     private val writes = HashMap<String, ArrayDeque<Long>>()
     private var watcher: Job? = null
@@ -305,12 +310,32 @@ class RadicleProvider(
         return null
     }
 
-    private fun follow(origin: String, rid: String) = synchronized(lock) { followers.getOrPut(rid) { HashSet() }.add(origin) }
+    private fun follow(origin: String, rid: String) = synchronized(lock) {
+        val mine = followed.getOrPut(origin) { LinkedHashSet() }
+        // Asked again: it moves to the newest end.
+        mine.remove(rid)
+        mine.add(rid)
+        followers.getOrPut(rid) { HashSet() }.add(origin)
+        if (mine.size <= MAX_FOLLOWED_REPOS) return@synchronized
+        // Drop this site's least recently asked-about repository, sparing
+        // one whose fetch is running or about to (and the one just asked).
+        val running = node.state.value.seed?.takeIf { it.active }?.rid
+        val evict = mine.firstOrNull { it != rid && it != running && tracks[it]?.pendingSince == null }
+            ?: mine.first { it != rid }
+        unfollow(origin, evict)
+    }
+
+    /** Caller holds [lock]. */
+    private fun unfollow(origin: String, rid: String) {
+        followed[origin]?.let { if (it.remove(rid) && it.isEmpty()) followed.remove(origin) }
+        followers[rid]?.let { if (it.remove(origin) && it.isEmpty()) followers.remove(rid) }
+    }
 
     /** [origin] stops hearing every repository's `seedStatus`. */
     private fun unfollowAll(origin: String) = synchronized(lock) {
-        followers.values.forEach { it.remove(origin) }
-        followers.values.removeAll { it.isEmpty() }
+        followed.remove(origin)?.forEach { rid ->
+            followers[rid]?.let { if (it.remove(origin) && it.isEmpty()) followers.remove(rid) }
+        }
     }
 
     /**
@@ -653,7 +678,7 @@ class RadicleProvider(
         /** How long a seed just asked of the node reads as starting before its line shows up. */
         const val PENDING_MS = 5_000L
 
-        /** Repositories whose `seedStatus` followers are kept ([followers]). */
+        /** Repositories each site's `seedStatus` follows are kept for ([followed]). */
         const val MAX_FOLLOWED_REPOS = 512
 
         private val COB_ID = Regex("^[0-9a-f]{6,40}$")
