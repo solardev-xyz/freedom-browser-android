@@ -169,8 +169,11 @@ object EthereumLinks {
     var onNotice: ((String) -> Unit)? = null
 
     /**
-     * The link [url], tapped on [tab]'s page [pageUrl] while [doc] was
-     * the tab's document ([EthereumProviders.currentDocument]). Main thread.
+     * The link [url], tapped on [tab]'s page while [doc] was the tab's
+     * document ([EthereumProviders.currentDocument]). [pageUrl] is that
+     * page's committed origin ([externalLinkAsker]), never
+     * `WebView.getUrl()`, which may already name a pending load (#342).
+     * Main thread.
      */
     fun fromPage(context: Context, tab: BrowserState, pageUrl: String?, doc: Int, url: String) {
         val origin = permissionOriginKey(pageUrl)

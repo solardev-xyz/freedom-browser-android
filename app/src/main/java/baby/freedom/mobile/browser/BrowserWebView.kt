@@ -2698,7 +2698,19 @@ private fun buildRefreshableWebView(
         // remembered answer) for the page that asked, then the app is
         // started. An `intent:` no app can take goes to its http(s)
         // fallback instead, as a page navigation would.
+        //
+        // [pageUrl] is the site asking: for a page's own tap, its
+        // committed origin ([externalLinkAsker], #342), as document
+        // [doc]; for a load the user named, the hop that answered.
         fun offerExternalLink(view: WebView, pageUrl: String?, tab: BrowserState, url: String, doc: Int, userNamed: Boolean = false) {
+            // The page's tap is offered only while its page is still the
+            // tab's document: the offer can run a moment after the tap
+            // (the top-document check), and a page committed meanwhile
+            // never asked, and nor did one the tab left for Home (#342).
+            if (!userNamed && !externalLinkPageCurrent(tab, pageUrl, doc)) {
+                Log.i(LOG_TAG, "external link refused: page gone: ${externalUrlForLog(url)}")
+                return
+            }
             // A payment link (#317): the wallet's Send page, not an app.
             // One the user's own address answered with (a redirect) is
             // theirs, as if typed: no ask filed against the page on
@@ -3518,13 +3530,16 @@ private fun buildRefreshableWebView(
                     // iframe's that navigates the top frame (target=_top):
                     // the offer waits for the top document to say so
                     // ([UserGestureLatch]). The page it is asked for is
-                    // the one on screen now, whatever commits meanwhile.
-                    val pageUrl = askingView?.url
+                    // the one on screen now: the origin its tab (a popup's
+                    // opener, for the popup's first navigation) committed,
+                    // not `askingView.url`, which may already be a pending
+                    // load's address (#342) — and as its document now, so
+                    // nothing is offered once that page is gone.
                     val offerTab = opener?.first ?: state
-                    // …and its document now: a payment link's Send page is
-                    // dropped if that page is gone by the time it's shown.
-                    val offerDoc = EthereumProviders.currentDocument(offerTab.id)
-                    val offer = askingView?.let { page -> { offerExternalLink(page, pageUrl, offerTab, target, offerDoc) } }
+                    val asker = externalLinkAsker(offerTab)
+                    val offer = askingView?.let { page ->
+                        { offerExternalLink(page, asker?.origin, offerTab, target, asker?.doc ?: EthereumProviders.currentDocument(offerTab.id)) }
+                    }
                     val waiting = verdict == ExternalLinkVerdict.Ask && input != null && latch != null &&
                         offer != null && latch.whenInTopDocument(input, offer)
                     if (verdict == ExternalLinkVerdict.AskUserNamed && askingView != null) {

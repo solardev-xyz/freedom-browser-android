@@ -19,6 +19,7 @@ import baby.freedom.swarm.SwarmNode
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.MalformedURLException
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.WeakHashMap
@@ -845,7 +846,15 @@ internal object GatewayHttp : SwarmProvider.Http {
         timeoutMs: Int,
     ): SwarmProvider.Http.Answer = requestAt(SwarmNode.GATEWAY_URL, method, path, headers, body, timeoutMs)
 
-    /** [request] against [base] (tests point it at a local server). */
+    /**
+     * [request] against [base] (tests point it at a local server), which
+     * manifest discovery also uses for the external Swarm endpoint — an
+     * onion one included. The connection is opened through
+     * [TorRouting.openConnection], so an onion [base] goes to the routed
+     * Tor proxy, or is refused with [TorRouting.RefusedException] before
+     * anything is dialed — its name is never looked up in DNS (#356).
+     * Redirects aren't followed, so no hop can bypass that.
+     */
     internal fun requestAt(
         base: String,
         method: String,
@@ -858,7 +867,8 @@ internal object GatewayHttp : SwarmProvider.Http {
         /** The most of the answer's body that is read: past it the call fails with [AnswerTooLarge]. */
         maxBytes: Int = MAX_ANSWER_BYTES,
     ): SwarmProvider.Http.Answer {
-        val conn = URL(base + path).openConnection() as HttpURLConnection
+        val conn = TorRouting.openConnection(URL(base + path)) as? HttpURLConnection
+            ?: throw IOException("not an http URL: $base")
         // RUNNING until either the answer is read to its end (DONE) or
         // the deadline passes first (EXPIRED) — whichever gets there
         // first decides, so an answer complete in time is never turned
@@ -978,8 +988,21 @@ internal suspend fun withinDeadline(timeoutMs: Long, work: (remainingMs: () -> L
  * reading — within [timeoutMs] for the whole call.
  */
 internal fun fetchManifest(url: String, timeoutMs: Int = MANIFEST_TIMEOUT_MS): ManifestDiscovery {
+    // An onion endpoint while an external Tor proxy is being re-checked
+    // waits for that verdict, within this call's deadline, as the
+    // interceptor holds a page's onion request — rather than being
+    // refused at once (#376 R1-F1).
+    val started = System.nanoTime()
+    val onion = try {
+        fetchMayReachOnion(URL(url))
+    } catch (e: MalformedURLException) {
+        return ManifestDiscovery.Unresolved(e.javaClass.simpleName)
+    }
+    if (onion) TorRouting.awaitOnionRoute(timeoutMs.toLong())
+    val left = timeoutMs - ((System.nanoTime() - started) / 1_000_000).toInt()
+    if (left <= 0) return ManifestDiscovery.Unresolved("timed out")
     val answer = try {
-        GatewayHttp.requestAt(url, "GET", "", emptyMap(), null, timeoutMs, maxBytes = SwarmManifestFormat.MAX_BYTES)
+        GatewayHttp.requestAt(url, "GET", "", emptyMap(), null, left, maxBytes = SwarmManifestFormat.MAX_BYTES)
     } catch (e: GatewayHttp.AnswerTooLarge) {
         return ManifestDiscovery.Invalid("manifest exceeds 8 KiB")
     } catch (e: IOException) {
