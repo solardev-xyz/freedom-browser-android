@@ -22,6 +22,13 @@ class BackupRulesTest {
         "AutoApproveStore.kt" to "freedom_dapp_auto_approve",
         "X402Store.kt" to "freedom_x402",
         "SwarmGrantStore.kt" to "freedom_swarm_grants",
+        // A signing grant names the wallet's Radicle DID, which the same phrase derives again (#336).
+        "RadicleGrantStore.kt" to "freedom_radicle_grants",
+    )
+
+    /** Plain files beside them: the Swarm manifests' record of which Swarm grants they own. */
+    private val files = mapOf(
+        "../browser/SwarmProviderBridge.kt" to "swarm-manifests.json",
     )
 
     private fun excludes(file: String, section: String?): Set<String> {
@@ -35,11 +42,14 @@ class BackupRulesTest {
     }
 
     @Test
-    fun `grant, auto-approve, x402 and API key stores are excluded from every backup and transfer`() {
+    fun `grant, auto-approve, x402, API key and manifest stores are excluded from every backup and transfer`() {
         for ((source, name) in stores) {
             assertTrue("$source names its store $name", File(sources, source).readText().contains("\"$name\""))
         }
-        val paths = stores.values.map { "datastore/$it.preferences_pb" }
+        for ((source, name) in files) {
+            assertTrue("$source names its file $name", File(sources, source).readText().contains("filesDir, \"$name\")"))
+        }
+        val paths = stores.values.map { "datastore/$it.preferences_pb" } + files.values
         for ((file, section) in listOf(
             "data_extraction_rules.xml" to "cloud-backup",
             "data_extraction_rules.xml" to "device-transfer",

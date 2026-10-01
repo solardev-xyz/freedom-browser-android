@@ -10,10 +10,16 @@
   `freedom_node_settings`; MainActivity moves them out on start.)
   So are the stores that let a site act on the wallet or the node without
   asking: connected sites (DappGrantStore), auto-approve rules
-  (AutoApproveStore), x402 allowances (X402Store) and Swarm grants
-  (SwarmGrantStore). The wallet itself never travels, so on a new phone
-  these would come back silently once the same phrase is imported there,
-  never granted on that device (#229).
+  (AutoApproveStore), x402 allowances (X402Store), Swarm grants
+  (SwarmGrantStore) and Radicle grants (RadicleGrantStore: a signing
+  grant names the wallet's Radicle DID, which the same phrase derives
+  again). The wallet itself never travels, so on a new phone these would
+  come back silently once the same phrase is imported there, never
+  granted on that device (#229). The Swarm permission manifests' record
+  (`swarm-manifests.json`, SwarmManifests) stays with the Swarm grants it
+  says it owns: without them a copy would claim grants the user later
+  makes by hand on the new phone, and turn them off when the app's
+  manifest drops the row.
   The wallet vault (KeystoreVaultStore) needs no rule: it lives in
   `noBackupFilesDir` (`no_backup/wallet/vault.json`), which no backup
   domain includes, under its own Keystore key (`freedom.wallet.vault`,
@@ -26,6 +32,8 @@
         <exclude domain="file" path="datastore/freedom_dapp_auto_approve.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_x402.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_swarm_grants.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_radicle_grants.preferences_pb" />
+        <exclude domain="file" path="swarm-manifests.json" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="datastore/freedom_rpc_secrets.preferences_pb" />
@@ -33,5 +41,7 @@
         <exclude domain="file" path="datastore/freedom_dapp_auto_approve.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_x402.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_swarm_grants.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_radicle_grants.preferences_pb" />
+        <exclude domain="file" path="swarm-manifests.json" />
     </device-transfer>
 </data-extraction-rules>
