@@ -29,10 +29,21 @@ class BookmarksDatabaseTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
 
     /**
-     * A database file [name] exactly as Room created it at [version], from
-     * that version's exported schema (`app/schemas`, handed to this APK as
-     * assets): its tables, indices and Room's identity hash — what
-     * room-testing's `MigrationTestHelper.createDatabase` does.
+     * A database file [name] at user_version [version], built from the
+     * exported schema of [schemaVersion] (`app/schemas`, handed to this APK
+     * as assets): its tables (only those in [tables], if given), indices
+     * and setup queries, including the `room_master_table` row with that
+     * schema's identity hash — what room-testing's
+     * `MigrationTestHelper.createDatabase` does.
+     *
+     * When [schemaVersion] equals [version] this is the database exactly as
+     * Room created it at that version. When it doesn't (v1/v2, which
+     * predate the exported schemas and are built from v3's entities), the
+     * tables match that older version but the stored identity hash is
+     * [schemaVersion]'s, not the one Room wrote then. That's fine for the
+     * migration tests here — Room rewrites the stored hash once its
+     * migrations have run and only checks it after that — but such a file
+     * is not a byte-exact old database.
      */
     private fun createDatabase(
         name: String,
