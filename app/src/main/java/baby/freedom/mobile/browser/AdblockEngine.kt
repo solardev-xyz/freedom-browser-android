@@ -392,15 +392,22 @@ internal class AdblockEngine private constructor(
             val include = ArrayList<String>()
             val exclude = ArrayList<String>()
             if (domainsText.isNotEmpty()) {
+                var droppedInclude = false
                 for (raw in domainsText.split(',')) {
                     val d = raw.trim().lowercase()
                     val negated = d.startsWith("~")
                     val name = if (negated) d.substring(1) else d
                     // `example.*` (uBlock's any-TLD form) isn't a host this can match.
-                    if (name.isEmpty() || name.endsWith(".*") || name.contains('/')) continue
+                    if (name.isEmpty() || name.endsWith(".*") || name.contains('/')) {
+                        if (!negated) droppedInclude = true
+                        continue
+                    }
                     if (negated) exclude += name else include += name
                 }
                 if (include.isEmpty() && exclude.isEmpty()) return false
+                // A rule scoped to sites this can't match (`vipbox.*,~vipbox.pl##…`)
+                // must not fall back to every site but its `~` ones (#318 R6-F1).
+                if (include.isEmpty() && droppedInclude) return false
             }
             if (separator == "#@#") {
                 if (include.isEmpty()) {
@@ -850,6 +857,7 @@ internal fun parseNetworkFilter(line: String): NetworkFilter? {
                 (name == "elemhide" || name == "ehide") && exception -> exempts = exempts or 2
                 (name == "generichide" || name == "ghide") && exception -> exempts = exempts or 4
                 (opt.startsWith("domain=") || opt.startsWith("from=")) -> {
+                    var droppedInclude = false
                     for (d in raw.trim().substringAfter('=').split('|')) {
                         val dom = d.trim().lowercase()
                         if (dom.startsWith("~")) {
@@ -857,9 +865,14 @@ internal fun parseNetworkFilter(line: String): NetworkFilter? {
                             if (n.isNotEmpty() && !n.endsWith(".*")) (exclude ?: ArrayList<String>().also { exclude = it }) += n
                         } else if (dom.isNotEmpty() && !dom.endsWith(".*")) {
                             (include ?: ArrayList<String>().also { include = it }) += dom
+                        } else if (dom.isNotEmpty()) {
+                            droppedInclude = true
                         }
                     }
                     if (include == null && exclude == null) return null
+                    // `domain=google.*|~www.google.com` names only sites this can't
+                    // match: dropped, not turned into a filter for every other site.
+                    if (include == null && droppedInclude) return null
                 }
                 else -> return null // An option we don't honour: drop the whole filter.
             }

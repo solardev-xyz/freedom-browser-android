@@ -150,8 +150,13 @@ internal fun parseScriptletCall(body: String, catalog: ScriptletCatalog): Script
  * (`JSON.parse`, `fetch`, a property, a timer, a text node…), leaves no
  * marker of its own on the page, inserts no `<script>` or
  * `<style>` element (either would meet the page's CSP and could report
- * us), doesn't `eval`, doesn't reach the network, and needs no extension
- * API. The one page global set beyond what a scriptlet is told to patch
+ * us), doesn't `eval`, doesn't reach the network itself, and needs no
+ * extension API. One exception, as in uBlock: `prevent-window-open` with
+ * a delay argument answers a blocked popup with a decoy — a hidden 1px
+ * `<iframe>`/`<object>` at the popup's URL appended to the page (a
+ * request with cookies, which the network filter still sees), or with
+ * `blank` the real `window.open('about:blank')` (a tab that opens, then
+ * closes after the delay). The one page global set beyond what a scriptlet is told to patch
  * is `window.onerror`: `get-exception-token` (a dependency of `json-prune*`,
  * `abort-*` and `trusted-suppress-native-method`) wraps it, as in uBlock,
  * to swallow the errors the `abort-*` scriptlets throw — so on a host
@@ -425,7 +430,7 @@ internal class TabScriptlets(
     /** Host → the generation its script was built for, readable off the main thread. */
     private val current = ConcurrentHashMap<String, Int>()
 
-    /** Hosts asked for before the first engine build landed. Main thread only. */
+    /** Hosts asked for before the first engine build landed, its wait deadline passed or not. Main thread only. */
     private val waiting = LinkedHashSet<String>()
 
     @Volatile
@@ -446,6 +451,12 @@ internal class TabScriptlets(
         // The twin first, so the host asked for is the most recently
         // needed one if the tab's budget runs out.
         val hosts = listOfNotNull(scriptletRedirectTwin(host), host)
+        // Past the wait's deadline with no engine yet: nothing to register
+        // now, but queue them for when it lands ([refresh], R6-M2).
+        if (!source.firstBuildLanded) {
+            main.post { ensureHosts(hosts) }
+            return
+        }
         // Nothing to do if both are in place, or have no rules (or blocking is off).
         if (hosts.none { h -> current[h] != generation && (current[h] != null || source.hasScriptlets(h)) }) return
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -515,8 +526,9 @@ internal class TabScriptlets(
         val script = source.script(host, private)
         if (script == null) {
             have?.let { drop(host) }
-            // No engine yet: try again once it lands ([refresh]).
-            if (source.firstBuildPending) waiting += host
+            // No engine yet: try again once it lands ([refresh]) — however
+            // long that takes, not only within the first build's wait (R6-M2).
+            if (!source.firstBuildLanded) waiting += host
             return
         }
         if (have != null && have.script == script) {
@@ -626,8 +638,11 @@ internal interface ScriptletSource {
     /** The frame script for [host] in a tab that is [private] or not ([scriptletFrameJs]); `null` for none. */
     fun script(host: String, private: Boolean): String?
 
-    /** The first engine build is under way (its answers aren't in yet). */
+    /** The first engine build is under way (its answers aren't in yet), within its wait's deadline. */
     val firstBuildPending: Boolean get() = false
+
+    /** The first engine build has landed (or there's none to wait for); `false` from start until then, deadline or not. */
+    val firstBuildLanded: Boolean get() = true
 
     /** Block until the first engine build lands (bounded); a network thread only. */
     fun awaitFirstBuild() {}
@@ -639,6 +654,7 @@ internal object AdblockScriptletSource : ScriptletSource {
     override fun hasScriptlets(host: String) = Adblock.scriptletCode(host) != null
     override fun script(host: String, private: Boolean) = Adblock.scriptletScript(host, private)
     override val firstBuildPending: Boolean get() = Adblock.firstBuildPending
+    override val firstBuildLanded: Boolean get() = Adblock.firstBuildLanded
     override fun awaitFirstBuild() = Adblock.awaitFirstBuildBlocking()
 }
 

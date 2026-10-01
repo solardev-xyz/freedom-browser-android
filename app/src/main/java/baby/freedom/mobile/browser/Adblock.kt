@@ -362,6 +362,9 @@ internal class FirstBuildGate(
 
     val isReady: Boolean get() = latch.count == 0L
 
+    /** [isReady], or [open] never called (nothing will land). */
+    val landedOrUnstarted: Boolean get() = isReady || deadline == 0L
+
     /**
      * Would a caller wait now: the build started, hasn't landed, and the
      * deadline hasn't passed?
@@ -915,6 +918,13 @@ internal object Adblock {
      * asking for good.
      */
     val firstBuildPending: Boolean get() = firstBuild.pending
+
+    /**
+     * Has the first engine build landed — or was none ever started? Unlike
+     * [firstBuildPending], stays `false` past the wait's deadline, for
+     * work queued until the engine exists ([TabScriptlets]).
+     */
+    val firstBuildLanded: Boolean get() = firstBuild.landedOrUnstarted
 
     /** Block (a WebView network thread) until the first engine build lands or its deadline passes. */
     fun awaitFirstBuildBlocking() {

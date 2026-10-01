@@ -280,6 +280,33 @@ class AdblockScriptletsDeviceTest {
         instrumentation.runOnMainSync { small.close() }
     }
 
+    /**
+     * The first engine build outlasted its wait (R6-M2): a document asked
+     * for then — from a network thread and from the main thread — has no
+     * script yet, but is registered, twin and all, once the build lands.
+     */
+    @Test
+    fun aHostAskedForPastTheFirstBuildWaitIsRegisteredWhenItLands() {
+        val late = object : ScriptletSource {
+            @Volatile var landed = false
+            override val generation get() = if (landed) 1 else 0
+            override fun hasScriptlets(host: String) = landed
+            override fun script(host: String, private: Boolean) = if (landed) "/* $host */" else null
+            override val firstBuildPending get() = false
+            override val firstBuildLanded get() = landed
+        }
+        lateinit var slow: TabScriptlets
+        instrumentation.runOnMainSync { slow = TabScriptlets(webView, private = false, source = late) }
+        slow.ensureFromNetworkThread("http://h1.test/")
+        instrumentation.runOnMainSync { slow.ensure("http://www.h2.test/") }
+        instrumentation.waitForIdleSync()
+        assertEquals(emptySet<String>(), slow.hosts)
+        late.landed = true
+        instrumentation.runOnMainSync { slow.refresh() }
+        assertEquals(setOf("www.h1.test", "h1.test", "h2.test", "www.h2.test"), slow.hosts)
+        instrumentation.runOnMainSync { slow.close() }
+    }
+
     /** A page whose frame, on d.test, came in by a route nothing saw (a redirect). */
     private val redirectedTop = """
         <!doctype html><script>
