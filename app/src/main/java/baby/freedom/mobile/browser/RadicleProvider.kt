@@ -306,33 +306,77 @@ class RadicleProvider(
         val now = clock()
         // Check and claim in one step, so two sites' prompts answered at
         // once can't both reach the node.
-        val claimed = synchronized(lock) {
+        val claim = synchronized(lock) {
             if (otherFetch(rid)) return busyReply()
-            val line = node.state.value.seed
-            // Already fetching this one: report on that fetch.
-            if (line != null && line.active && line.rid == rid) return null
-            val fresh = rid !in tracks
-            val track = tracks.getOrPut(rid) { Track(now, 0) }
-            val previous = track.pendingSince
-            track.pendingSince = now
-            Triple(track, previous, fresh)
+            claimLocked(rid, now) ?: return null
         }
         if (!node.seed(rid)) {
-            synchronized(lock) {
-                val (track, previous, fresh) = claimed
-                if (track.pendingSince == now) track.pendingSince = previous
-                if (fresh && tracks[rid] === track) tracks.remove(rid)
-            }
+            synchronized(lock) { claim.giveBack() }
             return Reply.Err(INTERNAL, "seed failed", "seed_failed")
         }
-        synchronized(lock) {
-            val track = claimed.first
-            track.startedAt = now
+        synchronized(lock) { claim.started() }
+        return null
+    }
+
+    /**
+     * The user started a seed of [rid] from the Radicle page, which goes to
+     * the node without passing through here: claim it the same way, so a
+     * site's prompt answered before its seed line reaches the app reads the
+     * node as busy instead of being told `{seeded:true}` for a seed the node
+     * skips (#349 R5-M1).
+     */
+    fun userSeeding(rid: String) {
+        val now = clock()
+        synchronized(lock) { claimLocked(rid, now)?.started() }
+    }
+
+    /** A fetch of [rid] just asked of the node; [giveBack] if the node refused it. */
+    private inner class Claim(
+        val rid: String,
+        val track: Track,
+        val at: Long,
+        val previousPending: Long?,
+        val previousLine: RadicleSeed?,
+        val fresh: Boolean,
+    ) {
+        /** Caller holds [lock]. */
+        fun giveBack() {
+            if (track.pendingSince == at) {
+                track.pendingSince = previousPending
+                track.lastLine = previousLine
+            }
+            if (fresh && tracks[rid] === track) tracks.remove(rid)
+        }
+
+        /** Caller holds [lock]. */
+        fun started() {
+            track.startedAt = at
             track.attemptCount++
             track.finishedAt = null
             track.recentAttempts.clear()
         }
-        return null
+    }
+
+    /**
+     * Mark [rid] as asked of the node at [now]; null if its fetch is
+     * already running (report on that one). Caller holds [lock].
+     *
+     * The rid's seed line as it stands — an earlier fetch's finished line,
+     * say — becomes the track's [Track.lastLine]: it says nothing about the
+     * fetch just asked, so only a line that moves after this may clear the
+     * claim. A fresh track's null [Track.lastLine] otherwise let the next
+     * unrelated [RadicleInfo] push, repeating that stale line, clear it at
+     * once (#349 R5-M2).
+     */
+    private fun claimLocked(rid: String, now: Long): Claim? {
+        val line = node.state.value.seed?.takeIf { it.rid == rid }
+        if (line != null && line.active) return null
+        val fresh = rid !in tracks
+        val track = tracks.getOrPut(rid) { Track(now, 0) }
+        val claim = Claim(rid, track, now, track.pendingSince, track.lastLine, fresh)
+        track.pendingSince = now
+        if (line != null) track.lastLine = line
+        return claim
     }
 
     private fun follow(origin: String, rid: String) = synchronized(lock) {

@@ -138,6 +138,15 @@ object RadicleProviders {
     }
 
     /**
+     * The user is seeding [rid] from the Radicle page: a site's seed
+     * prompt answered before that fetch's line arrives reads the node as
+     * busy (#349 R5-M1). Call before asking the node.
+     */
+    fun userSeeding(rid: String) {
+        provider?.userSeeding(rid)
+    }
+
+    /**
      * Track [webView] (a tab's, before its first load) and, while Radicle
      * is on, register the channel and the script on it. Nothing for a
      * private tab: its grants would have nowhere to live that the private
