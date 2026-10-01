@@ -40,6 +40,7 @@ import java.util.concurrent.atomic.AtomicReference
 class AdblockScriptletsDeviceTest {
 
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
+    private val seen = java.util.concurrent.ConcurrentLinkedQueue<Pair<String, Map<String, String>>>()
     private lateinit var webView: WebView
     private lateinit var tab: TabScriptlets
     private val source = FixtureSource()
@@ -60,6 +61,7 @@ class AdblockScriptletsDeviceTest {
                     a.test,b.test##+js(set, fixtureFlag, true)
                     a.test,b.test##+js(json-prune, ad)
                     b.test##+js(trusted-replace-fetch-response, '"ad"', '"no"', /data)
+                    d.test,e.test##+js(set, fixtureFlag, true)
                     """.trimIndent(),
                     trustedScriptlets = true,
                 ),
@@ -128,12 +130,23 @@ class AdblockScriptletsDeviceTest {
                 override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                     val url = request?.url?.toString() ?: return null
                     val accept = request.requestHeaders.entries.firstOrNull { it.key.equals("Accept", true) }?.value.orEmpty()
-                    if (request.isForMainFrame || accept.startsWith("text/html")) tab.ensureFromNetworkThread(url)
+                    seen += url to request.requestHeaders
+                    val document = request.isForMainFrame || accept.startsWith("text/html")
+                    // d.test's frame stands for one a redirect hop landed on: nothing saw it coming.
+                    if (document && !url.startsWith("http://d.test/")) tab.ensureFromNetworkThread(url)
+                    if (!document) tab.noteReferer(request.requestHeaders)
                     return when (url) {
                         "http://a.test/" -> html(topPage)
                         "http://b.test/frame" -> html(framePage)
                         "http://b.test/" -> html("<script>document.title = 'b:' + String(window.fixtureFlag)</script>")
                         "http://c.test/" -> html("<script>document.title = 'c:' + String(window.fixtureFlag)</script>")
+                        "http://c.test/redirected" -> html(redirectedTop, csp = false)
+                        "http://d.test/frame" -> html(redirectedFrame, csp = false)
+                        "http://d.test/s.js" -> WebResourceResponse("text/javascript", "utf-8", ByteArrayInputStream("var s = 1;".toByteArray()))
+                        "http://e.test/s.css" -> WebResourceResponse(
+                            "text/css", "utf-8",
+                            ByteArrayInputStream("@font-face { font-family: f; src: url(http://e.test/f.woff); } body { font-family: f; background: url(http://e.test/bg.png); }".toByteArray()),
+                        )
                         "http://a.test/data", "http://b.test/data" -> WebResourceResponse(
                             "application/json", "utf-8", 200, "OK",
                             mapOf("Access-Control-Allow-Origin" to "*"),
@@ -265,5 +278,56 @@ class AdblockScriptletsDeviceTest {
         assertTrue("www.h1.test in $hosts", "www.h1.test" in hosts)
         assertEquals(3, hosts.size)
         instrumentation.runOnMainSync { small.close() }
+    }
+
+    /** A page whose frame, on d.test, came in by a route nothing saw (a redirect). */
+    private val redirectedTop = """
+        <!doctype html><script>
+        window.addEventListener('message', function (e) { window.report = e.data; });
+        </script><iframe src="http://d.test/frame"></iframe>
+    """.trimIndent()
+
+    /**
+     * The frame: a script of its own (`Referer` = the frame), and a
+     * stylesheet on e.test whose font and image name the stylesheet.
+     */
+    private val redirectedFrame = """
+        <!doctype html><link rel="stylesheet" href="http://e.test/s.css"><script src="/s.js"></script>
+        <body>text<script>
+        var flag = String(window.fixtureFlag);
+        document.fonts.ready.then(function () { setTimeout(function () { parent.postMessage(flag, '*'); }, 300); });
+        </script></body>
+    """.trimIndent()
+
+    /**
+     * A frame redirected to a host with rules (R3-F1): WebView's
+     * interceptor gets no `Sec-Fetch-Dest`, yet the frame's own script
+     * request still registers its host from the `Referer`, so its next
+     * load runs the scriptlets. The stylesheet's font and image name only
+     * the stylesheet, and don't register its host.
+     */
+    @Test
+    fun aRedirectedFrameGetsItsScriptletsOnItsNextLoad() {
+        load("http://c.test/redirected")
+        assertEquals("undefined", waitReport())
+        instrumentation.waitForIdleSync()
+        val hosts = tab.hosts
+        assertTrue("d.test in $hosts", "d.test" in hosts)
+        assertFalse("e.test in $hosts", "e.test" in hosts)
+        // What the interceptor really sees: no Fetch Metadata, and the font and image did load.
+        assertTrue(seen.none { (_, h) -> h.keys.any { it.equals("Sec-Fetch-Dest", true) } })
+        assertTrue(seen.map { it.first }.containsAll(listOf("http://d.test/s.js", "http://e.test/f.woff", "http://e.test/bg.png")))
+        load("http://c.test/redirected")
+        assertEquals("true", waitReport())
+    }
+
+    private fun waitReport(): String {
+        val deadline = System.currentTimeMillis() + 15_000
+        while (System.currentTimeMillis() < deadline) {
+            val v = js("window.report || ''")
+            if (v != "\"\"" && v != "null") return JSONObject("{\"v\":$v}").getString("v")
+            Thread.sleep(100)
+        }
+        throw AssertionError("no report")
     }
 }

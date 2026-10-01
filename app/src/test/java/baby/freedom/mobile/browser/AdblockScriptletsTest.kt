@@ -358,19 +358,38 @@ class AdblockScriptletsTest {
     /**
      * Only a request the document itself made has the document as its
      * `Referer` (R2-M1): a stylesheet's font, image or `@import` names
-     * the stylesheet, and a request with no `Sec-Fetch-Dest` proves
-     * nothing.
+     * the stylesheet. WebView's interceptor never gets `Sec-Fetch-Dest`
+     * (R3-F1), so these are the headers it does get: the kind shows in
+     * `Accept`, and a font's (`*` `/` `*`, like a script's) only in its
+     * stylesheet `Referer`.
      */
     @Test
     fun `a Referer names a document only for what the document fetches`() {
+        val doc = "https://a.example/watch?v=1"
+        val any = "*/*"
+        // script, fetch / XHR, a frame's document, media: as WebView 133 hands them over.
+        for (accept in listOf(any, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "", null)) {
+            val headers = buildMap { put("Referer", doc); put("User-Agent", "x"); accept?.let { put("Accept", it) } }
+            assertTrue("$accept", refererNamesDocument(headers))
+        }
+        // An image, a stylesheet (an @import too).
+        for (accept in listOf("image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", "text/css,*/*;q=0.1")) {
+            assertFalse(accept, refererNamesDocument(mapOf("Accept" to accept, "Referer" to doc)))
+        }
+        // A font from a stylesheet: named by the stylesheet's .css path.
+        assertFalse(refererNamesDocument(mapOf("Accept" to any, "Referer" to "https://cdn.example/a.CSS?v=2")))
+        assertTrue(refererNamesDocument(mapOf("Accept" to any, "Referer" to "https://a.example/css/")))
+        // No Referer, or one that isn't a URL.
+        assertFalse(refererNamesDocument(mapOf("Accept" to any)))
+        assertFalse(refererNamesDocument(mapOf("Accept" to any, "Referer" to "https://a.example/a b")))
+        assertFalse(refererNamesDocument(null))
+        // Sec-Fetch-Dest, should a WebView ever pass it on, decides.
         for (dest in listOf("script", "empty", "iframe", "video", "worker", "Script")) {
-            assertTrue(dest, refererNamesDocument(mapOf("sec-fetch-dest" to dest, "Referer" to "https://a.example/")))
+            assertTrue(dest, refererNamesDocument(mapOf("sec-fetch-dest" to dest, "Referer" to doc)))
         }
         for (dest in listOf("font", "image", "style", "")) {
-            assertFalse(dest, refererNamesDocument(mapOf("Sec-Fetch-Dest" to dest, "Referer" to "https://cdn.example/a.css")))
+            assertFalse(dest, refererNamesDocument(mapOf("Sec-Fetch-Dest" to dest, "Accept" to any, "Referer" to doc)))
         }
-        assertFalse(refererNamesDocument(mapOf("Referer" to "https://a.example/")))
-        assertFalse(refererNamesDocument(null))
     }
 
     /**

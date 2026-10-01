@@ -638,18 +638,29 @@ internal object AdblockScriptletSource : ScriptletSource {
 
 /**
  * Does a subresource request's `Referer` name the document that made it
- * ([TabScriptlets.noteReferer])? Only for the `Sec-Fetch-Dest` kinds a
- * document's own elements and scripts fetch. Not `font`, `image` or
- * `style`: CSS fetches those too (`@font-face`, `background`,
- * `@import`), and their `Referer` is then the stylesheet's URL — often
- * a CDN's, not a document's. A worker's own fetches name the worker's
- * script, which is same-origin with the document that started it. No
- * `Sec-Fetch-Dest` at all: not trusted.
+ * ([TabScriptlets.noteReferer])? Not when CSS fetched it (`@font-face`,
+ * `background`, `@import`): its `Referer` is then the stylesheet's URL —
+ * often a CDN's, not a document's.
+ *
+ * WebView's `shouldInterceptRequest` never sees `Sec-Fetch-Dest`
+ * (Chromium adds Fetch Metadata later, in the network service), so the
+ * kind is read from `Accept`, which Blink sets per kind before the hook:
+ * an image (`image/…`) or a stylesheet (`text/css…`) isn't trusted. A
+ * font sends the same catch-all `Accept` as a script or `fetch`, so a `Referer`
+ * whose path is a `.css` file isn't trusted either. What's left — a
+ * font from a stylesheet served at another path — at worst registers
+ * that stylesheet's host, if it has rules, for nothing. Should
+ * `Sec-Fetch-Dest` ever turn up, it decides instead.
  */
 internal fun refererNamesDocument(headers: Map<String, String>?): Boolean {
-    val dest = headers?.entries?.firstOrNull { it.key.equals("Sec-Fetch-Dest", ignoreCase = true) }
-        ?.value?.trim()?.lowercase() ?: return false
-    return dest in REFERER_DOCUMENT_DESTS
+    fun header(name: String) =
+        headers?.entries?.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value?.trim()?.lowercase()
+    val referer = refererOf(headers) ?: return false
+    header("Sec-Fetch-Dest")?.let { return it in REFERER_DOCUMENT_DESTS }
+    val accept = header("Accept").orEmpty()
+    if (accept.startsWith("image/") || accept.startsWith("text/css")) return false
+    val path = runCatching { java.net.URI(referer).rawPath }.getOrNull() ?: return false
+    return !path.lowercase().endsWith(".css")
 }
 
 private val REFERER_DOCUMENT_DESTS = setOf(
