@@ -462,6 +462,33 @@ internal fun parseTopDocumentInput(data: String?): TopDocumentInput? {
 }
 
 /**
+ * Kotlin's ask to the top document's detector, sent a moment after an
+ * input ended (`sync <id>`), and the detector's echo (`synced <id>`) a
+ * task later (#348). The page's renderer thread handles input ahead of
+ * the message and ahead of that task, so the echo says it is past input
+ * `<id>` — and past any activation it gave an iframe, however long that
+ * iframe's own handlers held the thread
+ * ([UserGestureLatch.onRendererCaughtUp]).
+ */
+internal const val INPUT_SYNC = "sync"
+internal const val INPUT_SYNCED = "synced"
+
+internal fun inputSyncRequest(id: Int): String = "$INPUT_SYNC $id"
+
+/**
+ * How long after an input ends its [INPUT_SYNC] is sent: margin for the
+ * input's last events to reach the renderer thread ahead of it, over
+ * their own pipe.
+ */
+internal const val INPUT_SYNC_DELAY_MS = 100L
+
+private val INPUT_SYNCED_RE = Regex("^$INPUT_SYNCED (\\d{1,9})$")
+
+/** The input id an [INPUT_SYNCED] echo names, or `null` when [data] isn't one. */
+internal fun parseInputSynced(data: String?): Int? =
+    INPUT_SYNCED_RE.matchEntire(data ?: return null)?.groupValues?.get(1)?.toIntOrNull()
+
+/**
  * A frame's report that media in its document is now audible (#91):
  * playing, not muted by the page, volume above zero. Sent on a change
  * only; [AUDIO_SILENT] when that stops. See [TabAudioFrames].
@@ -576,6 +603,12 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * an iframe is dispatched in the iframe's document only, so this is how
  * Kotlin tells a tap on the top page from one on an embedded frame that
  * navigates the top frame ([UserGestureLatch]).
+ *
+ * **Renderer sync** (#348): in the main frame, a `sync <id>` ask
+ * ([INPUT_SYNC]), sent by Kotlin just after an input ends, is echoed as
+ * `synced <id>` a task later, before first paint too — the earliest the
+ * renderer is known to be past that input, and so past any activation
+ * it gave an iframe ([UserGestureLatch.onRendererCaughtUp]).
  *
  * **Dormant until first paint.** In the main frame it posts
  * [BOTTOM_UI_READY] (so Kotlin holds a reply channel for the document)
@@ -785,7 +818,7 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   said('pointerdown');
   said('keydown');
   said('click');
-  var T = null, started = false, ASK = /^probe ([0-9a-f]{1,64})$/, THEME_ASK = /^theme ([0-9a-f]{1,64})$/,
+  var T = null, started = false, SYNC = /^$INPUT_SYNC ([0-9]{1,9})$/, ASK = /^probe ([0-9a-f]{1,64})$/, THEME_ASK = /^theme ([0-9a-f]{1,64})$/,
       GO = /^$PAGE_REISSUE_PREFIX([0-9a-f]{1,64}) (https?:\/\/\S+)$/i, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
   var gcs = w.getComputedStyle, MO = w.MutationObserver,
       RO = w.ResizeObserver, IO = w.IntersectionObserver;
@@ -980,6 +1013,13 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     var data = null;
     try { var own = e ? gopd(e, 'data') : null; data = own ? own.value : e ? dom.data(e) : null; } catch (x) {}
     if (typeof data !== 'string') return;
+    var y = tc.exec(SYNC, data);
+    if (y) {
+      // A task later: input the renderer already had runs first (#348).
+      var id = y[1];
+      setT(function () { port.postMessage('$INPUT_SYNCED ' + id); }, 0);
+      return;
+    }
     var g = go ? tc.exec(GO, data) : null;
     if (g) {
       if (started && g[1] === T) {

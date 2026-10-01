@@ -453,6 +453,32 @@ class BottomUiDetectorScriptTest {
         assertEquals(1, num("contextMenuListeners.length"))
     }
 
+    // ---- the renderer sync after an input (#348) ----------------------
+
+    private fun Page.synced(): String = Context.toString(eval("sent.filter(function (s) { return /^synced /.test(s); }).join('|')"))
+
+    @Test
+    fun `a sync is echoed a task later, before first paint too, and only in the top document`() = page {
+        documentStart()
+        eval("kotlinSays('${inputSyncRequest(7)}')")
+        assertEquals("", synced()) // not at once: input queued ahead of it runs first
+        flush()
+        assertEquals("synced 7", synced())
+        assertEquals(7, parseInputSynced(synced()))
+        // Anything else in that shape isn't echoed.
+        eval("kotlinSays('sync x'); kotlinSays('sync 1234567890')")
+        flush()
+        assertEquals("synced 7", synced())
+        assertEquals(null, parseInputSynced("synced 7 "))
+    }
+
+    @Test
+    fun `a subframe's detector echoes no sync`() = page {
+        eval("top = {}")
+        documentStart()
+        assertEquals(0, num("channelListeners.length"))
+    }
+
     // ---- the page's say on a long-press (#84) -------------------------
 
     private fun Page.verdicts(): String = Context.toString(eval("sent.filter(function (s) { return /^contextmenu /.test(s); }).join('|')"))

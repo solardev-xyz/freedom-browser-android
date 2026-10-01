@@ -399,7 +399,15 @@ internal fun externalLinkPageCurrent(tab: BrowserState, origin: String?, doc: In
  * [consume]; and a frame keeps the activation of its own tap for
  * [WINDOW_MS] whatever the user taps next, so it isn't enough that the
  * latest input was the top document's — every input of that window has
- * to have been.
+ * to have been. That window runs from when the renderer *handles* the
+ * input, not from the platform's event time: an iframe that busy-waits
+ * in its own `pointerdown` handler gets its activation seconds after the
+ * finger lifted. So an input the top document didn't confirm counts
+ * until [WINDOW_MS] after the renderer is known to have caught up past
+ * it ([onRendererCaughtUp]: the top document's echo of a sync sent
+ * after the input ended, which the shared renderer thread can only run
+ * once it is done with the input's events) — with no such word yet, it
+ * counts still.
  *
  * [clock] is a monotonic millisecond clock (`SystemClock.uptimeMillis`).
  * Main thread only.
@@ -421,6 +429,16 @@ internal class UserGestureLatch(private val clock: () -> Long) {
 
         /** [consume] handed this input's id to a navigation. */
         var handedOut = false
+
+        /**
+         * When the renderer was first known to be past this input
+         * ([onRendererCaughtUp]) — no earlier than any activation it
+         * gave a frame began. Null until then.
+         */
+        var handledBy: Long? = null
+
+        /** Can a frame no longer hold an activation this input gave it, at [now]? */
+        fun activationOver(now: Long): Boolean = handledBy.let { it != null && it < now - WINDOW_MS }
 
         /**
          * Whether the top document's input at [at] can be this input's.
@@ -446,6 +464,18 @@ internal class UserGestureLatch(private val clock: () -> Long) {
 
     /** [topDocumentGesture] answers still waiting on the top document's word. */
     private val topWatches = ArrayList<TopWatch>()
+
+    /**
+     * The newest input dropped from [recent] (its cap) while its
+     * activation could still be live and unconfirmed — 0 for none —
+     * and when the renderer was known to be past it (null: not yet).
+     * Until [WINDOW_MS] after that, no gesture is the top document's.
+     */
+    private var droppedId = 0
+    private var droppedHandledBy: Long? = null
+
+    /** The latest input's id: what [onRendererCaughtUp] names once the renderer is past it. */
+    val latestInputId: Int get() = inputId
 
     private class TopWatch(val inputs: List<Input>, val deadline: Long) {
         val answer = CompletableDeferred<Boolean>()
@@ -481,9 +511,35 @@ internal class UserGestureLatch(private val clock: () -> Long) {
         inputId++
         val repeats = untilConfirmed && recent.any { it.untilConfirmed }
         recent.addLast(Input(inputId, at, at, untilConfirmed, repeats))
-        val stale = clock() - WINDOW_MS - CONFIRM_MS
-        while (recent.isNotEmpty() && (recent.size > MAX_RECENT || recent.first().end < stale)) recent.removeFirst()
+        val now = clock()
+        val stale = now - WINDOW_MS - CONFIRM_MS
+        while (recent.isNotEmpty()) {
+            val first = recent.first()
+            // An unconfirmed input stays while a frame can still hold its
+            // activation: [topDocumentGesture] has to see it.
+            val done = first.end < stale && (first.inTopDocument || first.activationOver(now - CONFIRM_MS))
+            if (!done && recent.size <= MAX_RECENT) break
+            if (!done && !first.inTopDocument && !first.activationOver(now)) {
+                droppedId = first.id
+                droppedHandledBy = first.handledBy
+            }
+            recent.removeFirst()
+        }
         settleTopWatches()
+    }
+
+    /**
+     * The renderer has handled every input up to [id], as of now: the
+     * top document echoed a sync sent once input [id] had ended
+     * ([INPUT_SYNC]). Input reaches the page's (shared) renderer thread
+     * ahead of a message sent after it, so any activation those inputs
+     * gave a frame — an iframe's included — began by now at the latest.
+     */
+    fun onRendererCaughtUp(id: Int) {
+        if (id > inputId) return
+        val now = clock()
+        for (input in recent) if (input.id <= id && input.handledBy == null) input.handledBy = now
+        if (droppedId in 1..id && droppedHandledBy == null) droppedHandledBy = now
     }
 
     /** The current input goes on until [at] (a touch's `ACTION_UP`). */
@@ -538,7 +594,9 @@ internal class UserGestureLatch(private val clock: () -> Long) {
      * For a navigation starting now with the user's activation (#348):
      * whether every input of the last [WINDOW_MS] — any one of which can
      * have lent a frame the activation it carries — was the top
-     * document's own, as its [TOP_DOCUMENT_INPUT] confirms. Doesn't use
+     * document's own (an unconfirmed input counts until [WINDOW_MS]
+     * after the renderer is known to have handled it, see
+     * [onRendererCaughtUp]), as its [TOP_DOCUMENT_INPUT] confirms. Doesn't use
      * the input up ([consume]): the navigation goes on either way, and
      * what's asked is only whose it was. False when there was no input
      * at all (a gesture this view never saw), or once [CONFIRM_MS] has
@@ -547,7 +605,8 @@ internal class UserGestureLatch(private val clock: () -> Long) {
      */
     fun topDocumentGesture(): TopDocumentGesture {
         val now = clock()
-        val inputs = recent.filter { it.end >= now - WINDOW_MS }
+        if (droppedId != 0 && droppedHandledBy.let { it == null || it >= now - WINDOW_MS }) return TopDocumentGesture { false }
+        val inputs = recent.filter { !it.activationOver(now) }
         if (inputs.isEmpty()) return TopDocumentGesture { false }
         val watch = TopWatch(inputs, now + CONFIRM_MS)
         if (!watch.settle(now)) {

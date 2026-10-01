@@ -287,10 +287,77 @@ class ExternalAppsTest {
     fun `x402 an iframe tap whose activation has run out doesn't count`() {
         val c = Clock()
         c.tap() // on the iframe
+        c.now += INPUT_SYNC_DELAY_MS
+        c.latch.onRendererCaughtUp(c.latch.latestInputId) // the renderer was idle
         c.now += UserGestureLatch.WINDOW_MS + 100
         val next = c.tap() // on the top page
         c.topDocumentSaw(next)
         assertTrue(runBlocking { c.latch.topDocumentGesture().confirmed() })
+    }
+
+    @Test
+    fun `x402 an iframe that held the renderer in its own handler keeps its tap's activation past the native window`() {
+        // The R1-F1 repro: the iframe busy-waits 6.5 s in its pointerdown
+        // handler, so its activation starts then, not at the tap.
+        val c = Clock()
+        c.tap() // on the iframe
+        val iframeTap = c.latch.latestInputId
+        c.now += 6_500
+        c.latch.onRendererCaughtUp(iframeTap) // the sync's echo, behind the busy loop
+        c.now += 1_000 // 7.5 s after the iframe tap
+        val next = c.tap() // on the top page
+        c.topDocumentSaw(next)
+        val gesture = c.latch.topDocumentGesture()
+        c.now += UserGestureLatch.CONFIRM_MS + 1 // its deadline passes, unconfirmed
+        assertFalse(runBlocking { gesture.confirmed() })
+        // Once WINDOW_MS has passed since the renderer was past it, it's out.
+        c.now += UserGestureLatch.WINDOW_MS
+        val later = c.tap()
+        c.topDocumentSaw(later)
+        c.latch.onRendererCaughtUp(c.latch.latestInputId)
+        assertTrue(runBlocking { c.latch.topDocumentGesture().confirmed() })
+    }
+
+    @Test
+    fun `x402 an unconfirmed input the renderer was never heard past counts however old`() {
+        val c = Clock()
+        c.tap() // on the iframe; no echo (a renderer still stuck in it, or no detector)
+        c.now += 60_000
+        val next = c.tap()
+        c.topDocumentSaw(next)
+        val gesture = c.latch.topDocumentGesture()
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 an unconfirmed input dropped from the record still counts until the renderer is past it`() {
+        val c = Clock()
+        c.tap() // on the iframe, held up
+        repeat(40) { // a burst of top-page taps, past the record's cap
+            c.now += 50
+            c.topDocumentSaw(c.tap())
+        }
+        assertFalse(runBlocking { c.latch.topDocumentGesture().confirmed() })
+        c.latch.onRendererCaughtUp(c.latch.latestInputId)
+        c.now += UserGestureLatch.WINDOW_MS + 1
+        val next = c.tap()
+        c.topDocumentSaw(next)
+        c.latch.onRendererCaughtUp(c.latch.latestInputId)
+        assertTrue(runBlocking { c.latch.topDocumentGesture().confirmed() })
+    }
+
+    @Test
+    fun `x402 an echo can't name an input that hasn't happened`() {
+        val c = Clock()
+        c.latch.onRendererCaughtUp(5) // ahead of any input: ignored
+        c.tap() // on the iframe
+        c.now += UserGestureLatch.WINDOW_MS + 100
+        val next = c.tap()
+        c.topDocumentSaw(next)
+        val gesture = c.latch.topDocumentGesture()
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        assertFalse(runBlocking { gesture.confirmed() })
     }
 
     @Test

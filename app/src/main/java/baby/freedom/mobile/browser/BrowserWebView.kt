@@ -1933,6 +1933,19 @@ private fun buildRefreshableWebView(
         if (state.private) PrivateWindowContext.of(context) else context,
     ).apply {
         privateTab = state.private
+        // An input ended: a moment later, ask the top document's detector
+        // to echo once the renderer is past it (#348). The echo bounds
+        // when an iframe that held the thread in its own handlers got
+        // that input's activation ([UserGestureLatch.onRendererCaughtUp]).
+        // No detector, no echo: the input keeps counting, fail closed.
+        if (bottomUiSupported) {
+            onInputEnded = { id ->
+                postDelayed({
+                    val request = inputSyncRequest(id)
+                    for (reply in bottomUiChannels.targets) runCatching { reply.postMessage(request) }
+                }, INPUT_SYNC_DELAY_MS)
+            }
+        }
         // A private tab's WebView goes on the private session's profile
         // (#86) before anything else touches it: Chromium only takes a
         // profile change on a WebView that has never been used.
@@ -2497,6 +2510,12 @@ private fun buildRefreshableWebView(
                 // vouch for a tap on itself ([UserGestureLatch]).
                 parseTopDocumentInput(message.data)?.let { input ->
                     if (isMainFrame) userGestures.onTopDocumentInput(input.ageMs, input.isClick)
+                    return@WebMessageListener
+                }
+                // The renderer is past an input (#348): the top
+                // document's echo of the sync sent after it ended.
+                parseInputSynced(message.data)?.let { id ->
+                    if (isMainFrame) userGestures.onRendererCaughtUp(id)
                     return@WebMessageListener
                 }
                 // The page's say on a long-press (#84): any frame, since
@@ -4331,11 +4350,13 @@ private const val REVEAL_HANDOVER_TIMEOUT_MS = 1_000L
 private class GestureArmingNodeProvider(
     private val inner: AccessibilityNodeProvider,
     private val latch: UserGestureLatch,
+    private val armed: () -> Unit,
 ) : AccessibilityNodeProvider() {
     override fun performAction(virtualViewId: Int, action: Int, arguments: Bundle?): Boolean {
         if (accessibilityActionArmsGestureLatch(action)) {
             latch.onInputStart(untilConfirmed = true)
             latch.onInput()
+            armed()
         }
         return inner.performAction(virtualViewId, action, arguments)
     }
@@ -4715,6 +4736,9 @@ internal class PageWebView(context: Context) : WebView(context) {
      */
     val userGestures = UserGestureLatch(SystemClock::uptimeMillis)
 
+    /** An input ended (or an accessibility click began): its id, for the renderer sync (#348). */
+    var onInputEnded: ((Int) -> Unit)? = null
+
     /** Only a tap counts: not the lift at the end of a scroll or fling. */
     private val taps = TapTracker(ViewConfiguration.get(context).scaledTouchSlop.toFloat())
 
@@ -4725,10 +4749,15 @@ internal class PageWebView(context: Context) : WebView(context) {
                 taps.onDown(event.x, event.y)
             }
             MotionEvent.ACTION_MOVE -> taps.onMove(event.x, event.y)
-            MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> taps.onCancel()
+            MotionEvent.ACTION_POINTER_DOWN -> taps.onCancel()
+            MotionEvent.ACTION_CANCEL -> {
+                taps.onCancel()
+                onInputEnded?.invoke(userGestures.latestInputId)
+            }
             MotionEvent.ACTION_UP -> {
                 userGestures.onInputContinues(event.eventTime)
                 if (taps.onUp(event.x, event.y)) userGestures.onInput()
+                onInputEnded?.invoke(userGestures.latestInputId)
             }
         }
         return super.dispatchTouchEvent(event)
@@ -4745,6 +4774,7 @@ internal class PageWebView(context: Context) : WebView(context) {
             userGestures.onInputStart(event.eventTime)
             userGestures.onInputContinues(SystemClock.uptimeMillis())
             userGestures.onInput()
+            onInputEnded?.invoke(userGestures.latestInputId)
         }
         return super.dispatchKeyEvent(event)
     }
@@ -4756,6 +4786,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (accessibilityActionArmsGestureLatch(action)) {
             userGestures.onInputStart(untilConfirmed = true)
             userGestures.onInput()
+            onInputEnded?.invoke(userGestures.latestInputId)
         }
         return super.performAccessibilityAction(action, arguments)
     }
@@ -4765,7 +4796,8 @@ internal class PageWebView(context: Context) : WebView(context) {
     override fun getAccessibilityNodeProvider(): AccessibilityNodeProvider? {
         val inner = super.getAccessibilityNodeProvider() ?: return null
         a11yProvider?.let { (wrapped, wrapper) -> if (wrapped === inner) return wrapper }
-        return GestureArmingNodeProvider(inner, userGestures).also { a11yProvider = inner to it }
+        return GestureArmingNodeProvider(inner, userGestures) { onInputEnded?.invoke(userGestures.latestInputId) }
+            .also { a11yProvider = inner to it }
     }
 
     /**
