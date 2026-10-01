@@ -318,6 +318,14 @@ class X402Store internal constructor(
      * never one the user has revoked or replaced since. `false` if it
      * couldn't be written.
      *
+     * The restore assumes the withdrawn grant is still the latest for its
+     * key. With two overlapping granting payments withdrawn oldest-first
+     * (P2 grants B, P4 grants C replacing B), withdrawing P2 finds C, not
+     * B, so it changes nothing; withdrawing P4 then puts B back even
+     * though P2, the payment that granted B, was withdrawn. B can
+     * outlive its own withdrawn grant this way, but only as a cap the
+     * user did approve on a sheet, never one they didn't.
+     *
      * Deliberately conservative: an automatic payment carried over onto
      * the allowance put back is never given back to it. If that payment
      * is itself withdrawn later, its [Commit.Done.allowanceCreated] names
