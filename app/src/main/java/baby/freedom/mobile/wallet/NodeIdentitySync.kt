@@ -91,12 +91,20 @@ class NodeIdentitySync internal constructor(
         data object Dropped : Change
 
         /**
-         * The wallet unlocked and its keys were already in place: nothing
-         * changed, and nothing is returned or noticed. But `:node`'s Swarm
-         * launch may have failed on a read that has since cleared (#357),
-         * and no other change would come to retry it — so the listener is
-         * still told, and has it reload; that restarts only a node that's
-         * up as another identity, or whose boot failed.
+         * The wallet settled — unlocked, or removed — and the store needed no
+         * change: nothing is returned or noticed. But `:node`'s Swarm launch
+         * may have failed on a read that has since cleared (#357) — keys
+         * that open again, or an unreadable vault file the user removed
+         * while no node keys were on disk — and no other change would come
+         * to retry it, so the listener is still told, and has it reload.
+         *
+         * Told for every [Vault.State.Unlocked] or [Vault.State.Empty] the
+         * wallet reaches that changes nothing — an unlock, an `Unlocked`
+         * whose info changed, the `Empty` a device with no wallet starts in —
+         * and for one whose reconcile threw. Each costs `:node` a store read;
+         * the reload restarts only a Swarm node that's up as another
+         * identity or whose boot failed, and a Radicle node that's up as
+         * another identity or in Error (for any reason).
          */
         data object Unchanged : Change
     }
@@ -154,7 +162,11 @@ class NodeIdentitySync internal constructor(
             Log.w(TAG, "node identity sync failed: ${t.javaClass.simpleName}")
             null
         } ?: run {
-            if (state is Vault.State.Unlocked) runCatching { onChanged.get()?.invoke(Change.Unchanged) }
+            // A settled wallet that changed nothing still has `:node` reload
+            // (see [Change.Unchanged]); Locked/Unreadable can't help it read.
+            if (state is Vault.State.Unlocked || state == Vault.State.Empty) {
+                runCatching { onChanged.get()?.invoke(Change.Unchanged) }
+            }
             return null
         }
         runCatching { onChanged.get()?.invoke(change) }

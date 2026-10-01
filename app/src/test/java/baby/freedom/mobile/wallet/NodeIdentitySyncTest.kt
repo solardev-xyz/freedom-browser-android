@@ -123,9 +123,40 @@ class NodeIdentitySyncTest {
         assertEquals(NodeIdentitySync.Change.Dropped, reconcile())
         assertFalse(file.exists())
         assertNull(keys.key)
-        // Nothing to drop the next time round.
+        // Nothing to drop the next time round: only a reload for `:node` (#357).
         assertNull(reconcile())
-        assertEquals(2, changes.size)
+        assertEquals(NodeIdentitySync.Change.Dropped, changes[1])
+        assertEquals(NodeIdentitySync.Change.Unchanged, changes[2])
+        assertEquals(3, changes.size)
+    }
+
+    @Test
+    fun `removing an unreadable wallet with no node keys still has the node reload`() = runBlocking {
+        // #357 R2-F1: the vault file can't be read, so Swarm's launch failed and
+        // the wallet can't be unlocked; Remove wallet is the way out. There are
+        // no node keys to drop, but `:node` must still be told to reload.
+        vaultStore.fileExists = true
+        val unreadable = Vault(vaultStore, scope, clock = { 1_000_000L }, io = Dispatchers.Unconfined, compute = Dispatchers.Unconfined)
+        val told = mutableListOf<NodeIdentitySync.Change>()
+        val s = NodeIdentitySync(unreadable, store, scope, io = Dispatchers.Unconfined).apply { setOnChanged { told += it } }
+        assertEquals(Vault.State.Unreadable, unreadable.state.value)
+        assertTrue(runCatching { store.boot(vaultStore) }.exceptionOrNull() is IllegalStateException)
+        // Unreadable itself can't help the node read: nothing told.
+        assertNull(s.reconcile(unreadable.state.value))
+        assertEquals(emptyList<NodeIdentitySync.Change>(), told)
+        unreadable.remove()
+        assertNull(s.reconcile(unreadable.state.value))
+        assertEquals(listOf<NodeIdentitySync.Change>(NodeIdentitySync.Change.Unchanged), told)
+        // …and its reload now reads "no wallet", so it boots as ant's own key.
+        assertNull(store.boot(vaultStore))
+        // A locked wallet still tells nothing.
+        unreadable.create(abandon12, auth, imported = false)
+        s.reconcile(unreadable.state.value)
+        told.clear()
+        unreadable.lock()
+        assertNull(s.reconcile(unreadable.state.value))
+        assertEquals(emptyList<NodeIdentitySync.Change>(), told)
+        assertNull(withTimeoutOrNull(100) { s.notices.first { it == NodeIdentitySync.Change.Unchanged } })
     }
 
     @Test

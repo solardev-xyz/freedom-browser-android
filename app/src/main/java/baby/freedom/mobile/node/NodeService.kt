@@ -683,14 +683,24 @@ class NodeService : Service() {
                 // When the wallet's keys are there but can't be read (#357),
                 // the launch fails with an error the Nodes page shows rather
                 // than boot as ant's own key; the next reload (a bind, an
-                // unlock, the app coming back to the foreground) tries again.
+                // unlock, a Remove wallet, the app coming back to the
+                // foreground) tries again.
                 identity = {
                     bootIdentity.boot {
                         val boot = try {
                             identityStore.boot(vaultStore)
                         } catch (e: IllegalStateException) {
                             Log.w(TAG, "swarm identity unreadable: ${e.message}")
-                            throw IllegalStateException(getString(R.string.node_swarm_identity_unreadable), e)
+                            // The wallet file itself unreadable can't be
+                            // unlocked: only removing it (or the file
+                            // reading again) gets past it, so say that.
+                            val walletUnreadable = runCatching { vaultStore.read() }.getOrNull() == null
+                            val message = if (walletUnreadable) {
+                                R.string.node_swarm_wallet_unreadable
+                            } else {
+                                R.string.node_swarm_identity_unreadable
+                            }
+                            throw IllegalStateException(getString(message), e)
                         }
                         val mode = swarmMode()
                         launchMode = mode
