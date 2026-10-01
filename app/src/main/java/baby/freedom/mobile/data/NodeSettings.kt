@@ -794,6 +794,17 @@ class NodeSettings private constructor(
          * [androidx.datastore.core.CorruptionException] into collectors
          * nobody catches (ad blocking's, at startup), and the app dies on
          * every launch until its data is cleared — wallet and all.
+         *
+         * The defaults aren't all the most private choice, so a reset can
+         * quietly undo some of what the user had turned off: public
+         * mainnet RPCs switched off for name lookups are used again
+         * ([Keys.ENS_RPC_DISABLED_PUBLIC] empties), CCIP-Read and the
+         * daily GitHub release check come back on, the search engine goes
+         * back to DuckDuckGo, and the external Swarm/IPFS endpoints, Tor
+         * and the ad-block allowlist and categories go back to theirs.
+         * Clearing app data — the only way out before this handler —
+         * lands on the same defaults; nothing tells the user a reset
+         * happened yet (#372).
          */
         internal val corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() }
 
