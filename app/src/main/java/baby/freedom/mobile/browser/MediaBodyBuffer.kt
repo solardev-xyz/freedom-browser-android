@@ -51,6 +51,11 @@ import java.util.concurrent.ExecutionException
  * cycling through more bodies than the budget holds don't download every
  * one again on each request. [refetch] sees the free bytes too, so such a
  * marker can be fetched again once there is room without evicting.
+ * While one request fetches a marker's body again, the marker stays
+ * buffered and the URL's other non-fresh requests are answered from it
+ * (R6-M1), so an overlapping request can't start a second full download
+ * whose reservation, the free room being taken by the first, evicts
+ * another body.
  */
 internal class MediaBodyBuffer<B : Any>(
     private val maxEntries: Int = 64,
@@ -150,6 +155,8 @@ internal class MediaBodyBuffer<B : Any>(
     }
     private var nextEpoch = 0L
     private val freshFetches = HashMap<String, CompletableFuture<B?>>()
+    // URLs whose stored marker one request is fetching again (R6-M1).
+    private val refetches = HashMap<String, Any>()
 
     /**
      * The body for [url]: buffered, or fetched with [fetch] (its argument
@@ -171,6 +178,7 @@ internal class MediaBodyBuffer<B : Any>(
         val startedAt: Long
         val mine: CompletableFuture<B?>?
         val joined: CompletableFuture<B?>?
+        var refetching: Any? = null
         synchronized(this) {
             startedAt = nextEpoch
             if (fresh) {
@@ -182,9 +190,21 @@ internal class MediaBodyBuffer<B : Any>(
                 joined = null
             } else {
                 bodies[url]?.let { held ->
+                    // Another request is already fetching this marker's
+                    // body again: answer from the marker, as before the
+                    // refetch, rather than start a second full download
+                    // whose reservation would evict another body (R6-M1).
+                    if (url in refetches) return held
                     if (!refetch(held, maxBytes - used, obtainable())) return held
-                    bodies.remove(url)
-                    used -= sizeOf(held)
+                    if (sizeOf(held) == 0L) {
+                        // A marker costs nothing: it stays until the
+                        // refetched body replaces it, and stays if that
+                        // fetch fails or isn't kept.
+                        refetching = Any().also { refetches[url] = it }
+                    } else {
+                        bodies.remove(url)
+                        used -= sizeOf(held)
+                    }
                 }
                 epoch = epochs[url]
                 mine = null
@@ -220,6 +240,9 @@ internal class MediaBodyBuffer<B : Any>(
                 }
             }
         } finally {
+            refetching?.let { token ->
+                synchronized(this) { if (refetches[url] === token) refetches.remove(url) }
+            }
             if (mine != null) {
                 synchronized(this) { if (freshFetches[url] === mine) freshFetches.remove(url) }
                 mine.complete(body)

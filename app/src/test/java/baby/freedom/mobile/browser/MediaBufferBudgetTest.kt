@@ -235,6 +235,53 @@ class MediaBufferBudgetTest {
     }
 
     @Test
+    fun `a request overlapping an evicted body's refetch evicts nothing (R6-M1)`() {
+        val buffer = markingBuffer(64)
+        for (name in listOf("a", "b", "c")) {
+            buffer.load("$url$name", fresh = false) { if (buffer.reserve(30)) body(30) else null }
+        }
+        // c's read evicted a; dropping c leaves 34 free, room for a's 30.
+        buffer.load("${url}c", fresh = true) { null }
+        assertEquals(30L, buffer.usedBytes)
+        val inFetch = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val first = pool.submit<Any?> {
+                buffer.load("${url}a", fresh = false) {
+                    assertTrue(buffer.reserve(30))
+                    inFetch.countDown()
+                    assertTrue(release.await(5, TimeUnit.SECONDS))
+                    body(30)
+                }
+            }
+            assertTrue(inFetch.await(5, TimeUnit.SECONDS))
+            // Overlapping: answered from a's marker, no second full GET.
+            assertTrue(buffer.load("${url}a", fresh = false) { error("second download") } is Evicted)
+            release.countDown()
+            assertTrue(first.get(5, TimeUnit.SECONDS) is ByteArray)
+        } finally {
+            pool.shutdownNow()
+        }
+        assertTrue(buffer.load("${url}b", fresh = false) { error("b was evicted") } is ByteArray)
+        assertTrue(buffer.load("${url}a", fresh = false) { error("a is buffered") } is ByteArray)
+        assertEquals(60L, buffer.usedBytes)
+    }
+
+    @Test
+    fun `a failed refetch keeps the marker and can be retried (R6-M1)`() {
+        val buffer = markingBuffer(100)
+        buffer.load("${url}a", fresh = false) { assertTrue(buffer.reserve(40)); body(40) }
+        assertTrue(buffer.reserve(70)) // evicts a, leaving its marker
+        buffer.release(70)
+        assertTrue(buffer.load("${url}a", fresh = false) { null } == null)
+        // The marker is still there, and the next request fetches again.
+        val again = buffer.load("${url}a", fresh = false) { assertTrue(buffer.reserve(40)); body(40) }
+        assertTrue(again is ByteArray)
+        assertEquals(40L, buffer.usedBytes)
+    }
+
+    @Test
     fun `a Hard-reloaded document's later fetches go past the caches (R5-M1)`() {
         val buffer = markingBuffer(64)
         val noCache = mutableListOf<Boolean>()
