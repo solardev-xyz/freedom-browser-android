@@ -251,13 +251,22 @@ class TorRoutingTest {
             assertTrue(location, refused(location))
         }
         // A public name that resolves to the device, on any port (R1-F1):
-        // the HTTP stack would dial loopback just the same. One that doesn't
-        // resolve at all is refused too — it could resolve to loopback next.
+        // the HTTP stack would dial loopback just the same.
         for (location in listOf(
             "http://localtest.me:8080/secret", "http://127.0.0.1.nip.io:45123/", "https://loop6.example/",
-            "http://mapped.example:631/", "http://mixed.example/", "http://unresolvable.example:9000/",
+            "http://mapped.example:631/", "http://mixed.example/",
         )) {
             assertTrue(location, refused(location))
+        }
+        // One that doesn't resolve at all isn't followed either — it could
+        // resolve to loopback next — but as a failed lookup, worth a retry,
+        // not as a redirect onto this device (R6-F1).
+        try {
+            refused("http://unresolvable.example:9000/")
+            fail("judged a hop whose name didn't resolve")
+        } catch (e: TorRouting.RedirectUnresolvedException) {
+            assertTrue(e is java.net.UnknownHostException)
+            assertFalse((e as java.io.IOException) is java.net.ConnectException)
         }
         // Elsewhere, or on the same origin: followed as before.
         for (location in listOf(
@@ -306,13 +315,19 @@ class TorRoutingTest {
         assertEquals("rb.evil.example:8711", pin.hostHeader)
         assertEquals("rb.evil.example", TorRouting.pin(URL("http://RB.evil.example/"))!!.hostHeader)
         assertEquals(listOf("http://[2001:db8:0:0:0:0:0:7]/"), TorRouting.pin(URL("http://v6.example/"))!!.urls.map { it.toString() })
-        // Resolving to the device, or not at all: refused at the dial too.
-        for (hop in listOf("http://loop.example:8711/b", "http://unresolvable.example/", "http://localtest.me/")) {
+        // Resolving to the device: refused at the dial too.
+        for (hop in listOf("http://loop.example:8711/b", "http://localtest.me/")) {
             try {
                 TorRouting.pin(URL(hop))
                 fail("pinned $hop")
             } catch (_: TorRouting.RedirectRefusedException) {
             }
+        }
+        // Not resolving at all: not dialed, as a failed lookup (R6-F1).
+        try {
+            TorRouting.pin(URL("http://unresolvable.example/"))
+            fail("pinned a name that didn't resolve")
+        } catch (_: TorRouting.RedirectUnresolvedException) {
         }
         // Nothing to pin: https (its connected peer is checked), onion, literals.
         assertEquals(null, TorRouting.pin(URL("https://rb.evil.example/")))
@@ -425,7 +440,8 @@ class TorRoutingTest {
         assertTrue(TorRouting.hopRefused(gateway, todo, "GET"))
         // ß: IDNA2003 maps it to ss, UTS-46 nontransitional keeps it.
         assertTrue(TorRouting.resolvesToLoopback(URL("http://stra%C3%9Fe.example/")))
-        // A literal the connection would read out of a name is judged as one.
+        // A literal the connection would read out of a name is judged as one,
+        // and refuses the hop although the WHATWG reading doesn't resolve.
         assertTrue(TorRouting.resolvesToLoopback(URL("http://127.0.0.1%E1%A0%86/")))
         assertFalse(TorRouting.resolvesToLoopback(URL("http://public.example/")))
     }

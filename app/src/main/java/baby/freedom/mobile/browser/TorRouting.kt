@@ -595,7 +595,10 @@ object TorRouting {
      * Location: http://127.0.0.1:1633/addresses` would otherwise hand a
      * page the node's addresses and wallet — past [NodeApiGuard], which
      * sees only the page's own request, and past the gateway's empty CORS
-     * list, since the read happens on the page's own origin.
+     * list, since the read happens on the page's own origin. A hop whose
+     * name can't be looked up isn't followed either, but it's thrown as a
+     * [RedirectUnresolvedException] — an [java.net.UnknownHostException],
+     * worth retrying like any other failed lookup — not as a refusal.
      */
     fun openFollowingRedirects(
         url: URL,
@@ -654,7 +657,13 @@ object TorRouting {
                     return c
                 }
                 val nextMethod = if (next.toGet) "GET" else c.requestMethod
-                if (hopRefused(url, next.url, nextMethod)) {
+                val refused = try {
+                    hopRefused(url, next.url, nextMethod)
+                } catch (e: RedirectUnresolvedException) {
+                    Log.w(TAG, "not following a redirect whose host didn't resolve: $nextMethod ${next.url.protocol}://${next.url.authority}")
+                    throw e
+                }
+                if (refused) {
                     Log.w(TAG, "refused a redirect onto this device: $nextMethod ${next.url.protocol}://${next.url.authority}")
                     throw RedirectRefusedException(next.url)
                 }
@@ -688,6 +697,11 @@ object TorRouting {
      * `127.0.0.1` between two of its own hops (answer the first hop
      * publicly, wait out the resolver cache, then `302 /b` on the same
      * name), and the second hop's connection looks the name up afresh.
+     *
+     * A name that can't be looked up isn't followed, but throws
+     * [RedirectUnresolvedException] rather than answering yes: it isn't
+     * known to be this device, and the lookup may well work next time
+     * (R6-F1).
      */
     internal fun hopRefused(start: URL, to: URL, method: String): Boolean =
         NodeApiGuard.refuses(method, to.toString()) ||
@@ -696,8 +710,11 @@ object TorRouting {
     /**
      * Does [url]'s host, a name, resolve to this device — any address
      * [isDeviceAddress] calls loopback or unspecified? A name that doesn't
-     * resolve counts as yes (fail closed: a lookup that fails here and
-     * answers loopback a moment later is a rebinding trick). An onion
+     * resolve isn't followed (fail closed: a lookup that fails here and
+     * answers loopback a moment later is a rebinding trick), but throws
+     * [RedirectUnresolvedException], not a yes, so a caller retries it
+     * like any failed lookup rather than giving up on it as a redirect
+     * onto this device (R6-F1). An onion
      * host is never looked up — it goes to Tor, not the system DNS — and
      * neither is an IP literal ([NodeApiGuard.mayBeLoopback] judges those).
      *
@@ -721,7 +738,18 @@ object TorRouting {
     internal fun resolvesToLoopback(url: URL): Boolean {
         if (fetchMayReachOnion(url)) return false
         val whatwg = WhatwgHost.parse(url.toString())?.hostname?.lowercase()?.trimEnd('.') ?: return true
-        return (linkedSetOf(whatwg) + dialedHosts(url)).any { hostReachesDevice(it) }
+        // A reading that reaches the device refuses the hop even if another
+        // reading didn't resolve: that one's verdict is final, not retried.
+        var unresolved: RedirectUnresolvedException? = null
+        for (host in linkedSetOf(whatwg) + dialedHosts(url)) {
+            try {
+                if (hostReachesDevice(host, url)) return true
+            } catch (e: RedirectUnresolvedException) {
+                unresolved = e
+            }
+        }
+        unresolved?.let { throw it }
+        return false
     }
 
     /**
@@ -751,11 +779,12 @@ object TorRouting {
     }
 
     /**
-     * Does [host] (canonical: ASCII, lower-case) reach this device? An IP
-     * literal is judged as written ([isDeviceAddress]); a name is looked
-     * up, and one that doesn't resolve counts as yes.
+     * Does [host] (canonical: ASCII, lower-case), a reading of [url]'s,
+     * reach this device? An IP literal is judged as written
+     * ([isDeviceAddress]); a name is looked up, and one that doesn't
+     * resolve throws [RedirectUnresolvedException].
      */
-    private fun hostReachesDevice(host: String): Boolean {
+    private fun hostReachesDevice(host: String, url: URL): Boolean {
         if (host.startsWith("[")) {
             val inner = host.removePrefix("[").substringBefore(']')
             if (inner.isEmpty() || !inner.all { it == ':' || it == '.' || it in '0'..'9' || it in 'a'..'f' }) return true
@@ -769,9 +798,10 @@ object TorRouting {
         val addresses = try {
             resolve(host)
         } catch (_: Exception) {
-            return true
+            throw RedirectUnresolvedException(url)
         }
-        return addresses.isEmpty() || addresses.any { isDeviceAddress(it) }
+        if (addresses.isEmpty()) throw RedirectUnresolvedException(url)
+        return addresses.any { isDeviceAddress(it) }
     }
 
     /** The system resolver; swapped in tests. */
@@ -874,8 +904,9 @@ object TorRouting {
      *
      * The name looked up is the one `HttpURLConnection` would dial
      * ([okHttpHost], percent-decoded, IDNA2003); it's refused
-     * ([RedirectRefusedException]) if it doesn't resolve or any address
-     * is this device ([isDeviceAddress]).
+     * ([RedirectRefusedException]) if any address is this device
+     * ([isDeviceAddress]), and not followed ([RedirectUnresolvedException])
+     * if it doesn't resolve.
      */
     internal fun pin(hop: URL): Pin? {
         if (!hop.protocol.equals("http", ignoreCase = true) || fetchMayReachOnion(hop)) return null
@@ -888,9 +919,10 @@ object TorRouting {
         val addresses = try {
             resolve(name)
         } catch (_: Exception) {
-            throw RedirectRefusedException(hop)
+            throw RedirectUnresolvedException(hop)
         }
-        if (addresses.isEmpty() || addresses.any { isDeviceAddress(it) }) throw RedirectRefusedException(hop)
+        if (addresses.isEmpty()) throw RedirectUnresolvedException(hop)
+        if (addresses.any { isDeviceAddress(it) }) throw RedirectRefusedException(hop)
         val urls = addresses.map { it.hostAddress.orEmpty().substringBefore('%') }.distinct()
             .map { URL(hop.protocol, it, hop.port, hop.file) }
         val hostHeader = if (hop.port == -1 || hop.port == hop.defaultPort) host else "$host:${hop.port}"
@@ -938,6 +970,16 @@ object TorRouting {
      */
     class RedirectRefusedException(to: URL) :
         java.net.ConnectException(Strings.get(R.string.node_fetch_redirect_refused, "${to.protocol}://${to.authority}"))
+
+    /**
+     * [openFollowingRedirects] not following a hop whose name it couldn't
+     * look up, so couldn't tell isn't this device ([hopRefused]). An
+     * [java.net.UnknownHostException], so a caller retries it the way it
+     * would a failed lookup of its own, rather than reporting a redirect
+     * onto this device that may never have been one (R6-F1).
+     */
+    class RedirectUnresolvedException(to: URL) :
+        java.net.UnknownHostException(Strings.get(R.string.node_fetch_redirect_unresolved, "${to.protocol}://${to.authority}"))
 
     /** [openConnection]'s refusal of an onion URL while no Tor port is routed. */
     class RefusedException : IOException(Strings.get(R.string.node_tor_refused_fetch))
