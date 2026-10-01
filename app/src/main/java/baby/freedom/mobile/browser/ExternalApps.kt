@@ -342,13 +342,16 @@ internal fun externalLinkAsker(tab: BrowserState): ExternalLinkAsker? =
 internal data class ExternalLinkAsker(val origin: String, val doc: Int)
 
 /**
- * Whether [doc], the document a page's app or payment link was tapped on
- * ([externalLinkAsker]), is still [tab]'s. The offer can run a moment
- * after the tap ([UserGestureLatch]); a page committed meanwhile never
- * asked, and mustn't be asked for (#342).
+ * Whether the page a page's app or payment link was tapped on — [origin]
+ * as document [doc] ([externalLinkAsker]) — is still [tab]'s. The offer
+ * can run a moment after the tap ([UserGestureLatch]); a page committed
+ * meanwhile never asked, and mustn't be asked for (#342). The origin is
+ * checked as well as the document number: Back/Forward onto Home's blank
+ * entry fires no `onPageStarted`, so it doesn't bump the document, but
+ * its `onPageFinished` does clear [BrowserState.permissionOrigin].
  */
-internal fun externalLinkPageCurrent(tab: BrowserState, doc: Int): Boolean =
-    doc == EthereumProviders.currentDocument(tab.id)
+internal fun externalLinkPageCurrent(tab: BrowserState, origin: String?, doc: Int): Boolean =
+    doc == EthereumProviders.currentDocument(tab.id) && origin == tab.permissionOrigin
 
 /**
  * The tab's own record of user input, standing in for the "one tap buys

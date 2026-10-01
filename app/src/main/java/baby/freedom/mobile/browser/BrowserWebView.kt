@@ -2703,8 +2703,8 @@ private fun buildRefreshableWebView(
             // The page's tap is offered only while its page is still the
             // tab's document: the offer can run a moment after the tap
             // (the top-document check), and a page committed meanwhile
-            // never asked (#342).
-            if (!userNamed && !externalLinkPageCurrent(tab, doc)) {
+            // never asked, and nor did one the tab left for Home (#342).
+            if (!userNamed && !externalLinkPageCurrent(tab, pageUrl, doc)) {
                 Log.i(LOG_TAG, "external link refused: page gone: ${externalUrlForLog(url)}")
                 return
             }
