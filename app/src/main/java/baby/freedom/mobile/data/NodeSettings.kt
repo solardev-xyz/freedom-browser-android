@@ -4,9 +4,11 @@ import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import baby.freedom.mobile.browser.AdblockCategory
@@ -784,8 +786,20 @@ class NodeSettings private constructor(
             "offline",
         )
 
+        /**
+         * A settings file that no longer parses (a write torn by a power
+         * loss, a bad sector) reads as empty — every setting at its
+         * default — and is replaced on the next write, as every other
+         * store here does. Without it the read throws
+         * [androidx.datastore.core.CorruptionException] into collectors
+         * nobody catches (ad blocking's, at startup), and the app dies on
+         * every launch until its data is cleared — wallet and all.
+         */
+        internal val corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() }
+
         private val Context.nodeSettingsStore by preferencesDataStore(
             name = "freedom_node_settings",
+            corruptionHandler = corruptionHandler,
         )
 
         @Volatile

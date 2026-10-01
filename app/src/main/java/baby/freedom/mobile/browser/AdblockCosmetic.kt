@@ -134,8 +134,10 @@ internal fun parseCosmeticTokens(data: String): List<String>? {
  * put back with the next batch of DOM changes, and checked for every
  * [COSMETIC_RECHECK_MS] besides (R1-F3). Rules reach the document's own
  * tree only, not elements inside a shadow root. It stops for good on
- * [COSMETIC_OFF]. Everything it calls is saved at document start, so a
- * page can't redirect it.
+ * [COSMETIC_OFF]. Only the timer, `MutationObserver`, `CSSStyleSheet`
+ * and the `adoptedStyleSheets` accessor are saved at document start; the
+ * DOM, `Array` and `Set` methods it calls later are the live ones, which
+ * a page can wrap to notice it (#368).
  */
 internal fun adblockCosmeticJs(channel: String): String {
     require(Regex("[a-z]{8,64}").matches(channel)) { "channel must be lower-case letters" }
