@@ -1926,8 +1926,8 @@ private fun buildRefreshableWebView(
     // them FLAG_SECURE like the Activity window (#86).
     val webView = PageWebView(
         if (state.private) PrivateWindowContext.of(context) else context,
-        private = state.private,
     ).apply {
+        privateTab = state.private
         // A private tab's WebView goes on the private session's profile
         // (#86) before anything else touches it: Chromium only takes a
         // profile change on a WebView that has never been used.
@@ -4310,11 +4310,7 @@ private class GestureArmingNodeProvider(
  * The tab's WebView. A subclass only for what `WebView` keeps
  * protected: Chromium's unconsumed overscroll, and the scroll range.
  */
-internal class PageWebView(
-    context: Context,
-    /** A private tab's (#86): the page's own text fields ask the keyboard not to learn. */
-    private val private: Boolean = false,
-) : WebView(context) {
+internal class PageWebView(context: Context) : WebView(context) {
     /** [destroy] has been called: nothing may be asked of this WebView any more. */
     var destroyed = false
         private set
@@ -4323,6 +4319,9 @@ internal class PageWebView(
         destroyed = true
         super.destroy()
     }
+
+    /** A private tab's (#86): the page's own text fields ask the keyboard not to learn. */
+    var privateTab = false
 
     /**
      * A page's own `<input>`/`<textarea>`/`contenteditable` in a private
@@ -4335,7 +4334,7 @@ internal class PageWebView(
      */
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? =
         super.onCreateInputConnection(outAttrs).also {
-            outAttrs.imeOptions = tabImeOptions(outAttrs.imeOptions, private)
+            outAttrs.imeOptions = tabImeOptions(outAttrs.imeOptions, privateTab)
         }
 
     /**

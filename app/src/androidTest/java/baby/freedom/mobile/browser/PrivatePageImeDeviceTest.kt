@@ -21,7 +21,7 @@ class PrivatePageImeDeviceTest {
     private fun imeOptionsOf(private: Boolean): Int {
         var options = 0
         instrumentation.runOnMainSync {
-            val view = PageWebView(instrumentation.targetContext, private = private)
+            val view = PageWebView(instrumentation.targetContext).apply { privateTab = private }
             try {
                 val info = EditorInfo().apply { imeOptions = EditorInfo.IME_ACTION_GO }
                 view.onCreateInputConnection(info)
