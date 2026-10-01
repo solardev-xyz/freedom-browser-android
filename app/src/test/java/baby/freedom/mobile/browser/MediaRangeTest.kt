@@ -1,15 +1,19 @@
 package baby.freedom.mobile.browser
 
 import java.io.ByteArrayInputStream
+import java.io.InputStream
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * [byteRangeFor]: a page-chosen Range header never throws; [readBounded]:
- * a buffered body stays inside the shared byte budget (#355).
+ * [byteRangeFor]: a page-chosen Range header never throws (#355);
+ * [mediaReplyFor]/[SlicedInputStream]: a media answer is streamed, and a
+ * Range the gateway ignored is sliced from the stream, never buffered;
+ * [SeekAbsorbingInputStream]: WebView's own seek doesn't cut it again.
  */
 class MediaRangeTest {
     private fun partial(start: Long, end: Long) = ByteRangeAnswer.Partial(start, end)
@@ -60,218 +64,226 @@ class MediaRangeTest {
         assertEquals(ByteRangeAnswer.Unsatisfiable, byteRangeFor("bytes=-5", 0))
     }
 
-    private class Budget(val limit: Long) {
-        var used = 0L
-        var peak = 0L
-        fun reserve(n: Long): Boolean {
-            if (used + n > limit) return false
-            used += n
-            peak = maxOf(peak, used)
-            return true
-        }
-        fun release(n: Long) { used -= n }
-        var freeReserves = 0
-        // Like MediaBodyBuffer.reserveFree: never evicts (counted, so a
-        // test can tell which reserve the trim went through).
-        fun reserveFree(n: Long): Boolean {
-            freeReserves++
-            return reserve(n)
-        }
-    }
+    private val gateway = mapOf(
+        "content-type" to "audio/x-wav",
+        "accept-ranges" to "bytes",
+        "Access-Control-Allow-Origin" to "*",
+    )
 
-    private fun read(body: ByteArray, limit: Int, expected: Long, budget: Budget) =
-        readBounded(ByteArrayInputStream(body), limit, expected, budget::reserve, budget::release, budget::reserveFree)
-
-    @Test
-    fun `readBounded holds exactly the body it returns`() {
-        val body = ByteArray(200_000) { it.toByte() }
-        for (expected in listOf(200_000L, -1L)) {
-            val budget = Budget(Long.MAX_VALUE)
-            val got = (read(body, 200_000, expected, budget) as BoundedRead.Bytes).body
-            assertArrayEquals(body, got.toByteArray())
-            assertEquals(200_000L, got.size)
-            // The last chunk is trimmed when there's room: nothing spare.
-            assertEquals(200_000L, got.held)
-            assertEquals(got.held, budget.used)
-        }
-        // A chunked body ending on a chunk boundary leaves no empty chunk.
-        val even = Budget(Long.MAX_VALUE)
-        val got = (read(ByteArray(128 * 1024), 200_000, -1, even) as BoundedRead.Bytes).body
-        assertEquals(128L * 1024, got.held)
-        assertEquals(got.held, even.used)
-        val empty = Budget(Long.MAX_VALUE)
-        assertArrayEquals(ByteArray(0), (read(ByteArray(0), 0, -1, empty) as BoundedRead.Bytes).body.toByteArray())
-        assertEquals(0L, empty.used)
+    /** [headers]' value for [name], whatever its spelling, asserting there's at most one. */
+    private fun MediaReply.header(name: String): String? {
+        val values = headers.filterKeys { it.equals(name, ignoreCase = true) }.values
+        assertTrue("one $name in $headers", values.size <= 1)
+        return values.firstOrNull()
     }
 
     @Test
-    fun `a known length is read into one array, with no growth or copy`() {
-        val budget = Budget(Long.MAX_VALUE)
-        read(ByteArray(1_000_000), 1_000_000, 1_000_000, budget)
-        assertEquals(1_000_000L, budget.peak)
+    fun `a gateway 206 is streamed as it is, with its Content-Length back`() {
+        val reply = mediaReplyFor(
+            "bytes=0-", 206, "Partial Content",
+            gateway + ("content-range" to "bytes 0-54958119/54958120"), 54_958_120,
+        )
+        assertEquals(206, reply.status)
+        assertEquals("bytes 0-54958119/54958120", reply.header("Content-Range"))
+        assertEquals("54958120", reply.header("Content-Length"))
+        assertEquals("bytes", reply.header("Accept-Ranges"))
+        assertEquals("*", reply.header("Access-Control-Allow-Origin"))
+        assertEquals(0L, reply.skip)
+        assertNull(reply.length)
+        assertFalse(reply.empty)
     }
 
     @Test
-    fun `readBounded gives up past the limit or the budget, holding nothing`() {
-        val body = ByteArray(200_000)
-        val budget = Budget(Long.MAX_VALUE)
-        assertEquals(BoundedRead.TooLarge, read(body, 199_999, -1, budget))
-        assertEquals(BoundedRead.TooLarge, read(body, 199_999, 200_000, budget))
-        assertEquals(0L, budget.used)
-        // Never more than one chunk past the limit before giving up.
-        assertTrue(budget.peak <= 199_999 + 64 * 1024)
-
-        val small = Budget(150_000)
-        assertEquals(BoundedRead.NoRoom, read(body, 200_000, 200_000, small))
-        assertEquals(BoundedRead.NoRoom, read(body, 200_000, -1, small))
-        assertEquals(0L, small.used)
-        assertTrue(small.peak <= 150_000)
+    fun `a whole 200 to an unranged request keeps its length`() {
+        val reply = mediaReplyFor(null, 200, "OK", gateway, 1000)
+        assertEquals(200, reply.status)
+        assertEquals("1000", reply.header("Content-Length"))
+        assertEquals("bytes", reply.header("Accept-Ranges"))
+        assertEquals(0L, reply.skip)
+        assertNull(reply.length)
     }
 
     @Test
-    fun `a chunked body read to its end is kept without room for a joined copy (R2-M1)`() {
-        val body = ByteArray(200_000) { (it * 7).toByte() }
-        // Room for the four chunks (262 144) but not for a 200 000-byte
-        // copy beside them, nor for trimming the last chunk.
-        val tight = Budget(4L * 64 * 1024 + 1_000)
-        val got = (read(body, 200_000, -1, tight) as BoundedRead.Bytes).body
-        assertArrayEquals(body, got.toByteArray())
-        assertEquals(4L * 64 * 1024, got.held)
-        assertEquals(got.held, tight.used)
-        assertTrue(tight.peak <= tight.limit)
+    fun `a Range the gateway ignored is sliced from the stream`() {
+        val reply = mediaReplyFor("bytes=100-199", 200, "OK", gateway - "accept-ranges", 1000)
+        assertEquals(206, reply.status)
+        assertEquals("bytes 100-199/1000", reply.header("Content-Range"))
+        assertEquals("100", reply.header("Content-Length"))
+        assertEquals("bytes", reply.header("Accept-Ranges"))
+        assertEquals(100L, reply.skip)
+        assertEquals(100L, reply.length)
+
+        val suffix = mediaReplyFor("bytes=-10", 200, "OK", gateway, 1000)
+        assertEquals("bytes 990-999/1000", suffix.header("Content-Range"))
+        assertEquals(990L, suffix.skip)
+        assertEquals(10L, suffix.length)
+
+        // Offsets past 2^31 stay Longs end to end.
+        val far = mediaReplyFor("bytes=3000000000-", 200, "OK", gateway, 4_000_000_000)
+        assertEquals(3_000_000_000L, far.skip)
+        assertEquals(1_000_000_000L, far.length)
+        assertEquals("bytes 3000000000-3999999999/4000000000", far.header("Content-Range"))
     }
 
     @Test
-    fun `a chunked body ending on a chunk boundary is kept with no room for one more (R3-M1)`() {
-        for (k in 0..4) {
-            val body = ByteArray(k * 64 * 1024) { (it * 3).toByte() }
-            val full = Budget(4L * 64 * 1024)
-            val got = (read(body, 1_000_000, -1, full) as BoundedRead.Bytes).body
-            assertArrayEquals(body, got.toByteArray())
-            assertEquals(k * 64L * 1024, got.held)
-            assertEquals(got.held, full.used)
-        }
-        // One byte more than fits is still refused, holding nothing...
-        val over = Budget(4L * 64 * 1024)
-        assertEquals(BoundedRead.NoRoom, read(ByteArray(4 * 64 * 1024 + 1), 1_000_000, -1, over))
-        assertEquals(0L, over.used)
-        // ...and past the limit it is TooLarge, not NoRoom.
-        val atLimit = Budget(2L * 64 * 1024)
-        assertEquals(BoundedRead.TooLarge, read(ByteArray(2 * 64 * 1024 + 1), 2 * 64 * 1024, -1, atLimit))
-        assertEquals(0L, atLimit.used)
+    fun `an ignored Range past the body is a 416 with no body`() {
+        val reply = mediaReplyFor("bytes=5000-", 200, "OK", gateway, 1000)
+        assertEquals(416, reply.status)
+        assertEquals("bytes */1000", reply.header("Content-Range"))
+        assertEquals("0", reply.header("Content-Length"))
+        assertTrue(reply.empty)
     }
 
     @Test
-    fun `the last-chunk trim never evicts a buffered body (R3-M2)`() {
-        // A buffered two-chunk body fills the budget but for one chunk.
-        val buffer = MediaBodyBuffer<MediaBytes>(maxBytes = 3L * 64 * 1024, sizeOf = { it.held })
-        val a = buffer.load("a", fresh = false) {
-            (readBounded(ByteArrayInputStream(ByteArray(2 * 64 * 1024)), 1_000_000, -1, buffer::reserve, buffer::release, buffer::reserveFree) as BoundedRead.Bytes).body
-        }!!
-        assertEquals(2L * 64 * 1024, buffer.usedBytes)
-        // A 100-byte chunked read takes the free chunk; trimming it would
-        // need 100 more, which only evicting `a` could make room for.
-        val small = buffer.load("b", fresh = false) {
-            (readBounded(ByteArrayInputStream(ByteArray(100)), 1_000_000, -1, buffer::reserve, buffer::release, buffer::reserveFree) as BoundedRead.Bytes).body
-        }!!
-        assertEquals(64L * 1024, small.held) // kept untrimmed
-        assertEquals(100L, small.size)
-        assertTrue(a === buffer.load("a", fresh = false) { error("a was evicted") })
-        assertEquals(3L * 64 * 1024, buffer.usedBytes)
-        // With free room the trim still happens, through reserveFree.
-        val roomy = Budget(Long.MAX_VALUE)
-        assertEquals(100L, (read(ByteArray(100), 1_000_000, -1, roomy) as BoundedRead.Bytes).body.held)
-        assertEquals(1, roomy.freeReserves)
+    fun `an unparsable Range the gateway ignored serves the whole body`() {
+        val reply = mediaReplyFor("bytes=0-10,20-30", 200, "OK", gateway, 1000)
+        assertEquals(200, reply.status)
+        assertEquals("1000", reply.header("Content-Length"))
+        assertEquals(0L, reply.skip)
+        assertNull(reply.length)
     }
 
     @Test
-    fun `a body that isn't the announced length`() {
-        val budget = Budget(Long.MAX_VALUE)
-        // Longer: never worth buffering, so remembered and streamed (R2-M1).
-        assertEquals(BoundedRead.TooLarge, read(ByteArray(1_001), 10_000, 1_000, budget))
-        assertEquals(0L, budget.used)
-        // Shorter: what came, in the array already reserved, with no copy
-        // (so no room needed for one).
-        val tight = Budget(1_000)
-        val got = (read(ByteArray(500) { 7 }, 10_000, 1_000, tight) as BoundedRead.Bytes).body
-        assertArrayEquals(ByteArray(500) { 7 }, got.toByteArray())
-        assertEquals(500L, got.size)
-        assertEquals(1_000L, got.held)
-        assertEquals(1_000L, tight.used)
+    fun `a 200 of unknown length is passed on whole`() {
+        val reply = mediaReplyFor("bytes=100-", 200, "OK", gateway - "accept-ranges", -1)
+        assertEquals(200, reply.status)
+        assertNull(reply.header("Content-Length"))
+        assertNull(reply.header("Accept-Ranges"))
+        assertEquals(0L, reply.skip)
+        assertNull(reply.length)
     }
 
     @Test
-    fun `slices of a chunked body cross chunk boundaries`() {
-        val body = ByteArray(200_000) { (it % 251).toByte() }
-        val got = (read(body, 200_000, -1, Budget(Long.MAX_VALUE)) as BoundedRead.Bytes).body
-        for ((start, length) in listOf(0L to 0L, 0L to 1L, 65_535L to 2L, 60_000L to 140_000L, 199_999L to 1L, 131_072L to 65_536L)) {
-            assertArrayEquals(
-                "$start+$length",
-                body.copyOfRange(start.toInt(), (start + length).toInt()),
-                got.stream(start, length).readBytes(),
-            )
-        }
-        // A shorter-than-announced body never streams its unused tail.
-        val short = (read(ByteArray(500) { 7 }, 10_000, 1_000, Budget(Long.MAX_VALUE)) as BoundedRead.Bytes).body
-        assertEquals(500, short.stream().readBytes().size)
-    }
-
-    @Test
-    fun `a failed read gives its reservation back`() {
-        val failing = object : java.io.InputStream() {
-            var n = 0
-            override fun read(): Int = throw java.io.IOException("reset")
-            override fun read(b: ByteArray, off: Int, len: Int): Int {
-                if (n++ > 2) throw java.io.IOException("reset")
-                return len.coerceAtMost(1_000)
-            }
-        }
-        for (expected in listOf(100_000L, -1L)) {
-            failing.n = 0
-            val budget = Budget(Long.MAX_VALUE)
-            try {
-                readBounded(failing, 200_000, expected, budget::reserve, budget::release, budget::reserveFree)
-                fail("expected IOException")
-            } catch (_: java.io.IOException) {
-            }
-            assertEquals(0L, budget.used)
+    fun `other statuses are passed on as they are`() {
+        val notFound = mapOf("content-type" to "application/json")
+        for (status in listOf(404, 416, 500, 502)) {
+            val reply = mediaReplyFor("bytes=0-", status, "x", notFound, 47)
+            assertEquals(status, reply.status)
+            assertEquals(notFound, reply.headers)
+            assertEquals(0L, reply.skip)
+            assertNull(reply.length)
+            assertFalse(reply.empty)
         }
     }
 
-    @Test
-    fun `no room for the first chunk streams without waiting on a byte (R4-M3)`() {
-        val untouched = object : java.io.InputStream() {
-            override fun read(): Int = throw AssertionError("read the body")
-            override fun read(b: ByteArray, off: Int, len: Int): Int = throw AssertionError("read the body")
+    private fun body(n: Int) = ByteArray(n) { (it % 251).toByte() }
+
+    /** An input that hands out at most [step] bytes per read and never skips, like a slow socket. */
+    private class Trickle(private val data: ByteArray, private val step: Int) : InputStream() {
+        var at = 0
+        var closed = false
+        override fun read(): Int = if (at < data.size) data[at++].toInt() and 0xff else -1
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (at >= data.size) return -1
+            val n = minOf(len, step, data.size - at)
+            System.arraycopy(data, at, b, off, n)
+            at += n
+            return n
         }
-        val full = Budget(1_000)
-        assertEquals(BoundedRead.NoRoom, readBounded(untouched, 1_000_000, -1, full::reserve, full::release, full::reserveFree))
-        assertEquals(0L, full.used)
+        override fun skip(n: Long): Long = 0
+        override fun close() { closed = true }
     }
 
     @Test
-    fun `a failure to close after the read keeps the body and its reservation (R4-M4)`() {
-        var closed = 0
-        val stream = object : java.io.ByteArrayInputStream(ByteArray(1_000) { 5 }) {
-            override fun close() {
-                closed++
-                throw java.io.IOException("close")
-            }
+    fun `a sliced stream skips and limits without holding the body`() {
+        val data = body(300_000)
+        val input = Trickle(data, 1000)
+        val slice = SlicedInputStream(input, 150_000, 100_000)
+        // Nothing is read until the slice is.
+        assertEquals(0, input.at)
+        assertArrayEquals(data.copyOfRange(150_000, 250_000), slice.readBytes())
+        assertEquals(-1, slice.read())
+        // Stops at the end of the slice: the rest is never pulled.
+        assertEquals(250_000, input.at)
+        slice.close()
+        assertTrue(input.closed)
+    }
+
+    @Test
+    fun `a sliced stream with no length runs to the end`() {
+        val data = body(10_000)
+        assertArrayEquals(
+            data.copyOfRange(9_000, 10_000),
+            SlicedInputStream(Trickle(data, 333), 9_000, null).readBytes(),
+        )
+        val single = SlicedInputStream(ByteArrayInputStream(data), 5, 2)
+        assertEquals(data[5].toInt() and 0xff, single.read())
+        assertEquals(data[6].toInt() and 0xff, single.read())
+        assertEquals(-1, single.read())
+    }
+
+    @Test
+    fun `a body shorter than the skip ends the slice`() {
+        val slice = SlicedInputStream(Trickle(body(100), 7), 500, 10)
+        assertEquals(-1, slice.read(ByteArray(10), 0, 10))
+        assertEquals(-1, slice.read())
+    }
+
+    @Test
+    fun `the bytes WebView skips itself`() {
+        assertEquals(0L, webViewSkipFor(null))
+        assertEquals(0L, webViewSkipFor("bytes=0-"))
+        assertEquals(46_071_808L, webViewSkipFor("bytes=46071808-"))
+        assertEquals(100L, webViewSkipFor(" Bytes = 100 - 199 "))
+        assertEquals(3_000_000_000L, webViewSkipFor("bytes=3000000000-"))
+        // Suffix, several ranges, nonsense, past a Long: no seek.
+        assertEquals(0L, webViewSkipFor("bytes=-500"))
+        assertEquals(0L, webViewSkipFor("bytes=0-10,20-30"))
+        assertEquals(0L, webViewSkipFor("items=5-"))
+        assertEquals(0L, webViewSkipFor("bytes=99999999999999999999-"))
+    }
+
+    /**
+     * What Chromium's `InputStreamReader::Seek` does to an intercepted
+     * body for a range starting at [first]: check the range against
+     * `available()`, then `skip()` in a loop, failing on a skip of 0.
+     */
+    private fun webViewSeek(stream: InputStream, first: Long): Boolean {
+        val size = stream.available()
+        if (size > 0 && first >= size) return false
+        var left = first
+        while (left > 0) {
+            val skipped = stream.skip(left)
+            if (skipped <= 0) return false
+            left -= skipped
         }
-        val budget = Budget(Long.MAX_VALUE)
-        val got = readThenClose(stream) {
-            readBounded(it, 10_000, 1_000, budget::reserve, budget::release, budget::reserveFree)
-        }
-        assertEquals(1, closed)
-        assertEquals(1_000L, (got as BoundedRead.Bytes).body.size)
-        assertEquals(1_000L, budget.used)
-        // A failing read is still thrown, and closes the stream.
-        try {
-            readThenClose(stream) { throw java.io.IOException("read") }
-            fail("expected IOException")
-        } catch (e: java.io.IOException) {
-            assertEquals("read", e.message)
-        }
-        assertEquals(2, closed)
+        return true
+    }
+
+    @Test
+    fun `a body that starts at the range survives WebView's own seek`() {
+        val file = body(50_000)
+        // The gateway's 206 for bytes=40000-: the slice, from its first byte.
+        val slice = { ByteArrayInputStream(file, 40_000, 10_000) }
+        // Unprotected, WebView's seek cuts it again (or fails outright).
+        assertFalse(webViewSeek(slice(), 40_000))
+
+        val absorbing = SeekAbsorbingInputStream(slice(), webViewSkipFor("bytes=40000-"))
+        assertTrue(webViewSeek(absorbing, 40_000))
+        assertArrayEquals(file.copyOfRange(40_000, 50_000), absorbing.readBytes())
+    }
+
+    @Test
+    fun `once read, a seek-absorbing stream skips for real`() {
+        val data = body(100)
+        val stream = SeekAbsorbingInputStream(ByteArrayInputStream(data), 50)
+        assertEquals(data[0].toInt() and 0xff, stream.read())
+        assertEquals(10L, stream.skip(10))
+        assertEquals(data[11].toInt() and 0xff, stream.read())
+        assertEquals(0, stream.available())
+    }
+
+    @Test
+    fun `a sliced fallback survives WebView's seek too`() {
+        // The gateway ignored bytes=1000-: whole body, sliced here.
+        val file = body(5_000)
+        val reply = mediaReplyFor("bytes=1000-", 200, "OK", gateway, 5_000)
+        val stream = SeekAbsorbingInputStream(
+            SlicedInputStream(Trickle(file, 300), reply.skip, reply.length),
+            webViewSkipFor("bytes=1000-"),
+        )
+        assertTrue(webViewSeek(stream, 1_000))
+        assertArrayEquals(file.copyOfRange(1_000, 5_000), stream.readBytes())
     }
 }
+

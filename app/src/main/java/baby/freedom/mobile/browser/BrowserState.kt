@@ -394,15 +394,11 @@ class BrowserState(val id: Long, val private: Boolean = false) {
 
     /**
      * Should the interceptor fetch [target] (a gateway URL) for a request
-     * of load [generation] past its own response caches (#262)? True
-     * the first time the Hard-reloaded document asks for it: its media
-     * body is fetched again rather than served from the Range buffer,
-     * and the gateway is asked not to answer from a cache. Later
-     * requests for the same URL (a video's seeks) use what that fetch
-     * buffered — or, for a media body too large or with no room to
-     * buffer, are streamed past the gateway's cache as well
-     * ([fetchedFresh], R4-M2). False for every other document, in this
-     * tab or any other.
+     * of load [generation] past the gateway's caches (#262)? True the
+     * first time the Hard-reloaded document asks for it. Its later
+     * requests for the same URL (a streamed video's seeks) go past them
+     * too ([fetchedFresh], R4-M2). False for every other document, in
+     * this tab or any other.
      */
     internal fun takeFreshFetch(generation: Int, target: String): Boolean {
         val doc = freshDocument ?: return false
@@ -411,9 +407,9 @@ class BrowserState(val id: Long, val private: Boolean = false) {
 
     /**
      * Has the Hard-reloaded document of load [generation] already fetched
-     * [target] fresh ([takeFreshFetch])? Its later requests for it that
-     * nothing fresh was buffered for — a streamed video's seeks — still
-     * go past the gateway's cache (R4-M2). False for every other document.
+     * [target] fresh ([takeFreshFetch])? Its later media requests for it
+     * — a streamed video's seeks — still go past the gateway's cache
+     * (R4-M2). False for every other document.
      */
     internal fun fetchedFresh(generation: Int, target: String): Boolean {
         val doc = freshDocument ?: return false
