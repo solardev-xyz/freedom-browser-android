@@ -277,6 +277,51 @@ class TorRoutingTest {
     }
 
     @Test
+    fun `a hop within a redirected-to origin is resolved again, so a rebinding name is refused`() {
+        val gateway = URL("http://gateway.example/ipfs/bafyroot/")
+        val first = URL("http://rb.evil.example:8711/a")
+        val second = URL(first, "/b")
+        // First hop: the name answers publicly, so it's followed.
+        withResolver("gateway.example" to "203.0.113.5", "rb.evil.example" to "198.51.100.7") {
+            assertFalse(TorRouting.hopRefused(gateway, first, "GET"))
+        }
+        // The server waits out the resolver cache and rebinds before its
+        // same-origin `302 /b`: that hop is looked up again and refused.
+        withResolver("gateway.example" to "203.0.113.5", "rb.evil.example" to "127.0.0.1") {
+            assertTrue(TorRouting.hopRefused(gateway, second, "GET"))
+            assertTrue(TorRouting.hopRefused(gateway, second, "HEAD"))
+        }
+        // A hop back onto the origin the caller asked for stays its own business.
+        withResolver("gateway.example" to "127.0.0.1") {
+            assertFalse(TorRouting.hopRefused(gateway, URL(gateway, "/ipfs/bafyroot/index.html"), "GET"))
+        }
+    }
+
+    @Test
+    fun `an http hop off the caller's origin is dialed by the address it was judged on`() = withResolver(
+        "rb.evil.example" to "198.51.100.7", "loop.example" to "127.0.0.1", "v6.example" to "2001:db8::7",
+    ) {
+        val pin = TorRouting.pin(URL("http://rb.evil.example:8711/b?x=1"))!!
+        assertEquals("http://198.51.100.7:8711/b?x=1", pin.url.toString())
+        assertEquals("rb.evil.example:8711", pin.hostHeader)
+        assertEquals("rb.evil.example", TorRouting.pin(URL("http://RB.evil.example/"))!!.hostHeader)
+        assertEquals("http://[2001:db8:0:0:0:0:0:7]/", TorRouting.pin(URL("http://v6.example/"))!!.url.toString())
+        // Resolving to the device, or not at all: refused at the dial too.
+        for (hop in listOf("http://loop.example:8711/b", "http://unresolvable.example/", "http://localtest.me/")) {
+            try {
+                TorRouting.pin(URL(hop))
+                fail("pinned $hop")
+            } catch (_: TorRouting.RedirectRefusedException) {
+            }
+        }
+        // Nothing to pin: https (its connected peer is checked), onion, literals.
+        assertEquals(null, TorRouting.pin(URL("https://rb.evil.example/")))
+        assertEquals(null, TorRouting.pin(URL("http://${"a".repeat(56)}.onion/")))
+        assertEquals(null, TorRouting.pin(URL("http://192.168.1.20:8080/")))
+        assertEquals(null, TorRouting.pin(URL("http://[2001:db8::1]/")))
+    }
+
+    @Test
     fun `an onion or IP-literal hop is never looked up`() = withResolver {
         val looked = mutableListOf<String>()
         val real = TorRouting.resolve
