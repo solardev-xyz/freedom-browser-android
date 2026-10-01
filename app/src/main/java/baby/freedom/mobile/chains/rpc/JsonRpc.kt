@@ -183,8 +183,14 @@ internal object JsonRpc {
      * where that parser would skip it too — inside a `"…"` or `'…'`
      * string, a block (slash-star), `//` or `#` comment — and an unquoted literal
      * runs to the same terminators, so a quote inside one (`a"`) opens no
-     * string. Read strictly, a comment or a single-quoted string holding one `"` would hide every bracket
-     * after it from the count while the parser still nests them.
+     * string, and a `=>` key separator is one token. Read strictly, a
+     * comment or a single-quoted string holding one `"` would hide every
+     * bracket after it from the count while the parser still nests them.
+     *
+     * It's a fast first pass, not the guarantee: it follows the lenient
+     * grammar only as far as listed here, so [parse] measures the parsed
+     * tree again with [tooDeep], which holds whatever this scan misreads.
+     * Don't drop that check on the strength of this one.
      */
     internal fun depth(text: String): Int {
         var depth = 0
@@ -196,7 +202,9 @@ internal object JsonRpc {
         }
         while (i < n) {
             when (val c = text[i]) {
-                ' ', '\t', '\n', '\r', ',', ':', '=', ';' -> i++
+                ' ', '\t', '\n', '\r', ',', ':', ';' -> i++
+                // A key separator may be `=>`: the `>` is part of it, not a literal that would swallow a quote.
+                '=' -> i += if (text.getOrNull(i + 1) == '>') 2 else 1
                 '[', '{' -> {
                     depth++
                     if (depth > max) max = depth

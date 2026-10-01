@@ -47,7 +47,7 @@ class HostileRpcJsonDeviceTest {
     @Test
     fun lenientSyntaxDoesNotSmuggleNesting() {
         for (n in listOf(3_000, 8_000, 20_000)) {
-            for (prefix in listOf("/* \" */", "'\"':1,", "# \"\n", "a\":1,")) {
+            for (prefix in listOf("/* \" */", "'\"':1,", "# \"\n", "a\":1,", "\"x\"=>\"]]]\",")) {
                 val body = """{"jsonrpc":"2.0","id":1,$prefix"result":""" + "[".repeat(n) + "]".repeat(n) + "}"
                 val parsed = JsonRpc.parse(body)
                 assertEquals("$prefix $n", JsonRpc.Envelope.Malformed("nested too deeply"), parsed)

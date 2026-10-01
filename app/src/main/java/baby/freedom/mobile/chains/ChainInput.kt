@@ -1,6 +1,7 @@
 package baby.freedom.mobile.chains
 
 import baby.freedom.mobile.browser.WhatwgHost
+import baby.freedom.mobile.wallet.MessageSigning
 import baby.freedom.mobile.wallet.PublisherIdentity
 
 /**
@@ -21,12 +22,12 @@ object ChainInput {
     }
 
     /**
-     * A chain or currency name: no control, line/paragraph separator or
-     * invisible format character ([PublisherIdentity.isRefusedInLabel],
-     * emoji joiners allowed). A site names the chain it adds, and the
-     * approval sheets show it as is: a bidi override would reorder the
-     * row, and a U+2028 would push the Switch sheet's real chain ID off
-     * its line under a name like "Ethereum (chain 1)".
+     * A chain or currency name that draws as what it is ([shownAsIs]). A
+     * site names the chain it adds, and the approval sheets show it as
+     * is: a bidi override would reorder the row, and a U+2028 — or a run
+     * of spaces or blank letters the row wraps at — would push the Switch
+     * sheet's real chain ID off its line under a name like
+     * "Ethereum (chain 1)".
      */
     fun parseName(raw: String): String? = parseName(raw, strict = true)
 
@@ -43,7 +44,37 @@ object ChainInput {
                 (!strict || shownAsIs(it))
         }
 
-    private fun shownAsIs(s: String): Boolean = s.codePoints().noneMatch(PublisherIdentity::isRefusedInLabel)
+    /**
+     * Whether [s] draws as the characters it holds, on one line unless the
+     * row itself is too narrow: no control, line/paragraph separator or
+     * invisible format character ([PublisherIdentity.isRefusedInLabel]);
+     * no space but single U+0020s between words, so a run of spaces can't
+     * wrap the rest of the row away; nothing that draws blank or stacks
+     * ink over the rows around it ([MessageSigning.hides]: Hangul fillers,
+     * U+2800, variation selectors other than an emoji's own, unassigned
+     * default-ignorables, a fourth combining mark in a row). The emoji
+     * joiners and flag tag characters stay allowed, and like the other
+     * default-ignorables they don't end a run of combining marks.
+     */
+    private fun shownAsIs(s: String): Boolean {
+        var prev = -1
+        var marks = 0
+        for (cp in s.codePoints().toArray()) {
+            val emojiPart = cp == 0x200C || cp == 0x200D || cp in 0xE0020..0xE007F
+            when {
+                PublisherIdentity.isRefusedInLabel(cp) -> return false
+                Character.isWhitespace(cp) || Character.isSpaceChar(cp) -> if (cp != 0x20 || prev == 0x20) return false
+                !emojiPart && MessageSigning.hides(cp, prev, marks) -> return false
+            }
+            marks = when {
+                MessageSigning.isMark(cp) -> marks + 1
+                emojiPart -> marks
+                else -> 0
+            }
+            prev = cp
+        }
+        return true
+    }
 
     fun parseDecimals(raw: String): Int? = raw.trim().toIntOrNull()?.takeIf { it in Chain.DECIMALS_RANGE }
 

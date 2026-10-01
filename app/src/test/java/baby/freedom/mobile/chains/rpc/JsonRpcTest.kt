@@ -119,7 +119,7 @@ class JsonRpcTest {
     fun lenientSyntaxDoesNotHideNesting() {
         fun deep(n: Int) = "[".repeat(n) + "]".repeat(n)
         val n = 3_000
-        for (prefix in listOf("/* \" */", "// \"\n", "# \"\n", "'\"':1,", "a\":1,")) {
+        for (prefix in listOf("/* \" */", "// \"\n", "# \"\n", "'\"':1,", "a\":1,", "\"x\"=>\"]]]\",", "\"x\"=\"]]]\",")) {
             val body = """{"jsonrpc":"2.0","id":1,$prefix"result":${deep(n)}}"""
             assertTrue("$prefix: ${JsonRpc.depth(body)}", JsonRpc.depth(body) > JsonRpc.MAX_DEPTH)
             assertEquals(prefix, JsonRpc.Envelope.Malformed("nested too deeply"), JsonRpc.parse(body))

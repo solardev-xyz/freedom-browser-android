@@ -70,6 +70,22 @@ class ChainInputTest {
             assertNull(bad, ChainInput.parseSymbol(bad.take(10)))
         }
         assertNull(build("Test", symbol = "ETH\u202E"))
+        // Nothing that wraps the rest of the row away, draws blank or overprints the rows around it.
+        val spaced = "Ethereum (chain 1)" + " ".repeat(40) + "Net"
+        for (bad in listOf(
+            spaced, "Ethereum  Net", "Ethereum\u00A0Net", "Ethereum\u3000Net", "Ethereum\u2003Net",
+            "Ethereum" + "\u3164".repeat(20) + "Net", "Ethereum\u2800Net", "Eth\u115Fereum", "Eth\uFFA0ereum",
+            "Ethereum" + "\u0301".repeat(40), "Ethereum\u0301\u0301\u0301\u0301", "Eth\u0301\u0301\u200D\u0301\u0301ereum",
+            "Eth\uFE00ereum", "Eth\uDB40\uDD00ereum", "Eth\u2065ereum", "Eth\uFFF0ereum", "Eth\u034Fereum",
+        )) {
+            assertNull(bad, ChainInput.parseName(bad))
+            assertNull(bad, build(bad))
+        }
+        assertNull(ChainInput.parseSymbol("E\u3164"))
+        // Real names: single spaces, a few combining marks, an emoji with its presentation selector, a keycap.
+        for (good in listOf("Ethereum Classic Testnet", "Vi\u1EC7t Nam", "Tie\u0302\u0301ng", "Love \u2764\uFE0F", "Chain 1\uFE0F\u20E3")) {
+            assertEquals(good, build(good)!!.name)
+        }
         // A bad currency name falls back to the symbol, as an invalid one always has.
         assertEquals("TST", build("Test", currencyName = "Ether\u2028x")!!.currencyName)
         // Emoji built from joiners and tag characters are names like any other.
