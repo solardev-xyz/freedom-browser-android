@@ -1,6 +1,6 @@
 {
  "generatedBy": "scripts/native-licences.sh",
- "ffiRef": "v0.12.5",
+ "ffiRef": "v0.12.7",
  "features": [
   "chain",
   "radicle",
