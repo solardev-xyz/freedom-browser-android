@@ -10,6 +10,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * [MediaBodyBuffer]'s byte budget with [readBounded] behind it (#355):
@@ -301,5 +302,41 @@ class MediaBufferBudgetTest {
         buffer.load("${url}z", fresh = false, pastCaches = true) { noCache += it; null }
         buffer.load("${url}z", fresh = false) { noCache += it; null }
         assertEquals(listOf(true, true, true, false), noCache)
+    }
+
+    @Test
+    fun `a request that joins a fresh fetch after refetching its marker gives the refetch back (R1-M1)`() {
+        // The gap: a Hard reload's fresh fetch has stored a marker but not
+        // yet unregistered itself, and a plain request sees that marker,
+        // takes the refetch and gets the fresh fetch's marker as its answer.
+        // Its refetch must end with it, or the URL is streamed for good.
+        repeat(3000) { round ->
+            var plain: Thread? = null
+            val answer = AtomicReference<Any?>()
+            lateinit var buffer: MediaBodyBuffer<Any>
+            buffer = MediaBodyBuffer(
+                maxBytes = 64,
+                sizeOf = { (it as? ByteArray)?.size?.toLong() ?: 0L },
+                refetch = { b, free, _ -> b is Evicted && free >= b.size },
+                stored = stored@{ kept ->
+                    if (plain != null) return@stored kept
+                    // Inside the fresh fetch's store, under the lock: the
+                    // plain request queues for it, so it lands in the gap
+                    // before (or races) the fresh fetch's unregistering.
+                    val t = Thread { answer.set(buffer.load(url, fresh = false) { body(30) }) }
+                    plain = t
+                    t.start()
+                    val until = System.nanoTime() + 1_000_000_000
+                    while (t.state != Thread.State.BLOCKED && System.nanoTime() < until) Thread.onSpinWait()
+                    kept
+                },
+            )
+            assertTrue(buffer.load(url, fresh = true) { Evicted(30) } is Evicted)
+            plain!!.join(5_000)
+            assertTrue(!plain!!.isAlive)
+            // A later plain request refetches the marker, not streams it.
+            val later = buffer.load(url, fresh = false) { body(30) }
+            assertTrue("round $round: plain got ${answer.get()}, later $later", later is ByteArray)
+        }
     }
 }

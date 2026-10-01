@@ -211,19 +211,23 @@ internal class MediaBodyBuffer<B : Any>(
                 joined = freshFetches[url]
             }
         }
-        if (joined != null) {
-            val body = try {
-                joined.get()
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-                return null
-            } catch (_: ExecutionException) {
-                null
-            }
-            if (body != null) return body
-        }
         var body: B? = null
+        // The wait is inside the try: a request that took the refetch
+        // token above and then gets the fresh fetch's body (or is
+        // interrupted) must give the token back too, or every later
+        // request is answered from the marker for good (R1-M1).
         try {
+            if (joined != null) {
+                val shared = try {
+                    joined.get()
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return null
+                } catch (_: ExecutionException) {
+                    null
+                }
+                if (shared != null) return shared
+            }
             body = fetch(fresh || pastCaches || joined != null)
             if (body != null) {
                 synchronized(this) {
