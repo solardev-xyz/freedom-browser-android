@@ -79,6 +79,16 @@ class AdblockScriptletsTest {
             assertFalse(name, Regex("bcSecret\\s*=[^=]").containsMatchIn(code))
         }
         assertFalse(catalog.isVetted("trusted-click-element"))
+        // The only page global a vetted scriptlet sets beyond the API it
+        // is told to patch: `onerror`, by get-exception-token (as the
+        // class comment says).
+        val assigned = Regex("\\b(?:self|window|globalThis)\\.([A-Za-z_$][\\w$]*)\\s*=(?!=)")
+        val patched = setOf("fetch", "XMLHttpRequest", "setTimeout", "setInterval")
+        val extra = ScriptletCatalog.VETTED.flatMap { name ->
+            assigned.findAll(catalog.code(listOf(ScriptletCall(name, emptyList())))).map { it.groupValues[1] }.toList()
+        }.toSet() - patched
+        assertEquals(setOf("onerror"), extra)
+        assertTrue(catalog.code(listOf(ScriptletCall("json-prune", emptyList()))).contains("function getExceptionTokenFn("))
         assertFalse(catalog.isVetted("trusted-create-html"))
     }
 
@@ -290,6 +300,59 @@ class AdblockScriptletsTest {
             ),
         )
         assertTrue(runsIn("www.youtube.com", "https://www.youtube.com/", emptyList(), listOf("notyoutube.com")))
+        // A top page on the name's absolute form (`example.com.`) is the
+        // allowlisted site too, as the request filter judges it.
+        assertTrue(isAllowlisted("www.example.com.", listOf("example.com")))
+        assertFalse(
+            runsIn(
+                "www.youtube.com", "https://www.youtube.com/embed/x",
+                listOf("https://www.example.com."), listOf("example.com"),
+            ),
+        )
+        assertFalse(
+            runsIn("www.youtube.com", "https://www.youtube.com/embed/x", listOf("https://example.com.:8443"), listOf("example.com")),
+        )
+    }
+
+    @Test
+    fun `a host is registered with the www twin a redirect most often lands on`() {
+        assertEquals("www.youtube.com", scriptletRedirectTwin("youtube.com"))
+        assertEquals("youtube.com", scriptletRedirectTwin("www.youtube.com"))
+        assertEquals("www.bbc.co.uk", scriptletRedirectTwin("bbc.co.uk"))
+        assertEquals("bbc.co.uk", scriptletRedirectTwin("www.bbc.co.uk"))
+        // Only around a registrable domain: not a deeper subdomain, not a public suffix.
+        assertNull(scriptletRedirectTwin("m.youtube.com"))
+        assertNull(scriptletRedirectTwin("www.m.youtube.com"))
+        assertNull(scriptletRedirectTwin("co.uk"))
+        assertNull(scriptletRedirectTwin("www.co.uk"))
+    }
+
+    @Test
+    fun `the scriptlet code cache drops the least recently used past its bounds`() {
+        val byCount = ScriptletCodeCache(maxEntries = 3, maxChars = 1_000)
+        byCount.put("a", "1"); byCount.put("b", "2"); byCount.put("c", "3")
+        assertEquals("1", byCount["a"]) // a is now the most recently used
+        byCount.put("d", "4")
+        assertNull(byCount["b"])
+        assertEquals(3, byCount.size)
+        assertEquals("1", byCount["a"])
+
+        val byChars = ScriptletCodeCache(maxEntries = 100, maxChars = 10)
+        byChars.put("a", "xxxx"); byChars.put("b", "yyyy"); byChars.put("c", "")
+        assertEquals(8, byChars.chars)
+        byChars.put("d", "zzzz")
+        assertNull(byChars["a"])
+        assertEquals(8, byChars.chars)
+        // Replacing a host's code counts the new length only.
+        byChars.put("d", "z")
+        assertEquals(5, byChars.chars)
+        // One host bigger than the budget still stays: it was just asked for.
+        byChars.put("e", "x".repeat(50))
+        assertEquals("x".repeat(50), byChars["e"])
+        assertEquals(1, byChars.size)
+        byChars.clear()
+        assertEquals(0, byChars.chars)
+        assertEquals(0, byChars.size)
     }
 
     /**

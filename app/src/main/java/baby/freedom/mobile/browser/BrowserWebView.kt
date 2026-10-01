@@ -3716,6 +3716,10 @@ private fun buildRefreshableWebView(
                     if (url != null && isDocumentRequest(false, request.requestHeaders)) {
                         adblockPage.frameRequested(url, refererOf(request.requestHeaders))
                     }
+                    // A document live in the tab whose host never got its
+                    // scriptlets (a frame redirected there): in place for
+                    // its next load (#318).
+                    scriptlets?.noteReferer(refererOf(request.requestHeaders))
                     if (url != null &&
                         Adblock.shouldBlock(
                             url,

@@ -148,10 +148,17 @@ internal fun parseScriptletCall(body: String, catalog: ScriptletCatalog): Script
  * Only [VETTED] scriptlets run. Each was checked for what an injected
  * script here may do: it patches only the page API it is told to
  * (`JSON.parse`, `fetch`, a property, a timer, a text node…), leaves no
- * global or marker of its own on the page, inserts no `<script>` or
+ * marker of its own on the page, inserts no `<script>` or
  * `<style>` element (either would meet the page's CSP and could report
  * us), doesn't `eval`, doesn't reach the network, and needs no extension
- * API. uBlock's debug logger (a `BroadcastChannel`) only starts when a
+ * API. The one page global set beyond what a scriptlet is told to patch
+ * is `window.onerror`: `get-exception-token` (a dependency of `json-prune*`,
+ * `abort-*` and `trusted-suppress-native-method`) wraps it, as in uBlock,
+ * to swallow the errors the `abort-*` scriptlets throw — so on a host
+ * running those, `onerror` is a (bound, native-looking) function before
+ * the page's first script runs, which a page can notice. Nothing else of
+ * ours is defined there (a test pins this). uBlock's debug logger (a
+ * `BroadcastChannel`) only starts when a
  * `bcSecret` is set, which it never is here. Left out, and counted as
  * "can't run" in Settings: the rest, among them `trusted-click-element`
  * (extension APIs) and `trusted-create-html` (sets a page global).
@@ -254,6 +261,49 @@ internal class ScriptletCatalog private constructor(
     }
 }
 
+/**
+ * Per host, its scriptlet code (`""` for a host with none): the least
+ * recently used dropped past [maxEntries] hosts or [maxChars] of code,
+ * so a long session doesn't keep every host it ever met on the heap
+ * until the next engine build. Not thread-safe: callers lock it.
+ */
+internal class ScriptletCodeCache(
+    private val maxEntries: Int = MAX_ENTRIES,
+    private val maxChars: Int = MAX_CHARS,
+) {
+    private val map = LinkedHashMap<String, String>(64, 0.75f, true)
+
+    /** The code held now, in characters. */
+    var chars = 0
+        private set
+
+    val size: Int get() = map.size
+
+    operator fun get(host: String): String? = map[host]
+
+    fun put(host: String, code: String) {
+        map.put(host, code)?.let { chars -= it.length }
+        chars += code.length
+        val it = map.entries.iterator()
+        while ((map.size > maxEntries || chars > maxChars) && it.hasNext()) {
+            val e = it.next()
+            if (e.key == host) continue
+            chars -= e.value.length
+            it.remove()
+        }
+    }
+
+    fun clear() {
+        map.clear()
+        chars = 0
+    }
+
+    companion object {
+        const val MAX_ENTRIES = 512
+        const val MAX_CHARS = 1_000_000
+    }
+}
+
 /** [s] as a JavaScript string literal; everything outside printable ASCII escaped. */
 internal fun jsString(s: String): String {
     val sb = StringBuilder(s.length + 2).append('"')
@@ -296,6 +346,7 @@ internal fun scriptletFrameJs(host: String, code: String, allowlist: Collection<
     if (i > t.lastIndexOf(']')) t = t.substring(0, i);
   } else if (h !== ${jsString(host)}) return;
   t = t.toLowerCase();
+  while (t.charAt(t.length - 1) === '.') t = t.substring(0, t.length - 1);
   if (t.substring(0, 4) === 'www.') t = t.substring(4);
   var allow = [$allowed];
   for (var s = t; s; ) {
@@ -332,12 +383,19 @@ $code})();
  *   (`shouldOverrideUrlLoading`), which a service worker may answer
  *   without `shouldInterceptRequest` ever seeing the request.
  *
+ * A redirect hop of a frame's document reaches neither callback, so
+ * each host is registered with its `www.` / bare-domain twin
+ * ([scriptletRedirectTwin]: `youtube.com/embed/…` → `www.youtube.com`),
+ * and [noteReferer] registers a host whose document turns up in the tab
+ * unannounced (seen as a subresource's `Referer`), for its next load.
+ *
  * A registered host stays for the tab's later loads (Back, a reload, a
  * page its service worker serves), up to [MAX_HOSTS] and [MAX_CHARS] of
- * script, the least recently needed dropped first. What isn't covered:
- * a frame a service worker serves (where `shouldOverrideUrlLoading`
- * isn't asked either), from a host this tab hasn't loaded a document
- * from before, gets its scriptlets from its next load on.
+ * script, the least recently needed dropped first. What isn't covered,
+ * and gets its scriptlets from its next load on: a frame a service
+ * worker serves (where `shouldOverrideUrlLoading` isn't asked either),
+ * and a frame redirected to a host other than its twin, from a host
+ * this tab hasn't loaded a document from before.
  *
  * A changed engine or allowlist ([Adblock.scriptletGeneration]) makes
  * every tab rebuild its scripts: the new one is added before the old one
@@ -365,7 +423,11 @@ internal class TabScriptlets(
     @Volatile
     private var closed = false
 
-    /** From `shouldInterceptRequest` (a WebView network thread): [ensure] [url]'s host, waiting for it (bounded). */
+    /**
+     * From `shouldInterceptRequest` (a WebView network thread): [ensure]
+     * [url]'s host — and its `www.` / bare-domain twin, see
+     * [scriptletRedirectTwin] — waiting for it (bounded).
+     */
     fun ensureFromNetworkThread(url: String) {
         if (closed) return
         val host = scriptletHostOf(url) ?: return
@@ -373,17 +435,21 @@ internal class TabScriptlets(
         // wait for it as the request filter does (bounded, #192).
         source.awaitFirstBuild()
         val generation = source.generation
-        if (current[host] == generation) return
-        // Nothing to register: no rules for the host (or blocking off).
-        if (!source.hasScriptlets(host) && current[host] == null) return
+        // The twin first, so the host asked for is the most recently
+        // needed one if the tab's budget runs out.
+        val hosts = listOfNotNull(scriptletRedirectTwin(host), host).filter { h ->
+            // Nothing to register: no rules for the host (or blocking off).
+            current[h] != generation && (current[h] != null || source.hasScriptlets(h))
+        }
+        if (hosts.isEmpty()) return
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            ensureHost(host)
+            hosts.forEach(::ensureHost)
             return
         }
         val done = CountDownLatch(1)
         main.post {
             try {
-                ensureHost(host)
+                hosts.forEach(::ensureHost)
             } finally {
                 done.countDown()
             }
@@ -395,10 +461,31 @@ internal class TabScriptlets(
         }
     }
 
-    /** On the main thread: make sure [url]'s host has its current script, if it has rules. */
+    /** On the main thread: make sure [url]'s host (and its [scriptletRedirectTwin]) has its current script, if it has rules. */
     fun ensure(url: String?) {
         if (closed || url == null) return
-        scriptletHostOf(url)?.let(::ensureHost)
+        val host = scriptletHostOf(url) ?: return
+        scriptletRedirectTwin(host)?.let(::ensureHost)
+        ensureHost(host)
+    }
+
+    /**
+     * From `shouldInterceptRequest`, for a frame's subresource: its
+     * `Referer` names a document already live in this tab. If that host
+     * has rules but no script here, its document arrived by a route
+     * nothing saw — a frame redirected to another host (WebView doesn't
+     * ask `shouldInterceptRequest` about a redirect hop, nor
+     * `shouldOverrideUrlLoading` about a subframe's) — so register it
+     * now, for its next load: a reload, or the frame loading again.
+     * Doesn't wait.
+     */
+    fun noteReferer(referer: String?) {
+        if (closed || referer == null || source.firstBuildPending) return
+        val host = scriptletHostOf(referer) ?: return
+        val generation = source.generation
+        if (current[host] == generation) return
+        if (current[host] == null && !source.hasScriptlets(host)) return
+        main.post { ensureHost(host) }
     }
 
     private fun ensureHost(host: String) {
@@ -535,6 +622,22 @@ internal object AdblockScriptletSource : ScriptletSource {
     override fun script(host: String, private: Boolean) = Adblock.scriptletScript(host, private)
     override val firstBuildPending: Boolean get() = Adblock.firstBuildPending
     override fun awaitFirstBuild() = Adblock.awaitFirstBuildBlocking()
+}
+
+/**
+ * The host a document asked for on [host] most often lands on instead
+ * by a redirect — the same name with `www.` added or taken off, when the
+ * name without it is a registrable domain (`youtube.com/embed/…` 301s to
+ * `www.youtube.com`) — or `null`. A frame's redirect hop reaches neither
+ * `shouldInterceptRequest` nor `shouldOverrideUrlLoading`, so its final
+ * host has to be registered with the host asked for, up front.
+ */
+internal fun scriptletRedirectTwin(host: String): String? {
+    if (host.startsWith("www.")) {
+        val bare = host.substring(4)
+        return if (PublicSuffixList.registrableDomain(bare) == bare) bare else null
+    }
+    return if (PublicSuffixList.registrableDomain(host) == host) "www.$host" else null
 }
 
 /**

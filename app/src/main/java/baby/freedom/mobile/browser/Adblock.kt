@@ -31,7 +31,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayInputStream
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -537,8 +536,13 @@ internal object Adblock {
     var scriptletGeneration = 0
         private set
 
-    /** Per host, its scriptlet code for the current engine, `""` for none ([scriptletCode]). */
-    private val scriptletCodes = ConcurrentHashMap<String, String>()
+    /**
+     * Per host, its scriptlet code for the current engine, `""` for none
+     * ([scriptletCode]). Bounded: a long session's hosts don't stay on
+     * the heap until the next engine build; a host dropped is rebuilt on
+     * demand. Its own lock also guards [engine] swaps.
+     */
+    private val scriptletCodes = ScriptletCodeCache()
 
     /** Loaded once, with the first engine build. */
     @Volatile
@@ -867,10 +871,10 @@ internal object Adblock {
         if (isExempt(host)) return null
         val (e, catalog) = synchronized(scriptletCodes) { engine to scriptletCatalog }
         if (e == null || catalog == null) return null
-        scriptletCodes[host]?.let { return it.ifEmpty { null } }
+        synchronized(scriptletCodes) { scriptletCodes[host] }?.let { return it.ifEmpty { null } }
         val calls = e.scriptletsFor(host)
         val code = if (calls.isEmpty()) "" else catalog.code(calls)
-        synchronized(scriptletCodes) { if (engine === e) scriptletCodes[host] = code }
+        synchronized(scriptletCodes) { if (engine === e) scriptletCodes.put(host, code) }
         return code.ifEmpty { null }
     }
 
