@@ -80,15 +80,33 @@ class NodeIdentitySync internal constructor(
          * This vault's keys were on disk but couldn't be opened, and are
          * sealed again: the very same identities, so no grants were taken
          * back and there's nothing to tell the user. But `:node` may have
-         * hit the same unreadable file when it booted — Radicle then fails
-         * its boot and Swarm runs as the device's own key — so the
-         * listener still has it reload; it restarts only a node that's up
-         * as another identity, or whose boot failed.
+         * hit the same unreadable file when it booted — Radicle and Swarm
+         * then both fail their boot rather than run as the device's own
+         * key (#357) — so the listener still has it reload; it restarts
+         * only a node that's up as another identity, or whose boot failed.
          */
         data object Resealed : Change
 
         /** The wallet is gone; the nodes are back to their own identities. */
         data object Dropped : Change
+
+        /**
+         * The wallet settled — unlocked, or removed — and the store needed no
+         * change: nothing is returned or noticed. But `:node`'s Swarm launch
+         * may have failed on a read that has since cleared (#357) — keys
+         * that open again, or an unreadable vault file the user removed
+         * while no node keys were on disk — and no other change would come
+         * to retry it, so the listener is still told, and has it reload.
+         *
+         * Told for every [Vault.State.Unlocked] or [Vault.State.Empty] the
+         * wallet reaches that changes nothing — an unlock, an `Unlocked`
+         * whose info changed, the `Empty` a device with no wallet starts in —
+         * and for one whose reconcile threw. Each costs `:node` a store read;
+         * the reload restarts only a Swarm node that's up as another
+         * identity or whose boot failed, and a Radicle node that's up as
+         * another identity or in Error (for any reason).
+         */
+        data object Unchanged : Change
     }
 
     /**
@@ -143,7 +161,14 @@ class NodeIdentitySync internal constructor(
             // Never the keys: only what went wrong.
             Log.w(TAG, "node identity sync failed: ${t.javaClass.simpleName}")
             null
-        } ?: return null
+        } ?: run {
+            // A settled wallet that changed nothing still has `:node` reload
+            // (see [Change.Unchanged]); Locked/Unreadable can't help it read.
+            if (state is Vault.State.Unlocked || state == Vault.State.Empty) {
+                runCatching { onChanged.get()?.invoke(Change.Unchanged) }
+            }
+            return null
+        }
         runCatching { onChanged.get()?.invoke(change) }
         // Nothing to tell about the same identities sealed again.
         if (change != Change.Resealed) _notices.trySend(change)
@@ -164,8 +189,8 @@ class NodeIdentitySync internal constructor(
         val sameVault = stored == null && store.storedTag() == tag
         val sameRadicle = sameVault && store.storedHasRadicle()
         // Only keys that could be read count as Swarm already adopted: if
-        // they couldn't be, `:node`'s Swarm booted as the device's key and
-        // restarts onto the wallet's account now.
+        // they couldn't be, `:node`'s Swarm boot may have failed on them
+        // (#357) and restarts onto the wallet's account now.
         val hadSwarm = stored != null
         if (stored != null) {
             val complete = stored.radicleKey != null

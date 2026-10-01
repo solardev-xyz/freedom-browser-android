@@ -225,5 +225,9 @@ class SpendStopGateTest {
         assertEquals(NodeInfo(), reportedNodeInfo(NodeInfo(), doomed = false))
         val err = NodeInfo(status = NodeStatus.Error, errorMessage = "x")
         assertEquals(err, reportedNodeInfo(err, doomed = true))
+        // A restart waiting on an unreadable identity (#357 R4-M1) is marked, and unmarked.
+        val running = NodeInfo(status = NodeStatus.Running)
+        assertTrue(reportedNodeInfo(running, doomed = false, reloadOwed = true).reloadOwed)
+        assertEquals(running, reportedNodeInfo(running.copy(reloadOwed = true), doomed = false, reloadOwed = false))
     }
 }

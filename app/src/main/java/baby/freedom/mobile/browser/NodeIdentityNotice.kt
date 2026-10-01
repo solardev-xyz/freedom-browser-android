@@ -21,7 +21,7 @@ internal fun nodeIdentityNotice(
 ): String? {
     val parts = when (change) {
         // The same identities, sealed again: nothing to tell.
-        NodeIdentitySync.Change.Resealed -> emptyList()
+        NodeIdentitySync.Change.Resealed, NodeIdentitySync.Change.Unchanged -> emptyList()
         is NodeIdentitySync.Change.Adopted -> listOfNotNull(
             if (!change.swarmChanged) {
                 null

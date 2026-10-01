@@ -47,6 +47,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -175,7 +176,7 @@ class NodeService : Service() {
     private val callbacks = RemoteCallbackList<INodeCallback>()
 
     private val binder = object : INodeService.Stub() {
-        override fun getState(): NodeInfo = reportedNodeInfo(swarmNode.state.value, doomed)
+        override fun getState(): NodeInfo = reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)
 
         override fun getIpfsState(): IpfsInfo = ipfsNode?.state?.value ?: IpfsInfo()
 
@@ -193,7 +194,7 @@ class NodeService : Service() {
         override fun registerCallback(cb: INodeCallback?) {
             cb ?: return
             callbacks.register(cb)
-            runCatching { cb.onStateChanged(reportedNodeInfo(swarmNode.state.value, doomed)) }
+            runCatching { cb.onStateChanged(reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)) }
             runCatching { cb.onIpfsStateChanged(ipfsNode?.state?.value ?: IpfsInfo()) }
             runCatching { cb.onRadicleStateChanged(radicleNode.state.value) }
         }
@@ -216,6 +217,14 @@ class NodeService : Service() {
             scope.launch {
                 Log.i(TAG, "app foreground → resume nodes")
                 swarmNode.resume()
+                // A launch that couldn't read the wallet's identity (#357)
+                // sits in Error, and a reload (a mode change) that couldn't
+                // read it wasn't applied; resume() touches neither, so
+                // reopening the app reads the store again and restarts the
+                // node once it reads.
+                if (bootIdentity.retryDue()) {
+                    launch(Dispatchers.IO) { restartSwarmIfStale("app foreground after an unreadable identity") }
+                }
                 ipfsNode?.enterForeground()
                 repromoteForegroundIfDemoted()
             }
@@ -503,14 +512,23 @@ class NodeService : Service() {
     /**
      * Restart the Swarm node if it booted as another identity (#77) or in
      * another mode (#114) than it would boot as now — once, however many
-     * reloads race the change (see [SwarmBootIdentity]).
+     * reloads race the change (see [SwarmBootIdentity]). A store that
+     * can't be read now (#357) says nothing about what the node should be:
+     * the node is kept, not restarted as ant's own key, and the reload is
+     * retried when the app next comes to the foreground.
      */
     private fun restartSwarmIfStale(reason: String) {
         bootIdentity.restartIfStale(
-            want = {
-                val address = identityStore.boot(vaultStore)?.let { boot ->
-                    boot.antIdentity.fill(0)
-                    boot.swarmAddress
+            want = want@{
+                val boot = try {
+                    identityStore.boot(vaultStore)
+                } catch (e: IllegalStateException) {
+                    Log.w(TAG, "$reason, but the wallet's Swarm identity can't be read; keeping the node as it is: ${e.message}")
+                    return@want null
+                }
+                val address = boot?.let {
+                    it.antIdentity.fill(0)
+                    it.swarmAddress
                 }.orEmpty()
                 swarmBootKey(address, swarmMode())
             },
@@ -635,7 +653,7 @@ class NodeService : Service() {
     private fun repromoteForegroundIfDemoted() {
         if (!foregroundDemoted) return
         runCatching {
-            startForeground(NOTIFICATION_ID, buildNotification(reportedNodeInfo(swarmNode.state.value, doomed)), foregroundTypeCompat())
+            startForeground(NOTIFICATION_ID, buildNotification(reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)), foregroundTypeCompat())
         }.onSuccess {
             foregroundDemoted = false
             Log.i(TAG, "re-promoted to foreground service")
@@ -666,9 +684,28 @@ class NodeService : Service() {
                 // re-read at every (re)start; ant's own otherwise.
                 // And the mode (#114), read in the same step so the boot
                 // key records the pair this launch really boots as.
+                // When the wallet's keys are there but can't be read (#357),
+                // the launch fails with an error the Nodes page shows rather
+                // than boot as ant's own key; the next reload (a bind, an
+                // unlock, a Remove wallet, the app coming back to the
+                // foreground) tries again.
                 identity = {
                     bootIdentity.boot {
-                        val boot = identityStore.boot(vaultStore)
+                        val boot = try {
+                            identityStore.boot(vaultStore)
+                        } catch (e: IllegalStateException) {
+                            Log.w(TAG, "swarm identity unreadable: ${e.message}")
+                            // The wallet file itself unreadable can't be
+                            // unlocked: only removing it (or the file
+                            // reading again) gets past it, so say that.
+                            val walletUnreadable = runCatching { vaultStore.read() }.getOrNull() == null
+                            val message = if (walletUnreadable) {
+                                R.string.node_swarm_wallet_unreadable
+                            } else {
+                                R.string.node_swarm_identity_unreadable
+                            }
+                            throw IllegalStateException(getString(message), e)
+                        }
                         val mode = swarmMode()
                         launchMode = mode
                         swarmBootKey(boot?.swarmAddress.orEmpty(), mode) to boot?.antIdentity
@@ -684,10 +721,11 @@ class NodeService : Service() {
             foregroundTypeCompat(),
         )
 
-        swarmObserver = swarmNode.state
-            .onEach { raw ->
-                // In a doomed process, why the node isn't up yet (#116).
-                val info = reportedNodeInfo(raw, doomed)
+        swarmObserver = combine(swarmNode.state, bootIdentity.owed, ::Pair)
+            .onEach { (raw, owed) ->
+                // In a doomed process, why the node isn't up yet (#116);
+                // and a restart waiting on an unreadable identity (#357).
+                val info = reportedNodeInfo(raw, doomed, owed)
                 updateNotification(info)
                 broadcastState(info)
                 Log.i(TAG, "swarm → ${info.status}  peers=${info.connectedPeers}")

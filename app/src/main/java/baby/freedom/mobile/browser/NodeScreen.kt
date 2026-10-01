@@ -408,6 +408,13 @@ internal fun swarmModeSubtitle(nodeInfo: NodeInfo, lightModeWanted: Boolean?): S
         } else {
             Strings.get(R.string.node_mode_ultra_light_running)
         }
+        // The restart couldn't read the wallet's identity (#357): it's
+        // waiting for the app's next foreground, not underway (R4-M1).
+        nodeInfo.reloadOwed && (running || nodeInfo.status == NodeStatus.Starting) -> if (lightModeWanted) {
+            Strings.get(R.string.node_mode_light_owed)
+        } else {
+            Strings.get(R.string.node_mode_ultra_light_owed)
+        }
         running || nodeInfo.status == NodeStatus.Starting -> if (lightModeWanted) {
             Strings.get(R.string.node_mode_light_restarting)
         } else {
