@@ -75,6 +75,13 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         val shown: String get() = DisplayUrl.withTransport(prefix)
 
         /**
+         * Is [url] on [baseUrl] — the base itself, or it followed by a
+         * path, query or fragment? Not just a string prefix: the host
+         * `<base host>.evil.com` starts with the base too.
+         */
+        fun covers(url: String): Boolean = startsWithPrefix(url, baseUrl)
+
+        /**
          * `bzz` / `ipfs` / `ipns` when the prefix is a typed-scheme form
          * — the transport this tab's address asserts, which a document
          * re-check holds the name to ([Gateways.reverifyEnsDocument]).
@@ -1059,8 +1066,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
 
     /** Is [url] on the display override's origin (its manifest)? */
     fun isUnderOverride(url: String): Boolean {
-        val o = override ?: return false
-        return startsWithPrefix(url, o.baseUrl)
+        return override?.covers(url) == true
     }
 
     /** Drop any active ENS display override. Call before loading a URL

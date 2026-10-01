@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Update
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -223,6 +224,8 @@ fun SettingsScreen(
     val chains by remember(chainStore) { chainStore.chains }
         .collectAsState(initial = BuiltInChains.ALL)
     var chainPage by remember { mutableStateOf<ChainPage?>(null) }
+    // Open-source licences (#325), a page standing in for the list like the others.
+    var licencesOpen by rememberSaveable { mutableStateOf(false) }
     var chainQuery by rememberSaveable { mutableStateOf("") }
     var confirmRemoveChain by remember { mutableStateOf<Chain?>(null) }
     var removeChainFailed by remember { mutableStateOf<Chain?>(null) }
@@ -359,7 +362,10 @@ fun SettingsScreen(
             onBack = { openSite = null },
         )
     }
-    if (chainPage == null && site == null) FullScreenScaffold(
+    if (licencesOpen && chainPage == null && site == null) {
+        OpenSourceLicencesPage(onBack = { licencesOpen = false })
+    }
+    if (chainPage == null && site == null && !licencesOpen) FullScreenScaffold(
         title = stringResource(R.string.settings_title),
         onDismiss = onDismiss,
     ) {
@@ -506,6 +512,7 @@ fun SettingsScreen(
                         onCheckForUpdates = { on -> scope.launch { settings.setCheckForUpdates(on) } },
                         onCheckNow = { AppUpdates.checkForUpdates() },
                         onOpenRelease = { onOpenUrl(it.url) },
+                        onOpenLicences = { licencesOpen = true },
                     )
                 }
                 if (otherRows.isNotEmpty()) item("other") {
@@ -2041,6 +2048,8 @@ private val ABOUT_TAGLINE: String get() = Strings.get(R.string.settings_about_ta
 private val ABOUT_BLURB: String get() = Strings.get(R.string.settings_about_blurb)
 
 private val UPDATES_CHECK: String get() = Strings.get(R.string.settings_updates_check)
+private val LICENCES: String get() = Strings.get(R.string.settings_licences)
+private val LICENCES_SUBTITLE: String get() = Strings.get(R.string.settings_licences_subtitle)
 private val UPDATES_CHECK_SUBTITLE: String get() = Strings.get(R.string.settings_updates_check_subtitle)
 private val UPDATES_CHECK_NOW: String get() = Strings.get(R.string.settings_updates_check_now)
 private val UPDATES_CHECK_NOW_SUBTITLE: String get() = Strings.get(R.string.settings_updates_check_now_subtitle)
@@ -2104,6 +2113,7 @@ private fun aboutRows(version: String, packageName: String, update: AppUpdateSta
             ),
         )
     }
+    add(settingsRow("licences", LICENCES, LICENCES_SUBTITLE, *searchKeywords(R.string.settings_licences_keywords)))
     add(settingsRow("blurb", ABOUT_BLURB))
 }
 
@@ -2116,6 +2126,7 @@ private fun AboutSection(
     onCheckForUpdates: (Boolean) -> Unit,
     onCheckNow: () -> Unit,
     onOpenRelease: (LatestRelease) -> Unit,
+    onOpenLicences: () -> Unit,
 ) {
     val context = LocalContext.current
     SectionCard(title = stringResource(R.string.settings_section_about)) {
@@ -2180,6 +2191,13 @@ private fun AboutSection(
             leadingIcon = Icons.Filled.Sync,
             enabled = !fromStore && !update.checking,
             onClick = onCheckNow,
+        )
+        if ("licences" in visible) PageRow(
+            title = LICENCES,
+            subtitle = LICENCES_SUBTITLE,
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Description,
+            onClick = onOpenLicences,
         )
         if ("blurb" in visible) {
             // Spaced off only when something sits above it.

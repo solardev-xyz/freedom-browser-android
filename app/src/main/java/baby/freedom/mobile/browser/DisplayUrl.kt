@@ -48,7 +48,13 @@ object DisplayUrl {
         override: BrowserState.Override?,
         protocolFor: (name: String) -> String? = KnownEnsNames::protocolFor,
     ): String {
-        if (override != null && actualUrl.startsWith(override.baseUrl)) {
+        // Only a URL *on* the override's origin: the next character after
+        // the base must end it. A bare prefix match would dress a DNS
+        // host that merely begins with the virtual one
+        // (`https://mysite-eth.ens.freedom.baby.evil.com/`) as
+        // `bzz://mysite.eth.evil.com/`, dweb badge included — the same
+        // boundary [BrowserState.isUnderOverride] draws.
+        if (override != null && override.covers(actualUrl)) {
             return withTransport(override.prefix, protocolFor) +
                 actualUrl.substring(override.baseUrl.length)
         }

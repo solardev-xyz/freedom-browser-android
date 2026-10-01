@@ -357,3 +357,5 @@ For distribution, Android App Bundles ship just the one ABI the device needs via
 ## License
 
 TBD. Not yet decided.
+
+Third-party licences: Settings → About → **Open-source licences** lists every component the APK ships (Gradle dependencies, the Rust crates in `libfreedom_mobile_ffi.so`, what Colibri links into `libc4.so`, the OpenLV bundle and the filter lists) with its licence text. The list is built from [`app/licences/`](app/licences/README.md), and the build fails when it's incomplete or stale; when bumping `FFI_REF` or `COLIBRI_REF`, see that README.

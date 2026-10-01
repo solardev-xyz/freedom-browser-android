@@ -208,6 +208,8 @@ class X402FlowTest {
 
     @Test
     fun `R4-M3 the user's own load lets an allowance pay`() {
+        // Their Reload of the site's page on screen.
+        flow.committed(tab, b)
         flow.superseded(tab)
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
         flow.detected(tab, a, "terms")
@@ -216,7 +218,7 @@ class X402FlowTest {
 
     @Test
     fun `R4-M3 the site's own page's navigation lets its allowance pay`() {
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = null, gesture = true)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
         flow.redirected(tab, b) // before the 402: the site's own redirect
         flow.detected(tab, a, "terms")
         assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
@@ -505,5 +507,26 @@ class X402FlowTest {
         flow.superseded(tab)
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = a)
         assertFalse(flow.holds(origin))
+    }
+
+    @Test
+    fun `R5-M1 the user's Reload of another site's page redirected to the 402 can't spend it`() {
+        // evil.example is on screen; the user pulls to refresh; it answers 302 → pay.example.
+        flow.committed(tab, "https://evil.example/x")
+        flow.superseded(tab)
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
+        flow.redirected(tab, a)
+        flow.detected(tab, a, "terms")
+        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        // The Reload of the site's own page still may.
+        flow.superseded(tab)
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
+        flow.detected(tab, a, "terms")
+        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        // A Reload with no page committed starts nowhere known: it asks.
+        val fresh = 2L
+        flow.navigationStarted(fresh, byUser = true, fromOrigin = null, url = null)
+        flow.detected(fresh, a, "terms")
+        assertFalse(flow.committed(fresh, a)!!.allowanceMayPay(origin))
     }
 }

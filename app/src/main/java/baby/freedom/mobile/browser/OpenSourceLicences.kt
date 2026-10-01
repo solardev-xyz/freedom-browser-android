@@ -1,0 +1,188 @@
+package baby.freedom.mobile.browser
+
+import android.content.Context
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * Every third-party component the APK ships, with its licence text
+ * (#325): Settings → About → Open-source licences.
+ *
+ * Read from the asset the build generates ([ASSET], `generateLicences<Variant>`
+ * in app/build.gradle.kts, from AboutLibraries' scan of the Gradle
+ * dependencies and app/licences/), so it's there offline and matches the
+ * build it's in. A component names its texts by index into [texts]: most
+ * of the ~900 components share a few dozen texts.
+ */
+internal class OpenSourceLicences(
+    val components: List<Component>,
+    val texts: List<LicenceText>,
+) {
+    /** Where a component lives in the APK; the page groups by it, in this order. */
+    enum class Section(val key: String) {
+        /** A Gradle dependency: Kotlin/Java code in the app's dex, or an AAR's native helper. */
+        Android("android"),
+
+        /** A Rust crate in libfreedom_mobile_ffi.so, or what Colibri links into libc4.so. */
+        Native("native"),
+
+        /** A script or data file under assets/: the OpenLV bundle, the filter lists. */
+        Data("data"),
+    }
+
+    class Component(
+        val section: Section,
+        val name: String,
+        /** Maven coordinates for a Gradle dependency, the crate name for a crate. */
+        val id: String,
+        /** Empty when the component has no version of its own (the filter lists). */
+        val version: String,
+        /** As published: an SPDX expression, or the licence names a POM gives. */
+        val licence: String,
+        val url: String,
+        /** Attribution or a note on how it's shipped, shown above the texts. */
+        val notice: String?,
+        val texts: List<Int>,
+    )
+
+    class LicenceText(val title: String, val text: String)
+
+    fun textsOf(component: Component): List<LicenceText> = component.texts.map { texts[it] }
+
+    companion object {
+        const val ASSET = "licences/licences.json"
+
+        @Volatile private var loaded: OpenSourceLicences? = null
+
+        /** The asset, parsed once per process (about 1 MB of JSON). */
+        suspend fun load(context: Context): OpenSourceLicences = loaded ?: withContext(Dispatchers.IO) {
+            val json = context.applicationContext.assets.open(ASSET).bufferedReader().use { it.readText() }
+            parse(json).also { loaded = it }
+        }
+
+        fun parse(json: String): OpenSourceLicences {
+            val root = JSONObject(json)
+            val texts = root.getJSONArray("texts").objects().map {
+                LicenceText(it.getString("title"), it.getString("text"))
+            }
+            val sections = Section.entries.associateBy { it.key }
+            val components = root.getJSONArray("components").objects().map { c ->
+                val ids = c.getJSONArray("texts").let { a -> List(a.length()) { a.getInt(it) } }
+                require(ids.isNotEmpty() && ids.all { it in texts.indices }) { "bad texts for ${c.optString("name")}" }
+                Component(
+                    section = sections[c.getString("section")] ?: error("unknown section ${c.getString("section")}"),
+                    name = c.getString("name"),
+                    id = c.getString("id"),
+                    version = c.optString("version"),
+                    licence = c.getString("licence"),
+                    url = c.optString("url"),
+                    notice = c.optString("notice").takeIf { it.isNotBlank() },
+                    texts = ids,
+                )
+            }
+            // Grouped by section, then by name, as the page lists them.
+            val sorted = components.sortedWith(
+                compareBy<Component> { it.section.ordinal }
+                    .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+                    .thenBy { it.version },
+            )
+            return OpenSourceLicences(sorted, texts)
+        }
+
+        /**
+         * The components matching [query] (by name, id, version or
+         * licence, ignoring case), in list order; all of them for a blank
+         * query.
+         */
+        fun search(components: List<Component>, query: String): List<Component> {
+            val q = query.trim()
+            if (q.isEmpty()) return components
+            return components.filter { c ->
+                listOf(c.name, c.id, c.version, c.licence).any { it.contains(q, ignoreCase = true) }
+            }
+        }
+
+        /**
+         * [text] as paragraphs for a narrow screen: split at blank lines,
+         * and each paragraph's hard-wrapped lines joined into one, so a
+         * licence set at 72 columns doesn't break every line in two at a
+         * large font scale. A line that starts a list item ("(a)", "1.",
+         * "- ") or a copyright line stays on a line of its own, but only
+         * where one can start: after a line that ends a sentence or clause
+         * (". : ;", "and", "or"), a heading (no lower-case letters), or a
+         * line that itself started one. A wrapped sentence whose next line
+         * happens to begin "2. of the License" is still one sentence.
+         *
+         * Indentation that carries structure is kept, relative to the
+         * paragraph's own: a line starting an item keeps its indent (so a
+         * sub-clause stays nested under its clause), as does a line
+         * indented past one ending in ":" (a quoted block). A paragraph laid
+         * out in columns (a table, an aligned list: a run of three or more
+         * spaces or a tab inside a line, or a rule line of dashes) isn't
+         * reflowed at all, only stripped of the paragraph's common indent.
+         * CRLF line ends (some crates' licence files) count as LF.
+         */
+        fun paragraphs(text: String): List<String> =
+            text.replace("\r\n", "\n").split(PARAGRAPH_BREAK).mapNotNull { paragraph ->
+                val lines = paragraph.lines().map { it.trimEnd() }.filter { it.isNotBlank() }
+                if (lines.isEmpty()) return@mapNotNull null
+                val base = lines.minOf(::indentOf)
+                fun relative(line: String) = (indentOf(line) - base).coerceIn(0, MAX_INDENT)
+                if (lines.any { COLUMNS.containsMatchIn(it.trim()) || RULE.matches(it.trim()) }) {
+                    return@mapNotNull lines.joinToString("\n") { " ".repeat(relative(it)) + it.trim() }
+                }
+                val out = StringBuilder()
+                var previous = ""
+                var lineIndent = 0 // of the output line being built
+                var previousStartedLine = false
+                var previousCopyright = false
+                for (raw in lines) {
+                    val line = raw.trim()
+                    val indent = relative(raw)
+                    val copyright = COPYRIGHT.containsMatchIn(line)
+                    val canStart = out.isEmpty() || previousStartedLine || CLAUSE_END.containsMatchIn(previous) ||
+                        previous.none { it.isLowerCase() }
+                    val startsLine = canStart && (LIST_ITEM.containsMatchIn(line) || copyright) ||
+                        (copyright && previousCopyright) ||
+                        (out.isNotEmpty() && indent > lineIndent && previous.endsWith(':'))
+                    if (out.isNotEmpty()) out.append(if (startsLine) '\n' else ' ')
+                    if (startsLine) out.append(" ".repeat(indent))
+                    if (startsLine || out.isEmpty()) lineIndent = indent
+                    out.append(line)
+                    previous = line
+                    previousStartedLine = startsLine
+                    previousCopyright = copyright
+                }
+                out.toString()
+            }
+
+        /** What of a search [query] to keep in saved instance state: null (nothing) past the cap. */
+        fun savedQuery(query: String): String? = query.takeIf { it.length <= MAX_SAVED_QUERY }
+
+        const val MAX_SAVED_QUERY = 1024
+
+        private fun indentOf(line: String): Int {
+            var width = 0
+            for (ch in line) {
+                when (ch) {
+                    ' ' -> width++
+                    '\t' -> width = (width / 4 + 1) * 4
+                    else -> return width
+                }
+            }
+            return width
+        }
+
+        private const val MAX_INDENT = 8
+        private val PARAGRAPH_BREAK = Regex("\\n[ \\t]*\\n")
+        private val LIST_ITEM = Regex("^([-*•]|\\(?([0-9]{1,3}|[A-Za-z]|[ivxIVX]{1,4})[.)])\\s")
+        private val COPYRIGHT = Regex("^(Copyright\\b|\\([cC]\\)\\s|©)")
+        private val COLUMNS = Regex("\\S( {3,}|\\t)\\S")
+        private val RULE = Regex("[-=+|_]{4,}")
+        private val CLAUSE_END = Regex("([.:;!?]|\\b(and|or),?)[\"'”’)]*$", RegexOption.IGNORE_CASE)
+
+        private fun JSONArray.objects(): List<JSONObject> = List(length()) { getJSONObject(it) }
+    }
+}

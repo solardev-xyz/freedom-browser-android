@@ -5,6 +5,7 @@ import baby.freedom.swarm.RadicleNode
 import baby.freedom.swarm.RadicleSeed
 import baby.freedom.swarm.RadicleStatus
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -519,5 +520,249 @@ class RadicleProviderTest {
     fun `prompt copy names what each ask means`() {
         assertEquals("Connect", radiclePromptCopy(RadicleAsk.Connect(site)).allow)
         assertTrue(radiclePromptCopy(RadicleAsk.Signing(site)).detail.contains("can't be taken back"))
+    }
+
+    @Test
+    fun `seedStatus goes only to the sites that follow that repository`() {
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        val b = "https://b.example"
+        grants.map[site] = ""
+        grants.map[b] = ""
+        val heard = mutableListOf<Pair<String, String>>()
+        provider.events = RadicleProvider.Events { o, e, d -> if (e == "seedStatus") heard += o to (d as JSONObject).getString("rid") }
+        runBlocking {
+            val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined)
+            provider.start(scope)
+            // b asks about another repository only: it joins no one else's fetch.
+            req("radicle_getSeedStatus", JSONObject().put("rid", other), origin = b)
+            req("radicle_seed", JSONObject().put("rid", rid))
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "connecting", "a (1/3)"))
+            assertEquals(listOf(site to rid), heard)
+            // Once b asks about rid itself, it hears rid's too.
+            heard.clear()
+            req("radicle_getSeedStatus", JSONObject().put("rid", rid), origin = b)
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "fetching", "b (2/3)"))
+            assertEquals(setOf(site to rid, b to rid), heard.toSet())
+            scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        }
+    }
+
+    @Test
+    fun `another site asking about many repositories can't drop a site's follow of its own fetch`() {
+        val b = "https://b.example"
+        grants.map[site] = ""
+        grants.map[b] = ""
+        val heard = mutableListOf<Pair<String, String>>()
+        provider.events = RadicleProvider.Events { o, e, d -> if (e == "seedStatus") heard += o to (d as JSONObject).getString("rid") }
+        val alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        fun ridOf(i: Int) = "rad:z" + "1".repeat(20) + alphabet[i / alphabet.length % alphabet.length] + alphabet[i % alphabet.length]
+        runBlocking {
+            val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined)
+            provider.start(scope)
+            req("radicle_seed", JSONObject().put("rid", rid))
+            // b fills far more than the cap with repositories of its own.
+            for (i in 0 until RadicleProvider.MAX_FOLLOWED_REPOS + 100) {
+                req("radicle_getSeedStatus", JSONObject().put("rid", ridOf(i)), origin = b)
+            }
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "connecting", "a (1/3)"))
+            assertEquals(listOf(site to rid), heard)
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "done", active = false))
+            // b's own oldest follow went; its newest stayed.
+            heard.clear()
+            req("radicle_seed", JSONObject().put("rid", ridOf(0)))
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(ridOf(0), "connecting", "a (1/3)"))
+            assertEquals(listOf(site to ridOf(0)), heard)
+            val newest = ridOf(RadicleProvider.MAX_FOLLOWED_REPOS + 99)
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(ridOf(0), "done", active = false))
+            heard.clear()
+            req("radicle_seed", JSONObject().put("rid", newest))
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(newest, "connecting", "a (1/3)"))
+            assertEquals(setOf(site to newest, b to newest), heard.toSet())
+            scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        }
+    }
+
+    @Test
+    fun `a fetch started while the seed prompt was up is busy, not a silent no-op`() {
+        grants.map[site] = ""
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        val r = runBlocking {
+            provider.request(site, "radicle_seed", JSONObject().put("rid", rid)) {
+                // Another tab (or the Radicle page) starts a fetch meanwhile.
+                node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(other, "connecting", "a (1/3)"))
+                true
+            }
+        }
+        assertEquals("busy", err(r).reason)
+        assertTrue(node.seeds.isEmpty())
+    }
+
+    @Test
+    fun `a fetch another site just asked for is busy before its seed line reaches the app`() {
+        grants.map[site] = ""
+        val siteB = "https://b.example"
+        grants.map[siteB] = ""
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        // B's prompt is up while A's seed is allowed; A's line hasn't arrived over IPC.
+        val r = runBlocking {
+            provider.request(siteB, "radicle_seed", JSONObject().put("rid", other)) {
+                val a = provider.request(site, "radicle_seed", JSONObject().put("rid", rid)) { true }
+                assertTrue((ok(a) as JSONObject).getBoolean("seeded"))
+                true
+            }
+        }
+        assertEquals("busy", err(r).reason)
+        assertEquals(listOf(rid), node.seeds)
+        // Asked straight out, too — and sync is held back the same way.
+        assertEquals("busy", err(req("radicle_seed", JSONObject().put("rid", other), origin = siteB)).reason)
+        node.seeded = JSONArray().put(JSONObject().put("rid", other))
+        assertEquals("busy", err(req("radicle_sync", JSONObject().put("rid", other), origin = siteB)).reason)
+        assertEquals(listOf(rid), node.seeds)
+        // The node never moved its line: the claim lapses with the pending window.
+        now += RadicleProvider.PENDING_MS
+        assertTrue((ok(req("radicle_seed", JSONObject().put("rid", other), origin = siteB)) as JSONObject).getBoolean("seeded"))
+        assertEquals(listOf(rid, other), node.seeds)
+    }
+
+    @Test
+    fun `a seed the user started from the Radicle page is busy before its line reaches the app`() {
+        grants.map[site] = ""
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        // MainActivity.onRadicleSeed, through RadicleProviders.userSeeding,
+        // before it asks the node; the line is still in flight over IPC.
+        provider.userSeeding(other) { true }
+        assertEquals("busy", err(req("radicle_seed", JSONObject().put("rid", rid))).reason)
+        assertTrue(node.seeds.isEmpty())
+        val status = ok(req("radicle_getSeedStatus", JSONObject().put("rid", other))) as JSONObject
+        assertEquals("fetching", status.getString("state"))
+        // The node never took it: the claim lapses with the pending window.
+        now += RadicleProvider.PENDING_MS
+        assertTrue((ok(req("radicle_seed", JSONObject().put("rid", rid))) as JSONObject).getBoolean("seeded"))
+        assertEquals(listOf(rid), node.seeds)
+    }
+
+    @Test
+    fun `an earlier fetch's finished line doesn't clear a fetch just asked of the node`() {
+        grants.map[site] = ""
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        runBlocking {
+            val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined)
+            provider.start(scope)
+            // The user seeded rid from the Radicle page earlier; its line is done.
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "done", "", active = false))
+            node.seeded = JSONArray().put(JSONObject().put("rid", rid))
+            ok(req("radicle_sync", JSONObject().put("rid", rid)))
+            assertEquals(listOf(rid), node.seeds)
+            // An unrelated push repeating that stale line arrives before the new fetch's line.
+            node.state.value = node.state.value.copy(connectedPeers = 7)
+            assertEquals("busy", err(req("radicle_seed", JSONObject().put("rid", other))).reason)
+            val pending = ok(req("radicle_getSeedStatus", JSONObject().put("rid", rid))) as JSONObject
+            assertEquals("fetching", pending.getString("state"))
+            assertEquals("starting", pending.getJSONObject("progress").getString("phase"))
+            // The new fetch's own line moves: that one ends the claim.
+            node.state.value = node.state.value.copy(seed = RadicleSeed(rid, "connecting", "a (1/3)"))
+            assertEquals("connecting", (ok(req("radicle_getSeedStatus", JSONObject().put("rid", rid))) as JSONObject)
+                .getJSONObject("progress").getString("phase"))
+            node.state.value = node.state.value.copy(seed = RadicleSeed(rid, "done", "", active = false))
+            assertEquals("fetched", (ok(req("radicle_getSeedStatus", JSONObject().put("rid", rid))) as JSONObject).getString("state"))
+            assertTrue((ok(req("radicle_seed", JSONObject().put("rid", other))) as JSONObject).getBoolean("seeded"))
+            scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        }
+    }
+
+    @Test
+    fun `a user seed that never reached the node, or that the node skips, claims nothing`() {
+        grants.map[site] = ""
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        // The binder call threw (a dead :node): the claim is given back.
+        runCatching { provider.userSeeding(other) { throw IllegalStateException("dead binder") } }
+        assertEquals("idle", (ok(req("radicle_getSeedStatus", JSONObject().put("rid", other))) as JSONObject).getString("state"))
+        // Or said it didn't get there.
+        provider.userSeeding(other) { false }
+        assertEquals("idle", (ok(req("radicle_getSeedStatus", JSONObject().put("rid", other))) as JSONObject).getString("state"))
+        assertTrue((ok(req("radicle_seed", JSONObject().put("rid", rid))) as JSONObject).getBoolean("seeded"))
+        // A site's fetch of rid is claimed: the user's seed of other still
+        // goes to the node, which skips it, so it makes no claim of its own.
+        var asked = false
+        provider.userSeeding(other) { asked = true; true }
+        assertTrue(asked)
+        assertEquals("idle", (ok(req("radicle_getSeedStatus", JSONObject().put("rid", other))) as JSONObject).getString("state"))
+        // Once rid's claim lapses, nothing of other's holds rid back.
+        now += RadicleProvider.PENDING_MS
+        assertTrue((ok(req("radicle_seed", JSONObject().put("rid", rid))) as JSONObject).getBoolean("seeded"))
+    }
+
+    @Test
+    fun `a new fetch that ends on the same line as the last one still ends its claim and is heard`() {
+        grants.map[site] = ""
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        val events = mutableListOf<JSONObject>()
+        provider.events = RadicleProvider.Events { _, e, d -> if (e == "seedStatus") events += d as JSONObject }
+        runBlocking {
+            val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined)
+            provider.start(scope)
+            val first = RadicleSeed(rid, "failed", "no seeds found", active = false, fetch = 1)
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = first)
+            node.seeded = JSONArray().put(JSONObject().put("rid", rid))
+            ok(req("radicle_sync", JSONObject().put("rid", rid)))
+            // A repeat of the earlier line (an unrelated push) still doesn't end the claim.
+            node.state.value = node.state.value.copy(connectedPeers = 3)
+            assertEquals("fetching", (ok(req("radicle_getSeedStatus", JSONObject().put("rid", rid))) as JSONObject).getString("state"))
+            assertTrue(events.isEmpty())
+            // The new fetch fails the same way before the collector saw any line in between.
+            node.state.value = node.state.value.copy(seed = first.copy(fetch = 2))
+            assertEquals(listOf("failed"), events.map { it.getString("state") })
+            assertEquals("failed", (ok(req("radicle_getSeedStatus", JSONObject().put("rid", rid))) as JSONObject).getString("state"))
+            assertTrue((ok(req("radicle_seed", JSONObject().put("rid", other))) as JSONObject).getBoolean("seeded"))
+            scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        }
+    }
+
+    @Test
+    fun `a seed the node refused doesn't hold other repositories back`() {
+        grants.map[site] = ""
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        val failing = object : RadicleProvider.Node by node {
+            override fun seed(rid: String) = false
+        }
+        val p = RadicleProvider(grants, failing, clock = { now }, io = Dispatchers.Unconfined)
+        val r = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", rid)) { true } }
+        assertEquals("seed_failed", err(r).reason)
+        val r2 = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", other)) { true } }
+        assertEquals("seed_failed", err(r2).reason)
+        val status = runBlocking { p.request(site, "radicle_getSeedStatus", JSONObject().put("rid", rid)) { true } }
+        assertEquals(0, (ok(status) as JSONObject).getInt("attemptCount"))
+    }
+
+    @Test
+    fun `a prompt left unanswered is refused before the page's own timer, without blocking the tab`() {
+        assertTrue(RadicleProviders.PROMPT_WAIT_MS + RadicleClient.READ_TIMEOUT_MS + RadicleClient.WRITE_TIMEOUT_MS < 300_000L)
+        val tab = BrowserState(9_500L)
+        try {
+            val allowed = runBlocking { RadicleProviders.askOnTab(tab, 0, RadicleAsk.Connect(site), waitMs = 200) }
+            assertFalse(allowed)
+            assertNull("the prompt is taken down", tab.radiclePrompt)
+            // Not a refusal: the next ask still gets a prompt.
+            val next = runBlocking {
+                val result = async { RadicleProviders.askOnTab(tab, 0, RadicleAsk.Connect(site), waitMs = 5_000) }
+                while (tab.radiclePrompt == null) kotlinx.coroutines.yield()
+                tab.radiclePrompt!!.respond(true)
+                result.await()
+            }
+            assertTrue(next)
+            assertFalse(runBlocking { RadicleProviders.askOnTab(tab, 0, RadicleAsk.Connect(site), waitMs = 0) })
+        } finally {
+            RadicleProviders.onTabClosed(tab.id)
+        }
+    }
+
+    @Test
+    fun `a request that doesn't parse is still answered by its id`() {
+        val bad = """{"id":7,"method":"radicle_seed","params":"rad:$bare"}"""
+        assertNull(parseRadicleRequest(bad))
+        assertEquals(7L, unparsedRequestId(bad))
+        assertNull(unparsedRequestId("""{"method":"m","id":7}"""))
+        assertNull(unparsedRequestId("""{"id":"7"}"""))
+        assertNull(unparsedRequestId(null))
     }
 }

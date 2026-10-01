@@ -113,8 +113,21 @@ class RadicleProvider(
 
     private val lock = Any()
 
-    /** Origins that seed / sync / ask seed status: they get `seedStatus` events (desktop's broadcaster model). */
-    private val followers = HashSet<String>()
+    /**
+     * rid → the origins that seeded, synced or asked the status of that
+     * repository: they get its `seedStatus` events, and only its — desktop
+     * keeps a listener per repository (`seed-status.js`), so a site never
+     * hears what another site (or the user) seeds.
+     */
+    private val followers = HashMap<String, MutableSet<String>>()
+
+    /**
+     * origin → the repositories it follows, least recently asked about
+     * first. The cap is per site: a page picks the RIDs it asks about, so
+     * one site asking about thousands of them only ever drops its own
+     * oldest follows, never another site's (#349 R1-F1).
+     */
+    private val followed = HashMap<String, LinkedHashSet<String>>()
     private val tracks = HashMap<String, Track>()
     private val writes = HashMap<String, ArrayDeque<Long>>()
     private var watcher: Job? = null
@@ -193,7 +206,7 @@ class RadicleProvider(
 
     private suspend fun disconnect(origin: String): Reply {
         if (!grants.revoke(origin)) return Reply.Err(INTERNAL, "Couldn't drop the connection")
-        synchronized(lock) { followers.remove(origin) }
+        unfollowAll(origin)
         events.emit(origin, "disconnect", JSONObject().put("origin", origin))
         return Reply.Ok(JSONObject().put("connected", false))
     }
@@ -231,13 +244,17 @@ class RadicleProvider(
         }
         "radicle_getSeedStatus" -> {
             val rid = rid(params) ?: return invalidRid()
-            follow(origin)
+            follow(origin, rid)
             Reply.Ok(withContext(io) { status(rid) })
         }
         "radicle_seed" -> {
             val rid = rid(params) ?: return invalidRid()
             busy(rid)?.let { return it }
             if (!ask(RadicleAsk.Seed(origin, rid))) return rejected()
+            // Another fetch may have started while the prompt was up: the
+            // node would skip this one without a word.
+            node.unavailableReason()?.let { return Reply.Err(UNAVAILABLE, RadicleClient.unavailableMessage(it), it) }
+            busy(rid)?.let { return it }
             startFetch(origin, rid)?.let { return it }
             Reply.Ok(JSONObject().put("rid", rid).put("seeded", true).put("status", withContext(io) { status(rid) }))
         }
@@ -266,40 +283,148 @@ class RadicleProvider(
         else -> Reply.Err(UNSUPPORTED, "Unknown method: $method")
     }
 
-    /** A fetch of another repository is running: the node takes one at a time. */
-    private fun busy(rid: String): Reply? {
+    /**
+     * A fetch of another repository is running, or was just asked of the
+     * node and its seed line hasn't reached the app yet: the node takes one
+     * at a time and skips a second seed without a word (#349 R4-M1).
+     */
+    private fun busy(rid: String): Reply? = if (synchronized(lock) { otherFetch(rid) }) busyReply() else null
+
+    /** Caller holds [lock]. */
+    private fun otherFetch(rid: String): Boolean {
         val line = node.state.value.seed
-        if (line != null && line.active && line.rid != rid) {
-            return Reply.Err(INTERNAL, "Another repository is being fetched; try again when it's done", "busy")
-        }
-        return null
+        if (line != null && line.active && line.rid != rid) return true
+        val now = clock()
+        return tracks.any { (other, track) -> other != rid && track.pendingSince?.let { now - it < PENDING_MS } == true }
     }
+
+    private fun busyReply() =
+        Reply.Err(INTERNAL, "Another repository is being fetched; try again when it's done", "busy")
 
     private fun startFetch(origin: String, rid: String): Reply? {
-        follow(origin)
-        val line = node.state.value.seed
-        // Already fetching this one: report on that fetch.
-        if (line != null && line.active && line.rid == rid) return null
-        if (!node.seed(rid)) return Reply.Err(INTERNAL, "seed failed", "seed_failed")
+        follow(origin, rid)
         val now = clock()
-        synchronized(lock) {
-            val track = tracks.getOrPut(rid) { Track(now, 0) }
-            track.startedAt = now
-            track.attemptCount++
-            track.finishedAt = null
-            track.pendingSince = now
-            track.recentAttempts.clear()
+        // Check and claim in one step, so two sites' prompts answered at
+        // once can't both reach the node.
+        val claim = synchronized(lock) {
+            if (otherFetch(rid)) return busyReply()
+            claimLocked(rid, now) ?: return null
         }
+        if (!node.seed(rid)) {
+            synchronized(lock) { claim.giveBack() }
+            return Reply.Err(INTERNAL, "seed failed", "seed_failed")
+        }
+        synchronized(lock) { claim.started() }
         return null
     }
 
-    private fun follow(origin: String) = synchronized(lock) { followers.add(origin) }
+    /**
+     * The user started a seed of [rid] from the Radicle page, which goes to
+     * the node without passing through here: claim it the same way, so a
+     * site's prompt answered before its seed line reaches the app reads the
+     * node as busy instead of being told `{seeded:true}` for a seed the node
+     * skips (#349 R5-M1).
+     *
+     * [ask] hands the seed to the node and says whether it got there. The
+     * user's seed always goes to the node; it only claims when no other
+     * fetch is running or claimed (the node skips it then, so it would be a
+     * claim for nothing), and a seed that never reached the node gives its
+     * claim back, so neither holds other sites' seeds `busy` (#349 R6-M2).
+     */
+    fun userSeeding(rid: String, ask: () -> Boolean) {
+        val now = clock()
+        val claim = synchronized(lock) { if (otherFetch(rid)) null else claimLocked(rid, now) }
+        val asked = try {
+            ask()
+        } catch (t: Throwable) {
+            synchronized(lock) { claim?.giveBack() }
+            throw t
+        }
+        synchronized(lock) { if (asked) claim?.started() else claim?.giveBack() }
+    }
+
+    /** A fetch of [rid] just asked of the node; [giveBack] if the node refused it. */
+    private inner class Claim(
+        val rid: String,
+        val track: Track,
+        val at: Long,
+        val previousPending: Long?,
+        val previousLine: RadicleSeed?,
+        val fresh: Boolean,
+    ) {
+        /** Caller holds [lock]. */
+        fun giveBack() {
+            if (track.pendingSince == at) {
+                track.pendingSince = previousPending
+                track.lastLine = previousLine
+            }
+            if (fresh && tracks[rid] === track) tracks.remove(rid)
+        }
+
+        /** Caller holds [lock]. */
+        fun started() {
+            track.startedAt = at
+            track.attemptCount++
+            track.finishedAt = null
+            track.recentAttempts.clear()
+        }
+    }
+
+    /**
+     * Mark [rid] as asked of the node at [now]; null if its fetch is
+     * already running (report on that one). Caller holds [lock].
+     *
+     * The rid's seed line as it stands — an earlier fetch's finished line,
+     * say — becomes the track's [Track.lastLine]: it says nothing about the
+     * fetch just asked, so only a line that moves after this may clear the
+     * claim. A fresh track's null [Track.lastLine] otherwise let the next
+     * unrelated [RadicleInfo] push, repeating that stale line, clear it at
+     * once (#349 R5-M2).
+     */
+    private fun claimLocked(rid: String, now: Long): Claim? {
+        val line = node.state.value.seed?.takeIf { it.rid == rid }
+        if (line != null && line.active) return null
+        val fresh = rid !in tracks
+        val track = tracks.getOrPut(rid) { Track(now, 0) }
+        val claim = Claim(rid, track, now, track.pendingSince, track.lastLine, fresh)
+        track.pendingSince = now
+        if (line != null) track.lastLine = line
+        return claim
+    }
+
+    private fun follow(origin: String, rid: String) = synchronized(lock) {
+        val mine = followed.getOrPut(origin) { LinkedHashSet() }
+        // Asked again: it moves to the newest end.
+        mine.remove(rid)
+        mine.add(rid)
+        followers.getOrPut(rid) { HashSet() }.add(origin)
+        if (mine.size <= MAX_FOLLOWED_REPOS) return@synchronized
+        // Drop this site's least recently asked-about repository, sparing
+        // one whose fetch is running or about to (and the one just asked).
+        val running = node.state.value.seed?.takeIf { it.active }?.rid
+        val evict = mine.firstOrNull { it != rid && it != running && tracks[it]?.pendingSince == null }
+            ?: mine.first { it != rid }
+        unfollow(origin, evict)
+    }
+
+    /** Caller holds [lock]. */
+    private fun unfollow(origin: String, rid: String) {
+        followed[origin]?.let { if (it.remove(rid) && it.isEmpty()) followed.remove(origin) }
+        followers[rid]?.let { if (it.remove(origin) && it.isEmpty()) followers.remove(rid) }
+    }
+
+    /** [origin] stops hearing every repository's `seedStatus`. */
+    private fun unfollowAll(origin: String) = synchronized(lock) {
+        followed.remove(origin)?.forEach { rid ->
+            followers[rid]?.let { if (it.remove(origin) && it.isEmpty()) followers.remove(rid) }
+        }
+    }
 
     /**
      * [origin]'s grant is gone (the user disconnected it from the Radicle
      * page): it stops hearing `seedStatus` (#201 R1-F2).
      */
-    fun forget(origin: String) = synchronized(lock) { followers.remove(origin) }
+    fun forget(origin: String) = unfollowAll(origin)
 
     /**
      * Where [rid]'s replication stands (desktop's `getSeedStatus` shape).
@@ -373,7 +498,7 @@ class RadicleProvider(
             }
             while (track.recentAttempts.size > 5) track.recentAttempts.removeAt(0)
             if (!line.active) track.finishedAt = now
-            followers.toList()
+            followers[line.rid]?.toList().orEmpty()
         }
         if (targets.isEmpty()) return
         val status = withContext(io) { status(line.rid) }
@@ -634,6 +759,9 @@ class RadicleProvider(
 
         /** How long a seed just asked of the node reads as starting before its line shows up. */
         const val PENDING_MS = 5_000L
+
+        /** Repositories each site's `seedStatus` follows are kept for ([followed]). */
+        const val MAX_FOLLOWED_REPOS = 512
 
         private val COB_ID = Regex("^[0-9a-f]{6,40}$")
         private val ISSUE_STATES = setOf("open", "closed", "solved")
