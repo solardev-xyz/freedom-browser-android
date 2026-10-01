@@ -88,7 +88,10 @@ class IpfsNodeTest {
         }
     }
 
-    private fun node(ops: FakeOps) = IpfsNode(IpfsNode.Config(dataDir = "/data/ipfs"), ops)
+    /** Each test its own data dir: the live-node lease is process-wide, per dir. */
+    private val dataDir = "/data/ipfs-${java.util.UUID.randomUUID()}"
+
+    private fun node(ops: FakeOps) = IpfsNode(IpfsNode.Config(dataDir = dataDir), ops)
 
     private fun awaitStatus(node: IpfsNode, status: IpfsStatus) {
         val until = System.currentTimeMillis() + 5_000
@@ -233,6 +236,77 @@ class IpfsNodeTest {
         Thread.sleep(100)
         assertEquals(IpfsStatus.Stopped, node.state.value.status)
         assertEquals(emptyList<String>(), ops.stale.toList())
+        node.dispose()
+    }
+
+    @Test
+    fun `a new instance after off then on waits for the old instance's node to be freed`() {
+        // NodeService builds a fresh IpfsNode on every off → on: the old
+        // instance's release (held up here by a call still inside its node)
+        // must finish before the new instance opens the same data dir.
+        repeat(10) { round ->
+            val ops = FakeOps().apply { releaseForeground = CountDownLatch(1) }
+            val old = node(ops)
+            old.start()
+            awaitStatus(old, IpfsStatus.Running)
+            old.enterForeground()
+            assertTrue(ops.foregroundEntered.await(5, TimeUnit.SECONDS))
+            old.dispose()
+            val fresh = node(ops)
+            fresh.start()
+            Thread.sleep(150)
+            assertTrue("round $round: ${ops.calls}", ops.calls.none { it == "new:2" })
+            assertEquals(IpfsStatus.Starting, fresh.state.value.status)
+            ops.releaseForeground.countDown()
+            awaitStatus(fresh, IpfsStatus.Running)
+            val calls = ops.calls.toList()
+            assertTrue("round $round: $calls", calls.indexOf("free:1") in 0 until calls.indexOf("new:2"))
+            assertEquals("http://127.0.0.1:42000", fresh.state.value.gatewayUrl)
+            assertEquals(emptyList<String>(), ops.overlapping.toList())
+            assertEquals(emptyList<String>(), ops.stale.toList())
+            fresh.dispose()
+        }
+    }
+
+    @Test
+    fun `a new instance waits for the old instance's launch still starting its gateway`() {
+        // Off while the old instance's gateway is still starting, then on:
+        // its launch frees node 1 only once the start returns, and the new
+        // instance's node must not exist before then.
+        val ops = FakeOps().apply { releaseGateway = CountDownLatch(1) }
+        val old = node(ops)
+        old.start()
+        assertTrue(ops.gatewayEntered.await(5, TimeUnit.SECONDS))
+        old.dispose()
+        val fresh = node(ops)
+        fresh.start()
+        Thread.sleep(200)
+        assertTrue(ops.calls.toString(), ops.calls.none { it == "new:2" })
+        ops.releaseGateway.countDown()
+        awaitStatus(fresh, IpfsStatus.Running)
+        val calls = ops.calls.toList()
+        assertTrue(calls.toString(), calls.indexOf("free:1") in 0 until calls.indexOf("new:2"))
+        assertEquals(IpfsStatus.Stopped, old.state.value.status)
+        assertEquals(emptyList<String>(), ops.overlapping.toList())
+        assertEquals(emptyList<String>(), ops.stale.toList())
+        fresh.dispose()
+    }
+
+    @Test
+    fun `a failed nodeNew gives the lease back, so a later start still runs`() {
+        val delegate = FakeOps()
+        val ops = object : IpfsNode.Ops by delegate {
+            @Volatile var fail = true
+            override fun nodeNew(dataDir: String, maxCacheBytes: Long): Long =
+                if (fail) throw IllegalStateException("boom") else delegate.nodeNew(dataDir, maxCacheBytes)
+        }
+        val node = IpfsNode(IpfsNode.Config(dataDir = dataDir), ops)
+        node.start()
+        awaitStatus(node, IpfsStatus.Error)
+        ops.fail = false
+        node.start()
+        awaitStatus(node, IpfsStatus.Running)
+        assertEquals(emptyList<String>(), delegate.stale.toList())
         node.dispose()
     }
 }

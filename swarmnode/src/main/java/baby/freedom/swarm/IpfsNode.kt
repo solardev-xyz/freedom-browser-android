@@ -14,6 +14,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Semaphore
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
 import kotlin.concurrent.write
@@ -120,12 +123,28 @@ class IpfsNode internal constructor(
 
     /**
      * Held while a node is built (a launch's nodeNew → gateway start →
-     * publish) and while one is freed ([releaseHandle]), so at most one
-     * node is ever alive: a launch first frees any node an older
-     * generation published, and waits out a free still running. Never
-     * taken by a poll. Order: [nodeLock], then [handleLock], then [stateLock].
+     * publish) and while one is freed ([releaseHandle]), so this
+     * instance's launches and releases run one at a time: a launch first
+     * frees any node an older generation of *this instance* published.
+     * Never taken by a poll. Order: [nodeLock], then [dataDirLease], then
+     * [handleLock], then [stateLock].
+     *
+     * It says nothing about other instances — NodeService builds a fresh
+     * [IpfsNode] on every off → on, while the old one's release (or a
+     * launch still finishing its gateway start) runs on — so exclusivity
+     * across instances comes from [dataDirLease].
      */
     private val nodeLock = Any()
+
+    /**
+     * The process-wide permit for a live node on [Config.dataDir]: taken
+     * before nodeNew and given back only after that node's nodeFree, so
+     * at most one node (and one gateway) is ever alive per data dir in
+     * this process, whichever [IpfsNode] instance owns it — a new
+     * instance's launch waits out the old instance's release or in-flight
+     * launch instead of opening the same store beside it.
+     */
+    private val dataDirLease: Semaphore = leaseFor(config.dataDir)
 
     /** Orders [start]/[stop] with each other: guards [generation] and the Starting/Running/Stopped transitions. */
     private val stateLock = Any()
@@ -155,8 +174,16 @@ class IpfsNode internal constructor(
             // this launch's node with [nodeLock] held.
             synchronized(nodeLock) {
                 releaseHandle(before = gen)
+                // Another instance's node on this data dir (an earlier
+                // off → on's) may still be freeing: wait for it to be gone.
+                dataDirLease.acquireUninterruptibly()
                 var node = 0L
                 try {
+                    // A stop while this waited: never make the node.
+                    if (synchronized(stateLock) { generation != gen }) {
+                        dataDirLease.release()
+                        return@launch
+                    }
                     node = ops.nodeNew(config.dataDir, 0L)
                     if (node == 0L) error("freedom_ipfs_node_new_with_data_dir failed")
                     // The gateway starts before the node is published, so
@@ -195,8 +222,9 @@ class IpfsNode internal constructor(
                     }
                 } catch (t: Throwable) {
                     Log.e(TAG, "Failed to start IPFS node", t)
-                    // Never published: only this launch has it.
-                    if (node != 0L) freeNode(node)
+                    // Never published: only this launch has it. No node
+                    // made (nodeNew failed or threw): just give the lease back.
+                    if (node != 0L) freeNode(node) else dataDirLease.release()
                     synchronized(stateLock) {
                         if (generation != gen) return@launch
                         _state.update {
@@ -310,11 +338,16 @@ class IpfsNode internal constructor(
         freeNode(node)
     }
 
+    /** Stop [node]'s gateway and free it, then give back the [dataDirLease] its launch took. */
     private fun freeNode(node: Long) {
-        runCatching { ops.stopGateway(node) }
-            .onFailure { Log.w(TAG, "stopGateway threw", it) }
-        runCatching { ops.nodeFree(node) }
-            .onFailure { Log.w(TAG, "nodeFree threw", it) }
+        try {
+            runCatching { ops.stopGateway(node) }
+                .onFailure { Log.w(TAG, "stopGateway threw", it) }
+            runCatching { ops.nodeFree(node) }
+                .onFailure { Log.w(TAG, "nodeFree threw", it) }
+        } finally {
+            dataDirLease.release()
+        }
     }
 
     /**
@@ -346,5 +379,11 @@ class IpfsNode internal constructor(
 
     companion object {
         private const val TAG = "IpfsNode"
+
+        private val leases = ConcurrentHashMap<String, Semaphore>()
+
+        /** One permit per data dir, shared by every [IpfsNode] in the process. */
+        private fun leaseFor(dataDir: String): Semaphore =
+            leases.computeIfAbsent(File(dataDir).absoluteFile.normalize().path) { Semaphore(1) }
     }
 }
