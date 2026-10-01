@@ -646,10 +646,19 @@ internal object AdblockScriptletSource : ScriptletSource {
  * (Chromium adds Fetch Metadata later, in the network service), so the
  * kind is read from `Accept`, which Blink sets per kind before the hook:
  * an image (`image/…`) or a stylesheet (`text/css…`) isn't trusted. A
- * font sends the same catch-all `Accept` as a script or `fetch`, so a `Referer`
- * whose path is a `.css` file isn't trusted either. What's left — a
- * font from a stylesheet served at another path — at worst registers
- * that stylesheet's host, if it has rules, for nothing. Should
+ * font sends the same catch-all `Accept` as a script or `fetch`, so it
+ * is told apart two ways. A font is a CORS request, so it carries the
+ * document's `Origin`: when that names another host than the `Referer`,
+ * the `Referer` is a stylesheet from elsewhere (a cross-origin stylesheet
+ * sends only its bare origin, `http://e.test/`, for a font on a third
+ * host) and isn't trusted. And a `Referer` whose path is a `.css` file
+ * isn't trusted either (a stylesheet's font on its own host, which
+ * carries the full stylesheet URL). What's left — a font from a
+ * stylesheet on the document's own host, or on another host at a path
+ * not ending `.css` with the font on that same host — at worst
+ * registers the document's or that stylesheet's host, if it has rules,
+ * for nothing. A script, frame or media request a document makes
+ * either sends no `Origin` or its own, so it is still trusted. Should
  * `Sec-Fetch-Dest` ever turn up, it decides instead.
  */
 internal fun refererNamesDocument(headers: Map<String, String>?): Boolean {
@@ -659,6 +668,9 @@ internal fun refererNamesDocument(headers: Map<String, String>?): Boolean {
     header("Sec-Fetch-Dest")?.let { return it in REFERER_DOCUMENT_DESTS }
     val accept = header("Accept").orEmpty()
     if (accept.startsWith("image/") || accept.startsWith("text/css")) return false
+    // A CORS request whose Origin isn't the Referer's host: a stylesheet's font from elsewhere.
+    val origin = header("Origin")
+    if (origin != null && origin != "null" && hostOfUrl(origin) != hostOfUrl(referer.lowercase())) return false
     val path = runCatching { java.net.URI(referer).rawPath }.getOrNull() ?: return false
     return !path.lowercase().endsWith(".css")
 }

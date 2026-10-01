@@ -145,7 +145,7 @@ class AdblockScriptletsDeviceTest {
                         "http://d.test/s.js" -> WebResourceResponse("text/javascript", "utf-8", ByteArrayInputStream("var s = 1;".toByteArray()))
                         "http://e.test/s.css" -> WebResourceResponse(
                             "text/css", "utf-8",
-                            ByteArrayInputStream("@font-face { font-family: f; src: url(http://e.test/f.woff); } body { font-family: f; background: url(http://e.test/bg.png); }".toByteArray()),
+                            ByteArrayInputStream("@font-face { font-family: f; src: url(http://e.test/f.woff); } @font-face { font-family: g; src: url(http://g.test/f.woff); } body { font-family: f, g; background: url(http://e.test/bg.png); }".toByteArray()),
                         )
                         "http://a.test/data", "http://b.test/data" -> WebResourceResponse(
                             "application/json", "utf-8", 200, "OK",
@@ -289,11 +289,12 @@ class AdblockScriptletsDeviceTest {
 
     /**
      * The frame: a script of its own (`Referer` = the frame), and a
-     * stylesheet on e.test whose font and image name the stylesheet.
+     * stylesheet on e.test whose font and image name the stylesheet, and
+     * whose font on g.test names only its bare origin (R4-M1).
      */
     private val redirectedFrame = """
         <!doctype html><link rel="stylesheet" href="http://e.test/s.css"><script src="/s.js"></script>
-        <body>text<script>
+        <body>text<span style="font-family: g">g</span><script>
         var flag = String(window.fixtureFlag);
         document.fonts.ready.then(function () { setTimeout(function () { parent.postMessage(flag, '*'); }, 300); });
         </script></body>
@@ -316,7 +317,12 @@ class AdblockScriptletsDeviceTest {
         assertFalse("e.test in $hosts", "e.test" in hosts)
         // What the interceptor really sees: no Fetch Metadata, and the font and image did load.
         assertTrue(seen.none { (_, h) -> h.keys.any { it.equals("Sec-Fetch-Dest", true) } })
-        assertTrue(seen.map { it.first }.containsAll(listOf("http://d.test/s.js", "http://e.test/f.woff", "http://e.test/bg.png")))
+        assertTrue(seen.map { it.first }.containsAll(listOf("http://d.test/s.js", "http://e.test/f.woff", "http://e.test/bg.png", "http://g.test/f.woff")))
+        // The cross-origin stylesheet's font on g.test: Referer its bare origin, Origin the frame's.
+        val gFont = seen.first { it.first == "http://g.test/f.woff" }.second
+        fun h(name: String) = gFont.entries.firstOrNull { it.key.equals(name, true) }?.value
+        assertEquals("http://e.test/", h("Referer"))
+        assertEquals("http://d.test", h("Origin"))
         load("http://c.test/redirected")
         assertEquals("true", waitReport())
     }

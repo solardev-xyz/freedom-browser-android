@@ -379,6 +379,13 @@ class AdblockScriptletsTest {
         // A font from a stylesheet: named by the stylesheet's .css path.
         assertFalse(refererNamesDocument(mapOf("Accept" to any, "Referer" to "https://cdn.example/a.CSS?v=2")))
         assertTrue(refererNamesDocument(mapOf("Accept" to any, "Referer" to "https://a.example/css/")))
+        // A font from a cross-origin stylesheet (R4-M1): its Referer is the stylesheet's
+        // bare origin, its Origin the document's.
+        assertFalse(refererNamesDocument(mapOf("Accept" to any, "Origin" to "http://d.test", "Referer" to "http://e.test/")))
+        // A document's own CORS fetch, or a script from a sandboxed (opaque) one: still the document.
+        assertTrue(refererNamesDocument(mapOf("Accept" to any, "Origin" to "https://a.example", "Referer" to doc)))
+        assertTrue(refererNamesDocument(mapOf("accept" to any, "origin" to "HTTPS://A.example:443", "Referer" to doc)))
+        assertTrue(refererNamesDocument(mapOf("Accept" to any, "Origin" to "null", "Referer" to doc)))
         // No Referer, or one that isn't a URL.
         assertFalse(refererNamesDocument(mapOf("Accept" to any)))
         assertFalse(refererNamesDocument(mapOf("Accept" to any, "Referer" to "https://a.example/a b")))
