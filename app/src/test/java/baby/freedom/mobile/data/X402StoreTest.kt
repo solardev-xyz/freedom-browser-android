@@ -342,4 +342,30 @@ class X402StoreTest {
         assertEquals(BigInteger.TEN, ok.each)
         assertEquals(ok, X402Store.decodeAllowance(key, X402Store.encodeAllowance(ok)))
     }
+
+    @Test
+    fun `#347 a hold is kept until lifted, and goes with the wallet`() = runBlocking {
+        val s = store()
+        assertEquals(emptySet<String>(), s.holds())
+        assertTrue(s.grant(cap = 30))
+        assertTrue(s.hold(site))
+        assertTrue(s.hold("https://other.example"))
+        assertEquals(setOf(site, "https://other.example"), s.holds())
+        // Holds aren't allowances, nor history.
+        assertEquals(1, s.allowances.first().size)
+        assertEquals(emptyList<X402Store.Payment>(), s.history.first())
+        assertTrue(s.lift(site))
+        assertTrue(s.lift(site))
+        assertEquals(setOf("https://other.example"), s.holds())
+        assertTrue(s.clear())
+        assertEquals(emptySet<String>(), s.holds())
+    }
+
+    @Test
+    fun `#347 holds that can't be read are unknown, not none`() = runBlocking {
+        val s = X402Store(BrokenStore(IOException("disk"))) { now }
+        assertNull(s.holds())
+        assertFalse(s.hold(site))
+        assertFalse(s.lift(site))
+    }
 }

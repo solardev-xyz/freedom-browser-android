@@ -57,7 +57,11 @@ import java.util.concurrent.ConcurrentHashMap
  * user navigates to it themselves: their address on that site
  * ([navigationStarted] `byUser`), or their own Reload or Back/Forward on
  * its page ([usersStep]) — as the server may keep a refused payment's
- * authorization and collect it anyway (#237).
+ * authorization and collect it anyway (#237). A hold outlives the
+ * process: it's handed to [onHold] / [onLift] to be kept on disk, and the
+ * holds an earlier run left are [restore]d — until then, and for good if
+ * they couldn't be read, [holds] says every site is held but one the user
+ * has since navigated to themselves (#347).
  *
  * Main thread only, but for [epoch].
  */
@@ -66,6 +70,10 @@ internal class X402Flow<D : Any>(
     private val settle: (recordId: String, status: X402Store.Status, httpStatus: Int?) -> Unit,
     /** A URL's origin key, as [Committed.allowanceMayPay] is asked for; null for one that has none. */
     private val originOf: (String) -> String?,
+    /** [origin] was put on hold: keep it across restarts (#347). */
+    private val onHold: (origin: String) -> Unit = {},
+    /** [origin]'s hold, if it has one kept, is lifted (#347). */
+    private val onLift: (origin: String) -> Unit = {},
 ) {
     private class Detection<D>(val url: String, val value: D)
 
@@ -94,7 +102,8 @@ internal class X402Flow<D : Any>(
         private val fromOrigin: String?,
         private val gesture: Boolean,
         private val hopOrigins: List<String?>,
-        private val held: Set<String>,
+        /** Whether an origin was held as the 402 committed ([holds]). */
+        private val held: (String) -> Boolean,
     ) {
         /**
          * An allowance of [origin]'s may pay this without asking: the user
@@ -107,7 +116,7 @@ internal class X402Flow<D : Any>(
          * after a Refused payment (#237).
          */
         fun allowanceMayPay(origin: String): Boolean =
-            origin !in held && (byUser || (fromOrigin == origin && gesture)) && hopOrigins.all { it == origin }
+            !held(origin) && (byUser || (fromOrigin == origin && gesture)) && hopOrigins.all { it == origin }
     }
 
     private val detections = HashMap<Long, Detection<D>>()
@@ -117,6 +126,19 @@ internal class X402Flow<D : Any>(
 
     /** Origins a paid request of which was answered Refused: no allowance of theirs pays silently (#237). */
     private val held = HashSet<String>()
+
+    /** The holds an earlier run kept have been [restore]d (#347). */
+    private var restored = false
+
+    /** The kept holds couldn't be read: every origin is held but those [lifted] (#347). */
+    private var heldUnknown = false
+
+    /**
+     * Origins the user navigated to themselves while the kept holds weren't
+     * known — before [restore], or after it found them unreadable — so a
+     * kept hold of theirs is lifted already (#347).
+     */
+    private val lifted = HashSet<String>()
 
     /** The origin of the page each tab last committed: what the user's Reload or Back/Forward navigates away from. */
     private val pages = HashMap<Long, String>()
@@ -148,7 +170,7 @@ internal class X402Flow<D : Any>(
         settle(retry.recordId, X402Store.Status.REFUSED, status)
         // The server may keep the refused authorization and collect it anyway: its site's
         // allowance pays nothing more silently until the user navigates to it (#237).
-        originOf(retry.url)?.let(held::add)
+        originOf(retry.url)?.let(::hold)
         return true
     }
 
@@ -205,7 +227,7 @@ internal class X402Flow<D : Any>(
      * 307/308 redirects no callback shows. Called after [superseded].
      * The user's address on a site held after a Refused payment lets its
      * allowance pay again (#237); their Reload or Back/Forward does
-     * through [usersStep].
+     * through [usersStep]. Not if it mustn't [lifts]: a private tab's (#347).
      */
     fun navigationStarted(
         tab: Long,
@@ -214,8 +236,9 @@ internal class X402Flow<D : Any>(
         url: String?,
         post: Boolean = false,
         gesture: Boolean = false,
+        lifts: Boolean = true,
     ) {
-        if (byUser && url != null) originOf(url)?.let(held::remove)
+        if (lifts && byUser && url != null) originOf(url)?.let(::lift)
         // Where it starts: [url]'s origin, or — a reload of the entry on
         // screen, whose own URL isn't named — the page the tab last
         // committed, or somewhere unknown (null) if it has none. A Reload
@@ -233,7 +256,45 @@ internal class X402Flow<D : Any>(
      * before it goes out, as a paid request of the site's in another tab
      * may have been Refused while this one was worked out (#237 R2-M1).
      */
-    fun holds(origin: String): Boolean = origin in held
+    fun holds(origin: String): Boolean = origin in held || (!restored || heldUnknown) && origin !in lifted
+
+    /** [holds] as it is now, not as it will be. */
+    private fun heldNow(): (String) -> Boolean {
+        val held = held.toSet()
+        val unknown = !restored || heldUnknown
+        val lifted = lifted.toSet()
+        return { origin -> origin in held || unknown && origin !in lifted }
+    }
+
+    /**
+     * The holds an earlier run kept ([onHold]), read back: held too, but
+     * for any the user has lifted since this run began. Null: they
+     * couldn't be read — every origin stays held until the user navigates
+     * to it themselves, as any of them may have been (#347).
+     */
+    fun restore(kept: Set<String>?) {
+        if (restored) return
+        restored = true
+        if (kept == null) {
+            heldUnknown = true
+            return
+        }
+        held += kept - lifted - held
+        lifted.clear()
+    }
+
+    private fun hold(origin: String) {
+        held += origin
+        lifted -= origin
+        onHold(origin)
+    }
+
+    private fun lift(origin: String) {
+        var changed = held.remove(origin)
+        // A kept hold this run doesn't know about (yet) is lifted too.
+        if (!restored || heldUnknown) changed = lifted.add(origin) || changed
+        if (changed) onLift(origin)
+    }
 
     /**
      * The user's own Reload or Back/Forward on [tab] — the bar's buttons,
@@ -244,7 +305,7 @@ internal class X402Flow<D : Any>(
      * started the navigation is still [navigationStarted]'s to say.
      */
     fun usersStep(tab: Long) {
-        pages[tab]?.let(held::remove)
+        pages[tab]?.let(::lift)
     }
 
     /**
@@ -305,7 +366,7 @@ internal class X402Flow<D : Any>(
             initiator?.fromOrigin,
             initiator?.gesture == true,
             initiator?.hopOrigins.orEmpty(),
-            held.toSet(),
+            heldNow(),
         )
     }
 

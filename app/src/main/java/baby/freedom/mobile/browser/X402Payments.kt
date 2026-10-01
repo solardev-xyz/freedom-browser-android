@@ -29,10 +29,12 @@ import java.math.BigInteger
 import java.security.SecureRandom
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -106,7 +108,9 @@ data class X402Grant(val cap: BigInteger, val windowMs: Long)
  * the payment it was granted with ([X402Store.Allowance]), only for a
  * navigation the user made (their load, or their tap on the site's page),
  * and not after the site answered a paid request Refused until the user
- * navigates to it themselves ([X402Flow], #237).
+ * navigates to it themselves ([X402Flow], #237) — across restarts: the
+ * hold is kept in [X402Store], and nothing pays silently until the holds
+ * an earlier run kept are read back (#347).
  *
  * Never in a private tab, and never automatically while the wallet is
  * locked: an allowance only pays when the wallet is open already; a
@@ -137,15 +141,37 @@ object X402Payments {
     private val flow = X402Flow<Detection>(
         settle = { id, status, httpStatus -> settle(id, status, httpStatus) },
         originOf = ::providerOriginKey,
+        onHold = { holdWrites.trySend(it to true) },
+        onLift = { holdWrites.trySend(it to false) },
     )
     private val random = SecureRandom()
+
+    /** Holds to keep (true) or lift (false), written one at a time, in order (#347). */
+    private val holdWrites = Channel<Pair<String, Boolean>>(Channel.UNLIMITED)
+
+    /** The holds an earlier run kept are read back into [flow] (#347). */
+    private val holdsRestored = CompletableDeferred<Unit>()
 
     fun init(context: Context) {
         if (this.context != null) return
         val app = context.applicationContext
         this.context = app
+        val store = X402Store.get(app)
         // Paid requests an earlier run never saw answered.
-        scope.launch { X402Store.get(app).settleStale() }
+        scope.launch { store.settleStale() }
+        // Sites an earlier run held after a Refused paid request stay held (#347).
+        scope.launch {
+            val kept = store.holds()
+            if (kept == null) Log.w(TAG, "x402 holds unreadable: every site's allowance asks until the user navigates to it")
+            flow.restore(kept)
+            holdsRestored.complete(Unit)
+        }
+        scope.launch {
+            for ((origin, held) in holdWrites) {
+                val written = if (held) store.hold(origin) else store.lift(origin)
+                if (!written) Log.w(TAG, if (held) "keeping an x402 hold failed" else "lifting a kept x402 hold failed")
+            }
+        }
     }
 
     /**
@@ -188,7 +214,10 @@ object X402Payments {
      * The user's own Reload or Back/Forward on [tab]'s page: a hold on its
      * site after a Refused payment is lifted (#237 R1-M1).
      */
-    fun onUsersStep(tab: BrowserState) = flow.usersStep(tab.id)
+    fun onUsersStep(tab: BrowserState) {
+        // A private tab never writes the x402 store, nor pays from an allowance.
+        if (!tab.private) flow.usersStep(tab.id)
+    }
 
     /**
      * [tab] began a navigation to [url] (null: a reload or history step)
@@ -197,10 +226,14 @@ object X402Payments {
      * [pageUrl], with the user's [gesture] or on its own. Only these may
      * let a site's allowance pay without asking (#218 R4-M3) — the page's
      * only with the user's gesture (#237) — and only while its redirects
-     * stay on that site (#218 R5-M1).
+     * stay on that site (#218 R5-M1). A private tab's never lifts a hold:
+     * it doesn't write the x402 store (#347).
      */
     fun onNavigationStarted(tab: BrowserState, byUser: Boolean, pageUrl: String?, url: String?, gesture: Boolean = false) =
-        flow.navigationStarted(tab.id, byUser, if (byUser) null else pageUrl?.let(::providerOriginKey), url, gesture = gesture)
+        flow.navigationStarted(
+            tab.id, byUser, if (byUser) null else pageUrl?.let(::providerOriginKey), url,
+            gesture = gesture, lifts = !tab.private,
+        )
 
     /**
      * [tab]'s payment epoch, read on the interceptor's thread as a
@@ -293,7 +326,9 @@ object X402Payments {
             // to be short: otherwise the sheet says why (#218 R2-M1).
             val payer = account?.address
             // The hold is read again, not only as the 402 committed: a paid request of the
-            // site's may have been Refused, in another tab, since (#237 R2-M1).
+            // site's may have been Refused, in another tab, since (#237 R2-M1) — once the
+            // holds an earlier run kept are known (#347).
+            if (allowanceMayPay) holdsRestored.await()
             val covered = silentPayOption(allowanceMayPay && !flow.holds(d.origin), switched, payer, account?.isLedger == true, options) { o ->
                 store.covering(allowances, d.origin, o.chainId, o.asset, payer!!, o.payTo, o.amount) != null
             }

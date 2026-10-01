@@ -10,10 +10,19 @@ import org.junit.Test
 /** Which navigation an x402 402 or a paid request's answer belongs to (#218 R2). */
 class X402FlowTest {
     private val settled = mutableListOf<Triple<String, Status, Int?>>()
-    private val flow = X402Flow<String>(
+    /** Holds kept (true) and lifted (false), in order (#347). */
+    private val kept = mutableListOf<Pair<String, Boolean>>()
+    private val originOf = { url: String -> url.substringBefore("://") + "://" + url.substringAfter("://").substringBefore('/') }
+
+    private fun newFlow() = X402Flow<String>(
         settle = { id, status, http -> settled += Triple(id, status, http) },
-        originOf = { url -> url.substringBefore("://") + "://" + url.substringAfter("://").substringBefore('/') },
+        originOf = originOf,
+        onHold = { kept += it to true },
+        onLift = { kept += it to false },
     )
+
+    // No holds kept by an earlier run.
+    private val flow = newFlow().also { it.restore(emptySet()) }
     private val tab = 1L
     private val a = "https://pay.example/a"
     private val b = "https://pay.example/b"
@@ -528,5 +537,87 @@ class X402FlowTest {
         flow.navigationStarted(fresh, byUser = true, fromOrigin = null, url = null)
         flow.detected(fresh, a, "terms")
         assertFalse(flow.committed(fresh, a)!!.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `#347 a hold is kept, and lifted, through the store`() {
+        refusedOnScreen()
+        assertEquals(listOf(origin to true), kept)
+        // A user's step on another site, or on a site not held, writes nothing.
+        flow.navigationStarted(2L, byUser = true, fromOrigin = null, url = "https://other.example/")
+        assertEquals(listOf(origin to true), kept)
+        flow.superseded(tab)
+        flow.usersStep(tab)
+        assertEquals(listOf(origin to true, origin to false), kept)
+        flow.usersStep(tab)
+        assertEquals(2, kept.size)
+    }
+
+    @Test
+    fun `#347 a hold kept by an earlier run holds after a restart, until the user lifts it`() {
+        val restarted = newFlow()
+        restarted.restore(setOf(origin))
+        assertTrue(restarted.holds(origin))
+        assertFalse(restarted.holds("https://other.example"))
+        // The issue's reproduction: the site's link the user taps, after the restart.
+        restarted.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        restarted.detected(tab, b, "terms")
+        assertFalse(restarted.committed(tab, b)!!.allowanceMayPay(origin))
+        // Their own address on the site lifts it, kept or not.
+        restarted.superseded(tab)
+        restarted.navigationStarted(tab, byUser = true, fromOrigin = null, url = a)
+        assertFalse(restarted.holds(origin))
+        assertEquals(listOf(origin to false), kept)
+    }
+
+    @Test
+    fun `#347 before the kept holds are read back, every site is held but one the user went to`() {
+        val restarted = newFlow()
+        assertTrue(restarted.holds(origin))
+        restarted.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        restarted.detected(tab, b, "terms")
+        val early = restarted.committed(tab, b)!!
+        assertFalse(early.allowanceMayPay(origin))
+        // The user's own address on the site, while its kept hold isn't known yet: lifted, on disk too.
+        restarted.navigationStarted(tab, byUser = true, fromOrigin = null, url = a)
+        assertFalse(restarted.holds(origin))
+        assertEquals(listOf(origin to false), kept)
+        // Another site Refused while the read was out: held, whatever the read says.
+        val other = "https://other.example"
+        restarted.navigationStarted(2L, byUser = true, fromOrigin = null, url = "$other/a")
+        restarted.sending(2L)
+        restarted.paid(2L, "$other/a", "r2")
+        assertTrue(restarted.httpError(2L, "$other/a", "GET", 402))
+        // The read comes back from before both: the lift stands, the new hold too.
+        restarted.restore(setOf(origin))
+        assertFalse(restarted.holds(origin))
+        assertTrue(restarted.holds(other))
+        assertFalse(restarted.holds("https://third.example"))
+        // The commit's snapshot was taken while nothing was known: it still asks.
+        assertFalse(early.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `#347 kept holds that can't be read hold every site until the user goes to it`() {
+        val restarted = newFlow()
+        restarted.restore(null)
+        assertTrue(restarted.holds(origin))
+        assertTrue(restarted.holds("https://other.example"))
+        restarted.navigationStarted(tab, byUser = true, fromOrigin = null, url = a)
+        assertFalse(restarted.holds(origin))
+        assertTrue(restarted.holds("https://other.example"))
+        assertEquals(listOf(origin to false), kept)
+        restarted.superseded(tab)
+        restarted.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        restarted.detected(tab, b, "terms")
+        assertTrue(restarted.committed(tab, b)!!.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `#347 a private tab's address on a held site doesn't lift the hold`() {
+        refusedOnScreen()
+        flow.navigationStarted(2L, byUser = true, fromOrigin = null, url = b, lifts = false)
+        assertTrue(flow.holds(origin))
+        assertEquals(listOf(origin to true), kept)
     }
 }
