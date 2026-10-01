@@ -102,6 +102,35 @@ class UnverifiedOriginsTest {
     }
 
     @Test
+    fun `a private tab that took a normal tab's pending cleanup leaves the next sweep's cleanup on disk`() {
+        UnverifiedOrigins.record("https://gw-1.example", a)
+        UnverifiedOrigins.sweep("https://gw-2.example") {}
+        assertEquals(emptySet<String>() to setOf(a), UnverifiedOrigins.persistedSnapshot())
+        // A private tab's document request takes the one-shot cleanup
+        // (which clears only the private profile, #360), then is served.
+        assertTrue(UnverifiedOrigins.takeClearFor(a, Any(), private = true))
+        UnverifiedOrigins.record("https://gw-2.example", a, private = true)
+        // The normal profile's cleanup is still owed: the origin stays a
+        // persisted one, so the next sweep's cleanup survives a restart.
+        assertEquals(setOf(a) to emptySet<String>(), UnverifiedOrigins.persistedSnapshot())
+        UnverifiedOrigins.sweep("https://gw-3.example") {}
+        assertEquals(emptySet<String>() to setOf(a), UnverifiedOrigins.persistedSnapshot())
+    }
+
+    @Test
+    fun `once a normal tab took the cleanup a private tab's origin is private-only again`() {
+        UnverifiedOrigins.record("https://gw-1.example", a)
+        UnverifiedOrigins.sweep("https://gw-2.example") {}
+        assertTrue(UnverifiedOrigins.takeClearFor(a, Any(), private = true))
+        UnverifiedOrigins.record("https://gw-2.example", a, private = true)
+        UnverifiedOrigins.sweep("https://gw-3.example") {}
+        // A normal tab takes it: the normal profile is cleared.
+        assertTrue(UnverifiedOrigins.takeClearFor(a, Any()))
+        UnverifiedOrigins.record("https://gw-3.example", a, private = true)
+        assertEquals(emptySet<String>() to emptySet<String>(), UnverifiedOrigins.persistedSnapshot())
+    }
+
+    @Test
     fun `another external gateway wipes the previous one's origins too`() {
         UnverifiedOrigins.record("https://gw.example", a)
         val wiped = mutableSetOf<String>()

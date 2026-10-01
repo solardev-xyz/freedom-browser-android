@@ -5612,7 +5612,7 @@ internal fun interceptVirtualRequest(
     // The Radicle repository browser and its read API (#124).
     val response = RadApi.intercept(req, url)
         ?: interceptOnchainAppRequest(req, url, onchain)
-        ?: siteDataCleanupFor(req, url, tab)
+        ?: siteDataCleanupFor(req, url, tab, private)
         ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, onMainFrameRoot, private)
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
@@ -5678,14 +5678,14 @@ private val DOWNLOADED_TEXT_TYPES = setOf(
  * intercepted response touches those. Then it reloads the URL in
  * place, which is served normally.
  */
-private fun siteDataCleanupFor(req: WebResourceRequest, url: String, tab: Any?): WebResourceResponse? {
+private fun siteDataCleanupFor(req: WebResourceRequest, url: String, tab: Any?, private: Boolean): WebResourceResponse? {
     if (!isDocumentRequest(req.isForMainFrame, req.requestHeaders)) return null
     val origin = VirtualOrigin.parseHostOfUrl(url)?.let(VirtualOrigin::originFor) ?: return null
     // At a cold start the origins left to clear are loaded, and swept,
     // just before the endpoint settings land: a restored tab's first
     // document must not get ahead of that.
     Gateways.awaitExternalEndpointsBlocking()
-    if (!UnverifiedOrigins.takeClearFor(origin, tab)) return null
+    if (!UnverifiedOrigins.takeClearFor(origin, tab, private)) return null
     return WebResourceResponse(
         "text/html", "utf-8", 200, "OK",
         // `Vary: *`: a service worker's Cache Storage won't keep it.

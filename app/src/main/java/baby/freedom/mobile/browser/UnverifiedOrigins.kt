@@ -80,9 +80,21 @@ object UnverifiedOrigins {
      * [toClear]): kept in memory, never persisted (see the class doc).
      * Left only when a normal tab is served one ([record]); never
      * entered by an origin already pending a cleanup from a normal tab's
-     * earlier gateway.
+     * earlier gateway, nor by one whose such cleanup a private tab
+     * consumed ([owedToNormal]).
      */
     private val privateOnly = HashSet<String>()
+
+    /**
+     * Origins whose persisted, one-shot cleanup ([toClear]) a private
+     * tab's document took ([takeClearFor] with `private`): that page
+     * cleared the private profile, so the normal profile's cleanup is
+     * still owed (#360). Such an origin is never made [privateOnly], so
+     * the cleanup a later [sweep] or [release] queues there is persisted
+     * again, as it was before #86 — the CID was on disk already. Left
+     * when a normal tab takes a cleanup there. Memory only.
+     */
+    private val owedToNormal = HashSet<String>()
 
     /** The IPFS gateway [sweep] last saw in use; `null` until the first sweep. */
     private var current: String? = null
@@ -149,8 +161,12 @@ object UnverifiedOrigins {
             // else of: one a normal tab's earlier gateway left a cleanup
             // pending on ([toClear], or a [hold] that [release] puts back
             // there) keeps that cleanup on disk — filtering it out of the
-            // persisted list would lose the normal profile's (R1-F1).
-            if (origins.add(origin) && private && origin !in toClear && holds.values.none { origin in it }) {
+            // persisted list would lose the normal profile's (R1-F1). So
+            // does one whose pending cleanup a private tab took first
+            // ([owedToNormal], R2-M1).
+            if (origins.add(origin) && private && origin !in toClear && origin !in owedToNormal &&
+                holds.values.none { origin in it }
+            ) {
                 privateOnly.add(origin)
             }
             persist()
@@ -287,9 +303,15 @@ object UnverifiedOrigins {
      * same-origin page that clears it and reloads
      * (`SITE_DATA_CLEANUP_HTML`) — the only way to reach the DOM storage
      * and service workers [wipeWebData] can't.
+     *
+     * [private]: the requester is a private tab (#86). Its cleanup page
+     * runs in the private profile, so taking a cleanup a normal tab's
+     * gateway left leaves that one owed ([owedToNormal]).
      */
-    fun takeClearFor(origin: String, requester: Any? = null): Boolean = synchronized(lock) {
+    fun takeClearFor(origin: String, requester: Any? = null, private: Boolean = false): Boolean = synchronized(lock) {
         if (toClear.remove(origin)) {
+            if (!private) owedToNormal.remove(origin)
+            else if (origin !in privateOnly) owedToNormal.add(origin)
             persist()
             return true
         }
@@ -334,6 +356,7 @@ object UnverifiedOrigins {
             origins.clear()
             toClear.clear()
             privateOnly.clear()
+            owedToNormal.clear()
             holds.clear()
             clearedWhileHeld.clear()
             workerDocuments.clear()
