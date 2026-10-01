@@ -227,7 +227,8 @@ class MediaRangeTest {
         assertEquals(46_071_808L, webViewSkipFor("bytes=46071808-"))
         assertEquals(100L, webViewSkipFor(" Bytes = 100 - 199 "))
         assertEquals(3_000_000_000L, webViewSkipFor("bytes=3000000000-"))
-        // Suffix, several ranges, nonsense, past a Long: no seek.
+        // Suffix (seeks off available(), not a fixed skip), several
+        // ranges, nonsense, past a Long: no fixed skip.
         assertEquals(0L, webViewSkipFor("bytes=-500"))
         assertEquals(0L, webViewSkipFor("bytes=0-10,20-30"))
         assertEquals(0L, webViewSkipFor("items=5-"))
@@ -307,10 +308,49 @@ class MediaRangeTest {
     }
 
     @Test
-    fun `an unranged or suffix request is left alone`() {
+    fun `an unranged request is left alone`() {
         val plain = ByteArrayInputStream(body(10))
         assertSame(plain, webViewSeekProof(plain, null))
-        assertSame(plain, webViewSeekProof(plain, "bytes=-5"))
         assertSame(plain, webViewSeekProof(plain, "bytes=0-"))
+        assertSame(plain, webViewSeekProof(plain, "bytes=0-10,20-30"))
+    }
+
+    @Test
+    fun `suffix ranges are recognised`() {
+        assertTrue(isWebViewSuffixRange("bytes=-500"))
+        assertTrue(isWebViewSuffixRange(" Bytes = - 500 "))
+        assertFalse(isWebViewSuffixRange(null))
+        assertFalse(isWebViewSuffixRange("bytes=-"))
+        assertFalse(isWebViewSuffixRange("bytes=10-"))
+        assertFalse(isWebViewSuffixRange("bytes=-1-2"))
+        assertFalse(isWebViewSuffixRange("bytes=-5,-6"))
+    }
+
+    /**
+     * What Chromium's `ComputeBounds` + `Seek` do to an intercepted body
+     * for a suffix range `bytes=-n`: seek to `available() - min(available(), n)`.
+     */
+    private fun webViewSuffixSeek(stream: InputStream, n: Long): Boolean {
+        val size = stream.available().toLong()
+        return webViewSeek(stream, size - minOf(size, n))
+    }
+
+    /** A body that reports [buffered] bytes available, like a socket stream with data in. */
+    private class Buffered(data: ByteArray, private val buffered: Int) : ByteArrayInputStream(data) {
+        override fun available(): Int = minOf(buffered, super.available())
+    }
+
+    @Test
+    fun `a whole 200 to a suffix request is not cut by WebView's seek`() {
+        // A gateway that ignored bytes=-1000, with 8 KB already buffered at open.
+        val file = body(50_000)
+        val unprotected = Buffered(file, 8_000)
+        assertTrue(webViewSuffixSeek(unprotected, 1_000))
+        assertEquals(50_000 - 7_000, unprotected.readBytes().size)
+
+        val stream = webViewSeekProof(Buffered(file, 8_000), "bytes=-1000")
+        assertEquals(0, stream.available())
+        assertTrue(webViewSuffixSeek(stream, 1_000))
+        assertArrayEquals(file, stream.readBytes())
     }
 }

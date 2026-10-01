@@ -192,7 +192,12 @@ private const val SKIP_CHUNK = 64 * 1024
  * `AndroidStreamReaderURLLoader` parses a single `bytes=<first>-…` range
  * and, whatever status the response has, seeks the stream to `<first>`
  * (`InputStreamReader::Seek`) — a body made for a `200` of the whole
- * file. A suffix range (`bytes=-n`), several ranges, or none: nothing.
+ * file. Several ranges, or none: nothing. A suffix range (`bytes=-n`) is
+ * not a fixed skip, so it isn't counted here, but WebView does seek for
+ * it too: `ComputeBounds` takes the first byte as `available()` minus
+ * `min(available(), n)`, so a body that reports more than `n` bytes
+ * already buffered would lose the difference — [webViewSeekProof] covers
+ * it by reporting nothing buffered ([isWebViewSuffixRange]).
  */
 internal fun webViewSkipFor(rangeHeader: String?): Long {
     val match = rangeHeader?.let { WEBVIEW_RANGE_REGEX.matchEntire(it.trim()) } ?: return 0
@@ -202,15 +207,31 @@ internal fun webViewSkipFor(rangeHeader: String?): Long {
 private val WEBVIEW_RANGE_REGEX = Regex("""^bytes\s*=\s*(\d+)\s*-\s*\d*$""", RegexOption.IGNORE_CASE)
 
 /**
+ * Whether [rangeHeader] is a single suffix range (`bytes=-n`), for which
+ * WebView seeks a body to `available() - min(available(), n)`
+ * ([webViewSkipFor]): harmless only while the body reports nothing
+ * buffered.
+ */
+internal fun isWebViewSuffixRange(rangeHeader: String?): Boolean =
+    rangeHeader?.let { WEBVIEW_SUFFIX_REGEX.matches(it.trim()) } ?: false
+
+private val WEBVIEW_SUFFIX_REGEX = Regex("""^bytes\s*=\s*-\s*\d+$""", RegexOption.IGNORE_CASE)
+
+/**
  * [body], the whole answer to a request that sent [rangeHeader], protected
  * from WebView's own seek ([webViewSkipFor]) whatever the response's
  * status: a `206` body already starts at the range, and a whole `200`
  * (a gateway that ignored Range) or an error page (`416`, …) is meant
- * whole, so no answer the proxy hands back may be cut by WebView again.
+ * whole, so no answer the proxy hands back may be cut by WebView again —
+ * for a suffix range (`bytes=-n`) too, whose seek WebView derives from
+ * the body's `available()`.
  */
 internal fun webViewSeekProof(body: InputStream, rangeHeader: String?): InputStream {
     val skip = webViewSkipFor(rangeHeader)
-    return if (skip > 0) SeekAbsorbingInputStream(body, skip) else body
+    // A suffix range: no fixed skip, but WebView's seek is computed from
+    // available(), which a SeekAbsorbingInputStream reports as 0, so it
+    // seeks to the start and skips nothing.
+    return if (skip > 0 || isWebViewSuffixRange(rangeHeader)) SeekAbsorbingInputStream(body, skip) else body
 }
 
 /**
