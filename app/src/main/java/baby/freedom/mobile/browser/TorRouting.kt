@@ -194,6 +194,14 @@ object TorRouting {
     private val held = AtomicInteger(0)
 
     /**
+     * Native fetches held in [awaitOnionRoute] right now, capped at
+     * [MAX_NATIVE_HELD] — counted apart from [held], so manifest discovery
+     * waiting on a re-check can't take the slots a page's onion document
+     * is held in (#376 R2-F2).
+     */
+    private val nativeHeld = AtomicInteger(0)
+
+    /**
      * How long an onion request waits for [externalPending]'s check: the
      * whole first check at its own deadlines ([TorProxy.CHECK_MAX_MS] —
      * the greeting and canary, then every probe onion, which a slow
@@ -212,6 +220,14 @@ object TorRouting {
      * interceptor threads.
      */
     const val MAX_HELD = 8
+
+    /**
+     * At most this many native onion fetches ([awaitOnionRoute]: manifest
+     * discovery) wait at once, in their own pool apart from [MAX_HELD];
+     * more get the answer as it stands — a refusal mid-check, which
+     * discovery reads as unresolved, as before #376 R1-F1.
+     */
+    const val MAX_NATIVE_HELD = 4
 
     /**
      * The Tor SOCKS endpoint `*.onion` is routed to — set only once the
@@ -335,10 +351,14 @@ object TorRouting {
      * the answer as it stands. Not on the main thread (the verdict is
      * published there). #305 R1-F1.
      */
-    internal fun awaitExternalVerdict(timeoutMs: Long = HOLD_MS): Boolean {
+    internal fun awaitExternalVerdict(timeoutMs: Long = HOLD_MS): Boolean =
+        awaitExternalVerdict(timeoutMs, held, MAX_HELD)
+
+    /** [awaitExternalVerdict], counting the wait in [slots], at most [max] at once. */
+    private fun awaitExternalVerdict(timeoutMs: Long, slots: AtomicInteger, max: Int): Boolean {
         if (!awaitingExternal()) return routed != null
-        if (held.incrementAndGet() > MAX_HELD) {
-            held.decrementAndGet()
+        if (slots.incrementAndGet() > max) {
+            slots.decrementAndGet()
             return routed != null
         }
         try {
@@ -353,9 +373,32 @@ object TorRouting {
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         } finally {
-            held.decrementAndGet()
+            slots.decrementAndGet()
         }
         return routed != null
+    }
+
+    /**
+     * For a native onion fetch with its own deadline (manifest discovery,
+     * #356): wait, within [timeoutMs] in all, for the Tor settings
+     * ([awaitSettings]) and then for a pending external proxy's verdict
+     * ([awaitExternalVerdict]), the way [refusalFor] holds a page's onion
+     * request — so a fetch arriving while the proxy is re-checked (the
+     * app just came back) is held rather than refused at once. Whether
+     * onion is routed at the end. Not on the main thread.
+     *
+     * These waits count against their own [MAX_NATIVE_HELD], not the
+     * interceptor's [MAX_HELD]: several onion-endpoint origins running
+     * discovery during a re-check must not fill the slots a page's onion
+     * document needs and get it the [CODE_PROXY_CHECKING] page early
+     * (#376 R2-F2).
+     */
+    internal fun awaitOnionRoute(timeoutMs: Long): Boolean {
+        if (timeoutMs <= 0) return routed != null
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000
+        awaitSettings(minOf(timeoutMs, SETTINGS_WAIT_MS))
+        val left = (deadline - System.nanoTime()) / 1_000_000
+        return if (left <= 0) routed != null else awaitExternalVerdict(minOf(left, HOLD_MS), nativeHeld, MAX_NATIVE_HELD)
     }
 
     /** [ProxyController.setProxyOverride]; swapped in tests. */
@@ -376,6 +419,7 @@ object TorRouting {
         externalRunning = false
         settingsKnown = CountDownLatch(0)
         held.set(0)
+        nativeHeld.set(0)
         routed = null
         target = null
         refusing = false

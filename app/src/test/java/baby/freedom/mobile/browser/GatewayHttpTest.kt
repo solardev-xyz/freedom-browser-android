@@ -105,7 +105,34 @@ class GatewayHttpTest {
         }
     }
 
+    @Test
+    fun `an onion endpoint is refused with no Tor routed, before anything is dialed`() {
+        // An external Swarm endpoint on an onion host (#356): no route, no connection, no DNS lookup.
+        val started = System.nanoTime()
+        try {
+            GatewayHttp.requestAt("http://$ONION:1633", "GET", "/bzz/abc/freedom-manifest.json", emptyMap(), null, 5_000)
+            fail("an onion endpoint was opened with no Tor routed")
+        } catch (_: TorRouting.RefusedException) {
+        }
+        val ms = (System.nanoTime() - started) / 1_000_000
+        assertTrue("took $ms ms", ms < 1_000)
+    }
+
+    @Test
+    fun `an onion endpoint spelled the way the HTTP stack decodes it is refused too`() {
+        val name = ONION.removeSuffix(".onion")
+        for (base in listOf("http://${name}%2eonion:1633", "http://${name}\u3002onion:1633", "http://WWW.${ONION.uppercase()}.")) {
+            try {
+                GatewayHttp.requestAt(base, "GET", "/bzz/abc/", emptyMap(), null, 5_000)
+                fail("opened $base with no Tor routed")
+            } catch (_: TorRouting.RefusedException) {
+            }
+        }
+    }
+
     private companion object {
+        const val ONION = "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion"
+
         /** The address the client dials. Android's `getLoopbackAddress()` is `::1`, which `127.0.0.1` never reaches (#224 R6-F2). */
         val LOOPBACK: InetAddress = InetAddress.getByName("127.0.0.1")
     }
