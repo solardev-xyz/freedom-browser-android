@@ -26,6 +26,8 @@ import android.view.Menu
 import android.view.MenuItem
 import android.view.PixelCopy
 import android.view.KeyEvent
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -852,6 +854,8 @@ fun BrowserWebViewHost(
         // A private session a dead process left behind (#86) goes
         // before any page — private or not — can load.
         PrivateProfile.discardLeftovers()
+        // …and so do the images its tabs copied or shared.
+        if (!PrivateProfile.isLive()) discardPrivateImageShares(context)
         Unit
     }
 
@@ -924,6 +928,7 @@ fun BrowserWebViewHost(
      */
     fun endPrivateSession() {
         PrivateProfile.discard()
+        discardPrivateImageShares(context)
         sitePermissions.onPrivateSessionEnded()
         Adblock.onPrivateSessionEnded()
         pageZoom.clearPrivate()
@@ -1099,6 +1104,8 @@ fun BrowserWebViewHost(
                     tab.audioMuted = false
                 }
             }
+            // The restored entry's scriptlets (#318), before it loads.
+            (wv as? PageWebView)?.scriptlets?.ensure(tab.url)
             val restored = restore.webViewState?.let { wv.restoreState(it) } != null
             if (restored) {
                 tab.canGoBack = wv.canGoBack()
@@ -1922,6 +1929,7 @@ private fun buildRefreshableWebView(
     val webView = PageWebView(
         if (state.private) PrivateWindowContext.of(context) else context,
     ).apply {
+        privateTab = state.private
         // A private tab's WebView goes on the private session's profile
         // (#86) before anything else touches it: Chromium only takes a
         // profile change on a WebView that has never been used.
@@ -2566,6 +2574,10 @@ private fun buildRefreshableWebView(
         // The cosmetic channel reads it on the main thread.
         val adblockPage = AdblockPage()
         AdblockCosmetic.install(this, state.private) { adblockPage.current() }
+        // Scriptlets (#318): registered per host the tab loads documents
+        // from, before each document arrives (see [TabScriptlets]).
+        val scriptlets = TabScriptlets.install(this, state.private)
+        (this as? PageWebView)?.scriptlets = scriptlets
 
         // `window.radicle` (#124): the provider's page object and channel.
         RadicleProviders.install(this, state)
@@ -3406,6 +3418,9 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): Boolean {
                 val target = request?.url?.toString() ?: return false
+                // Scriptlets for the page it's heading to (#318), before a
+                // service worker can answer it unseen by the interceptor.
+                if (request.isForMainFrame) scriptlets?.ensure(target)
                 // "Continue once" on the not-cross-checked ENS warning
                 // (#96): never a load, only a message for the submit
                 // flow, which checks it is this tab's ([EnsGate]).
@@ -3707,6 +3722,11 @@ private fun buildRefreshableWebView(
                     if (url != null && isDocumentRequest(false, request.requestHeaders)) {
                         adblockPage.frameRequested(url, refererOf(request.requestHeaders))
                     }
+                    // A document live in the tab whose host never got its
+                    // scriptlets (a frame redirected there): in place for
+                    // its next load (#318). Only a request the document
+                    // itself made names it (see [refererNamesDocument]).
+                    scriptlets?.noteReferer(request.requestHeaders)
                     if (url != null &&
                         Adblock.shouldBlock(
                             url,
@@ -3717,7 +3737,13 @@ private fun buildRefreshableWebView(
                     ) {
                         return Adblock.blockedResponse()
                     }
+                    // A frame's document: its scriptlets in place before
+                    // its answer can arrive (#318).
+                    if (url != null && isDocumentRequest(false, request.requestHeaders)) {
+                        scriptlets?.ensureFromNetworkThread(url)
+                    }
                 }
+                if (mainFrame) request!!.url?.toString()?.let { scriptlets?.ensureFromNetworkThread(it) }
                 // A certificate-refused load issued again: its page, in
                 // its own entry, never reaching the network (#259).
                 val certPage = if (mainFrame) request!!.url?.toString()?.let(certRefusal::take) else null
@@ -3731,6 +3757,7 @@ private fun buildRefreshableWebView(
                         // the interceptor's caches — this tab's, this
                         // document's only (#262).
                         freshFetch = { target -> state.takeFreshFetch(generation, target) },
+                        private = state.private,
                     ) { served ->
                         noteMainFrameContentLoad(view, state, generation, served)
                     }
@@ -4310,7 +4337,38 @@ internal class PageWebView(context: Context) : WebView(context) {
 
     override fun destroy() {
         destroyed = true
+        scriptlets?.close()
         super.destroy()
+    }
+
+    /** A private tab's (#86): the page's own text fields ask the keyboard not to learn. */
+    var privateTab = false
+
+    /**
+     * A page's own `<input>`/`<textarea>`/`contenteditable` in a private
+     * tab gets [EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING], like the
+     * address and find bars ([tabImeOptions]). Chromium sets it only for
+     * an off-the-record profile, and a WebView profile never is one — so
+     * without this, whatever is typed into a private page (a search box,
+     * a login name) goes into the keyboard's dictionary and comes back as
+     * a suggestion in other apps, outliving the private session.
+     */
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? =
+        super.onCreateInputConnection(outAttrs).also {
+            outAttrs.imeOptions = tabImeOptions(outAttrs.imeOptions, privateTab)
+        }
+
+    /**
+     * This tab's scriptlets (#318), set by the tab: every load the app
+     * starts registers its destination's first ([TabScriptlets.ensure]).
+     */
+    var scriptlets: TabScriptlets? = null
+
+    /** The entry a history step of [steps] lands on, for its scriptlets. */
+    private fun ensureScriptletsForStep(steps: Int) {
+        val s = scriptlets ?: return
+        val list = copyBackForwardList()
+        s.ensure(list.getItemAtIndex(list.currentIndex + steps)?.url)
     }
 
     /**
@@ -4867,6 +4925,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
         documents.navigationStarted(url)
         browserInitiatedLoad(url)
+        scriptlets?.ensure(url)
         super.loadUrl(url)
     }
 
@@ -4877,6 +4936,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
         documents.navigationStarted(url)
         browserInitiatedLoad(url)
+        scriptlets?.ensure(url)
         super.loadUrl(url, additionalHttpHeaders)
     }
 
@@ -4887,6 +4947,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
         documents.navigationStarted(url)
         browserInitiatedLoad(url)
+        scriptlets?.ensure(url)
         super.postUrl(url, postData)
     }
 
@@ -4907,24 +4968,28 @@ internal class PageWebView(context: Context) : WebView(context) {
         matchUserAgentTo(url)
         url?.let(documents::navigationStarted)
         browserInitiatedLoad()
+        scriptlets?.ensure(url)
         super.reload()
     }
 
     override fun goBack() {
         historyStepStarting(-1)
         browserInitiatedLoad()
+        ensureScriptletsForStep(-1)
         super.goBack()
     }
 
     override fun goForward() {
         historyStepStarting(1)
         browserInitiatedLoad()
+        ensureScriptletsForStep(1)
         super.goForward()
     }
 
     override fun goBackOrForward(steps: Int) {
         historyStepStarting(steps)
         browserInitiatedLoad()
+        ensureScriptletsForStep(steps)
         super.goBackOrForward(steps)
     }
 
@@ -5566,6 +5631,8 @@ internal fun interceptVirtualRequest(
     assertedProtocol: (name: String) -> String? = { null },
     onchain: OnchainAppTab? = null,
     freshFetch: (target: String) -> Boolean = { false },
+    /** Asked for by a private tab (#86) — or its profile's service workers. */
+    private: Boolean = false,
     onMainFrameRoot: (ContentRoot?) -> Unit = {},
 ): WebResourceResponse? {
     val req = request ?: return null
@@ -5586,8 +5653,8 @@ internal fun interceptVirtualRequest(
     // The Radicle repository browser and its read API (#124).
     val response = RadApi.intercept(req, url)
         ?: interceptOnchainAppRequest(req, url, onchain)
-        ?: siteDataCleanupFor(req, url, tab)
-        ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, onMainFrameRoot)
+        ?: siteDataCleanupFor(req, url, tab, private)
+        ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, onMainFrameRoot, private)
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
     ) {
@@ -5652,14 +5719,14 @@ private val DOWNLOADED_TEXT_TYPES = setOf(
  * intercepted response touches those. Then it reloads the URL in
  * place, which is served normally.
  */
-private fun siteDataCleanupFor(req: WebResourceRequest, url: String, tab: Any?): WebResourceResponse? {
+private fun siteDataCleanupFor(req: WebResourceRequest, url: String, tab: Any?, private: Boolean): WebResourceResponse? {
     if (!isDocumentRequest(req.isForMainFrame, req.requestHeaders)) return null
     val origin = VirtualOrigin.parseHostOfUrl(url)?.let(VirtualOrigin::originFor) ?: return null
     // At a cold start the origins left to clear are loaded, and swept,
     // just before the endpoint settings land: a restored tab's first
     // document must not get ahead of that.
     Gateways.awaitExternalEndpointsBlocking()
-    if (!UnverifiedOrigins.takeClearFor(origin, tab)) return null
+    if (!UnverifiedOrigins.takeClearFor(origin, tab, private)) return null
     return WebResourceResponse(
         "text/html", "utf-8", 200, "OK",
         // `Vary: *`: a service worker's Cache Storage won't keep it.
@@ -5702,6 +5769,7 @@ private fun interceptVirtualRequestFor(
     assertedProtocol: (name: String) -> String?,
     freshFetch: (target: String) -> Boolean,
     onMainFrameRoot: (ContentRoot?) -> Unit,
+    private: Boolean,
 ): WebResourceResponse? {
     val uri = req.url ?: return null
     val url = uri.toString()
@@ -5815,7 +5883,8 @@ private fun interceptVirtualRequestFor(
             val origin = VirtualOrigin.originFor(root)
             if (origin != null) {
                 // Swept away from since `target` was resolved: resolve again.
-                token = UnverifiedOrigins.record(external, origin) ?: return@repeat
+                // A private tab's origin isn't written to disk (#86).
+                token = UnverifiedOrigins.record(external, origin, private) ?: return@repeat
             }
             if (isServiceWorkerScript(req.requestHeaders)) {
                 return syntheticResponse(

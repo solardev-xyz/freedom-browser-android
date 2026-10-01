@@ -5,6 +5,7 @@ import android.webkit.CookieManager
 import android.webkit.ServiceWorkerClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.WebStorage
 import android.webkit.WebView
 import androidx.annotation.MainThread
 import androidx.webkit.Profile
@@ -83,7 +84,7 @@ object PrivateProfile {
                     object : ServiceWorkerClient() {
                         override fun shouldInterceptRequest(
                             request: WebResourceRequest,
-                        ): WebResourceResponse? = interceptVirtualRequest(request)
+                        ): WebResourceResponse? = interceptVirtualRequest(request, private = true)
                     },
                 )
             }.onFailure { Log.w(TAG, "service-worker interception not installed", it) }
@@ -102,6 +103,14 @@ object PrivateProfile {
      * [CookieHygiene]. Null while no private tab is open. Any thread.
      */
     fun cookieManager(): CookieManager? = cookies
+
+    /**
+     * The private session's site storage, for wiping single origins
+     * ([UnverifiedOrigins.wipeWebData]). Null while no private tab is
+     * open. Main thread.
+     */
+    @MainThread
+    fun webStorage(): WebStorage? = current?.let { runCatching { it.webStorage }.getOrNull() }
 
     /**
      * The last private tab has closed (the caller cleared the HTTP cache

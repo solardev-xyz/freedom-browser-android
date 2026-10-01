@@ -101,6 +101,7 @@ import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import java.text.NumberFormat
 
 /**
  * Full-screen settings page. A search field pinned under the title
@@ -1581,9 +1582,32 @@ internal fun adblockUpdateLine(update: AdblockUpdateState): String? {
     }
 }
 
-/** The line under a category: its list, and while it's on, how the engine is doing. */
-internal fun adblockCategorySubtitle(category: AdblockCategory, on: Boolean, status: AdblockStatus): String =
-    if (on && status.loading) Strings.get(R.string.settings_adblock_category_loading, category.listName) else category.listName
+/** The line under a category: its lists, and while it's on, how the engine is doing. */
+internal fun adblockCategorySubtitle(category: AdblockCategory, on: Boolean, status: AdblockStatus): String {
+    val lists = category.listNames.joinNames()
+    return if (on && status.loading) Strings.get(R.string.settings_adblock_category_loading, lists) else lists
+}
+
+/**
+ * The wrapping line under an enabled category (#318): how many of its
+ * lists' rules run, how many of those are scriptlets, and how many
+ * can't run here — procedural and HTML filters, options and scriptlets
+ * this browser doesn't support, generic scriptlets. `null` while it's
+ * off or has no engine yet.
+ */
+internal fun adblockCategoryCounts(category: AdblockCategory, on: Boolean, status: AdblockStatus): String? {
+    if (!on) return null
+    val counts = status.counts[category] ?: return null
+    val n = NumberFormat.getIntegerInstance()
+    return if (counts.scriptlets == 0) {
+        Strings.get(R.string.settings_adblock_category_counts_no_scriptlets, n.format(counts.used), n.format(counts.skipped))
+    } else {
+        Strings.get(
+            R.string.settings_adblock_category_counts,
+            n.format(counts.used), n.format(counts.scriptletsUsed), n.format(counts.skipped),
+        )
+    }
+}
 
 private fun adblockSectionRows(
     enabled: Set<AdblockCategory>,
@@ -1592,7 +1616,12 @@ private fun adblockSectionRows(
     update: AdblockUpdateState,
 ) = buildList {
     for (category in AdblockCategory.entries) {
-        add(settingsRow(category, category.title, category.listName, onOff(category in enabled)))
+        add(
+            settingsRow(
+                category, category.title, category.listNames.joinNames(), onOff(category in enabled),
+                adblockCategoryCounts(category, category in enabled, status),
+            ),
+        )
     }
     val updateWords = searchKeywords(R.string.settings_adblock_updates_keywords)
     add(settingsRow("auto-update", ADBLOCK_AUTO_UPDATE, ADBLOCK_AUTO_UPDATE_SUBTITLE, adblockListsLine(status), *updateWords))
@@ -1659,6 +1688,7 @@ private fun AdblockSection(
             PageRow(
                 title = category.title,
                 subtitle = adblockCategorySubtitle(category, on, status),
+                thirdLine = adblockCategoryCounts(category, on, status),
                 style = PageRowStyle.Inset,
                 leadingIcon = Icons.Filled.Shield,
                 onClick = { onToggle(category, !on) },

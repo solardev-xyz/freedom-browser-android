@@ -219,6 +219,16 @@
       "notice": "The filter lists are © The EasyList authors (https://easylist.to/), dual-licensed under the GNU General Public License v3 or later and the Creative Commons Attribution-ShareAlike 3.0 Unported licence (or later). Freedom redistributes them, unmodified, under CC BY-SA 3.0. The copies built into the app are assets/adblock/*.txt.",
       "files": ["adblock/easylist.txt", "adblock/easyprivacy.txt", "adblock/fanboy-annoyance.txt", "adblock/fanboy-cookiemonster.txt"],
       "texts": ["texts/CC-BY-SA-3.0.txt"]
+    },
+    {
+      "name": "uBlock filters and uBlock Origin's scriptlets",
+      "version": "",
+      "section": "data",
+      "licence": "GPL-3.0-only",
+      "url": "https://github.com/uBlockOrigin/uAssets",
+      "notice": "© Raymond Hill and the uBlock Origin contributors. assets/adblock/ublock-filters.txt is built from uAssets' filters/filters.txt and filters/quick-fixes.txt at the commit named in its header: its !#if blocks evaluated for a Chromium mobile browser, its !#include files spliced in and the two lists concatenated; the rules themselves are unchanged. assets/adblock/resources.json is uBlock Origin's scriptlets as @ghostery/adblocker v2.18.2 publishes them, unmodified; their source is uBlock Origin's src/js/resources at https://github.com/gorhill/uBlock/tree/de31aee0fcd69dc89cde558f1a0638c1aa77b75e/src/js/resources. Both are data files the app reads at run time, shipped as separate files with the GPL's text next to them (assets/adblock/COPYING.GPL-3.0.txt).",
+      "files": ["adblock/ublock-filters.txt", "adblock/resources.json", "adblock/COPYING.GPL-3.0.txt"],
+      "texts": ["texts/GPL-3.0.txt"]
     }
   ],
   "nativeCode": {
