@@ -871,9 +871,12 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   // `shouldOverrideUrlLoading` for its URL, which a same-document one
   // (pushState, replaceState, a fragment, one the page intercept()ed), a
   // reload or a Back/Forward never reaches, so its word would be left
-  // over for a cross-origin frame's load of that URL to claim.
+  // over for a cross-origin frame's load of that URL to claim. Nor is a
+  // POST form's submission (`formData` set, #382 R1-M1): WebView never
+  // calls `shouldOverrideUrlLoading` for a POST navigation either.
   var NAV = w.navigation, NEP = proto(w.NavigateEvent), NDP = proto(w.NavigationDestination),
       navDest = prop(NEP, 'destination'), navType = prop(NEP, 'navigationType'), navHash = prop(NEP, 'hashChange'),
+      navForm = prop(NEP, 'formData'),
       destUrl = prop(NDP, 'url'), destSame = prop(NDP, 'sameDocument'),
       navTransition = prop(proto(w.Navigation), 'transition'), entryChanges = 0;
   if (NAV && onEl && NEP && NDP) {
@@ -887,6 +890,7 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
       try {
         var dest = navDest(e), ty = navType(e);
         if (destSame(dest) !== false || navHash(e) !== false || (ty !== 'push' && ty !== 'replace')) return;
+        if (navForm(e) != null) return;
         u = destUrl(dest);
       } catch (x) { return; }
       if (typeof u !== 'string' || u.length > $TOP_DOCUMENT_NAVIGATE_MAX) return;

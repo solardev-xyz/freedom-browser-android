@@ -596,6 +596,32 @@ class ExternalAppsTest {
     }
 
     @Test
+    fun `x402 382 R1-M1 the top document's word on a navigation without a gesture is used up by it`() {
+        // A timer on the top page navigates to the priced URL (no gesture);
+        // a cross-origin iframe's gestured load of the same URL right after
+        // must not take that word as its own.
+        for (wordFirst in listOf(true, false)) {
+            val c = Clock()
+            c.topDocumentSaw(c.tap())
+            if (wordFirst) c.latch.onTopDocumentNavigate(PRICED)
+            c.latch.onTopNavigationWithoutGesture(PRICED)
+            if (!wordFirst) {
+                c.now += 5
+                c.latch.onTopDocumentNavigate(PRICED)
+            }
+            c.now += 10
+            val iframe = c.latch.topDocumentGesture(PRICED)
+            c.now += UserGestureLatch.CONFIRM_MS + 1
+            c.latch.onInputStart(c.now)
+            assertFalse(runBlocking { iframe.confirmed() })
+        }
+        // With no such navigation, the top document's own gestured one still is.
+        val c = Clock()
+        c.topDocumentSaw(c.tap())
+        assertTrue(runBlocking { c.topNavigation().confirmed() })
+    }
+
+    @Test
     fun `x402 R5-F2 a media key pressed into an iframe keeps the top document from vouching`() {
         // Headset play/pause reaches the focused iframe as a trusted keydown
         // and renews its activation: it is recorded, and never confirmed.

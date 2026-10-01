@@ -119,6 +119,7 @@ class BottomUiDetectorScriptTest {
         Object.defineProperty(NavigateEvent.prototype, 'destination', { configurable: true, get: function () { return this._d; } });
         Object.defineProperty(NavigateEvent.prototype, 'navigationType', { configurable: true, get: function () { return this._ty; } });
         Object.defineProperty(NavigateEvent.prototype, 'hashChange', { configurable: true, get: function () { return this._h; } });
+        Object.defineProperty(NavigateEvent.prototype, 'formData', { configurable: true, get: function () { return this._f; } });
         function NavigationDestination() {}
         Object.defineProperty(NavigationDestination.prototype, 'url', { configurable: true, get: function () { return this._u; } });
         Object.defineProperty(NavigationDestination.prototype, 'sameDocument', { configurable: true, get: function () { return this._s; } });
@@ -130,12 +131,13 @@ class BottomUiDetectorScriptTest {
         // A navigation of this document: our listener, then the page's handlers, then tasks.
         // o: { type: 'push' (default) | 'replace' | 'reload' | 'traverse', same: a
         // same-document one (pushState etc.), hash: a fragment change, intercept:
-        // 'now' (the page intercept()s it, committed at once) | 'held' (its commit waits) }.
+        // 'now' (the page intercept()s it, committed at once) | 'held' (its commit waits),
+        // post: a POST form's submission (formData set) }.
         function navigate(url, trusted, pageCancels, o) {
           o = o || {};
           var dest = new NavigationDestination(); dest._u = url; dest._s = !!(o.same || o.hash);
           var e = new NavigateEvent(); e._d = dest; e.isTrusted = trusted; e.defaultPrevented = false;
-          e._ty = o.type || 'push'; e._h = !!o.hash;
+          e._ty = o.type || 'push'; e._h = !!o.hash; e._f = o.post ? {} : null;
           navFire('navigate', e);
           if (pageCancels) e.defaultPrevented = true;
           if (dest._s || o.intercept === 'now') navFire('currententrychange', {});
@@ -557,6 +559,26 @@ class BottomUiDetectorScriptTest {
         eval("navigate('http://localhost:8710/a', true, false, { type: 'replace' })")
         eval("navigate('http://localhost:8710/b', true, false)")
         assertEquals("navigate http://localhost:8710/a|navigate http://localhost:8710/b", navigations())
+    }
+
+    @Test
+    fun `a POST form's submission is never reported, a GET form's is (382 R1-M1)`() = page {
+        documentStart()
+        // WebView never calls shouldOverrideUrlLoading for a POST navigation,
+        // so its word would sit unclaimed.
+        eval("navigate('http://localhost:8710/priced', true, false, { post: true })")
+        eval("navigate('http://localhost:8710/priced', true, false, { post: true, type: 'replace' })")
+        assertEquals("", navigations())
+        eval("navigate('http://localhost:8710/priced?q=1', true, false)")
+        assertEquals("navigate http://localhost:8710/priced?q=1", navigations())
+    }
+
+    @Test
+    fun `a page that replaces the formData getter later can't make a POST one reported`() = page {
+        documentStart()
+        eval("Object.defineProperty(NavigateEvent.prototype, 'formData', { get: function () { return null; } })")
+        eval("navigate('http://localhost:8710/priced', true, false, { post: true })")
+        assertEquals("", navigations())
     }
 
     @Test

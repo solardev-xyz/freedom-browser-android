@@ -637,11 +637,15 @@ internal class UserGestureLatch(private val clock: () -> Long) {
      * an iframe setting `top.location` or following a `target=_top` link
      * (#348 R5-F1). Vouches for one [topDocumentGesture] to [url], asked
      * within [CONFIRM_MS] either side. The detector says it only for a
-     * cross-document `push`/`replace`, the kind that reaches
-     * `shouldOverrideUrlLoading` and so asks for it: a word for a
-     * same-document navigation, a reload or a Back/Forward would sit
-     * unclaimed, for a cross-origin frame's load of the same URL to take
-     * (#348 R6-F1).
+     * cross-document `push`/`replace` that isn't a POST form's submission,
+     * the kind that reaches `shouldOverrideUrlLoading`: a word for a
+     * same-document navigation, a reload, a Back/Forward (#348 R6-F1) or a
+     * POST (#382 R1-M1) would sit unclaimed, for a cross-origin frame's
+     * load of the same URL to take. There, a navigation without the
+     * user's activation claims its word too ([onTopNavigationWithoutGesture]),
+     * so a word is left over only if the page's navigation never reaches
+     * `shouldOverrideUrlLoading` for some other reason — and then only
+     * for [CONFIRM_MS].
      */
     fun onTopDocumentNavigate(url: String) {
         val now = clock()
@@ -700,6 +704,23 @@ internal class UserGestureLatch(private val clock: () -> Long) {
             val answer = watch.answer
             if (!answer.isCompleted) withTimeoutOrNull((watch.deadline - clock()).coerceAtLeast(1)) { answer.await() }
             answer.isCompleted && answer.await()
+        }
+    }
+
+    /**
+     * A navigation of the top frame to [url] starting now without the
+     * user's activation, which never asks [topDocumentGesture] (#382
+     * R1-M1): it takes the top document's word on it, if one comes within
+     * [CONFIRM_MS] either side, so that word isn't left for a later
+     * navigation to the same URL — a cross-origin frame's, carrying the
+     * user's next tap on the top page — to claim as its own.
+     */
+    fun onTopNavigationWithoutGesture(url: String) {
+        val now = clock()
+        val watch = TopWatch(url, emptyList(), now, now + CONFIRM_MS)
+        if (!watch.settle(now)) {
+            topWatches.add(watch)
+            while (topWatches.size > MAX_RECENT) topWatches.removeAt(0).answer.complete(false)
         }
     }
 

@@ -3703,6 +3703,10 @@ private fun buildRefreshableWebView(
                         val gesture = if (request.hasGesture()) {
                             (view as? PageWebView)?.userGestures?.topDocumentGesture(target) ?: TopDocumentGesture { false }
                         } else {
+                            // Still takes the top document's word on it, or a
+                            // cross-origin frame's gestured load of the same
+                            // URL just after could claim it (#382 R1-M1).
+                            (view as? PageWebView)?.userGestures?.onTopNavigationWithoutGesture(target)
                             null
                         }
                         X402Payments.onNavigationStarted(
