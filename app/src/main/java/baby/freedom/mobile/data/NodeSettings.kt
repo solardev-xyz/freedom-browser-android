@@ -4,9 +4,11 @@ import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import baby.freedom.mobile.browser.AdblockCategory
@@ -784,8 +786,31 @@ class NodeSettings private constructor(
             "offline",
         )
 
+        /**
+         * A settings file that no longer parses (a write torn by a power
+         * loss, a bad sector) reads as empty — every setting at its
+         * default — and is replaced on the next write, as every other
+         * store here does. Without it the read throws
+         * [androidx.datastore.core.CorruptionException] into collectors
+         * nobody catches (ad blocking's, at startup), and the app dies on
+         * every launch until its data is cleared — wallet and all.
+         *
+         * The defaults aren't all the most private choice, so a reset can
+         * quietly undo some of what the user had turned off: public
+         * mainnet RPCs switched off for name lookups are used again
+         * ([Keys.ENS_RPC_DISABLED_PUBLIC] empties), CCIP-Read and the
+         * daily GitHub release check come back on, the search engine goes
+         * back to DuckDuckGo, and the external Swarm/IPFS endpoints, Tor
+         * and the ad-block allowlist and categories go back to theirs.
+         * Clearing app data — the only way out before this handler —
+         * lands on the same defaults; nothing tells the user a reset
+         * happened yet (#372).
+         */
+        internal val corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() }
+
         private val Context.nodeSettingsStore by preferencesDataStore(
             name = "freedom_node_settings",
+            corruptionHandler = corruptionHandler,
         )
 
         @Volatile
