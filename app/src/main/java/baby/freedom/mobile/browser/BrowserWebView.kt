@@ -117,6 +117,9 @@ internal val HEADERS_TO_STRIP = setOf(
     // [nameResolutionErrorIn] and [NodeApiGuard.isRefusal]).
     NAME_RESOLUTION_ERROR_HEADER.lowercase(),
     NodeApiGuard.REFUSAL_HEADER.lowercase(),
+    // Would let a gateway-served worker script claim a scope wider than
+    // its own path on the virtual origin (#355; desktop drops it too).
+    "service-worker-allowed",
 )
 
 /**
@@ -3772,6 +3775,7 @@ private fun buildRefreshableWebView(
                         // the interceptor's caches — this tab's, this
                         // document's only (#262).
                         freshFetch = { target -> state.takeFreshFetch(generation, target) },
+                        freshDocument = { target -> state.fetchedFresh(generation, target) },
                         private = state.private,
                     ) { served ->
                         noteMainFrameContentLoad(view, state, generation, served)
@@ -5646,6 +5650,12 @@ internal fun interceptVirtualRequest(
     assertedProtocol: (name: String) -> String? = { null },
     onchain: OnchainAppTab? = null,
     freshFetch: (target: String) -> Boolean = { false },
+    /**
+     * Whether [target] was already fetched fresh for this request's
+     * document — a Hard reload's (#262) — so a streamed media request
+     * for it goes past the gateway's cache too (R4-M2).
+     */
+    freshDocument: (target: String) -> Boolean = { false },
     /** Asked for by a private tab (#86) — or its profile's service workers. */
     private: Boolean = false,
     onMainFrameRoot: (ContentRoot?) -> Unit = {},
@@ -5666,10 +5676,18 @@ internal fun interceptVirtualRequest(
     // clears what that gateway's pages left there, before anything else
     // runs.
     // The Radicle repository browser and its read API (#124).
-    val response = RadApi.intercept(req, url)
-        ?: interceptOnchainAppRequest(req, url, onchain)
-        ?: siteDataCleanupFor(req, url, tab, private)
-        ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, onMainFrameRoot, private)
+    // Runs on WebView's interceptor thread, where anything thrown kills
+    // the whole process — every tab — so a bug a page can reach (#355:
+    // a page-chosen Range header) answers a 502 instead.
+    val response = try {
+        RadApi.intercept(req, url)
+            ?: interceptOnchainAppRequest(req, url, onchain)
+            ?: siteDataCleanupFor(req, url, tab, private)
+            ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, freshDocument, onMainFrameRoot, private)
+    } catch (t: Throwable) {
+        Log.e(LOG_TAG, "interceptor failed for $url", t)
+        syntheticResponse(502, "Bad Gateway", "The browser couldn't serve this request.")
+    }
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
     ) {
@@ -5783,6 +5801,7 @@ private fun interceptVirtualRequestFor(
     incoming: EnsDocumentPins.Page?,
     assertedProtocol: (name: String) -> String?,
     freshFetch: (target: String) -> Boolean,
+    freshDocument: (target: String) -> Boolean,
     onMainFrameRoot: (ContentRoot?) -> Unit,
     private: Boolean,
 ): WebResourceResponse? {
@@ -5915,7 +5934,7 @@ private fun interceptVirtualRequestFor(
         // own cache either.
         val fresh = freshFetch(target)
         val response = if (isMediaLikeUrl(target)) {
-            fetchMediaWithRangeSupport(req, target, fresh)
+            fetchMediaWithRangeSupport(req, target, url, fresh, !fresh && freshDocument(target))
         } else {
             fetchWithRetry(req, target, url, fresh)
         }
@@ -5997,20 +6016,85 @@ internal fun sweptOrigins(
 
 // Fully-buffered media bodies keyed by gateway URL, so successive Range
 // requests for the same file don't re-fetch it (see [MediaBodyBuffer]).
-private data class MediaBody(val bytes: ByteArray, val mime: String)
+// A body past [MEDIA_BUFFER_MAX_BYTES] is remembered as [MediaBody.TooLarge]
+// instead, and streamed from the gateway on every request (#355). A body
+// the shared budget had no room for is [MediaBody.Unbuffered]: streamed,
+// and fetched for buffering again only once the budget could fit a body
+// of any bufferable size (R4-M3) — until then a seek streams straight
+// away rather than first opening a full GET that has no room to land.
+// A streamed marker's [MediaBody.Streamed.noCache] is whether the fetch
+// that made it went past the caches: the requests handed that very
+// marker (it and any joined to it) stream past them too (R4-M2); the
+// buffered copy says false, so other documents don't.
+// A buffered body evicted to make room for another is [MediaBody.Evicted]
+// (R5-M2): streamed too, and fetched for buffering again only once its
+// own size fits in *free* room — fetching it while the budget is full of
+// buffered bodies would only evict another one, which a page cycling
+// through three large videos would then download again, and so on, each
+// request waiting on a whole file.
+private sealed class MediaBody {
+    class Bytes(val bytes: MediaBytes, val mime: String) : MediaBody()
+    sealed class Streamed(val noCache: Boolean) : MediaBody()
+    class TooLarge(noCache: Boolean) : Streamed(noCache)
+    class Unbuffered(noCache: Boolean) : Streamed(noCache)
+    class Evicted(val size: Long) : Streamed(false)
+}
 
-private val mediaBodies = MediaBodyBuffer<MediaBody>()
+/**
+ * The largest media body buffered in memory (#355). A larger file — a
+ * page's long `<video>` — is proxied as a stream with its Range header
+ * passed to the gateway instead.
+ */
+private const val MEDIA_BUFFER_MAX_BYTES = 32 * 1024 * 1024
+
+/**
+ * All the memory media buffering may hold at once (#355): every buffered
+ * body plus every body still being read, however many a page loads in
+ * parallel. A load that doesn't fit, after evicting buffered bodies, is
+ * streamed instead, so a page fetching many media files at once can't
+ * drive the app out of memory.
+ */
+private const val MEDIA_BUFFER_BUDGET_BYTES = 64L * 1024 * 1024
+
+private val mediaBodies = MediaBodyBuffer<MediaBody>(
+    maxBytes = MEDIA_BUFFER_BUDGET_BYTES,
+    sizeOf = { (it as? MediaBody.Bytes)?.bytes?.held ?: 0L },
+    stored = {
+        when (it) {
+            is MediaBody.Bytes -> it
+            is MediaBody.TooLarge -> if (it.noCache) MediaBody.TooLarge(false) else it
+            is MediaBody.Unbuffered -> if (it.noCache) MediaBody.Unbuffered(false) else it
+            is MediaBody.Evicted -> it
+        }
+    },
+    refetch = { body, free, obtainable ->
+        when (body) {
+            is MediaBody.Unbuffered -> obtainable >= MEDIA_BUFFER_MAX_BYTES
+            is MediaBody.Evicted -> free >= body.size
+            else -> false
+        }
+    },
+    evicted = { (it as? MediaBody.Bytes)?.let { b -> MediaBody.Evicted(b.bytes.held) } },
+)
 
 private fun loadMediaBody(
     req: WebResourceRequest,
     targetUrl: String,
     fresh: Boolean,
+    freshDocument: Boolean,
 ): MediaBody? =
     // [fresh]: a Hard reload's (#262) — the buffered body may be the very
     // stale answer being reloaded past. The buffer drops it, and until this
     // fetch ends, other requests for the URL wait for it instead of
     // fetching (possibly stale) bodies of their own.
-    mediaBodies.load(targetUrl, fresh) { noCache -> fetchMediaBody(req, targetUrl, noCache) }
+    // [freshDocument]: a later request of that Hard-reloaded document.
+    // Any fetch it makes — a stored marker fetched again for buffering,
+    // or a miss once its fresh body was evicted — goes past the gateway's
+    // cache too (R5-M1), so what gets buffered is never staler than what
+    // the reload fetched.
+    mediaBodies.load(targetUrl, fresh, pastCaches = freshDocument) { noCache ->
+        fetchMediaBody(req, targetUrl, noCache)
+    }
 
 private fun fetchMediaBody(
     req: WebResourceRequest,
@@ -6062,12 +6146,13 @@ private fun tryLoadMediaBody(
         Log.w(LOG_TAG, "media fetch open failed: $targetUrl", t)
         return MediaLoadResult.Fatal
     }
+    var conn: java.net.HttpURLConnection? = null
     return try {
         // Redirects are followed hop by hop through TorRouting.
-        val conn = TorRouting.openFollowingRedirects(target) { hop ->
+        conn = TorRouting.openFollowingRedirects(target) { hop ->
             requestMethod = "GET"
             connectTimeout = 5_000
-            readTimeout = 60_000
+            readTimeout = MEDIA_READ_TIMEOUT_MS
             forwardProxiedHeaders(
                 req,
                 stripRange = true,
@@ -6084,7 +6169,37 @@ private fun tryLoadMediaBody(
             Log.w(LOG_TAG, "media fetch status $status for $targetUrl")
             return MediaLoadResult.Fatal
         }
-        val bytes = conn.inputStream.use { it.readBytes() }
+        if (conn.contentLengthLong > MEDIA_BUFFER_MAX_BYTES) {
+            Log.i(LOG_TAG, "media too large to buffer: $targetUrl bytes=${conn.contentLengthLong}")
+            return MediaLoadResult.Ok(MediaBody.TooLarge(noCache))
+        }
+        // Every array is reserved against the shared budget before it is
+        // allocated; no length (chunked) is read in bounded chunks. A body
+        // longer than its Content-Length comes back TooLarge: remembered,
+        // and streamed from then on rather than downloaded again.
+        // A failure to close the stream once the body is read is ignored,
+        // or the body's reservation would be lost with it (R4-M4).
+        val read = readThenClose(conn.inputStream) {
+            readBounded(
+                it,
+                MEDIA_BUFFER_MAX_BYTES,
+                conn.contentLengthLong,
+                mediaBodies::reserve,
+                mediaBodies::release,
+                mediaBodies::reserveFree,
+            )
+        }
+        val bytes = when (read) {
+            is BoundedRead.Bytes -> read.body
+            BoundedRead.TooLarge -> {
+                Log.i(LOG_TAG, "media too large to buffer: $targetUrl")
+                return MediaLoadResult.Ok(MediaBody.TooLarge(noCache))
+            }
+            BoundedRead.NoRoom -> {
+                Log.i(LOG_TAG, "media buffer full, streaming: $targetUrl")
+                return MediaLoadResult.Ok(MediaBody.Unbuffered(noCache))
+            }
+        }
         val rawCt = conn.contentType
         val mime = rawCt
             ?.substringBefore(';')
@@ -6093,7 +6208,7 @@ private fun tryLoadMediaBody(
             ?: mimeTypeFromUrl(targetUrl)
             ?: "application/octet-stream"
         Log.i(LOG_TAG, "media fetched: $targetUrl bytes=${bytes.size} mime=$mime")
-        MediaLoadResult.Ok(MediaBody(bytes, mime))
+        MediaLoadResult.Ok(MediaBody.Bytes(bytes, mime))
     } catch (t: TorRouting.RefusedException) {
         Log.w(LOG_TAG, "media fetch open failed: $targetUrl", t)
         MediaLoadResult.Fatal
@@ -6108,16 +6223,12 @@ private fun tryLoadMediaBody(
     } catch (t: Throwable) {
         Log.w(LOG_TAG, "media fetch unexpected failure: $targetUrl", t)
         MediaLoadResult.Fatal
+    } finally {
+        // Every path is done with the connection: the body is read (or
+        // the attempt given up), so its socket and error stream go too.
+        runCatching { conn?.disconnect() }
     }
 }
-
-/**
- * Regex matching a single byte-range in an HTTP `Range` request header —
- * `bytes=<first>-<last>`. We only support single-range requests (the
- * common case for HTML5 media); multipart/byteranges is vanishingly rare
- * and Chromium never sends it for `<video>`.
- */
-private val RANGE_REGEX = Regex("""^bytes=(\d+)?-(\d+)?$""")
 
 /**
  * Serve a media subresource with synthetic Range support. We fetch the
@@ -6126,6 +6237,8 @@ private val RANGE_REGEX = Regex("""^bytes=(\d+)?-(\d+)?$""")
  * Content-Length — exactly what Chromium expects. (Load-bearing under
  * bee, which answered every Range with the full body; kept under ant
  * so seeks are served from the buffer instead of re-hitting the node.)
+ * A body too large to buffer ([MEDIA_BUFFER_MAX_BYTES]) is proxied like
+ * any other subresource instead, Range header and all (#355).
  *
  * Also injects a real MIME type (inferred from the URL extension) so
  * the media element can pick a decoder.
@@ -6133,59 +6246,65 @@ private val RANGE_REGEX = Regex("""^bytes=(\d+)?-(\d+)?$""")
 private fun fetchMediaWithRangeSupport(
     req: WebResourceRequest,
     targetUrl: String,
+    originalUrl: String,
     fresh: Boolean = false,
+    freshDocument: Boolean = false,
 ): WebResourceResponse? {
-    val body = loadMediaBody(req, targetUrl, fresh) ?: return null
+    val body = when (val loaded = loadMediaBody(req, targetUrl, fresh, freshDocument) ?: return null) {
+        is MediaBody.Bytes -> loaded
+        // Streamed instead, with the media path's longer read timeout for
+        // slow chunks. A Hard-reloaded document's requests stream past the
+        // gateway's cache every time, not just its first (R4-M2): nothing
+        // fresh was buffered for its later ones (seeks) to be served from.
+        is MediaBody.Streamed -> return fetchWithRetry(
+            req, targetUrl, originalUrl,
+            fresh || freshDocument || loaded.noCache,
+            MEDIA_READ_TIMEOUT_MS,
+        )
+    }
     val total = body.bytes.size
+    // Page-controlled: [byteRangeFor] never throws, whatever it says.
     val rangeHeader = req.requestHeaders?.entries
         ?.firstOrNull { it.key.equals("Range", ignoreCase = true) }
         ?.value
-    val match = rangeHeader?.let { RANGE_REGEX.matchEntire(it.trim()) }
     val baseHeaders = mutableMapOf(
         "Accept-Ranges" to "bytes",
         "Access-Control-Allow-Origin" to "*",
     )
-    return if (match != null) {
-        val firstStr = match.groupValues[1]
-        val lastStr = match.groupValues[2]
-        val (start, end) = when {
-            firstStr.isEmpty() && lastStr.isEmpty() -> 0 to (total - 1)
-            firstStr.isEmpty() -> {
-                val suffixLen = lastStr.toLong().coerceAtMost(total.toLong()).toInt()
-                (total - suffixLen) to (total - 1)
-            }
-            lastStr.isEmpty() -> firstStr.toLong().toInt() to (total - 1)
-            else -> firstStr.toLong().toInt() to lastStr.toLong().toInt().coerceAtMost(total - 1)
-        }
-        if (start < 0 || start >= total || end < start) {
+    return when (val range = byteRangeFor(rangeHeader, total)) {
+        ByteRangeAnswer.Unsatisfiable -> {
             Log.w(LOG_TAG, "media range unsatisfiable: $rangeHeader total=$total")
-            return WebResourceResponse(
+            WebResourceResponse(
                 body.mime, null, 416, "Range Not Satisfiable",
                 baseHeaders + ("Content-Range" to "bytes */$total"),
                 ByteArrayInputStream(ByteArray(0)),
             )
         }
-        val length = end - start + 1
-        val slice = body.bytes.copyOfRange(start, end + 1)
-        val headers = baseHeaders + mapOf(
-            "Content-Range" to "bytes $start-$end/$total",
-            "Content-Length" to length.toString(),
-        )
-        Log.v(
-            LOG_TAG,
-            "media 206: $targetUrl range=$start-$end/$total mime=${body.mime}",
-        )
-        WebResourceResponse(
-            body.mime, null, 206, "Partial Content",
-            headers, ByteArrayInputStream(slice),
-        )
-    } else {
-        val headers = baseHeaders + ("Content-Length" to total.toString())
-        Log.v(LOG_TAG, "media 200 full: $targetUrl bytes=$total mime=${body.mime}")
-        WebResourceResponse(
-            body.mime, null, 200, "OK",
-            headers, ByteArrayInputStream(body.bytes),
-        )
+        is ByteRangeAnswer.Partial -> {
+            // Inside the body; served as a view of the buffer rather
+            // than a copy of the slice.
+            val length = range.length
+            val headers = baseHeaders + mapOf(
+                "Content-Range" to "bytes ${range.start}-${range.end}/$total",
+                "Content-Length" to length.toString(),
+            )
+            Log.v(
+                LOG_TAG,
+                "media 206: $targetUrl range=${range.start}-${range.end}/$total mime=${body.mime}",
+            )
+            WebResourceResponse(
+                body.mime, null, 206, "Partial Content",
+                headers, body.bytes.stream(range.start, length),
+            )
+        }
+        ByteRangeAnswer.Full -> {
+            val headers = baseHeaders + ("Content-Length" to total.toString())
+            Log.v(LOG_TAG, "media 200 full: $targetUrl bytes=$total mime=${body.mime}")
+            WebResourceResponse(
+                body.mime, null, 200, "OK",
+                headers, body.bytes.stream(),
+            )
+        }
     }
 }
 
@@ -6203,11 +6322,15 @@ private sealed class FetchAttempt {
     object Unreachable : FetchAttempt()
 }
 
+/** Media reads: a Swarm chunk can take well past the subresource 10 s. */
+private const val MEDIA_READ_TIMEOUT_MS = 60_000
+
 private fun fetchWithRetry(
     req: WebResourceRequest,
     targetUrl: String,
     originalUrl: String,
     fresh: Boolean = false,
+    readTimeoutMs: Int = 10_000,
 ): WebResourceResponse? {
     var lastResponse: WebResourceResponse? = null
     for ((index, delayMs) in ESCAPE_RETRY_DELAYS_MS.withIndex()) {
@@ -6220,8 +6343,11 @@ private fun fetchWithRetry(
             }
         }
 
-        when (val attempt = fetchOnce(req, targetUrl, fresh)) {
+        when (val attempt = fetchOnce(req, targetUrl, fresh, readTimeoutMs)) {
             is FetchAttempt.Response -> {
+                // The earlier transient answer is superseded: close its
+                // body (and with it the connection) before dropping it.
+                lastResponse?.data?.let { runCatching { it.close() } }
                 if (!attempt.transient) return attempt.response
                 lastResponse = attempt.response
                 Log.i(
@@ -6242,6 +6368,7 @@ private fun fetchOnce(
     req: WebResourceRequest,
     targetUrl: String,
     fresh: Boolean = false,
+    readTimeoutMs: Int = 10_000,
 ): FetchAttempt {
     return try {
         val target = URL(targetUrl)
@@ -6249,7 +6376,7 @@ private fun fetchOnce(
         val conn = TorRouting.openFollowingRedirects(target) { hop ->
             requestMethod = if (req.method == "HEAD") "HEAD" else "GET"
             connectTimeout = 5_000
-            readTimeout = 10_000
+            readTimeout = readTimeoutMs
             forwardProxiedHeaders(req, crossOrigin = !TorRouting.sameOrigin(hop, target), noCache = fresh)
         }
         val status = conn.responseCode
