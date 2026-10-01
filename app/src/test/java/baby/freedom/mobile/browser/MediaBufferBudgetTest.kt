@@ -25,7 +25,7 @@ class MediaBufferBudgetTest {
     private fun buffer(maxBytes: Long, maxEntries: Int = 64) = MediaBodyBuffer<Any>(
         maxEntries = maxEntries,
         maxBytes = maxBytes,
-        sizeOf = { (it as? ByteArray)?.size?.toLong() ?: 0L },
+        sizeOf = { (it as? ByteArray)?.size?.toLong() ?: (it as? MediaBytes)?.held ?: 0L },
         keep = { it !== noRoom },
     )
 
@@ -63,7 +63,7 @@ class MediaBufferBudgetTest {
                         }
                     }
                     when (val r = readBounded(stream, 32 * 1024 * 1024, size.toLong(), reserve, buffer::release)) {
-                        is BoundedRead.Bytes -> r.bytes
+                        is BoundedRead.Bytes -> r.body
                         BoundedRead.NoRoom -> noRoom
                         BoundedRead.TooLarge -> tooLarge
                     }
@@ -75,7 +75,7 @@ class MediaBufferBudgetTest {
         go.countDown()
         val results = jobs.map { it.get(5, TimeUnit.SECONDS) }
         pool.shutdown()
-        assertEquals(2, results.count { it is ByteArray })
+        assertEquals(2, results.count { it is MediaBytes })
         assertEquals(6, results.count { it === noRoom })
         assertTrue("peak ${peak.get()}", peak.get() <= budget)
         assertEquals(2L * size, buffer.usedBytes)

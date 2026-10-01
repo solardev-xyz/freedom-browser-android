@@ -60,15 +60,60 @@ internal fun byteRangeFor(header: String?, total: Long): ByteRangeAnswer {
     }
 }
 
+/**
+ * A buffered media body (#355): [size] bytes kept as the arrays they were
+ * read into, in order, so a body of unknown length never needs a joined
+ * copy (which would need its whole size a second time, and could find no
+ * room for it after the body was already read). [held] is what the
+ * arrays take, at most one partly-filled [READ_CHUNK] more than [size].
+ */
+internal class MediaBytes(private val chunks: List<ByteArray>, val size: Long) {
+    val held: Long = chunks.sumOf { it.size.toLong() }
+
+    init {
+        require(size in 0..held)
+    }
+
+    /** Bytes [start] until [start] + [length], both inside the body, as a stream over the arrays. */
+    fun stream(start: Long = 0, length: Long = size - start): InputStream {
+        require(start >= 0 && length >= 0 && start + length <= size)
+        val parts = ArrayList<InputStream>()
+        var at = 0L // offset of the current array in the body
+        val end = start + length
+        for (chunk in chunks) {
+            val chunkEnd = minOf(at + chunk.size, size)
+            val from = maxOf(start, at)
+            val to = minOf(end, chunkEnd)
+            if (from < to) {
+                parts += java.io.ByteArrayInputStream(chunk, (from - at).toInt(), (to - from).toInt())
+            }
+            at += chunk.size
+            if (at >= end) break
+        }
+        return java.io.SequenceInputStream(java.util.Collections.enumeration(parts))
+    }
+
+    /** The whole body as one array (a copy, for tests). */
+    fun toByteArray(): ByteArray = stream().readBytes()
+}
+
 /** What [readBounded] made of a body. */
 internal sealed class BoundedRead {
-    /** The whole body; exactly `bytes.size` bytes of the budget are held for it. */
-    class Bytes(val bytes: ByteArray) : BoundedRead()
+    /** The whole body; exactly [MediaBytes.held] bytes of the budget are held for it. */
+    class Bytes(val body: MediaBytes) : BoundedRead()
 
-    /** Past the limit: never worth buffering. Nothing held. */
+    /**
+     * Never worth buffering: past the limit, or longer than its announced
+     * length (a body that doesn't match its own `Content-Length` will do
+     * so again). Nothing held.
+     */
     object TooLarge : BoundedRead()
 
-    /** Within the limit, but the budget had no room for it right now. Nothing held. */
+    /**
+     * Within the limit, but the budget had no room for it right now. Only
+     * answered when a reservation fails *before* the bytes it was for are
+     * read, never once the whole body is in hand. Nothing held.
+     */
     object NoRoom : BoundedRead()
 }
 
@@ -81,13 +126,21 @@ private const val READ_CHUNK = 64 * 1024
  *
  * - [expected] (the announced length, or negative if unknown) within the
  *   limit is reserved up front and read straight into one array of that
- *   size, so there's no growth or copy;
+ *   size, so there's no growth or copy. A body shorter than announced
+ *   keeps that array (holding its unused tail); one longer is
+ *   [BoundedRead.TooLarge];
  * - an unknown length is read in [READ_CHUNK]s, each reserved first, and
- *   joined once the end is reached (its copy reserved too); it gives up
- *   one chunk past [limit].
+ *   kept as those chunks ([MediaBytes]), so nothing has to be reserved
+ *   once the end is reached (only the last chunk is trimmed, if there's
+ *   room for its copy); it gives up one chunk past [limit].
  *
- * On [BoundedRead.Bytes] the reservation left is exactly its size; on
- * any other answer, or a thrown [IOException], nothing is left reserved.
+ * So a body read to its end is never thrown away for want of room (R2-M1):
+ * that would leave it unbuffered, and every later Range request for it
+ * would download it in full again before streaming.
+ *
+ * On [BoundedRead.Bytes] the reservation left is exactly its
+ * [MediaBytes.held]; on any other answer, or a thrown [IOException],
+ * nothing is left reserved.
  */
 @Throws(IOException::class)
 internal fun readBounded(
@@ -110,27 +163,15 @@ internal fun readBounded(
                 if (r < 0) break
                 n += r
             }
-            if (n == out.size) {
-                // Longer than announced: not buffered this time.
-                if (input.read() >= 0) {
-                    release(held)
-                    held = 0
-                    return BoundedRead.NoRoom
-                }
-                held = 0
-                return BoundedRead.Bytes(out)
-            }
-            // Shorter than announced: keep just what came.
-            if (!reserve(n.toLong())) {
+            // Longer than announced: streamed, every time.
+            if (n == out.size && input.read() >= 0) {
                 release(held)
                 held = 0
-                return BoundedRead.NoRoom
+                return BoundedRead.TooLarge
             }
-            held += n
-            val bytes = out.copyOf(n)
-            release(expected)
+            // Shorter than announced keeps the array: no copy to reserve.
             held = 0
-            return BoundedRead.Bytes(bytes)
+            return BoundedRead.Bytes(MediaBytes(listOf(out), n.toLong()))
         }
         val chunks = ArrayList<ByteArray>()
         var total = 0L
@@ -157,21 +198,19 @@ internal fun readBounded(
             lastFill += r
             total += r
         }
-        if (!reserve(total)) {
-            release(held)
-            held = 0
-            return BoundedRead.NoRoom
+        // The last chunk is never full here: drop it if empty, else trim
+        // it when there's room for the copy (keeping it whole otherwise).
+        if (lastFill == 0) {
+            chunks.removeAt(chunks.size - 1)
+            release(READ_CHUNK.toLong())
+            held -= READ_CHUNK
+        } else if (reserve(lastFill.toLong())) {
+            chunks[chunks.size - 1] = chunks.last().copyOf(lastFill)
+            release(READ_CHUNK.toLong())
+            held += lastFill - READ_CHUNK
         }
-        val out = ByteArray(total.toInt())
-        var at = 0
-        for (chunk in chunks) {
-            val n = minOf(chunk.size.toLong(), total - at).toInt()
-            System.arraycopy(chunk, 0, out, at, n)
-            at += n
-        }
-        release(held)
         held = 0
-        return BoundedRead.Bytes(out)
+        return BoundedRead.Bytes(MediaBytes(chunks, total))
     } catch (t: Throwable) {
         release(held)
         throw t

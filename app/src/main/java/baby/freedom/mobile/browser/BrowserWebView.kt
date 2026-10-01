@@ -5998,7 +5998,7 @@ internal fun sweptOrigins(
 // the shared budget had no room for is [MediaBody.Unbuffered]: streamed
 // for this request only, and tried again for the next.
 private sealed class MediaBody {
-    class Bytes(val bytes: ByteArray, val mime: String) : MediaBody()
+    class Bytes(val bytes: MediaBytes, val mime: String) : MediaBody()
     object TooLarge : MediaBody()
     object Unbuffered : MediaBody()
 }
@@ -6021,7 +6021,7 @@ private const val MEDIA_BUFFER_BUDGET_BYTES = 64L * 1024 * 1024
 
 private val mediaBodies = MediaBodyBuffer<MediaBody>(
     maxBytes = MEDIA_BUFFER_BUDGET_BYTES,
-    sizeOf = { (it as? MediaBody.Bytes)?.bytes?.size?.toLong() ?: 0L },
+    sizeOf = { (it as? MediaBody.Bytes)?.bytes?.held ?: 0L },
     keep = { it !is MediaBody.Unbuffered },
 )
 
@@ -6114,7 +6114,9 @@ private fun tryLoadMediaBody(
             return MediaLoadResult.Ok(MediaBody.TooLarge)
         }
         // Every array is reserved against the shared budget before it is
-        // allocated; no length (chunked) is read in bounded chunks.
+        // allocated; no length (chunked) is read in bounded chunks. A body
+        // longer than its Content-Length comes back TooLarge: remembered,
+        // and streamed from then on rather than downloaded again.
         val read = conn.inputStream.use {
             readBounded(
                 it,
@@ -6125,7 +6127,7 @@ private fun tryLoadMediaBody(
             )
         }
         val bytes = when (read) {
-            is BoundedRead.Bytes -> read.bytes
+            is BoundedRead.Bytes -> read.body
             BoundedRead.TooLarge -> {
                 Log.i(LOG_TAG, "media too large to buffer: $targetUrl")
                 return MediaLoadResult.Ok(MediaBody.TooLarge)
@@ -6200,7 +6202,7 @@ private fun fetchMediaWithRangeSupport(
         "Accept-Ranges" to "bytes",
         "Access-Control-Allow-Origin" to "*",
     )
-    return when (val range = byteRangeFor(rangeHeader, total.toLong())) {
+    return when (val range = byteRangeFor(rangeHeader, total)) {
         ByteRangeAnswer.Unsatisfiable -> {
             Log.w(LOG_TAG, "media range unsatisfiable: $rangeHeader total=$total")
             WebResourceResponse(
@@ -6210,10 +6212,9 @@ private fun fetchMediaWithRangeSupport(
             )
         }
         is ByteRangeAnswer.Partial -> {
-            // Inside the body, so both fit an Int; served as a view of
-            // the buffer rather than a copy of the slice.
-            val start = range.start.toInt()
-            val length = range.length.toInt()
+            // Inside the body; served as a view of the buffer rather
+            // than a copy of the slice.
+            val length = range.length
             val headers = baseHeaders + mapOf(
                 "Content-Range" to "bytes ${range.start}-${range.end}/$total",
                 "Content-Length" to length.toString(),
@@ -6224,7 +6225,7 @@ private fun fetchMediaWithRangeSupport(
             )
             WebResourceResponse(
                 body.mime, null, 206, "Partial Content",
-                headers, ByteArrayInputStream(body.bytes, start, length),
+                headers, body.bytes.stream(range.start, length),
             )
         }
         ByteRangeAnswer.Full -> {
@@ -6232,7 +6233,7 @@ private fun fetchMediaWithRangeSupport(
             Log.v(LOG_TAG, "media 200 full: $targetUrl bytes=$total mime=${body.mime}")
             WebResourceResponse(
                 body.mime, null, 200, "OK",
-                headers, ByteArrayInputStream(body.bytes),
+                headers, body.bytes.stream(),
             )
         }
     }

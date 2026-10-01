@@ -77,12 +77,20 @@ class MediaRangeTest {
         val body = ByteArray(200_000) { it.toByte() }
         for (expected in listOf(200_000L, -1L)) {
             val budget = Budget(Long.MAX_VALUE)
-            val got = read(body, 200_000, expected, budget) as BoundedRead.Bytes
-            assertArrayEquals(body, got.bytes)
-            assertEquals(200_000L, budget.used)
+            val got = (read(body, 200_000, expected, budget) as BoundedRead.Bytes).body
+            assertArrayEquals(body, got.toByteArray())
+            assertEquals(200_000L, got.size)
+            // The last chunk is trimmed when there's room: nothing spare.
+            assertEquals(200_000L, got.held)
+            assertEquals(got.held, budget.used)
         }
+        // A chunked body ending on a chunk boundary leaves no empty chunk.
+        val even = Budget(Long.MAX_VALUE)
+        val got = (read(ByteArray(128 * 1024), 200_000, -1, even) as BoundedRead.Bytes).body
+        assertEquals(128L * 1024, got.held)
+        assertEquals(got.held, even.used)
         val empty = Budget(Long.MAX_VALUE)
-        assertArrayEquals(ByteArray(0), (read(ByteArray(0), 0, -1, empty) as BoundedRead.Bytes).bytes)
+        assertArrayEquals(ByteArray(0), (read(ByteArray(0), 0, -1, empty) as BoundedRead.Bytes).body.toByteArray())
         assertEquals(0L, empty.used)
     }
 
@@ -108,22 +116,51 @@ class MediaRangeTest {
         assertEquals(BoundedRead.NoRoom, read(body, 200_000, -1, small))
         assertEquals(0L, small.used)
         assertTrue(small.peak <= 150_000)
-        // Unknown length: the chunks plus the joined copy must both fit.
-        val tight = Budget(300_000)
-        assertEquals(BoundedRead.NoRoom, read(body, 200_000, -1, tight))
-        assertEquals(0L, tight.used)
+    }
+
+    @Test
+    fun `a chunked body read to its end is kept without room for a joined copy (R2-M1)`() {
+        val body = ByteArray(200_000) { (it * 7).toByte() }
+        // Room for the four chunks (262 144) but not for a 200 000-byte
+        // copy beside them, nor for trimming the last chunk.
+        val tight = Budget(4L * 64 * 1024 + 1_000)
+        val got = (read(body, 200_000, -1, tight) as BoundedRead.Bytes).body
+        assertArrayEquals(body, got.toByteArray())
+        assertEquals(4L * 64 * 1024, got.held)
+        assertEquals(got.held, tight.used)
+        assertTrue(tight.peak <= tight.limit)
     }
 
     @Test
     fun `a body that isn't the announced length`() {
         val budget = Budget(Long.MAX_VALUE)
-        // Longer: not buffered this time.
-        assertEquals(BoundedRead.NoRoom, read(ByteArray(1_001), 10_000, 1_000, budget))
+        // Longer: never worth buffering, so remembered and streamed (R2-M1).
+        assertEquals(BoundedRead.TooLarge, read(ByteArray(1_001), 10_000, 1_000, budget))
         assertEquals(0L, budget.used)
-        // Shorter: what came, holding just that.
-        val got = read(ByteArray(500) { 7 }, 10_000, 1_000, budget) as BoundedRead.Bytes
-        assertEquals(500, got.bytes.size)
-        assertEquals(500L, budget.used)
+        // Shorter: what came, in the array already reserved, with no copy
+        // (so no room needed for one).
+        val tight = Budget(1_000)
+        val got = (read(ByteArray(500) { 7 }, 10_000, 1_000, tight) as BoundedRead.Bytes).body
+        assertArrayEquals(ByteArray(500) { 7 }, got.toByteArray())
+        assertEquals(500L, got.size)
+        assertEquals(1_000L, got.held)
+        assertEquals(1_000L, tight.used)
+    }
+
+    @Test
+    fun `slices of a chunked body cross chunk boundaries`() {
+        val body = ByteArray(200_000) { (it % 251).toByte() }
+        val got = (read(body, 200_000, -1, Budget(Long.MAX_VALUE)) as BoundedRead.Bytes).body
+        for ((start, length) in listOf(0L to 0L, 0L to 1L, 65_535L to 2L, 60_000L to 140_000L, 199_999L to 1L, 131_072L to 65_536L)) {
+            assertArrayEquals(
+                "$start+$length",
+                body.copyOfRange(start.toInt(), (start + length).toInt()),
+                got.stream(start, length).readBytes(),
+            )
+        }
+        // A shorter-than-announced body never streams its unused tail.
+        val short = (read(ByteArray(500) { 7 }, 10_000, 1_000, Budget(Long.MAX_VALUE)) as BoundedRead.Bytes).body
+        assertEquals(500, short.stream().readBytes().size)
     }
 
     @Test
