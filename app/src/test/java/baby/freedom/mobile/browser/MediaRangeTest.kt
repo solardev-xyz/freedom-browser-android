@@ -6,6 +6,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -285,5 +286,31 @@ class MediaRangeTest {
         assertTrue(webViewSeek(stream, 1_000))
         assertArrayEquals(file.copyOfRange(1_000, 5_000), stream.readBytes())
     }
-}
 
+    @Test
+    fun `a whole 200 to a ranged request reaches the page whole`() {
+        // A non-media fetch from a gateway that ignored bytes=1000-1999.
+        val file = body(300_000)
+        val stream = webViewSeekProof(ByteArrayInputStream(file), "bytes=1000-1999")
+        assertTrue(webViewSeek(stream, 1_000))
+        assertArrayEquals(file, stream.readBytes())
+    }
+
+    @Test
+    fun `an error body to a ranged request survives WebView's seek`() {
+        // A gateway 416 for bytes=5000000-: a short body, far shorter than the skip.
+        val error = "Requested Range Not Satisfiable".toByteArray()
+        assertFalse(webViewSeek(ByteArrayInputStream(error), 5_000_000))
+        val stream = webViewSeekProof(ByteArrayInputStream(error), "bytes=5000000-")
+        assertTrue(webViewSeek(stream, 5_000_000))
+        assertArrayEquals(error, stream.readBytes())
+    }
+
+    @Test
+    fun `an unranged or suffix request is left alone`() {
+        val plain = ByteArrayInputStream(body(10))
+        assertSame(plain, webViewSeekProof(plain, null))
+        assertSame(plain, webViewSeekProof(plain, "bytes=-5"))
+        assertSame(plain, webViewSeekProof(plain, "bytes=0-"))
+    }
+}

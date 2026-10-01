@@ -202,6 +202,18 @@ internal fun webViewSkipFor(rangeHeader: String?): Long {
 private val WEBVIEW_RANGE_REGEX = Regex("""^bytes\s*=\s*(\d+)\s*-\s*\d*$""", RegexOption.IGNORE_CASE)
 
 /**
+ * [body], the whole answer to a request that sent [rangeHeader], protected
+ * from WebView's own seek ([webViewSkipFor]) whatever the response's
+ * status: a `206` body already starts at the range, and a whole `200`
+ * (a gateway that ignored Range) or an error page (`416`, …) is meant
+ * whole, so no answer the proxy hands back may be cut by WebView again.
+ */
+internal fun webViewSeekProof(body: InputStream, rangeHeader: String?): InputStream {
+    val skip = webViewSkipFor(rangeHeader)
+    return if (skip > 0) SeekAbsorbingInputStream(body, skip) else body
+}
+
+/**
  * [input], a body that already starts at the requested range ([skip] =
  * [webViewSkipFor]), made proof against WebView's own seek: the first
  * [skip] bytes it skips are skipped without reading anything, and

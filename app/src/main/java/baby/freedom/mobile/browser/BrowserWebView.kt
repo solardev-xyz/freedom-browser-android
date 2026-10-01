@@ -6267,13 +6267,14 @@ private fun fetchOnce(
             status in 200..399 -> conn.inputStream
             else -> conn.errorStream ?: ByteArrayInputStream(ByteArray(0))
         }
-        // Page-controlled: [mediaReplyFor] and [webViewSkipFor] never throw.
+        // Page-controlled: [mediaReplyFor] and [webViewSeekProof] never throw.
         val range = req.requestHeaders?.entries
             ?.firstOrNull { it.key.equals("Range", ignoreCase = true) }
             ?.value
         // WebView seeks every intercepted body to the range's first byte
-        // itself; a body that already starts there must not be cut again.
-        val webViewSkip = webViewSkipFor(range)
+        // itself, whatever its status; no body handed back here is meant
+        // to be cut again (a 206 slice starts at the range, a whole 200 or
+        // an error page is meant whole).
         val response = if (media) {
             val reply = mediaReplyFor(range, status, reason, headers, conn.contentLengthLong)
             Log.v(LOG_TAG, "media ${reply.status}: $targetUrl range=$range gateway=$status")
@@ -6285,16 +6286,17 @@ private fun fetchOnce(
                 reply.skip > 0 || reply.length != null -> SlicedInputStream(body, reply.skip, reply.length)
                 else -> body
             }
-            // Every media answer: one that's sliced starts at the range;
-            // any other (a whole `200`, an error) is meant whole too.
             WebResourceResponse(
                 mime, charset, reply.status, reply.reason, reply.headers,
-                if (webViewSkip > 0) SeekAbsorbingInputStream(data, webViewSkip) else data,
+                webViewSeekProof(data, range),
             )
         } else {
+            // Not just a 206: a gateway that ignored Range answers a whole
+            // 200 (WebView would drop its first bytes), and a 416's body
+            // is shorter than the skip (WebView would fail the fetch).
             WebResourceResponse(
                 mime, charset, status, reason, headers,
-                if (status == 206 && webViewSkip > 0) SeekAbsorbingInputStream(body, webViewSkip) else body,
+                webViewSeekProof(body, range),
             )
         }
         FetchAttempt.Response(response, transient = status in TRANSIENT_STATUSES)
