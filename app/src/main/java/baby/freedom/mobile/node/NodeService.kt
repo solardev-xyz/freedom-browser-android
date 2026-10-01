@@ -217,9 +217,11 @@ class NodeService : Service() {
                 Log.i(TAG, "app foreground → resume nodes")
                 swarmNode.resume()
                 // A launch that couldn't read the wallet's identity (#357)
-                // sits in Error; resume() doesn't touch it, so reopening the
-                // app reads the store again and restarts it once it reads.
-                if (bootIdentity.failedRead()) {
+                // sits in Error, and a reload (a mode change) that couldn't
+                // read it wasn't applied; resume() touches neither, so
+                // reopening the app reads the store again and restarts the
+                // node once it reads.
+                if (bootIdentity.retryDue()) {
                     launch(Dispatchers.IO) { restartSwarmIfStale("app foreground after an unreadable identity") }
                 }
                 ipfsNode?.enterForeground()
@@ -511,7 +513,8 @@ class NodeService : Service() {
      * another mode (#114) than it would boot as now — once, however many
      * reloads race the change (see [SwarmBootIdentity]). A store that
      * can't be read now (#357) says nothing about what the node should be:
-     * the node is kept, not restarted as ant's own key.
+     * the node is kept, not restarted as ant's own key, and the reload is
+     * retried when the app next comes to the foreground.
      */
     private fun restartSwarmIfStale(reason: String) {
         bootIdentity.restartIfStale(

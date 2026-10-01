@@ -81,27 +81,54 @@ class SwarmModeTest {
     }
 
     @Test
+    fun `a mode change made while the identity can't be read is applied on the next read`() {
+        // #357 R3-M1: the retry must not depend on the launch having failed.
+        val boot = SwarmBootIdentity()
+        var restarts = 0
+        val light = SwarmNode.Mode.light("https://rpc.example")
+        boot.boot { swarmBootKey("0xabc", light) to null }
+        // The user switches to ultra-light just as a read fails: kept, owed.
+        assertFalse(boot.restartIfStale({ null }, { true }, { restarts++ }))
+        assertTrue(boot.retryDue())
+        // App foreground, the read now works: restarts in the new mode.
+        assertTrue(boot.restartIfStale({ swarmBootKey("0xabc", SwarmNode.Mode.ULTRA_LIGHT) }, { true }, { restarts++ }))
+        assertEquals(1, restarts)
+        assertFalse(boot.retryDue())
+        // The new launch reads: nothing owed, nothing to restart.
+        boot.boot { swarmBootKey("0xabc", SwarmNode.Mode.ULTRA_LIGHT) to null }
+        assertFalse(boot.retryDue())
+        assertFalse(boot.restartIfStale({ swarmBootKey("0xabc", SwarmNode.Mode.ULTRA_LIGHT) }, { true }, { restarts++ }))
+        assertEquals(1, restarts)
+    }
+
+    @Test
     fun `a failed identity read keeps a running node, and a failed launch restarts once it reads`() {
         // #357: an unreadable store is never taken for "no wallet".
         val boot = SwarmBootIdentity()
         var restarts = 0
         val light = SwarmNode.Mode.light("https://rpc.example")
         boot.boot { swarmBootKey("0xabc", light) to null }
-        assertFalse(boot.failedRead())
-        // A reload whose read fails can't tell: the node stays as the wallet's.
+        assertFalse(boot.retryDue())
+        // A reload whose read fails can't tell: the node stays as the wallet's...
         assertFalse(boot.restartIfStale({ null }, { true }, { restarts++ }))
+        assertEquals(0, restarts)
+        // ...but the reload is owed, so the app coming back retries it (R3-M1)...
+        assertTrue(boot.retryDue())
+        // ...and one that reads the same key settles it with no restart.
+        assertFalse(boot.restartIfStale({ swarmBootKey("0xabc", light) }, { true }, { restarts++ }))
+        assertFalse(boot.retryDue())
         assertEquals(0, restarts)
         // A launch whose read fails fails with it...
         val failure = IllegalStateException("unreadable")
         assertEquals(failure, runCatching { boot.boot<ByteArray?> { throw failure } }.exceptionOrNull())
         // (so the app coming back to the foreground retries it)
-        assertTrue(boot.failedRead())
+        assertTrue(boot.retryDue())
         // ...is kept while reads keep failing...
         assertFalse(boot.restartIfStale({ null }, { true }, { restarts++ }))
         // ...and restarts once one reads, as the wallet's or as ant's own.
         assertTrue(boot.restartIfStale({ swarmBootKey("0xabc", light) }, { true }, { restarts++ }))
         assertEquals(1, restarts)
-        assertFalse(boot.failedRead())
+        assertFalse(boot.retryDue())
         runCatching { boot.boot<ByteArray?> { throw failure } }
         assertTrue(boot.restartIfStale({ swarmBootKey("", light) }, { true }, { restarts++ }))
         assertEquals(2, restarts)
