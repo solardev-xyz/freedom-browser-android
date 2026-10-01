@@ -78,6 +78,9 @@ class SwarmNode internal constructor(
         fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String, corsOrigins: List<String>)
         fun agentString(handle: Long): String?
         fun peerCount(handle: Long): Int
+        fun resume(handle: Long)
+        fun wake(handle: Long)
+        fun suspend(handle: Long)
         fun stopGateway(handle: Long)
         fun shutdown(handle: Long)
         fun storageStatus(handle: Long): String
@@ -112,6 +115,9 @@ class SwarmNode internal constructor(
             ) = AntNative.startGateway(handle, apiAddr, lightMode, gnosisRpc, corsOrigins.toTypedArray())
             override fun agentString(handle: Long) = AntNative.agentString(handle)
             override fun peerCount(handle: Long) = AntNative.peerCount(handle)
+            override fun resume(handle: Long) { AntNative.resume(handle) }
+            override fun wake(handle: Long) { AntNative.wake(handle) }
+            override fun suspend(handle: Long) { AntNative.suspend(handle) }
             override fun stopGateway(handle: Long) = AntNative.stopGateway(handle)
             override fun shutdown(handle: Long) = AntNative.shutdown(handle)
             override fun storageStatus(handle: Long) = AntNative.storageStatus(handle)
@@ -408,24 +414,33 @@ class SwarmNode internal constructor(
      * the node is toggled off and on" wedge — see freedom-hq/ant#12.
      */
     fun resume() = lifecycle("resume") { h ->
-        AntNative.resume(h)
-        AntNative.wake(h)
+        ops.resume(h)
+        ops.wake(h)
     }
 
     /** App went to the background: let uploads checkpoint and quiesce. */
-    fun suspend() = lifecycle("suspend") { h -> AntNative.suspend(h) }
+    fun suspend() = lifecycle("suspend") { h -> ops.suspend(h) }
 
     /** Network changed (Wi-Fi ↔ cellular, airplane mode off): redial. */
-    fun onNetworkChanged() = lifecycle("network-change") { h -> AntNative.resume(h) }
+    fun onNetworkChanged() = lifecycle("network-change") { h -> ops.resume(h) }
 
+    /**
+     * [block] on the running node, off the caller's thread. The handle is
+     * read, and used, under [handleUse] (read) like a storage call's, so
+     * [stop]'s shutdown waits for a call still inside ant rather than
+     * freeing the node under it.
+     */
     private fun lifecycle(what: String, block: (Long) -> Unit) {
-        val h = handle
-        if (h == 0L || _state.value.status != NodeStatus.Running) return
+        if (handle == 0L || _state.value.status != NodeStatus.Running) return
         scope.launch {
             withContext(Dispatchers.IO) {
-                runCatching { block(h) }
-                    .onSuccess { Log.i(TAG, "$what ok  peers=${_state.value.connectedPeers}") }
-                    .onFailure { Log.w(TAG, "$what failed", it) }
+                handleUse.read {
+                    val h = synchronized(lock) { handle }
+                    if (h == 0L || _state.value.status != NodeStatus.Running) return@read
+                    runCatching { block(h) }
+                        .onSuccess { Log.i(TAG, "$what ok  peers=${_state.value.connectedPeers}") }
+                        .onFailure { Log.w(TAG, "$what failed", it) }
+                }
             }
         }
     }
@@ -771,9 +786,12 @@ class SwarmNode internal constructor(
         peerPoller?.cancel()
         peerPoller = scope.launch {
             while (isActive) {
-                val h = handle
-                if (h == 0L) break
-                val peers = runCatching { ops.peerCount(h) }.getOrDefault(-1)
+                // Under [handleUse], like [lifecycle]: [stop]'s shutdown
+                // can't free the node during the count.
+                val peers = handleUse.read {
+                    val h = synchronized(lock) { handle }
+                    if (h == 0L) null else runCatching { ops.peerCount(h) }.getOrDefault(-1)
+                } ?: break
                 _state.update { it.copy(connectedPeers = peers.coerceAtLeast(0).toLong()) }
                 delay(if (peers > 100) 5_000L else 1_000L)
             }
