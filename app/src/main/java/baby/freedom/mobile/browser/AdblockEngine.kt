@@ -42,9 +42,23 @@ package baby.freedom.mobile.browser
  * the few generic selectors with no such key are served to every page.
  * `#@#` exceptions and the `$elemhide` / `$generichide` exception filters
  * are honoured. Procedural selectors (`:has-text()`, `:-abp-…`,
- * `:xpath()`, `:style()`, …), scriptlets (`##+js`), HTML filters (`##^`)
- * and the `#?#` / `#$#` / `#%#` extensions are skipped: CSS can't express
- * them.
+ * `:xpath()`, `:style()`, …), HTML filters (`##^`) and the `#?#` /
+ * `#$#` / `#%#` extensions are skipped: CSS can't express them.
+ *
+ * ## Scriptlets
+ *
+ * `example.com##+js(name, args…)` rules (#318) are kept per host — or
+ * per uBlock *entity*, `example.*` — for [scriptletsFor], which hands
+ * the injector ([AdblockScriptlets]) the calls a frame on a host is to
+ * run. Only scriptlets the [ScriptletCatalog] vets are kept; the
+ * `trusted-*` ones only from a list built with trusted scriptlets on
+ * (uBlock Origin's own, as uBlock itself does). `#@#+js(…)` exceptions
+ * turn one call off on their hosts, `#@#+js()` all of them. Generic
+ * scriptlets (no host to scope them to) aren't run.
+ *
+ * Each list's rules that can't run here — unsupported syntax or
+ * options, procedural and HTML filters, unvetted scriptlets — are
+ * counted ([listCounts]), for Settings.
  */
 internal class AdblockEngine private constructor(
     private val plainBlockedHosts: HashSet<String>,
@@ -56,9 +70,46 @@ internal class AdblockEngine private constructor(
     private val specificUnhide: HashMap<String, MutableSet<String>>,
     private val genericKeyed: HashMap<String, MutableList<CosmeticRule>>,
     private val genericUnkeyed: List<CosmeticRule>,
+    private val scriptletRules: HashMap<String, MutableList<ScriptletRule>>,
+    private val scriptletUnhide: HashMap<String, MutableSet<String>>,
     /** How many filters made it in, for Settings and the logs. */
     val filterCount: Int,
+    /** Per list, in the order given to [build]: its rules, and how many of them run. */
+    val listCounts: List<FilterListCounts>,
 ) {
+
+    /**
+     * The scriptlet calls a frame on [frameHost] (lower-case) runs, in
+     * list order, each once: the host's and its parents' rules and
+     * those of their uBlock entities (`example.*`), less the ones a
+     * `~` domain or a `#@#+js(…)` exception excludes there. Empty when
+     * an `@@…$document` / `$elemhide` exception covers the host.
+     */
+    fun scriptletsFor(frameHost: String): List<ScriptletCall> {
+        if (scriptletRules.isEmpty() || frameHost.isEmpty()) return emptyList()
+        val keys = scriptletKeys(frameHost)
+        var rules: MutableList<ScriptletRule>? = null
+        for (key in keys) {
+            val found = scriptletRules[key] ?: continue
+            (rules ?: ArrayList<ScriptletRule>().also { rules = it }).addAll(found)
+        }
+        val matched = rules ?: return emptyList()
+        val origin = "https://$frameHost/"
+        if (pageExempt(origin, frameHost, EXEMPT_DOCUMENT or EXEMPT_ELEMHIDE)) return emptyList()
+        var off: MutableSet<String>? = null
+        for (key in keys) scriptletUnhide[key]?.let { (off ?: HashSet<String>().also { s -> off = s }).addAll(it) }
+        val disabled = off.orEmpty()
+        if (ALL_SCRIPTLETS in disabled) return emptyList()
+        val out = LinkedHashMap<String, ScriptletCall>()
+        matched.sortBy { it.order }
+        for (rule in matched) {
+            val key = rule.call.key
+            if (key in disabled || key in out) continue
+            if (rule.excludes != null && keys.any { it in rule.excludes }) continue
+            out[key] = rule.call
+        }
+        return out.values.toList()
+    }
 
     /**
      * Should the subresource [url] (lower-case host [host]) be blocked,
@@ -230,7 +281,14 @@ internal class AdblockEngine private constructor(
          * can abandon a build that's no longer wanted by throwing from it.
          */
         fun build(lists: List<String>, checkpoint: () -> Unit = {}): AdblockEngine =
-            Builder().apply { lists.forEach { addList(it, checkpoint) } }.build()
+            build(lists.map { FilterListText(it) }, null, checkpoint)
+
+        /**
+         * [build] with scriptlets: `+js(…)` rules [catalog] vets are kept
+         * ([scriptletsFor]); with no catalog, none are.
+         */
+        fun build(lists: List<FilterListText>, catalog: ScriptletCatalog?, checkpoint: () -> Unit = {}): AdblockEngine =
+            Builder(catalog).apply { lists.forEach { addList(it, checkpoint) } }.build()
 
         private const val CHECKPOINT_LINES = 1024
 
@@ -246,9 +304,12 @@ internal class AdblockEngine private constructor(
         )
 
         internal const val MIN_TOKEN = 2
+
+        /** The [scriptletUnhide] key of `#@#+js()`: every scriptlet off. */
+        private const val ALL_SCRIPTLETS = ""
     }
 
-    private class Builder {
+    private class Builder(private val catalog: ScriptletCatalog?) {
         val plainBlockedHosts = HashSet<String>()
         val hostFilters = HashMap<String, MutableList<NetworkFilter>>()
         val tokenFilters = HashMap<String, MutableList<NetworkFilter>>()
@@ -259,9 +320,28 @@ internal class AdblockEngine private constructor(
         val genericKeyed = HashMap<String, MutableList<CosmeticRule>>()
         val genericUnkeyed = ArrayList<CosmeticRule>()
         val globallyUnhidden = HashSet<String>()
+        val scriptletRules = HashMap<String, MutableList<ScriptletRule>>()
+        val scriptletUnhide = HashMap<String, MutableSet<String>>()
+        val counts = ArrayList<FilterListCounts>()
         var count = 0
 
-        fun addList(text: String, checkpoint: () -> Unit) {
+        /** The list [addList] is on: may it call `trusted-*` scriptlets? */
+        private var trusted = false
+
+        /** Scriptlet rules seen / kept in the list [addList] is on. */
+        private var scriptletsSeen = 0
+        private var scriptletsKept = 0
+
+        /** A rule's place across every list, so a host's calls keep list order. */
+        private var order = 0
+
+        fun addList(list: FilterListText, checkpoint: () -> Unit) {
+            trusted = list.trustedScriptlets
+            scriptletsSeen = 0
+            scriptletsKept = 0
+            val text = list.text
+            var rules = 0
+            var used = 0
             var start = 0
             val n = text.length
             var lines = 0
@@ -272,9 +352,14 @@ internal class AdblockEngine private constructor(
                 val line = text.substring(start, end).trim()
                 start = end + 1
                 if (line.isEmpty() || line[0] == '!' || line[0] == '[') continue
+                rules++
                 val added = runCatching { addLine(line) }.getOrDefault(false)
-                if (added) count++
+                if (added) {
+                    count++
+                    used++
+                }
             }
+            counts += FilterListCounts(rules, used, scriptletsSeen, scriptletsKept)
         }
 
         fun addLine(line: String): Boolean {
@@ -302,6 +387,7 @@ internal class AdblockEngine private constructor(
         fun addCosmetic(domainsText: String, separator: String, selectorText: String): Boolean {
             if (separator != "##" && separator != "#@#") return false
             val selector = selectorText.trim()
+            if (selector.startsWith("+js(")) return addScriptlet(domainsText, separator == "#@#", selector)
             if (!isPlainCssSelector(selector)) return false
             val include = ArrayList<String>()
             val exclude = ArrayList<String>()
@@ -336,6 +422,49 @@ internal class AdblockEngine private constructor(
             return true
         }
 
+        /**
+         * A `+js(…)` rule or `#@#+js(…)` exception. A rule counts as kept
+         * only if it will run: parsed, a vetted scriptlet (a trusted one
+         * only from a trusted list), and scoped to hosts this can match.
+         */
+        fun addScriptlet(domainsText: String, exception: Boolean, selector: String): Boolean {
+            if (!exception) scriptletsSeen++
+            val catalog = catalog ?: return false
+            if (!selector.endsWith(")")) return false
+            val body = selector.substring(4, selector.length - 1)
+            val include = ArrayList<String>()
+            val exclude = ArrayList<String>()
+            if (domainsText.isNotEmpty()) {
+                for (raw in domainsText.split(',')) {
+                    val d = raw.trim().lowercase()
+                    val negated = d.startsWith("~")
+                    val name = if (negated) d.substring(1) else d
+                    // `*` is "every site"; anything that isn't a host or an
+                    // entity (uBlock's `>>` frame syntax, say) is one this
+                    // can't match: the rule is kept to its other hosts, or
+                    // dropped if it has none.
+                    if (name == "*" && !negated) { include += name; continue }
+                    if (!isScriptletDomain(name)) continue
+                    if (negated) exclude += name else include += name
+                }
+            }
+            if (exception) {
+                if (include.isEmpty() || "*" in include) return false
+                val key = if (body.isBlank()) ALL_SCRIPTLETS else (parseScriptletCall(body, catalog)?.key ?: return false)
+                for (d in include) scriptletUnhide.getOrPut(d) { HashSet() } += key
+                return true
+            }
+            // Generic (no host, or `*`): would have to run in every frame.
+            if (include.isEmpty() || "*" in include) return false
+            val call = parseScriptletCall(body, catalog) ?: return false
+            if (!catalog.isVetted(call.name)) return false
+            if (catalog.requiresTrust(call.name) && !trusted) return false
+            val rule = ScriptletRule(call, exclude.takeIf { it.isNotEmpty() }?.toHashSet(), order++)
+            for (d in include) scriptletRules.getOrPut(d) { ArrayList(1) } += rule
+            scriptletsKept++
+            return true
+        }
+
         fun build(): AdblockEngine {
             if (globallyUnhidden.isNotEmpty()) {
                 genericUnkeyed.removeAll { it.selector in globallyUnhidden }
@@ -344,7 +473,8 @@ internal class AdblockEngine private constructor(
             }
             return AdblockEngine(
                 plainBlockedHosts, hostFilters, tokenFilters, untokened, pageExceptions,
-                specificHide, specificUnhide, genericKeyed, genericUnkeyed, count,
+                specificHide, specificUnhide, genericKeyed, genericUnkeyed,
+                scriptletRules, scriptletUnhide, count, counts,
             )
         }
     }

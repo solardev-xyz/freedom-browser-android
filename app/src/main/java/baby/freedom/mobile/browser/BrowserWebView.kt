@@ -1099,6 +1099,8 @@ fun BrowserWebViewHost(
                     tab.audioMuted = false
                 }
             }
+            // The restored entry's scriptlets (#318), before it loads.
+            (wv as? PageWebView)?.scriptlets?.ensure(tab.url)
             val restored = restore.webViewState?.let { wv.restoreState(it) } != null
             if (restored) {
                 tab.canGoBack = wv.canGoBack()
@@ -2566,6 +2568,10 @@ private fun buildRefreshableWebView(
         // The cosmetic channel reads it on the main thread.
         val adblockPage = AdblockPage()
         AdblockCosmetic.install(this, state.private) { adblockPage.current() }
+        // Scriptlets (#318): registered per host the tab loads documents
+        // from, before each document arrives (see [TabScriptlets]).
+        val scriptlets = TabScriptlets.install(this, state.private)
+        (this as? PageWebView)?.scriptlets = scriptlets
 
         // `window.radicle` (#124): the provider's page object and channel.
         RadicleProviders.install(this, state)
@@ -3409,6 +3415,9 @@ private fun buildRefreshableWebView(
                 // "Continue once" on the not-cross-checked ENS warning
                 // (#96): never a load, only a message for the submit
                 // flow, which checks it is this tab's ([EnsGate]).
+                // Scriptlets for the page it's heading to (#318), before a
+                // service worker can answer it unseen by the interceptor.
+                if (request.isForMainFrame) scriptlets?.ensure(target)
                 if (EnsGate.continueToken(target) != null) {
                     if (request.isForMainFrame) {
                         // A stale warning (Back, tab restore) re-runs its
@@ -3717,7 +3726,13 @@ private fun buildRefreshableWebView(
                     ) {
                         return Adblock.blockedResponse()
                     }
+                    // A frame's document: its scriptlets in place before
+                    // its answer can arrive (#318).
+                    if (url != null && isDocumentRequest(false, request.requestHeaders)) {
+                        scriptlets?.ensureFromNetworkThread(url)
+                    }
                 }
+                if (mainFrame) request!!.url?.toString()?.let { scriptlets?.ensureFromNetworkThread(it) }
                 // A certificate-refused load issued again: its page, in
                 // its own entry, never reaching the network (#259).
                 val certPage = if (mainFrame) request!!.url?.toString()?.let(certRefusal::take) else null
@@ -4310,7 +4325,21 @@ internal class PageWebView(context: Context) : WebView(context) {
 
     override fun destroy() {
         destroyed = true
+        scriptlets?.close()
         super.destroy()
+    }
+
+    /**
+     * This tab's scriptlets (#318), set by the tab: every load the app
+     * starts registers its destination's first ([TabScriptlets.ensure]).
+     */
+    var scriptlets: TabScriptlets? = null
+
+    /** The entry a history step of [steps] lands on, for its scriptlets. */
+    private fun ensureScriptletsForStep(steps: Int) {
+        val s = scriptlets ?: return
+        val list = copyBackForwardList()
+        s.ensure(list.getItemAtIndex(list.currentIndex + steps)?.url)
     }
 
     /**
@@ -4867,6 +4896,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
         documents.navigationStarted(url)
         browserInitiatedLoad(url)
+        scriptlets?.ensure(url)
         super.loadUrl(url)
     }
 
@@ -4877,6 +4907,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
         documents.navigationStarted(url)
         browserInitiatedLoad(url)
+        scriptlets?.ensure(url)
         super.loadUrl(url, additionalHttpHeaders)
     }
 
@@ -4887,6 +4918,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
         documents.navigationStarted(url)
         browserInitiatedLoad(url)
+        scriptlets?.ensure(url)
         super.postUrl(url, postData)
     }
 
@@ -4907,24 +4939,28 @@ internal class PageWebView(context: Context) : WebView(context) {
         matchUserAgentTo(url)
         url?.let(documents::navigationStarted)
         browserInitiatedLoad()
+        scriptlets?.ensure(url)
         super.reload()
     }
 
     override fun goBack() {
         historyStepStarting(-1)
         browserInitiatedLoad()
+        ensureScriptletsForStep(-1)
         super.goBack()
     }
 
     override fun goForward() {
         historyStepStarting(1)
         browserInitiatedLoad()
+        ensureScriptletsForStep(1)
         super.goForward()
     }
 
     override fun goBackOrForward(steps: Int) {
         historyStepStarting(steps)
         browserInitiatedLoad()
+        ensureScriptletsForStep(steps)
         super.goBackOrForward(steps)
     }
 
