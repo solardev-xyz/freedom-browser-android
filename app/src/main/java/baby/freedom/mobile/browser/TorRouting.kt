@@ -358,6 +358,23 @@ object TorRouting {
         return routed != null
     }
 
+    /**
+     * For a native onion fetch with its own deadline (manifest discovery,
+     * #356): wait, within [timeoutMs] in all, for the Tor settings
+     * ([awaitSettings]) and then for a pending external proxy's verdict
+     * ([awaitExternalVerdict]), the way [refusalFor] holds a page's onion
+     * request — so a fetch arriving while the proxy is re-checked (the
+     * app just came back) is held rather than refused at once. Whether
+     * onion is routed at the end. Not on the main thread.
+     */
+    internal fun awaitOnionRoute(timeoutMs: Long): Boolean {
+        if (timeoutMs <= 0) return routed != null
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000
+        awaitSettings(minOf(timeoutMs, SETTINGS_WAIT_MS))
+        val left = (deadline - System.nanoTime()) / 1_000_000
+        return if (left <= 0) routed != null else awaitExternalVerdict(minOf(left, HOLD_MS))
+    }
+
     /** [ProxyController.setProxyOverride]; swapped in tests. */
     internal var setOverride: (ProxyConfig, Context, Runnable) -> Unit = { config, context, done ->
         ProxyController.getInstance().setProxyOverride(config, context.mainExecutor, done)

@@ -19,6 +19,7 @@ import baby.freedom.swarm.SwarmNode
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.MalformedURLException
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.WeakHashMap
@@ -987,8 +988,21 @@ internal suspend fun withinDeadline(timeoutMs: Long, work: (remainingMs: () -> L
  * reading — within [timeoutMs] for the whole call.
  */
 internal fun fetchManifest(url: String, timeoutMs: Int = MANIFEST_TIMEOUT_MS): ManifestDiscovery {
+    // An onion endpoint while an external Tor proxy is being re-checked
+    // waits for that verdict, within this call's deadline, as the
+    // interceptor holds a page's onion request — rather than being
+    // refused at once (#376 R1-F1).
+    val started = System.nanoTime()
+    val onion = try {
+        fetchMayReachOnion(URL(url))
+    } catch (e: MalformedURLException) {
+        return ManifestDiscovery.Unresolved(e.javaClass.simpleName)
+    }
+    if (onion) TorRouting.awaitOnionRoute(timeoutMs.toLong())
+    val left = timeoutMs - ((System.nanoTime() - started) / 1_000_000).toInt()
+    if (left <= 0) return ManifestDiscovery.Unresolved("timed out")
     val answer = try {
-        GatewayHttp.requestAt(url, "GET", "", emptyMap(), null, timeoutMs, maxBytes = SwarmManifestFormat.MAX_BYTES)
+        GatewayHttp.requestAt(url, "GET", "", emptyMap(), null, left, maxBytes = SwarmManifestFormat.MAX_BYTES)
     } catch (e: GatewayHttp.AnswerTooLarge) {
         return ManifestDiscovery.Invalid("manifest exceeds 8 KiB")
     } catch (e: IOException) {
