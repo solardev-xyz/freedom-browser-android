@@ -20,6 +20,14 @@
   says it owns: without them a copy would claim grants the user later
   makes by hand on the new phone, and turn them off when the app's
   manifest drops the row.
+  The nodes' own device-only keys stay too: ant's `ant/identity.json`
+  (signing key, overlay nonce, libp2p key pair, used when there's no
+  wallet identity) and the Radicle profile's `radicle/keys` (its NID
+  when there's no wallet Radicle identity). Copied, two phones would run
+  one Swarm overlay or Radicle node and both sign as it. Left behind,
+  each node makes a fresh key on the new phone (ant writes a new
+  identity.json and account.json; libradicle's `start` makes a new key
+  pair when `keys/radicle` is missing, as after Remove wallet).
   The wallet vault (KeystoreVaultStore) needs no rule: it lives in
   `noBackupFilesDir` (`no_backup/wallet/vault.json`), which no backup
   domain includes, under its own Keystore key (`freedom.wallet.vault`,
@@ -34,6 +42,8 @@
         <exclude domain="file" path="datastore/freedom_swarm_grants.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_radicle_grants.preferences_pb" />
         <exclude domain="file" path="swarm-manifests.json" />
+        <exclude domain="file" path="ant/identity.json" />
+        <exclude domain="file" path="radicle/keys" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="datastore/freedom_rpc_secrets.preferences_pb" />
@@ -43,5 +53,7 @@
         <exclude domain="file" path="datastore/freedom_swarm_grants.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_radicle_grants.preferences_pb" />
         <exclude domain="file" path="swarm-manifests.json" />
+        <exclude domain="file" path="ant/identity.json" />
+        <exclude domain="file" path="radicle/keys" />
     </device-transfer>
 </data-extraction-rules>

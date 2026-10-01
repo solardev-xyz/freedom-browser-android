@@ -31,6 +31,16 @@ class BackupRulesTest {
         "../browser/SwarmProviderBridge.kt" to "swarm-manifests.json",
     )
 
+    /**
+     * The nodes' own device-only keys (no wallet identity): ant's identity
+     * under the data dir NodeService hands it, and the Radicle profile's
+     * key pair. A copy would run one node identity on two phones.
+     */
+    private val nodeKeys = mapOf(
+        "../node/NodeService.kt" to listOf("dataDir = filesDir.absolutePath" to "ant/identity.json"),
+        "../node/NodeService.kt#radicle" to listOf("home = filesDir.resolve(\"radicle\")" to "radicle/keys"),
+    )
+
     private fun excludes(file: String, section: String?): Set<String> {
         val doc = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(File(res, file))
         val root = if (section == null) doc.documentElement else doc.getElementsByTagName(section).item(0) as Element
@@ -42,14 +52,19 @@ class BackupRulesTest {
     }
 
     @Test
-    fun `grant, auto-approve, x402, API key and manifest stores are excluded from every backup and transfer`() {
+    fun `grant, auto-approve, x402, API key, manifest and node key stores are excluded from every backup and transfer`() {
         for ((source, name) in stores) {
             assertTrue("$source names its store $name", File(sources, source).readText().contains("\"$name\""))
         }
         for ((source, name) in files) {
             assertTrue("$source names its file $name", File(sources, source).readText().contains("filesDir, \"$name\")"))
         }
-        val paths = stores.values.map { "datastore/$it.preferences_pb" } + files.values
+        for ((source, pins) in nodeKeys) {
+            val text = File(sources, source.substringBefore('#')).readText()
+            for ((pin, _) in pins) assertTrue("$source still has $pin", text.contains(pin))
+        }
+        val paths = stores.values.map { "datastore/$it.preferences_pb" } + files.values +
+            nodeKeys.values.flatten().map { it.second }
         for ((file, section) in listOf(
             "data_extraction_rules.xml" to "cloud-backup",
             "data_extraction_rules.xml" to "device-transfer",
