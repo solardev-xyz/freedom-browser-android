@@ -342,6 +342,25 @@ class TezosDomainsResolverTest {
     private val stuckTime = "2026-09-27T17:37:37Z"
 
     @Test
+    fun `an answer cached while the clock ran ahead is asked again once it's set right`() = runBlocking {
+        val http = rpc(record("web:content_url" to "ipfs://bafyexample"))
+        var now = clock + 6 * 3_600_000L
+        val resolver = TezosDomainsResolver(threeEndpoints, http) { now }
+        fun reads() = http.calls.count { it.contains("/big_maps/1264/") }
+
+        assertTrue(answer(resolver.resolveOutcome("alice.tez")).verified)
+        val first = reads()
+        resolver.resolveOutcome("alice.tez")
+        assertEquals("cached within its TTL", first, reads())
+
+        // NTP pulls the clock back six hours: the answer is minutes old,
+        // not six hours and five minutes from expiring.
+        now = clock
+        resolver.resolveOutcome("alice.tez")
+        assertTrue("asked again, got ${reads()} reads", reads() > first)
+    }
+
+    @Test
     fun `a stuck provider sits out the round and doesn't vouch for the live answers`() = runBlocking {
         val http = rpc(
             null,

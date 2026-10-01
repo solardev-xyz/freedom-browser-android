@@ -219,6 +219,44 @@ class AdblockEngineTest {
         assertEquals(null, cosmeticKey(".\\[weird\\]"))
     }
 
+    /**
+     * #318 R6-F1: a rule whose only positive domains are `example.*`
+     * entities (which this can't match) is dropped — it must not fall
+     * back to every site but its `~` ones.
+     */
+    @Test
+    fun `a rule scoped only to entities never applies everywhere else`() {
+        val e = AdblockEngine.build(listOf(
+            """
+            ~vipbox.pl,vipbox.*,vipboxtv.*##.position-absolute
+            oxy.*,~oxy.edu##[href*=".info"]
+            vipbox.*,~vipbox.pl,shop.example##.promo
+            ||ads.example^${'$'}domain=google.*|~www.google.com
+            ||track.example^
+            @@||track.example^${'$'}domain=google.*|~www.google.com
+            """.trimIndent(),
+        ))
+        assertEquals("", css(e, "news.example"))
+        assertEquals("", e.cosmeticsForTokens(listOf(".position-absolute", ".promo"), "https://news.example/", "news.example", null, null))
+        // A plain host next to the entity keeps the rule, for that host only.
+        assertTrue(css(e, "shop.example").contains(".promo"))
+        val page = "https://news.example/"
+        assertFalse(e.blocks("https://ads.example/x.js", page, RequestType.SCRIPT))
+        assertTrue(e.blocks("https://track.example/t.js", page, RequestType.SCRIPT))
+    }
+
+    /** The same over the lists the app ships, uBlock filters included (#318 R6-F1). */
+    @Test
+    fun `bundled uBlock filters add no entity rule to unrelated sites`() {
+        val dir = File("src/main/assets/adblock")
+        val texts = (AdblockCategory.entries.map { it.file } + BundledList.entries.map { it.file })
+            .map { File(dir, it).readText() }
+        val e = AdblockEngine.build(texts)
+        val host = "getbootstrap.com"
+        assertFalse(css(e, host).contains("[href*=\".info\"]"))
+        assertFalse(e.cosmeticsForTokens(listOf(".position-absolute"), "https://$host/", host, null, null).contains(".position-absolute"))
+    }
+
     private fun css(e: AdblockEngine, host: String) =
         e.initialCosmetics("https://$host/", host, "https://$host/", host)
 

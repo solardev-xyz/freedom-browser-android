@@ -1,6 +1,7 @@
 package baby.freedom.mobile.ens
 
 import baby.freedom.mobile.R
+import baby.freedom.mobile.browser.BidiControls
 import baby.freedom.mobile.browser.WhatwgHost
 import baby.freedom.mobile.l10n.Strings
 import io.github.adraffy.ens.ENSNormalize
@@ -131,11 +132,11 @@ object EnsNormalize {
      * The library wraps the offending label in U+200E LEFT-TO-RIGHT MARKs
      * (so an RTL label prints the right way round); they are invisible
      * and come along when the reason is copied off the error page, so
-     * drop them — and any other bidi controls — from the text we show.
+     * drop them — and any other bidi control ([BidiControls], ALM
+     * included) — from the text we show.
      */
     internal fun cleanMessage(message: String?): String =
-        (message ?: Strings.get(R.string.names_error_invalid_name))
-            .replace(Regex("[\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]"), "")
+        BidiControls.stripped(message ?: Strings.get(R.string.names_error_invalid_name))
             .ifBlank { Strings.get(R.string.names_error_invalid_name) }
 
     /**

@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Update
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -53,6 +54,7 @@ import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.VpnLock
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -99,6 +101,7 @@ import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import java.text.NumberFormat
 
 /**
  * Full-screen settings page. A search field pinned under the title
@@ -221,6 +224,8 @@ fun SettingsScreen(
     val chains by remember(chainStore) { chainStore.chains }
         .collectAsState(initial = BuiltInChains.ALL)
     var chainPage by remember { mutableStateOf<ChainPage?>(null) }
+    // Open-source licences (#325), a page standing in for the list like the others.
+    var licencesOpen by rememberSaveable { mutableStateOf(false) }
     var chainQuery by rememberSaveable { mutableStateOf("") }
     var confirmRemoveChain by remember { mutableStateOf<Chain?>(null) }
     var removeChainFailed by remember { mutableStateOf<Chain?>(null) }
@@ -234,6 +239,7 @@ fun SettingsScreen(
     val rpcRemoveFailed = stringResource(R.string.settings_rpc_remove_failed)
     val appUpdate by AppUpdates.state.collectAsState()
     val checkForUpdates by settings.checkForUpdates.collectAsState(initial = true)
+    val askWhereToSave by settings.askWhereToSave.collectAsState(initial = false)
 
     // Each section's rows for the current query; an empty set hides the
     // section. The index is what the page shows right now (see
@@ -260,6 +266,7 @@ fun SettingsScreen(
     val browsingRows = visibleSettingsRows(
         query, SECTION_BROWSING, browsingDataRows(history.size, bookmarks.size),
     )
+    val downloadRows = visibleSettingsRows(query, SECTION_DOWNLOADS, downloadSettingsRows(askWhereToSave))
     val permissionRows = visibleSettingsRows(
         query, SECTION_PERMISSIONS, sitePermissionRows(permissionEntries, dappGrants, walletAccounts, chains),
     )
@@ -277,7 +284,8 @@ fun SettingsScreen(
         visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
     } else emptySet()
     val nothingMatches = listOf(
-        walletRows, searchRows, appearanceRows, defaultBrowserRows, adblockRows, ensRows, rpcRows, browsingRows, permissionRows, nodeRows,
+        walletRows, searchRows, appearanceRows, defaultBrowserRows, adblockRows, ensRows, rpcRows, browsingRows, downloadRows,
+        permissionRows, nodeRows,
         torRows,
         chainRows, aboutRows, otherRows, ipfsRows,
     ).all { it.isEmpty() }
@@ -354,7 +362,10 @@ fun SettingsScreen(
             onBack = { openSite = null },
         )
     }
-    if (chainPage == null && site == null) FullScreenScaffold(
+    if (licencesOpen && chainPage == null && site == null) {
+        OpenSourceLicencesPage(onBack = { licencesOpen = false })
+    }
+    if (chainPage == null && site == null && !licencesOpen) FullScreenScaffold(
         title = stringResource(R.string.settings_title),
         onDismiss = onDismiss,
     ) {
@@ -438,6 +449,12 @@ fun SettingsScreen(
                         onClearSiteDataRequested = { confirmClearSiteData = true },
                     )
                 }
+                if (downloadRows.isNotEmpty()) item("downloads") {
+                    DownloadSettingsSection(
+                        askWhereToSave = askWhereToSave,
+                        onAskWhereToSave = { on -> scope.launch { settings.setAskWhereToSave(on) } },
+                    )
+                }
                 if (permissionRows.isNotEmpty()) item("permissions") {
                     SitePermissionsSection(
                         visible = permissionRows,
@@ -495,6 +512,7 @@ fun SettingsScreen(
                         onCheckForUpdates = { on -> scope.launch { settings.setCheckForUpdates(on) } },
                         onCheckNow = { AppUpdates.checkForUpdates() },
                         onOpenRelease = { onOpenUrl(it.url) },
+                        onOpenLicences = { licencesOpen = true },
                     )
                 }
                 if (otherRows.isNotEmpty()) item("other") {
@@ -659,6 +677,7 @@ private val SECTION_APPEARANCE: String get() = Strings.get(R.string.settings_sec
 private val SECTION_ADBLOCK: String get() = Strings.get(R.string.settings_section_adblock)
 private val SECTION_BROWSING: String get() = Strings.get(R.string.settings_section_browsing)
 private val SECTION_PERMISSIONS: String get() = Strings.get(R.string.settings_section_permissions)
+private val SECTION_DOWNLOADS: String get() = Strings.get(R.string.settings_section_downloads)
 private val SECTION_NODES: String get() = Strings.get(R.string.settings_section_nodes)
 private val SECTION_TOR: String get() = Strings.get(R.string.settings_section_tor)
 private val SECTION_ABOUT: String get() = Strings.get(R.string.settings_section_about)
@@ -1044,6 +1063,45 @@ private fun onOff(on: Boolean): String = Strings.get(if (on) R.string.settings_o
 
 private fun torClientSubtitle(externalProxy: String) =
     if (externalProxy.isEmpty()) TOR_CLIENT_EMBEDDED else TOR_CLIENT_EXTERNAL
+
+private val ASK_WHERE_TO_SAVE: String get() = Strings.get(R.string.settings_downloads_ask_where)
+private val ASK_WHERE_TO_SAVE_PRIVATE: String get() = Strings.get(R.string.settings_downloads_ask_where_private)
+
+private fun askWhereToSaveSubtitle(on: Boolean): String = Strings.get(
+    if (on) R.string.settings_downloads_ask_where_subtitle_on else R.string.settings_downloads_ask_where_subtitle_off,
+)
+
+/** Settings → Downloads (#322), for settings search. */
+internal fun downloadSettingsRows(askWhereToSave: Boolean) = listOf(
+    settingsRow(
+        "ask-where", ASK_WHERE_TO_SAVE, askWhereToSaveSubtitle(askWhereToSave), ASK_WHERE_TO_SAVE_PRIVATE,
+        onOff(askWhereToSave), *searchKeywords(R.string.settings_downloads_ask_where_keywords),
+    ),
+)
+
+/**
+ * Settings → Downloads (#322): *Ask where to save each file*, off by
+ * default. On, confirming a download opens the system's *Save as*
+ * picker; private tabs' downloads keep saving to Download/Freedom.
+ */
+@Composable
+private fun DownloadSettingsSection(
+    askWhereToSave: Boolean,
+    onAskWhereToSave: (Boolean) -> Unit,
+) {
+    SectionCard(title = SECTION_DOWNLOADS) {
+        PageRow(
+            title = ASK_WHERE_TO_SAVE,
+            subtitle = askWhereToSaveSubtitle(askWhereToSave),
+            thirdLine = ASK_WHERE_TO_SAVE_PRIVATE,
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Folder,
+            onClick = { onAskWhereToSave(!askWhereToSave) },
+            checked = askWhereToSave,
+            trailing = { Switch(checked = askWhereToSave, onCheckedChange = null) },
+        )
+    }
+}
 
 /** Settings → Tor (#143, #275), for settings search. */
 internal fun torRows(enabled: Boolean, startOnLaunch: Boolean, externalProxy: String = "") = listOf(
@@ -1524,9 +1582,32 @@ internal fun adblockUpdateLine(update: AdblockUpdateState): String? {
     }
 }
 
-/** The line under a category: its list, and while it's on, how the engine is doing. */
-internal fun adblockCategorySubtitle(category: AdblockCategory, on: Boolean, status: AdblockStatus): String =
-    if (on && status.loading) Strings.get(R.string.settings_adblock_category_loading, category.listName) else category.listName
+/** The line under a category: its lists, and while it's on, how the engine is doing. */
+internal fun adblockCategorySubtitle(category: AdblockCategory, on: Boolean, status: AdblockStatus): String {
+    val lists = category.listNames.joinNames()
+    return if (on && status.loading) Strings.get(R.string.settings_adblock_category_loading, lists) else lists
+}
+
+/**
+ * The wrapping line under an enabled category (#318): how many of its
+ * lists' rules run, how many of those are scriptlets, and how many
+ * can't run here — procedural and HTML filters, options and scriptlets
+ * this browser doesn't support, generic scriptlets. `null` while it's
+ * off or has no engine yet.
+ */
+internal fun adblockCategoryCounts(category: AdblockCategory, on: Boolean, status: AdblockStatus): String? {
+    if (!on) return null
+    val counts = status.counts[category] ?: return null
+    val n = NumberFormat.getIntegerInstance()
+    return if (counts.scriptlets == 0) {
+        Strings.get(R.string.settings_adblock_category_counts_no_scriptlets, n.format(counts.used), n.format(counts.skipped))
+    } else {
+        Strings.get(
+            R.string.settings_adblock_category_counts,
+            n.format(counts.used), n.format(counts.scriptletsUsed), n.format(counts.skipped),
+        )
+    }
+}
 
 private fun adblockSectionRows(
     enabled: Set<AdblockCategory>,
@@ -1535,7 +1616,12 @@ private fun adblockSectionRows(
     update: AdblockUpdateState,
 ) = buildList {
     for (category in AdblockCategory.entries) {
-        add(settingsRow(category, category.title, category.listName, onOff(category in enabled)))
+        add(
+            settingsRow(
+                category, category.title, category.listNames.joinNames(), onOff(category in enabled),
+                adblockCategoryCounts(category, category in enabled, status),
+            ),
+        )
     }
     val updateWords = searchKeywords(R.string.settings_adblock_updates_keywords)
     add(settingsRow("auto-update", ADBLOCK_AUTO_UPDATE, ADBLOCK_AUTO_UPDATE_SUBTITLE, adblockListsLine(status), *updateWords))
@@ -1602,6 +1688,7 @@ private fun AdblockSection(
             PageRow(
                 title = category.title,
                 subtitle = adblockCategorySubtitle(category, on, status),
+                thirdLine = adblockCategoryCounts(category, on, status),
                 style = PageRowStyle.Inset,
                 leadingIcon = Icons.Filled.Shield,
                 onClick = { onToggle(category, !on) },
@@ -1961,6 +2048,8 @@ private val ABOUT_TAGLINE: String get() = Strings.get(R.string.settings_about_ta
 private val ABOUT_BLURB: String get() = Strings.get(R.string.settings_about_blurb)
 
 private val UPDATES_CHECK: String get() = Strings.get(R.string.settings_updates_check)
+private val LICENCES: String get() = Strings.get(R.string.settings_licences)
+private val LICENCES_SUBTITLE: String get() = Strings.get(R.string.settings_licences_subtitle)
 private val UPDATES_CHECK_SUBTITLE: String get() = Strings.get(R.string.settings_updates_check_subtitle)
 private val UPDATES_CHECK_NOW: String get() = Strings.get(R.string.settings_updates_check_now)
 private val UPDATES_CHECK_NOW_SUBTITLE: String get() = Strings.get(R.string.settings_updates_check_now_subtitle)
@@ -2024,6 +2113,7 @@ private fun aboutRows(version: String, packageName: String, update: AppUpdateSta
             ),
         )
     }
+    add(settingsRow("licences", LICENCES, LICENCES_SUBTITLE, *searchKeywords(R.string.settings_licences_keywords)))
     add(settingsRow("blurb", ABOUT_BLURB))
 }
 
@@ -2036,6 +2126,7 @@ private fun AboutSection(
     onCheckForUpdates: (Boolean) -> Unit,
     onCheckNow: () -> Unit,
     onOpenRelease: (LatestRelease) -> Unit,
+    onOpenLicences: () -> Unit,
 ) {
     val context = LocalContext.current
     SectionCard(title = stringResource(R.string.settings_section_about)) {
@@ -2100,6 +2191,13 @@ private fun AboutSection(
             leadingIcon = Icons.Filled.Sync,
             enabled = !fromStore && !update.checking,
             onClick = onCheckNow,
+        )
+        if ("licences" in visible) PageRow(
+            title = LICENCES,
+            subtitle = LICENCES_SUBTITLE,
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Description,
+            onClick = onOpenLicences,
         )
         if ("blurb" in visible) {
             // Spaced off only when something sits above it.

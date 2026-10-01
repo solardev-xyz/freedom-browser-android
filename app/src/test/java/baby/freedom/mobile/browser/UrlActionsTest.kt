@@ -41,6 +41,20 @@ class UrlActionsTest {
     }
 
     @Test
+    fun `copy and share mark bidi controls as the label does`() {
+        // A refused name keeps its RLO in the bar; pasted elsewhere it
+        // would read `hte.paypal.com`.
+        assertEquals(
+            "ens://\uFFFDmoc.lapyap.eth",
+            urlActionTarget(addressBarText = "ens://\u202Emoc.lapyap.eth", url = ""),
+        )
+        assertEquals(
+            "\uFFFDa\uFFFDb\uFFFDc",
+            urlActionTarget(addressBarText = "", url = "\u061Ca\u2067b\u200Fc"),
+        )
+    }
+
+    @Test
     fun `falls back to the loaded page when there is no committed address`() {
         assertEquals(
             "https://example.com/x",

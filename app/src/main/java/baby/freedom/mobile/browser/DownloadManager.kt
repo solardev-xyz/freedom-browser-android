@@ -138,7 +138,10 @@ sealed class DownloadEvent {
  * (`no_backup/downloads/<id>.part`, #265), and only a complete file is
  * copied into a `MediaStore.Downloads` entry (`Download/Freedom/…`) and
  * published — no storage permission is needed on API 29+, and a
- * cancelled or failed download leaves nothing behind. Every download
+ * cancelled or failed download leaves nothing behind. With *Ask where
+ * to save each file* on (#322), the complete file is written through the
+ * document the user picked instead ([DownloadEntry.saveTo], see
+ * [DownloadSaveTo]); everything before that step is the same. Every download
  * gets a row in the `downloads` table (the history screen); running
  * byte counts live in [progress] only.
  *
@@ -247,7 +250,17 @@ class DownloadManager private constructor(context: Context) {
     private val staleSweep: Job = scope.launch {
         sweepGateForTest?.await()
         for (stale in dao.withStatus(DownloadStatus.RUNNING)) {
-            stale.contentUri?.let { deleteQuietly(it) }
+            val saveTo = stale.saveTo
+            if (saveTo == null) {
+                stale.contentUri?.let { deleteQuietly(it) }
+            } else if (stale.contentUri != null) {
+                // Died copying into the picked document (#322): what it
+                // holds is part of the file. The document is the user's
+                // pick, so it's emptied, not deleted — a resume writes it
+                // again, and a failure's discard deletes it if the picker
+                // created it (never an existing file picked to replace).
+                DownloadSaveTo.truncate(resolver, Uri.parse(saveTo))
+            }
             val partial = partialFile(stale.id)
             val kept = if (partial.exists()) partial.length() else 0L
             if (stale.resumable && kept > 0) {
@@ -261,6 +274,7 @@ class DownloadManager private constructor(context: Context) {
                 )
             } else {
                 deletePartial(stale.id)
+                saveTo?.let { DownloadSaveTo.discard(appContext, Uri.parse(it), stale.saveToCreated) }
                 dao.update(
                     stale.copy(
                         status = DownloadStatus.FAILED,
@@ -272,11 +286,16 @@ class DownloadManager private constructor(context: Context) {
                 )
             }
         }
-        val paused = dao.withStatus(DownloadStatus.PAUSED).mapTo(HashSet()) { it.id }
+        val pausedRows = dao.withStatus(DownloadStatus.PAUSED)
+        val paused = pausedRows.mapTo(HashSet()) { it.id }
         for (file in partialDir.listFiles().orEmpty()) {
             val id = file.name.removeSuffix(PARTIAL_SUFFIX).toLongOrNull()
             if (id == null || id !in paused) file.delete()
         }
+        // Grants on picked documents (#322) only paused downloads still
+        // need: any other was left by a download that ended while the
+        // process died before it could give its grant back.
+        DownloadSaveTo.sweep(appContext, keep = pausedRows.mapNotNullTo(HashSet()) { it.saveTo })
     }
 
     init {
@@ -316,14 +335,52 @@ class DownloadManager private constructor(context: Context) {
         // A private offer belongs to the session live when it was made:
         // accepted after that session ended, it's dropped ([enqueue]).
         val session = if (private) privateSession() else null
-        val queued = offerQueue.offer(tabId, requestedBy, name, target.displayUrl, contentLength.coerceAtLeast(-1), private) {
-            enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, session)
+        val queued = offerQueue.offer(
+            tabId, requestedBy, name, target.displayUrl, contentLength.coerceAtLeast(-1), private,
+            mimeType = saveAsMimeType(normalizeMime(mimeType)),
+        ) { saveTo ->
+            enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, session, saveTo)
         }
         if (!queued) Log.i(LOG_TAG, "download offer from tab $tabId dropped (tab blocked or $MAX_PENDING_OFFERS waiting)")
     }
 
-    /** The user wants [DownloadOffer.key]'s file: start it. */
-    fun accept(key: Long) = offerQueue.accept(key)
+    /**
+     * The user wants [DownloadOffer.key]'s file: start it — saved as
+     * [saveTo], the document they picked in the *Save as* picker (#322),
+     * or into Download/Freedom. The picked document's grant is kept from
+     * here until the download ends; if the offer went meanwhile (its tab
+     * closed while the picker was up), the document the picker created
+     * goes again.
+     *
+     * When no lasting grant can be had on [saveTo], nothing starts: the
+     * picker's document goes again (while the activity's grant still
+     * lets it), the offer stays up, and [onNoLastingAccess] is called on
+     * the main thread — a download there couldn't be written once the
+     * activity is gone.
+     */
+    fun accept(key: Long, saveTo: Uri? = null, onNoLastingAccess: () -> Unit = {}) {
+        if (saveTo == null) {
+            offerQueue.accept(key)
+            return
+        }
+        scope.launch {
+            val picked = holdOrRefuse(saveTo, onNoLastingAccess) ?: return@launch
+            if (!offerQueue.accept(key, picked)) DownloadSaveTo.discard(appContext, saveTo, picked.created)
+        }
+    }
+
+    /**
+     * [DownloadSaveTo.hold] on [saveTo]; null — with the document given
+     * up and [onNoLastingAccess] told — when Freedom couldn't keep
+     * access to it past the activity.
+     */
+    private suspend fun holdOrRefuse(saveTo: Uri, onNoLastingAccess: () -> Unit): PickedDocument? {
+        val picked = DownloadSaveTo.hold(appContext, saveTo)
+        if (picked.lasting) return picked
+        DownloadSaveTo.discard(appContext, saveTo, picked.created)
+        withContext(Dispatchers.Main) { onNoLastingAccess() }
+        return null
+    }
 
     /** The user doesn't want [DownloadOffer.key]'s file. */
     fun decline(key: Long) = offerQueue.decline(key)
@@ -354,12 +411,23 @@ class DownloadManager private constructor(context: Context) {
         contentLength: Long,
         refererOrigin: String?,
         session: PrivateSession?,
+        /** The document picked to save it as (#322); never for a private download. */
+        saveTo: PickedDocument? = null,
     ) {
         val target = classifyDownloadUrl(url, Gateways::isLocalGateway, Gateways::toDisplay)
         val guessedMime = normalizeMime(mimeType)
-        val initialName = downloadFileName(contentDisposition, url, guessedMime, ::extensionForMime)
         scope.launch {
             staleSweep.join()
+            val picked = saveTo?.uri?.let(Uri::parse)
+            if (picked != null && saveTo != null && session != null) {
+                // Private downloads always go to Download/Freedom (#322).
+                DownloadSaveTo.discard(appContext, picked, saveTo.created)
+            }
+            val savesTo = picked?.takeIf { session == null }
+            // Listed under the name the user gave it in the picker (or
+            // the one the provider settled on).
+            val initialName = savesTo?.let(::queryDisplayName)
+                ?: downloadFileName(contentDisposition, url, guessedMime, ::extensionForMime)
             val row = DownloadEntry(
                     fileName = initialName,
                     displayUrl = target.displayUrl,
@@ -377,6 +445,8 @@ class DownloadManager private constructor(context: Context) {
                     finishedAt = null,
                     refererOrigin = refererOrigin.takeIf { target is DownloadTarget.Web },
                     userAgent = userAgent?.takeIf { it.isNotBlank() },
+                    saveTo = savesTo?.toString(),
+                    saveToCreated = savesTo != null && saveTo?.created == true,
                 )
             val cookies = if (session != null) {
                 session.cookies
@@ -416,6 +486,7 @@ class DownloadManager private constructor(context: Context) {
         val stop = cancellation.stopOf(id)
         job.cancel()
         val row = daoFor(id).get(id) ?: return
+        if (stop != DownloadStop.PAUSE) endSaveTo(row, discard = true)
         daoFor(id).update(
             if (stop == DownloadStop.PAUSE) {
                 row.copy(status = DownloadStatus.PAUSED)
@@ -501,12 +572,27 @@ class DownloadManager private constructor(context: Context) {
     private fun userAgentOf(entry: DownloadEntry): String? =
         entry.userAgent ?: runCatching { WebSettings.getDefaultUserAgent(appContext) }.getOrNull()
 
-    /** Fetch a finished-unsuccessfully download again, as a new entry. */
-    fun retry(entry: DownloadEntry) {
-        if (entry.sourceUrl.isBlank()) return
+    /**
+     * Fetch a finished-unsuccessfully download again, as a new entry —
+     * saved as [saveTo] when the user picked where (#322).
+     */
+    fun retry(entry: DownloadEntry, saveTo: Uri? = null, onNoLastingAccess: () -> Unit = {}) {
+        if (saveTo == null) {
+            retryInto(entry, null)
+            return
+        }
+        // As [accept]: nothing starts into a document Freedom can't keep.
+        scope.launch {
+            val picked = holdOrRefuse(saveTo, onNoLastingAccess) ?: return@launch
+            if (!retryInto(entry, picked)) DownloadSaveTo.discard(appContext, saveTo, picked.created)
+        }
+    }
+
+    /** [retry], with the document already held; false when nothing was started. */
+    private fun retryInto(entry: DownloadEntry, saveTo: PickedDocument?): Boolean {
         // A private row from a session that has ended is already being
         // cleared; retrying it would carry it into the next one.
-        if (entry.id < 0 && !privateSessions.isLive(entry.id)) return
+        if (entry.sourceUrl.isBlank() || entry.id < 0 && !privateSessions.isLive(entry.id)) return false
         scope.launch { daoFor(entry.id).delete(entry.id) }
         enqueue(
             url = entry.sourceUrl,
@@ -516,7 +602,21 @@ class DownloadManager private constructor(context: Context) {
             contentLength = -1,
             refererOrigin = entry.refererOrigin,
             session = if (entry.id < 0) privateSession() else null,
+            saveTo = saveTo,
         )
+        return true
+    }
+
+    /**
+     * A document picked in the *Save as* picker (#322) that nothing will
+     * save into after all (the row it was for is gone): delete it again.
+     */
+    fun abandonSaveTo(uri: Uri) {
+        scope.launch {
+            // Looked at first, as a held one is: an existing file the
+            // user picked to replace stays.
+            DownloadSaveTo.discard(appContext, uri, DownloadSaveTo.hold(appContext, uri).created)
+        }
     }
 
     /** The history row for [id], if it still exists. */
@@ -534,6 +634,7 @@ class DownloadManager private constructor(context: Context) {
                 val row = daoFor(id).get(id)
                 if (row?.status == DownloadStatus.PAUSED) {
                     deletePartial(id)
+                    endSaveTo(row, discard = true)
                     daoFor(id).update(
                         row.copy(
                             status = DownloadStatus.CANCELLED,
@@ -560,10 +661,12 @@ class DownloadManager private constructor(context: Context) {
             // As [cancel]: after the sweep has settled a dead process's row.
             staleSweep.join()
             transitions.withLock {
+                val row = daoFor(id).get(id)
                 daoFor(id).delete(id)
                 // A running job's own cancel deletes its partial; this
-                // gets a paused one's.
+                // gets a paused one's — and gives up its picked document.
                 deletePartial(id)
+                if (row?.status == DownloadStatus.PAUSED) endSaveTo(row, discard = true)
                 // A job registered after this finds no row and ends at once;
                 // an early-cancel mark has nothing left to guard.
                 cancellation.forget(id)
@@ -588,6 +691,7 @@ class DownloadManager private constructor(context: Context) {
                         cancellation.cancel(row.id)
                     }
                     for (row in d.withStatus(DownloadStatus.PAUSED)) {
+                        endSaveTo(row, discard = true)
                         d.update(
                             row.copy(
                                 status = DownloadStatus.CANCELLED,
@@ -612,7 +716,15 @@ class DownloadManager private constructor(context: Context) {
      */
     suspend fun open(context: Context, entry: DownloadEntry): String? {
         val uri = entry.contentUri?.let(Uri::parse) ?: return Strings.get(R.string.library_download_file_not_available)
-        when (withContext(Dispatchers.IO) { queryDownloadFileState(resolver, uri) }) {
+        // A file saved where the user picked (#322) isn't a MediaStore
+        // item to check: whether it's still there, and still ours to
+        // open, only the provider knows — see the catch below.
+        val state = if (entry.saveTo != null) {
+            DownloadFileState.UNKNOWN
+        } else {
+            withContext(Dispatchers.IO) { queryDownloadFileState(resolver, uri) }
+        }
+        when (state) {
             DownloadFileState.PRESENT, DownloadFileState.UNKNOWN -> Unit
             // In the system trash (restorable for 30 days): keep the row
             // and its URI, so it opens again once the user restores it.
@@ -633,7 +745,31 @@ class DownloadManager private constructor(context: Context) {
             null
         } catch (_: ActivityNotFoundException) {
             Strings.get(R.string.library_download_no_app_to_open)
+        } catch (_: SecurityException) {
+            // A picked location's grant (#322) is given back once the
+            // download ends, and the picker's own one goes with the
+            // activity that got it: the file is the user's, in the
+            // folder they chose, but no longer Freedom's to hand out.
+            Strings.get(R.string.library_download_open_from_files)
         }
+    }
+
+    /**
+     * [row]'s download, saving into a picked document (#322), has ended:
+     * give its grant back — and, when it ended unfinished ([discard]),
+     * the document the picker created with it (never an existing file
+     * picked to replace, [DownloadEntry.saveToCreated]). Unless another
+     * unfinished download is saving into the same document (the same
+     * existing file picked twice): that one still needs it.
+     */
+    private suspend fun endSaveTo(row: DownloadEntry, discard: Boolean) {
+        val saveTo = row.saveTo ?: return
+        val shared = listOf(DownloadStatus.RUNNING, DownloadStatus.PAUSED).any { status ->
+            dao.withStatus(status).any { it.id != row.id && it.saveTo == saveTo }
+        }
+        if (shared) return
+        val uri = Uri.parse(saveTo)
+        if (discard) DownloadSaveTo.discard(appContext, uri, row.saveToCreated) else DownloadSaveTo.release(appContext, uri)
     }
 
     /**
@@ -745,20 +881,40 @@ class DownloadManager private constructor(context: Context) {
             dao.update(entry)
             _progress.update { it + (id to DownloadProgress(received, received, saving = true)) }
             // The copy into Downloads needs room for a second copy of
-            // the file until the partial one is deleted.
-            if (!downloadFitsStorage(allocatableBytes(sharedStorageDir()), partial.length(), STORAGE_FLOOR_BYTES)) {
+            // the file until the partial one is deleted. A picked
+            // document (#322) needs it on the volume it's on — an SD card
+            // or another provider's, not necessarily the primary one —
+            // and is asked before `wt` empties an existing file there.
+            val picked = entry.saveTo?.let(Uri::parse)
+            val room = if (picked != null) {
+                pickedRoomForTest?.let { it(picked) } ?: DownloadSaveTo.roomFor(resolver, picked)
+            } else {
+                allocatableBytes(sharedStorageDir())
+            }
+            if (!downloadFitsStorage(room, partial.length(), STORAGE_FLOOR_BYTES)) {
                 throw notEnoughStorage()
             }
-            val uri = insertPendingDownload(resolver, "Download/$DOWNLOAD_SUBDIR", "dl$id", entry.fileName, entry.mimeType)
-                ?: throw DownloadFailure(DownloadNote.of(R.string.library_download_create_file_failed))
-            pending = uri
-            entry = entry.copy(contentUri = uri.toString())
-            dao.update(entry)
-            copyToDownloads(partial, uri)
-            if (!publishPendingDownload(resolver, uri, entry.fileName)) {
-                throw DownloadFailure(DownloadNote.of(R.string.library_download_save_file_failed))
+            val uri = if (picked != null) {
+                // Where the user picked (#322). Recorded before the first
+                // byte goes in, as a pending item is: a process that dies
+                // copying leaves the startup sweep a document to empty.
+                entry = entry.copy(contentUri = picked.toString())
+                dao.update(entry)
+                copyToDownloads(partial, picked, intoPicked = true)
+                picked
+            } else {
+                val uri = insertPendingDownload(resolver, "Download/$DOWNLOAD_SUBDIR", "dl$id", entry.fileName, entry.mimeType)
+                    ?: throw DownloadFailure(DownloadNote.of(R.string.library_download_create_file_failed))
+                pending = uri
+                entry = entry.copy(contentUri = uri.toString())
+                dao.update(entry)
+                copyToDownloads(partial, uri)
+                if (!publishPendingDownload(resolver, uri, entry.fileName)) {
+                    throw DownloadFailure(DownloadNote.of(R.string.library_download_save_file_failed))
+                }
+                pending = null
+                uri
             }
-            pending = null
             published = true
             afterPublishForTest?.invoke(id)
             withContext(NonCancellable) {
@@ -774,6 +930,8 @@ class DownloadManager private constructor(context: Context) {
                     note = null,
                     finishedAt = System.currentTimeMillis(),
                 )
+                // Done with the picked document (#322): its grant goes back.
+                endSaveTo(entry, discard = false)
                 dao.update(entry)
                 _events.tryEmit(DownloadEvent.Completed(id, finalName))
             }
@@ -852,6 +1010,13 @@ class DownloadManager private constructor(context: Context) {
         }
         val reason = DownloadNote.shown(storedReason)
         pending?.let { deleteQuietly(it.toString()) }
+        // A copy into the picked document (#322) that didn't finish left
+        // part of the file in it: empty it — a resume writes it afresh,
+        // and an end deletes it if the picker created it
+        // ([DownloadSaveTo.discard]). An existing file picked to replace
+        // stays, emptied: its old content went when the copy started.
+        val saveTo = entry.saveTo
+        if (saveTo != null && entry.contentUri == saveTo) DownloadSaveTo.truncate(resolver, Uri.parse(saveTo))
         val received = _progress.value[id]?.received ?: entry.receivedBytes
         cancellation.release(id, job)
         _progress.update { it - id }
@@ -876,6 +1041,8 @@ class DownloadManager private constructor(context: Context) {
             )
         } else {
             partial.delete()
+            // Gone before the row says it ended, as its partial file is.
+            endSaveTo(entry, discard = true)
             dao.update(
                 entry.copy(
                     status = if (stopped) DownloadStatus.CANCELLED else DownloadStatus.FAILED,
@@ -937,9 +1104,13 @@ class DownloadManager private constructor(context: Context) {
             if (fromStart) {
                 // A whole response carries the validator a later resume
                 // checks against, and — on a first run — names the file.
-                // A resumed row keeps the name it has been listed under.
+                // A resumed row keeps the name it has been listed under,
+                // and so does one saved where the user picked (#322): the
+                // name is the one they gave it.
                 val validator = downloadValidator(src.etag, src.lastModified, src.date)
-                if (!resuming) {
+                if (!resuming && entry.saveTo != null) {
+                    entry = entry.copy(mimeType = src.mimeType ?: entry.mimeType)
+                } else if (!resuming) {
                     val mime = src.mimeType ?: entry.mimeType
                     entry = entry.copy(
                         mimeType = mime,
@@ -1282,9 +1453,25 @@ class DownloadManager private constructor(context: Context) {
         return received
     }
 
-    /** Copy the finished partial [file] into the pending Downloads item [uri]. */
-    private suspend fun copyToDownloads(file: File, uri: Uri) {
-        val out = resolver.openOutputStream(uri) ?: throw DownloadFailure(DownloadNote.of(R.string.library_download_write_to_downloads_failed))
+    /**
+     * Copy the finished partial [file] into the pending Downloads item
+     * [uri] — or, [intoPicked], the document the user picked (#322),
+     * written from its start.
+     */
+    private suspend fun copyToDownloads(file: File, uri: Uri, intoPicked: Boolean = false) {
+        val out = if (intoPicked) {
+            // Gone, or no longer Freedom's to write (a grant the provider
+            // wouldn't let outlive the activity that picked it).
+            try {
+                DownloadSaveTo.openForWriting(resolver, uri)
+            } catch (_: SecurityException) {
+                null
+            } catch (_: java.io.FileNotFoundException) {
+                null
+            } ?: throw DownloadFailure(DownloadNote.of(R.string.library_download_write_to_picked_failed))
+        } else {
+            resolver.openOutputStream(uri) ?: throw DownloadFailure(DownloadNote.of(R.string.library_download_write_to_downloads_failed))
+        }
         out.use { sink ->
             file.inputStream().use { src ->
                 val buffer = ByteArray(64 * 1024)
@@ -1338,6 +1525,9 @@ class DownloadManager private constructor(context: Context) {
 
     /** Test hook: free space on [dir]'s volume, in place of the real answer. */
     @Volatile internal var allocatableForTest: ((dir: File) -> Long?)? = null
+
+    /** Test hook: the room a picked document's volume has (#322), instead of asking it. */
+    @Volatile internal var pickedRoomForTest: ((Uri) -> Long?)? = null
 
     /** Test hook: the shared-storage volume's directory, for [allocatableForTest]. */
     internal fun sharedStorageDirForTest(): File = sharedStorageDir()

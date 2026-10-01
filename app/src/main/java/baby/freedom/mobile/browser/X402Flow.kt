@@ -216,7 +216,14 @@ internal class X402Flow<D : Any>(
         gesture: Boolean = false,
     ) {
         if (byUser && url != null) originOf(url)?.let(held::remove)
-        initiators[tab] = Initiator(byUser, fromOrigin, post, gesture).also { if (url != null) it.hopOrigins.add(originOf(url)) }
+        // Where it starts: [url]'s origin, or — a reload of the entry on
+        // screen, whose own URL isn't named — the page the tab last
+        // committed, or somewhere unknown (null) if it has none. A Reload
+        // of another site's page that redirects to the 402 was that site's
+        // say, as much as the user's address on it would be (#218 R5-M1).
+        initiators[tab] = Initiator(byUser, fromOrigin, post, gesture).also {
+            it.hopOrigins.add(if (url != null) originOf(url) else pages[tab])
+        }
     }
 
     /**

@@ -1,0 +1,258 @@
+{
+  "own": [
+    "adblock/README.md",
+    "error/error.html",
+    "openlv/shell.html",
+    "openlv/shim.js",
+    "rad/viewer.css",
+    "rad/viewer.html",
+    "rad/viewer.js",
+    "wallet/provider-icon.png"
+  ],
+  "components": [
+    {
+      "name": "Colibri (colibri-stateless)",
+      "version": "3.0.0",
+      "colibri": "self",
+      "section": "native",
+      "licence": "MIT",
+      "url": "https://github.com/corpus-core/colibri-stateless",
+      "texts": ["bundled/colibri-stateless.txt"]
+    },
+    {
+      "name": "trezor-crypto (in Colibri)",
+      "version": "",
+      "colibri": "crypto",
+      "section": "native",
+      "licence": "MIT",
+      "url": "https://github.com/corpus-core/colibri-stateless/tree/main/libs/crypto",
+      "texts": ["bundled/trezor-crypto.txt"]
+    },
+    {
+      "name": "blst",
+      "version": "0.3.13",
+      "colibri": "blst",
+      "section": "native",
+      "licence": "Apache-2.0",
+      "url": "https://github.com/supranational/blst",
+      "texts": ["bundled/blst.txt"]
+    },
+    {
+      "name": "evmone",
+      "version": "0.23.0",
+      "colibri": "evmone",
+      "section": "native",
+      "licence": "Apache-2.0",
+      "url": "https://github.com/ipsilon/evmone",
+      "texts": ["texts/Apache-2.0.txt"]
+    },
+    {
+      "name": "intx",
+      "version": "0.15.0",
+      "colibri": "intx",
+      "section": "native",
+      "licence": "Apache-2.0",
+      "url": "https://github.com/chfast/intx",
+      "texts": ["texts/Apache-2.0.txt"]
+    },
+    {
+      "name": "Zstandard (zstd)",
+      "version": "1.5.6",
+      "colibri": "zstd",
+      "section": "native",
+      "licence": "BSD-3-Clause OR GPL-2.0-only (used under BSD-3-Clause)",
+      "url": "https://github.com/facebook/zstd",
+      "texts": ["bundled/zstd.txt"]
+    },
+    {
+      "name": "libgit2 (in libgit2-sys)",
+      "version": "1.9.6",
+      "inCrate": "libgit2-sys 0.18.7+1.9.6",
+      "section": "native",
+      "licence": "GPL-2.0-only with a linking exception",
+      "url": "https://github.com/libgit2/libgit2/tree/v1.9.6",
+      "notice": "Compiled into libfreedom_mobile_ffi.so from source by the libgit2-sys crate, for Radicle's git storage. The linking exception lets it be linked into a program under other terms. It includes SHA-1 collision detection (MIT), wildmatch (BSD), the RFC 6234 SHA-256 code (BSD-style) and xoroshiro256** (public domain), and bundles LibXDiff, PCRE2 and llhttp, listed on their own. libgit2's COPYING file below gives every one of these licences.",
+      "texts": ["bundled/libgit2/COPYING"],
+      "crateFiles": {
+        "bundled/libgit2/COPYING": "libgit2/COPYING"
+      }
+    },
+    {
+      "name": "LibXDiff (in libgit2)",
+      "version": "",
+      "inCrate": "libgit2-sys 0.18.7+1.9.6",
+      "section": "native",
+      "licence": "LGPL-2.1-or-later",
+      "url": "https://github.com/libgit2/libgit2/tree/v1.9.6/deps/xdiff",
+      "notice": "Copyright (C) 2003 Davide Libenzi, with changes by the Git and libgit2 authors. libgit2 1.9.6 bundles it (deps/xdiff) and libgit2-sys compiles it into libfreedom_mobile_ffi.so; its source is at the address above.",
+      "texts": ["texts/LGPL-2.1.txt"]
+    },
+    {
+      "name": "PCRE2 (in libgit2)",
+      "version": "10.47",
+      "inCrate": "libgit2-sys 0.18.7+1.9.6",
+      "section": "native",
+      "licence": "BSD-3-Clause WITH PCRE2-exception",
+      "url": "https://github.com/libgit2/libgit2/tree/v1.9.6/deps/pcre2",
+      "notice": "libgit2's regular-expression backend, bundled with it (deps/pcre2) and compiled into libfreedom_mobile_ffi.so by libgit2-sys.",
+      "texts": ["bundled/libgit2/pcre2-LICENCE.md"],
+      "crateFiles": {
+        "bundled/libgit2/pcre2-LICENCE.md": "libgit2/deps/pcre2/LICENCE.md"
+      }
+    },
+    {
+      "name": "llhttp (in libgit2)",
+      "version": "9.2.1",
+      "inCrate": "libgit2-sys 0.18.7+1.9.6",
+      "section": "native",
+      "licence": "MIT",
+      "url": "https://github.com/libgit2/libgit2/tree/v1.9.6/deps/llhttp",
+      "notice": "libgit2's HTTP parser, bundled with it (deps/llhttp) and compiled into libfreedom_mobile_ffi.so by libgit2-sys.",
+      "texts": ["bundled/libgit2/llhttp-LICENSE-MIT"],
+      "crateFiles": {
+        "bundled/libgit2/llhttp-LICENSE-MIT": "libgit2/deps/llhttp/LICENSE-MIT"
+      }
+    },
+    {
+      "name": "liblzma, XZ Utils (in liblzma-sys)",
+      "version": "5.8.4",
+      "inCrate": "liblzma-sys 0.4.9",
+      "section": "native",
+      "licence": "0BSD",
+      "url": "https://tukaani.org/xz/",
+      "notice": "Copyright (C) The XZ Utils authors and contributors. Compiled into libfreedom_mobile_ffi.so from source by the liblzma-sys crate (Tor's directory downloads).",
+      "texts": ["bundled/xz/COPYING.0BSD"],
+      "crateFiles": {
+        "bundled/xz/COPYING.0BSD": "xz/COPYING.0BSD"
+      }
+    },
+    {
+      "name": "SQLite (in libsqlite3-sys)",
+      "version": "3.51.3",
+      "inCrate": "libsqlite3-sys 0.37.0",
+      "section": "native",
+      "licence": "Public domain",
+      "url": "https://sqlite.org/",
+      "notice": "The amalgamation bundled with the libsqlite3-sys crate, compiled into libfreedom_mobile_ffi.so. Radicle's sqlite bindings use the same copy.",
+      "texts": ["bundled/sqlite.txt"]
+    },
+    {
+      "name": "libffi (in JNA's libjnidispatch.so)",
+      "version": "3.4.4",
+      "inGradle": "net.java.dev.jna:jna 5.17.0",
+      "section": "native",
+      "licence": "MIT",
+      "url": "https://github.com/java-native-access/jna/tree/5.17.0/native/libffi",
+      "notice": "JNA 5.17.0 links its copy of libffi statically into libjnidispatch.so.",
+      "texts": ["bundled/libffi.txt"]
+    },
+    {
+      "name": "OpenLV (@openlv/core, @openlv/session, @openlv/signaling, @openlv/transport)",
+      "version": "0.2.0",
+      "section": "data",
+      "licence": "LGPL-3.0-only",
+      "url": "https://github.com/open-lavatory/open-lavatory",
+      "notice": "Copyright (c) Open-Lavatory contributors. Shipped unmodified in the separate, replaceable file assets/openlv/openlv.esm.js inside the APK (built by desktop Freedom's scripts/bundle-openlv.js from the published npm packages), so it can be exchanged for a modified version as the LGPL allows. The LGPL-3.0 adds its terms to those of the GNU GPL 3.0, whose text follows it.",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["texts/LGPL-3.0.txt", "texts/GPL-3.0.txt"]
+    },
+    {
+      "name": "websocket-mqtt (in the OpenLV bundle)",
+      "version": "0.0.7",
+      "section": "data",
+      "licence": "LGPL-3.0",
+      "url": "https://github.com/v3xlabs/websocket-mqtt",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["texts/LGPL-3.0.txt", "texts/GPL-3.0.txt"]
+    },
+    {
+      "name": "@noble/ciphers (in the OpenLV bundle)",
+      "version": "1.3.0",
+      "section": "data",
+      "licence": "MIT",
+      "url": "https://github.com/paulmillr/noble-ciphers",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["bundled/noble-ciphers.txt"]
+    },
+    {
+      "name": "@noble/curves (in the OpenLV bundle)",
+      "version": "1.9.7",
+      "section": "data",
+      "licence": "MIT",
+      "url": "https://github.com/paulmillr/noble-curves",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["bundled/noble-hashes-curves.txt"]
+    },
+    {
+      "name": "@noble/hashes (in the OpenLV bundle)",
+      "version": "1.8.0",
+      "section": "data",
+      "licence": "MIT",
+      "url": "https://github.com/paulmillr/noble-hashes",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["bundled/noble-hashes-curves.txt"]
+    },
+    {
+      "name": "eventemitter3 (in the OpenLV bundle)",
+      "version": "5.0.4",
+      "section": "data",
+      "licence": "MIT",
+      "url": "https://github.com/primus/eventemitter3",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["bundled/eventemitter3.txt"]
+    },
+    {
+      "name": "ts-pattern (in the OpenLV bundle)",
+      "version": "5.9.0",
+      "section": "data",
+      "licence": "MIT",
+      "url": "https://github.com/gvergnaud/ts-pattern",
+      "files": ["openlv/openlv.esm.js"],
+      "texts": ["bundled/ts-pattern.txt"]
+    },
+    {
+      "name": "EasyList, EasyPrivacy, Fanboy's Cookiemonster and Fanboy's Annoyance List",
+      "version": "",
+      "section": "data",
+      "licence": "GPL-3.0-or-later OR CC-BY-SA-3.0 (redistributed under CC-BY-SA-3.0)",
+      "url": "https://easylist.to/",
+      "notice": "The filter lists are © The EasyList authors (https://easylist.to/), dual-licensed under the GNU General Public License v3 or later and the Creative Commons Attribution-ShareAlike 3.0 Unported licence (or later). Freedom redistributes them, unmodified, under CC BY-SA 3.0. The copies built into the app are assets/adblock/*.txt.",
+      "files": ["adblock/easylist.txt", "adblock/easyprivacy.txt", "adblock/fanboy-annoyance.txt", "adblock/fanboy-cookiemonster.txt"],
+      "texts": ["texts/CC-BY-SA-3.0.txt"]
+    },
+    {
+      "name": "uBlock filters and uBlock Origin's scriptlets",
+      "version": "",
+      "section": "data",
+      "licence": "GPL-3.0-only",
+      "url": "https://github.com/uBlockOrigin/uAssets",
+      "notice": "© Raymond Hill and the uBlock Origin contributors. assets/adblock/ublock-filters.txt is built from uAssets' filters/filters.txt and filters/quick-fixes.txt at the commit named in its header: its !#if blocks evaluated for a Chromium mobile browser, its !#include files spliced in and the two lists concatenated; the rules themselves are unchanged. assets/adblock/resources.json is uBlock Origin's scriptlets as @ghostery/adblocker v2.18.2 publishes them, unmodified; their source is uBlock Origin's src/js/resources at https://github.com/gorhill/uBlock/tree/de31aee0fcd69dc89cde558f1a0638c1aa77b75e/src/js/resources. Both are data files the app reads at run time, shipped as separate files with the GPL's text next to them (assets/adblock/COPYING.GPL-3.0.txt).",
+      "files": ["adblock/ublock-filters.txt", "adblock/resources.json", "adblock/COPYING.GPL-3.0.txt"],
+      "texts": ["texts/GPL-3.0.txt"]
+    }
+  ],
+  "nativeCode": {
+    "blst 0.3.17": "blst's own C and assembly, under the crate's Apache-2.0.",
+    "libgit2-sys 0.18.7+1.9.6": "Compiles libgit2 1.9.6 with its bundled LibXDiff, PCRE2 and llhttp (all listed). Built without the ssh and https features: no libssh2, no OpenSSL. zlib comes from libz-sys.",
+    "liblzma-sys 0.4.9": "Compiles liblzma from XZ Utils 5.8.4 (listed); pkg-config finds no liblzma for an Android target.",
+    "libsqlite3-sys 0.37.0": "The bundled feature (from rusqlite's): compiles the SQLite 3.51.3 amalgamation (listed). sqlite3-sys links against the same copy; freedom-mobile-ffi's vendor/sqlite3-src stand-in compiles nothing.",
+    "libz-sys 1.1.29": "On Android it links the system libz.so and compiles nothing.",
+    "reed-solomon-erasure 6.0.0": "cc is only for the simd-accel feature, which isn't enabled: pure Rust.",
+    "ring 0.17.14": "ring's own C and assembly (partly from BoringSSL), covered by the licence files listed for the crate.",
+    "zstd-sys 2.1.0+zstd.1.5.7": "Compiles zstd 1.5.7, whose BSD licence is among the texts listed for the crate."
+  },
+  "nativeLibraries": {
+    "libfreedom_mobile_ffi.so": "The Rust crates in native.json, and the C code listed with inCrate",
+    "libc4.so": "Colibri and what it links (the components with colibri)",
+    "libfreedom_colibri.so": "Freedom's own (swarmnode/src/main/cpp/colibri_jni.c)",
+    "libfreedom_jni.so": "Freedom's own (swarmnode/src/main/cpp)",
+    "libjnidispatch.so": "JNA (net.java.dev.jna:jna), with libffi (listed)",
+    "libandroidx.graphics.path.so": "androidx.graphics:graphics-path",
+    "libdatastore_shared_counter.so": "androidx.datastore:datastore-core",
+    "libimage_processing_util_jni.so": "androidx.camera:camera-core (with libyuv, in its notice)",
+    "libsurface_util_jni.so": "androidx.camera:camera-core"
+  },
+  "optionalNativeLibraries": {
+    "libc4.so": "colibri"
+  }
+}

@@ -40,7 +40,13 @@ class DownloadOffer internal constructor(
      * accepting it is no occasion to ask for that permission (#265).
      */
     val private: Boolean = false,
-    internal val start: () -> Unit,
+    /**
+     * The type the file is expected to have, for the *Save as* picker
+     * (#322); `application/octet-stream` when nothing said.
+     */
+    val mimeType: String = "application/octet-stream",
+    /** Starts the download; with the document the user picked to save it as, if any (#322). */
+    internal val start: (saveTo: PickedDocument?) -> Unit,
 )
 
 /**
@@ -90,9 +96,12 @@ internal class DownloadOffers {
         source: String,
         totalBytes: Long,
         private: Boolean = false,
-        start: () -> Unit,
+        mimeType: String = "application/octet-stream",
+        start: (saveTo: PickedDocument?) -> Unit,
     ): Boolean {
-        val offer = DownloadOffer(nextKey.getAndIncrement(), tabId, requestedBy, fileName, source, totalBytes, private, start)
+        val offer = DownloadOffer(
+            nextKey.getAndIncrement(), tabId, requestedBy, fileName, source, totalBytes, private, mimeType, start,
+        )
         synchronized(this) {
             if (requestedBy != null && tabId in blockedTabs) return false
             if (requestedBy != null &&
@@ -112,10 +121,14 @@ internal class DownloadOffers {
     /**
      * The user said yes to [key]: it leaves the queue and starts. Only
      * once, however often it's accepted — a double tap on Download
-     * mustn't fetch the file twice.
+     * mustn't fetch the file twice. [saveTo]: the document the user
+     * picked to save it as (#322). False when [key] was no longer
+     * waiting (answered, or its tab closed) — nothing was started.
      */
-    fun accept(key: Long) {
-        take(key)?.start?.invoke()
+    fun accept(key: Long, saveTo: PickedDocument? = null): Boolean {
+        val offer = take(key) ?: return false
+        offer.start(saveTo)
+        return true
     }
 
     /**
