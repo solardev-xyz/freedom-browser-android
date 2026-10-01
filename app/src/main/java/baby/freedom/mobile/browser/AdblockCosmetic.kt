@@ -154,9 +154,11 @@ internal fun parseCosmeticTokens(data: String): List<String>? {
  * objects walked with index loops, and the report is built as text. The
  * two sequences the platform reads by iterating — the sheets handed to
  * the `adoptedStyleSheets` setter and `observe()`'s `attributeFilter` —
- * are prototype-less iterables whose iterators were built at document
- * start, not arrays (which would be walked through the live
- * `Array.prototype[Symbol.iterator]`), and `observe()`'s options object
+ * are prototype-less iterables, not arrays (which would be walked
+ * through the live `Array.prototype[Symbol.iterator]`). The filter's is
+ * built at document start; the sheets' is built on each call, but only
+ * from `Object.create` saved then and the script's own closures, so
+ * building or walking it calls nothing live. `observe()`'s options object
  * has no prototype. The reply's `data` is read as the plain object's own
  * property, or through the saved `MessageEvent.data` getter. So a page
  * that wraps any of these catches no call and is never handed one of its
@@ -211,8 +213,9 @@ internal fun adblockCosmeticJs(channel: String): String {
   // A sequence (the sheets the setter takes, the observer's attribute
   // filter) is read by iterating it: an array would be walked through
   // Array.prototype's iterator, which the page can replace. So each is
-  // its own iterable, built now, whose iterator calls nothing but these
-  // closures.
+  // its own iterable whose iterator calls nothing but these closures and
+  // the saved Object.create (the filter's is built now; the sheets' per
+  // call, from the same saved natives).
   var ITER = typeof Symbol === 'function' ? Symbol.iterator : null;
   function iterable(l) {
     if (!ITER) { var a = []; for (var k = 0; k < l.n; k++) a[k] = l[k]; return a; }
