@@ -149,6 +149,57 @@ class DownloadRequestTest {
     }
 
     @Test
+    fun `a bidi override can't disguise the file's extension`() {
+        // "invoice<RLO>fdp.apk" draws as "invoicekpa.pdf": an APK posing as a PDF.
+        assertEquals(
+            "invoice_fdp.apk",
+            downloadFileName("attachment; filename*=UTF-8''invoice%E2%80%AEfdp.apk", "https://x.com/", null),
+        )
+        assertEquals("invoice_fdp.apk", downloadFileName(null, "https://x.com/invoice%E2%80%AEfdp.apk", null))
+        // Every other bidi control too: embeddings, isolates, marks.
+        for (c in listOf('\u202A', '\u202B', '\u202C', '\u202D', '\u2066', '\u2067', '\u2068', '\u2069', '\u200E', '\u200F', '\u061C')) {
+            assertEquals("a_b.txt", sanitizeFileName("a${c}b.txt"))
+        }
+    }
+
+    @Test
+    fun `invisible format characters, separators and C1 controls are replaced`() {
+        // Zero-width space, BOM, soft hyphen, word joiner, line / paragraph separators, a C1 control.
+        for (c in listOf('\u200B', '\uFEFF', '\u00AD', '\u2060', '\u2028', '\u2029', '\u0085', '\u009B')) {
+            assertEquals("a_b.txt", sanitizeFileName("a${c}b.txt"))
+        }
+        // A supplementary-plane format character, judged by code point (not as two surrogates).
+        assertEquals("a_b.txt", sanitizeFileName("a\uDB40\uDC01b.txt"))
+        // A lone surrogate can't be encoded into a file name.
+        assertEquals("a_b.txt", sanitizeFileName("a\uD83Db.txt"))
+    }
+
+    @Test
+    fun `names that need joiners and tags keep them`() {
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67" // 👨‍👩‍👧
+        assertEquals("$family.png", sanitizeFileName("$family.png"))
+        val persian = "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645.pdf" // می‌خواهم (ZWNJ)
+        assertEquals(persian, sanitizeFileName(persian))
+        val scotland = "\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74\uDB40\uDC7F"
+        assertEquals("$scotland.jpg", sanitizeFileName("$scotland.jpg"))
+        assertEquals("na\u00EFve caf\u00E9 \u65E5\u672C.txt", sanitizeFileName("na\u00EFve caf\u00E9 \u65E5\u672C.txt"))
+    }
+
+    @Test
+    fun `clamping never splits an emoji in half`() {
+        val emoji = "\uD83D\uDE00" // 😀, two chars
+        // 116 chars kept before ".txt": the 116th would be the first half of an emoji.
+        val name = downloadFileName(null, "https://x.com/" + "a".repeat(115) + emoji.repeat(10) + ".txt", null)
+        assertTrue(name.endsWith(".txt"))
+        assertTrue(name.length <= 120)
+        assertTrue(name.indices.none { i ->
+            name[i].isHighSurrogate() && (i + 1 >= name.length || !name[i + 1].isLowSurrogate()) ||
+                name[i].isLowSurrogate() && (i == 0 || !name[i - 1].isHighSurrogate())
+        })
+        assertEquals("a".repeat(115) + ".txt", name)
+    }
+
+    @Test
     fun `overlong names are clamped keeping the extension`() {
         val name = downloadFileName(null, "https://x.com/" + "a".repeat(300) + ".tar.gz", null)
         assertEquals(120, name.length)

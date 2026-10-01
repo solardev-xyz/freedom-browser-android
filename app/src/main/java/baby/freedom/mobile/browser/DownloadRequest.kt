@@ -248,22 +248,59 @@ private fun lastPathSegment(url: String): String? {
  * saying `../../x` must not escape Downloads), control characters, and
  * the characters Android's FAT-backed shared storage rejects. Leading
  * dots go too so a download is never a hidden file.
+ *
+ * So do the invisible characters that change how the rest of the name
+ * reads ([fileNameCharIsHidden]): a server naming its file
+ * `invoice<U+202E>fdp.apk` would otherwise be shown — in the prompt,
+ * the downloads list, the notification, and the Files app — as
+ * `invoicekpa.pdf`, an APK passed off as a PDF. Chromium's own
+ * download names (desktop's) replace them the same way.
  */
 internal fun sanitizeFileName(raw: String): String {
     val base = raw.substringAfterLast('/').substringAfterLast('\\')
-    return base
-        .map { c -> if (c.code < 0x20 || c == '\u007f' || c in "\"*:<>?|") '_' else c }
-        .joinToString("")
+    val out = StringBuilder(base.length)
+    var i = 0
+    while (i < base.length) {
+        val cp = base.codePointAt(i)
+        i += Character.charCount(cp)
+        if (fileNameCharIsHidden(cp)) out.append('_') else out.appendCodePoint(cp)
+    }
+    return out.toString()
         .trim()
         .trimStart('.')
         .trim()
+}
+
+/**
+ * Is [cp] a character a file name mustn't carry: C0/C1 controls, the
+ * FAT-reserved `"*:<>?|`, a lone surrogate, a line/paragraph separator,
+ * or a format character (Cf: the bidi embeddings, overrides, isolates
+ * and marks, zero-width spaces, the BOM, soft hyphen …). By code point,
+ * so a supplementary-plane format character (U+E0001) is caught too.
+ * ZWJ / ZWNJ and the emoji tag characters (U+E0020–E007F) stay: emoji
+ * sequences, flags and Persian / Indic words need them, and they
+ * reorder nothing.
+ */
+private fun fileNameCharIsHidden(cp: Int): Boolean {
+    if (cp < 0x80) return cp < 0x20 || cp == 0x7f || cp.toChar() in "\"*:<>?|"
+    if (cp == 0x200C || cp == 0x200D || cp in 0xE0020..0xE007F) return false
+    return when (Character.getType(cp).toByte()) {
+        Character.CONTROL, Character.FORMAT, Character.SURROGATE,
+        Character.LINE_SEPARATOR, Character.PARAGRAPH_SEPARATOR,
+        -> true
+        else -> false
+    }
 }
 
 private fun clampFileName(name: String): String {
     if (name.length <= MAX_FILE_NAME_CHARS) return name
     val dot = name.lastIndexOf('.')
     val ext = if (dot > 0 && name.length - dot <= 16) name.substring(dot) else ""
-    return name.take(MAX_FILE_NAME_CHARS - ext.length) + ext
+    // Never cut between the two halves of a surrogate pair: a lone one
+    // can't be encoded, and the name would get a `?` where an emoji was.
+    var keep = MAX_FILE_NAME_CHARS - ext.length
+    if (keep > 0 && name[keep - 1].isHighSurrogate()) keep--
+    return name.take(keep) + ext
 }
 
 /** "1.4 MB" — the unit ladder the downloads list shows sizes in. */
