@@ -478,9 +478,9 @@ class LedgerRoutesTest {
         val a = "/dev/bus/usb/001/002"
         val b = "/dev/bus/usb/001/003"
         val back = "/dev/bus/usb/001/005"
-        assertEquals(back, Ledger.reappeared(setOf(a, b), emptySet(), listOf(b, back)))
+        assertEquals(back, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(b, back)))
         // Not back yet; another Ledger plugged in already is its own route.
-        assertEquals(null, Ledger.reappeared(setOf(a, b), emptySet(), listOf(b)))
+        assertEquals(null, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(b)))
     }
 
     /**
@@ -496,13 +496,36 @@ class LedgerRoutesTest {
         val aBack = "/dev/bus/usb/001/006"
         // Listed when A last answered (alive): B had come back as B' by then.
         val known = setOf(a, bBack)
-        assertEquals(aBack, Ledger.reappeared(known, emptySet(), listOf(bBack, aBack)))
+        assertEquals(aBack, Ledger.reappeared(known, a, emptySet(), listOf(bBack, aBack)))
         // Not seen while A answered, but B's route has it open: still not A's.
-        assertEquals(aBack, Ledger.reappeared(setOf(a, b), setOf(bBack), listOf(bBack, aBack)))
+        assertEquals(aBack, Ledger.reappeared(setOf(a, b), a, setOf(bBack), listOf(bBack, aBack)))
         // Both came back within one poll and neither is held yet: no guess at all.
-        assertEquals(null, Ledger.reappeared(setOf(a, b), emptySet(), listOf(bBack, aBack)))
+        assertEquals(null, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(bBack, aBack)))
         // Once B's route has taken its own, A's is the one left.
-        assertEquals(aBack, Ledger.reappeared(setOf(a, b), setOf(bBack), listOf(aBack, bBack)))
+        assertEquals(aBack, Ledger.reappeared(setOf(a, b), a, setOf(bBack), listOf(aBack, bBack)))
+    }
+
+    /**
+     * Two Nano S Plus, A tapped and B not (#350 R3-F1): the Ethereum app
+     * is opened on B, then on A within a poll — B came back as B' after A
+     * last answered, and before A dropped out. B' is the only new path
+     * when A's follow starts, but B is gone too, so B' may be B's: it's
+     * not taken for A — nor is A' once it comes back, with nothing to
+     * tell the two apart. Once B's route holds B', A' is A's.
+     */
+    @Test
+    fun `a path that appeared since the last answer while another Ledger is gone too is never taken`() {
+        val a = "/dev/bus/usb/001/002"
+        val b = "/dev/bus/usb/001/003"
+        val bBack = "/dev/bus/usb/001/005"
+        val aBack = "/dev/bus/usb/001/006"
+        assertEquals(null, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(bBack)))
+        assertEquals(null, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(bBack, aBack)))
+        assertEquals(aBack, Ledger.reappeared(setOf(a, b), a, setOf(bBack), listOf(bBack, aBack)))
+        // A Ledger unplugged meanwhile is as good as one that may come back: no guess.
+        assertEquals(null, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(aBack)))
+        // Only A gone: the one new path is A's, however soon after the last answer it appeared.
+        assertEquals(aBack, Ledger.reappeared(setOf(a, b), a, emptySet(), listOf(b, aBack)))
     }
 
     @Test
@@ -528,6 +551,31 @@ class LedgerRoutesTest {
             assertEquals(LedgerException.Kind.APP_NOT_OPEN, e.kind)
         }
         assertTrue((System.nanoTime() - start) / 1_000_000 < 2_000)
+    }
+
+    /**
+     * A follow that runs out on Android's USB prompt (#350 R3-M2): the app
+     * is open (that's what re-enumerated it), so the wait ends as USB
+     * access not given, not as "Open the Ethereum app".
+     */
+    @Test
+    fun `a follow that runs out on the USB prompt ends as access not given`() = runBlocking {
+        var asking = false
+        try {
+            Ledger.awaitReady(
+                {}, readyMs = 200, pollMs = 10,
+                follow = {
+                    asking = true
+                    kotlinx.coroutines.delay(10_000)
+                    true
+                },
+                asking = { asking },
+                read = reads(LedgerException.Kind.APP_NOT_OPEN, LedgerException.Kind.DISCONNECTED, account),
+            )
+            fail("followed")
+        } catch (e: LedgerException) {
+            assertEquals(LedgerException.Kind.PERMISSION, e.kind)
+        }
     }
 
     @Test

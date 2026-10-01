@@ -452,14 +452,16 @@ class Ledger internal constructor(private val context: Context) {
                     val opened = LedgerUsbLink.open(context, manager, usb, onPermission = { turn.stage(Stage.USB_PERMISSION) })
                     turn.stage(Stage.CONNECTING)
                     FollowingLink(opened).also { link ->
-                        // Every path listed while this route's Ledger is still at its own: none
-                        // of them is where it comes back. Brought up to date each time it answers
-                        // while it's waited on, so a same-model Ledger that re-enumerated (or was
-                        // plugged in) meanwhile is never taken for it (#350 R2-F1).
-                        var known = listed.map { it.deviceName }.toSet()
-                        turn.alive = { known = LedgerUsbLink.devices(manager).map { it.deviceName }.toSet() }
+                        val model = LedgerUsbLink.name(usb)
+                        fun ofModel() = LedgerUsbLink.devices(manager).filter { LedgerUsbLink.name(it) == model }.map { it.deviceName }.toSet()
+                        // The paths of this route's model listed while its Ledger is still at its
+                        // own: none of them is where it comes back, and any of them gone by then
+                        // is another Ledger that may come back too. Brought up to date each time it
+                        // answers while it's waited on (#350 R2-F1, R3-F1).
+                        var known = listed.filter { LedgerUsbLink.name(it) == model }.map { it.deviceName }.toSet()
+                        turn.alive = { known = ofModel() }
                         turn.follow = {
-                            followUsb(manager, link, LedgerUsbLink.name(usb), known, turn) { path ->
+                            followUsb(manager, link, model, known, held, turn) { path ->
                                 held?.let(::release)
                                 held = path
                             }?.let { known = it } != null
@@ -493,14 +495,17 @@ class Ledger internal constructor(private val context: Context) {
      * or on the dashboard or another app), followed to where it came back:
      * opening or quitting an app re-enumerates a Ledger over USB, under a
      * new device path (#350 R1-F1). The Ledger that comes back is the one
-     * of its [model] plugged in that isn't [before] — what was listed the
-     * last time this route's Ledger answered — nor held by another
-     * route's link ([usbHeld]): a same-model Ledger that re-enumerated or
-     * was plugged in meanwhile is never taken for it (#350 R2-F1). With
-     * two such paths (two Ledgers of one model re-enumerating within a
-     * poll of each other) there's no telling which is this one's: none is
-     * taken until the other route has taken its own. The path taken is
-     * held ([picked]) before it's opened, so no other route takes it too.
+     * of its [model] plugged in that isn't [before] — its model's paths
+     * listed the last time this route's Ledger answered, [own] among them
+     * — nor held by another route's link ([usbHeld]), and only once every
+     * other Ledger of [before] that's gone too is accounted for by a new
+     * path another route has taken ([reappeared]): one that re-enumerated
+     * since the last answer, even before this one dropped out, may be the
+     * new path, so it's never taken for this one (#350 R2-F1, R3-F1).
+     * Until then, or with two such paths, there's no telling which is
+     * this one's: none is taken. The path taken is held ([picked]) before
+     * it's opened, so no other route takes it too. While Android's USB
+     * prompt for it is up, [Turn.asking] says so.
      * Android asks for access again (a grant ends when a device leaves the
      * bus); with "Open Freedom when a Ledger is plugged in" on, Android
      * may offer to open Freedom too, as for any plug-in. Returns what's
@@ -512,14 +517,16 @@ class Ledger internal constructor(private val context: Context) {
         link: FollowingLink,
         model: String,
         before: Set<String>,
+        own: String?,
         turn: Turn,
         picked: (String) -> Unit,
     ): Set<String>? {
         val deadline = monotonicMs() + FOLLOW_MS
+        turn.asking = false
         while (true) {
             val now = LedgerUsbLink.devices(manager)
             val device = synchronized(usbHeld) {
-                reappeared(before, usbHeld.keys, now.filter { LedgerUsbLink.name(it) == model }.map { it.deviceName })
+                reappeared(before, own, usbHeld.keys, now.filter { LedgerUsbLink.name(it) == model }.map { it.deviceName })
                     ?.let { p -> now.firstOrNull { it.deviceName == p } }
                     ?.also { hold(it.deviceName) }
             }
@@ -527,10 +534,20 @@ class Ledger internal constructor(private val context: Context) {
                 picked(device.deviceName)
                 Log.i(TAG, "a Ledger came back over USB after re-enumerating")
                 turn.stage(Stage.CONNECTING)
-                val opened = LedgerUsbLink.open(context, manager, device, onPermission = { turn.stage(Stage.USB_PERMISSION) })
+                // Left set if the follow is cancelled with the prompt up: the wait that ran out reads it.
+                val opened = try {
+                    LedgerUsbLink.open(context, manager, device, onPermission = {
+                        turn.asking = true
+                        turn.stage(Stage.USB_PERMISSION)
+                    })
+                } catch (e: LedgerException) {
+                    turn.asking = false
+                    throw e
+                }
+                turn.asking = false
                 turn.stage(Stage.CONNECTING)
                 link.replace(opened)
-                return now.map { it.deviceName }.toSet()
+                return now.filter { LedgerUsbLink.name(it) == model }.map { it.deviceName }.toSet()
             }
             if (monotonicMs() >= deadline) return null
             delay(FOLLOW_POLL_MS)
@@ -644,6 +661,14 @@ class Ledger internal constructor(private val context: Context) {
              */
             @Volatile
             var alive: () -> Unit = {}
+
+            /**
+             * Whether Android's USB prompt is up for where this route's
+             * Ledger came back ([follow]): a wait that runs out then ran
+             * out on the prompt, not on the Ledger (#350 R3-M2).
+             */
+            @Volatile
+            var asking: Boolean = false
 
             /**
              * [block], an exchange with this route's Ledger, finished
@@ -831,7 +856,9 @@ class Ledger internal constructor(private val context: Context) {
          * of the wait — the wait for it to come back and Android's USB
          * prompt included (#350 R2-M1): run out while it's followed, the
          * Ledger is taken as left locked or on another app, as it was last
-         * seen; dropped out after it's run out, it's taken as unplugged.
+         * seen — unless it ran out with Android's USB prompt for it up
+         * ([asking]): then USB access wasn't given (#350 R3-M2). Dropped
+         * out after it's run out, it's taken as unplugged.
          */
         internal suspend fun awaitReady(
             stage: (Stage) -> Unit,
@@ -839,6 +866,7 @@ class Ledger internal constructor(private val context: Context) {
             pollMs: Long = POLL_MS,
             follow: suspend () -> Boolean = { false },
             alive: () -> Unit = {},
+            asking: () -> Boolean = { false },
             read: suspend () -> String,
         ): String {
             // Monotonic: a wall-clock step can't cut the wait short or stretch it (#350 R1-M1).
@@ -859,10 +887,20 @@ class Ledger internal constructor(private val context: Context) {
                             val left = deadline - monotonicMs()
                             if (left <= 0) throw e
                             stage(Stage.CONNECTING)
-                            when (withTimeoutOrNull(left) { follow() }) {
+                            // Read before the follow is cancelled: that takes the prompt down.
+                            var prompted = false
+                            val followed = withTimeoutOrNull(left) {
+                                try {
+                                    follow()
+                                } catch (c: CancellationException) {
+                                    prompted = asking()
+                                    throw c
+                                }
+                            }
+                            when (followed) {
                                 true -> continue
                                 false -> throw e
-                                null -> throw last
+                                null -> throw if (prompted) LedgerUsbLink.accessNotGiven() else last
                             }
                         }
                         else -> throw e
@@ -890,10 +928,11 @@ class Ledger internal constructor(private val context: Context) {
             pollMs: Long = POLL_MS,
             follow: suspend () -> Boolean = { false },
             alive: () -> Unit = {},
+            asking: () -> Boolean = { false },
             read: suspend () -> String,
         ) {
             val got = try {
-                awaitReady(stage, readyMs, pollMs, follow, alive, read)
+                awaitReady(stage, readyMs, pollMs, follow, alive, asking, read)
             } catch (e: LedgerException) {
                 throw NotThisLedger(e)
             }
@@ -915,7 +954,7 @@ class Ledger internal constructor(private val context: Context) {
             pollMs: Long = POLL_MS,
             read: suspend () -> String,
         ) {
-            holding(address, turn::stage, readyMs, pollMs, { turn.follow() }, { turn.alive() }, read)
+            holding(address, turn::stage, readyMs, pollMs, { turn.follow() }, { turn.alive() }, { turn.asking }, read)
             turn.stage(Stage.READING)
             turn.claim()
         }
@@ -969,13 +1008,22 @@ class Ledger internal constructor(private val context: Context) {
         internal fun monotonicMs(): Long = System.nanoTime() / 1_000_000
 
         /**
-         * The USB device path a Ledger that re-enumerated came back under:
-         * the one listed [now] that wasn't [before] and isn't [held] by
-         * another route's link. Two or more such paths: there's no telling
-         * which is this Ledger's, so none (#350 R2-F1).
+         * The USB device path a Ledger that re-enumerated came back under,
+         * from its model's paths: the one listed [now] that wasn't [before]
+         * (listed when it last answered, its own path [own] among them) and
+         * isn't [held] by another route's link. Every other path of
+         * [before] gone [now] is another Ledger that re-enumerated (or was
+         * unplugged) and may be any new path: until each is accounted for
+         * by a new path another route holds, none is taken — however long
+         * ago it appeared (#350 R3-F1). Two or more such paths: there's no
+         * telling which is this Ledger's, so none (#350 R2-F1).
          */
-        internal fun reappeared(before: Set<String>, held: Set<String>, now: List<String>): String? =
-            now.filter { it !in before && it !in held }.distinct().singleOrNull()
+        internal fun reappeared(before: Set<String>, own: String?, held: Set<String>, now: List<String>): String? {
+            val fresh = now.filter { it !in before }.distinct()
+            val othersGone = before.count { it != own && it !in now }
+            if (fresh.count { it in held } < othersGone) return null
+            return fresh.filter { it !in held }.singleOrNull()
+        }
 
         @Volatile
         private var instance: Ledger? = null

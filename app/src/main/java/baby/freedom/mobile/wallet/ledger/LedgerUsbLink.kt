@@ -258,7 +258,7 @@ internal class LedgerUsbLink(private val pipe: Pipe) : LedgerLink {
             throw if (!attached(manager, device)) {
                 unplugged()
             } else {
-                LedgerException(LedgerException.Kind.PERMISSION, Strings.said(R.string.signing_ledger_usb_permission_refused))
+                accessNotGiven()
             }
         }
 
@@ -306,6 +306,9 @@ internal class LedgerUsbLink(private val pipe: Pipe) : LedgerLink {
 
         /** The broadcast action of permission request [n]: one per request, never shared by two prompts. */
         internal fun permissionAction(packageName: String, n: Int): String = "$packageName$ACTION_PERMISSION_SUFFIX.$n"
+
+        /** Android's USB prompt for a Ledger refused, or not answered in time. */
+        fun accessNotGiven() = LedgerException(LedgerException.Kind.PERMISSION, Strings.said(R.string.signing_ledger_usb_permission_refused))
 
         fun unplugged() = LedgerException(LedgerException.Kind.DISCONNECTED, Strings.said(R.string.signing_ledger_usb_unplugged))
 
