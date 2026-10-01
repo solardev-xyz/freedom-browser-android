@@ -4829,16 +4829,20 @@ internal class PageWebView(context: Context) : WebView(context) {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (keyArmsGestureLatch(
+        // Every press and auto-repeat is recorded — each gives the focused
+        // frame a fresh activation (#348 R4-F1) — but only a fresh press
+        // buys an app-link launch.
+        if (keyIsPageInput(
                 action = event.action,
-                repeatCount = event.repeatCount,
                 isSystem = event.isSystem,
                 isModifier = KeyEvent.isModifierKey(event.keyCode),
             )
         ) {
-            userGestures.onInputStart(event.eventTime)
+            userGestures.onInputStart(event.eventTime, key = true)
             userGestures.onInputContinues(SystemClock.uptimeMillis())
-            userGestures.onInput()
+            if (keyArmsGestureLatch(event.action, event.repeatCount, event.isSystem, KeyEvent.isModifierKey(event.keyCode))) {
+                userGestures.onInput()
+            }
             inputEnded(userGestures.latestInputId)
         }
         return super.dispatchKeyEvent(event)
@@ -6892,9 +6896,8 @@ private class KeyboardEditRecorder(
         edit { super.performEditorAction(editorAction) }
 
     override fun sendKeyEvent(event: KeyEvent): Boolean =
-        if (keyArmsGestureLatch(
+        if (keyIsPageInput(
                 action = event.action,
-                repeatCount = event.repeatCount,
                 isSystem = event.isSystem,
                 isModifier = KeyEvent.isModifierKey(event.keyCode),
             )

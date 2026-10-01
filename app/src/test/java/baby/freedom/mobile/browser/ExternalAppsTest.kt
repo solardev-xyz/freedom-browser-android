@@ -364,6 +364,96 @@ class ExternalAppsTest {
         assertTrue(runBlocking { c.latch.topDocumentGesture().confirmed() })
     }
 
+    /**
+     * A hardware key press or auto-repeat as PageWebView records it
+     * (#348 R4-F1): every one an input, only a fresh press armed.
+     */
+    private fun Clock.hardwareKey(repeatCount: Int): Long {
+        val at = now
+        latch.onInputStart(at, key = true)
+        // Dispatched a few ms after its event time: a repeat's keydown then
+        // also falls in the previous repeat's LATE_MS slack, as on the AVD.
+        latch.onInputContinues(at + 5)
+        if (repeatCount == 0) latch.onInput()
+        now += INPUT_SYNC_DELAY_MS
+        latch.onRendererCaughtUp(latch.latestInputId)
+        return at
+    }
+
+    @Test
+    fun `x402 R4-F1 a key held in an iframe keeps its activation fresh past the first press`() {
+        val c = Clock()
+        c.tap() // into the iframe's text field
+        c.latch.onRendererCaughtUp(c.latch.latestInputId)
+        c.now += 300
+        c.hardwareKey(repeatCount = 0) // Backspace goes down there…
+        repeat(150) { c.now += 50; c.hardwareKey(repeatCount = it + 1) } // …and is held 7.5 s
+        c.now += 300
+        val next = c.tap() // a plain button on the top page
+        c.topDocumentSaw(next)
+        val gesture = c.latch.topDocumentGesture()
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 R4-F1 a key held in the top document's own field is confirmed by its keydowns`() {
+        val c = Clock()
+        c.topDocumentSaw(c.tap()) // into the top page's text field
+        c.now += 300
+        c.topDocumentSaw(c.hardwareKey(repeatCount = 0), isClick = false)
+        repeat(150) { c.now += 50; c.topDocumentSaw(c.hardwareKey(repeatCount = it + 1), isClick = false) }
+        c.now += 300
+        val next = c.tap() // the site's own priced link
+        c.topDocumentSaw(next)
+        assertTrue(runBlocking { c.latch.topDocumentGesture().confirmed() })
+    }
+
+    @Test
+    fun `R4-F1 a held key's keydown is the latest repeat begun by its time`() {
+        val c = Clock()
+        val first = c.now
+        c.latch.onInputStart(first, key = true)
+        c.latch.onInputContinues(first + 5)
+        c.now = first + 50
+        val second = c.now
+        c.latch.onInputStart(second, key = true)
+        c.latch.onInputContinues(second + 5)
+        val id = c.latch.latestInputId
+        c.now = second + 4
+        c.topDocumentSaw(second, transitMs = 2, isClick = false) // fits both: the second's
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(id) { offered++ })
+        assertEquals(1, offered)
+        assertTrue(c.latch.whenInTopDocument(id - 1) { offered++ })
+        assertEquals(1, offered) // the first still waits on its own keydown
+    }
+
+    @Test
+    fun `R4-F1 the tie-break is for key inputs only - a tap among the candidates still fails closed`() {
+        val c = Clock()
+        val tap = c.tap(holdMs = 40)
+        c.latch.onInputStart(c.now, key = true)
+        c.latch.onInputContinues(c.now + 5)
+        val key = c.latch.latestInputId
+        c.now += 4
+        c.topDocumentSaw(c.now - 3, transitMs = 1, isClick = false) // fits the tap's slack and the key
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(key) { offered++ })
+        assertTrue(c.latch.whenInTopDocument(key - 1) { offered++ })
+        assertEquals(0, offered)
+        assertTrue(tap > 0)
+    }
+
+    @Test
+    fun `R4-F1 a held key's repeats buy no app-link launch of their own`() {
+        val c = Clock()
+        c.hardwareKey(repeatCount = 0)
+        assertNotNull(c.latch.consume())
+        repeat(10) { c.now += 50; c.hardwareKey(repeatCount = it + 1) }
+        assertNull(c.latch.consume())
+    }
+
     @Test
     fun `x402 R3-F1 a keyboard edit's end lands on it even after a later input began`() {
         val c = Clock()
@@ -775,6 +865,17 @@ class ExternalAppsTest {
         assertFalse(keyArmsGestureLatch(down, repeatCount = 0, isSystem = true, isModifier = false))
         assertFalse(keyArmsGestureLatch(down, repeatCount = 0, isSystem = false, isModifier = true))
         assertFalse(keyArmsGestureLatch(up, repeatCount = 0, isSystem = false, isModifier = false))
+    }
+
+    @Test
+    fun `every press and auto-repeat of a page key is recorded as input`() {
+        val down = android.view.KeyEvent.ACTION_DOWN
+        val up = android.view.KeyEvent.ACTION_UP
+        // R4-F1: a repeat is a trusted keydown that renews the focused frame's activation.
+        assertTrue(keyIsPageInput(down, isSystem = false, isModifier = false))
+        assertFalse(keyIsPageInput(down, isSystem = true, isModifier = false))
+        assertFalse(keyIsPageInput(down, isSystem = false, isModifier = true))
+        assertFalse(keyIsPageInput(up, isSystem = false, isModifier = false))
     }
 
     @Test

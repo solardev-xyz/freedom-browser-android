@@ -422,6 +422,8 @@ internal class UserGestureLatch(private val clock: () -> Long) {
         val accessibility: Boolean,
         /** An accessibility input that began while an earlier one was still open. */
         val repeatsAccessibility: Boolean,
+        /** A hardware key press or auto-repeat: one `keydown`, stamped with [start] itself. */
+        val key: Boolean,
     ) {
         /** An accessibility input whose one click hasn't been heard yet. */
         var untilConfirmed = accessibility
@@ -507,11 +509,14 @@ internal class UserGestureLatch(private val clock: () -> Long) {
      * word arrives while it is still open matches both and is refused:
      * fail closed — unless both are open accessibility inputs (see
      * [onTopDocumentInput]).
+     *
+     * [key] is for a hardware key press or auto-repeat, whose one
+     * `keydown` Chromium stamps with [at] itself (see [onTopDocumentInput]).
      */
-    fun onInputStart(at: Long = clock(), untilConfirmed: Boolean = false) {
+    fun onInputStart(at: Long = clock(), untilConfirmed: Boolean = false, key: Boolean = false) {
         inputId++
         val repeats = untilConfirmed && recent.any { it.untilConfirmed }
-        recent.addLast(Input(inputId, at, at, untilConfirmed, repeats))
+        recent.addLast(Input(inputId, at, at, untilConfirmed, repeats, key && !untilConfirmed))
         val now = clock()
         val stale = now - WINDOW_MS - CONFIRM_MS
         while (recent.isNotEmpty()) {
@@ -571,6 +576,16 @@ internal class UserGestureLatch(private val clock: () -> Long) {
      * already, before its navigation, and a later click aimed at the top
      * page mustn't vouch for an earlier one on an iframe. If every
      * candidate was handed out, nothing: fail closed.
+     *
+     * Another, for a held key (#348 R4-F1): auto-repeats come every
+     * 50 ms or so, so a repeat's `keydown` also falls in the previous
+     * repeat's [LATE_MS] slack. A `keydown` that fits only hardware key
+     * inputs is the latest one begun by its time: each such input makes
+     * exactly one `keydown`, stamped with the input's own event time, so
+     * the word can't be an input's that began after it. A neighbour
+     * credited by mistake (a message slower than 50 ms) leaves its own
+     * input unconfirmed instead: every repeat still needs a `keydown` of
+     * the top document's, and one that went to an iframe never makes one.
      */
     fun onTopDocumentInput(ageMs: Long, isClick: Boolean) {
         // Event time plus the message's own (small, positive) transit.
@@ -579,6 +594,8 @@ internal class UserGestureLatch(private val clock: () -> Long) {
         val input = candidates.singleOrNull()
             ?: candidates.takeIf { c -> c.isNotEmpty() && c.all { it.untilConfirmed } }
                 ?.firstOrNull { !it.handedOut }
+            ?: candidates.takeIf { c -> !isClick && c.isNotEmpty() && c.all { it.key } }
+                ?.lastOrNull { it.start <= at + EARLY_MS }
             ?: return
         if (input.untilConfirmed) {
             input.untilConfirmed = false
@@ -716,19 +733,36 @@ internal class UserGestureLatch(private val clock: () -> Long) {
 }
 
 /**
- * Whether a key event arms the [UserGestureLatch]: one fresh press of a
- * key that reaches the page. Not an auto-repeat (holding a key would
- * re-arm it on every repeat, one launch each), not a system key (volume,
- * media, back, call — pressed at the device, not at the page), and not
- * a modifier on its own (Shift or Ctrl isn't a key the page acts on).
- * Chromium grants activation on the same terms.
+ * Whether a key event is input the page acts on — recorded by the
+ * [UserGestureLatch] ([UserGestureLatch.onInputStart]) for the question
+ * of whose input it was: a press or auto-repeat of a key that reaches
+ * the page. Not a system key (volume, media, back, call — pressed at
+ * the device, not at the page), and not a modifier on its own (Shift or
+ * Ctrl isn't a key the page acts on). An auto-repeat counts: each is a
+ * trusted `keydown` in the focused frame, and gives that frame a fresh
+ * activation — so a key held in a cross-origin iframe's field keeps the
+ * iframe able to navigate the top frame long after the first press, and
+ * [UserGestureLatch.topDocumentGesture] has to see every repeat (#348
+ * R4-F1).
+ */
+internal fun keyIsPageInput(
+    action: Int,
+    isSystem: Boolean,
+    isModifier: Boolean,
+): Boolean = action == android.view.KeyEvent.ACTION_DOWN && !isSystem && !isModifier
+
+/**
+ * Whether a key event arms the [UserGestureLatch] for one launch
+ * ([UserGestureLatch.onInput]): one fresh press of a key that reaches
+ * the page ([keyIsPageInput]). Not an auto-repeat: holding a key would
+ * re-arm it on every repeat, one launch each.
  */
 internal fun keyArmsGestureLatch(
     action: Int,
     repeatCount: Int,
     isSystem: Boolean,
     isModifier: Boolean,
-): Boolean = action == android.view.KeyEvent.ACTION_DOWN && repeatCount == 0 && !isSystem && !isModifier
+): Boolean = repeatCount == 0 && keyIsPageInput(action, isSystem, isModifier)
 
 /**
  * Whether an accessibility action arms the [UserGestureLatch]. TalkBack's
