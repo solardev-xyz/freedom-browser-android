@@ -220,8 +220,47 @@ class DownloadRequestTest {
 
     @Test
     fun `a name that is one long cluster is still cut, never emptied`() {
-        val name = downloadFileName(null, "https://x.com/e" + "\u0301".repeat(300) + ".txt", null)
-        assertEquals("e" + "\u0301".repeat(115) + ".txt", name)
+        // A real name can't get here any more (marks are capped at three a
+        // letter), but a cut inside one cluster still keeps the surrogate rule
+        // only rather than cutting to nothing.
+        val oneCluster = "e" + "\u0301".repeat(300)
+        assertEquals(116, clusterSafeCut(oneCluster, 116))
+        val flag = "\uD83C\uDFF4" + "\uDB40\uDC67".repeat(100) // 🏴 with 100 tags
+        assertEquals(116, clusterSafeCut(flag, 117)) // mid-surrogate: back one
+    }
+
+    @Test
+    fun `a stack of combining marks is capped at three on one letter`() {
+        // ~100 marks on one letter (in the 120-char clamp) paint ink over the prompt's other rows.
+        val zalgo = "a" + "\u0301\u0300\u0302\u0303".repeat(25) + "b.pdf"
+        assertEquals("a\u0301\u0300\u0302b.pdf", sanitizeFileName(zalgo))
+        assertEquals("a\u0301\u0300\u0302b.pdf", downloadFileName(null, "https://x.com/" + java.net.URLEncoder.encode(zalgo, "UTF-8"), null))
+        // An enclosing mark counts too.
+        assertEquals("x\u20DD\u20DD\u20DD.txt", sanitizeFileName("x" + "\u20DD".repeat(50) + ".txt"))
+        // A kept joiner or tag draws nothing, so it doesn't start a new stack…
+        assertEquals("a\u0301\u0301\u200D\u0301.txt", sanitizeFileName("a\u0301\u0301\u200D\u0301\u0301\u0301.txt"))
+        // …but a replaced character does: it is a visible `_` now.
+        assertEquals("a\u0301\u0301\u0301_\u0301\u0301\u0301.txt", sanitizeFileName("a" + "\u0301".repeat(5) + "\u2065" + "\u0301".repeat(5) + ".txt"))
+        // Real text keeps every mark: Vietnamese, Hebrew points, a keycap emoji.
+        for (real in listOf("Ti\u00EA\u0301ng Vi\u00EA\u0323t.txt", "\u05E9\u05C1\u05B8\u05DC\u05D5\u05B9\u05DD.txt", "1\uFE0F\u20E3.png")) {
+            assertEquals(real, sanitizeFileName(real))
+        }
+        // Stored names are capped the same way, and cleaning is idempotent.
+        val once = cleanStoredFileName(zalgo)
+        assertEquals("a\u0301\u0300\u0302b.pdf", once)
+        assertEquals(once, cleanStoredFileName(once))
+    }
+
+    @Test
+    fun `unassigned default-ignorable code points are replaced`() {
+        // They draw nothing: "report<U+2065>.pdf" would look just like "report.pdf".
+        assertEquals("report_.pdf", sanitizeFileName("report\u2065.pdf"))
+        for (cp in listOf(0xFFF0, 0xFFF8, 0xE0000, 0xE0002, 0xE001F, 0xE0080, 0xE01F0, 0xE0FFF)) {
+            assertEquals("a_b.txt", sanitizeFileName("a" + String(Character.toChars(cp)) + "b.txt"))
+        }
+        // The supplementary variation selectors in the same block stay (ideographic variants).
+        val ivs = "\u845B" + String(Character.toChars(0xE0100)) + ".txt" // 葛 + VS17
+        assertEquals(ivs, sanitizeFileName(ivs))
     }
 
     @Test

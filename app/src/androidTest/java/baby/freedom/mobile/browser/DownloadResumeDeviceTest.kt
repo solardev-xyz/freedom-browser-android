@@ -566,4 +566,38 @@ class DownloadResumeDeviceTest {
             assertTrue(shown, shown.startsWith("${stem}_fdp"))
         }
     }
+
+    /**
+     * Rows that ended under such a version — completed, failed,
+     * cancelled — are cleaned by the same sweep, so the downloads list
+     * no longer shows `x<U+202E>fdp.apk` as `xkpa.pdf`.
+     */
+    @Test
+    fun finishedRowsFromBeforeNamesWereCleanedAreListedUnderACleanName() = runBlocking {
+        val dao = baby.freedom.mobile.data.AppDatabase.get(context).downloads()
+        val stem = "legacy-done-${System.nanoTime()}"
+        val ids = listOf(DownloadStatus.COMPLETED, DownloadStatus.FAILED, DownloadStatus.CANCELLED)
+            .mapIndexed { i, status ->
+                dao.insert(
+                    DownloadEntry(
+                        fileName = "$stem$i\u202Efdp.apk",
+                        displayUrl = "https://example.com/x",
+                        sourceUrl = "https://example.com/x",
+                        mimeType = "application/vnd.android.package-archive",
+                        contentUri = null,
+                        status = status,
+                        totalBytes = 10,
+                        receivedBytes = 10,
+                        error = null,
+                        startedAt = System.currentTimeMillis(),
+                        finishedAt = System.currentTimeMillis(),
+                    ),
+                ).also { rows += it }
+            }
+        DownloadManager.newProcessForTest(context)
+        ids.forEachIndexed { i, id ->
+            val row = await("$stem$i") { it.id == id && it.fileName == "$stem${i}_fdp.apk" }
+            assertFalse(row.fileName, row.fileName.contains('\u202E'))
+        }
+    }
 }

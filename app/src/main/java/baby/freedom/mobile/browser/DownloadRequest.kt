@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.wallet.MessageSigning
 import java.math.RoundingMode
 import java.net.URLDecoder
 import java.text.NumberFormat
@@ -267,8 +268,10 @@ internal fun sanitizeFileName(raw: String): String {
 /**
  * Is [cp] a character a file name mustn't carry: C0/C1 controls, the
  * FAT-reserved `"*:<>?|`, a lone surrogate, a line/paragraph separator,
- * or a format character (Cf: the bidi embeddings, overrides, isolates
- * and marks, zero-width spaces, the BOM, soft hyphen …). By code point,
+ * a format character (Cf: the bidi embeddings, overrides, isolates
+ * and marks, zero-width spaces, the BOM, soft hyphen …), or an
+ * unassigned default-ignorable one (U+2065, U+FFF0–FFF8, U+E0000–E0FFF
+ * but for the supplementary variation selectors). By code point,
  * so a supplementary-plane format character (U+E0001) is caught too.
  * ZWJ / ZWNJ and the emoji tag characters (U+E0020–E007F) stay: emoji
  * sequences, flags and Persian / Indic words need them, and they
@@ -277,6 +280,13 @@ internal fun sanitizeFileName(raw: String): String {
 private fun fileNameCharIsHidden(cp: Int): Boolean {
     if (cp < 0x80) return cp < 0x20 || cp == 0x7f || cp.toChar() in "\"*:<>?|"
     if (cp == 0x200C || cp == 0x200D || cp in 0xE0020..0xE007F) return false
+    // Default_Ignorable_Code_Point slots that are unassigned (Cn, so not
+    // caught as format below) yet draw nothing: `report<U+2065>.pdf`
+    // would look just like `report.pdf`. By range rather than by type so
+    // a newer Unicode table assigning one changes nothing; the variation
+    // selectors U+E0100–E01EF (marks, kept for ideographic variants) are
+    // the one part of U+E0000–E0FFF that stays.
+    if (cp == 0x2065 || cp in 0xFFF0..0xFFF8 || cp in 0xE0000..0xE0FFF && cp !in 0xE0100..0xE01EF) return true
     return when (Character.getType(cp).toByte()) {
         Character.CONTROL, Character.FORMAT, Character.SURROGATE,
         Character.LINE_SEPARATOR, Character.PARAGRAPH_SEPARATOR,
@@ -348,19 +358,37 @@ private fun regionalIndicatorsBefore(s: String, end: Int): Int {
 }
 
 /**
- * [name] with every [fileNameCharIsHidden] character replaced by `_`
- * and nothing else changed — [sanitizeFileName]'s core, and how a name
+ * [name] with every [fileNameCharIsHidden] character replaced by `_`,
+ * and combining marks past the [MessageSigning.MAX_STACKED_MARKS]th
+ * on one letter dropped — a stack of a hundred ("Zalgo") paints ink far
+ * above and below its line, over the offer prompt's other rows, since
+ * Compose doesn't clip glyphs to the line box; real text stacks two or
+ * three — and nothing else changed — [sanitizeFileName]'s core, and how a name
  * stored before it replaced format characters (a paused row from an
  * older version) is cleaned when that row is loaded again, without
  * touching a name the user picked any further.
  */
 internal fun cleanStoredFileName(name: String): String {
     val out = StringBuilder(name.length)
+    var marks = 0
     var i = 0
     while (i < name.length) {
         val cp = name.codePointAt(i)
         i += Character.charCount(cp)
-        if (fileNameCharIsHidden(cp)) out.append('_') else out.appendCodePoint(cp)
+        when {
+            fileNameCharIsHidden(cp) -> { out.append('_'); marks = 0 }
+            MessageSigning.isMark(cp) -> {
+                if (marks < MessageSigning.MAX_STACKED_MARKS) out.appendCodePoint(cp)
+                marks++
+            }
+            else -> {
+                out.appendCodePoint(cp)
+                // A kept character that draws nothing (ZWJ, ZWNJ, an emoji
+                // tag) doesn't end the stack: marks after it still pile
+                // onto the same letter.
+                if (cp != 0x200C && cp != ZWJ && cp !in 0xE0020..0xE007F) marks = 0
+            }
+        }
     }
     return out.toString()
 }

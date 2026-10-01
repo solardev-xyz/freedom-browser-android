@@ -40,6 +40,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -286,13 +287,15 @@ class DownloadManager private constructor(context: Context) {
                 )
             }
         }
-        // A paused row from before names were cleaned of bidi/format
-        // characters keeps the name it was listed under — and is saved
-        // under it on resume — so it is cleaned here, before either.
-        val pausedRows = dao.withStatus(DownloadStatus.PAUSED).map { row ->
+        // A row from before names were cleaned of bidi/format characters
+        // keeps the name it was listed under — a finished one in the
+        // downloads list, a paused one also the name it is saved under on
+        // resume — so every row is cleaned here, before either is read.
+        for (row in dao.all().first()) {
             val clean = cleanStoredFileName(row.fileName)
-            if (clean == row.fileName) row else row.copy(fileName = clean).also { dao.update(it) }
+            if (clean != row.fileName) dao.update(row.copy(fileName = clean))
         }
+        val pausedRows = dao.withStatus(DownloadStatus.PAUSED)
         val paused = pausedRows.mapTo(HashSet()) { it.id }
         for (file in partialDir.listFiles().orEmpty()) {
             val id = file.name.removeSuffix(PARTIAL_SUFFIX).toLongOrNull()
