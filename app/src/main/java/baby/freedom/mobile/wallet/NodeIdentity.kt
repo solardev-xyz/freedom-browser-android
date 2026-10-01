@@ -79,11 +79,24 @@ class NodeIdentity internal constructor(
 
     /** kubo `Identity.PrivKey`: base64 of the libp2p PrivateKey protobuf (`priv ‖ pub`). Secret. */
     internal fun libp2pPrivateKey(): String {
-        val proto = byteArrayOf(0x08, 0x01, 0x12, 0x40) + ipfsKey + ipfsPublicKey
-        return try {
-            Base64.getEncoder().encodeToString(proto)
+        // One array at its final size: `ByteArray.plus` would leave an
+        // unzeroed intermediate holding the private key (#339).
+        val proto = ByteArray(PRIV_PROTO_HEADER.size + 64)
+        PRIV_PROTO_HEADER.copyInto(proto)
+        ipfsKey.copyInto(proto, PRIV_PROTO_HEADER.size)
+        ipfsPublicKey.copyInto(proto, PRIV_PROTO_HEADER.size + 32)
+        // Encode to bytes and build the String ourselves, so the base64
+        // bytes (the key again) can be zeroed too; only the returned
+        // String, which the caller needs, keeps a copy.
+        val encoded = try {
+            Base64.getEncoder().encode(proto)
         } finally {
             proto.fill(0)
+        }
+        return try {
+            String(encoded, Charsets.ISO_8859_1)
+        } finally {
+            encoded.fill(0)
         }
     }
 
@@ -125,6 +138,9 @@ class NodeIdentity internal constructor(
         const val IPFS_PATH = "m/44'/73405'/0'/0'/0'"
         const val RADICLE_PATH = "m/44'/73404'/0'/0'/0'"
         private const val SWARM_NETWORK_ID = 1
+
+        /** libp2p PrivateKey protobuf header: `KeyType = Ed25519`, `Data` of 64 bytes. */
+        private val PRIV_PROTO_HEADER = byteArrayOf(0x08, 0x01, 0x12, 0x40)
 
         /** Derives every node identity from a 64-byte BIP-39 seed (see [Vault.withSeed]). */
         fun derive(seed: ByteArray): NodeIdentity = NodeIdentity(
