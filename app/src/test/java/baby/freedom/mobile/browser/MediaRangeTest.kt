@@ -237,4 +237,41 @@ class MediaRangeTest {
             assertEquals(0L, budget.used)
         }
     }
+
+    @Test
+    fun `no room for the first chunk streams without waiting on a byte (R4-M3)`() {
+        val untouched = object : java.io.InputStream() {
+            override fun read(): Int = throw AssertionError("read the body")
+            override fun read(b: ByteArray, off: Int, len: Int): Int = throw AssertionError("read the body")
+        }
+        val full = Budget(1_000)
+        assertEquals(BoundedRead.NoRoom, readBounded(untouched, 1_000_000, -1, full::reserve, full::release, full::reserveFree))
+        assertEquals(0L, full.used)
+    }
+
+    @Test
+    fun `a failure to close after the read keeps the body and its reservation (R4-M4)`() {
+        var closed = 0
+        val stream = object : java.io.ByteArrayInputStream(ByteArray(1_000) { 5 }) {
+            override fun close() {
+                closed++
+                throw java.io.IOException("close")
+            }
+        }
+        val budget = Budget(Long.MAX_VALUE)
+        val got = readThenClose(stream) {
+            readBounded(it, 10_000, 1_000, budget::reserve, budget::release, budget::reserveFree)
+        }
+        assertEquals(1, closed)
+        assertEquals(1_000L, (got as BoundedRead.Bytes).body.size)
+        assertEquals(1_000L, budget.used)
+        // A failing read is still thrown, and closes the stream.
+        try {
+            readThenClose(stream) { throw java.io.IOException("read") }
+            fail("expected IOException")
+        } catch (e: java.io.IOException) {
+            assertEquals("read", e.message)
+        }
+        assertEquals(2, closed)
+    }
 }

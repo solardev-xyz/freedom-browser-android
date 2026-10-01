@@ -135,7 +135,9 @@ private const val READ_CHUNK = 64 * 1024
  *   full chunk's successor can't be reserved, one byte is read to tell
  *   "more to come" ([BoundedRead.NoRoom]) from "that was the end" (the
  *   body, with no reservation needed — R3-M1: a body that is an exact
- *   multiple of [READ_CHUNK] would otherwise be thrown away whole). The
+ *   multiple of [READ_CHUNK] would otherwise be thrown away whole) —
+ *   unless no chunk was read yet, which is [BoundedRead.NoRoom] at once
+ *   (R4-M3: the body is streamed rather than waiting on a byte). The
  *   last chunk is trimmed only if [reserveFree] — which must never evict
  *   a buffered body — has room for its copy (R3-M2): saving under one
  *   chunk is never worth a body that would then be downloaded again.
@@ -191,6 +193,10 @@ internal fun readBounded(
             }
             if (lastFill == READ_CHUNK) {
                 if (!reserve(READ_CHUNK.toLong())) {
+                    // No room for even the first chunk: streamed, without
+                    // waiting on this full GET's first byte to learn
+                    // whether the body is empty (R4-M3).
+                    if (total == 0L) return BoundedRead.NoRoom
                     // The chunks so far are full: the body may end right
                     // here, and then it is whole with nothing more to hold.
                     val next = input.read()
@@ -227,5 +233,24 @@ internal fun readBounded(
     } catch (t: Throwable) {
         release(held)
         throw t
+    }
+}
+
+/**
+ * [block]'s answer on [input], which is then closed. A failure to close
+ * is ignored rather than thrown (R4-M4): the body is already in hand, and
+ * throwing would lose it together with the budget it holds — a
+ * [BoundedRead.Bytes]' reservation would never be given back. A failure
+ * in [block] itself is thrown as ever.
+ */
+internal inline fun <T> readThenClose(input: InputStream, block: (InputStream) -> T): T {
+    try {
+        return block(input)
+    } finally {
+        try {
+            input.close()
+        } catch (_: IOException) {
+        } catch (_: RuntimeException) {
+        }
     }
 }

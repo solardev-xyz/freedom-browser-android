@@ -399,12 +399,25 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * body is fetched again rather than served from the Range buffer,
      * and the gateway is asked not to answer from a cache. Later
      * requests for the same URL (a video's seeks) use what that fetch
-     * buffered. False for every other document, in this tab or any
-     * other.
+     * buffered — or, for a media body too large or with no room to
+     * buffer, are streamed past the gateway's cache as well
+     * ([fetchedFresh], R4-M2). False for every other document, in this
+     * tab or any other.
      */
     internal fun takeFreshFetch(generation: Int, target: String): Boolean {
         val doc = freshDocument ?: return false
         return doc.generation == generation && doc.fetched.add(target)
+    }
+
+    /**
+     * Has the Hard-reloaded document of load [generation] already fetched
+     * [target] fresh ([takeFreshFetch])? Its later requests for it that
+     * nothing fresh was buffered for — a streamed video's seeks — still
+     * go past the gateway's cache (R4-M2). False for every other document.
+     */
+    internal fun fetchedFresh(generation: Int, target: String): Boolean {
+        val doc = freshDocument ?: return false
+        return doc.generation == generation && target in doc.fetched
     }
 
     /**

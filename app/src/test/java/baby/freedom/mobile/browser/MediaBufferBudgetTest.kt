@@ -132,4 +132,54 @@ class MediaBufferBudgetTest {
         small.load("${url}y", fresh = false) { body(20) }
         assertEquals(20L, small.usedBytes)
     }
+
+    @Test
+    fun `a reservation that can't fit evicts nothing (R4-M1)`() {
+        val buffer = buffer(64)
+        assertTrue(buffer.reserve(10))
+        val a = buffer.load("${url}a", fresh = false) { body(10) }
+        // B and C in flight.
+        assertTrue(buffer.reserve(30))
+        assertTrue(buffer.reserve(20))
+        // D's 30 couldn't fit even with A gone: refused, and A stays.
+        assertTrue(!buffer.reserve(30))
+        assertEquals(60L, buffer.usedBytes)
+        assertEquals(14L, buffer.obtainableBytes)
+        assertSame(a, buffer.load("${url}a", fresh = false) { error("a was evicted") })
+        // 14 fits once A goes: then it does.
+        assertTrue(buffer.reserve(14))
+        assertEquals(64L, buffer.usedBytes)
+    }
+
+    @Test
+    fun `a stored marker is refetched only once there could be room (R4-M3)`() {
+        val unbuffered = "unbuffered"
+        var fetches = 0
+        val buffer = MediaBodyBuffer<Any>(
+            maxBytes = 100,
+            sizeOf = { (it as? ByteArray)?.size?.toLong() ?: 0L },
+            // The fetch's own marker is what its request sees; the buffer
+            // keeps a plain one.
+            stored = { if (it is Pair<*, *>) unbuffered else it },
+            refetch = { b, obtainable -> b === unbuffered && obtainable >= 50 },
+        )
+        assertTrue(buffer.reserve(60)) // a read in flight
+        val first = buffer.load(url, fresh = false) { fetches++; "fresh" to unbuffered }
+        assertTrue(first is Pair<*, *>)
+        // Still no room for 50: answered from the buffer, no new GET.
+        repeat(3) { assertSame(unbuffered, buffer.load(url, fresh = false) { error("refetched") }) }
+        assertEquals(1, fetches)
+        // The read lands as a buffered body: evictable, so there's room.
+        buffer.load("${url}other", fresh = false) { body(60) }
+        assertEquals(100L, buffer.obtainableBytes)
+        val again = buffer.load(url, fresh = false) {
+            fetches++
+            assertTrue(buffer.reserve(50))
+            body(50)
+        }
+        assertEquals(2, fetches)
+        assertTrue(again is ByteArray)
+        assertSame(again, buffer.load(url, fresh = false) { error("refetched") })
+        assertEquals(50L, buffer.usedBytes) // the 60 was evicted for it
+    }
 }

@@ -3760,6 +3760,7 @@ private fun buildRefreshableWebView(
                         // the interceptor's caches — this tab's, this
                         // document's only (#262).
                         freshFetch = { target -> state.takeFreshFetch(generation, target) },
+                        freshDocument = { target -> state.fetchedFresh(generation, target) },
                         private = state.private,
                     ) { served ->
                         noteMainFrameContentLoad(view, state, generation, served)
@@ -5634,6 +5635,12 @@ internal fun interceptVirtualRequest(
     assertedProtocol: (name: String) -> String? = { null },
     onchain: OnchainAppTab? = null,
     freshFetch: (target: String) -> Boolean = { false },
+    /**
+     * Whether [target] was already fetched fresh for this request's
+     * document — a Hard reload's (#262) — so a streamed media request
+     * for it goes past the gateway's cache too (R4-M2).
+     */
+    freshDocument: (target: String) -> Boolean = { false },
     /** Asked for by a private tab (#86) — or its profile's service workers. */
     private: Boolean = false,
     onMainFrameRoot: (ContentRoot?) -> Unit = {},
@@ -5661,7 +5668,7 @@ internal fun interceptVirtualRequest(
         RadApi.intercept(req, url)
             ?: interceptOnchainAppRequest(req, url, onchain)
             ?: siteDataCleanupFor(req, url, tab, private)
-            ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, onMainFrameRoot, private)
+            ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, freshDocument, onMainFrameRoot, private)
     } catch (t: Throwable) {
         Log.e(LOG_TAG, "interceptor failed for $url", t)
         syntheticResponse(502, "Bad Gateway", "The browser couldn't serve this request.")
@@ -5779,6 +5786,7 @@ private fun interceptVirtualRequestFor(
     incoming: EnsDocumentPins.Page?,
     assertedProtocol: (name: String) -> String?,
     freshFetch: (target: String) -> Boolean,
+    freshDocument: (target: String) -> Boolean,
     onMainFrameRoot: (ContentRoot?) -> Unit,
     private: Boolean,
 ): WebResourceResponse? {
@@ -5911,7 +5919,7 @@ private fun interceptVirtualRequestFor(
         // own cache either.
         val fresh = freshFetch(target)
         val response = if (isMediaLikeUrl(target)) {
-            fetchMediaWithRangeSupport(req, target, url, fresh)
+            fetchMediaWithRangeSupport(req, target, url, fresh, !fresh && freshDocument(target))
         } else {
             fetchWithRetry(req, target, url, fresh)
         }
@@ -5995,12 +6003,19 @@ internal fun sweptOrigins(
 // requests for the same file don't re-fetch it (see [MediaBodyBuffer]).
 // A body past [MEDIA_BUFFER_MAX_BYTES] is remembered as [MediaBody.TooLarge]
 // instead, and streamed from the gateway on every request (#355). A body
-// the shared budget had no room for is [MediaBody.Unbuffered]: streamed
-// for this request only, and tried again for the next.
+// the shared budget had no room for is [MediaBody.Unbuffered]: streamed,
+// and fetched for buffering again only once the budget could fit a body
+// of any bufferable size (R4-M3) — until then a seek streams straight
+// away rather than first opening a full GET that has no room to land.
+// A streamed marker's [MediaBody.Streamed.noCache] is whether the fetch
+// that made it went past the caches: the requests handed that very
+// marker (it and any joined to it) stream past them too (R4-M2); the
+// buffered copy says false, so other documents don't.
 private sealed class MediaBody {
     class Bytes(val bytes: MediaBytes, val mime: String) : MediaBody()
-    object TooLarge : MediaBody()
-    object Unbuffered : MediaBody()
+    sealed class Streamed(val noCache: Boolean) : MediaBody()
+    class TooLarge(noCache: Boolean) : Streamed(noCache)
+    class Unbuffered(noCache: Boolean) : Streamed(noCache)
 }
 
 /**
@@ -6022,7 +6037,16 @@ private const val MEDIA_BUFFER_BUDGET_BYTES = 64L * 1024 * 1024
 private val mediaBodies = MediaBodyBuffer<MediaBody>(
     maxBytes = MEDIA_BUFFER_BUDGET_BYTES,
     sizeOf = { (it as? MediaBody.Bytes)?.bytes?.held ?: 0L },
-    keep = { it !is MediaBody.Unbuffered },
+    stored = {
+        when (it) {
+            is MediaBody.Bytes -> it
+            is MediaBody.TooLarge -> if (it.noCache) MediaBody.TooLarge(false) else it
+            is MediaBody.Unbuffered -> if (it.noCache) MediaBody.Unbuffered(false) else it
+        }
+    },
+    refetch = { body, obtainable ->
+        body is MediaBody.Unbuffered && obtainable >= MEDIA_BUFFER_MAX_BYTES
+    },
 )
 
 private fun loadMediaBody(
@@ -6111,13 +6135,15 @@ private fun tryLoadMediaBody(
         }
         if (conn.contentLengthLong > MEDIA_BUFFER_MAX_BYTES) {
             Log.i(LOG_TAG, "media too large to buffer: $targetUrl bytes=${conn.contentLengthLong}")
-            return MediaLoadResult.Ok(MediaBody.TooLarge)
+            return MediaLoadResult.Ok(MediaBody.TooLarge(noCache))
         }
         // Every array is reserved against the shared budget before it is
         // allocated; no length (chunked) is read in bounded chunks. A body
         // longer than its Content-Length comes back TooLarge: remembered,
         // and streamed from then on rather than downloaded again.
-        val read = conn.inputStream.use {
+        // A failure to close the stream once the body is read is ignored,
+        // or the body's reservation would be lost with it (R4-M4).
+        val read = readThenClose(conn.inputStream) {
             readBounded(
                 it,
                 MEDIA_BUFFER_MAX_BYTES,
@@ -6131,11 +6157,11 @@ private fun tryLoadMediaBody(
             is BoundedRead.Bytes -> read.body
             BoundedRead.TooLarge -> {
                 Log.i(LOG_TAG, "media too large to buffer: $targetUrl")
-                return MediaLoadResult.Ok(MediaBody.TooLarge)
+                return MediaLoadResult.Ok(MediaBody.TooLarge(noCache))
             }
             BoundedRead.NoRoom -> {
                 Log.i(LOG_TAG, "media buffer full, streaming: $targetUrl")
-                return MediaLoadResult.Ok(MediaBody.Unbuffered)
+                return MediaLoadResult.Ok(MediaBody.Unbuffered(noCache))
             }
         }
         val rawCt = conn.contentType
@@ -6186,13 +6212,19 @@ private fun fetchMediaWithRangeSupport(
     targetUrl: String,
     originalUrl: String,
     fresh: Boolean = false,
+    freshDocument: Boolean = false,
 ): WebResourceResponse? {
     val body = when (val loaded = loadMediaBody(req, targetUrl, fresh) ?: return null) {
         is MediaBody.Bytes -> loaded
-        // Streamed instead; a Hard reload's still past the gateway's cache,
-        // with the media path's longer read timeout for slow chunks.
-        MediaBody.TooLarge, MediaBody.Unbuffered ->
-            return fetchWithRetry(req, targetUrl, originalUrl, fresh, MEDIA_READ_TIMEOUT_MS)
+        // Streamed instead, with the media path's longer read timeout for
+        // slow chunks. A Hard-reloaded document's requests stream past the
+        // gateway's cache every time, not just its first (R4-M2): nothing
+        // fresh was buffered for its later ones (seeks) to be served from.
+        is MediaBody.Streamed -> return fetchWithRetry(
+            req, targetUrl, originalUrl,
+            fresh || freshDocument || loaded.noCache,
+            MEDIA_READ_TIMEOUT_MS,
+        )
     }
     val total = body.bytes.size
     // Page-controlled: [byteRangeFor] never throws, whatever it says.

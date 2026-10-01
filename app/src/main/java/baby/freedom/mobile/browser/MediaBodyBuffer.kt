@@ -37,7 +37,12 @@ import java.util.concurrent.ExecutionException
  * buffer" marker) count only toward [maxEntries], which is set well
  * above the number of real bodies the byte budget allows, so a marker
  * doesn't push a real body out. A body [keep] refuses is handed back to
- * its request but never buffered.
+ * its request but never buffered; one it keeps is buffered as [stored]
+ * of it (same [sizeOf]), so a marker can drop what only its own request
+ * should see. A buffered body [refetch] judges stale — given the bytes a
+ * new read could get by evicting every buffered body ([obtainableBytes])
+ * — is fetched again instead of answered (R4-M3: a "no room right now"
+ * marker, once there is room).
  */
 internal class MediaBodyBuffer<B : Any>(
     private val maxEntries: Int = 64,
@@ -45,6 +50,8 @@ internal class MediaBodyBuffer<B : Any>(
     private val maxBytes: Long = Long.MAX_VALUE,
     private val sizeOf: (B) -> Long = { 0L },
     private val keep: (B) -> Boolean = { true },
+    private val stored: (B) -> B = { it },
+    private val refetch: (body: B, obtainable: Long) -> Boolean = { _, _ -> false },
 ) {
     // Bytes held by buffered bodies plus every outstanding reservation.
     private var used = 0L
@@ -61,12 +68,15 @@ internal class MediaBodyBuffer<B : Any>(
      * Reserve [bytes] of the budget for a body being read, evicting the
      * least recently used buffered bodies to make room. False (nothing
      * reserved) if even an empty buffer couldn't fit them alongside the
-     * other reads in flight: the caller should not buffer then.
+     * other reads in flight: the caller should not buffer then, and
+     * nothing is evicted for it (R4-M1) — a buffered body thrown out for a
+     * reservation that fails anyway would only be downloaded again.
      */
     @Synchronized
     fun reserve(bytes: Long): Boolean {
         if (bytes < 0) return false
         if (used + bytes > maxBytes) {
+            if (bytes > obtainable()) return false
             val it = bodies.entries.iterator()
             while (used + bytes > maxBytes && it.hasNext()) {
                 val size = sizeOf(it.next().value)
@@ -80,6 +90,14 @@ internal class MediaBodyBuffer<B : Any>(
         used += bytes
         return true
     }
+
+    // Free bytes plus every buffered body's: what a reservation could get
+    // by evicting them all, the reads in flight being untouchable.
+    private fun obtainable(): Long = maxBytes - used + bodies.values.sumOf { sizeOf(it) }
+
+    /** What [reserve] could get right now by evicting every buffered body. */
+    @get:Synchronized
+    val obtainableBytes: Long get() = obtainable()
 
     /**
      * Reserve [bytes] only if they fit beside what is already held,
@@ -141,7 +159,11 @@ internal class MediaBodyBuffer<B : Any>(
                 freshFetches[url] = mine
                 joined = null
             } else {
-                bodies[url]?.let { return it }
+                bodies[url]?.let { held ->
+                    if (!refetch(held, obtainable())) return held
+                    bodies.remove(url)
+                    used -= sizeOf(held)
+                }
                 epoch = epochs[url]
                 mine = null
                 joined = freshFetches[url]
@@ -168,7 +190,8 @@ internal class MediaBodyBuffer<B : Any>(
                     if (unchanged && keep(body)) {
                         // A parallel non-fresh fetch of the same URL may
                         // have buffered first: its body goes, with its bytes.
-                        bodies.put(url, body)?.let { if (it !== body) used -= sizeOf(it) }
+                        val kept = stored(body)
+                        bodies.put(url, kept)?.let { if (it !== kept) used -= sizeOf(it) }
                     } else {
                         used -= sizeOf(body)
                     }
