@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
 import kotlin.concurrent.write
@@ -176,14 +177,16 @@ class IpfsNode internal constructor(
                 releaseHandle(before = gen)
                 // Another instance's node on this data dir (an earlier
                 // off → on's) may still be freeing: wait for it to be gone.
-                dataDirLease.acquireUninterruptibly()
+                // Only while this launch is still current: a superseded one
+                // (a stop, or a newer launch that already got [nodeLock]
+                // first and published its node — which holds the lease)
+                // must give [nodeLock] back at once, never park on the
+                // lease holding it, or the next release (which needs
+                // [nodeLock] to free that node and so return the lease)
+                // waits on this launch forever.
+                if (!acquireLeaseWhileCurrent(gen)) return@launch
                 var node = 0L
                 try {
-                    // A stop while this waited: never make the node.
-                    if (synchronized(stateLock) { generation != gen }) {
-                        dataDirLease.release()
-                        return@launch
-                    }
                     node = ops.nodeNew(config.dataDir, 0L)
                     if (node == 0L) error("freedom_ipfs_node_new_with_data_dir failed")
                     // The gateway starts before the node is published, so
@@ -338,6 +341,37 @@ class IpfsNode internal constructor(
         freeNode(node)
     }
 
+    /**
+     * Take [dataDirLease] for the launch of generation [gen], or false —
+     * without it — once a [start]/[stop] has superseded that launch. Polls
+     * so a launch waiting on another instance's node notices it went stale
+     * and lets [nodeLock] go instead of holding it for the whole wait.
+     */
+    private fun acquireLeaseWhileCurrent(gen: Long): Boolean {
+        // Uninterruptible like the plain acquire it replaces: an interrupt
+        // is kept for the caller, never thrown out of the launch.
+        var interrupted = false
+        try {
+            while (true) {
+                if (synchronized(stateLock) { generation != gen }) return false
+                val got = try {
+                    dataDirLease.tryAcquire(LEASE_POLL_MS, TimeUnit.MILLISECONDS)
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                    false
+                }
+                if (got) {
+                    // A stop while this waited: never make the node.
+                    if (synchronized(stateLock) { generation == gen }) return true
+                    dataDirLease.release()
+                    return false
+                }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
     /** Stop [node]'s gateway and free it, then give back the [dataDirLease] its launch took. */
     private fun freeNode(node: Long) {
         try {
@@ -379,6 +413,9 @@ class IpfsNode internal constructor(
 
     companion object {
         private const val TAG = "IpfsNode"
+
+        /** How often a launch waiting on [dataDirLease] rechecks it's still current. */
+        private const val LEASE_POLL_MS = 50L
 
         private val leases = ConcurrentHashMap<String, Semaphore>()
 

@@ -24,6 +24,7 @@ class IpfsNodeTest {
         /** [enterForeground] blocks until this opens; open by default. */
         @Volatile var releaseForeground = CountDownLatch(0)
         private val live: MutableSet<Long> = Collections.synchronizedSet(mutableSetOf())
+        fun liveCount() = live.size
 
         /** A call on a handle that was never made or was already freed: a use-after-free on the device. */
         val stale: MutableList<String> = Collections.synchronizedList(mutableListOf())
@@ -290,6 +291,41 @@ class IpfsNodeTest {
         assertEquals(emptyList<String>(), ops.overlapping.toList())
         assertEquals(emptyList<String>(), ops.stale.toList())
         fresh.dispose()
+    }
+
+    @Test
+    fun `out-of-order launches never park a stale one on the lease, so every node is freed`() {
+        // stop, start, stop, start while a call holds node 1: launches 3 and
+        // 5 race for nodeLock. If 5 wins it publishes node 2 (holding the
+        // lease); stale launch 3 must then give nodeLock back rather than
+        // wait on the lease, or the next stop's release (which needs
+        // nodeLock) never frees node 2.
+        repeat(30) { round ->
+            val ops = FakeOps().apply { releaseForeground = CountDownLatch(1) }
+            val node = IpfsNode(IpfsNode.Config(dataDir = "/data/ipfs-${java.util.UUID.randomUUID()}"), ops)
+            node.start()
+            awaitStatus(node, IpfsStatus.Running)
+            node.enterForeground()
+            assertTrue(ops.foregroundEntered.await(5, TimeUnit.SECONDS))
+            node.stop()
+            node.start()
+            node.stop()
+            node.start()
+            Thread.sleep(50)
+            ops.releaseForeground.countDown()
+            awaitStatus(node, IpfsStatus.Running)
+            node.stop()
+            val until = System.currentTimeMillis() + 5_000
+            while (ops.liveCount() > 0 && System.currentTimeMillis() < until) Thread.sleep(5)
+            val calls = ops.calls.toList()
+            assertEquals("round $round: $calls", 0, ops.liveCount())
+            assertEquals("round $round: $calls", emptyList<String>(), ops.overlapping.toList())
+            assertEquals("round $round: $calls", emptyList<String>(), ops.stale.toList())
+            // The instance still starts after all that: nothing is wedged.
+            node.start()
+            awaitStatus(node, IpfsStatus.Running)
+            node.dispose()
+        }
     }
 
     @Test
