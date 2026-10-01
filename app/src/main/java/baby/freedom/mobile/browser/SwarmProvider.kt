@@ -358,6 +358,13 @@ class SwarmProvider(
         val payload = payloadOf(data) ?: fail("data must be a string, Uint8Array, or ArrayBuffer")
         if (payload.size > MAX_DATA_BYTES) tooLarge("Payload exceeds maximum size of $MAX_DATA_BYTES bytes", MAX_DATA_BYTES, payload.size)
         val name = (params.opt("name") as? String)?.takeIf { it.isNotEmpty() }
+        // The sheet shows it in one row, every hiding code point written
+        // out as `<U+XXXX>`: an uncapped name (a request may carry
+        // millions of characters) would be laid out on the main thread
+        // when the sheet comes up. A file name needs no more than this.
+        if (name != null && name.toByteArray(Charsets.UTF_8).size > MAX_NAME_BYTES) {
+            fail("name exceeds $MAX_NAME_BYTES UTF-8 bytes", "invalid_name")
+        }
         preflightOrFail()
         approvePublish(origin, calls, SwarmAsk.Publish(origin, SwarmAsk.Publish.Kind.Data, payload.size.toLong(), contentType, name, emptyList()))
         val batch = batchFor(payload.size.toLong())
@@ -1332,6 +1339,9 @@ class SwarmProvider(
 
         const val MAX_DATA_BYTES = 10 * 1024 * 1024
         const val MAX_CONTENT_TYPE_CHARS = 256
+
+        /** A publishData `name`: a file name's usual 255-byte limit. */
+        const val MAX_NAME_BYTES = 255
         const val MAX_FILES_BYTES = 50 * 1024 * 1024
         const val MAX_FILE_COUNT = 100
         const val MAX_PATH_BYTES = 100

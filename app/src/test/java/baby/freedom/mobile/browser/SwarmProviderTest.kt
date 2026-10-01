@@ -1597,6 +1597,20 @@ class SwarmProviderTest {
     }
 
     @Test
+    fun `a publish name too long for one sheet row is refused before the sheet`() {
+        connect()
+        for (bad in listOf("\u200B".repeat(100), "x".repeat(SwarmProvider.MAX_NAME_BYTES + 1), "\u200B".repeat(10_000_000))) {
+            val e = err(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", "text/plain").put("name", bad)))
+            assertEquals(SwarmProvider.INVALID_PARAMS, e.code)
+            assertEquals("invalid_name", e.reason)
+        }
+        assertTrue(asked.isEmpty())
+        assertTrue(node.uploads().isEmpty())
+        ok(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", "text/plain").put("name", "x".repeat(SwarmProvider.MAX_NAME_BYTES))))
+        ok(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", "text/plain").put("name", "ü".repeat(SwarmProvider.MAX_NAME_BYTES / 2))))
+    }
+
+    @Test
     fun `an Allow tapped after the user disconnected the site does nothing and gives nothing back`() {
         connect()
         // The wallet page's Disconnect while the sheet is up.
