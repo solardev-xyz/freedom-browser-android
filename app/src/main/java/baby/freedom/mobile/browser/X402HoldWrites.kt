@@ -16,7 +16,10 @@ import kotlinx.coroutines.selects.select
  * store was cleared ([cleared]: Remove wallet) is dropped once that clear
  * has landed, not written back after it; while the clear is still being
  * written it waits, and if the clear fails it is written after all
- * (#347 R2-M1).
+ * (#347 R2-M1). One sent without [send]'s `retry` (a lift of a site not
+ * known to have a kept hold) is tried once and dropped if it fails, so a
+ * broken store isn't sent a write retried forever for every site the user
+ * visits (#380 R1-M1).
  */
 internal class X402HoldWrites(
     private val write: suspend (origin: String, held: Boolean) -> Boolean,
@@ -29,13 +32,17 @@ internal class X402HoldWrites(
     private val cleared: (era: Long) -> Boolean? = { false },
     private val onFailed: (held: Boolean) -> Unit = {},
 ) {
-    private class Write(val held: Boolean, val era: Long)
+    private class Write(val held: Boolean, val era: Long, val retry: Boolean)
 
     private val queue = Channel<Pair<String, Write>>(Channel.UNLIMITED)
 
-    fun send(origin: String, held: Boolean) {
-        queue.trySend(origin to Write(held, era()))
+    fun send(origin: String, held: Boolean, retry: Boolean = true) {
+        queue.trySend(origin to Write(held, era(), retry))
     }
+
+    /** [w] replacing [old], for the same site: a retried write of the same kind stays retried. */
+    private fun merged(old: Write?, w: Write): Write =
+        if (old != null && old.held == w.held && old.retry && !w.retry) Write(w.held, w.era, true) else w
 
     /** Writes until [close]. */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -59,12 +66,10 @@ internal class X402HoldWrites(
             }
             if (next != null) {
                 val (origin, w) = next.getOrNull() ?: return
-                pending.remove(origin)
-                pending[origin] = w
+                pending[origin] = merged(pending.remove(origin), w)
                 while (true) {
                     val (o, more) = queue.tryReceive().getOrNull() ?: break
-                    pending.remove(o)
-                    pending[o] = more
+                    pending[o] = merged(pending.remove(o), more)
                 }
             }
             val failedBefore = pending.isNotEmpty() && next == null
@@ -77,6 +82,9 @@ internal class X402HoldWrites(
                     // A clear is being written: try again once it has landed or failed.
                     null -> Unit
                     false -> if (write(origin, w.held)) {
+                        it.remove()
+                    } else if (!w.retry) {
+                        // One try only: dropped, quietly.
                         it.remove()
                     } else {
                         if (!failed) onFailed(w.held)

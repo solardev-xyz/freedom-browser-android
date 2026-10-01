@@ -72,8 +72,14 @@ internal class X402Flow<D : Any>(
     private val originOf: (String) -> String?,
     /** [origin] was put on hold: keep it across restarts (#347). */
     private val onHold: (origin: String) -> Unit = {},
-    /** [origin]'s hold, if it has one kept, is lifted (#347). */
-    private val onLift: (origin: String) -> Unit = {},
+    /**
+     * [origin]'s hold, if it has one kept, is lifted (#347). [sure]: it's
+     * known to have one — a hold this run took, or one [restore] read back
+     * — so the lift is written until it lands; otherwise (the kept holds
+     * couldn't be read) the site may have none, and one try will do: a
+     * lift that didn't land only asks once more next run (#380 R1-M1).
+     */
+    private val onLift: (origin: String, sure: Boolean) -> Unit = { _, _ -> },
 ) {
     private class Detection<D>(val url: String, val value: D)
 
@@ -287,8 +293,12 @@ internal class X402Flow<D : Any>(
         restored = true
         if (kept == null) {
             heldUnknown = true
+            // Lifted before the read: any of them may have been kept.
+            lifted.forEach { onLift(it, false) }
             return
         }
+        // Lifted before the read, and kept: now known to be, written for sure.
+        kept.filter { it in lifted }.forEach { onLift(it, true) }
         held += kept - lifted - held
         lifted.clear()
     }
@@ -300,10 +310,17 @@ internal class X402Flow<D : Any>(
     }
 
     private fun lift(origin: String) {
-        var changed = held.remove(origin)
+        val wasHeld = held.remove(origin)
         // A kept hold this run doesn't know about (yet) is lifted too.
-        if (!restored || heldUnknown) changed = lifted.add(origin) || changed
-        if (changed) onLift(origin)
+        val unknown = (!restored || heldUnknown) && lifted.add(origin)
+        when {
+            wasHeld -> onLift(origin, true)
+            // Not known to be kept: one try, not a write retried for every
+            // site the user visits while the store is broken (#380 R1-M1).
+            unknown && restored -> onLift(origin, false)
+            // Before the read: [restore] writes it if it was kept.
+            else -> Unit
+        }
     }
 
     /**

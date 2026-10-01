@@ -141,7 +141,7 @@ object X402Payments {
         settle = { id, status, httpStatus -> settle(id, status, httpStatus) },
         originOf = ::providerOriginKey,
         onHold = { holdWrites.send(it, held = true) },
-        onLift = { holdWrites.send(it, held = false) },
+        onLift = { origin, sure -> holdWrites.send(origin, held = false, retry = sure) },
     )
     private val random = SecureRandom()
 

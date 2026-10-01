@@ -223,4 +223,42 @@ class X402HoldWritesTest {
             dispatcher.close()
         }
     }
+
+    @Test
+    fun `#380 a lift sent for one try isn't retried, quietly`() = runTest {
+        var failures = 0
+        val w = X402HoldWrites(
+            write = { origin, held ->
+                tries += origin to held
+                !full
+            },
+            onFailed = { failures++ },
+        )
+        val job = launch { w.run() }
+        full = true
+        w.send("a", held = false, retry = false)
+        w.send("b", held = false, retry = false)
+        runCurrent()
+        advanceTimeBy(10 * X402HoldWrites.MAX_RETRY_MS)
+        assertEquals(listOf("a" to false, "b" to false), tries)
+        assertEquals(0, failures)
+        w.close()
+        job.join()
+    }
+
+    @Test
+    fun `#380 a one-try lift doesn't downgrade a retried lift of the same site still waiting`() = runTest {
+        val job = launch { writes.run() }
+        disk += "a"
+        full = true
+        writes.send("a", held = false)
+        runCurrent()
+        writes.send("a", held = false, retry = false)
+        runCurrent()
+        full = false
+        advanceTimeBy(X402HoldWrites.MAX_RETRY_MS + 1)
+        assertEquals(emptySet<String>(), disk)
+        writes.close()
+        job.join()
+    }
 }
