@@ -391,11 +391,17 @@ $code})();
  *
  * A registered host stays for the tab's later loads (Back, a reload, a
  * page its service worker serves), up to [MAX_HOSTS] and [MAX_CHARS] of
- * script, the least recently needed dropped first. What isn't covered,
- * and gets its scriptlets from its next load on: a frame a service
- * worker serves (where `shouldOverrideUrlLoading` isn't asked either),
- * and a frame redirected to a host other than its twin, from a host
- * this tab hasn't loaded a document from before.
+ * script, the least recently needed dropped first — one entry at a
+ * time, so a host can stay while its twin goes; the host's next document
+ * request ([ensureHosts]) adds the twin back, and never drops the host
+ * itself to make room for it. What isn't covered, and gets its
+ * scriptlets from its next load on (via [noteReferer]): a frame a
+ * service worker serves (where `shouldOverrideUrlLoading` isn't asked
+ * either); a frame redirected to a host other than its twin, from a host
+ * this tab hasn't loaded a document from before; and a main-frame form
+ * POST answered with a 307/308 to another host, a hop that keeps the
+ * POST and so reaches neither `shouldOverrideUrlLoading` nor
+ * `shouldInterceptRequest` either.
  *
  * A changed engine or allowlist ([Adblock.scriptletGeneration]) makes
  * every tab rebuild its scripts: the new one is added before the old one

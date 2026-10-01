@@ -3412,12 +3412,12 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): Boolean {
                 val target = request?.url?.toString() ?: return false
-                // "Continue once" on the not-cross-checked ENS warning
-                // (#96): never a load, only a message for the submit
-                // flow, which checks it is this tab's ([EnsGate]).
                 // Scriptlets for the page it's heading to (#318), before a
                 // service worker can answer it unseen by the interceptor.
                 if (request.isForMainFrame) scriptlets?.ensure(target)
+                // "Continue once" on the not-cross-checked ENS warning
+                // (#96): never a load, only a message for the submit
+                // flow, which checks it is this tab's ([EnsGate]).
                 if (EnsGate.continueToken(target) != null) {
                     if (request.isForMainFrame) {
                         // A stale warning (Back, tab restore) re-runs its
