@@ -8,6 +8,10 @@
 # protection, so a red run here does not stop a merge unless `ffi-ref`
 # is made a required check. What actually enforces the pin is the same
 # script as the first step of release.yml, which refuses to build.
+#
+# The `licences` job (#325) checks that app/licences/ lists every crate
+# linked at FFI_REF and what Colibri links at COLIBRI_REF; release.yml
+# runs it too, and won't publish unless it passes.
 
 name: ffi-ref
 
@@ -25,3 +29,65 @@ jobs:
         run: scripts/test-check-ffi-ref.sh
       - name: FFI_REF is a tagged freedom-mobile-ffi release
         run: scripts/check-ffi-ref.sh
+
+  # Open-source licences (#325): app/licences/native.json lists every crate
+  # in libfreedom_mobile_ffi.so at FFI_REF, and bundled.json what libc4.so
+  # links at COLIBRI_REF. The Gradle build checks the pins offline; this
+  # regenerates the crate list and reads Colibri's own pins, so a list
+  # that's stale for the current refs fails here. See app/licences/README.md.
+  licences:
+    name: open-source licences
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read the pins
+        id: pins
+        run: |
+          echo "ffi=$(sed -n 's/^  FFI_REF: *//p' .github/workflows/release.yml)" >> "$GITHUB_OUTPUT"
+          echo "colibri=$(sed -n 's/^  COLIBRI_REF: *//p' .github/workflows/release.yml)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout freedom-mobile-ffi
+        uses: actions/checkout@v4
+        with:
+          repository: solardev-xyz/freedom-mobile-ffi
+          ref: ${{ steps.pins.outputs.ffi }}
+          path: freedom-mobile-ffi
+          fetch-depth: 0
+
+      - name: Checkout colibri-stateless
+        uses: actions/checkout@v4
+        with:
+          repository: corpus-core/colibri-stateless
+          ref: ${{ steps.pins.outputs.colibri }}
+          path: colibri-stateless
+          fetch-depth: 0
+
+      # The pinned release binary (scripts/native-licences.sh checks the
+      # version), checked against the hash published with it.
+      - name: Install cargo-about
+        run: |
+          v=0.9.2
+          f="cargo-about-$v-x86_64-unknown-linux-musl"
+          curl -sSfL -o "$RUNNER_TEMP/$f.tar.gz" "https://github.com/EmbarkStudios/cargo-about/releases/download/$v/$f.tar.gz"
+          echo "9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af  $RUNNER_TEMP/$f.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/$f.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$f" >> "$GITHUB_PATH"
+
+      # As in release.yml's ffi job: the ffi crate's node deps are ssh://
+      # git URLs, all public, fetched over https; and the toolchain its
+      # rust-toolchain.toml names.
+      - name: Rust toolchain and git deps over https
+        working-directory: freedom-mobile-ffi
+        run: |
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          channel="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+
+      - name: The native crate list is current
+        run: scripts/native-licences.sh freedom-mobile-ffi --check
+
+      - name: The Colibri list is current
+        if: ${{ !cancelled() }}
+        run: scripts/check-colibri-licences.sh colibri-stateless

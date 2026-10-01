@@ -24,6 +24,7 @@
     <string name="settings_section_adblock">Ad blocking</string>
     <string name="settings_section_browsing">Browsing data</string>
     <string name="settings_section_permissions">Site permissions</string>
+    <string name="settings_section_downloads">Downloads</string>
     <string name="settings_section_nodes">Nodes</string>
     <string name="settings_section_tor">Tor</string>
     <string name="settings_section_about">About</string>
@@ -194,6 +195,25 @@
     <string name="settings_about_blurb">Loads regular https:// sites plus decentralised content via bzz:// hashes and ENS names (vitalik.eth), served through embedded nodes.</string>
     <string name="settings_version">Version</string>
     <string name="settings_package">Package</string>
+    <!-- SettingsScreen.kt, LicencesPage.kt: Open-source licences (#325) -->
+    <string name="settings_licences">Open-source licences</string>
+    <string name="settings_licences_subtitle">The software and data Freedom is built from, and their licences</string>
+    <!-- Comma-separated words that also find the Open-source licences row in Settings search. -->
+    <string name="settings_licences_keywords">licenses, license, open source, third-party, notices, copyright, credits</string>
+    <string name="licences_title">Open-source licences</string>
+    <string name="licences_search_placeholder">Search components</string>
+    <string name="licences_search_clear">Clear search</string>
+    <string name="licences_intro">Everything below ships inside Freedom. Tap one to read its licence. Web pages are drawn by Android System WebView, which is part of the phone, not of Freedom.</string>
+    <string name="licences_section_android">Android libraries</string>
+    <string name="licences_section_native">Native libraries</string>
+    <string name="licences_section_data">Scripts and filter lists</string>
+    <!-- A section heading with how many components it lists: "Android libraries (119)". -->
+    <string name="licences_section_count">%1$s (%2$d)</string>
+    <string name="licences_no_match">No components match “%1$s”</string>
+    <string name="licences_failed">The licence list couldn’t be read from this build.</string>
+    <string name="licences_detail_id">Package</string>
+    <string name="licences_detail_licence">Licence</string>
+    <string name="licences_detail_source">Source</string>
     <string name="settings_updates_check">Check for updates</string>
     <string name="settings_updates_check_subtitle">Once a day, from GitHub Releases</string>
     <string name="settings_updates_check_now">Check now</string>
@@ -302,4 +322,11 @@
 
     <!-- PageZoom.kt. %1$s: the level, already formatted as a number. -->
     <string name="settings_zoom_level">%1$s%%</string>
+
+    <!-- Settings → Downloads (#322) -->
+    <string name="settings_downloads_ask_where">Ask where to save each file</string>
+    <string name="settings_downloads_ask_where_subtitle_off">Downloads are saved to Download/Freedom</string>
+    <string name="settings_downloads_ask_where_subtitle_on">Choose a name and folder for each download when you confirm it</string>
+    <string name="settings_downloads_ask_where_private">Private tabs always save to Download/Freedom.</string>
+    <string name="settings_downloads_ask_where_keywords">save as, folder, location, download folder</string>
 </resources>

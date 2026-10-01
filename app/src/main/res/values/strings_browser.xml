@@ -95,6 +95,8 @@
     <string name="browser_download_started">Downloading %1$s</string>
     <string name="browser_download_completed">Downloaded %1$s</string>
     <string name="browser_download_failed">Download failed: %1$s</string>
+    <!-- #322: a location picked in Save as that Freedom couldn't keep access to past the app being closed. -->
+    <string name="browser_download_save_to_no_access">Freedom can\'t keep access to that location. Choose another folder.</string>
     <string name="browser_download_details">Details</string>
     <string name="browser_download_background_dropped">A background tab is asking for more downloads than can wait; extras are dropped</string>
     <string name="browser_download_show">Show</string>

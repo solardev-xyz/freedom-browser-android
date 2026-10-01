@@ -2816,20 +2816,65 @@ fun BrowserScreen(
     val downloadNotificationPermission = rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
     ) { }
+    // Called once a (non-private) download is really accepted — after
+    // the Save as picker when there is one, so the two don't stack.
+    val askForDownloadNotifications = {
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED &&
+            !DownloadNotifications.askedForPermission(context)
+        ) {
+            DownloadNotifications.markAskedForPermission(context)
+            downloadNotificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+    // *Ask where to save each file* (#322): Download opens the system's
+    // Save as picker, and the download starts only with the document it
+    // answers. Backing out of the picker leaves the prompt up, to pick
+    // again or cancel. The offer being picked for rides in saved state,
+    // so an activity rebuilt while the picker is up still starts it.
+    val askWhereToSave by remember(context) { NodeSettings.get(context).askWhereToSave }
+        .collectAsState(initial = false)
+    var savingOffer by rememberSaveable { mutableStateOf<Long?>(null) }
+    val saveAsPicker = rememberLauncherForActivityResult(SaveAsContract()) { uri ->
+        val key = savingOffer
+        savingOffer = null
+        when {
+            uri == null -> Unit
+            // A result nothing is waiting for: its document goes again.
+            key == null -> downloads.abandonSaveTo(uri)
+            else -> {
+                downloads.accept(key, uri) {
+                    // No lasting grant: the prompt stays up to pick elsewhere.
+                    android.widget.Toast.makeText(
+                        context, R.string.browser_download_save_to_no_access, android.widget.Toast.LENGTH_LONG,
+                    ).show()
+                }
+                askForDownloadNotifications()
+            }
+        }
+    }
     tabOffers.firstOrNull()?.takeIf { promptTurn == PromptTurn.DownloadOffer }?.let { offer ->
         DownloadOfferDialog(
             offer = offer,
             othersWaiting = tabOffers.size - 1,
             dropped = droppedOffers[activeTabId] ?: 0,
-            onAccept = {
-                downloads.accept(offer.key)
-                if (!offer.private && android.os.Build.VERSION.SDK_INT >= 33 &&
-                    context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
-                    android.content.pm.PackageManager.PERMISSION_GRANTED &&
-                    !DownloadNotifications.askedForPermission(context)
-                ) {
-                    DownloadNotifications.markAskedForPermission(context)
-                    downloadNotificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            onAccept = accept@{
+                // A picker already up (a double tap on Download): one is
+                // enough, and a second's document would have nobody to
+                // save into it.
+                if (savingOffer != null) return@accept
+                val picked = asksWhereToSave(askWhereToSave, offer.private) && try {
+                    saveAsPicker.launch(SaveAsRequest(offer.fileName, offer.mimeType))
+                    savingOffer = offer.key
+                    true
+                } catch (_: android.content.ActivityNotFoundException) {
+                    // No documents UI on this device: save as before.
+                    false
+                }
+                if (!picked) {
+                    downloads.accept(offer.key)
+                    if (!offer.private) askForDownloadNotifications()
                 }
             },
             onDecline = { downloads.decline(offer.key) },

@@ -33,6 +33,9 @@
     <string name="library_download_server_error">Server error %1$s</string>
     <string name="library_download_too_many_redirects">Too many redirects</string>
     <string name="library_download_write_to_downloads_failed">Couldn\'t write to Downloads</string>
+    <!-- #322: the download was to be saved where the user picked in the Save as picker. -->
+    <string name="library_download_write_to_picked_failed">Couldn\'t write to the chosen location</string>
+    <string name="library_download_open_from_files">Freedom can\'t open this file any more. Find it in the folder you saved it to.</string>
 
     <!-- DownloadNotifications.kt -->
     <string name="library_download_channel_name">Downloads</string>
@@ -62,12 +65,16 @@
     <string name="library_downloads_title">Downloads</string>
     <string name="library_downloads_empty_title">No downloads yet</string>
     <string name="library_downloads_empty_hint">Files you download from web and dweb pages will show up here.</string>
+    <string name="library_downloads_search_placeholder">Search downloads</string>
+    <string name="library_downloads_no_matches_title">No matches</string>
+    <string name="library_downloads_no_matches_hint">No download matches that. Search looks at file names and addresses.</string>
     <!-- %1$s: bytes received so far, %2$s: the file's size, e.g. "12.0 MB of 40.0 MB" -->
     <string name="library_download_bytes_of_total">%1$s of %2$s</string>
     <!-- %1$s: bytes received so far, when the size isn't known -->
     <string name="library_download_bytes_downloaded">%1$s downloaded</string>
     <string name="library_download_status_starting">Starting…</string>
     <string name="library_download_status_saving">Saving to Downloads…</string>
+    <string name="library_download_status_saving_picked">Saving to the chosen location…</string>
     <!-- %1$s: the progress line, %2$s: a note such as why it restarted -->
     <string name="library_download_status_with_note">%1$s · %2$s</string>
     <string name="library_download_status_paused">Paused</string>

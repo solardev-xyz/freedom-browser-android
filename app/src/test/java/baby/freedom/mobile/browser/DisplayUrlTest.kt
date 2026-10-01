@@ -181,6 +181,30 @@ class DisplayUrlTest {
     }
 
     @Test
+    fun `the override covers its own origin only, not a host that starts with it`() {
+        val virtual = VirtualOrigin.toVirtualUrl("ens://mysite.eth")!!.removeSuffix("/")
+        val o = BrowserState.Override(baseUrl = virtual, prefix = "mysite.eth")
+        KnownEnsNames.record("bzz://$REF", "mysite.eth", EnsTrust.ASSUMED)
+        // A DNS site whose host merely begins with the name's virtual
+        // host: shown as what it is, not as `bzz://mysite.eth.evil.com/`
+        // under the Swarm badge.
+        assertEquals(
+            "$virtual.evil.com/",
+            DisplayUrl.forActualUrl("$virtual.evil.com/", o),
+        )
+        assertEquals(
+            "${virtual}x.evil.com/login",
+            DisplayUrl.forActualUrl("${virtual}x.evil.com/login", o),
+        )
+        assertNull(protocolBadgeFor(BrowserState(1).apply { url = DisplayUrl.forActualUrl("$virtual.evil.com/", o) }))
+        // The origin itself, with a path, query or fragment, still is.
+        assertEquals("bzz://mysite.eth", DisplayUrl.forActualUrl(virtual, o))
+        assertEquals("bzz://mysite.eth/p", DisplayUrl.forActualUrl("$virtual/p", o))
+        assertEquals("bzz://mysite.eth?q=1", DisplayUrl.forActualUrl("$virtual?q=1", o))
+        assertEquals("bzz://mysite.eth#top", DisplayUrl.forActualUrl("$virtual#top", o))
+    }
+
+    @Test
     fun `withTransport leaves urls and unresolved names alone`() {
         KnownEnsNames.record("bzz://$REF", "known.eth", EnsTrust.ASSUMED)
         assertEquals("bzz://known.eth", DisplayUrl.withTransport("known.eth"))
