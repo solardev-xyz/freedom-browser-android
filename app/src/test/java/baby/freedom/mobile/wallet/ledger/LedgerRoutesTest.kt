@@ -14,7 +14,10 @@ import org.junit.Test
  * every Ledger that may hold the account — plugged-in ones first, the one
  * it was added from first among them, then Bluetooth — and passes over
  * one that can't be reached or doesn't hold it, before anything is shown
- * on it; anything else (a refusal on the device, Cancel) ends it there.
+ * on it — including one that's unplugged, or locked / on another app
+ * (set aside at once unless it's the last, and only waited on after the
+ * others, PR #350 R2-F1); anything else (a refusal on the device, Cancel,
+ * a confirmation timing out) ends it there.
  */
 class LedgerRoutesTest {
     private val nanoSPlusA = Route("usb:/dev/bus/usb/001/002", "Ledger Nano S Plus")
@@ -60,7 +63,7 @@ class LedgerRoutesTest {
     @Test
     fun `a Ledger that doesn't hold the account, or can't be reached, is passed over`() = runBlocking {
         val tried = ArrayList<Route>()
-        val got = Ledger.inTurn(listOf(nanoSPlusA, nanoSPlusB, nanoXRadio)) { r ->
+        val got = Ledger.inTurn(listOf(nanoSPlusA, nanoSPlusB, nanoXRadio)) { r, _ ->
             tried += r
             when (r) {
                 nanoSPlusA -> throw NotThisLedger(ex(LedgerException.Kind.WRONG_DEVICE))
@@ -77,7 +80,7 @@ class LedgerRoutesTest {
         fun failsWith(expected: LedgerException.Kind, vararg reasons: LedgerException.Kind) = runBlocking {
             val routes = reasons.indices.map { Route("r$it", "r$it") }
             try {
-                Ledger.inTurn(routes) { r -> throw NotThisLedger(ex(reasons[routes.indexOf(r)])) }
+                Ledger.inTurn(routes) { r, _ -> throw NotThisLedger(ex(reasons[routes.indexOf(r)])) }
                 fail("succeeded")
             } catch (e: LedgerException) {
                 assertEquals(expected, e.kind)
@@ -89,11 +92,11 @@ class LedgerRoutesTest {
     }
 
     @Test
-    fun `a refusal on the device or a cancel ends it without trying another Ledger`() = runBlocking {
-        for (kind in listOf(LedgerException.Kind.REJECTED, LedgerException.Kind.CANCELLED, LedgerException.Kind.LOCKED)) {
+    fun `a refusal on the device, a cancel or a confirmation timeout ends it without trying another Ledger`() = runBlocking {
+        for (kind in listOf(LedgerException.Kind.REJECTED, LedgerException.Kind.CANCELLED, LedgerException.Kind.TIMEOUT)) {
             val tried = ArrayList<Route>()
             try {
-                Ledger.inTurn(listOf(nanoSPlusA, nanoXRadio)) { r ->
+                Ledger.inTurn(listOf(nanoSPlusA, nanoXRadio)) { r, _ ->
                     tried += r
                     throw ex(kind)
                 }
@@ -102,6 +105,95 @@ class LedgerRoutesTest {
                 assertEquals(kind, e.kind)
             }
             assertEquals(listOf(nanoSPlusA), tried)
+        }
+    }
+
+    /** A fake Ledger's address reads: [answers] in turn, the last repeated. */
+    private fun reads(vararg answers: Any): suspend () -> String {
+        var i = 0
+        return {
+            val a = answers[minOf(i++, answers.lastIndex)]
+            if (a is LedgerException.Kind) throw ex(a)
+            a as String
+        }
+    }
+
+    private val account = "0x1111111111111111111111111111111111111111"
+    private val other = "0x2222222222222222222222222222222222222222"
+
+    private suspend fun passedOver(patient: Boolean, read: suspend () -> String): NotThisLedger? = try {
+        Ledger.holding(account, patient, {}, readyMs = 200, pollMs = 10, read = read)
+        null
+    } catch (e: NotThisLedger) {
+        e
+    }
+
+    @Test
+    fun `a Ledger that's unplugged, locked or on another app before it's checked is passed over`() = runBlocking {
+        // Holds it once unlocked: waited on, it's used.
+        assertEquals(null, passedOver(true, reads(LedgerException.Kind.LOCKED, LedgerException.Kind.APP_NOT_OPEN, account)))
+        // Not waited on: locked is set aside for later, not an end.
+        passedOver(false, reads(LedgerException.Kind.LOCKED, account))!!.let {
+            assertEquals(LedgerException.Kind.LOCKED, it.reason.kind)
+            assertTrue(it.later)
+        }
+        // Waited on and never unlocked: passed over, not come back to.
+        passedOver(true, reads(LedgerException.Kind.APP_NOT_OPEN))!!.let {
+            assertEquals(LedgerException.Kind.APP_NOT_OPEN, it.reason.kind)
+            assertFalse(it.later)
+        }
+        // Unplugged while it's waited on.
+        passedOver(true, reads(LedgerException.Kind.LOCKED, LedgerException.Kind.DISCONNECTED))!!.let {
+            assertEquals(LedgerException.Kind.DISCONNECTED, it.reason.kind)
+            assertFalse(it.later)
+        }
+        // Another seed.
+        assertEquals(LedgerException.Kind.WRONG_DEVICE, passedOver(true, reads(other))!!.reason.kind)
+        // The address matches whatever its case.
+        assertEquals(null, passedOver(false, reads(account.uppercase().replace("0X", "0x"))))
+    }
+
+    @Test
+    fun `a locked Ledger plugged in doesn't hold up the account's own Ledger further down`() = runBlocking {
+        // The finding: a Bluetooth Nano X account, a locked Nano S Plus of another seed plugged in.
+        val asked = ArrayList<Pair<Route, Boolean>>()
+        val got = Ledger.inTurn(listOf(nanoSPlusA, nanoXRadio)) { r, patient ->
+            asked += r to patient
+            Ledger.holding(account, patient, {}, readyMs = 5_000, pollMs = 10, read = if (r == nanoSPlusA) reads(LedgerException.Kind.LOCKED) else reads(account))
+            "signed on ${r.name}"
+        }
+        assertEquals("signed on Nano X 1A2B", got)
+        assertEquals(listOf(nanoSPlusA to false, nanoXRadio to true), asked)
+    }
+
+    @Test
+    fun `a locked Ledger set aside is waited on once no other Ledger works`() = runBlocking {
+        // A USB account's own Ledger, locked; the paired Nano X out of range.
+        var unlocked = false
+        val asked = ArrayList<Pair<Route, Boolean>>()
+        val got = Ledger.inTurn(listOf(nanoXCable, nanoXRadio)) { r, patient ->
+            asked += r to patient
+            if (r == nanoXRadio) throw NotThisLedger(ex(LedgerException.Kind.NOT_FOUND))
+            Ledger.holding(account, patient, { unlocked = true }, readyMs = 5_000, pollMs = 10) {
+                if (!unlocked) throw ex(LedgerException.Kind.LOCKED)
+                account
+            }
+            "signed on ${r.name}"
+        }
+        assertEquals("signed on Ledger Nano X", got)
+        assertEquals(listOf(nanoXCable to false, nanoXRadio to true, nanoXCable to true), asked)
+    }
+
+    @Test
+    fun `set aside and never unlocked, the lock is what's reported`() = runBlocking {
+        try {
+            Ledger.inTurn(listOf(nanoSPlusA, nanoXRadio)) { r, patient ->
+                if (r == nanoXRadio) throw NotThisLedger(ex(LedgerException.Kind.NOT_FOUND))
+                Ledger.holding(account, patient, {}, readyMs = 50, pollMs = 10, read = reads(LedgerException.Kind.LOCKED))
+            }
+            fail("succeeded")
+        } catch (e: LedgerException) {
+            assertEquals(LedgerException.Kind.LOCKED, e.kind)
         }
     }
 }
