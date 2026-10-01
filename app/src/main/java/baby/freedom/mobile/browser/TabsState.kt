@@ -341,7 +341,13 @@ class TabsState(
     fun newTab(url: String? = null, activate: Boolean = true, private: Boolean = false): BrowserState {
         val tab = newBlankTab(private)
         tabs.add(tab)
-        if (activate) activeIndex = tabs.lastIndex
+        if (activate) {
+            // Fullscreen belongs to the active tab only (see [fullscreen]):
+            // a link from another app arriving mid-video must not open
+            // its tab under the old page's fullscreen view.
+            exitFullscreen()
+            activeIndex = tabs.lastIndex
+        }
         if (url != null) tab.loadUrl(url)
         return tab
     }
@@ -419,7 +425,12 @@ class TabsState(
 
     fun switchTo(index: Int) {
         if (index !in tabs.indices) return
-        if (index != activeIndex) captureActiveThumbnail?.invoke()
+        if (index != activeIndex) {
+            captureActiveThumbnail?.invoke()
+            // As in [newTab]: the tab leaving the screen takes its
+            // fullscreen session with it.
+            exitFullscreen()
+        }
         activeIndex = index
     }
 
