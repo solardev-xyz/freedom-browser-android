@@ -78,7 +78,9 @@ object UnverifiedOrigins {
      * Origins only a private tab was served, wherever they are now
      * ([origins], [toClear], a hold that [release] puts back into
      * [toClear]): kept in memory, never persisted (see the class doc).
-     * Left only when a normal tab is served one ([record]).
+     * Left only when a normal tab is served one ([record]); never
+     * entered by an origin already pending a cleanup from a normal tab's
+     * earlier gateway.
      */
     private val privateOnly = HashSet<String>()
 
@@ -143,7 +145,14 @@ object UnverifiedOrigins {
         val madePublic = !private && privateOnly.remove(origin)
         if (this.gateway != gateway || origin !in origins || madePublic) {
             this.gateway = gateway
-            if (origins.add(origin) && private) privateOnly.add(origin)
+            // Private-only just for an origin this process knows nothing
+            // else of: one a normal tab's earlier gateway left a cleanup
+            // pending on ([toClear], or a [hold] that [release] puts back
+            // there) keeps that cleanup on disk — filtering it out of the
+            // persisted list would lose the normal profile's (R1-F1).
+            if (origins.add(origin) && private && origin !in toClear && holds.values.none { origin in it }) {
+                privateOnly.add(origin)
+            }
             persist()
         }
         generation

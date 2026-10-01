@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -37,9 +38,9 @@ class PrivateImageSharesDeviceTest {
     }
 
     /** Copy image, on the main thread as the page menu runs it (it may toast). */
-    private fun copy(url: String, private: Boolean): Boolean {
+    private fun copy(url: String, private: Boolean, session: Long = privateImageSession()): Boolean {
         var ok = false
-        instrumentation.runOnMainSync { ok = runBlocking { copyImageToClipboard(context, image, url, private) } }
+        instrumentation.runOnMainSync { ok = runBlocking { copyImageToClipboard(context, image, url, private, session) } }
         return ok
     }
 
@@ -60,5 +61,24 @@ class PrivateImageSharesDeviceTest {
         assertEquals(emptyList<File>(), filesUnder(private))
         // The normal tab's copy isn't the private session's to take.
         assertEquals(listOf("public.gif"), filesUnder(shared).map { it.name })
+    }
+
+    /**
+     * A Copy image picked in a private tab whose fetch is still out when
+     * the private session ends writes nothing once it's back: the discard
+     * already ran, and nothing would take the file after it.
+     */
+    @Test
+    fun aCopyFetchedAfterThePrivateSessionEndedWritesNothing() {
+        shared.deleteRecursively()
+        val session = privateImageSession() // picked Copy image; fetch under way
+        discardPrivateImageShares(context) // the last private tab closed
+        Thread.sleep(200)
+
+        assertFalse(copy("https://a.example/late.gif", private = true, session = session))
+        assertEquals(emptyList<File>(), filesUnder(File(shared, "private")))
+        // A copy picked in the next session is kept as usual.
+        assertTrue(copy("https://a.example/next.gif", private = true))
+        assertEquals(listOf("next.gif"), filesUnder(File(shared, "private")).map { it.name })
     }
 }
