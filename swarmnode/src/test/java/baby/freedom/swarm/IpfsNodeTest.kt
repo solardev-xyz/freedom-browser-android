@@ -32,8 +32,12 @@ class IpfsNodeTest {
             if (handle !in live) stale += "$what:$handle"
         }
 
+        /** A node made while another was still alive: on the device the store lock refuses it, or the old one leaks. */
+        val overlapping: MutableList<String> = Collections.synchronizedList(mutableListOf())
+
         override fun nodeNew(dataDir: String, maxCacheBytes: Long): Long {
             val h = nextHandle++
+            if (live.isNotEmpty()) overlapping += "new:$h while ${live.toList()}"
             live += h
             calls += "new:$h"
             return h
@@ -177,6 +181,57 @@ class IpfsNodeTest {
         Thread.sleep(200)
         assertEquals(listOf("free:1"), ops.calls.filter { it.startsWith("free") })
         assertEquals("http://127.0.0.1:42000", node.state.value.gatewayUrl)
+        assertEquals(emptyList<String>(), ops.stale.toList())
+        node.dispose()
+    }
+
+    @Test
+    fun `off then on while a call holds the node frees the old node before making the new one`() {
+        // A lifecycle call holds the node; Settings → IPFS off then on. The
+        // stop's release and the new launch both wait on it, and whichever
+        // goes first, node 1 must be freed — and before node 2 exists.
+        repeat(10) { round ->
+            val ops = FakeOps().apply { releaseForeground = CountDownLatch(1) }
+            val node = node(ops)
+            node.start()
+            awaitStatus(node, IpfsStatus.Running)
+            node.enterForeground()
+            assertTrue(ops.foregroundEntered.await(5, TimeUnit.SECONDS))
+            node.stop()
+            node.start()
+            Thread.sleep(100)
+            ops.releaseForeground.countDown()
+            awaitStatus(node, IpfsStatus.Running)
+            assertTrue(ops.freed.await(5, TimeUnit.SECONDS))
+            Thread.sleep(100)
+            val calls = ops.calls.toList()
+            assertEquals("round $round: $calls", listOf("free:1"), calls.filter { it.startsWith("free") })
+            assertEquals("round $round: $calls", listOf("stopGateway:1"), calls.filter { it.startsWith("stopGateway") })
+            assertTrue("round $round: $calls", calls.indexOf("free:1") < calls.indexOf("new:2"))
+            assertEquals("http://127.0.0.1:42000", node.state.value.gatewayUrl)
+            assertEquals(emptyList<String>(), ops.overlapping.toList())
+            assertEquals(emptyList<String>(), ops.stale.toList())
+            node.dispose()
+        }
+    }
+
+    @Test
+    fun `a stop during a slow gateway start never blocks the binder polls`() {
+        val ops = FakeOps().apply { releaseGateway = CountDownLatch(1) }
+        val node = node(ops)
+        node.start()
+        assertTrue(ops.gatewayEntered.await(5, TimeUnit.SECONDS))
+        node.stop()
+        Thread.sleep(100)
+        val t0 = System.nanoTime()
+        assertEquals(null, node.progressSnapshotJson())
+        assertEquals(null, node.diagnostics())
+        val ms = (System.nanoTime() - t0) / 1_000_000
+        assertTrue("polls took $ms ms", ms < 500)
+        ops.releaseGateway.countDown()
+        assertTrue(ops.freed.await(5, TimeUnit.SECONDS))
+        Thread.sleep(100)
+        assertEquals(IpfsStatus.Stopped, node.state.value.status)
         assertEquals(emptyList<String>(), ops.stale.toList())
         node.dispose()
     }

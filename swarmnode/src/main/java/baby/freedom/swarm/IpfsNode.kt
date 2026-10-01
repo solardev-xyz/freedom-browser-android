@@ -110,13 +110,22 @@ class IpfsNode internal constructor(
      * Guards [handle]'s lifetime. Every native call on a handle holds it
      * (read) for the whole call — the binder-thread polls
      * ([progressSnapshotJson], [diagnostics]), the stats poller, the
-     * lifecycle and network calls, and the gateway start — and
-     * [releaseHandle] holds it (write) only to swap the handle to 0, so it
+     * lifecycle and network calls — and [releaseHandle] and a launch's
+     * publish hold it (write) only to swap the handle, so a release
      * waits out any call still inside the node before freeing it, while
      * the (slow) gateway shutdown and free run outside it and never block
      * a poll, which just finds 0.
      */
     private val handleLock = ReentrantReadWriteLock()
+
+    /**
+     * Held while a node is built (a launch's nodeNew → gateway start →
+     * publish) and while one is freed ([releaseHandle]), so at most one
+     * node is ever alive: a launch first frees any node an older
+     * generation published, and waits out a free still running. Never
+     * taken by a poll. Order: [nodeLock], then [handleLock], then [stateLock].
+     */
+    private val nodeLock = Any()
 
     /** Orders [start]/[stop] with each other: guards [generation] and the Starting/Running/Stopped transitions. */
     private val stateLock = Any()
@@ -138,64 +147,64 @@ class IpfsNode internal constructor(
         }
 
         scope.launch {
-            var node = 0L
-            var published = false
-            try {
-                node = ops.nodeNew(config.dataDir, 0L)
-                if (node == 0L) error("freedom_ipfs_node_new_with_data_dir failed")
-                // A [stop] since this launch began wins: the new node is
-                // never published, so nothing else can be using it.
-                published = handleLock.write {
-                    synchronized(stateLock) { generation == gen }.also {
-                        if (it) {
-                            handle = node
-                            handleGen = gen
-                        }
-                    }
-                }
-                if (!published) {
-                    freeNode(node)
-                    return@launch
-                }
-                // Under the read lock, so a [stop] meanwhile can't free the
-                // node under the gateway start; one that already took it
-                // ([handle] no longer [node]) has freed it, and this launch
-                // is over.
-                val gatewayUrl = handleLock.read {
-                    if (handle != node) return@launch
+            // One node at a time: a node an earlier launch or stop is still
+            // freeing holds the data dir's store lock, and one still
+            // published from before a [stop] whose release hasn't run yet
+            // must not be overwritten (and so leaked, gateway serving) by
+            // this launch's — so free whatever is older first, and build
+            // this launch's node with [nodeLock] held.
+            synchronized(nodeLock) {
+                releaseHandle(before = gen)
+                var node = 0L
+                try {
+                    node = ops.nodeNew(config.dataDir, 0L)
+                    if (node == 0L) error("freedom_ipfs_node_new_with_data_dir failed")
+                    // The gateway starts before the node is published, so
+                    // nothing else can reach it yet and no poll waits on it:
+                    // [handleLock] isn't held, and a [stop] meanwhile just
+                    // bumps [generation] (its release waits on [nodeLock]).
                     if (!ops.startGatewayOnline(node, "127.0.0.1:0", routingModeConstant())) {
                         error("freedom_ipfs start_gateway_online failed")
                     }
-                    ops.gatewayUrl(node) ?: error("gateway started but reported no URL")
-                }
-                val version = ops.version().orEmpty()
-                Log.i(TAG, "freedom-ipfs $version gateway at $gatewayUrl")
-                val running = synchronized(stateLock) {
-                    if (generation != gen) return@synchronized false
-                    _state.update {
-                        it.copy(
-                            status = IpfsStatus.Running,
-                            gatewayUrl = gatewayUrl,
-                            clientVersion = version,
-                            errorMessage = null,
-                        )
+                    val gatewayUrl = ops.gatewayUrl(node) ?: error("gateway started but reported no URL")
+                    val version = ops.version().orEmpty()
+                    // A [stop] since this launch began wins: the node is
+                    // never published, so this launch frees it.
+                    val running = handleLock.write {
+                        synchronized(stateLock) {
+                            if (generation != gen) return@synchronized false
+                            handle = node
+                            handleGen = gen
+                            _state.update {
+                                it.copy(
+                                    status = IpfsStatus.Running,
+                                    gatewayUrl = gatewayUrl,
+                                    clientVersion = version,
+                                    errorMessage = null,
+                                )
+                            }
+                            startStatsPolling()
+                            true
+                        }
                     }
-                    startStatsPolling()
-                    true
-                }
-                if (!running) Log.i(TAG, "stopped while starting")
-            } catch (t: Throwable) {
-                Log.e(TAG, "Failed to start IPFS node", t)
-                // Only the node this launch made, and only if a [stop]
-                // hasn't already taken it.
-                if (published) releaseHandle(node)
-                synchronized(stateLock) {
-                    if (generation != gen) return@launch
-                    _state.update {
-                        it.copy(
-                            status = IpfsStatus.Error,
-                            errorMessage = t.message ?: t.javaClass.simpleName,
-                        )
+                    if (running) {
+                        Log.i(TAG, "freedom-ipfs $version gateway at $gatewayUrl")
+                    } else {
+                        Log.i(TAG, "stopped while starting")
+                        freeNode(node)
+                    }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Failed to start IPFS node", t)
+                    // Never published: only this launch has it.
+                    if (node != 0L) freeNode(node)
+                    synchronized(stateLock) {
+                        if (generation != gen) return@launch
+                        _state.update {
+                            it.copy(
+                                status = IpfsStatus.Error,
+                                errorMessage = t.message ?: t.javaClass.simpleName,
+                            )
+                        }
                     }
                 }
             }
@@ -285,21 +294,20 @@ class IpfsNode internal constructor(
     }
 
     /**
-     * Take the handle — only if it is still [expected], or (with [before])
-     * was published by a launch older than that generation — and free its
-     * node. The write lock waits for every call still using the
-     * handle; once the swap is done no call can pick it up, so the slow
-     * stopGateway + nodeFree needn't block anyone.
+     * Take the handle — only if a launch older than generation [before]
+     * published it — and free its node. The write lock waits for every
+     * call still using the handle; once the swap is done no call can pick
+     * it up, so the slow stopGateway + nodeFree needn't block anyone but
+     * a launch, which waits on [nodeLock] for the node to be gone.
      */
-    private fun releaseHandle(expected: Long = 0L, before: Long = Long.MAX_VALUE) {
+    private fun releaseHandle(before: Long) = synchronized(nodeLock) {
         val node = handleLock.write {
             val old = handle
-            if (expected != 0L && old != expected) return
-            if (handleGen >= before) return
+            if (old == 0L || handleGen >= before) return@synchronized
             handle = 0L
             old
         }
-        if (node != 0L) freeNode(node)
+        freeNode(node)
     }
 
     private fun freeNode(node: Long) {
