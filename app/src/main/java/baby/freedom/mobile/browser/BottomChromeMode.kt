@@ -462,6 +462,26 @@ internal fun parseTopDocumentInput(data: String?): TopDocumentInput? {
 }
 
 /**
+ * The top document's detector saw a navigation of the top frame begin
+ * (`navigate <url>`, the Navigation API's `navigate` event, and the
+ * page didn't cancel it), which Chromium fires only for a navigation
+ * the top document's own origin started — never for one a cross-origin
+ * iframe starts by setting `top.location` (#348 R5-F1, see
+ * [UserGestureLatch.onTopDocumentNavigate]).
+ */
+internal const val TOP_DOCUMENT_NAVIGATE = "navigate"
+
+/** The longest URL a [TOP_DOCUMENT_NAVIGATE] report carries; a longer one isn't reported (fail closed). */
+internal const val TOP_DOCUMENT_NAVIGATE_MAX = 8192
+
+private val TOP_DOCUMENT_NAVIGATE_RE = Regex("^$TOP_DOCUMENT_NAVIGATE (https?://\\S{1,$TOP_DOCUMENT_NAVIGATE_MAX})$")
+
+/** The URL a [TOP_DOCUMENT_NAVIGATE] report names, or `null` when [data] isn't one. */
+internal fun parseTopDocumentNavigate(data: String?): String? =
+    TOP_DOCUMENT_NAVIGATE_RE.matchEntire(data ?: return null)?.groupValues?.get(1)
+        ?.takeIf { it.length <= TOP_DOCUMENT_NAVIGATE_MAX }
+
+/**
  * Kotlin's ask to the top document's detector, sent a moment after an
  * input ended (`sync <id> <settleMs>`), and the detector's echo
  * (`synced <id>`) (#348). The page's renderer thread handles input
@@ -838,6 +858,21 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   said('pointerdown');
   said('keydown');
   said('click');
+  // A navigation of the top frame its own origin started (#348 R5-F1):
+  // Chromium fires `navigate` for no navigation a cross-origin frame
+  // starts. Said a task later, once the page's own listeners have had
+  // their chance to cancel it.
+  var NAV = w.navigation, navDest = prop(proto(w.NavigateEvent), 'destination'),
+      destUrl = prop(proto(w.NavigationDestination), 'url');
+  if (NAV && onEl && w.NavigateEvent && w.NavigationDestination) {
+    onEl(NAV, 'navigate', function (e) {
+      if (!e.isTrusted) return;
+      var u = null;
+      try { u = destUrl(navDest(e)); } catch (x) { return; }
+      if (typeof u !== 'string' || u.length > $TOP_DOCUMENT_NAVIGATE_MAX) return;
+      setT(function () { if (!evPrevented(e)) port.postMessage('$TOP_DOCUMENT_NAVIGATE ' + u); }, 0);
+    });
+  }
   var T = null, started = false, SYNC = /^$INPUT_SYNC ([0-9]{1,9}) ([0-9]{1,4})$/, ASK = /^probe ([0-9a-f]{1,64})$/, THEME_ASK = /^theme ([0-9a-f]{1,64})$/,
       GO = /^$PAGE_REISSUE_PREFIX([0-9a-f]{1,64}) (https?:\/\/\S+)$/i, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
   var gcs = w.getComputedStyle, MO = w.MutationObserver,

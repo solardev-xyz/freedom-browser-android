@@ -124,8 +124,10 @@ internal class X402Flow<D : Any>(
         /**
          * An allowance of [origin]'s may pay this without asking: the user
          * named the load, or [origin]'s own page started it on the user's
-         * tap (#237), one the top document confirms it received — not a
-         * cross-origin iframe's tap navigating the top frame (#348) — not
+         * tap (#237), one the top document confirms it received, on a
+         * navigation it says it started itself — not a cross-origin
+         * iframe's tap navigating the top frame, nor an iframe navigating
+         * it during the user's tap on the page (#348, R5-F1) — not
          * another site's link, script or popup, nor a
          * navigation nobody was seen starting (#218 R4-M3), nor one the
          * page started on its own (#237) — and it never left [origin] on
@@ -425,7 +427,9 @@ internal class X402Flow<D : Any>(
  * Whether the user's input behind a page's own navigation — one WebView
  * reports with a gesture — was the top document's, as the top document
  * itself says ([UserGestureLatch.topDocumentGesture]): not a tap in a
- * cross-origin iframe that navigates the top frame (#348).
+ * cross-origin iframe that navigates the top frame (#348), nor the
+ * user's tap on the top page lent to a navigation an iframe started
+ * during it (R5-F1).
  */
 internal fun interface TopDocumentGesture {
     /** True once confirmed; false when it can't be, or isn't in time. */

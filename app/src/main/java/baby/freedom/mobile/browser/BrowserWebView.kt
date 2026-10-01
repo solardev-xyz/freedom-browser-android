@@ -2519,6 +2519,12 @@ private fun buildRefreshableWebView(
                     if (isMainFrame) userGestures.onTopDocumentInput(input.ageMs, input.isClick)
                     return@WebMessageListener
                 }
+                // A navigation the top document itself started (#348
+                // R5-F1): only the main frame's word counts.
+                parseTopDocumentNavigate(message.data)?.let { url ->
+                    if (isMainFrame) userGestures.onTopDocumentNavigate(url)
+                    return@WebMessageListener
+                }
                 // The renderer is past an input (#348): the top
                 // document's echo of the sync sent after it ended.
                 parseInputSynced(message.data)?.let { id ->
@@ -3689,10 +3695,13 @@ private fun buildRefreshableWebView(
                         // script chaining 402s (#237) — a tap the top
                         // document says it received, not one on a
                         // cross-origin iframe that navigates the top
-                        // frame with it (#348). Without a PageWebView's
-                        // latch, nothing confirms it: fail closed.
+                        // frame with it (#348), and a navigation the top
+                        // document says it started itself, not one an
+                        // iframe started during the user's tap on the top
+                        // page (R5-F1). Without a PageWebView's latch,
+                        // nothing confirms it: fail closed.
                         val gesture = if (request.hasGesture()) {
-                            (view as? PageWebView)?.userGestures?.topDocumentGesture() ?: TopDocumentGesture { false }
+                            (view as? PageWebView)?.userGestures?.topDocumentGesture(target) ?: TopDocumentGesture { false }
                         } else {
                             null
                         }
@@ -4830,11 +4839,11 @@ internal class PageWebView(context: Context) : WebView(context) {
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         // Every press and auto-repeat is recorded — each gives the focused
-        // frame a fresh activation (#348 R4-F1) — but only a fresh press
-        // buys an app-link launch.
+        // frame a fresh activation (#348 R4-F1), a media key's included
+        // (R5-F2) — but only a fresh press of a page key buys an app-link
+        // launch.
         if (keyIsPageInput(
                 action = event.action,
-                isSystem = event.isSystem,
                 isModifier = KeyEvent.isModifierKey(event.keyCode),
             )
         ) {
@@ -6898,7 +6907,6 @@ private class KeyboardEditRecorder(
     override fun sendKeyEvent(event: KeyEvent): Boolean =
         if (keyIsPageInput(
                 action = event.action,
-                isSystem = event.isSystem,
                 isModifier = KeyEvent.isModifierKey(event.keyCode),
             )
         ) {

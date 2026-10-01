@@ -113,6 +113,22 @@ class BottomUiDetectorScriptTest {
           if (pageCancels) e.defaultPrevented = true;
           flushTimers();
         }
+        // The Navigation API (#348 R5-F1): `navigation` fires `navigate` with
+        // the destination's URL, read through native getters.
+        function NavigateEvent() {}
+        Object.defineProperty(NavigateEvent.prototype, 'destination', { configurable: true, get: function () { return this._d; } });
+        function NavigationDestination() {}
+        Object.defineProperty(NavigationDestination.prototype, 'url', { configurable: true, get: function () { return this._u; } });
+        var navigation = new EventTarget();
+        // A navigation of this document: our listener, then the page's handlers, then tasks.
+        function navigate(url, trusted, pageCancels) {
+          var dest = new NavigationDestination(); dest._u = url;
+          var e = new NavigateEvent(); e._d = dest; e.isTrusted = trusted; e.defaultPrevented = false;
+          var ls = navigation.ls || [];
+          for (var i = 0; i < ls.length; i++) if (ls[i].t === 'navigate') ls[i].f(e);
+          if (pageCancels) e.defaultPrevented = true;
+          flushTimers();
+        }
         var mutationObs = null;
         function mutationCbOpts() { return mutationObs.opts; }
         function MutationObserver(cb) { mutationCb = cb; mutationObs = this; this.observe = function (n, o) { this.target = n; this.opts = o; }; }
@@ -490,6 +506,47 @@ class BottomUiDetectorScriptTest {
         eval("top = {}")
         documentStart()
         assertEquals(0, num("channelListeners.length"))
+    }
+
+    // ---- navigations the top document started (#348 R5-F1) ----------
+
+    private fun Page.navigations(): String =
+        Context.toString(eval("sent.filter(function (s) { return /^navigate /.test(s); }).join('|')"))
+
+    @Test
+    fun `a navigation the top document starts is reported, from document start, once the page let it go`() = page {
+        documentStart()
+        eval("navigate('http://localhost:8710/priced?a=1#x', true, false)")
+        assertEquals("navigate http://localhost:8710/priced?a=1#x", navigations())
+        assertEquals("http://localhost:8710/priced?a=1#x", parseTopDocumentNavigate(navigations()))
+        // One the page cancelled, or a synthetic event, isn't.
+        eval("navigate('http://localhost:8710/b', true, true); navigate('http://localhost:8710/c', false, false)")
+        assertEquals("navigate http://localhost:8710/priced?a=1#x", navigations())
+    }
+
+    @Test
+    fun `a page that replaces the getters later can't change the reported URL`() = page {
+        documentStart()
+        eval("Object.defineProperty(NavigationDestination.prototype, 'url', { get: function () { return 'http://evil.example/'; } })")
+        eval("navigate('http://localhost:8710/priced', true, false)")
+        assertEquals("navigate http://localhost:8710/priced", navigations())
+    }
+
+    @Test
+    fun `a subframe's detector reports no navigation`() = page {
+        eval("top = {}")
+        documentStart()
+        eval("navigate('http://localhost:8710/priced', true, false)")
+        assertEquals("", navigations())
+    }
+
+    @Test
+    fun `only an http(s) URL of bounded length parses as a navigation report`() {
+        assertEquals("https://a.example/x", parseTopDocumentNavigate("navigate https://a.example/x"))
+        assertEquals(null, parseTopDocumentNavigate("navigate javascript:alert(1)"))
+        assertEquals(null, parseTopDocumentNavigate("navigate https://a.example/x y"))
+        assertEquals(null, parseTopDocumentNavigate("navigate https://" + "a".repeat(TOP_DOCUMENT_NAVIGATE_MAX)))
+        assertEquals(null, parseTopDocumentNavigate("navigated https://a.example/x"))
     }
 
     // ---- the page's say on a long-press (#84) -------------------------

@@ -480,16 +480,39 @@ internal class UserGestureLatch(private val clock: () -> Long) {
     /** The latest input's id: what [onRendererCaughtUp] names once the renderer is past it. */
     val latestInputId: Int get() = inputId
 
-    private class TopWatch(val inputs: List<Input>, val deadline: Long) {
+    /**
+     * Navigations the top document itself started ([onTopDocumentNavigate]):
+     * the URL, and when its word came. Kept for [CONFIRM_MS], for a
+     * [topDocumentGesture] asked just after; each vouches for one.
+     */
+    private class TopNavigation(val url: String, val at: Long)
+
+    private val topNavigations = ArrayDeque<TopNavigation>()
+
+    private inner class TopWatch(val url: String, val inputs: List<Input>, val start: Long, val deadline: Long) {
         val answer = CompletableDeferred<Boolean>()
 
-        /** Answers if it can: false past [deadline], else true once every input is the top document's. */
+        /** The top document has said it started this navigation itself. */
+        var navigated = false
+
+        /**
+         * Answers if it can: false past [deadline], else true once the top
+         * document has said it started the navigation and every input is
+         * its own.
+         */
         fun settle(now: Long): Boolean {
             if (now > deadline) {
                 answer.complete(false)
-            } else if (inputs.all { it.inTopDocument }) {
-                answer.complete(true)
+                return true
             }
+            if (!navigated) {
+                val word = topNavigations.firstOrNull { it.url == url && it.at >= start - CONFIRM_MS }
+                if (word != null) {
+                    topNavigations.remove(word)
+                    navigated = true
+                }
+            }
+            if (navigated && inputs.all { it.inTopDocument }) answer.complete(true)
             return answer.isCompleted
         }
     }
@@ -606,14 +629,36 @@ internal class UserGestureLatch(private val clock: () -> Long) {
         settleTopWatches()
     }
 
+    /**
+     * The top document's detector saw a navigation of the top frame begin
+     * to [url] ([TOP_DOCUMENT_NAVIGATE], the Navigation API's `navigate`
+     * event) — one the top document's own origin started: Chromium fires
+     * no `navigate` for a navigation a cross-origin frame starts, such as
+     * an iframe setting `top.location` or following a `target=_top` link
+     * (#348 R5-F1). Vouches for one [topDocumentGesture] to [url], asked
+     * within [CONFIRM_MS] either side.
+     */
+    fun onTopDocumentNavigate(url: String) {
+        val now = clock()
+        while (topNavigations.isNotEmpty() &&
+            (topNavigations.first().at < now - CONFIRM_MS || topNavigations.size >= MAX_RECENT)
+        ) {
+            topNavigations.removeFirst()
+        }
+        topNavigations.addLast(TopNavigation(url, now))
+        settleTopWatches()
+    }
+
     private fun settleTopWatches() {
         val now = clock()
+        // Oldest first: a word on a URL goes to the navigation asked first.
         topWatches.removeAll { it.settle(now) }
     }
 
     /**
-     * For a navigation starting now with the user's activation (#348):
-     * whether every input of the last [WINDOW_MS] — any one of which can
+     * For a navigation of the top frame to [url] starting now with the
+     * user's activation (#348): whether the top document itself started
+     * it ([onTopDocumentNavigate]) and whether every input of the last [WINDOW_MS] — any one of which can
      * have lent a frame the activation it carries — was the top
      * document's own (an unconfirmed input counts until [WINDOW_MS]
      * after the renderer is known to have handled it, see
@@ -623,13 +668,23 @@ internal class UserGestureLatch(private val clock: () -> Long) {
      * at all (a gesture this view never saw), or once [CONFIRM_MS] has
      * passed with any of them unconfirmed — an iframe's, or the
      * detector's word never came: fail closed.
+     *
+     * Both are needed: WebView's `hasGesture` for a navigation of the top
+     * frame is the *top* frame's activation, not the activation of the
+     * frame that started it. So a cross-origin iframe the user once
+     * tapped (enough for Chromium to let it navigate the top frame at
+     * all) can set `top.location` from its `blur` handler — or a timer —
+     * during the user's next tap on the top page, which carries that
+     * tap's activation though the iframe has none of its own; and that
+     * tap is the top document's, confirmed (R5-F1). The top document's
+     * word that it started this navigation is what tells the two apart.
      */
-    fun topDocumentGesture(): TopDocumentGesture {
+    fun topDocumentGesture(url: String): TopDocumentGesture {
         val now = clock()
         if (droppedId != 0 && droppedHandledBy.let { it == null || it >= now - WINDOW_MS }) return TopDocumentGesture { false }
         val inputs = recent.filter { !it.activationOver(now) }
         if (inputs.isEmpty()) return TopDocumentGesture { false }
-        val watch = TopWatch(inputs, now + CONFIRM_MS)
+        val watch = TopWatch(url, inputs, now, now + CONFIRM_MS)
         if (!watch.settle(now)) {
             topWatches.add(watch)
             // A page that starts navigations in a loop can't grow this
@@ -733,12 +788,17 @@ internal class UserGestureLatch(private val clock: () -> Long) {
 }
 
 /**
- * Whether a key event is input the page acts on — recorded by the
- * [UserGestureLatch] ([UserGestureLatch.onInputStart]) for the question
- * of whose input it was: a press or auto-repeat of a key that reaches
- * the page. Not a system key (volume, media, back, call — pressed at
- * the device, not at the page), and not a modifier on its own (Shift or
- * Ctrl isn't a key the page acts on). An auto-repeat counts: each is a
+ * Whether a key event may be input a frame of the page acts on —
+ * recorded by the [UserGestureLatch] ([UserGestureLatch.onInputStart])
+ * for the question of whose input it was: any press or auto-repeat that
+ * reaches the WebView, but a modifier on its own (Chromium gives no
+ * activation for Shift or Ctrl alone). A system key counts too: a media
+ * key (play/pause, next) or Search that the WebView doesn't handle
+ * itself reaches the focused frame as a trusted `keydown` and renews its
+ * activation — an embedded player's, an iframe's (#348 R5-F2). One that
+ * never reaches the page (volume, Back) is never confirmed either, and
+ * only keeps [UserGestureLatch.topDocumentGesture] from vouching for the
+ * next few seconds: fail closed. An auto-repeat counts: each is a
  * trusted `keydown` in the focused frame, and gives that frame a fresh
  * activation — so a key held in a cross-origin iframe's field keeps the
  * iframe able to navigate the top frame long after the first press, and
@@ -747,22 +807,22 @@ internal class UserGestureLatch(private val clock: () -> Long) {
  */
 internal fun keyIsPageInput(
     action: Int,
-    isSystem: Boolean,
     isModifier: Boolean,
-): Boolean = action == android.view.KeyEvent.ACTION_DOWN && !isSystem && !isModifier
+): Boolean = action == android.view.KeyEvent.ACTION_DOWN && !isModifier
 
 /**
  * Whether a key event arms the [UserGestureLatch] for one launch
  * ([UserGestureLatch.onInput]): one fresh press of a key that reaches
- * the page ([keyIsPageInput]). Not an auto-repeat: holding a key would
- * re-arm it on every repeat, one launch each.
+ * the page ([keyIsPageInput]), not a system key (volume, media, back,
+ * call — pressed at the device, not at the page). Not an auto-repeat:
+ * holding a key would re-arm it on every repeat, one launch each.
  */
 internal fun keyArmsGestureLatch(
     action: Int,
     repeatCount: Int,
     isSystem: Boolean,
     isModifier: Boolean,
-): Boolean = repeatCount == 0 && keyIsPageInput(action, isSystem, isModifier)
+): Boolean = repeatCount == 0 && !isSystem && keyIsPageInput(action, isModifier)
 
 /**
  * Whether an accessibility action arms the [UserGestureLatch]. TalkBack's
