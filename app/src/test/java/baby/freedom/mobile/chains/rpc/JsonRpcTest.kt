@@ -81,4 +81,31 @@ class JsonRpcTest {
         assertNull(JsonRpc.quantity("1.5"))
         assertEquals(BigInteger.TEN, WalletRpc.quantity("0xa"))
     }
+
+    /**
+     * An answer nested past [JsonRpc.MAX_DEPTH] is malformed before the
+     * parser sees it (the platform's `org.json` overflows the stack a few
+     * thousand levels down; `HostileRpcJsonDeviceTest` runs that one), and
+     * brackets inside strings don't count towards it.
+     */
+    @Test
+    fun deeplyNestedAnswersAreMalformedBeforeTheyAreParsed() {
+        fun nested(n: Int) = """{"jsonrpc":"2.0","id":1,"result":""" + "[".repeat(n) + "]".repeat(n) + "}"
+        // Envelope plus 63 levels: the limit, still an answer.
+        assertTrue(JsonRpc.parse(nested(JsonRpc.MAX_DEPTH - 1)) is JsonRpc.Envelope.Result)
+        for (n in listOf(JsonRpc.MAX_DEPTH, 5_000)) {
+            assertEquals("$n levels", JsonRpc.Envelope.Malformed("nested too deeply"), JsonRpc.parse(nested(n)))
+        }
+        val deepError = """{"error":{"code":3,"message":"x","data":""" + "{\"a\":".repeat(100) + "1" + "}".repeat(100) + "}}"
+        assertEquals(JsonRpc.Envelope.Malformed("nested too deeply"), JsonRpc.parse(deepError))
+        // Brackets in a string (escaped quotes too) aren't nesting.
+        val text = "\\\"" + "[".repeat(500) + "{".repeat(500)
+        assertEquals(JsonRpc.Envelope.Result(text), JsonRpc.parse(JSONObject().put("result", text).toString()))
+        assertEquals(2, JsonRpc.depth("""[{"a":"\\","b":"\"{[[","c":"]"}]"""))
+        // A real block with access lists is far from it.
+        val block = """{"jsonrpc":"2.0","id":1,"result":{"number":"0x1","transactions":[{"hash":"0x00",""" +
+            """"accessList":[{"address":"0x00","storageKeys":["0x00"]}]}]}}"""
+        assertEquals(7, JsonRpc.depth(block))
+        assertTrue(JsonRpc.parse(block) is JsonRpc.Envelope.Result)
+    }
 }
