@@ -24,4 +24,17 @@ class AddressSuggestionsHighlightTest {
         assertTrue(ranges.all { (s, e) -> s >= 0 && e <= title.length })
         assertEquals("Loginpage", title.substring(7, 16))
     }
+
+    @Test
+    fun `action rows show the typed text with its bidi controls marked`() {
+        // The field's buffer keeps U+202E (Go submits it as it is); the
+        // rows drawn from it must not let it reorder what they show.
+        val edited = "ens://\u202Emoc.lapyap.et"
+        val go = AddressAction.Go(edited, AddressInput.Kind.Url)
+        val search = AddressAction.Search(edited, "DuckDuckGo", "https://duckduckgo.com/?q=x")
+        assertEquals("ens://\uFFFDmoc.lapyap.et", go.shownTitle)
+        assertEquals("ens://\uFFFDmoc.lapyap.et", search.shownTitle)
+        assertEquals(edited, go.submitText)
+        assertEquals("example.com", AddressAction.Go("example.com", AddressInput.Kind.Url).shownTitle)
+    }
 }

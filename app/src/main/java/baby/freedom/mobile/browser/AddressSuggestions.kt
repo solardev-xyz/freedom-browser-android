@@ -172,7 +172,10 @@ internal fun SuggestionsList(
     ) {
         if (actions.isEmpty() && suggestions.isEmpty()) {
             Text(
-                text = stringResource(R.string.browser_suggestions_no_matches_for, query),
+                text = stringResource(
+                    R.string.browser_suggestions_no_matches_for,
+                    BidiControls.marked(query),
+                ),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier
@@ -216,7 +219,15 @@ internal fun SuggestionsList(
     }
 }
 
-/** "🔍 swarm storage / Search with DuckDuckGo", or "🌐 example.com / Go to address". */
+/**
+ * "🔍 swarm storage / Search with DuckDuckGo", or "🌐 example.com / Go to address".
+ *
+ * The field's buffer keeps what the tab holds or the user typed, bidi
+ * controls and all (Go submits it as it is), so every row drawn from it
+ * shows them marked ([BidiControls.marked]), as the field itself and the
+ * resting label do: an edited `ens://‮moc.lapyap.eth` must not read
+ * `te.paypal.com` in the rows right above the field.
+ */
 @Composable
 private fun ActionRow(action: AddressAction, onClick: () -> Unit) {
     when (action) {
@@ -224,7 +235,7 @@ private fun ActionRow(action: AddressAction, onClick: () -> Unit) {
             icon = Icons.Filled.Search,
             iconDescription = stringResource(R.string.browser_suggestions_search),
             iconTint = MaterialTheme.colorScheme.primary,
-            title = AnnotatedString(action.query),
+            title = AnnotatedString(action.shownTitle),
             subtitle = AnnotatedString(stringResource(R.string.browser_suggestions_search_with, action.engine)),
             onClick = onClick,
         )
@@ -232,12 +243,21 @@ private fun ActionRow(action: AddressAction, onClick: () -> Unit) {
             icon = Icons.Filled.Public,
             iconDescription = stringResource(R.string.browser_suggestions_address),
             iconTint = MaterialTheme.colorScheme.primary,
-            title = AnnotatedString(action.input),
+            title = AnnotatedString(action.shownTitle),
             subtitle = AnnotatedString(action.subtitle),
             onClick = onClick,
         )
     }
 }
+
+/** The row's title: the query or address as typed, bidi controls marked. */
+internal val AddressAction.shownTitle: String
+    get() = BidiControls.marked(
+        when (this) {
+            is AddressAction.Search -> query
+            is AddressAction.Go -> input
+        },
+    )
 
 @Composable
 private fun SuggestionRow(
@@ -318,11 +338,13 @@ private fun RowLayout(
 /**
  * Bold every case-insensitive occurrence of [needle] inside [text].
  * Returns a plain [androidx.compose.ui.text.AnnotatedString] we can
- * drop straight into a [Text] composable.
+ * drop straight into a [Text] composable. A page title or URL can carry
+ * bidi controls too, so the text is drawn marked ([BidiControls.marked],
+ * same length, so the ranges found on [text] still line up).
  */
 private fun highlightedText(text: String, needle: String): AnnotatedString =
     buildAnnotatedString {
-        append(text)
+        append(BidiControls.marked(text))
         for ((start, end) in highlightRanges(text, needle)) {
             addStyle(SpanStyle(fontWeight = FontWeight.Bold), start, end)
         }
