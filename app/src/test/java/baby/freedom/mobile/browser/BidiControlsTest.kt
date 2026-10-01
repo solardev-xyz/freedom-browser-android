@@ -35,4 +35,12 @@ class BidiControlsTest {
             baby.freedom.mobile.ens.EnsNormalize.cleanMessage(text),
         )
     }
+
+    @Test
+    fun `the address field copy is marked, a clean one goes as it is`() {
+        assertEquals("ens://�moc.lapyap.eth", markedClipText("ens://\u202Emoc.lapyap.eth"))
+        assertEquals("a�b", markedClipText(StringBuilder("a\u200Fb")))
+        assertEquals(null, markedClipText("https://example.com/"))
+        assertEquals(null, markedClipText(null))
+    }
 }

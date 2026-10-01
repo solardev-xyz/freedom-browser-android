@@ -76,6 +76,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
@@ -112,6 +113,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -2378,13 +2380,16 @@ private fun AddressField(
     // briefly rendered the stale URL inside the newly-active tab's
     // pill.
     //
-    // Seeded with the address's bidi controls marked
-    // ([BidiControls.marked]), as the resting label shows them: tapping
-    // the capsule must not unmask an RLO the label just flagged (a
-    // refused `ens://%E2%80%AEmoc.lapyap.eth` read `hte.paypal.com` in
-    // the open field), and what the field shows is what its own Copy
-    // and Go hand on.
-    val shownAddress = remember(state.addressBarText) { BidiControls.marked(state.addressBarText) }
+    // Seeded with the address itself, bidi controls and all: Go on an
+    // unedited field submits exactly what the tab holds (a refused
+    // `ens://%E2%80%AEmoc.lapyap.eth` re-submitted names U+202E in its
+    // refusal, not U+FFFD), and a typed search keeps the RLM it was
+    // typed with. The marking is drawn, not stored
+    // ([BidiMarkingTransformation]) — tapping the capsule must not
+    // unmask an RLO the resting label just flagged (it read
+    // `hte.paypal.com` in the open field) — and the field's own Copy /
+    // Cut hand on what it shows ([BidiMarkingClipboard]).
+    val shownAddress = state.addressBarText
     var fieldValue by remember(state.id) {
         mutableStateOf(
             TextFieldValue(
@@ -2523,200 +2528,206 @@ private fun AddressField(
                     .border(1.5.dp, outline, CircleShape),
             )
         }
-        NoSuggestionsTextInput {
-            BasicTextField(
-                value = fieldValue,
-                onValueChange = { newValue ->
-                    val textChanged = newValue.text != fieldValue.text
-                    fieldValue = newValue
-                    if (textChanged) {
-                        // Typing feeds the suggestions query only. The
-                        // tab's committed address stays put until the user
-                        // actually submits (or the WebView navigates).
-                        onAddressQueryChanged(newValue.text)
-                        onAddressEditedChanged(true)
-                    }
-                },
-                singleLine = true,
-                // Text typed or pasted into the field gets the same
-                // marking as the seeded address, drawn only (the buffer
-                // keeps what the user entered).
-                visualTransformation = BidiMarkingTransformation,
-                textStyle = textStyle,
-                cursorBrush = SolidColor(colors.primary),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .focusRequester(focusRequester)
-                    .onFocusChanged { onAddressFocusChanged(it.isFocused) },
-                // A URL field, like Chrome's and Safari's (#172): URI
-                // keyboard, no auto-correct / capitals, and — via the
-                // [NoSuggestionsTextInput] wrapper — no IME suggestion strip over our
-                // own suggestion list.
-                keyboardOptions = urlKeyboardOptions(
-                    // Always Go, as in Chrome's omnibox — never switched to
-                    // Search as the text turns into a search term (#171):
-                    // a new action key means restarting input, the IME
-                    // hides for a moment, and [imeDismissalEndsEditing]
-                    // rightly reads that as the user closing the keyboard
-                    // and ends the edit mid-word. The top suggestion row
-                    // says what Enter will do instead.
-                    imeAction = ImeAction.Go,
-                ),
-                keyboardActions = KeyboardActions(
-                    onGo = { onSubmit(fieldValue.text) },
-                ),
-                decorationBox = { innerTextField ->
-                    // Protocol badge: the pill grows a Swarm hex mark or
-                    // the IPFS cube on the left whenever the *loaded*
-                    // page origin is one of our embedded gateways. For
-                    // `ens://` names we look at the active display
-                    // override — its `baseUrl` is the gateway that
-                    // actually served the page, which tells us whether
-                    // the contenthash resolved to Swarm or IPFS.
-                    // Mirrors `.protocol-icon[data-protocol='swarm'|'ipfs'|'ipns']`
-                    // in freedom-browser's desktop address bar.
-                    val badge = protocolBadgeFor(state)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            // Rides the same drawing shift as the surface it
-                            // sits on, so the content stays on the compact
-                            // pill's centre line rather than on the touch
-                            // box's ([addressPillTopShift]).
-                            .offset(y = pillTopShift)
-                            // Symmetric, because the field holds one control
-                            // at each end: 8 dp at rest and while editing,
-                            // [CapsuleCompactSidePadding] when compact, where
-                            // there is nothing left in the pill but the
-                            // domain (see [capsuleLabelInset]).
-                            .padding(horizontal = contentInset),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        // The overflow menu's reservation. Filled outside the
-                        // field for the same reason the trailing slot is (see
-                        // below) — what the row lays out is the empty box.
-                        if (slotScale > 0f) {
-                            Box(
-                                modifier = Modifier
-                                    .capsuleFieldSlot(slotScale, towardsStart = true),
-                            )
+        // The field's own Copy and Cut put on the clipboard what it shows
+        // (bidi controls marked), as the long-press menu's Copy does.
+        val appClipboard = LocalClipboard.current
+        val markingClipboard = remember(appClipboard) { BidiMarkingClipboard(appClipboard) }
+        CompositionLocalProvider(LocalClipboard provides markingClipboard) {
+            NoSuggestionsTextInput {
+                BasicTextField(
+                    value = fieldValue,
+                    onValueChange = { newValue ->
+                        val textChanged = newValue.text != fieldValue.text
+                        fieldValue = newValue
+                        if (textChanged) {
+                            // Typing feeds the suggestions query only. The
+                            // tab's committed address stays put until the user
+                            // actually submits (or the WebView navigates).
+                            onAddressQueryChanged(newValue.text)
+                            onAddressEditedChanged(true)
                         }
-                        // The badge, on the runs where the text it marks is
-                        // this row's: the editor's full URL, which starts at
-                        // the leading edge, and the home tab's placeholder.
-                        // The resting domain is drawn one level up, centred
-                        // in the field, and the badge is drawn up there
-                        // beside it — a mark on the domain has to travel with
-                        // the domain (see [addressBadgeCenterOffset]). The
-                        // two conditions are complements, so the badge is on
-                        // screen exactly once in every state.
-                        //
-                        // Either way it is one slot with the gap after it,
-                        // retreating into the pill's leading edge as the bar
-                        // collapses — the compact pill shows the domain and
-                        // nothing else. Zero-width means not composed, so it
-                        // can't take a tap meant for the label.
-                        if (badge != null && (addressFocused || restingLabel.isEmpty()) &&
-                            slotScale > 0f
+                    },
+                    singleLine = true,
+                    // The seeded address and anything typed or pasted get the
+                    // resting label's marking, drawn only: the buffer keeps
+                    // what the tab holds or the user entered, so Go submits it.
+                    visualTransformation = BidiMarkingTransformation,
+                    textStyle = textStyle,
+                    cursorBrush = SolidColor(colors.primary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester)
+                        .onFocusChanged { onAddressFocusChanged(it.isFocused) },
+                    // A URL field, like Chrome's and Safari's (#172): URI
+                    // keyboard, no auto-correct / capitals, and — via the
+                    // [NoSuggestionsTextInput] wrapper — no IME suggestion strip over our
+                    // own suggestion list.
+                    keyboardOptions = urlKeyboardOptions(
+                        // Always Go, as in Chrome's omnibox — never switched to
+                        // Search as the text turns into a search term (#171):
+                        // a new action key means restarting input, the IME
+                        // hides for a moment, and [imeDismissalEndsEditing]
+                        // rightly reads that as the user closing the keyboard
+                        // and ends the edit mid-word. The top suggestion row
+                        // says what Enter will do instead.
+                        imeAction = ImeAction.Go,
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onGo = { onSubmit(fieldValue.text) },
+                    ),
+                    decorationBox = { innerTextField ->
+                        // Protocol badge: the pill grows a Swarm hex mark or
+                        // the IPFS cube on the left whenever the *loaded*
+                        // page origin is one of our embedded gateways. For
+                        // `ens://` names we look at the active display
+                        // override — its `baseUrl` is the gateway that
+                        // actually served the page, which tells us whether
+                        // the contenthash resolved to Swarm or IPFS.
+                        // Mirrors `.protocol-icon[data-protocol='swarm'|'ipfs'|'ipns']`
+                        // in freedom-browser's desktop address bar.
+                        val badge = protocolBadgeFor(state)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                // Rides the same drawing shift as the surface it
+                                // sits on, so the content stays on the compact
+                                // pill's centre line rather than on the touch
+                                // box's ([addressPillTopShift]).
+                                .offset(y = pillTopShift)
+                                // Symmetric, because the field holds one control
+                                // at each end: 8 dp at rest and while editing,
+                                // [CapsuleCompactSidePadding] when compact, where
+                                // there is nothing left in the pill but the
+                                // domain (see [capsuleLabelInset]).
+                                .padding(horizontal = contentInset),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Row(
-                                modifier = Modifier
-                                    .collapsingControl(slotScale, towardsStart = true),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                ProtocolBadgeMark(
-                                    badge = badge,
-                                    trust = state.nameTrust,
-                                    modifier = Modifier.size(AddressPillBadgeSize),
-                                )
-                                Spacer(Modifier.width(AddressPillBadgeGap))
-                            }
-                        }
-                        // Resting vs editing text. At rest the domain is the
-                        // primary element (see [AddressLabel]); the moment
-                        // the field takes focus the full URL is back, still
-                        // select-alled, so nothing about editing changes.
-                        //
-                        // The text field itself stays composed and laid out
-                        // in both states — it is simply drawn transparent
-                        // under the domain label while resting — so a tap
-                        // anywhere on the pill still lands on it and focuses
-                        // it, exactly as before.
-                        //
-                        // The domain label itself is drawn one level up,
-                        // against the bar rather than against this row, so
-                        // that its geometry can be one function of the
-                        // collapse (#55) — see [BottomToolbar]. What is
-                        // left here is the box it used to share with the
-                        // field: the field, and the placeholder for when
-                        // there is no address to show.
-                        //
-                        // Blank label at rest means a blank address (the
-                        // home tab) — [AddressLabel.resting] passes
-                        // everything else through — so the placeholder is
-                        // the right thing to draw underneath.
-                        val showPlaceholder =
-                            if (addressFocused) fieldValue.text.isEmpty() else restingLabel.isEmpty()
-                        Box(modifier = Modifier.weight(1f)) {
-                            Box(
-                                modifier = Modifier.graphicsLayer {
-                                    alpha = if (addressFocused) 1f else 0f
-                                },
-                            ) {
-                                innerTextField()
-                            }
-                            if (showPlaceholder) {
-                                AddressPlaceholder(
-                                    color = colors.onSurfaceVariant,
-                                    // Centred while resting, for the same
-                                    // reason the domain it stands in for is:
-                                    // the split bar's field is symmetric, and
-                                    // a left-aligned placeholder in it reads
-                                    // as text that failed to centre. Editing
-                                    // hands the box back to the text field,
-                                    // which starts at the leading edge.
-                                    textAlign = if (addressFocused) TextAlign.Start
-                                    else TextAlign.Center,
-                                    modifier = Modifier.fillMaxWidth(),
+                            // The overflow menu's reservation. Filled outside the
+                            // field for the same reason the trailing slot is (see
+                            // below) — what the row lays out is the empty box.
+                            if (slotScale > 0f) {
+                                Box(
+                                    modifier = Modifier
+                                        .capsuleFieldSlot(slotScale, towardsStart = true),
                                 )
                             }
+                            // The badge, on the runs where the text it marks is
+                            // this row's: the editor's full URL, which starts at
+                            // the leading edge, and the home tab's placeholder.
+                            // The resting domain is drawn one level up, centred
+                            // in the field, and the badge is drawn up there
+                            // beside it — a mark on the domain has to travel with
+                            // the domain (see [addressBadgeCenterOffset]). The
+                            // two conditions are complements, so the badge is on
+                            // screen exactly once in every state.
+                            //
+                            // Either way it is one slot with the gap after it,
+                            // retreating into the pill's leading edge as the bar
+                            // collapses — the compact pill shows the domain and
+                            // nothing else. Zero-width means not composed, so it
+                            // can't take a tap meant for the label.
+                            if (badge != null && (addressFocused || restingLabel.isEmpty()) &&
+                                slotScale > 0f
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .collapsingControl(slotScale, towardsStart = true),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    ProtocolBadgeMark(
+                                        badge = badge,
+                                        trust = state.nameTrust,
+                                        modifier = Modifier.size(AddressPillBadgeSize),
+                                    )
+                                    Spacer(Modifier.width(AddressPillBadgeGap))
+                                }
+                            }
+                            // Resting vs editing text. At rest the domain is the
+                            // primary element (see [AddressLabel]); the moment
+                            // the field takes focus the full URL is back, still
+                            // select-alled, so nothing about editing changes.
+                            //
+                            // The text field itself stays composed and laid out
+                            // in both states — it is simply drawn transparent
+                            // under the domain label while resting — so a tap
+                            // anywhere on the pill still lands on it and focuses
+                            // it, exactly as before.
+                            //
+                            // The domain label itself is drawn one level up,
+                            // against the bar rather than against this row, so
+                            // that its geometry can be one function of the
+                            // collapse (#55) — see [BottomToolbar]. What is
+                            // left here is the box it used to share with the
+                            // field: the field, and the placeholder for when
+                            // there is no address to show.
+                            //
+                            // Blank label at rest means a blank address (the
+                            // home tab) — [AddressLabel.resting] passes
+                            // everything else through — so the placeholder is
+                            // the right thing to draw underneath.
+                            val showPlaceholder =
+                                if (addressFocused) fieldValue.text.isEmpty() else restingLabel.isEmpty()
+                            Box(modifier = Modifier.weight(1f)) {
+                                Box(
+                                    modifier = Modifier.graphicsLayer {
+                                        alpha = if (addressFocused) 1f else 0f
+                                    },
+                                ) {
+                                    innerTextField()
+                                }
+                                if (showPlaceholder) {
+                                    AddressPlaceholder(
+                                        color = colors.onSurfaceVariant,
+                                        // Centred while resting, for the same
+                                        // reason the domain it stands in for is:
+                                        // the split bar's field is symmetric, and
+                                        // a left-aligned placeholder in it reads
+                                        // as text that failed to centre. Editing
+                                        // hands the box back to the text field,
+                                        // which starts at the leading edge.
+                                        textAlign = if (addressFocused) TextAlign.Start
+                                        else TextAlign.Center,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+                            }
+                            // Trailing control slot — sized to the pill, never
+                            // pushes it taller, and *always* reserved at the same
+                            // 32 dp whatever it is currently holding. That fixed
+                            // reservation is what makes "no layout shifts" true
+                            // for the loading state: the Stop control appears
+                            // into a slot that was already there, and the URL
+                            // beside it doesn't re-wrap or re-ellipsise when a
+                            // load starts or finishes.
+                            //
+                            // Reserved here, *filled* outside the field: the
+                            // control has to sit above the pill's gesture surface
+                            // to keep its own taps, and that surface has to sit
+                            // above the text field (see below). So what the row
+                            // lays out is the empty slot, and the button is
+                            // composed over it with the same
+                            // [Modifier.capsuleFieldSlot] — one box, laid out
+                            // twice, so the two can't drift apart.
+                            //
+                            // The one thing that moves it is the collapse: the
+                            // slot retreats into the pill's trailing edge along
+                            // with the badge, because a minimised bar that is
+                            // the domain *and a button* is neither minimised nor
+                            // centred. Nothing is lost — the tap that brings the
+                            // bar back brings Reload/Stop back with it, the same
+                            // way it restores Back, the tab counter and the
+                            // menu — and the load's own progress keeps being
+                            // drawn on the compact pill's edge throughout.
+                            if (slotScale > 0f) {
+                                Box(
+                                    modifier = Modifier
+                                        .capsuleFieldSlot(slotScale, towardsStart = false),
+                                )
+                            }
                         }
-                        // Trailing control slot — sized to the pill, never
-                        // pushes it taller, and *always* reserved at the same
-                        // 32 dp whatever it is currently holding. That fixed
-                        // reservation is what makes "no layout shifts" true
-                        // for the loading state: the Stop control appears
-                        // into a slot that was already there, and the URL
-                        // beside it doesn't re-wrap or re-ellipsise when a
-                        // load starts or finishes.
-                        //
-                        // Reserved here, *filled* outside the field: the
-                        // control has to sit above the pill's gesture surface
-                        // to keep its own taps, and that surface has to sit
-                        // above the text field (see below). So what the row
-                        // lays out is the empty slot, and the button is
-                        // composed over it with the same
-                        // [Modifier.capsuleFieldSlot] — one box, laid out
-                        // twice, so the two can't drift apart.
-                        //
-                        // The one thing that moves it is the collapse: the
-                        // slot retreats into the pill's trailing edge along
-                        // with the badge, because a minimised bar that is
-                        // the domain *and a button* is neither minimised nor
-                        // centred. Nothing is lost — the tap that brings the
-                        // bar back brings Reload/Stop back with it, the same
-                        // way it restores Back, the tab counter and the
-                        // menu — and the load's own progress keeps being
-                        // drawn on the compact pill's edge throughout.
-                        if (slotScale > 0f) {
-                            Box(
-                                modifier = Modifier
-                                    .capsuleFieldSlot(slotScale, towardsStart = false),
-                            )
-                        }
-                    }
-                },
-            )
+                    },
+                )
+            }
         }
 
         // The capsule's tap surface: the two-step tap and the long-press
