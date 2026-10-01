@@ -420,4 +420,86 @@ class LedgerRoutesTest {
             assertEquals(LedgerException.Kind.LOCKED, e.kind)
         }
     }
+
+    /**
+     * Opening the Ethereum app on a Ledger over USB drops it off the bus
+     * and brings it back under a new path (#350 R1-F1): waited on, it's
+     * followed there and read again, not taken as unplugged.
+     */
+    @Test
+    fun `a Ledger that re-enumerates while it's waited on is followed, not taken as unplugged`() = runBlocking {
+        val follows = AtomicInteger()
+        val stages = mutableListOf<Ledger.Stage>()
+        val got = Ledger.awaitReady({ stages += it }, readyMs = 5_000, pollMs = 10, follow = { follows.incrementAndGet(); true }, read = reads(LedgerException.Kind.APP_NOT_OPEN, LedgerException.Kind.DISCONNECTED, account))
+        assertEquals(account, got)
+        assertEquals(1, follows.get())
+        assertEquals(listOf(Ledger.Stage.OPEN_APP), stages)
+        // Through holding too, and twice over (quitting another app, then opening this one).
+        assertEquals(null, try {
+            Ledger.holding(account, {}, readyMs = 5_000, pollMs = 10, follow = { true }, read = reads(LedgerException.Kind.LOCKED, LedgerException.Kind.DISCONNECTED, LedgerException.Kind.APP_NOT_OPEN, LedgerException.Kind.DISCONNECTED, account))
+            null
+        } catch (e: NotThisLedger) {
+            e
+        })
+    }
+
+    @Test
+    fun `a Ledger that drops out is followed only while it's waited on, and only if it comes back`() = runBlocking {
+        val follows = AtomicInteger()
+        // Gone at the first read: nothing was waited on, so it's unplugged; nothing is followed.
+        try {
+            Ledger.awaitReady({}, readyMs = 5_000, pollMs = 10, follow = { follows.incrementAndGet(); true }, read = reads(LedgerException.Kind.DISCONNECTED, account))
+            fail("followed")
+        } catch (e: LedgerException) {
+            assertEquals(LedgerException.Kind.DISCONNECTED, e.kind)
+        }
+        assertEquals(0, follows.get())
+        // Waited on, but never back: unplugged.
+        try {
+            Ledger.awaitReady({}, readyMs = 5_000, pollMs = 10, follow = { follows.incrementAndGet(); false }, read = reads(LedgerException.Kind.LOCKED, LedgerException.Kind.DISCONNECTED, account))
+            fail("followed")
+        } catch (e: LedgerException) {
+            assertEquals(LedgerException.Kind.DISCONNECTED, e.kind)
+        }
+        assertEquals(1, follows.get())
+        // Past the wait for unlocking, it isn't followed either.
+        try {
+            Ledger.awaitReady({}, readyMs = 30, pollMs = 40, follow = { follows.incrementAndGet(); true }, read = reads(LedgerException.Kind.LOCKED, LedgerException.Kind.DISCONNECTED, account))
+            fail("followed")
+        } catch (e: LedgerException) {
+            assertEquals(LedgerException.Kind.DISCONNECTED, e.kind)
+        }
+        assertEquals(1, follows.get())
+    }
+
+    @Test
+    fun `the path a Ledger comes back under is one that wasn't listed before`() {
+        val a = "/dev/bus/usb/001/002"
+        val b = "/dev/bus/usb/001/003"
+        val back = "/dev/bus/usb/001/005"
+        assertEquals(back, Ledger.reappeared(setOf(a, b), listOf(b, back)))
+        // Not back yet; another Ledger plugged in already is its own route.
+        assertEquals(null, Ledger.reappeared(setOf(a, b), listOf(b)))
+    }
+
+    @Test
+    fun `a link followed to its Ledger's new path talks there, and closes it once it's closed`() = runBlocking {
+        class Fake(val id: Int) : LedgerLink {
+            var closed = false
+            override suspend fun exchange(apdu: ByteArray, timeoutMs: Long) = byteArrayOf(id.toByte())
+            override fun close() { closed = true }
+        }
+        val first = Fake(1)
+        val link = Ledger.Companion.FollowingLink(first)
+        val second = Fake(2)
+        link.replace(second)
+        assertTrue(first.closed)
+        assertEquals(2, link.exchange(byteArrayOf(), 10)[0].toInt())
+        link.close()
+        assertTrue(second.closed)
+        // Followed after it was closed (a route let go meanwhile): the new link is closed at once.
+        val third = Fake(3)
+        link.replace(third)
+        assertTrue(third.closed)
+    }
 }
