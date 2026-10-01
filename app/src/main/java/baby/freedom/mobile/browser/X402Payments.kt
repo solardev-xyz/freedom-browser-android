@@ -157,7 +157,8 @@ object X402Payments {
             val store = checkNotNull(store)
             if (held) store.hold(origin) else store.lift(origin)
         },
-        era = { store?.clearCount ?: 0L },
+        era = { store?.clearEra ?: 0L },
+        cleared = { era -> store?.clearedSince(era) ?: false },
         onFailed = { held ->
             Log.w(TAG, if (held) "keeping an x402 hold failed; trying again" else "lifting a kept x402 hold failed; trying again")
         },

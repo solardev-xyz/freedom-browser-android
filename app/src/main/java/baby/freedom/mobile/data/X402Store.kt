@@ -12,7 +12,6 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import java.io.IOException
 import java.math.BigInteger
-import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -369,17 +368,43 @@ class X402Store internal constructor(
 
     /** Forget every allowance, payment and hold (the wallet was removed); `false` if it couldn't be written. */
     suspend fun clear(): Boolean {
-        clears.incrementAndGet()
-        return write { it.clear() }
+        val n = synchronized(clears) { (++clearsStarted).also { clearsWriting += it } }
+        var landed = false
+        try {
+            landed = write { it.clear() }
+            return landed
+        } finally {
+            synchronized(clears) {
+                clearsWriting -= n
+                if (landed && n > clearLanded) clearLanded = n
+            }
+        }
     }
 
     /**
-     * How many times [clear] was called: a hold queued (or retried) before
-     * the latest clear isn't written back after it (#347 R1-M1).
+     * Tag for a hold queued now: [clearedSince] it later tells whether
+     * the store was cleared after it (#347 R1-M1, R2-M1).
      */
-    val clearCount: Long get() = clears.get()
+    val clearEra: Long get() = synchronized(clears) { clearsStarted }
 
-    private val clears = AtomicLong()
+    /**
+     * Whether a [clear] begun after [era] ([clearEra]) has landed (true),
+     * is still being written (null: wait and ask again), or none did —
+     * a clear that failed to write counts as none: what it would have
+     * removed is still on disk (#347 R2-M1).
+     */
+    fun clearedSince(era: Long): Boolean? = synchronized(clears) {
+        when {
+            clearLanded > era -> true
+            clearsWriting.any { it > era } -> null
+            else -> false
+        }
+    }
+
+    private val clears = Any()
+    private var clearsStarted = 0L
+    private var clearLanded = 0L
+    private val clearsWriting = HashSet<Long>()
 
     private fun dropDead(prefs: MutablePreferences, now: Long) {
         prefs.asMap().forEach { (k, v) ->

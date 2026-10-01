@@ -368,4 +368,20 @@ class X402StoreTest {
         assertFalse(s.hold(site))
         assertFalse(s.lift(site))
     }
+
+    @Test
+    fun `#347 R2-M1 only a clear that landed counts as one`() = runBlocking {
+        val broken = X402Store(BrokenStore(IOException("disk"))) { now }
+        val before = broken.clearEra
+        assertFalse(broken.clear())
+        // Failed: what it would have removed is still there, so queued holds aren't stale.
+        assertEquals(false, broken.clearedSince(before))
+        val s = store()
+        val era = s.clearEra
+        assertEquals(false, s.clearedSince(era))
+        assertTrue(s.clear())
+        assertEquals(true, s.clearedSince(era))
+        // A hold queued after the clear isn't stale.
+        assertEquals(false, s.clearedSince(s.clearEra))
+    }
 }
