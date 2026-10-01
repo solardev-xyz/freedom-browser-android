@@ -102,8 +102,10 @@ internal object AntNative {
     /**
      * `ant_storage_discover`: registers every still-funded batch this
      * account owns on Gnosis (#118). Sends nothing: the shim puts the
-     * broadcast gate back first, so the chequebook deploy ant may try
-     * along the way is refused.
+     * broadcast gate back first, so what ant may try along the way when
+     * it sets up settlement — deploying a chequebook, or (ant 0.5.51+)
+     * topping up the deposit of one it adopted — is refused, and logged as
+     * a refused broadcast ([SpendGuard]).
      */
     external fun storageDiscover(handle: Long, gnosisRpc: String): String
 

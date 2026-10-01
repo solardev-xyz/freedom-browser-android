@@ -469,8 +469,12 @@ class SwarmNode internal constructor(
      * outside any [SpendGuard] permit, so nothing ant might try to send
      * meanwhile gets out. Returns `{"registered":[ids],"status":{…}}`.
      * ant's discover also sets up settlement, which adopts a chequebook
-     * this account already owns (no transaction); the gateway is reloaded
-     * then, as after a buy, so the chequebook page (#117) sees it now.
+     * this account already owns (a read, no transaction); the gateway is
+     * reloaded then, as after a buy, so the chequebook page (#117) sees
+     * it now. Settlement may also try to deploy a chequebook or (ant
+     * 0.5.51+) top up an adopted one's deposit: with no permit open,
+     * [SpendGuard] refuses that broadcast, which is the "refused a
+     * broadcast" log line a discover can leave behind.
      */
     fun discoverStamps(): String = withLightNode { h, rpc ->
         try {

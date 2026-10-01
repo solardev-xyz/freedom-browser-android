@@ -34,6 +34,30 @@ class NodeApiGuardTest {
     }
 
     @Test
+    fun `ant's v0 spending routes are refused as chain writes on every host`() {
+        val spends = listOf(
+            "/v0/storage/buy", "/v0/storage/extend", "/v0/settlement/deposit",
+            "/V0/Storage/Buy", "//v0/./storage/buy", "/%76%30/storage/buy", "/v0%2Fsettlement%2Fdeposit",
+            "/v0/storage/buy?depth=17", "/v0/storage/some-future-spend",
+        )
+        val spendRefusal = NodeApiGuard.refusalText("POST", "http://127.0.0.1:1633/stamps/1/17")
+        for (path in spends) {
+            for (host in listOf("127.0.0.1", "192.168.1.20", "nas")) {
+                val url = "http://$host:1633$path"
+                assertTrue(url, refused("POST", url, externalSwarm = "http://nas:1633"))
+                assertEquals(url, spendRefusal, NodeApiGuard.refusalText("POST", url))
+            }
+        }
+        // A read of those paths, or a write to any other v0 route, isn't a spend:
+        // refused on the device with the read text, let through to another node.
+        assertEquals(NodeApiGuard.READ_REFUSAL, NodeApiGuard.refusalText("GET", "http://127.0.0.1:1633/v0/storage/buy"))
+        assertEquals(NodeApiGuard.READ_REFUSAL, NodeApiGuard.refusalText("POST", "http://127.0.0.1:1633/v0/manifest/ab"))
+        assertFalse(refused("GET", "http://192.168.1.20:1633/v0/storage/buy"))
+        assertFalse(refused("POST", "http://192.168.1.20:1633/v0/manifest/ab"))
+        assertFalse(refused("POST", "http://192.168.1.20:1633/storage/buy"))
+    }
+
+    @Test
     fun `the node's own API is refused for reads too`() {
         for (path in listOf(
             "/addresses", "/wallet", "/stamps", "/stamps/abc", "/stamps/abc/buckets",
