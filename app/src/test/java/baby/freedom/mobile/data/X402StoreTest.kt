@@ -284,6 +284,37 @@ class X402StoreTest {
     }
 
     @Test
+    fun `an allowance put back keeps the spend of a payment the grant made meanwhile (#346 R1-F1)`() = runBlocking {
+        val s = store()
+        s.grant(cap = 50, spent = 20)
+        val before = s.allowances.first().single()
+        now += 1
+        val p2 = paid("p2", 10, auto = false)
+        val done = s.commit(p2, X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) as X402Store.Commit.Done
+        // Another tab's automatic payment is counted against the new allowance, and sent.
+        val p3 = paid("p3", 10, auto = true)
+        assertTrue(s.commit(p3, grant = null) is X402Store.Commit.Done)
+        assertTrue(s.withdraw(p2, done))
+        // The old allowance is back, with p3 counted against it: nothing sent goes uncounted.
+        assertEquals(listOf(before.copy(spent = BigInteger.valueOf(30))), s.allowances.first())
+        assertEquals(listOf("p3"), s.history.first().map { it.id })
+        // Withdrawing p3 later finds the allowance it was counted against gone, and changes nothing.
+        assertTrue(s.withdraw(p3, X402Store.Commit.Done(done.allowanceCreated)))
+        assertEquals(BigInteger.valueOf(30), s.allowances.first().single().spent)
+    }
+
+    @Test
+    fun `a replaced allowance that can't be read isn't put back when the grant paid meanwhile (#346 R1-F1)`() = runBlocking {
+        val s = store()
+        now += 1
+        val p2 = paid("p2", 10, auto = false)
+        val granted = s.commit(p2, X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) as X402Store.Commit.Done
+        assertTrue(s.commit(paid("p3", 10, auto = true), grant = null) is X402Store.Commit.Done)
+        assertTrue(s.withdraw(p2, granted.copy(replaced = "not json")))
+        assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
+    }
+
+    @Test
     fun `a commit that can't be written reports it, and nothing is paid`() = runBlocking {
         val s = X402Store(BrokenStore(IOException("disk"))) { now }
         assertEquals(X402Store.Commit.Failed, s.commit(paid("a", 10, auto = false), grant = null))

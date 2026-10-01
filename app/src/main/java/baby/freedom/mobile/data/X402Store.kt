@@ -311,7 +311,9 @@ class X402Store internal constructor(
      * Undo a [commit] whose payment was never sent: its history entry
      * goes, an allowance payment is given back to that allowance, and an
      * allowance granted with it is taken away, and the allowance that
-     * grant replaced ([Commit.Done.replaced]) put back as it was (#346) —
+     * grant replaced ([Commit.Done.replaced]) put back as it was (#346),
+     * charged with anything the granted one paid meanwhile besides this
+     * payment, so no sent payment goes uncounted (#346 R1-F1) —
      * only if it's still the one [commit] touched ([Commit.Done.allowanceCreated]),
      * never one the user has revoked or replaced since. `false` if it
      * couldn't be written.
@@ -328,7 +330,15 @@ class X402Store internal constructor(
         if (payment.auto) {
             prefs[key] = encodeAllowance(a.copy(spent = (a.spent - payment.amount).max(BigInteger.ZERO)))
         } else if (done.replaced != null) {
-            prefs[key] = done.replaced
+            // Whatever the granted allowance paid besides this payment — an
+            // automatic payment committed against it and sent meanwhile —
+            // stays counted, now against the one put back (#346 R1-F1).
+            val since = a.spent - payment.amount
+            val back = if (since.signum() <= 0) done.replaced else {
+                decodeAllowance(key.name.removePrefix(ALLOW), done.replaced)
+                    ?.let { encodeAllowance(it.copy(spent = it.spent + since)) }
+            }
+            if (back != null) prefs[key] = back else prefs.remove(key)
         } else {
             prefs.remove(key)
         }
