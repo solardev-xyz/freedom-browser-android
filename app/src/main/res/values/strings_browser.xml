@@ -67,7 +67,7 @@
     <!-- PopupBlocker.kt -->
     <string name="browser_popup_reading_address">Reading its address…</string>
     <string name="browser_popup_form_sent_to_long">A form sent to %1$s (its data can\'t be sent again from here)</string>
-    <string name="browser_popup_address_unread">Its address wasn\'t read (too many pop-ups at once)</string>
+    <string name="browser_popup_address_unread">Its address wasn\'t read (too many pop-ups at once, or the page closed first)</string>
     <string name="browser_popup_blank_window">A blank window (no address to open)</string>
 
     <!-- PrivateJsDialogs.kt: a private tab's alert/confirm/prompt/beforeunload -->

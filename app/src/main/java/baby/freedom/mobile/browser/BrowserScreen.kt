@@ -2441,9 +2441,15 @@ fun BrowserScreen(
 
         // The pop-up blocker's notice (#261): the active tab's blocked
         // pop-ups, above the IPFS line when that is up. Only over the
-        // page — not while the address bar is open, nor under a panel.
+        // page — not while the address bar is open, nor under a panel,
+        // nor under a page's fullscreen view.
         val blockedPopups = state.blockedPopups
-        val popupNoticeShown = blockedPopups.entries.isNotEmpty() && !addressFocused && !overlayShown
+        val popupNoticeShown = blockedPopupNoticeShown(
+            hasEntries = blockedPopups.entries.isNotEmpty(),
+            addressFocused = addressFocused,
+            overlayShown = overlayShown,
+            fullscreen = tabs.fullscreen != null,
+        )
         var popupNoticeHeightPx by remember { mutableIntStateOf(0) }
         val popupNoticeTopInsets = WindowInsets.systemBars
             .union(WindowInsets.displayCutout)
