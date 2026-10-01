@@ -600,4 +600,39 @@ class DownloadResumeDeviceTest {
             assertFalse(row.fileName, row.fileName.contains('\u202E'))
         }
     }
+
+    /**
+     * A Save-as row's name is the picked document's own, read back from
+     * its provider; the sweep leaves it as it is, so the list keeps
+     * matching what the document is really called. The ordinary row is
+     * older, so the sweep (newest first) reaches it only after the
+     * Save-as one: once it's cleaned, the Save-as row has been passed.
+     */
+    @Test
+    fun theSweepLeavesASaveAsRowsPickedNameAlone() = runBlocking {
+        val dao = baby.freedom.mobile.data.AppDatabase.get(context).downloads()
+        val stem = "legacy-pick-${System.nanoTime()}"
+        val now = System.currentTimeMillis()
+        fun row(name: String, startedAt: Long, saveTo: String?) = DownloadEntry(
+            fileName = name,
+            displayUrl = "https://example.com/x",
+            sourceUrl = "https://example.com/x",
+            mimeType = "application/pdf",
+            contentUri = saveTo,
+            status = DownloadStatus.COMPLETED,
+            totalBytes = 10,
+            receivedBytes = 10,
+            error = null,
+            startedAt = startedAt,
+            finishedAt = startedAt,
+            saveTo = saveTo,
+        )
+        val picked = "${stem}a:b.pdf"
+        val pickedId = dao.insert(row(picked, now, "content://com.example.docs/document/$stem"))
+            .also { rows += it }
+        val plainId = dao.insert(row("${stem}c\u202Efdp.apk", now - 1, null)).also { rows += it }
+        DownloadManager.newProcessForTest(context)
+        await("${stem}c") { it.id == plainId && it.fileName == "${stem}c_fdp.apk" }
+        assertEquals(picked, dao.get(pickedId)?.fileName)
+    }
 }

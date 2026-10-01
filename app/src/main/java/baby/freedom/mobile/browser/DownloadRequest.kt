@@ -276,6 +276,14 @@ internal fun sanitizeFileName(raw: String): String {
  * ZWJ / ZWNJ and the emoji tag characters (U+E0020–E007F) stay: emoji
  * sequences, flags and Persian / Indic words need them, and they
  * reorder nothing.
+ *
+ * Narrower than [MessageSigning.hides] on purpose: the blank-but-spacing
+ * characters it also flags — the Hangul fillers U+115F/1160/3164/FFA0,
+ * U+2800, the variation selectors — stay in a file name. Each draws
+ * an empty advance (or, for a selector, picks an emoji's style), so it
+ * can neither hide nor reorder an extension; on a signing sheet it
+ * matters because it can hide bytes that are signed, which a file
+ * name doesn't have.
  */
 private fun fileNameCharIsHidden(cp: Int): Boolean {
     if (cp < 0x80) return cp < 0x20 || cp == 0x7f || cp.toChar() in "\"*:<>?|"
@@ -364,9 +372,12 @@ private fun regionalIndicatorsBefore(s: String, end: Int): Int {
  * above and below its line, over the offer prompt's other rows, since
  * Compose doesn't clip glyphs to the line box; real text stacks two or
  * three — and nothing else changed — [sanitizeFileName]'s core, and how a name
- * stored before it replaced format characters (a paused row from an
- * older version) is cleaned when that row is loaded again, without
- * touching a name the user picked any further.
+ * stored before it replaced format characters (a row from an older
+ * version) is cleaned when that row is loaded again. The dropped marks
+ * are gone from the name the file is saved under too, not just from
+ * what's shown: Hebrew with cantillation, or Tibetan, stacking four
+ * or more on one letter loses the ones past the third. A Save-as row's
+ * name, the picked document's own, isn't passed through here.
  */
 internal fun cleanStoredFileName(name: String): String {
     val out = StringBuilder(name.length)
