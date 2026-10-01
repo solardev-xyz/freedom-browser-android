@@ -153,9 +153,9 @@
     <string name="names_add_chain_failed">Couldn\'t save the chain. Try again.</string>
     <string name="names_chain_id_hint">A whole number from 1 to %1$s (or 0x hex)</string>
     <string name="names_chain_name">Name</string>
-    <string name="names_chain_name_hint">1 to %1$d characters</string>
+    <string name="names_chain_name_hint">1 to %1$d characters, one space between words, no line breaks or invisible characters</string>
     <string name="names_currency_symbol">Symbol</string>
-    <string name="names_currency_symbol_hint">1 to %1$d characters, no spaces</string>
+    <string name="names_currency_symbol_hint">1 to %1$d characters, no spaces or invisible characters</string>
     <string name="names_currency_decimals">Decimals</string>
     <string name="names_currency_decimals_hint">0 to 36</string>
     <string name="names_block_explorer_url">URL (optional)</string>

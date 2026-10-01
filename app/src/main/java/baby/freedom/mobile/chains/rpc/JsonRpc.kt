@@ -116,12 +116,27 @@ internal object JsonRpc {
         .put("params", params)
         .toString()
 
+    /**
+     * [text], an RPC's answer, as an envelope. A body nested deeper than
+     * [MAX_DEPTH] is [Envelope.Malformed] before it reaches the parser:
+     * the platform's `org.json` recurses once per level with no limit of
+     * its own, and a few thousand levels — a 10 KB answer — overflow the
+     * stack with an error no `catch (Exception)` on the way up stops,
+     * which took the app down from a quorum leg's detached scope. The
+     * parsed tree is measured again too: everything downstream that walks
+     * it ([stable], the quorum's vote key) recurses as well, so the limit
+     * must hold for what was parsed, not only for what [depth] read.
+     */
     fun parse(text: String): Envelope {
+        if (depth(text) > MAX_DEPTH) return Envelope.Malformed("nested too deeply")
         val obj = try {
             JSONTokener(text).nextValue() as? JSONObject
         } catch (_: Exception) {
             null
+        } catch (_: StackOverflowError) {
+            null
         } ?: return Envelope.Malformed("not a JSON-RPC object")
+        if (tooDeep(obj)) return Envelope.Malformed("nested too deeply")
         obj.optJSONObject("error")?.let { err ->
             val code = (err.opt("code") as? Number)?.toInt() ?: return Envelope.Malformed("error without a code")
             val data = when (val d = err.opt("data")) {
@@ -152,6 +167,104 @@ internal object JsonRpc {
     }
 
     private val HEX_DATA = Regex("^0x[0-9a-fA-F]*$")
+
+    /**
+     * How deep an answer may nest, envelope included. The deepest a read
+     * the router carries goes is a block with its transactions' access
+     * lists (`{result:{transactions:[{accessList:[{storageKeys:[`, 7).
+     */
+    internal const val MAX_DEPTH = 64
+
+    /**
+     * The deepest `[`/`{` nesting in [text]; stops counting past
+     * [MAX_DEPTH]. Not a validator — the parser still refuses what isn't
+     * JSON — but it reads tokens the way the platform's lenient
+     * `JSONTokener` does, not as strict JSON: a bracket is skipped only
+     * where that parser would skip it too — inside a `"…"` or `'…'`
+     * string, a block (slash-star), `//` or `#` comment — and an unquoted literal
+     * runs to the same terminators, so a quote inside one (`a"`) opens no
+     * string, and a `=>` key separator is one token. Read strictly, a
+     * comment or a single-quoted string holding one `"` would hide every
+     * bracket after it from the count while the parser still nests them.
+     *
+     * It's a fast first pass, not the guarantee: it follows the lenient
+     * grammar only as far as listed here, so [parse] measures the parsed
+     * tree again with [tooDeep], which holds whatever this scan misreads.
+     * Don't drop that check on the strength of this one.
+     */
+    internal fun depth(text: String): Int {
+        var depth = 0
+        var max = 0
+        var i = 0
+        val n = text.length
+        fun skipLine() {
+            while (i < n && text[i] != '\n' && text[i] != '\r') i++
+        }
+        while (i < n) {
+            when (val c = text[i]) {
+                ' ', '\t', '\n', '\r', ',', ':', ';' -> i++
+                // A key separator may be `=>`: the `>` is part of it, not a literal that would swallow a quote.
+                '=' -> i += if (text.getOrNull(i + 1) == '>') 2 else 1
+                '[', '{' -> {
+                    depth++
+                    if (depth > max) max = depth
+                    if (max > MAX_DEPTH) return max
+                    i++
+                }
+                ']', '}' -> {
+                    depth--
+                    i++
+                }
+                '"', '\'' -> {
+                    i++
+                    while (i < n && text[i] != c) i += if (text[i] == '\\') 2 else 1
+                    i++
+                }
+                '#' -> skipLine()
+                '/' -> when (text.getOrNull(i + 1)) {
+                    '*' -> {
+                        val close = text.indexOf("*/", i + 2)
+                        // Unterminated: the parser refuses it.
+                        if (close < 0) return max
+                        i = close + 2
+                    }
+                    '/' -> skipLine()
+                    else -> i++
+                }
+                else -> {
+                    // An unquoted literal (`true`, `0x10`, `a"b`): JSONTokener reads to one of these.
+                    i++
+                    while (i < n && text[i] !in LITERAL_END) i++
+                }
+            }
+        }
+        return max
+    }
+
+    private const val LITERAL_END = "{}[]/\\:,=;# \t\u000c\r\n"
+
+    /**
+     * Whether [value], a parsed answer, nests deeper than [MAX_DEPTH]
+     * (counted the way [depth] counts: the outermost object is 1).
+     * Iterative, so it can't overflow on what it's guarding against.
+     */
+    internal fun tooDeep(value: Any?): Boolean {
+        val stack = ArrayDeque<Pair<Any, Int>>()
+        if (value is JSONObject || value is JSONArray) stack.addLast(value to 1)
+        while (stack.isNotEmpty()) {
+            val (node, level) = stack.removeLast()
+            if (level > MAX_DEPTH) return true
+            val children = when (node) {
+                is JSONObject -> node.keys().asSequence().map { node.opt(it) }
+                is JSONArray -> (0 until node.length()).asSequence().map { node.opt(it) }
+                else -> emptySequence()
+            }
+            for (child in children) {
+                if (child is JSONObject || child is JSONArray) stack.addLast(child to level + 1)
+            }
+        }
+        return false
+    }
 
     private val CALL_OBJECT_METHODS = setOf("eth_call", "eth_estimateGas")
     private val CALL_QUANTITY_FIELDS = listOf("value", "gas", "gasPrice", "maxFeePerGas", "maxPriorityFeePerGas", "nonce")

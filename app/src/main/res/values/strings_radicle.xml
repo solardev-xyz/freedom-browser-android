@@ -202,8 +202,10 @@
     <string name="radicle_viewer_no_page">This repository has no page here.</string>
 
     <!-- OnchainApp.kt: web3:// onchain apps -->
-    <!-- %1$s is the chain's name, %2$s its chain ID. -->
-    <string name="radicle_onchain_detail_network">Network: %1$s (chain %2$s)</string>
+    <!-- %1$s is the chain's ID: its own line, shown before the (possibly site-chosen) name. -->
+    <string name="radicle_onchain_detail_chain_id">Chain ID: %1$s</string>
+    <!-- %1$s is the chain's name as the user's chain list has it; may have been chosen by a site. -->
+    <string name="radicle_onchain_detail_network">Network: %1$s</string>
     <string name="radicle_onchain_detail_contract">Contract: %1$s</string>
     <string name="radicle_onchain_detail_html_hash">HTML keccak256: %1$s</string>
     <!-- %1$s is the RPC server that answered. -->

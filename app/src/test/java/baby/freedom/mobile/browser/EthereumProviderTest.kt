@@ -931,6 +931,21 @@ class EthereumProviderTest {
     }
 
     @Test
+    fun `a site can't name the chain it adds with characters that reorder or split the sheet`() {
+        answer = { EthAnswer.Approved() }
+        for (name in listOf("Ethereum (chain 1)\u2028\u2028Testnet", "\u202Emuereht\u202C")) {
+            val params = JSONObject()
+                .put("chainId", "0x539")
+                .put("chainName", name)
+                .put("nativeCurrency", JSONObject().put("name", "Test Ether").put("symbol", "TST").put("decimals", 18))
+                .put("rpcUrls", JSONArray().put("https://rpc.test.example"))
+            assertEquals(name, -32602, code(call("wallet_addEthereumChain", JSONArray().put(params))))
+        }
+        assertTrue("no sheet for a refused chain", asks.isEmpty())
+        assertTrue(grants.added.isEmpty())
+    }
+
+    @Test
     fun `a remote site can't add a chain whose RPC is on the device, a page on loopback can`() {
         answer = { EthAnswer.Approved() }
         val params = JSONObject()

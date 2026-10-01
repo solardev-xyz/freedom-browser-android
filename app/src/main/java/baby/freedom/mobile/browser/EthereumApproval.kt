@@ -55,6 +55,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
+import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
@@ -395,14 +396,11 @@ private fun SignMessageBody(ask: EthAsk.SignMessage) {
 
 @Composable
 private fun SignTypedDataBody(ask: EthAsk.SignTypedData) {
-    Row0(
-        stringResource(R.string.send_label_network),
-        if (ask.chainBound) {
-            stringResource(R.string.send_eth_chain_with_id, ask.chain.name, ask.chain.id.toString())
-        } else {
-            stringResource(R.string.send_eth_any_chain)
-        },
-    )
+    if (ask.chainBound) {
+        ChainRow(stringResource(R.string.send_label_network), ask.chain)
+    } else {
+        Row0(stringResource(R.string.send_label_network), stringResource(R.string.send_eth_any_chain))
+    }
     AccountRow(ask.account)
     ask.domainName?.let { Row0(stringResource(R.string.send_eth_application), it) }
     ask.verifyingContract?.let { AddressRow(stringResource(R.string.send_label_contract), it) }
@@ -534,10 +532,21 @@ internal fun autoApproveRuledNote(replaces: Boolean, highFee: Boolean, locked: B
 
 @Composable
 private fun SwitchBody(ask: EthAsk.SwitchChain) {
-    Row0(stringResource(R.string.send_label_from), stringResource(R.string.send_eth_chain_with_id, ask.from.name, ask.from.id.toString()))
-    Row0(stringResource(R.string.send_label_to), stringResource(R.string.send_eth_chain_with_id, ask.to.name, ask.to.id.toString()))
+    ChainRow(stringResource(R.string.send_label_from), ask.from)
+    ChainRow(stringResource(R.string.send_label_to), ask.to)
     Spacer(Modifier.height(8.dp))
     Note(stringResource(R.string.send_eth_switch_note))
+}
+
+/**
+ * A chain's site-chosen name, with its chain ID on a line of its own below
+ * it. The ID is never part of the name's text: a name like
+ * "Ethereum (chain 1) Neeee…t" would otherwise wrap so its first line reads
+ * as the real chain and the actual ID falls lines further down.
+ */
+@Composable
+private fun ChainRow(label: String, chain: Chain) {
+    Row0(label, chain.name, detail = stringResource(R.string.send_eth_chain_id_line, chain.id.toString()))
 }
 
 @Composable
