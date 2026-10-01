@@ -10,6 +10,8 @@ import android.util.Log
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
 import java.net.URISyntaxException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Links to other apps (#85): `mailto:`, `tel:`, `magnet:`, `geo:`,
@@ -389,6 +391,16 @@ internal fun externalLinkPageCurrent(tab: BrowserState, origin: String?, doc: In
  * (a WebView lacking the document-start script) no input is ever
  * confirmed, and app links are refused: fail closed.
  *
+ * x402 asks the same question without using the input up
+ * ([topDocumentGesture], #348): a site's allowance pays silently for the
+ * site's own tapped navigation, not one a cross-origin iframe the user
+ * tapped started by navigating the top frame. That navigation isn't
+ * cancelled and nothing is launched, so it takes no input from
+ * [consume]; and a frame keeps the activation of its own tap for
+ * [WINDOW_MS] whatever the user taps next, so it isn't enough that the
+ * latest input was the top document's — every input of that window has
+ * to have been.
+ *
  * [clock] is a monotonic millisecond clock (`SystemClock.uptimeMillis`).
  * Main thread only.
  */
@@ -432,6 +444,23 @@ internal class UserGestureLatch(private val clock: () -> Long) {
     private var armedAt = 0L
     private val waiting = HashMap<Int, () -> Unit>()
 
+    /** [topDocumentGesture] answers still waiting on the top document's word. */
+    private val topWatches = ArrayList<TopWatch>()
+
+    private class TopWatch(val inputs: List<Input>, val deadline: Long) {
+        val answer = CompletableDeferred<Boolean>()
+
+        /** Answers if it can: false past [deadline], else true once every input is the top document's. */
+        fun settle(now: Long): Boolean {
+            if (now > deadline) {
+                answer.complete(false)
+            } else if (inputs.all { it.inTopDocument }) {
+                answer.complete(true)
+            }
+            return answer.isCompleted
+        }
+    }
+
     /**
      * A touch, key press or accessibility click begins — before the page
      * sees it — at [at] (the event's own time, e.g. `MotionEvent.eventTime`).
@@ -454,6 +483,7 @@ internal class UserGestureLatch(private val clock: () -> Long) {
         recent.addLast(Input(inputId, at, at, untilConfirmed, repeats))
         val stale = clock() - WINDOW_MS - CONFIRM_MS
         while (recent.isNotEmpty() && (recent.size > MAX_RECENT || recent.first().end < stale)) recent.removeFirst()
+        settleTopWatches()
     }
 
     /** The current input goes on until [at] (a touch's `ACTION_UP`). */
@@ -496,6 +526,41 @@ internal class UserGestureLatch(private val clock: () -> Long) {
         }
         input.inTopDocument = true
         waiting.remove(input.id)?.invoke()
+        settleTopWatches()
+    }
+
+    private fun settleTopWatches() {
+        val now = clock()
+        topWatches.removeAll { it.settle(now) }
+    }
+
+    /**
+     * For a navigation starting now with the user's activation (#348):
+     * whether every input of the last [WINDOW_MS] — any one of which can
+     * have lent a frame the activation it carries — was the top
+     * document's own, as its [TOP_DOCUMENT_INPUT] confirms. Doesn't use
+     * the input up ([consume]): the navigation goes on either way, and
+     * what's asked is only whose it was. False when there was no input
+     * at all (a gesture this view never saw), or once [CONFIRM_MS] has
+     * passed with any of them unconfirmed — an iframe's, or the
+     * detector's word never came: fail closed.
+     */
+    fun topDocumentGesture(): TopDocumentGesture {
+        val now = clock()
+        val inputs = recent.filter { it.end >= now - WINDOW_MS }
+        if (inputs.isEmpty()) return TopDocumentGesture { false }
+        val watch = TopWatch(inputs, now + CONFIRM_MS)
+        if (!watch.settle(now)) {
+            topWatches.add(watch)
+            // A page that starts navigations in a loop can't grow this
+            // without bound: the oldest answer is no.
+            while (topWatches.size > MAX_RECENT) topWatches.removeAt(0).answer.complete(false)
+        }
+        return TopDocumentGesture {
+            val answer = watch.answer
+            if (!answer.isCompleted) withTimeoutOrNull((watch.deadline - clock()).coerceAtLeast(1)) { answer.await() }
+            answer.isCompleted && answer.await()
+        }
     }
 
     /** The user tapped or pressed a key on the page: one launch's worth. */

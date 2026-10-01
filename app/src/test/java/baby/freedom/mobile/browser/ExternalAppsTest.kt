@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertFalse
@@ -244,6 +245,76 @@ class ExternalAppsTest {
         assertTrue(c.latch.giveUp(id))
     }
 
+    // x402 (#348): whose tap a navigation that goes on carried, without using it up.
+
+    @Test
+    fun `x402 a tap the top document confirms is its own`() {
+        val c = Clock()
+        val down = c.tap()
+        val gesture = c.latch.topDocumentGesture()
+        c.now += 20 // its word lands just after the navigation started
+        c.topDocumentSaw(down, isClick = false)
+        assertTrue(runBlocking { gesture.confirmed() })
+        // Not used up: an app link from the same tap is still offered.
+        assertNotNull(c.latch.consume())
+    }
+
+    @Test
+    fun `x402 a tap on an iframe that navigates the top frame is never confirmed`() {
+        val c = Clock()
+        c.tap() // the iframe got the pointerdown; the top document heard nothing
+        val gesture = c.latch.topDocumentGesture()
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 a top-document tap can't vouch for an iframe tap still within its activation`() {
+        // The iframe keeps its own tap's activation for WINDOW_MS, and can
+        // navigate the top frame right after the user's next tap on the page.
+        val c = Clock()
+        c.tap() // on the iframe
+        c.now += 2_000
+        val next = c.tap() // on the top page
+        c.topDocumentSaw(next)
+        val gesture = c.latch.topDocumentGesture()
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        c.latch.onInputStart(c.now) // anything that settles it
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 an iframe tap whose activation has run out doesn't count`() {
+        val c = Clock()
+        c.tap() // on the iframe
+        c.now += UserGestureLatch.WINDOW_MS + 100
+        val next = c.tap() // on the top page
+        c.topDocumentSaw(next)
+        assertTrue(runBlocking { c.latch.topDocumentGesture().confirmed() })
+    }
+
+    @Test
+    fun `x402 no input at all, or a word too late, confirms nothing`() {
+        val c = Clock()
+        assertFalse(runBlocking { c.latch.topDocumentGesture().confirmed() })
+        val down = c.tap()
+        val gesture = c.latch.topDocumentGesture()
+        c.now += UserGestureLatch.CONFIRM_MS + 1 // a busy renderer's word
+        c.topDocumentSaw(down)
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 an accessibility click is confirmed by the top document's click`() {
+        val c = Clock()
+        c.latch.onInputStart(c.now, untilConfirmed = true)
+        c.latch.onInput()
+        val gesture = c.latch.topDocumentGesture()
+        c.now += 300 // Blink runs the simulated click late
+        c.topDocumentSaw(c.now - 5)
+        assertTrue(runBlocking { gesture.confirmed() })
+    }
+
     @Test
     fun `nor can a later top-document tap vouch for an earlier iframe tap`() {
         val c = Clock()
@@ -312,7 +383,7 @@ class ExternalAppsTest {
         var offered = 0
         assertTrue(c.latch.whenInTopDocument(id) { offered++ })
         c.now += 200
-        c.topDocumentSaw(c.now - 2)
+        c.topDocumentSaw(c.now - 5)
         assertEquals(1, offered)
     }
 

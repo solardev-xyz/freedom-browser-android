@@ -3660,9 +3660,18 @@ private fun buildRefreshableWebView(
                         // Started by the page on screen: only that site's
                         // own allowance may pay for it (#218 R4-M3), and
                         // only on the user's tap, not the page's own
-                        // script chaining 402s (#237).
+                        // script chaining 402s (#237) — a tap the top
+                        // document says it received, not one on a
+                        // cross-origin iframe that navigates the top
+                        // frame with it (#348). Without a PageWebView's
+                        // latch, nothing confirms it: fail closed.
+                        val gesture = if (request.hasGesture()) {
+                            (view as? PageWebView)?.userGestures?.topDocumentGesture() ?: TopDocumentGesture { false }
+                        } else {
+                            null
+                        }
                         X402Payments.onNavigationStarted(
-                            state, byUser = false, pageUrl = committedPageUrl, url = target, gesture = request.hasGesture(),
+                            state, byUser = false, pageUrl = committedPageUrl, url = target, gesture = gesture,
                         )
                     }
                 }

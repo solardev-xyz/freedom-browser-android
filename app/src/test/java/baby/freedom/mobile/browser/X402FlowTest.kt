@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.data.X402Store.Status
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -32,6 +33,9 @@ class X402FlowTest {
     private val a = "https://pay.example/a"
     private val b = "https://pay.example/b"
     private val origin = "https://pay.example"
+
+    /** The user's tap, which the top document confirms was its own (#348). */
+    private val tapped = TopDocumentGesture { true }
 
     /** Pay's order: the epoch moves, the paid GET is loaded, then noted; the interceptor sees the GET. */
     private fun send(url: String, id: String, tabId: Long = tab) {
@@ -227,36 +231,63 @@ class X402FlowTest {
         flow.superseded(tab)
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
         flow.detected(tab, a, "terms")
-        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
     }
 
     @Test
     fun `R4-M3 the site's own page's navigation lets its allowance pay`() {
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = tapped)
         flow.redirected(tab, b) // before the 402: the site's own redirect
         flow.detected(tab, a, "terms")
-        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
+    }
+
+    @Test
+    fun `348 a tap the top document didn't confirm — an iframe's, navigating the top frame — can't spend it`() {
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = a, gesture = { false })
+        flow.detected(tab, a, "terms")
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
+    }
+
+    @Test
+    fun `348 the top document's word is asked only for the page's own gesture navigation`() {
+        var asked = 0
+        val gesture = TopDocumentGesture { asked++; true }
+        // The user's own load pays without it.
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = a, gesture = gesture)
+        flow.detected(tab, a, "terms")
+        assertTrue(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
+        // A redirect through another origin asks whatever the tap was.
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = "https://evil.example/r", gesture = gesture)
+        flow.redirected(tab, a)
+        flow.detected(tab, a, "terms")
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
+        assertEquals(0, asked)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = a, gesture = gesture)
+        flow.detected(tab, a, "terms")
+        assertTrue(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
+        assertEquals(1, asked)
     }
 
     @Test
     fun `R4-M3 another site's link, script or popup can't spend the allowance`() {
         flow.navigationStarted(tab, byUser = false, fromOrigin = "https://evil.example", url = null)
         flow.detected(tab, a, "terms")
-        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
         // A popup's first navigation: no page on screen.
         flow.navigationStarted(tab, byUser = false, fromOrigin = null, url = null)
         flow.detected(tab, a, "terms")
-        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
     }
 
     @Test
     fun `R4-M3 a navigation nobody was seen starting can't spend it`() {
         // The site's link started one navigation, which committed...
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = null, gesture = true)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = null, gesture = tapped)
         assertNull(flow.committed(tab, "https://evil.example/"))
         // ...then evil's history.go() lands on the 402 with no start signal.
         flow.detected(tab, a, "terms")
-        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
     }
 
     @Test
@@ -264,7 +295,7 @@ class X402FlowTest {
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
         flow.superseded(tab)
         flow.detected(tab, a, "terms")
-        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
     }
 
     @Test
@@ -272,7 +303,7 @@ class X402FlowTest {
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
         flow.mainFrameRequested(tab, a, "POST", flow.epoch(tab), "https://evil.example")
         flow.detected(tab, a, "terms")
-        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
     }
 
     @Test
@@ -281,22 +312,22 @@ class X402FlowTest {
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = "https://evil.example/x")
         flow.redirected(tab, a)
         flow.detected(tab, a, "terms")
-        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
     }
 
     @Test
     fun `R5-M1 the site's link redirected back to it by another origin can't spend it`() {
         flow.superseded(tab)
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = "https://evil.example/r", gesture = true)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = "https://evil.example/r", gesture = tapped)
         flow.redirected(tab, a)
         flow.detected(tab, a, "terms")
-        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
         // Nor through another origin and back again.
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = b)
         flow.redirected(tab, "https://evil.example/r")
         flow.redirected(tab, a)
         flow.detected(tab, a, "terms")
-        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
     }
 
     @Test
@@ -304,15 +335,15 @@ class X402FlowTest {
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = b)
         flow.redirected(tab, a)
         flow.detected(tab, a, "terms")
-        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        assertTrue(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = tapped)
         flow.redirected(tab, a)
         flow.detected(tab, a, "terms")
-        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
         // Reload / Back: the entry's own URL isn't named, only its redirects.
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
         flow.detected(tab, a, "terms")
-        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
     }
 
     @Test
@@ -320,7 +351,7 @@ class X402FlowTest {
         flow.mainFrameRequested(tab, "https://evil.example/f", "POST", flow.epoch(tab), origin)
         flow.redirected(tab, a)
         flow.detected(tab, a, "terms")
-        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
     }
 
     @Test
@@ -330,12 +361,12 @@ class X402FlowTest {
         flow.mainFrameRequested(tab, "https://pay.example/x", "POST", flow.epoch(tab), origin)
         flow.redirected(tab, a)
         flow.detected(tab, a, "terms")
-        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
         // A GET's same-site redirect still pays (its hops all reach shouldOverrideUrlLoading).
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = tapped)
         flow.redirected(tab, a)
         flow.detected(tab, a, "terms")
-        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
     }
 
     @Test
@@ -343,7 +374,7 @@ class X402FlowTest {
         // The user opens the page: the allowance pays it.
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = a)
         flow.detected(tab, a, "terms")
-        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
         send(a, "r1")
         assertNull(flow.committed(tab, a))
         assertEquals(listOf(Triple("r1", Status.PAID, null)), settled)
@@ -351,45 +382,45 @@ class X402FlowTest {
         flow.superseded(tab)
         flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b)
         flow.detected(tab, b, "terms")
-        assertFalse(flow.committed(tab, b)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, b)!!.allowanceMayPay(origin) })
     }
 
     @Test
     fun `#237 after a Refused payment the site's allowance pays nothing until the user navigates`() {
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = a)
         flow.detected(tab, a, "terms")
-        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
         send(a, "r1")
         assertTrue(flow.httpError(tab, a, "GET", 402))
         assertNull(flow.committed(tab, a))
         assertEquals(listOf(Triple("r1", Status.REFUSED, 402)), settled)
         // A link the user taps on the refused page: the sheet asks.
         flow.superseded(tab)
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = tapped)
         flow.detected(tab, b, "terms")
-        assertFalse(flow.committed(tab, b)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, b)!!.allowanceMayPay(origin) })
         // Nor in another tab of the same site (a popup it opened, say).
-        flow.navigationStarted(2L, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        flow.navigationStarted(2L, byUser = false, fromOrigin = origin, url = b, gesture = tapped)
         flow.detected(2L, b, "terms")
-        assertFalse(flow.committed(2L, b)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(2L, b)!!.allowanceMayPay(origin) })
         // The hold is this site's: another site's allowance still pays.
         val other = "https://other.example"
-        flow.navigationStarted(3L, byUser = false, fromOrigin = other, url = "$other/x", gesture = true)
+        flow.navigationStarted(3L, byUser = false, fromOrigin = other, url = "$other/x", gesture = tapped)
         flow.detected(3L, "$other/x", "terms")
-        assertTrue(flow.committed(3L, "$other/x")!!.allowanceMayPay(other))
+        assertTrue(runBlocking { flow.committed(3L, "$other/x")!!.allowanceMayPay(other) })
         // The user's own address on another site doesn't lift it.
         flow.superseded(tab)
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = "$other/y")
         flow.committed(tab, "$other/y")
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = tapped)
         flow.detected(tab, b, "terms")
-        assertFalse(flow.committed(tab, b)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, b)!!.allowanceMayPay(origin) })
         // The user's own Reload (pull-to-refresh) of the site's page lifts it.
         flow.superseded(tab)
         flow.usersStep(tab)
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
         flow.detected(tab, b, "terms")
-        assertTrue(flow.committed(tab, b)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { flow.committed(tab, b)!!.allowanceMayPay(origin) })
     }
 
     /** The refused page on [tab]: [a] answered Refused and committed. */
@@ -402,9 +433,9 @@ class X402FlowTest {
     /** A link the user taps on the site's page on [tab]: may its allowance pay silently? */
     private fun tappedLinkPays(): Boolean {
         flow.superseded(tab)
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = tapped)
         flow.detected(tab, b, "terms")
-        return flow.committed(tab, b)!!.allowanceMayPay(origin)
+        return runBlocking { flow.committed(tab, b)!!.allowanceMayPay(origin) }
     }
 
     @Test
@@ -416,7 +447,7 @@ class X402FlowTest {
         flow.usersStep(tab)
         flow.navigationStarted(tab, byUser = false, fromOrigin = null, url = HISTORY_BACK_JS)
         flow.detected(tab, b, "terms")
-        assertFalse(flow.committed(tab, b)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, b)!!.allowanceMayPay(origin) })
         // ...but it lifts the hold: the site's link the user taps next pays silently again.
         assertTrue(tappedLinkPays())
     }
@@ -428,7 +459,7 @@ class X402FlowTest {
         flow.superseded(tab)
         flow.navigationStarted(tab, byUser = false, fromOrigin = null, url = null)
         flow.detected(tab, a, "terms")
-        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
         assertFalse(tappedLinkPays())
     }
 
@@ -440,7 +471,7 @@ class X402FlowTest {
         flow.superseded(tab)
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = b)
         flow.detected(tab, b, "terms")
-        assertTrue(flow.committed(tab, b)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { flow.committed(tab, b)!!.allowanceMayPay(origin) })
     }
 
     @Test
@@ -452,22 +483,22 @@ class X402FlowTest {
         flow.committed(2L, other)
         flow.usersStep(2L)
         flow.navigationStarted(2L, byUser = true, fromOrigin = null, url = null)
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = tapped)
         flow.detected(tab, b, "terms")
-        assertFalse(flow.committed(tab, b)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, b)!!.allowanceMayPay(origin) })
     }
 
     @Test
     fun `#237 the site's page pays silently for the user's tap, and its redirects on the site`() {
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = a, gesture = true)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = a, gesture = tapped)
         flow.redirected(tab, b)
         flow.detected(tab, b, "terms")
-        assertTrue(flow.committed(tab, b)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { flow.committed(tab, b)!!.allowanceMayPay(origin) })
         // A page-driven hop's server redirect doesn't gain the gesture.
         flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = a)
         flow.redirected(tab, b)
         flow.detected(tab, b, "terms")
-        assertFalse(flow.committed(tab, b)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, b)!!.allowanceMayPay(origin) })
     }
 
     @Test
@@ -475,9 +506,9 @@ class X402FlowTest {
         send(a, "r1")
         flow.committed(tab, a) // paid
         flow.superseded(tab)
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = tapped)
         flow.detected(tab, b, "terms")
-        assertTrue(flow.committed(tab, b)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { flow.committed(tab, b)!!.allowanceMayPay(origin) })
     }
 
     @Test
@@ -490,7 +521,7 @@ class X402FlowTest {
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = "https://evil.example/x")
         flow.redirected(tab, "$origin/next-402")
         flow.detected(tab, "$origin/next-402", "terms")
-        assertFalse(flow.committed(tab, "$origin/next-402")!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, "$origin/next-402")!!.allowanceMayPay(origin) })
         assertTrue(flow.holds(origin))
         assertFalse(tappedLinkPays())
     }
@@ -500,22 +531,22 @@ class X402FlowTest {
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = b)
         flow.redirected(tab, a)
         flow.detected(tab, a, "terms")
-        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
     }
 
     @Test
     fun `#237 R2-M1 a hold taken after a 402 committed is seen before its payment goes out`() {
         // Tab 2's tapped link on the site commits a 402 its allowance may pay...
-        flow.navigationStarted(2L, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        flow.navigationStarted(2L, byUser = false, fromOrigin = origin, url = b, gesture = tapped)
         flow.detected(2L, b, "terms")
         val committed = flow.committed(2L, b)!!
-        assertTrue(committed.allowanceMayPay(origin))
+        assertTrue(runBlocking { committed.allowanceMayPay(origin) })
         assertFalse(flow.holds(origin))
         // ...while tab 1's paid request on the same site is answered Refused.
         send(a, "r1")
         assertTrue(flow.httpError(tab, a, "GET", 402))
         // The commit's snapshot doesn't know; the live check that gates the payment does.
-        assertTrue(committed.allowanceMayPay(origin))
+        assertTrue(runBlocking { committed.allowanceMayPay(origin) })
         assertTrue(flow.holds(origin))
         assertFalse(flow.holds("https://other.example"))
         flow.superseded(tab)
@@ -531,17 +562,17 @@ class X402FlowTest {
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
         flow.redirected(tab, a)
         flow.detected(tab, a, "terms")
-        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
         // The Reload of the site's own page still may.
         flow.superseded(tab)
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
         flow.detected(tab, a, "terms")
-        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { flow.committed(tab, a)!!.allowanceMayPay(origin) })
         // A Reload with no page committed starts nowhere known: it asks.
         val fresh = 2L
         flow.navigationStarted(fresh, byUser = true, fromOrigin = null, url = null)
         flow.detected(fresh, a, "terms")
-        assertFalse(flow.committed(fresh, a)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { flow.committed(fresh, a)!!.allowanceMayPay(origin) })
     }
 
     @Test
@@ -565,9 +596,9 @@ class X402FlowTest {
         assertTrue(restarted.holds(origin))
         assertFalse(restarted.holds("https://other.example"))
         // The issue's reproduction: the site's link the user taps, after the restart.
-        restarted.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        restarted.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = tapped)
         restarted.detected(tab, b, "terms")
-        assertFalse(restarted.committed(tab, b)!!.allowanceMayPay(origin))
+        assertFalse(runBlocking { restarted.committed(tab, b)!!.allowanceMayPay(origin) })
         // Their own address on the site lifts it, kept or not.
         restarted.superseded(tab)
         restarted.navigationStarted(tab, byUser = true, fromOrigin = null, url = a)
@@ -579,10 +610,10 @@ class X402FlowTest {
     fun `#347 before the kept holds are read back, every site is held but one the user went to`() {
         val restarted = newFlow()
         assertTrue(restarted.holds(origin))
-        restarted.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        restarted.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = tapped)
         restarted.detected(tab, b, "terms")
         val early = restarted.committed(tab, b)!!
-        assertFalse(early.allowanceMayPay(origin))
+        assertFalse(runBlocking { early.allowanceMayPay(origin) })
         // The user's own address on the site, while its kept hold isn't known yet: lifted;
         // written once the read shows it was kept (#380 R1-M1).
         restarted.navigationStarted(tab, byUser = true, fromOrigin = null, url = a)
@@ -605,7 +636,7 @@ class X402FlowTest {
         assertEquals(listOf(other to true, origin to false), kept)
         assertEquals(emptyList<String>(), onceLifts)
         // The commit's snapshot was taken while nothing was known: it still asks.
-        assertFalse(early.allowanceMayPay(origin))
+        assertFalse(runBlocking { early.allowanceMayPay(origin) })
     }
 
     @Test
@@ -621,9 +652,9 @@ class X402FlowTest {
         assertEquals(listOf(origin to false), kept)
         assertEquals(listOf(origin), onceLifts)
         restarted.superseded(tab)
-        restarted.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        restarted.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = tapped)
         restarted.detected(tab, b, "terms")
-        assertTrue(restarted.committed(tab, b)!!.allowanceMayPay(origin))
+        assertTrue(runBlocking { restarted.committed(tab, b)!!.allowanceMayPay(origin) })
     }
 
     @Test
