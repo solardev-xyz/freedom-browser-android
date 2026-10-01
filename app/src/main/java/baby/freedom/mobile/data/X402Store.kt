@@ -317,6 +317,13 @@ class X402Store internal constructor(
      * only if it's still the one [commit] touched ([Commit.Done.allowanceCreated]),
      * never one the user has revoked or replaced since. `false` if it
      * couldn't be written.
+     *
+     * Deliberately conservative: an automatic payment carried over onto
+     * the allowance put back is never given back to it. If that payment
+     * is itself withdrawn later, its [Commit.Done.allowanceCreated] names
+     * the granted allowance, which is gone, so nothing changes and the
+     * restored one stays charged for it — an over-count that can only
+     * leave the site less to spend, never more (#346 R2-M1).
      */
     suspend fun withdraw(payment: Payment, done: Commit.Done): Boolean = write { prefs ->
         val allowanceCreated = done.allowanceCreated

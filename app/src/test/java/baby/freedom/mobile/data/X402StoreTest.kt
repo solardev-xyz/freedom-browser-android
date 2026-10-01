@@ -298,7 +298,9 @@ class X402StoreTest {
         // The old allowance is back, with p3 counted against it: nothing sent goes uncounted.
         assertEquals(listOf(before.copy(spent = BigInteger.valueOf(30))), s.allowances.first())
         assertEquals(listOf("p3"), s.history.first().map { it.id })
-        // Withdrawing p3 later finds the allowance it was counted against gone, and changes nothing.
+        // Withdrawing p3 later finds the allowance it was counted against gone, and changes nothing:
+        // the restored allowance stays charged for p3 even though p3 was never sent. A deliberate,
+        // conservative over-count — it can only leave the site less to spend, never more (#346 R2-M1).
         assertTrue(s.withdraw(p3, X402Store.Commit.Done(done.allowanceCreated)))
         assertEquals(BigInteger.valueOf(30), s.allowances.first().single().spent)
     }
