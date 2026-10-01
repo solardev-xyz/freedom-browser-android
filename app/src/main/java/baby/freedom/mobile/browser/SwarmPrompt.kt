@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
+import baby.freedom.mobile.wallet.MessageSigning
 import baby.freedom.mobile.wallet.Vault
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -138,20 +139,24 @@ private fun swarmMessagingCopy(ask: SwarmAsk.Message): SwarmPromptCopy = when {
 
 /**
  * A page's string as the sheet shows it — a messaging topic, a feed
- * name, a publish's name, content type or paths — with every control and
- * format character (bidi overrides and isolates, zero-width joiners,
- * line breaks and separators) written out as `<U+XXXX>`, so it can't
- * reorder or hide part of its row, or break it into rows of its own that
- * pass for the sheet's. The string itself goes to the node as is.
+ * name, a publish's name, content type or paths — with every code point
+ * that can hide or rearrange text written out as `<U+XXXX>`, so it can't
+ * reorder or hide part of its row, break it into rows of its own that
+ * pass for the sheet's, or paint over the rows around it. That's the
+ * signing sheets' own list ([MessageSigning.hides]): control and format
+ * characters (bidi overrides and isolates, zero-width joiners, tags),
+ * line and paragraph separators, variation selectors past an emoji's
+ * own, blank fillers, Default_Ignorable_Code_Point blocks, and a
+ * combining mark past the third stacked on one letter, whose ink would
+ * otherwise reach far above and below its line. The string itself goes
+ * to the node as is.
  */
 internal fun swarmShownTopic(topic: String): String = buildString {
+    val scan = MessageSigning.Scan()
     var i = 0
     while (i < topic.length) {
         val cp = topic.codePointAt(i)
-        val type = Character.getType(cp)
-        val hidden = Character.isISOControl(cp) || type == Character.FORMAT.toInt() ||
-            type == Character.LINE_SEPARATOR.toInt() || type == Character.PARAGRAPH_SEPARATOR.toInt()
-        if (hidden) append("<U+%04X>".format(cp)) else appendCodePoint(cp)
+        if (scan.hides(cp)) append("<U+%04X>".format(cp)) else appendCodePoint(cp)
         i += Character.charCount(cp)
     }
 }

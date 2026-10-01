@@ -1420,6 +1420,22 @@ class SwarmProviderTest {
     }
 
     @Test
+    fun `stacked marks, selectors, fillers and ignorables are written out on the sheet`() {
+        // Past the third combining mark on one letter, each is written out: no ink over the rows around it.
+        assertEquals("x\u0489\u0489\u0489" + "<U+0489>".repeat(1997), swarmShownTopic("x" + "\u0489".repeat(2000)))
+        // Real text keeps its two or three marks.
+        assertEquals("Vi\u1EC7t e\u0301\u0302", swarmShownTopic("Vi\u1EC7t e\u0301\u0302"))
+        // An emoji's own presentation selector stays; a run of selectors, or one smuggled after nothing, doesn't.
+        assertEquals("\u2764\uFE0F", swarmShownTopic("\u2764\uFE0F"))
+        assertEquals("a<U+FE00><U+FE01>", swarmShownTopic("a\uFE00\uFE01"))
+        assertEquals("a<U+E0100>", swarmShownTopic("a\uDB40\uDD00"))
+        // Blank fillers and Braille blank.
+        assertEquals("<U+3164><U+115F><U+2800>", swarmShownTopic("\u3164\u115F\u2800"))
+        // An unassigned default-ignorable is written out, and the text that takes its place splits the stack.
+        assertEquals("x\u0301\u0301<U+2065>\u0301\u0301", swarmShownTopic("x\u0301\u0301\u2065\u0301\u0301"))
+    }
+
+    @Test
     fun `unsubscribe never asks and only closes the site's own subscription`() {
         connect()
         connect(other)
@@ -1537,6 +1553,14 @@ class SwarmProviderTest {
         val malformed = unparsedSwarmRequestError("""{"id":4,"method":"m","params":"x"}""")
         assertEquals("Invalid request", malformed.message)
         assertNull(malformed.reason)
+        // Refused for lenient syntax, not size: malformed, not "too complex".
+        for (lenient in listOf("""{"id":1,"method":"x";}""", """{"id":1,"method":'x'}""", """{"id":1,/**/"method":"x"}""")) {
+            assertEquals(lenient, JsonShape.NOT_STRICT, jsonShape(lenient, MAX_SWARM_REQUEST_VALUES, MAX_SWARM_REQUEST_CONTAINERS))
+            val err = unparsedSwarmRequestError(lenient)
+            assertEquals(lenient, "Invalid request", err.message)
+            assertNull(lenient, err.reason)
+        }
+        assertEquals(JsonShape.TOO_COMPLEX, jsonShape(numbers, MAX_SWARM_REQUEST_VALUES, MAX_SWARM_REQUEST_CONTAINERS))
     }
 
     @Test

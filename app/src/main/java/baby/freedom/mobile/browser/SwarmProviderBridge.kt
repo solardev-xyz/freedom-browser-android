@@ -1075,8 +1075,11 @@ internal const val MAX_SWARM_REQUEST_CONTAINERS = 10_000
  * malformed one), or a plain "Invalid request".
  */
 internal fun unparsedSwarmRequestError(data: String?): SwarmProvider.Reply.Err {
+    // Only a strict-JSON request over the counts is "too complex": one
+    // refused for lenient syntax, or that parses but isn't a request, is
+    // just malformed.
     val tooComplex = data != null && data.length <= MAX_SWARM_REQUEST_CHARS &&
-        !jsonShapeWithin(data, MAX_SWARM_REQUEST_VALUES, MAX_SWARM_REQUEST_CONTAINERS)
+        jsonShape(data, MAX_SWARM_REQUEST_VALUES, MAX_SWARM_REQUEST_CONTAINERS) == JsonShape.TOO_COMPLEX
     if (!tooComplex) return SwarmProvider.Reply.Err(SwarmProvider.INVALID_PARAMS, "Invalid request")
     return SwarmProvider.Reply.Err(
         SwarmProvider.INVALID_PARAMS,
@@ -1103,7 +1106,14 @@ internal fun unparsedSwarmRequestError(data: String?): SwarmProvider.Reply.Err {
  * `/`, `#` or `;` outside a string, and a `"` that doesn't open a string
  * where one can begin (after `[`, `{`, `,`, `:` or at the start).
  */
-internal fun jsonShapeWithin(data: String, maxValues: Int, maxContainers: Int): Boolean {
+internal fun jsonShapeWithin(data: String, maxValues: Int, maxContainers: Int): Boolean =
+    jsonShape(data, maxValues, maxContainers) == JsonShape.WITHIN
+
+/** What [jsonShape] found: within the counts, over them, or not strict JSON's syntax. */
+internal enum class JsonShape { WITHIN, TOO_COMPLEX, NOT_STRICT }
+
+/** [jsonShapeWithin]'s scan, telling a request over the counts from one in lenient syntax. */
+internal fun jsonShape(data: String, maxValues: Int, maxContainers: Int): JsonShape {
     var values = 1
     var containers = 0
     var inString = false
@@ -1124,16 +1134,16 @@ internal fun jsonShapeWithin(data: String, maxValues: Int, maxContainers: Int): 
         }
         when (c) {
             '"' -> {
-                if (last != ' ' && last != '[' && last != '{' && last != ',' && last != ':') return false
+                if (last != ' ' && last != '[' && last != '{' && last != ',' && last != ':') return JsonShape.NOT_STRICT
                 inString = true
             }
-            ',' -> if (++values > maxValues) return false
-            '[', '{' -> if (++containers > maxContainers) return false
-            '\'', '/', '#', ';' -> return false
+            ',' -> if (++values > maxValues) return JsonShape.TOO_COMPLEX
+            '[', '{' -> if (++containers > maxContainers) return JsonShape.TOO_COMPLEX
+            '\'', '/', '#', ';' -> return JsonShape.NOT_STRICT
         }
         if (c != ' ' && c != '\t' && c != '\n' && c != '\r') last = c
     }
-    return true
+    return JsonShape.WITHIN
 }
 
 /**
