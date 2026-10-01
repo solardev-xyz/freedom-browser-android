@@ -15,8 +15,13 @@ import android.os.SystemClock
  * window sends it again: the first one after a cold start, and a
  * reconnect after `:node` died. `NodeService` dedups repeat asks.
  *
- * An ask made while the service isn't bound at all (the node switched off)
- * isn't kept: no connect is coming, and that tab has already given up.
+ * Until [settled] — the cold start has read whether the node runs and,
+ * if it does, started the bind — an unbound ask is kept too: `bound` is
+ * still false then only because that read hasn't resumed yet, not
+ * because the node is off, and a bind may well be on its way. [settled]
+ * with the node off drops it again. After that, an ask made while the
+ * service isn't bound at all (the node switched off) isn't kept: no
+ * connect is coming, and that tab has already given up.
  * Switching IPFS or the node off forgets the ask, so a later connect
  * doesn't start a node the user just stopped.
  *
@@ -27,16 +32,29 @@ internal class IpfsStartRequest(
     private val now: () -> Long = SystemClock::elapsedRealtime,
 ) {
     private var askedAt: Long? = null
+    private var settled = false
 
     /**
      * A navigation (or the Settings toggle) wants IPFS. [bound] is whether
      * the service is bound or binding; [send] calls the binder, a no-op
-     * while it isn't connected.
+     * while it isn't connected. Before [settled], an unbound ask is kept
+     * as well.
      */
     @Synchronized
     fun ask(bound: Boolean, send: () -> Unit) {
-        askedAt = if (bound) now() else null
+        askedAt = if (bound || !settled) now() else null
         send()
+    }
+
+    /**
+     * The cold start has decided whether to bind: [bound] is whether the
+     * service is now bound or binding. With the node off, an ask kept
+     * while that was still unknown is dropped — no connect is coming.
+     */
+    @Synchronized
+    fun settled(bound: Boolean) {
+        settled = true
+        if (!bound) askedAt = null
     }
 
     /** The binder just connected: send the ask again if it's still live. */

@@ -63,6 +63,7 @@ class IpfsStartRequestTest {
 
     @Test
     fun `an ask made with the node off isn't kept for a later bind`() {
+        request.settled(bound = false)
         request.ask(bound = false, send)
         assertFalse(request.pending)
         connect()
@@ -85,5 +86,33 @@ class IpfsStartRequestTest {
         assertFalse(request.pending)
         connect()
         assertEquals(0, starts)
+    }
+
+    @Test
+    fun `an ask made before the cold start read whether the node runs is kept for its bind`() {
+        // BrowserScreen asks before onCreate's runNodeEnabled read resumes:
+        // nothing is bound yet, though a bind is about to start.
+        request.ask(bound = false, send)
+        assertTrue(request.pending)
+        request.settled(bound = true)
+        clock += 2_000
+        connect()
+        assertEquals(1, starts)
+    }
+
+    @Test
+    fun `an ask made before the cold start read is dropped once it finds the node off`() {
+        request.ask(bound = false, send)
+        request.settled(bound = false)
+        assertFalse(request.pending)
+        connect()
+        assertEquals(0, starts)
+    }
+
+    @Test
+    fun `once settled, an unbound ask isn't kept`() {
+        request.settled(bound = true)
+        request.ask(bound = false, send) // the node was switched off since
+        assertFalse(request.pending)
     }
 }

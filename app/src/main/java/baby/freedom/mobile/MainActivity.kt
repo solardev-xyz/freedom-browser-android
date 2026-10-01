@@ -490,8 +490,15 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         // the node enabled, start + bind right away; otherwise leave
         // the :node process dormant so we don't hold the state store
         // open unnecessarily.
+        // Until this read resumes `bound` is false whatever the setting, so
+        // an IPFS ask made before it is kept for the bind it may start,
+        // and dropped here if it doesn't (#373, #384 R1-F1).
         lifecycleScope.launch {
-            if (settings.runNodeEnabled.first()) startAndBindService()
+            try {
+                if (settings.runNodeEnabled.first()) startAndBindService()
+            } finally {
+                ipfsStart.settled(bound)
+            }
         }
 
         // The Swarm node's mode (#114) follows its setting and the Gnosis
