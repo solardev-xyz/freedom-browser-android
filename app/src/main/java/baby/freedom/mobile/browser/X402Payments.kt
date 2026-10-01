@@ -557,14 +557,14 @@ object X402Payments {
         val view = webView.get()
         if (view == null || !stillOn(tab, doc, webView, d.url)) {
             // Never sent: the page it was for went while it was written.
-            store.withdraw(payment, committed.allowanceCreated)
+            store.withdraw(payment, committed)
             return Paid.NOT_SENT
         }
         // A paid request of the site's was Refused (in any tab) while this
         // one was read, signed and written: its allowance pays nothing more
         // silently — undone, and the sheet asks instead (#237 R2-M1).
         if (auto && flow.holds(d.origin)) {
-            store.withdraw(payment, committed.allowanceCreated)
+            store.withdraw(payment, committed)
             return Paid.HELD
         }
         // No suspension from the check above to here: the request goes out on the page it was for.

@@ -386,7 +386,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     /**
      * Has a bound `:node` reload the node identities on any [NodeIdentitySync.Change]
      * (#77, #328): its Swarm and Radicle nodes restart only if they're up as
-     * another identity (or, for Radicle, their boot failed); see onCreate.
+     * another identity, or their boot failed (Radicle; Swarm on an unreadable read, #357); see onCreate.
      */
     private val identityChanged: (NodeIdentitySync.Change) -> Unit = {
         runCatching { binder?.reloadIdentity() }

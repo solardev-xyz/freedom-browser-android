@@ -150,5 +150,16 @@ class PublishSetupTest {
             swarmModeSubtitle(light.copy(status = NodeStatus.Starting, lightMode = false), false),
         )
         assertEquals("Runs in light mode when the node is on", swarmModeSubtitle(NodeInfo(), true))
+        // A change whose restart waits on an unreadable identity (#357 R4-M1)
+        // isn't shown as restarting; one the node already runs as reads as usual.
+        assertEquals(
+            "Switches to light mode once the wallet can be read. Reopen the app to try again",
+            swarmModeSubtitle(wallet.copy(reloadOwed = true), true),
+        )
+        assertEquals(
+            "Switches to ultra-light mode once the wallet can be read. Reopen the app to try again",
+            swarmModeSubtitle(light.copy(status = NodeStatus.Starting, lightMode = true, reloadOwed = true), false),
+        )
+        assertTrue(swarmModeSubtitle(light.copy(reloadOwed = true), true).startsWith("Connected to Gnosis Chain"))
     }
 }

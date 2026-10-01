@@ -21,6 +21,10 @@
     <string name="node_address">Address</string>
     <string name="node_overlay">Overlay</string>
     <string name="node_error">Error</string>
+    <!-- The Swarm node's error when the wallet's node keys are on the device but couldn't be opened (#357): it doesn't start as the device's own identity instead. Unlocking the wallet seals the keys again. -->
+    <string name="node_swarm_identity_unreadable">Couldn\'t open your wallet\'s Swarm identity, so the node isn\'t running (it won\'t start as this device\'s own instead). Reopening the app or unlocking the wallet tries again.</string>
+    <!-- The Swarm node's error when the wallet file itself can't be read (#357): the wallet can't be unlocked, so the only ways out are the file becoming readable again or Settings › Wallet › Remove wallet -->
+    <string name="node_swarm_wallet_unreadable">Couldn\'t read your wallet, so the Swarm node isn\'t running (it won\'t start as this device\'s own identity instead). Reopening the app tries again. If the wallet still can\'t be read, removing it in Settings › Wallet starts the node as this device\'s own.</string>
     <string name="node_status">Status</string>
     <string name="node_mode_light">Light</string>
     <string name="node_mode_ultra_light">Ultra-light</string>
@@ -36,6 +40,8 @@
     <string name="node_mode_ultra_light_running">Browsing only. Light mode connects the node to Gnosis Chain so it can publish</string>
     <string name="node_mode_light_restarting">Restarting the node in light mode…</string>
     <string name="node_mode_ultra_light_restarting">Restarting the node in ultra-light mode…</string>
+    <string name="node_mode_light_owed">Switches to light mode once the wallet can be read. Reopen the app to try again</string>
+    <string name="node_mode_ultra_light_owed">Switches to ultra-light mode once the wallet can be read. Reopen the app to try again</string>
     <string name="node_mode_light_when_on">Runs in light mode when the node is on</string>
     <string name="node_mode_ultra_light_when_on">Runs in ultra-light mode (browsing only) when the node is on</string>
     <string name="node_gateway">Gateway</string>
