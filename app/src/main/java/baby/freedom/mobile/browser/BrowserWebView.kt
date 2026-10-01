@@ -6011,11 +6011,18 @@ internal fun sweptOrigins(
 // that made it went past the caches: the requests handed that very
 // marker (it and any joined to it) stream past them too (R4-M2); the
 // buffered copy says false, so other documents don't.
+// A buffered body evicted to make room for another is [MediaBody.Evicted]
+// (R5-M2): streamed too, and fetched for buffering again only once its
+// own size fits in *free* room — fetching it while the budget is full of
+// buffered bodies would only evict another one, which a page cycling
+// through three large videos would then download again, and so on, each
+// request waiting on a whole file.
 private sealed class MediaBody {
     class Bytes(val bytes: MediaBytes, val mime: String) : MediaBody()
     sealed class Streamed(val noCache: Boolean) : MediaBody()
     class TooLarge(noCache: Boolean) : Streamed(noCache)
     class Unbuffered(noCache: Boolean) : Streamed(noCache)
+    class Evicted(val size: Long) : Streamed(false)
 }
 
 /**
@@ -6042,23 +6049,37 @@ private val mediaBodies = MediaBodyBuffer<MediaBody>(
             is MediaBody.Bytes -> it
             is MediaBody.TooLarge -> if (it.noCache) MediaBody.TooLarge(false) else it
             is MediaBody.Unbuffered -> if (it.noCache) MediaBody.Unbuffered(false) else it
+            is MediaBody.Evicted -> it
         }
     },
-    refetch = { body, obtainable ->
-        body is MediaBody.Unbuffered && obtainable >= MEDIA_BUFFER_MAX_BYTES
+    refetch = { body, free, obtainable ->
+        when (body) {
+            is MediaBody.Unbuffered -> obtainable >= MEDIA_BUFFER_MAX_BYTES
+            is MediaBody.Evicted -> free >= body.size
+            else -> false
+        }
     },
+    evicted = { (it as? MediaBody.Bytes)?.let { b -> MediaBody.Evicted(b.bytes.held) } },
 )
 
 private fun loadMediaBody(
     req: WebResourceRequest,
     targetUrl: String,
     fresh: Boolean,
+    freshDocument: Boolean,
 ): MediaBody? =
     // [fresh]: a Hard reload's (#262) — the buffered body may be the very
     // stale answer being reloaded past. The buffer drops it, and until this
     // fetch ends, other requests for the URL wait for it instead of
     // fetching (possibly stale) bodies of their own.
-    mediaBodies.load(targetUrl, fresh) { noCache -> fetchMediaBody(req, targetUrl, noCache) }
+    // [freshDocument]: a later request of that Hard-reloaded document.
+    // Any fetch it makes — a stored marker fetched again for buffering,
+    // or a miss once its fresh body was evicted — goes past the gateway's
+    // cache too (R5-M1), so what gets buffered is never staler than what
+    // the reload fetched.
+    mediaBodies.load(targetUrl, fresh, pastCaches = freshDocument) { noCache ->
+        fetchMediaBody(req, targetUrl, noCache)
+    }
 
 private fun fetchMediaBody(
     req: WebResourceRequest,
@@ -6214,7 +6235,7 @@ private fun fetchMediaWithRangeSupport(
     fresh: Boolean = false,
     freshDocument: Boolean = false,
 ): WebResourceResponse? {
-    val body = when (val loaded = loadMediaBody(req, targetUrl, fresh) ?: return null) {
+    val body = when (val loaded = loadMediaBody(req, targetUrl, fresh, freshDocument) ?: return null) {
         is MediaBody.Bytes -> loaded
         // Streamed instead, with the media path's longer read timeout for
         // slow chunks. A Hard-reloaded document's requests stream past the

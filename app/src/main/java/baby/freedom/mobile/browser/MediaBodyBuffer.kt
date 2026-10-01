@@ -43,6 +43,14 @@ import java.util.concurrent.ExecutionException
  * new read could get by evicting every buffered body ([obtainableBytes])
  * — is fetched again instead of answered (R4-M3: a "no room right now"
  * marker, once there is room).
+ *
+ * A body [reserve] evicts is replaced by the size-0 marker [evicted]
+ * returns, if any, instead of being forgotten (R5-M2): the URL's later
+ * requests are answered from that marker (streamed) rather than starting
+ * a full download that would evict another body in turn, so pages
+ * cycling through more bodies than the budget holds don't download every
+ * one again on each request. [refetch] sees the free bytes too, so such a
+ * marker can be fetched again once there is room without evicting.
  */
 internal class MediaBodyBuffer<B : Any>(
     private val maxEntries: Int = 64,
@@ -51,7 +59,8 @@ internal class MediaBodyBuffer<B : Any>(
     private val sizeOf: (B) -> Long = { 0L },
     private val keep: (B) -> Boolean = { true },
     private val stored: (B) -> B = { it },
-    private val refetch: (body: B, obtainable: Long) -> Boolean = { _, _ -> false },
+    private val refetch: (body: B, free: Long, obtainable: Long) -> Boolean = { _, _, _ -> false },
+    private val evicted: (B) -> B? = { null },
 ) {
     // Bytes held by buffered bodies plus every outstanding reservation.
     private var used = 0L
@@ -79,9 +88,13 @@ internal class MediaBodyBuffer<B : Any>(
             if (bytes > obtainable()) return false
             val it = bodies.entries.iterator()
             while (used + bytes > maxBytes && it.hasNext()) {
-                val size = sizeOf(it.next().value)
+                val entry = it.next()
+                val size = sizeOf(entry.value)
                 if (size > 0) {
-                    it.remove()
+                    // Replacing a value isn't an access: the marker keeps
+                    // the evicted body's place in the LRU order.
+                    val marker = evicted(entry.value)?.takeIf { m -> sizeOf(m) == 0L }
+                    if (marker != null) entry.setValue(marker) else it.remove()
                     used -= size
                 }
             }
@@ -142,9 +155,18 @@ internal class MediaBodyBuffer<B : Any>(
      * The body for [url]: buffered, or fetched with [fetch] (its argument
      * is whether to ask the gateway not to answer from a cache) and
      * buffered. [fresh] fetches it again past the buffer (see the class).
-     * Null if the fetch failed.
+     * [pastCaches]: a later request of a document whose first one was
+     * [fresh] — whatever it does fetch (a stored marker [refetch]ed, or a
+     * miss after the fresh body was evicted) goes past the gateway's
+     * caches too (R5-M1), so the body it buffers is no staler than the
+     * fresh one. Null if the fetch failed.
      */
-    fun load(url: String, fresh: Boolean, fetch: (noCache: Boolean) -> B?): B? {
+    fun load(
+        url: String,
+        fresh: Boolean,
+        pastCaches: Boolean = false,
+        fetch: (noCache: Boolean) -> B?,
+    ): B? {
         val epoch: Long?
         val startedAt: Long
         val mine: CompletableFuture<B?>?
@@ -160,7 +182,7 @@ internal class MediaBodyBuffer<B : Any>(
                 joined = null
             } else {
                 bodies[url]?.let { held ->
-                    if (!refetch(held, obtainable())) return held
+                    if (!refetch(held, maxBytes - used, obtainable())) return held
                     bodies.remove(url)
                     used -= sizeOf(held)
                 }
@@ -182,7 +204,7 @@ internal class MediaBodyBuffer<B : Any>(
         }
         var body: B? = null
         try {
-            body = fetch(fresh || joined != null)
+            body = fetch(fresh || pastCaches || joined != null)
             if (body != null) {
                 synchronized(this) {
                     val current = epochs[url]

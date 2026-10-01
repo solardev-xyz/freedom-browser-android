@@ -161,7 +161,7 @@ class MediaBufferBudgetTest {
             // The fetch's own marker is what its request sees; the buffer
             // keeps a plain one.
             stored = { if (it is Pair<*, *>) unbuffered else it },
-            refetch = { b, obtainable -> b === unbuffered && obtainable >= 50 },
+            refetch = { b, _, obtainable -> b === unbuffered && obtainable >= 50 },
         )
         assertTrue(buffer.reserve(60)) // a read in flight
         val first = buffer.load(url, fresh = false) { fetches++; "fresh" to unbuffered }
@@ -181,5 +181,78 @@ class MediaBufferBudgetTest {
         assertTrue(again is ByteArray)
         assertSame(again, buffer.load(url, fresh = false) { error("refetched") })
         assertEquals(50L, buffer.usedBytes) // the 60 was evicted for it
+    }
+
+    // As the app wires it: an evicted body leaves a marker with its size,
+    // fetched again only once that size fits in free room.
+    private class Evicted(val size: Long)
+
+    private fun markingBuffer(maxBytes: Long) = MediaBodyBuffer<Any>(
+        maxBytes = maxBytes,
+        sizeOf = { (it as? ByteArray)?.size?.toLong() ?: 0L },
+        refetch = { b, free, _ -> b is Evicted && free >= b.size },
+        evicted = { (it as? ByteArray)?.let { b -> Evicted(b.size.toLong()) } },
+    )
+
+    @Test
+    fun `bodies cycled past the budget are each downloaded once (R5-M2)`() {
+        val buffer = markingBuffer(64)
+        val fetched = mutableListOf<String>()
+        val streamed = mutableListOf<String>()
+        repeat(3) {
+            for (name in listOf("a", "b", "c")) {
+                val got = buffer.load("$url$name", fresh = false) {
+                    fetched += name
+                    if (buffer.reserve(30)) body(30) else noRoom
+                }
+                if (got is Evicted) streamed += name
+            }
+        }
+        // c's read evicted a; from then on a is streamed, b and c buffered.
+        assertEquals(listOf("a", "b", "c"), fetched)
+        assertEquals(listOf("a", "a"), streamed)
+        assertEquals(60L, buffer.usedBytes)
+    }
+
+    @Test
+    fun `an evicted body is fetched again once its size fits in free room (R5-M2)`() {
+        val buffer = markingBuffer(100)
+        assertTrue(buffer.reserve(40))
+        buffer.load("${url}a", fresh = false) { body(40) }
+        assertTrue(buffer.reserve(40))
+        buffer.load("${url}b", fresh = false) { body(40) }
+        // A read of 50 evicts a, which leaves its marker.
+        assertTrue(buffer.reserve(50))
+        assertTrue(buffer.load("${url}a", fresh = false) { error("refetched into a full budget") } is Evicted)
+        assertEquals(90L, buffer.usedBytes)
+        // The read is dropped: 60 free now, room for a's 40 without evicting b.
+        buffer.release(50)
+        val a = buffer.load("${url}a", fresh = false) { assertTrue(buffer.reserve(40)); body(40) }
+        assertTrue(a is ByteArray)
+        assertSame(a, buffer.load("${url}a", fresh = false) { error("a is buffered") })
+        assertTrue(buffer.load("${url}b", fresh = false) { error("b was evicted") } is ByteArray)
+        assertEquals(80L, buffer.usedBytes)
+    }
+
+    @Test
+    fun `a Hard-reloaded document's later fetches go past the caches (R5-M1)`() {
+        val buffer = markingBuffer(64)
+        val noCache = mutableListOf<Boolean>()
+        // The reload's own fetch, then its body evicted by two other reads.
+        buffer.load(url, fresh = true) { noCache += it; assertTrue(buffer.reserve(30)); body(30) }
+        assertTrue(buffer.reserve(30))
+        buffer.load("${url}x", fresh = false) { body(30) }
+        assertTrue(buffer.reserve(30))
+        buffer.load("${url}y", fresh = false) { body(30) }
+        buffer.load("${url}x", fresh = true) { null } // drops x: free room again
+        buffer.load("${url}y", fresh = true) { null }
+        // The same document's seek: refetched for buffering, past the caches.
+        buffer.load(url, fresh = false, pastCaches = true) {
+            noCache += it; assertTrue(buffer.reserve(30)); body(30)
+        }
+        // A plain miss of that document too, and a miss of another document not.
+        buffer.load("${url}z", fresh = false, pastCaches = true) { noCache += it; null }
+        buffer.load("${url}z", fresh = false) { noCache += it; null }
+        assertEquals(listOf(true, true, true, false), noCache)
     }
 }
