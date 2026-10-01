@@ -77,6 +77,9 @@ class ChainInputTest {
             "Ethereum" + "\u3164".repeat(20) + "Net", "Ethereum\u2800Net", "Eth\u115Fereum", "Eth\uFFA0ereum",
             "Ethereum" + "\u0301".repeat(40), "Ethereum\u0301\u0301\u0301\u0301", "Eth\u0301\u0301\u200D\u0301\u0301ereum",
             "Eth\uFE00ereum", "Eth\uDB40\uDD00ereum", "Eth\u2065ereum", "Eth\uFFF0ereum", "Eth\u034Fereum",
+            // Joiners and tag characters draw nothing, so they can't split a run of spaces or start a word.
+            "Ethereum (chain 1)" + " \u200D".repeat(21) + " Net", "Ethereum (chain 1)" + " \uDB40\uDC20".repeat(20) + " Net",
+            "Ethereum \u200C Net", "Ethereum \u200DNet", "\u200DEthereum", "Ethereum \uDB40\uDC67Net",
         )) {
             assertNull(bad, ChainInput.parseName(bad))
             assertNull(bad, build(bad))

@@ -24,10 +24,11 @@ object ChainInput {
     /**
      * A chain or currency name that draws as what it is ([shownAsIs]). A
      * site names the chain it adds, and the approval sheets show it as
-     * is: a bidi override would reorder the row, and a U+2028 — or a run
-     * of spaces or blank letters the row wraps at — would push the Switch
-     * sheet's real chain ID off its line under a name like
-     * "Ethereum (chain 1)".
+     * is: a bidi override would reorder the row, and a U+2028 or a run of
+     * spaces or blank letters would leave a gap the row wraps at. The
+     * sheets never put the chain ID inside the name's own text — it's on
+     * a line of its own — so a plain name such as
+     * "Ethereum (chain 1) Neeee…t" that wraps can't push it away either.
      */
     fun parseName(raw: String): String? = parseName(raw, strict = true)
 
@@ -53,24 +54,31 @@ object ChainInput {
      * ink over the rows around it ([MessageSigning.hides]: Hangul fillers,
      * U+2800, variation selectors other than an emoji's own, unassigned
      * default-ignorables, a fourth combining mark in a row). The emoji
-     * joiners and flag tag characters stay allowed, and like the other
-     * default-ignorables they don't end a run of combining marks.
+     * joiners and flag tag characters stay allowed, but only right after
+     * something that draws (an emoji, a letter, another joiner in the same
+     * sequence), never after a space or at the start; they draw nothing,
+     * so two spaces with one between them still count as a run, and like
+     * the other default-ignorables they don't end a run of combining marks.
      */
     private fun shownAsIs(s: String): Boolean {
         var prev = -1
+        var afterSpace = true // at the start, as after a space: nothing drawn yet
         var marks = 0
         for (cp in s.codePoints().toArray()) {
             val emojiPart = cp == 0x200C || cp == 0x200D || cp in 0xE0020..0xE007F
+            val space = Character.isWhitespace(cp) || Character.isSpaceChar(cp)
             when {
                 PublisherIdentity.isRefusedInLabel(cp) -> return false
-                Character.isWhitespace(cp) || Character.isSpaceChar(cp) -> if (cp != 0x20 || prev == 0x20) return false
-                !emojiPart && MessageSigning.hides(cp, prev, marks) -> return false
+                space -> if (cp != 0x20 || afterSpace) return false
+                emojiPart -> if (afterSpace) return false
+                MessageSigning.hides(cp, prev, marks) -> return false
             }
             marks = when {
                 MessageSigning.isMark(cp) -> marks + 1
                 emojiPart -> marks
                 else -> 0
             }
+            if (!emojiPart) afterSpace = space
             prev = cp
         }
         return true
