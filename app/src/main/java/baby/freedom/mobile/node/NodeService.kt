@@ -47,6 +47,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -175,7 +176,7 @@ class NodeService : Service() {
     private val callbacks = RemoteCallbackList<INodeCallback>()
 
     private val binder = object : INodeService.Stub() {
-        override fun getState(): NodeInfo = reportedNodeInfo(swarmNode.state.value, doomed)
+        override fun getState(): NodeInfo = reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)
 
         override fun getIpfsState(): IpfsInfo = ipfsNode?.state?.value ?: IpfsInfo()
 
@@ -193,7 +194,7 @@ class NodeService : Service() {
         override fun registerCallback(cb: INodeCallback?) {
             cb ?: return
             callbacks.register(cb)
-            runCatching { cb.onStateChanged(reportedNodeInfo(swarmNode.state.value, doomed)) }
+            runCatching { cb.onStateChanged(reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)) }
             runCatching { cb.onIpfsStateChanged(ipfsNode?.state?.value ?: IpfsInfo()) }
             runCatching { cb.onRadicleStateChanged(radicleNode.state.value) }
         }
@@ -652,7 +653,7 @@ class NodeService : Service() {
     private fun repromoteForegroundIfDemoted() {
         if (!foregroundDemoted) return
         runCatching {
-            startForeground(NOTIFICATION_ID, buildNotification(reportedNodeInfo(swarmNode.state.value, doomed)), foregroundTypeCompat())
+            startForeground(NOTIFICATION_ID, buildNotification(reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)), foregroundTypeCompat())
         }.onSuccess {
             foregroundDemoted = false
             Log.i(TAG, "re-promoted to foreground service")
@@ -720,10 +721,11 @@ class NodeService : Service() {
             foregroundTypeCompat(),
         )
 
-        swarmObserver = swarmNode.state
-            .onEach { raw ->
-                // In a doomed process, why the node isn't up yet (#116).
-                val info = reportedNodeInfo(raw, doomed)
+        swarmObserver = combine(swarmNode.state, bootIdentity.owed, ::Pair)
+            .onEach { (raw, owed) ->
+                // In a doomed process, why the node isn't up yet (#116);
+                // and a restart waiting on an unreadable identity (#357).
+                val info = reportedNodeInfo(raw, doomed, owed)
                 updateNotification(info)
                 broadcastState(info)
                 Log.i(TAG, "swarm → ${info.status}  peers=${info.connectedPeers}")

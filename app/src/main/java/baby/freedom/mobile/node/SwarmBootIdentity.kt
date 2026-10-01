@@ -1,5 +1,9 @@
 package baby.freedom.mobile.node
 
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
 /**
  * What the Swarm node's current (re)start boots as (#77) — and in which
  * mode (#114) — so [INodeService.reloadIdentity] and
@@ -30,8 +34,13 @@ internal class SwarmBootIdentity {
     private val lock = Any()
     private var bootedAs: String? = null
 
-    /** A reload whose read failed and so wasn't applied: [retryDue] until one reads. */
-    private var owed = false
+    /**
+     * A reload whose read failed and so wasn't applied: [retryDue] until
+     * one reads. Published so the node page can say the change is waiting,
+     * not underway (#357 R4-M1).
+     */
+    private val owedFlow = MutableStateFlow(false)
+    val owed: StateFlow<Boolean> = owedFlow.asStateFlow()
 
     /**
      * A launch reads the store: [read] gives the key it boots as
@@ -46,7 +55,7 @@ internal class SwarmBootIdentity {
             throw t
         }
         bootedAs = address
-        owed = false
+        owedFlow.value = false
         identity
     }
 
@@ -62,7 +71,7 @@ internal class SwarmBootIdentity {
         synchronized(lock) {
             val booted = bootedAs ?: return false
             val wanted = want()
-            owed = wanted == null
+            owedFlow.value = wanted == null
             if (wanted == null) return false
             if (booted.equals(wanted, ignoreCase = true) || !running()) return false
             bootedAs = null
@@ -79,7 +88,7 @@ internal class SwarmBootIdentity {
      * activity) and no wallet change is the only other moment a cleared
      * read shows, so it retries too.
      */
-    fun retryDue(): Boolean = synchronized(lock) { owed || bootedAs == UNREADABLE }
+    fun retryDue(): Boolean = synchronized(lock) { owedFlow.value || bootedAs == UNREADABLE }
 
     private companion object {
         /** A launch whose read failed: never a [swarmBootKey], which always holds a `|`. */

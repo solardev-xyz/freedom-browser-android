@@ -90,10 +90,13 @@ class SwarmModeTest {
         // The user switches to ultra-light just as a read fails: kept, owed.
         assertFalse(boot.restartIfStale({ null }, { true }, { restarts++ }))
         assertTrue(boot.retryDue())
+        // Published, so the node page says it waits rather than restarts (R4-M1).
+        assertTrue(boot.owed.value)
         // App foreground, the read now works: restarts in the new mode.
         assertTrue(boot.restartIfStale({ swarmBootKey("0xabc", SwarmNode.Mode.ULTRA_LIGHT) }, { true }, { restarts++ }))
         assertEquals(1, restarts)
         assertFalse(boot.retryDue())
+        assertFalse(boot.owed.value)
         // The new launch reads: nothing owed, nothing to restart.
         boot.boot { swarmBootKey("0xabc", SwarmNode.Mode.ULTRA_LIGHT) to null }
         assertFalse(boot.retryDue())

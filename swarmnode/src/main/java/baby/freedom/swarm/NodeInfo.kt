@@ -27,4 +27,11 @@ data class NodeInfo(
      * `beeMode: light` and reads Gnosis. False while ultra-light, or not running.
      */
     val lightMode: Boolean = false,
+    /**
+     * True while a restart the node owes (a mode or identity change) is
+     * waiting because the wallet's identity couldn't be read when it was
+     * asked for: no restart is underway, and it's retried when the app
+     * next comes to the foreground. Set by the app's node service.
+     */
+    val reloadOwed: Boolean = false,
 ) : Parcelable
