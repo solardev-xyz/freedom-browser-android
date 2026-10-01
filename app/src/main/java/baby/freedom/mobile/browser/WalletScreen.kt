@@ -65,6 +65,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.AndroidClipboard
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.Clipboard
 import androidx.compose.ui.platform.LocalClipboard
@@ -509,8 +510,11 @@ internal class PastedPhrases {
  * plain-text preview in the system's copy overlay, and no copy in a
  * keyboard's clipboard history that clearing the clipboard can't reach.
  */
-internal class WatchedClipboard(private val inner: Clipboard, private val pastes: PastedPhrases) : Clipboard {
-    override val nativeClipboard: ClipboardManager get() = inner.nativeClipboard
+internal class WatchedClipboard(private val inner: Clipboard, private val pastes: PastedPhrases) : AndroidClipboard {
+    // An AndroidClipboard, not just a Clipboard: Compose's text fields read
+    // the platform clipboard through `nativeClipboardManager`, which throws
+    // for any other Clipboard (long-press with text on the clipboard crashed).
+    override val clipboardManager: ClipboardManager get() = inner.nativeClipboard
 
     override suspend fun getClipEntry(): ClipEntry? =
         inner.getClipEntry().also { pastes.committing(it?.plainText()) }
@@ -518,7 +522,7 @@ internal class WatchedClipboard(private val inner: Clipboard, private val pastes
     override suspend fun setClipEntry(clipEntry: ClipEntry?) {
         clipEntry?.clipData?.let(PhraseClipboard::markSensitive)
         inner.setClipEntry(clipEntry)
-        val stamp = runCatching { nativeClipboard.primaryClipDescription?.timestamp }.getOrNull()
+        val stamp = runCatching { clipboardManager.primaryClipDescription?.timestamp }.getOrNull()
         pastes.copied(clipEntry?.plainText(), stamp)
     }
 
