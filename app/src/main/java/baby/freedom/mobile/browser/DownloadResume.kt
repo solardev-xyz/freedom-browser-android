@@ -172,6 +172,7 @@ internal object DownloadNote {
         "gateway_error" to R.string.library_download_gateway_error,
         "server_error" to R.string.library_download_server_error,
         "too_many_redirects" to R.string.library_download_too_many_redirects,
+        "redirect_refused" to R.string.library_download_redirect_refused,
         "write_to_downloads_failed" to R.string.library_download_write_to_downloads_failed,
     )
     private val NAMES: Map<Int, String> = KEYS.entries.associate { (k, v) -> v to k }

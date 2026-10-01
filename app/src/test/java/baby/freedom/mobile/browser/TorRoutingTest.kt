@@ -228,6 +228,388 @@ class TorRoutingTest {
     }
 
     @Test
+    fun `a redirect onto this device is refused, whatever spells the host`() = withResolver(
+        "gateway.example" to "203.0.113.5", "other.example" to "198.51.100.7", "127.tracker.example" to "198.51.100.8",
+    ) {
+        val gateway = URL("http://gateway.example/ipfs/bafyroot/")
+        fun refused(location: String, method: String = "GET") =
+            TorRouting.hopRefused(gateway, URL(gateway, location), method)
+        // The node's own API, on any host that may be the device.
+        for (location in listOf(
+            "http://127.0.0.1:1633/addresses", "http://127.0.0.1:1633/wallet", "http://localhost:1633/stamps",
+            "http://127.1:1633/addresses", "http://2130706433:1633/addresses", "http://0x7f000001:1633/peers",
+            "http://127.0.0.%31:1633/addresses", "http://[::1]:1633/addresses", "http://[::ffff:127.0.0.1]:1633/balances",
+            "http://0.0.0.0:1633/addresses", "http://127.0.0.1.nip.io:1633/addresses", "http://localhost.:1633/wallet",
+        )) {
+            assertTrue(location, refused(location))
+        }
+        // Any other loopback service on another origin, even the content surface.
+        for (location in listOf(
+            "http://127.0.0.1:1633/bzz/abc/", "http://127.0.0.1:45123/ipfs/bafyother/", "http://localhost/",
+            "http://app.localhost:8080/", "http://[::1]:9050/", "http://0177.0.0.1:631/", "http://0:8080/",
+        )) {
+            assertTrue(location, refused(location))
+        }
+        // A public name that resolves to the device, on any port (R1-F1):
+        // the HTTP stack would dial loopback just the same.
+        for (location in listOf(
+            "http://localtest.me:8080/secret", "http://127.0.0.1.nip.io:45123/", "https://loop6.example/",
+            "http://mapped.example:631/", "http://mixed.example/",
+        )) {
+            assertTrue(location, refused(location))
+        }
+        // One that doesn't resolve at all isn't followed either — it could
+        // resolve to loopback next — but as a failed lookup, worth a retry,
+        // not as a redirect onto this device (R6-F1).
+        try {
+            refused("http://unresolvable.example:9000/")
+            fail("judged a hop whose name didn't resolve")
+        } catch (e: TorRouting.RedirectUnresolvedException) {
+            assertTrue(e is java.net.UnknownHostException)
+            assertFalse((e as java.io.IOException) is java.net.ConnectException)
+        }
+        // Elsewhere, or on the same origin: followed as before.
+        for (location in listOf(
+            "/ipfs/bafyroot/index.html", "http://gateway.example/ipfs/bafyother/",
+            "http://other.example/ipfs/bafyroot/", "http://192.168.1.20:8080/ipfs/bafyroot/",
+            "http://127.tracker.example/x",
+        )) {
+            assertFalse(location, refused(location))
+        }
+        // A loopback gateway may redirect within itself, but not onto the node's API.
+        val local = URL("http://127.0.0.1:45123/ipfs/bafyroot")
+        assertFalse(TorRouting.hopRefused(local, URL(local, "/ipfs/bafyroot/"), "GET"))
+        assertTrue(TorRouting.hopRefused(local, URL("http://127.0.0.1:1633/addresses"), "GET"))
+        val node = URL("http://127.0.0.1:1633/bzz/abc")
+        assertFalse(TorRouting.hopRefused(node, URL(node, "/bzz/abc/"), "GET"))
+        assertTrue(TorRouting.hopRefused(node, URL(node, "/addresses"), "GET"))
+    }
+
+    @Test
+    fun `a local Kubo's subdomain redirect stays with the gateway and is followed`() = withResolver {
+        val looked = mutableListOf<String>()
+        val real = TorRouting.resolve
+        TorRouting.resolve = { looked += it; real(it) }
+        val cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        val kubo = URL("http://localhost:8080/ipfs/$cid/")
+        // Kubo's default for localhost: 301 to the CID's subdomain, same port (#359 R1-F1).
+        for (location in listOf(
+            "http://$cid.ipfs.localhost:8080/", "http://$cid.IPFS.LOCALHOST:8080/index.html",
+            "http://k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8.ipns.localhost:8080/",
+        )) {
+            assertFalse(location, TorRouting.hopRefused(kubo, URL(kubo, location), "GET"))
+            assertTrue(location, TorRouting.sameLoopbackServer(kubo, URL(kubo, location)))
+        }
+        // And back from a subdomain to the bare name.
+        val sub = URL("http://$cid.ipfs.localhost:8080/")
+        assertFalse(TorRouting.hopRefused(sub, URL("http://localhost:8080/ipfs/$cid/"), "GET"))
+        // Judged as written: nothing was looked up.
+        assertEquals(emptyList<String>(), looked)
+        // Still refused: the node's API on any localhost name, another port, another
+        // scheme, a literal (a different listener may hold it), or from a literal start.
+        for ((start, location) in listOf(
+            kubo to "http://$cid.ipfs.localhost:1633/addresses",
+            kubo to "http://$cid.ipfs.localhost:9000/",
+            kubo to "https://$cid.ipfs.localhost:8080/",
+            kubo to "http://127.0.0.1:8080/",
+            kubo to "http://[::1]:8080/",
+            kubo to "http://localtest.me:8080/",
+            URL("http://127.0.0.1:8080/ipfs/$cid/") to "http://$cid.ipfs.localhost:8080/",
+            URL("http://gateway.example:8080/ipfs/$cid/") to "http://$cid.ipfs.localhost:8080/",
+        )) {
+            assertTrue("$start -> $location", TorRouting.hopRefused(start, URL(start, location), "GET"))
+        }
+        val node = URL("http://localhost:1633/bzz/abc/")
+        assertTrue(TorRouting.hopRefused(node, URL("http://x.localhost:1633/addresses"), "GET"))
+    }
+
+    @Test
+    fun `a local Kubo's subdomain hop is dialed on this device, never by a network lookup of its name`() {
+        val cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        val paths = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        val port = server.address.port
+        server.createContext("/") { ex ->
+            paths += ex.requestURI.path
+            val code = if (ex.requestURI.path.startsWith("/ipfs/")) 301 else 200
+            if (code == 301) ex.responseHeaders.add("Location", "http://$cid.ipfs.localhost:$port/")
+            val out = "ok".toByteArray()
+            ex.sendResponseHeaders(code, out.size.toLong())
+            ex.responseBody.use { it.write(out) }
+        }
+        server.start()
+        // Android sends `<x>.localhost` to the network's DNS, which may answer
+        // anything (#359 R2-F1): here a public address. Only `localhost`
+        // itself (the hosts file) may decide where the hop goes.
+        val looked = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val real = TorRouting.resolve
+        TorRouting.resolve = { host ->
+            looked += host
+            when (host) {
+                "localhost" -> arrayOf(java.net.InetAddress.getByName("127.0.0.1"))
+                else -> arrayOf(java.net.InetAddress.getByName("198.51.100.7"))
+            }
+        }
+        try {
+            val conn = TorRouting.openFollowingRedirects(URL("http://localhost:$port/ipfs/$cid/")) {}
+            assertEquals(200, conn.responseCode)
+            conn.disconnect()
+            // Both hops reached the gateway on 127.0.0.1 (the JVM's
+            // HttpURLConnection drops a set `Host`; Android's sends it, so
+            // there the gateway sees the subdomain: [Pin.hostHeader] below).
+            assertEquals(listOf("/ipfs/$cid/", "/"), paths.toList())
+            assertEquals(listOf("localhost"), looked.toList())
+
+            val pin = TorRouting.pinLocalhost(URL("http://$cid.ipfs.localhost:$port/"))!!
+            assertEquals(listOf("http://127.0.0.1:$port/"), pin.urls.map { it.toString() })
+            assertEquals("$cid.ipfs.localhost:$port", pin.hostHeader)
+            // https keeps its name (the certificate needs it) and has its peer checked instead.
+            assertEquals(null, TorRouting.pinLocalhost(URL("https://$cid.ipfs.localhost:$port/")))
+
+            // A `localhost` that isn't this device isn't dialed.
+            TorRouting.resolve = { arrayOf(java.net.InetAddress.getByName("198.51.100.7")) }
+            try {
+                TorRouting.pinLocalhost(URL("http://$cid.ipfs.localhost:$port/"))
+                fail("pinned a localhost hop off this device")
+            } catch (_: TorRouting.RedirectRefusedException) {
+            }
+        } finally {
+            TorRouting.resolve = real
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `a hop within a redirected-to origin is resolved again, so a rebinding name is refused`() {
+        val gateway = URL("http://gateway.example/ipfs/bafyroot/")
+        val first = URL("http://rb.evil.example:8711/a")
+        val second = URL(first, "/b")
+        // First hop: the name answers publicly, so it's followed.
+        withResolver("gateway.example" to "203.0.113.5", "rb.evil.example" to "198.51.100.7") {
+            assertFalse(TorRouting.hopRefused(gateway, first, "GET"))
+        }
+        // The server waits out the resolver cache and rebinds before its
+        // same-origin `302 /b`: that hop is looked up again and refused.
+        withResolver("gateway.example" to "203.0.113.5", "rb.evil.example" to "127.0.0.1") {
+            assertTrue(TorRouting.hopRefused(gateway, second, "GET"))
+            assertTrue(TorRouting.hopRefused(gateway, second, "HEAD"))
+        }
+        // A hop back onto the origin the caller asked for stays its own business.
+        withResolver("gateway.example" to "127.0.0.1") {
+            assertFalse(TorRouting.hopRefused(gateway, URL(gateway, "/ipfs/bafyroot/index.html"), "GET"))
+        }
+    }
+
+    @Test
+    fun `an http hop off the caller's origin is dialed by the address it was judged on`() = withResolver(
+        "rb.evil.example" to "198.51.100.7", "loop.example" to "127.0.0.1", "v6.example" to "2001:db8::7",
+    ) {
+        val pin = TorRouting.pin(URL("http://rb.evil.example:8711/b?x=1"))!!
+        assertEquals(listOf("http://198.51.100.7:8711/b?x=1"), pin.urls.map { it.toString() })
+        assertEquals("rb.evil.example:8711", pin.hostHeader)
+        assertEquals("rb.evil.example", TorRouting.pin(URL("http://RB.evil.example/"))!!.hostHeader)
+        assertEquals(listOf("http://[2001:db8:0:0:0:0:0:7]/"), TorRouting.pin(URL("http://v6.example/"))!!.urls.map { it.toString() })
+        // Resolving to the device: refused at the dial too.
+        for (hop in listOf("http://loop.example:8711/b", "http://localtest.me/")) {
+            try {
+                TorRouting.pin(URL(hop))
+                fail("pinned $hop")
+            } catch (_: TorRouting.RedirectRefusedException) {
+            }
+        }
+        // Not resolving at all: not dialed, as a failed lookup (R6-F1).
+        try {
+            TorRouting.pin(URL("http://unresolvable.example/"))
+            fail("pinned a name that didn't resolve")
+        } catch (_: TorRouting.RedirectUnresolvedException) {
+        }
+        // Nothing to pin: https (its connected peer is checked), onion, literals.
+        assertEquals(null, TorRouting.pin(URL("https://rb.evil.example/")))
+        assertEquals(null, TorRouting.pin(URL("http://${"a".repeat(56)}.onion/")))
+        assertEquals(null, TorRouting.pin(URL("http://192.168.1.20:8080/")))
+        assertEquals(null, TorRouting.pin(URL("http://[2001:db8::1]/")))
+    }
+
+    @Test
+    fun `a pinned hop keeps every address its name resolved to, in order, for fallback`() = withResolver {
+        val real = TorRouting.resolve
+        TorRouting.resolve = { host ->
+            if (host == "multi.example") {
+                arrayOf("2001:db8::7", "198.51.100.7", "198.51.100.8", "198.51.100.7").map { java.net.InetAddress.getByName(it) }.toTypedArray()
+            } else {
+                real(host)
+            }
+        }
+        val pin = TorRouting.pin(URL("http://multi.example:8080/p"))!!
+        assertEquals(
+            listOf("http://[2001:db8:0:0:0:0:0:7]:8080/p", "http://198.51.100.7:8080/p", "http://198.51.100.8:8080/p"),
+            pin.urls.map { it.toString() },
+        )
+        assertEquals("multi.example:8080", pin.hostHeader)
+        // Any one of them on this device refuses the whole hop.
+        try {
+            TorRouting.pin(URL("http://mixed.example/"))
+            fail("pinned a name with a loopback address")
+        } catch (_: TorRouting.RedirectRefusedException) {
+        }
+    }
+
+    @Test
+    fun `a hop is pinned or peer-checked only when the app dials it itself`() {
+        val real = TorRouting.proxiesFor
+        val http = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress.createUnresolved("127.0.0.1", 8080))
+        val socks = java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress.createUnresolved("127.0.0.1", 1080))
+        try {
+            TorRouting.proxiesFor = { listOf(java.net.Proxy.NO_PROXY) }
+            assertEquals(java.net.Proxy.NO_PROXY, TorRouting.hopRoute(URL("https://gw.example/ipfs/x")))
+            assertEquals(java.net.Proxy.NO_PROXY, TorRouting.hopRoute(URL("http://gw.example/ipfs/x")))
+            // Onion goes through Tor's SOCKS proxy: its socket's peer is unknown (R4-F1).
+            assertEquals(null, TorRouting.hopRoute(URL("https://${"a".repeat(56)}.onion/x")))
+            assertEquals(null, TorRouting.hopRoute(URL("http://${"a".repeat(56)}%2eonion/x")))
+            // A system proxy (a Wi-Fi proxy on 127.0.0.1, or SOCKS) owns the socket and the
+            // lookup; it's the only route, with no direct fallback past the checks.
+            TorRouting.proxiesFor = { listOf(http, java.net.Proxy.NO_PROXY) }
+            assertEquals(http, TorRouting.hopRoute(URL("https://gw.example/ipfs/x")))
+            assertEquals(http, TorRouting.hopRoute(URL("http://gw.example/ipfs/x")))
+            TorRouting.proxiesFor = { listOf(java.net.Proxy.NO_PROXY, socks) }
+            assertEquals(socks, TorRouting.hopRoute(URL("https://gw.example/ipfs/x")))
+            // A Location java.net.URI rejects as written still goes through the proxy (R5-F1).
+            val asked = mutableListOf<java.net.URI>()
+            TorRouting.proxiesFor = { asked += it; listOf(http) }
+            for (odd in listOf("http://other.test/ipfs/y|z", "http://other.test/a b?q={x}^\"", "https://other.test:8443/p#a|b")) {
+                assertEquals(odd, http, TorRouting.hopRoute(URL(odd)))
+            }
+            assertEquals(listOf("other.test"), asked.map { it.host }.distinct())
+            assertEquals(listOf(-1, -1, 8443), asked.map { it.port })
+            // A selector that fails is refused, never dialed directly past a proxy it may name.
+            TorRouting.proxiesFor = { throw IllegalArgumentException("bad uri") }
+            try {
+                TorRouting.hopRoute(URL("https://gw.example/ipfs/x"))
+                fail("dialed a hop the proxy selector failed on")
+            } catch (e: TorRouting.RedirectRouteException) {
+                // Not reported as a redirect onto this device, nor as an unreachable server (#359 R1-F4).
+                assertFalse((e as java.io.IOException) is java.net.ConnectException)
+                assertFalse((e as java.io.IOException) is java.net.UnknownHostException)
+            }
+            // One that answers nothing is read as direct, so the checks still run.
+            TorRouting.proxiesFor = { emptyList() }
+            assertEquals(java.net.Proxy.NO_PROXY, TorRouting.hopRoute(URL("https://gw.example/ipfs/x")))
+        } finally {
+            TorRouting.proxiesFor = real
+        }
+    }
+
+    @Test
+    fun `an onion or IP-literal hop is never looked up`() = withResolver {
+        val looked = mutableListOf<String>()
+        val real = TorRouting.resolve
+        TorRouting.resolve = { looked += it; real(it) }
+        val gateway = URL("http://gateway.example/ipfs/bafyroot/")
+        assertFalse(TorRouting.resolvesToLoopback(URL(gateway, "http://${"a".repeat(56)}.onion/")))
+        assertFalse(TorRouting.resolvesToLoopback(URL(gateway, "http://192.168.1.20:8080/")))
+        assertFalse(TorRouting.resolvesToLoopback(URL(gateway, "http://[2001:db8::1]/")))
+        assertEquals(emptyList<String>(), looked)
+    }
+
+    @Test
+    fun `a hop is judged on the host the connection dials, not only the WHATWG one`() = withResolver(
+        // UTS-46 keeps and punycodes U+1806; IDNA2003 (what HttpURLConnection maps with) deletes it.
+        "127.0.0.xn--1-f3j.8.8.8.8.nip.io" to "8.8.8.8",
+        "127.0.0.1.8.8.8.8.nip.io" to "127.0.0.1",
+        "strasse.example" to "127.0.0.1",
+        "xn--strae-oqa.example" to "198.51.100.9",
+        "public.example" to "198.51.100.9",
+        "gross.example" to "198.51.100.10",
+    ) {
+        val was = WhatwgHost.uts46
+        WhatwgHost.uts46 = Icu4jUts46
+        try {
+            dialedHostChecks()
+        } finally {
+            WhatwgHost.uts46 = was
+        }
+    }
+
+    private fun dialedHostChecks() {
+        val gateway = URL("http://gateway.example/ipfs/bafyroot/")
+        val todo = URL("http://127.0.0.1%E1%A0%86.8.8.8.8.nip.io:8712/secret.html")
+        assertTrue("127.0.0.1.8.8.8.8.nip.io" in TorRouting.dialedHosts(todo))
+        assertTrue(TorRouting.resolvesToLoopback(todo))
+        assertTrue(TorRouting.hopRefused(gateway, todo, "GET"))
+        // ß: IDNA2003 maps it to ss, UTS-46 nontransitional keeps it.
+        assertTrue(TorRouting.resolvesToLoopback(URL("http://stra%C3%9Fe.example/")))
+        // A literal the connection would read out of a name is judged as one,
+        // and refuses the hop although the WHATWG reading doesn't resolve.
+        assertTrue(TorRouting.resolvesToLoopback(URL("http://127.0.0.1%E1%A0%86/")))
+        assertFalse(TorRouting.resolvesToLoopback(URL("http://public.example/")))
+        // Only the dialed reading has DNS (`gross.example`); the WHATWG one
+        // (`xn--gro-7ka.example`), which nothing dials, doesn't resolve: the hop
+        // is followed, not left unresolved (#359 R1-F2).
+        assertFalse(TorRouting.resolvesToLoopback(URL("http://gro%C3%9F.example/")))
+        assertFalse(TorRouting.hopRefused(gateway, URL("http://gro%C3%9F.example/"), "GET"))
+        // A dialed reading that doesn't resolve still leaves the hop unresolved.
+        try {
+            TorRouting.resolvesToLoopback(URL("http://unresolvable.example/"))
+            fail("judged a hop whose dialed name didn't resolve")
+        } catch (_: TorRouting.RedirectUnresolvedException) {
+        }
+    }
+
+    /** Run [block] with [TorRouting.resolve] answering from [names] (anything else unresolvable). */
+    private fun <T> withResolver(vararg names: Pair<String, String>, block: () -> T): T {
+        val table = mapOf(
+            "localtest.me" to listOf("127.0.0.1"),
+            "127.0.0.1.nip.io" to listOf("127.0.0.1"),
+            "loop6.example" to listOf("::1"),
+            "mapped.example" to listOf("::ffff:7f00:1"),
+            "mixed.example" to listOf("198.51.100.9", "127.0.0.2"),
+        ) + names.associate { (k, v) -> k to listOf(v) }
+        val real = TorRouting.resolve
+        TorRouting.resolve = { host ->
+            table[host]?.map { java.net.InetAddress.getByName(it) }?.toTypedArray()
+                ?: throw java.net.UnknownHostException(host)
+        }
+        try {
+            return block()
+        } finally {
+            TorRouting.resolve = real
+        }
+    }
+
+    @Test
+    fun `a gateway's redirect to another loopback service is never opened`() {
+        val hits = java.util.concurrent.atomic.AtomicInteger()
+        val victim = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        victim.createContext("/") { ex ->
+            hits.incrementAndGet()
+            val out = """{"ethereum":"0xsecret"}""".toByteArray()
+            ex.sendResponseHeaders(200, out.size.toLong())
+            ex.responseBody.use { it.write(out) }
+        }
+        val gateway = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        gateway.createContext("/") { ex ->
+            ex.responseHeaders.add("Location", "http://localhost:${victim.address.port}/addresses")
+            ex.sendResponseHeaders(302, -1)
+            ex.close()
+        }
+        victim.start()
+        gateway.start()
+        try {
+            try {
+                TorRouting.openFollowingRedirects(URL("http://127.0.0.1:${gateway.address.port}/ipfs/bafyroot/")) {}
+                fail("followed a gateway's redirect onto another loopback service")
+            } catch (e: TorRouting.RedirectRefusedException) {
+                // Unreachable to the gateway interceptor, so it isn't retried.
+                assertTrue(e is java.net.ConnectException)
+            }
+            assertEquals(0, hits.get())
+        } finally {
+            gateway.stop(0)
+            victim.stop(0)
+        }
+    }
+
+    @Test
     fun `an override that fails is retried on the next state update`() {
         val context = android.content.ContextWrapper(null)
         val real = TorRouting.setOverride

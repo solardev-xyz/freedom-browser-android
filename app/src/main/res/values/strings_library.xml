@@ -32,6 +32,8 @@
     <!-- %1$d: an HTTP status code -->
     <string name="library_download_server_error">Server error %1$s</string>
     <string name="library_download_too_many_redirects">Too many redirects</string>
+    <!-- The gateway redirected the download onto this device (the node's API or another local service); refused. -->
+    <string name="library_download_redirect_refused">Gateway redirected to this device; refused</string>
     <string name="library_download_write_to_downloads_failed">Couldn\'t write to Downloads</string>
     <!-- #322: the download was to be saved where the user picked in the Save as picker. -->
     <string name="library_download_write_to_picked_failed">Couldn\'t write to the chosen location</string>
