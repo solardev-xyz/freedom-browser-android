@@ -318,6 +318,69 @@ class ExternalAppsTest {
         assertTrue(runBlocking { c.latch.topDocumentGesture().confirmed() })
     }
 
+    /**
+     * A keyboard edit as PageWebView records it (#348 R3-F1): its start,
+     * its end once Chromium has had it, then the renderer's echo.
+     */
+    private fun Clock.keyboardEdit(): Long {
+        val at = now
+        latch.onInputStart(at)
+        val id = latch.latestInputId
+        now += 2
+        latch.onInputContinues(now, id)
+        now += INPUT_SYNC_DELAY_MS
+        latch.onRendererCaughtUp(id)
+        return at
+    }
+
+    @Test
+    fun `x402 R3-F1 typing in an iframe keeps its activation fresh past the tap into its field`() {
+        val c = Clock()
+        c.tap() // into the iframe's text field
+        c.latch.onRendererCaughtUp(c.latch.latestInputId)
+        repeat(30) { // 6 s of typing there: no keydown of it is the top document's
+            c.now += 200
+            c.keyboardEdit()
+        }
+        c.now += 500
+        val next = c.tap() // a plain button on the top page
+        c.topDocumentSaw(next)
+        val gesture = c.latch.topDocumentGesture()
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 R3-F1 typing in the top document's own field is confirmed by its keydowns`() {
+        val c = Clock()
+        c.topDocumentSaw(c.tap()) // into the top page's text field
+        repeat(30) {
+            c.now += 200
+            c.topDocumentSaw(c.keyboardEdit(), isClick = false)
+        }
+        c.now += 500
+        val next = c.tap() // the site's own priced link
+        c.topDocumentSaw(next)
+        assertTrue(runBlocking { c.latch.topDocumentGesture().confirmed() })
+    }
+
+    @Test
+    fun `x402 R3-F1 a keyboard edit's end lands on it even after a later input began`() {
+        val c = Clock()
+        val at = c.now
+        c.latch.onInputStart(at) // the edit, recorded ahead of Chromium's task
+        val id = c.latch.latestInputId
+        c.now += 1
+        c.latch.onInputStart(c.now) // a key press lands in between
+        c.latch.onInputContinues(c.now + 1)
+        c.now = at + 100
+        c.latch.onInputContinues(c.now, id) // the edit's end: Chromium has stamped its keydown by now
+        c.topDocumentSaw(at + 90, isClick = false) // that keydown: past the key press's end, inside the edit
+        var confirmed = false
+        assertTrue(c.latch.whenInTopDocument(id) { confirmed = true })
+        assertTrue(confirmed)
+    }
+
     @Test
     fun `x402 an unconfirmed input the renderer was never heard past counts however old`() {
         val c = Clock()

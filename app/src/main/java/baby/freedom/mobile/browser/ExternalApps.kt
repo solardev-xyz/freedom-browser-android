@@ -543,9 +543,12 @@ internal class UserGestureLatch(private val clock: () -> Long) {
         if (droppedId in 1..id && droppedHandledBy == null) droppedHandledBy = now
     }
 
-    /** The current input goes on until [at] (a touch's `ACTION_UP`). */
-    fun onInputContinues(at: Long) {
-        val input = recent.lastOrNull()?.takeIf { it.id == inputId } ?: return
+    /**
+     * Input [id] — the current one unless named — goes on until [at] (a
+     * touch's `ACTION_UP`, the end of a keyboard edit's dispatch).
+     */
+    fun onInputContinues(at: Long, id: Int = inputId) {
+        val input = recent.lastOrNull { it.id == id } ?: return
         if (at > input.end) input.end = at
     }
 

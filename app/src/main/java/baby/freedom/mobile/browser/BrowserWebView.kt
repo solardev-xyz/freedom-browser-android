@@ -16,6 +16,7 @@ import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Bundle
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
@@ -28,6 +29,8 @@ import android.view.PixelCopy
 import android.view.KeyEvent
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputConnectionWrapper
+import android.view.inputmethod.TextAttribute
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -52,6 +55,7 @@ import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -4408,7 +4412,62 @@ internal class PageWebView(context: Context) : WebView(context) {
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? =
         super.onCreateInputConnection(outAttrs).also {
             outAttrs.imeOptions = tabImeOptions(outAttrs.imeOptions, privateTab)
+        }?.let { KeyboardEditRecorder(it, ::keyboardEdit) }
+
+    /**
+     * One edit from the on-screen keyboard ([KeyboardEditRecorder]),
+     * [send] handing it to Chromium — recorded as an input of
+     * [userGestures] like a key press (#348 R3-F1). Chromium turns each
+     * such edit into a trusted `keydown` (key code 229, or the key an
+     * editor action sends) in whichever frame has focus, and that keydown
+     * gives the frame a fresh activation — an iframe's text field
+     * included — yet it never passes through [dispatchKeyEvent]. Unrecorded,
+     * a user typing in a cross-origin iframe for longer than
+     * [UserGestureLatch.WINDOW_MS] would leave the latch with nothing but
+     * the tap into its field, long aged out, and the iframe could then
+     * navigate the top frame on the user's next tap of the top page as
+     * if that page had.
+     *
+     * Edits arrive on Chromium's keyboard thread, which posts each to the
+     * main thread for the renderer: the input is recorded by a task
+     * posted *ahead* of that one, so it is on record before the renderer
+     * can see the keydown, and its end by one posted after, so it covers
+     * the keydown's timestamp — which the top document's detector reports
+     * like any other ([TOP_DOCUMENT_INPUT]), confirming a keystroke in
+     * the top document's own field. Not one launch's worth for an app
+     * link ([UserGestureLatch.onInput]): typing doesn't open apps.
+     */
+    private fun keyboardEdit(send: () -> Boolean): Boolean {
+        val at = SystemClock.uptimeMillis()
+        val id = IntArray(1)
+        onMainThread {
+            userGestures.onInputStart(at)
+            id[0] = userGestures.latestInputId
         }
+        val result = send()
+        onMainThread {
+            userGestures.onInputContinues(SystemClock.uptimeMillis(), id[0])
+            inputEnded(id[0])
+        }
+        return result
+    }
+
+    private fun onMainThread(task: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) task() else mainHandler.post(task)
+    }
+
+    /**
+     * Input [id] ended: the renderer sync for it ([onInputEnded]) — unless
+     * a finger is still down. That touch's own activation comes with its
+     * lift, still ahead of the renderer; an echo now would mark it handled
+     * too early. Its `ACTION_UP` syncs the latest input, this one included.
+     */
+    private fun inputEnded(id: Int) {
+        if (!touching) onInputEnded?.invoke(id)
+    }
+
+    /** A finger is down on the page (#348 R3-F1, [inputEnded]). */
+    private var touching = false
 
     /**
      * This tab's scriptlets (#318), set by the tab: every load the app
@@ -4748,16 +4807,19 @@ internal class PageWebView(context: Context) : WebView(context) {
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                touching = true
                 userGestures.onInputStart(event.eventTime)
                 taps.onDown(event.x, event.y)
             }
             MotionEvent.ACTION_MOVE -> taps.onMove(event.x, event.y)
             MotionEvent.ACTION_POINTER_DOWN -> taps.onCancel()
             MotionEvent.ACTION_CANCEL -> {
+                touching = false
                 taps.onCancel()
                 onInputEnded?.invoke(userGestures.latestInputId)
             }
             MotionEvent.ACTION_UP -> {
+                touching = false
                 userGestures.onInputContinues(event.eventTime)
                 if (taps.onUp(event.x, event.y)) userGestures.onInput()
                 onInputEnded?.invoke(userGestures.latestInputId)
@@ -4777,7 +4839,7 @@ internal class PageWebView(context: Context) : WebView(context) {
             userGestures.onInputStart(event.eventTime)
             userGestures.onInputContinues(SystemClock.uptimeMillis())
             userGestures.onInput()
-            onInputEnded?.invoke(userGestures.latestInputId)
+            inputEnded(userGestures.latestInputId)
         }
         return super.dispatchKeyEvent(event)
     }
@@ -6781,4 +6843,64 @@ internal class CloseNotifyingInputStream(
 private fun errorPageStrings(view: WebView?, url: String?) {
     if (view == null || !ErrorPage.isErrorPage(url) || !ErrorPage.isErrorPage(view.url)) return
     view.evaluateJavascript(ErrorPage.stringsScript(), null)
+}
+
+/**
+ * The on-screen keyboard's connection to a page ([PageWebView]), passing
+ * every call on to Chromium's — through [edit] for the ones Chromium
+ * turns into a trusted `keydown` in the focused frame (#348 R3-F1):
+ * text committed, composed or deleted, a key the keyboard sends, an
+ * editor action (Enter / Go / Next). Not a selection or composing-region
+ * change, a read, or a batch edit's bounds: those make no keydown.
+ */
+private class KeyboardEditRecorder(
+    target: InputConnection,
+    private val edit: (send: () -> Boolean) -> Boolean,
+) : InputConnectionWrapper(target, false) {
+    override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean =
+        edit { super.commitText(text, newCursorPosition) }
+
+    override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean =
+        edit { super.setComposingText(text, newCursorPosition) }
+
+    // The keyboard's API 33+ forms: the wrapper hands these to Chromium
+    // directly, not through the two above.
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    override fun commitText(text: CharSequence, newCursorPosition: Int, textAttribute: TextAttribute?): Boolean =
+        edit { super.commitText(text, newCursorPosition, textAttribute) }
+
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    override fun setComposingText(text: CharSequence, newCursorPosition: Int, textAttribute: TextAttribute?): Boolean =
+        edit { super.setComposingText(text, newCursorPosition, textAttribute) }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    override fun replaceText(
+        start: Int,
+        end: Int,
+        text: CharSequence,
+        newCursorPosition: Int,
+        textAttribute: TextAttribute?,
+    ): Boolean = edit { super.replaceText(start, end, text, newCursorPosition, textAttribute) }
+
+    override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean =
+        edit { super.deleteSurroundingText(beforeLength, afterLength) }
+
+    override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean =
+        edit { super.deleteSurroundingTextInCodePoints(beforeLength, afterLength) }
+
+    override fun performEditorAction(editorAction: Int): Boolean =
+        edit { super.performEditorAction(editorAction) }
+
+    override fun sendKeyEvent(event: KeyEvent): Boolean =
+        if (keyArmsGestureLatch(
+                action = event.action,
+                repeatCount = event.repeatCount,
+                isSystem = event.isSystem,
+                isModifier = KeyEvent.isModifierKey(event.keyCode),
+            )
+        ) {
+            edit { super.sendKeyEvent(event) }
+        } else {
+            super.sendKeyEvent(event)
+        }
 }
