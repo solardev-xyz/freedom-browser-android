@@ -108,4 +108,35 @@ class JsonRpcTest {
         assertEquals(7, JsonRpc.depth(block))
         assertTrue(JsonRpc.parse(block) is JsonRpc.Envelope.Result)
     }
+
+    /**
+     * The platform's `JSONTokener` is lenient — comments, single-quoted
+     * strings, unquoted literals — and the depth count reads the body the
+     * same way: a stray `"` the parser skips mustn't hide the brackets
+     * after it. Past the count, the parsed tree is measured again.
+     */
+    @Test
+    fun lenientSyntaxDoesNotHideNesting() {
+        fun deep(n: Int) = "[".repeat(n) + "]".repeat(n)
+        val n = 3_000
+        for (prefix in listOf("/* \" */", "// \"\n", "# \"\n", "'\"':1,", "a\":1,")) {
+            val body = """{"jsonrpc":"2.0","id":1,$prefix"result":${deep(n)}}"""
+            assertTrue("$prefix: ${JsonRpc.depth(body)}", JsonRpc.depth(body) > JsonRpc.MAX_DEPTH)
+            assertEquals(prefix, JsonRpc.Envelope.Malformed("nested too deeply"), JsonRpc.parse(body))
+        }
+        // An unquoted literal with a quote in it, in an array: `a"` is one value.
+        assertEquals(4, JsonRpc.depth("""[a",[[[1]]],b"]"""))
+        // What the lexer skips the same way the parser does still doesn't count.
+        assertEquals(1, JsonRpc.depth("""{/* [[ */"a":'[[\'[',// [[
+b:1 # [[
+}"""))
+        assertEquals(1, JsonRpc.depth("{/* [[[ unterminated"))
+
+        // The parsed tree, whatever the lexer read.
+        var tree: Any = JSONArray()
+        repeat(JsonRpc.MAX_DEPTH - 1) { tree = JSONArray().put(tree) }
+        assertFalse(JsonRpc.tooDeep(tree))
+        assertTrue(JsonRpc.tooDeep(JSONObject().put("r", tree)))
+        assertFalse(JsonRpc.tooDeep("0x1"))
+    }
 }

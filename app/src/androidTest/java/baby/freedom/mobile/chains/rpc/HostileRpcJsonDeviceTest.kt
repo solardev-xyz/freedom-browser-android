@@ -38,6 +38,23 @@ class HostileRpcJsonDeviceTest {
         assertTrue(JsonRpc.parse(deepError) is JsonRpc.Envelope.Malformed)
     }
 
+    /**
+     * The platform parser is lenient: behind a comment or a single-quoted
+     * string holding a `"`, a strict count saw no nesting at all, and
+     * 3k–8k levels parsed fine and then overflowed in [JsonRpc.stable]
+     * (the quorum's vote key), on the caller's coroutine.
+     */
+    @Test
+    fun lenientSyntaxDoesNotSmuggleNesting() {
+        for (n in listOf(3_000, 8_000, 20_000)) {
+            for (prefix in listOf("/* \" */", "'\"':1,", "# \"\n", "a\":1,")) {
+                val body = """{"jsonrpc":"2.0","id":1,$prefix"result":""" + "[".repeat(n) + "]".repeat(n) + "}"
+                val parsed = JsonRpc.parse(body)
+                assertEquals("$prefix $n", JsonRpc.Envelope.Malformed("nested too deeply"), parsed)
+            }
+        }
+    }
+
     @Test
     fun aRouterReadFailsWithAChainRpcException() = runBlocking {
         val crashes = Collections.synchronizedList(ArrayList<Throwable>())
