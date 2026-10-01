@@ -2,6 +2,10 @@ package baby.freedom.mobile.wallet.ledger
 
 import baby.freedom.mobile.wallet.ledger.Ledger.Companion.NotThisLedger
 import baby.freedom.mobile.wallet.ledger.Ledger.Companion.Route
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -14,9 +18,9 @@ import org.junit.Test
  * every Ledger that may hold the account — plugged-in ones first, the one
  * it was added from first among them, then Bluetooth — and passes over
  * one that can't be reached or doesn't hold it, before anything is shown
- * on it — including one that's unplugged, or locked / on another app
- * (set aside at once unless it's the last, and only waited on after the
- * others, PR #350 R2-F1); anything else (a refusal on the device, Cancel,
+ * on it — including one that's unplugged, or never unlocked. Ledgers
+ * waiting on the user are waited on at once, so none holds up another
+ * (PR #350 R2-F1, R3-F1, R3-M1); anything else (a refusal on the device, Cancel,
  * a confirmation timing out) ends it there.
  */
 class LedgerRoutesTest {
@@ -76,7 +80,21 @@ class LedgerRoutesTest {
     }
 
     @Test
-    fun `none holding it, the Ledger that doesn't is named, else the last reason`() = runBlocking {
+    fun `a Ledger that answers at once is used without anything asked of the ones after it`() = runBlocking {
+        val tried = ArrayList<Route>()
+        val got = Ledger.inTurn(listOf(nanoXCable, nanoXRadio)) { r, turn ->
+            tried += r
+            Ledger.holding(account, turn::stage, readyMs = 5_000, pollMs = 10, read = reads(account))
+            turn.claim()
+            "signed on ${r.name}"
+        }
+        assertEquals("signed on Ledger Nano X", got)
+        // The Bluetooth one is never connected to (nor offered pairing).
+        assertEquals(listOf(nanoXCable), tried)
+    }
+
+    @Test
+    fun `none holding it, a Ledger left locked is named, else the one that doesn't hold it, else the last reason`() = runBlocking {
         fun failsWith(expected: LedgerException.Kind, vararg reasons: LedgerException.Kind) = runBlocking {
             val routes = reasons.indices.map { Route("r$it", "r$it") }
             try {
@@ -89,6 +107,9 @@ class LedgerRoutesTest {
         failsWith(LedgerException.Kind.WRONG_DEVICE, LedgerException.Kind.WRONG_DEVICE, LedgerException.Kind.NOT_FOUND)
         failsWith(LedgerException.Kind.NOT_FOUND, LedgerException.Kind.PERMISSION, LedgerException.Kind.NOT_FOUND)
         failsWith(LedgerException.Kind.NOT_FOUND)
+        // R3-M2: an unlocked Ledger of another seed plugged in, the account's own left locked.
+        failsWith(LedgerException.Kind.LOCKED, LedgerException.Kind.WRONG_DEVICE, LedgerException.Kind.LOCKED)
+        failsWith(LedgerException.Kind.APP_NOT_OPEN, LedgerException.Kind.APP_NOT_OPEN, LedgerException.Kind.WRONG_DEVICE)
     }
 
     @Test
@@ -118,78 +139,166 @@ class LedgerRoutesTest {
         }
     }
 
+    /** A fake Ledger that's locked until [unlocked], then holds [address]. */
+    private fun lockedUntil(unlocked: () -> Boolean, address: String): suspend () -> String = {
+        if (!unlocked()) throw ex(LedgerException.Kind.LOCKED)
+        address
+    }
+
     private val account = "0x1111111111111111111111111111111111111111"
     private val other = "0x2222222222222222222222222222222222222222"
 
-    private suspend fun passedOver(patient: Boolean, read: suspend () -> String): NotThisLedger? = try {
-        Ledger.holding(account, patient, {}, readyMs = 200, pollMs = 10, read = read)
+    private suspend fun passedOver(read: suspend () -> String): NotThisLedger? = try {
+        Ledger.holding(account, {}, readyMs = 200, pollMs = 10, read = read)
         null
     } catch (e: NotThisLedger) {
         e
     }
 
     @Test
-    fun `a Ledger that's unplugged, locked or on another app before it's checked is passed over`() = runBlocking {
+    fun `a Ledger that's unplugged, never unlocked or of another seed is passed over`() = runBlocking {
         // Holds it once unlocked: waited on, it's used.
-        assertEquals(null, passedOver(true, reads(LedgerException.Kind.LOCKED, LedgerException.Kind.APP_NOT_OPEN, account)))
-        // Not waited on: locked is set aside for later, not an end.
-        passedOver(false, reads(LedgerException.Kind.LOCKED, account))!!.let {
-            assertEquals(LedgerException.Kind.LOCKED, it.reason.kind)
-            assertTrue(it.later)
-        }
-        // Waited on and never unlocked: passed over, not come back to.
-        passedOver(true, reads(LedgerException.Kind.APP_NOT_OPEN))!!.let {
-            assertEquals(LedgerException.Kind.APP_NOT_OPEN, it.reason.kind)
-            assertFalse(it.later)
-        }
+        assertEquals(null, passedOver(reads(LedgerException.Kind.LOCKED, LedgerException.Kind.APP_NOT_OPEN, account)))
+        // Never opened on the Ethereum app.
+        assertEquals(LedgerException.Kind.APP_NOT_OPEN, passedOver(reads(LedgerException.Kind.APP_NOT_OPEN))!!.reason.kind)
         // Unplugged while it's waited on.
-        passedOver(true, reads(LedgerException.Kind.LOCKED, LedgerException.Kind.DISCONNECTED))!!.let {
-            assertEquals(LedgerException.Kind.DISCONNECTED, it.reason.kind)
-            assertFalse(it.later)
-        }
+        assertEquals(LedgerException.Kind.DISCONNECTED, passedOver(reads(LedgerException.Kind.LOCKED, LedgerException.Kind.DISCONNECTED))!!.reason.kind)
         // Another seed.
-        assertEquals(LedgerException.Kind.WRONG_DEVICE, passedOver(true, reads(other))!!.reason.kind)
+        assertEquals(LedgerException.Kind.WRONG_DEVICE, passedOver(reads(other))!!.reason.kind)
         // The address matches whatever its case.
-        assertEquals(null, passedOver(false, reads(account.uppercase().replace("0X", "0x"))))
+        assertEquals(null, passedOver(reads(account.uppercase().replace("0X", "0x"))))
     }
 
-    @Test
-    fun `a locked Ledger plugged in doesn't hold up the account's own Ledger further down`() = runBlocking {
-        // The finding: a Bluetooth Nano X account, a locked Nano S Plus of another seed plugged in.
-        val asked = ArrayList<Pair<Route, Boolean>>()
-        val got = Ledger.inTurn(listOf(nanoSPlusA, nanoXRadio)) { r, patient ->
-            asked += r to patient
-            Ledger.holding(account, patient, {}, readyMs = 5_000, pollMs = 10, read = if (r == nanoSPlusA) reads(LedgerException.Kind.LOCKED) else reads(account))
-            "signed on ${r.name}"
-        }
-        assertEquals("signed on Nano X 1A2B", got)
-        assertEquals(listOf(nanoSPlusA to false, nanoXRadio to true), asked)
-    }
+    /**
+     * [inTurn] over [routes], each answered by [ledgers]' fake: its read,
+     * and how long it takes to connect. Returns the route that signed, and
+     * which routes were let go (cancelled) along the way.
+     */
+    private class Run(val signed: Route, val letGo: List<Route>, val ms: Long)
 
-    @Test
-    fun `a locked Ledger set aside is waited on once no other Ledger works`() = runBlocking {
-        // A USB account's own Ledger, locked; the paired Nano X out of range.
-        var unlocked = false
-        val asked = ArrayList<Pair<Route, Boolean>>()
-        val got = Ledger.inTurn(listOf(nanoXCable, nanoXRadio)) { r, patient ->
-            asked += r to patient
-            if (r == nanoXRadio) throw NotThisLedger(ex(LedgerException.Kind.NOT_FOUND))
-            Ledger.holding(account, patient, { unlocked = true }, readyMs = 5_000, pollMs = 10) {
-                if (!unlocked) throw ex(LedgerException.Kind.LOCKED)
-                account
+    private fun run(routes: List<Route>, connectMs: Map<Route, Long> = emptyMap(), shown: MutableList<Pair<String, Ledger.Stage>>? = null, read: (Route) -> suspend () -> String): Run = runBlocking {
+        val letGo = ArrayList<Route>()
+        val started = System.currentTimeMillis()
+        val signed = Ledger.inTurn(routes, show = { n, s -> shown?.add(n to s) }) { r, turn ->
+            try {
+                turn.stage(Ledger.Stage.CONNECTING)
+                delay(connectMs[r] ?: 0)
+                Ledger.holding(account, turn::stage, readyMs = 5_000, pollMs = 10, read = read(r))
+                turn.claim()
+                r
+            } catch (e: CancellationException) {
+                synchronized(letGo) { letGo += r }
+                throw e
             }
-            "signed on ${r.name}"
         }
-        assertEquals("signed on Ledger Nano X", got)
-        assertEquals(listOf(nanoXCable to false, nanoXRadio to true, nanoXCable to true), asked)
+        Run(signed, letGo, System.currentTimeMillis() - started)
     }
 
     @Test
-    fun `set aside and never unlocked, the lock is what's reported`() = runBlocking {
+    fun `a locked Ledger plugged in doesn't hold up the account's own Ledger further down`() {
+        // R2-F1: a Bluetooth Nano X account, a locked Nano S Plus of another seed plugged in.
+        val r = run(listOf(nanoSPlusA, nanoXRadio)) { if (it == nanoSPlusA) reads(LedgerException.Kind.LOCKED) else reads(account) }
+        assertEquals(nanoXRadio, r.signed)
+        assertEquals(listOf(nanoSPlusA), r.letGo)
+        assertTrue("took ${r.ms} ms", r.ms < 2_000)
+    }
+
+    @Test
+    fun `the account's own Ledger plugged in and locked is picked up as soon as it's unlocked, while a Bluetooth one connects`() {
+        // R3-F1: a Nano X account, the Nano X plugged in (locked), its Bluetooth route slow to connect.
+        val start = System.currentTimeMillis()
+        val unlocked = { System.currentTimeMillis() - start > 200 }
+        val r = run(listOf(nanoXCable, nanoXRadio), connectMs = mapOf(nanoXRadio to 3_000L)) {
+            if (it == nanoXCable) lockedUntil(unlocked, account) else reads(account)
+        }
+        assertEquals(nanoXCable, r.signed)
+        assertEquals(listOf(nanoXRadio), r.letGo)
+        assertTrue("took ${r.ms} ms", r.ms < 2_000)
+    }
+
+    @Test
+    fun `two locked Ledgers are waited on at once, and the one the user unlocks is used`() {
+        // R3-F1: a USB account's own Ledger plugged in, a paired Nano X of another seed in range; both locked.
+        val start = System.currentTimeMillis()
+        val unlocked = { System.currentTimeMillis() - start > 300 }
+        val shown = ArrayList<Pair<String, Ledger.Stage>>()
+        val r = run(listOf(nanoXCable, nanoXRadio), shown = shown) {
+            if (it == nanoXCable) lockedUntil(unlocked, account) else reads(LedgerException.Kind.LOCKED)
+        }
+        assertEquals(nanoXCable, r.signed)
+        assertEquals(listOf(nanoXRadio), r.letGo)
+        assertTrue("took ${r.ms} ms", r.ms < 2_000)
+        // While both wait, the dialog names both.
+        assertTrue(shown.toString(), ("Ledger Nano X · Nano X 1A2B" to Ledger.Stage.UNLOCK) in shown)
+    }
+
+    @Test
+    fun `Android's USB prompt for a Ledger plugged in doesn't hold up the account's own Ledger`() = runBlocking {
+        // R3-M1: a Bluetooth account, an unrelated Nano S Plus newly plugged in, its access prompt ignored.
+        val letGo = ArrayList<Route>()
+        val started = System.currentTimeMillis()
+        val got = Ledger.inTurn(listOf(nanoSPlusA, nanoXRadio)) { r, turn ->
+            try {
+                if (r == nanoSPlusA) {
+                    turn.stage(Ledger.Stage.USB_PERMISSION)
+                    delay(60_000) // Android's prompt, never answered
+                }
+                Ledger.holding(account, turn::stage, readyMs = 5_000, pollMs = 10, read = reads(account))
+                turn.claim()
+                r
+            } catch (e: CancellationException) {
+                letGo += r
+                throw e
+            }
+        }
+        assertEquals(nanoXRadio, got)
+        assertEquals(listOf(nanoSPlusA), letGo)
+        assertTrue(System.currentTimeMillis() - started < 2_000)
+    }
+
+    @Test
+    fun `the dialog shows what most needs the user, then only the Ledger that took the conversation`() {
+        val a = Route("a", "A")
+        val b = Route("b", "B")
+        assertEquals("A" to Ledger.Stage.UNLOCK, Ledger.shown(listOf(a, b), listOf(Ledger.Stage.UNLOCK, Ledger.Stage.CONNECTING)))
+        assertEquals("B" to Ledger.Stage.USB_PERMISSION, Ledger.shown(listOf(a, b), listOf(Ledger.Stage.UNLOCK, Ledger.Stage.USB_PERMISSION)))
+        assertEquals("A · B" to Ledger.Stage.OPEN_APP, Ledger.shown(listOf(a, b), listOf(Ledger.Stage.OPEN_APP, Ledger.Stage.OPEN_APP)))
+        assertEquals(null, Ledger.shown(listOf(a, b), listOf(null, null)))
+        // Once B holds the account, A's stage no longer shows.
+        val shown = ArrayList<Pair<String, Ledger.Stage>>()
+        val race = Ledger.Companion.Race(listOf(a, b), show = { n, s -> shown += n to s })
+        race.stage(0, Ledger.Stage.UNLOCK)
+        race.stage(1, Ledger.Stage.CONNECTING)
+        assertTrue(race.claim(1))
+        race.stage(0, Ledger.Stage.UNLOCK)
+        race.stage(1, Ledger.Stage.CONFIRM)
+        assertEquals(listOf("A" to Ledger.Stage.UNLOCK, "A" to Ledger.Stage.UNLOCK, "B" to Ledger.Stage.CONNECTING, "B" to Ledger.Stage.CONFIRM), shown)
+        assertFalse(race.claim(0))
+    }
+
+    @Test
+    fun `on a thread pool, exactly one Ledger takes the conversation and the rest are let go`() = runBlocking(Dispatchers.Default) {
+        repeat(200) {
+            val routes = listOf(nanoSPlusA, nanoSPlusB, nanoXCable, nanoXRadio)
+            val claimed = AtomicInteger()
+            val got = Ledger.inTurn(routes) { r, turn ->
+                // Every one locked at first, so all are started, then all hold the account at about the same time.
+                Ledger.holding(account, turn::stage, readyMs = 5_000, pollMs = 1, read = reads(LedgerException.Kind.LOCKED, account))
+                turn.claim()
+                claimed.incrementAndGet()
+                r
+            }
+            assertTrue(got in routes)
+            assertEquals(1, claimed.get())
+        }
+    }
+
+    @Test
+    fun `never unlocked, the lock is what's reported`() = runBlocking {
         try {
-            Ledger.inTurn(listOf(nanoSPlusA, nanoXRadio)) { r, patient ->
+            Ledger.inTurn(listOf(nanoSPlusA, nanoXRadio)) { r, turn ->
                 if (r == nanoXRadio) throw NotThisLedger(ex(LedgerException.Kind.NOT_FOUND))
-                Ledger.holding(account, patient, {}, readyMs = 50, pollMs = 10, read = reads(LedgerException.Kind.LOCKED))
+                Ledger.holding(account, turn::stage, readyMs = 50, pollMs = 10, read = reads(LedgerException.Kind.LOCKED))
             }
             fail("succeeded")
         } catch (e: LedgerException) {

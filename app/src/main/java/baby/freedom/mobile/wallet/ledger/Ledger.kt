@@ -35,7 +35,9 @@ import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.coroutineScope
@@ -45,6 +47,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -94,11 +98,13 @@ enum class LedgerScheme(@StringRes private val labelRes: Int) {
  * cable; the one the account was added from first), then the account's
  * own Bluetooth Ledger — or, for an account added over USB, the paired
  * Bluetooth Ledgers of that model (a Nano X set up over a cable and later
- * used without it). Each is asked for the account's address in turn, and
- * one that doesn't hold it, or can't be read (unplugged, out of range,
- * locked or on another app), is passed over before anything is shown on
- * it; only the last is waited on to be unlocked, the others set aside
- * that way are waited on after ([Ledger.Companion.inTurn]).
+ * used without it). Each is asked for the account's address, and one
+ * that doesn't hold it, or can't be reached or read (unplugged, out of
+ * range, access refused), is passed over before anything is shown on it.
+ * One waiting on the user (locked, on another app, Android's USB access
+ * prompt, pairing) doesn't hold up the next: that one is started too,
+ * and every Ledger waiting is waited on at once — the first found to hold
+ * the account is the one used ([Ledger.Companion.inTurn]).
  *
  * While a conversation is on, [activity] says what the Ledger is waiting
  * for (connecting, pairing, unlock it, open the Ethereum app, confirm on
@@ -248,10 +254,10 @@ class Ledger internal constructor(private val context: Context) {
 
     /** [count] accounts from [start] on [device] under [scheme]: (path, address). */
     suspend fun accounts(device: LedgerDevice, scheme: LedgerScheme, start: Int, count: Int): List<Pair<String, String>> =
-        session({ deviceRoutes(device) }, Strings.get(R.string.signing_ledger_purpose_read_accounts)) { app, stage, _ ->
+        session({ deviceRoutes(device) }, Strings.get(R.string.signing_ledger_purpose_read_accounts)) { app, turn ->
             val first = scheme.path(start)
-            awaitReady(true, stage) { app.address(first) }
-            stage(Stage.READING)
+            awaitReady(turn::stage) { app.address(first) }
+            turn.stage(Stage.READING)
             (start until start + count).map { i -> scheme.path(i).let { it to app.address(it) } }
         }
 
@@ -264,8 +270,8 @@ class Ledger internal constructor(private val context: Context) {
     suspend fun signTransaction(account: WalletAccount, tx: EthTransaction, fresh: () -> Boolean = { true }): EthTransaction.Signed {
         val key = account.ledger ?: error("not a Ledger account")
         val payload = tx.signingPayload()
-        val sig = session({ routesFor(key) }, Strings.get(R.string.signing_ledger_purpose_confirm_transaction)) { app, stage, patient ->
-            verified(app, key, account.address, patient, stage) { if (!fresh()) throw QuoteStaleException() }
+        val sig = session({ routesFor(key) }, Strings.get(R.string.signing_ledger_purpose_confirm_transaction)) { app, turn ->
+            verified(app, key, account.address, turn) { if (!fresh()) throw QuoteStaleException() }
             app.signTransaction(key.path, payload)
         }
         return tx.signedWith(recover(sig, Keccak256.digest(payload), account.address), account.address)
@@ -274,8 +280,8 @@ class Ledger internal constructor(private val context: Context) {
     /** `personal_sign` of [message] on the Ledger holding [account]: `0x` + r ‖ s ‖ v. */
     suspend fun signPersonal(account: WalletAccount, message: ByteArray): String {
         val key = account.ledger ?: error("not a Ledger account")
-        val sig = session({ routesFor(key) }, Strings.get(R.string.signing_ledger_purpose_confirm_message)) { app, stage, patient ->
-            verified(app, key, account.address, patient, stage)
+        val sig = session({ routesFor(key) }, Strings.get(R.string.signing_ledger_purpose_confirm_message)) { app, turn ->
+            verified(app, key, account.address, turn)
             app.signPersonal(key.path, message)
         }
         return "0x" + recover(sig, MessageSigning.personalDigest(message), account.address).rsv().toHex()
@@ -296,8 +302,8 @@ class Ledger internal constructor(private val context: Context) {
     suspend fun signTypedData(account: WalletAccount, prepare: () -> Pair<Eip712.TypedData, ByteArray>): String {
         val key = account.ledger ?: error("not a Ledger account")
         var digest = ByteArray(0)
-        val sig = session({ routesFor(key) }, Strings.get(R.string.signing_ledger_purpose_sign_data)) { app, stage, patient ->
-            verified(app, key, account.address, patient, stage)
+        val sig = session({ routesFor(key) }, Strings.get(R.string.signing_ledger_purpose_sign_data)) { app, turn ->
+            verified(app, key, account.address, turn)
             val (data, d) = prepare()
             digest = d
             app.signTypedData(key.path, data)
@@ -308,20 +314,22 @@ class Ledger internal constructor(private val context: Context) {
     /**
      * Waits for the Ledger to be ready and checks it holds [address] at
      * [key]'s path ([holding]: a Ledger that doesn't, or that can't be
-     * read — unplugged, locked, out of range — is passed over), runs
+     * read — unplugged, never unlocked, out of range — is passed over),
+     * takes the conversation for it ([Turn.claim]: any other Ledger still
+     * being tried is let go, before anything is shown on this one), runs
      * [before] (which may still refuse), then asks for the confirmation.
      */
     private suspend fun verified(
         app: LedgerEthApp,
         key: LedgerKey,
         address: String,
-        patient: Boolean,
-        stage: (Stage) -> Unit,
+        turn: Turn,
         before: () -> Unit = {},
     ) {
-        holding(address, patient, stage) { app.address(key.path) }
+        holding(address, turn::stage) { app.address(key.path) }
+        turn.claim()
         before()
-        stage(Stage.CONFIRM)
+        turn.stage(Stage.CONFIRM)
     }
 
     /**
@@ -368,21 +376,41 @@ class Ledger internal constructor(private val context: Context) {
 
     /**
      * One conversation with a Ledger, one at a time: [routes] (listed once
-     * the conversation's turn comes) are tried in
-     * turn ([inTurn]) — a link opened, [block] run with it, the link
-     * closed, whatever happens — and the first Ledger that can be reached
-     * and holds what's asked for is the one used. Cancel
-     * ([Activity.cancel]) ends it with [LedgerException.Kind.CANCELLED].
+     * the conversation's turn comes) are tried ([inTurn]) — for each, a
+     * link opened, [block] run with it, the link closed, whatever happens —
+     * and the first Ledger that can be reached and holds what's asked for
+     * is the one used. Cancel ([Activity.cancel]) ends every one of them
+     * with [LedgerException.Kind.CANCELLED].
      */
     private suspend fun <T> session(
         routes: () -> List<Route>,
         purpose: String,
-        block: suspend (LedgerEthApp, (Stage) -> Unit, Boolean) -> T,
+        block: suspend (LedgerEthApp, Turn) -> T,
     ): T = conversation.withLock {
         try {
-            // Listed only once it's this conversation's turn: one queued behind
-            // another sees the Ledgers plugged in and paired by then (#350 R2-M1).
-            inTurn(routes()) { route, patient -> converse(route, purpose, patient, block) }
+            coroutineScope {
+                val cancelled = AtomicBoolean(false)
+                var cancel: () -> Unit = {}
+                // Created unstarted, so Cancel exists before anything can be shown with it.
+                val work = async(start = CoroutineStart.LAZY) {
+                    // Listed only once it's this conversation's turn: one queued behind
+                    // another sees the Ledgers plugged in and paired by then (#350 R2-M1).
+                    inTurn(routes(), show = { name, s -> _activity.value = Activity(name, s, purpose, cancel) }) { route, turn ->
+                        converse(route, turn, block)
+                    }
+                }
+                cancel = {
+                    cancelled.set(true)
+                    work.cancel()
+                }
+                work.start()
+                try {
+                    work.await()
+                } catch (e: CancellationException) {
+                    if (cancelled.get()) throw LedgerException(LedgerException.Kind.CANCELLED)
+                    throw e
+                }
+            }
         } catch (e: LedgerException) {
             Log.i(TAG, "Ledger: ${e.kind}${(e.cause as? LedgerException.StatusWord)?.let { " (${it.message})" } ?: ""}")
             throw e
@@ -392,51 +420,33 @@ class Ledger internal constructor(private val context: Context) {
     }
 
     /**
-     * [block] with the Ledger at [route]. A link that can't be opened ends
-     * as [NotThisLedger], as does a Ledger that can't be read or doesn't
-     * hold the account ([holding], before anything is shown on it), so the
-     * next route can be tried. [patient]: whether [block] waits for it to
-     * be unlocked and on the Ethereum app ([inTurn]).
+     * [block] with the Ledger at [route]. A link that can't be opened
+     * (out of range, unplugged, USB access refused) ends as
+     * [NotThisLedger], as does a Ledger that can't be read or doesn't
+     * hold the account ([holding], before anything is shown on it), so
+     * another route can be used.
      */
     private suspend fun <T> converse(
         route: Route,
-        purpose: String,
-        patient: Boolean,
-        block: suspend (LedgerEthApp, (Stage) -> Unit, Boolean) -> T,
-    ): T = coroutineScope {
-        var stage: (Stage) -> Unit = {}
-        val cancelled = AtomicBoolean(false)
-        // Created unstarted, so Cancel exists before anything can call stage() with it.
-        val work = async(start = CoroutineStart.LAZY) {
-            val link = try {
-                if (isUsbId(route.id)) {
-                    val manager = usbManager ?: throw LedgerUsbLink.unplugged()
-                    val usb = LedgerUsbLink.devices(manager).firstOrNull { USB_PREFIX + it.deviceName == route.id } ?: throw LedgerUsbLink.unplugged()
-                    LedgerUsbLink.open(context, manager, usb, onPermission = { stage(Stage.USB_PERMISSION) }).also { stage(Stage.CONNECTING) }
-                } else {
-                    open(route.id, onPairing = { stage(Stage.PAIRING) }, onPaired = { stage(Stage.CONNECTING) })
-                }
-            } catch (e: LedgerException) {
-                throw NotThisLedger(e)
+        turn: Turn,
+        block: suspend (LedgerEthApp, Turn) -> T,
+    ): T {
+        turn.stage(Stage.CONNECTING)
+        val link = try {
+            if (isUsbId(route.id)) {
+                val manager = usbManager ?: throw LedgerUsbLink.unplugged()
+                val usb = LedgerUsbLink.devices(manager).firstOrNull { USB_PREFIX + it.deviceName == route.id } ?: throw LedgerUsbLink.unplugged()
+                LedgerUsbLink.open(context, manager, usb, onPermission = { turn.stage(Stage.USB_PERMISSION) }).also { turn.stage(Stage.CONNECTING) }
+            } else {
+                open(route.id, onPairing = { turn.stage(Stage.PAIRING) }, onPaired = { turn.stage(Stage.CONNECTING) })
             }
-            try {
-                block(LedgerEthApp(link), stage, patient)
-            } finally {
-                link.close()
-            }
+        } catch (e: LedgerException) {
+            throw NotThisLedger(e)
         }
-        val cancel = {
-            cancelled.set(true)
-            work.cancel()
-        }
-        stage = { s: Stage -> _activity.value = Activity(route.name, s, purpose, cancel) }
-        stage(Stage.CONNECTING)
-        work.start()
-        try {
-            work.await()
-        } catch (e: CancellationException) {
-            if (cancelled.get()) throw LedgerException(LedgerException.Kind.CANCELLED)
-            throw e
+        return try {
+            block(LedgerEthApp(link), turn)
+        } finally {
+            link.close()
         }
     }
 
@@ -462,62 +472,173 @@ class Ledger internal constructor(private val context: Context) {
         /** A Ledger a conversation can go to: its id ([LedgerDevice.id]) and the name it shows. */
         internal data class Route(val id: String, val name: String)
 
-        /**
-         * A route that couldn't be used — not reachable, or not the Ledger
-         * holding the account — with why. [later]: it was only locked or
-         * not on the Ethereum app, and wasn't waited on; it's come back to
-         * if no other Ledger works ([inTurn]).
-         */
-        internal class NotThisLedger(val reason: LedgerException, val later: Boolean = false) : Exception(reason)
+        /** A route that couldn't be used — not reachable, or not the Ledger holding the account — with why. */
+        internal class NotThisLedger(val reason: LedgerException) : Exception(reason)
+
+        /** The stages where a Ledger waits on the user, in the order the dialog puts them first. */
+        private val WAITING_ON_USER = listOf(Stage.PAIRING, Stage.USB_PERMISSION, Stage.UNLOCK, Stage.OPEN_APP)
 
         /**
-         * [attempt] on each of [routes] in turn, until one doesn't end in
-         * [NotThisLedger]; anything else (a refusal on the device, Cancel,
-         * a confirmation timing out) ends it there.
-         *
-         * Only the last route is waited on (`patient`) while it's locked or
-         * on another app: an earlier one found that way is set aside at
-         * once, so a Ledger plugged in that isn't the account's own can't
-         * hold up, or end, a conversation the account's own Ledger further
-         * down would answer (#350 R2-F1). The ones set aside are then
-         * waited on in turn, if no other Ledger worked — a lock that's
-         * never opened, or an unplug while it's waited on, passes over to
-         * the next. None left, the reason given is that a Ledger reached
-         * doesn't hold the account if one said so — that's the Ledger the
-         * user has in hand — else the last one tried's.
+         * What the dialog shows while several Ledgers are tried at once:
+         * the stage that most needs the user (pairing or Android's USB
+         * prompt, then unlocking, then opening the app, then confirming,
+         * reading, connecting), with the name of every Ledger at that
+         * stage. [stages] is each route's current stage, null once it's
+         * been let go.
          */
-        internal suspend fun <T> inTurn(routes: List<Route>, attempt: suspend (Route, patient: Boolean) -> T): T {
-            var wrong: LedgerException? = null
-            var last = LedgerException(LedgerException.Kind.NOT_FOUND)
-            val later = ArrayList<Route>()
-            routes.forEachIndexed { i, route ->
-                try {
-                    return attempt(route, i == routes.lastIndex)
-                } catch (e: NotThisLedger) {
-                    last = e.reason
-                    if (e.reason.kind == LedgerException.Kind.WRONG_DEVICE) wrong = e.reason
-                    if (e.later) later += route
-                }
+        internal fun shown(routes: List<Route>, stages: List<Stage?>): Pair<String, Stage>? {
+            val order = WAITING_ON_USER + listOf(Stage.CONFIRM, Stage.READING, Stage.CONNECTING)
+            val stage = stages.filterNotNull().minByOrNull { order.indexOf(it) } ?: return null
+            val names = routes.indices.filter { stages[it] == stage }.map { routes[it].name }.distinct()
+            return names.joinToString(" · ") to stage
+        }
+
+        /**
+         * One route's part in [inTurn]: [stage] says what it's doing (and
+         * that it's waiting on the user, which lets the next route start);
+         * [claim] takes the conversation for it once it's been checked to
+         * hold the account — every other route still being tried is let
+         * go, and the one that comes second is let go too.
+         */
+        internal class Turn internal constructor(private val index: Int, private val race: Race) {
+            fun stage(s: Stage) = race.stage(index, s)
+
+            fun claim() {
+                if (!race.claim(index)) throw CancellationException("another Ledger holds the account")
             }
-            for (route in later) {
-                try {
-                    return attempt(route, true)
-                } catch (e: NotThisLedger) {
-                    last = e.reason
-                    if (e.reason.kind == LedgerException.Kind.WRONG_DEVICE) wrong = e.reason
-                }
+        }
+
+        /** The routes being tried at once: their stages, their jobs, and the one that's claimed the conversation. */
+        internal class Race(private val routes: List<Route>, private val show: (String, Stage) -> Unit) {
+            private val stages = arrayOfNulls<Stage>(routes.size)
+            private val jobs = arrayOfNulls<Job>(routes.size)
+            val waiting = List(routes.size) { CompletableDeferred<Unit>() }
+            private var winner = -1
+
+            @Synchronized
+            fun started(i: Int, job: Job) {
+                jobs[i] = job
             }
-            throw wrong ?: last
+
+            @Synchronized
+            fun stage(i: Int, s: Stage) {
+                if (winner >= 0 && winner != i) return
+                stages[i] = s
+                if (s in WAITING_ON_USER) waiting[i].complete(Unit)
+                publish()
+            }
+
+            /** Route [i] is over: it no longer shows, and the next one may start. */
+            @Synchronized
+            fun ended(i: Int) {
+                stages[i] = null
+                waiting[i].complete(Unit)
+                publish()
+            }
+
+            @Synchronized
+            fun claim(i: Int): Boolean {
+                if (winner >= 0) return winner == i
+                winner = i
+                for (j in routes.indices) {
+                    if (j == i) continue
+                    stages[j] = null
+                    jobs[j]?.cancel()
+                }
+                publish()
+                return true
+            }
+
+            @Synchronized
+            fun claimed(): Boolean = winner >= 0
+
+            private fun publish() {
+                shown(routes, stages.toList())?.let { (name, s) -> show(name, s) }
+            }
+        }
+
+        /**
+         * [attempt] on [routes], until one doesn't end in [NotThisLedger];
+         * anything else (a refusal on the device, Cancel, a confirmation
+         * timing out) ends it there.
+         *
+         * They're started in order, each once the one before it has ended
+         * or is waiting on the user (locked, on another app, Android's USB
+         * access prompt, pairing — [Turn.stage]): a Ledger that answers at
+         * once is used without anything being asked of the ones after it,
+         * and one waiting on the user doesn't hold up the rest. Every one
+         * waiting is waited on at the same time ([holding], up to
+         * [READY_MS] each), so whichever the user unlocks — the account's
+         * own Ledger on a cable or over Bluetooth, or another Ledger
+         * plugged in — is picked up then (#350 R2-F1, R3-F1, R3-M1). The
+         * first found to hold the account takes the conversation
+         * ([Turn.claim]); the others are let go before anything is shown
+         * on them.
+         *
+         * None left, the reason given is [reasonFrom]'s.
+         */
+        internal suspend fun <T> inTurn(
+            routes: List<Route>,
+            show: (String, Stage) -> Unit = { _, _ -> },
+            attempt: suspend (Route, Turn) -> T,
+        ): T = coroutineScope {
+            val race = Race(routes, show)
+            val result = CompletableDeferred<T>()
+            val reasons = arrayOfNulls<LedgerException>(routes.size)
+            val starter = launch {
+                val jobs = ArrayList<Job>()
+                for ((i, route) in routes.withIndex()) {
+                    if (result.isCompleted || race.claimed()) break
+                    val job = launch(start = CoroutineStart.LAZY) {
+                        try {
+                            result.complete(attempt(route, Turn(i, race)))
+                        } catch (e: NotThisLedger) {
+                            reasons[i] = e.reason
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            result.completeExceptionally(e)
+                        } finally {
+                            race.ended(i)
+                        }
+                    }
+                    race.started(i, job)
+                    jobs += job
+                    job.start()
+                    race.waiting[i].await()
+                }
+                jobs.joinAll()
+                result.completeExceptionally(reasonFrom(reasons.toList()))
+            }
+            try {
+                result.await()
+            } finally {
+                // Whatever's still being tried (only ever a Ledger that hasn't held the account) is let go.
+                starter.cancel()
+            }
+        }
+
+        /**
+         * Why no Ledger could be used, from each route's reason (null for
+         * one never tried): a Ledger left locked or on another app, if
+         * any — unlocking it is the one thing that can still work (#350
+         * R3-M2) — else a Ledger reached that doesn't hold the account (the
+         * one the user has in hand), else the last route's reason.
+         */
+        internal fun reasonFrom(reasons: List<LedgerException?>): LedgerException {
+            val got = reasons.filterNotNull()
+            return got.lastOrNull { it.kind == LedgerException.Kind.LOCKED || it.kind == LedgerException.Kind.APP_NOT_OPEN }
+                ?: got.lastOrNull { it.kind == LedgerException.Kind.WRONG_DEVICE }
+                ?: got.lastOrNull()
+                ?: LedgerException(LedgerException.Kind.NOT_FOUND)
         }
 
         /**
          * The address [read] gives once the Ledger is unlocked with the
          * Ethereum app open: while it's locked or on another app, [stage]
-         * says so and it's read again every [pollMs], up to [readyMs] —
-         * if [patient]; otherwise the first such answer is thrown.
+         * says so and it's read again every [pollMs], up to [readyMs].
          */
         internal suspend fun awaitReady(
-            patient: Boolean,
             stage: (Stage) -> Unit,
             readyMs: Long = READY_MS,
             pollMs: Long = POLL_MS,
@@ -533,7 +654,7 @@ class Ledger internal constructor(private val context: Context) {
                         LedgerException.Kind.APP_NOT_OPEN -> Stage.OPEN_APP
                         else -> throw e
                     }
-                    if (!patient || System.currentTimeMillis() >= deadline) throw e
+                    if (System.currentTimeMillis() >= deadline) throw e
                     stage(waiting)
                     delay(pollMs)
                 }
@@ -545,22 +666,19 @@ class Ledger internal constructor(private val context: Context) {
          * ready ([awaitReady]). Anything that stops that — it doesn't hold
          * it, it's unplugged or drops out of range, it stays locked or on
          * another app — ends as [NotThisLedger]: nothing has been shown on
-         * it yet, so another Ledger can still be tried. One only found
-         * locked or on another app, not waited on, is marked [NotThisLedger.later].
+         * it yet, so another Ledger can still be used.
          */
         internal suspend fun holding(
             address: String,
-            patient: Boolean,
             stage: (Stage) -> Unit,
             readyMs: Long = READY_MS,
             pollMs: Long = POLL_MS,
             read: suspend () -> String,
         ) {
             val got = try {
-                awaitReady(patient, stage, readyMs, pollMs, read)
+                awaitReady(stage, readyMs, pollMs, read)
             } catch (e: LedgerException) {
-                val notReady = e.kind == LedgerException.Kind.LOCKED || e.kind == LedgerException.Kind.APP_NOT_OPEN
-                throw NotThisLedger(e, later = notReady && !patient)
+                throw NotThisLedger(e)
             }
             if (!got.equals(address, ignoreCase = true)) throw NotThisLedger(LedgerException(LedgerException.Kind.WRONG_DEVICE))
         }
