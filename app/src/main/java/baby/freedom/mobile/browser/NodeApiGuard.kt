@@ -18,7 +18,9 @@ import java.io.ByteArrayInputStream
  * /stamps/{amount}/{depth}` buys a postage batch, `PATCH
  * /stamps/topup|dilute/…` tops one up or dilutes it, `POST
  * /chequebook/deposit` moves xBZZ into the chequebook — each signs and
- * sends a transaction with no prompt. Its reads are private too:
+ * sends a transaction with no prompt, and since ant 0.5.51 so do `POST
+ * /v0/storage/buy`, `/v0/storage/extend` and `/v0/settlement/deposit`
+ * ([V0_CHAIN_PATHS]). Its reads are private too:
  * `/addresses` (the node's Ethereum address, overlay, public keys and
  * underlay IPs — a stable identifier across sites that also names LAN
  * addresses), `/wallet` (the address and its balances), `/stamps`,
@@ -83,10 +85,20 @@ internal object NodeApiGuard {
      * First path segments of bee's API endpoints that sign transactions:
      * postage batches, the chequebook (deposit, withdraw, cash-out),
      * staking, wallet withdrawals and pending-transaction resend/cancel.
-     * Refused anyway (none is in [DAPP_PATHS]); named only to explain a
-     * write's refusal.
+     * On a host that may be this device they're refused anyway (none is in
+     * [DAPP_PATHS]) and named only to explain a write's refusal; on any
+     * other host, a write to one is still refused.
      */
     private val CHAIN_PATHS = setOf("stamps", "chequebook", "stake", "wallet", "transactions")
+
+    /**
+     * ant's own spending routes under `/v0/` (since ant 0.5.51): `POST
+     * /v0/storage/buy` and `/v0/storage/extend` swap xDAI and buy or extend
+     * a batch, `POST /v0/settlement/deposit` funds the chequebook. Matched
+     * by their first two segments, so any write under `/v0/storage/` or
+     * `/v0/settlement/` counts, like any write under `/stamps/` does.
+     */
+    private val V0_CHAIN_PATHS = setOf("storage", "settlement")
 
     private val GATEWAY_PORT: Int = SwarmNode.GATEWAY_URL.substringAfterLast(':').toInt()
 
@@ -116,7 +128,7 @@ internal object NodeApiGuard {
      */
     internal fun refusalText(method: String, url: String): String? {
         if (!refuses(method, url)) return null
-        val write = isWrite(method) && firstSegment(pathOf(url)) in CHAIN_PATHS
+        val write = isChainWrite(method, url)
         return when {
             write -> Strings.english(R.string.node_api_spend_refusal)
             isLoopbackLiteral(WhatwgHost.parse(url)?.hostname) -> READ_REFUSAL
@@ -163,7 +175,7 @@ internal object NodeApiGuard {
         if (!onGatewayPort(url)) return false
         val segment = firstSegment(pathOf(url))
         if (segment in DAPP_PATHS) return false
-        if (isWrite(method) && segment in CHAIN_PATHS) return true
+        if (isChainWrite(method, url)) return true
         return mayBeThisDevice(url, externalSwarm)
     }
 
@@ -210,6 +222,14 @@ internal object NodeApiGuard {
         val octets = h.split('.')
         if (octets.size != 4 || !octets.all { o -> o.isNotEmpty() && o.all { it in '0'..'9' } }) return false
         return octets[0].toInt() == 127 || octets[0].toInt() == 0
+    }
+
+    /** Is a [method] request to [url] a write to a transaction-signing endpoint ([CHAIN_PATHS], [V0_CHAIN_PATHS])? */
+    private fun isChainWrite(method: String, url: String): Boolean {
+        if (!isWrite(method)) return false
+        val segments = segments(pathOf(url))
+        val first = segments.firstOrNull()
+        return first in CHAIN_PATHS || (first == "v0" && segments.getOrNull(1) in V0_CHAIN_PATHS)
     }
 
     private fun isWrite(method: String): Boolean = method.uppercase().let { it != "GET" && it != "HEAD" }
@@ -260,9 +280,12 @@ internal object NodeApiGuard {
      * so none of them can hide the endpoint (`//stamps`, `/%2e%2e/stamps`,
      * `/%2Fstamps`). Stricter than ant's router, which matches the raw path.
      */
-    private fun firstSegment(path: String): String? =
+    private fun firstSegment(path: String): String? = segments(path).firstOrNull()
+
+    /** The path's real segments, decoded and lowercased as [firstSegment] reads them. */
+    private fun segments(path: String): List<String> =
         percentDecode(path).replace('\\', '/').lowercase().split('/')
-            .firstOrNull { it.isNotEmpty() && it != "." && it != ".." }
+            .filter { it.isNotEmpty() && it != "." && it != ".." }
 
     private fun percentDecode(s: String): String {
         if ('%' !in s) return s

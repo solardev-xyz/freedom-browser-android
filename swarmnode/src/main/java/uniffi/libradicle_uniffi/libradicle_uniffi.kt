@@ -1044,7 +1044,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_libradicle_uniffi_checksum_func_start() and 0xFFFF) != 34743) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_libradicle_uniffi_checksum_func_start_with_key() and 0xFFFF) != 30183) {
+    if ((lib.uniffi_libradicle_uniffi_checksum_func_start_with_key() and 0xFFFF) != 47074) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_libradicle_uniffi_checksum_func_status() and 0xFFFF) != 14863) {
@@ -1790,8 +1790,13 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         /**
          * Start the embedded node as `secret_key`, an identity the host keeps
          * (a 32-byte Ed25519 secret seed), instead of the profile's own key file.
-         * Nothing secret is written to `home`, and `secret_key`'s bytes are zeroed
-         * before this returns. `{"did": "..."}` on success.
+         * Nothing secret is written to `home`. `{"did": "..."}` on success.
+         *
+         * Only the Rust-side copy of `secret_key` is zeroed before this returns.
+         * The foreign array the host passed in (Kotlin `ByteArray`, Swift `Data`)
+         * and the buffer UniFFI copied it through are *not* wiped here — the host
+         * must clear its own array after the call and should keep the key out of
+         * long-lived managed objects.
          */ fun `startWithKey`(`home`: kotlin.String, `alias`: kotlin.String, `secretKey`: kotlin.ByteArray): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCall() { _status ->
