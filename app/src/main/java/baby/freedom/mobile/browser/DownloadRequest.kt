@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.wallet.MessageSigning
 import java.math.RoundingMode
 import java.net.URLDecoder
 import java.text.NumberFormat
@@ -248,22 +249,159 @@ private fun lastPathSegment(url: String): String? {
  * saying `../../x` must not escape Downloads), control characters, and
  * the characters Android's FAT-backed shared storage rejects. Leading
  * dots go too so a download is never a hidden file.
+ *
+ * So do the invisible characters that change how the rest of the name
+ * reads ([fileNameCharIsHidden]): a server naming its file
+ * `invoice<U+202E>fdp.apk` would otherwise be shown — in the prompt,
+ * the downloads list, the notification, and the Files app — as
+ * `invoicekpa.pdf`, an APK passed off as a PDF. Chromium's own
+ * download names (desktop's) replace them the same way.
  */
 internal fun sanitizeFileName(raw: String): String {
     val base = raw.substringAfterLast('/').substringAfterLast('\\')
-    return base
-        .map { c -> if (c.code < 0x20 || c == '\u007f' || c in "\"*:<>?|") '_' else c }
-        .joinToString("")
+    return cleanStoredFileName(base)
         .trim()
         .trimStart('.')
         .trim()
+}
+
+/**
+ * Is [cp] a character a file name mustn't carry: C0/C1 controls, the
+ * FAT-reserved `"*:<>?|`, a lone surrogate, a line/paragraph separator,
+ * a format character (Cf: the bidi embeddings, overrides, isolates
+ * and marks, zero-width spaces, the BOM, soft hyphen …), or an
+ * unassigned default-ignorable one (U+2065, U+FFF0–FFF8, U+E0000–E0FFF
+ * but for the supplementary variation selectors). By code point,
+ * so a supplementary-plane format character (U+E0001) is caught too.
+ * ZWJ / ZWNJ and the emoji tag characters (U+E0020–E007F) stay: emoji
+ * sequences, flags and Persian / Indic words need them, and they
+ * reorder nothing.
+ *
+ * Narrower than [MessageSigning.hides] on purpose: the blank-but-spacing
+ * characters it also flags — the Hangul fillers U+115F/1160/3164/FFA0,
+ * U+2800, the variation selectors — stay in a file name. Each draws
+ * an empty advance (or, for a selector, picks an emoji's style), so it
+ * can neither hide nor reorder an extension; on a signing sheet it
+ * matters because it can hide bytes that are signed, which a file
+ * name doesn't have.
+ */
+private fun fileNameCharIsHidden(cp: Int): Boolean {
+    if (cp < 0x80) return cp < 0x20 || cp == 0x7f || cp.toChar() in "\"*:<>?|"
+    if (cp == 0x200C || cp == 0x200D || cp in 0xE0020..0xE007F) return false
+    // Default_Ignorable_Code_Point slots that are unassigned (Cn, so not
+    // caught as format below) yet draw nothing: `report<U+2065>.pdf`
+    // would look just like `report.pdf`. By range rather than by type so
+    // a newer Unicode table assigning one changes nothing; the variation
+    // selectors U+E0100–E01EF (marks, kept for ideographic variants) are
+    // the one part of U+E0000–E0FFF that stays.
+    if (cp == 0x2065 || cp in 0xFFF0..0xFFF8 || cp in 0xE0000..0xE0FFF && cp !in 0xE0100..0xE01EF) return true
+    return when (Character.getType(cp).toByte()) {
+        Character.CONTROL, Character.FORMAT, Character.SURROGATE,
+        Character.LINE_SEPARATOR, Character.PARAGRAPH_SEPARATOR,
+        -> true
+        else -> false
+    }
 }
 
 private fun clampFileName(name: String): String {
     if (name.length <= MAX_FILE_NAME_CHARS) return name
     val dot = name.lastIndexOf('.')
     val ext = if (dot > 0 && name.length - dot <= 16) name.substring(dot) else ""
-    return name.take(MAX_FILE_NAME_CHARS - ext.length) + ext
+    return name.take(clusterSafeCut(name, MAX_FILE_NAME_CHARS - ext.length)) + ext
+}
+
+/**
+ * [at], moved back so cutting [s] there splits no character a reader
+ * sees as one: not the two halves of a surrogate pair (a lone one can't
+ * be encoded, and the name would get a `?` where an emoji was), and not
+ * a cluster — a ZWJ sequence (👨‍👩‍👧 keeping only 👨‍), a base and its
+ * combining marks, variation selector, skin tone or emoji tags (🏴 with
+ * its subdivision tags cut off is a plain black flag), or a flag's two
+ * regional indicators. By hand rather than with `BreakIterator`, whose
+ * JDK version knows nothing of emoji sequences. If the whole kept part
+ * is one cluster, only the surrogate rule holds: a name is never cut to
+ * nothing (or to a bare `.ext`, a hidden file).
+ */
+internal fun clusterSafeCut(s: String, at: Int): Int {
+    if (at <= 0 || at >= s.length) return at.coerceIn(0, s.length)
+    val pairSafe = if (s[at - 1].isHighSurrogate() && s[at].isLowSurrogate()) at - 1 else at
+    var k = pairSafe
+    while (k > 0) {
+        val next = s.codePointAt(k)
+        val prev = s.codePointBefore(k)
+        val inside = continuesCluster(next) || prev == ZWJ ||
+            isRegionalIndicator(next) && regionalIndicatorsBefore(s, k) % 2 == 1
+        if (!inside) break
+        k -= Character.charCount(prev)
+    }
+    return if (k > 0) k else pairSafe
+}
+
+private const val ZWJ = 0x200D
+
+/** Does [cp] attach to the character before it (grapheme `Extend`-like)? */
+private fun continuesCluster(cp: Int): Boolean =
+    cp == ZWJ || cp == 0x200C ||
+        cp in 0xFE00..0xFE0F || cp in 0xE0100..0xE01EF || // variation selectors
+        cp in 0x1F3FB..0x1F3FF || // skin tones
+        cp in 0xE0020..0xE007F || // emoji tags
+        when (Character.getType(cp).toByte()) {
+            Character.NON_SPACING_MARK, Character.ENCLOSING_MARK, Character.COMBINING_SPACING_MARK -> true
+            else -> false
+        }
+
+private fun isRegionalIndicator(cp: Int) = cp in 0x1F1E6..0x1F1FF
+
+/** How many regional indicators run back from just before [end]. */
+private fun regionalIndicatorsBefore(s: String, end: Int): Int {
+    var n = 0
+    var i = end
+    while (i > 0) {
+        val cp = s.codePointBefore(i)
+        if (!isRegionalIndicator(cp)) break
+        n++
+        i -= Character.charCount(cp)
+    }
+    return n
+}
+
+/**
+ * [name] with every [fileNameCharIsHidden] character replaced by `_`,
+ * and combining marks past the [MessageSigning.MAX_STACKED_MARKS]th
+ * on one letter dropped — a stack of a hundred ("Zalgo") paints ink far
+ * above and below its line, over the offer prompt's other rows, since
+ * Compose doesn't clip glyphs to the line box; real text stacks two or
+ * three — and nothing else changed — [sanitizeFileName]'s core, and how a name
+ * stored before it replaced format characters (a row from an older
+ * version) is cleaned when that row is loaded again. The dropped marks
+ * are gone from the name the file is saved under too, not just from
+ * what's shown: Hebrew with cantillation, or Tibetan, stacking four
+ * or more on one letter loses the ones past the third. A Save-as row's
+ * name, the picked document's own, isn't passed through here.
+ */
+internal fun cleanStoredFileName(name: String): String {
+    val out = StringBuilder(name.length)
+    var marks = 0
+    var i = 0
+    while (i < name.length) {
+        val cp = name.codePointAt(i)
+        i += Character.charCount(cp)
+        when {
+            fileNameCharIsHidden(cp) -> { out.append('_'); marks = 0 }
+            MessageSigning.isMark(cp) -> {
+                if (marks < MessageSigning.MAX_STACKED_MARKS) out.appendCodePoint(cp)
+                marks++
+            }
+            else -> {
+                out.appendCodePoint(cp)
+                // A kept character that draws nothing (ZWJ, ZWNJ, an emoji
+                // tag) doesn't end the stack: marks after it still pile
+                // onto the same letter.
+                if (cp != 0x200C && cp != ZWJ && cp !in 0xE0020..0xE007F) marks = 0
+            }
+        }
+    }
+    return out.toString()
 }
 
 /** "1.4 MB" — the unit ladder the downloads list shows sizes in. */

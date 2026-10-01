@@ -149,6 +149,130 @@ class DownloadRequestTest {
     }
 
     @Test
+    fun `a bidi override can't disguise the file's extension`() {
+        // "invoice<RLO>fdp.apk" draws as "invoicekpa.pdf": an APK posing as a PDF.
+        assertEquals(
+            "invoice_fdp.apk",
+            downloadFileName("attachment; filename*=UTF-8''invoice%E2%80%AEfdp.apk", "https://x.com/", null),
+        )
+        assertEquals("invoice_fdp.apk", downloadFileName(null, "https://x.com/invoice%E2%80%AEfdp.apk", null))
+        // Every other bidi control too: embeddings, isolates, marks.
+        for (c in listOf('\u202A', '\u202B', '\u202C', '\u202D', '\u2066', '\u2067', '\u2068', '\u2069', '\u200E', '\u200F', '\u061C')) {
+            assertEquals("a_b.txt", sanitizeFileName("a${c}b.txt"))
+        }
+    }
+
+    @Test
+    fun `invisible format characters, separators and C1 controls are replaced`() {
+        // Zero-width space, BOM, soft hyphen, word joiner, line / paragraph separators, a C1 control.
+        for (c in listOf('\u200B', '\uFEFF', '\u00AD', '\u2060', '\u2028', '\u2029', '\u0085', '\u009B')) {
+            assertEquals("a_b.txt", sanitizeFileName("a${c}b.txt"))
+        }
+        // A supplementary-plane format character, judged by code point (not as two surrogates).
+        assertEquals("a_b.txt", sanitizeFileName("a\uDB40\uDC01b.txt"))
+        // A lone surrogate can't be encoded into a file name.
+        assertEquals("a_b.txt", sanitizeFileName("a\uD83Db.txt"))
+    }
+
+    @Test
+    fun `names that need joiners and tags keep them`() {
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67" // 👨‍👩‍👧
+        assertEquals("$family.png", sanitizeFileName("$family.png"))
+        val persian = "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645.pdf" // می‌خواهم (ZWNJ)
+        assertEquals(persian, sanitizeFileName(persian))
+        val scotland = "\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74\uDB40\uDC7F"
+        assertEquals("$scotland.jpg", sanitizeFileName("$scotland.jpg"))
+        assertEquals("na\u00EFve caf\u00E9 \u65E5\u672C.txt", sanitizeFileName("na\u00EFve caf\u00E9 \u65E5\u672C.txt"))
+    }
+
+    @Test
+    fun `clamping never splits an emoji in half`() {
+        val emoji = "\uD83D\uDE00" // 😀, two chars
+        // 116 chars kept before ".txt": the 116th would be the first half of an emoji.
+        val name = downloadFileName(null, "https://x.com/" + "a".repeat(115) + emoji.repeat(10) + ".txt", null)
+        assertTrue(name.endsWith(".txt"))
+        assertTrue(name.length <= 120)
+        assertTrue(name.indices.none { i ->
+            name[i].isHighSurrogate() && (i + 1 >= name.length || !name[i + 1].isLowSurrogate()) ||
+                name[i].isLowSurrogate() && (i == 0 || !name[i - 1].isHighSurrogate())
+        })
+        assertEquals("a".repeat(115) + ".txt", name)
+    }
+
+    @Test
+    fun `clamping never splits a grapheme cluster`() {
+        // 116 chars are kept before ".txt"; each case puts the cut inside a cluster.
+        fun clamp(prefix: Int, cluster: String) =
+            downloadFileName(null, "https://x.com/" + "a".repeat(prefix) + cluster + "b".repeat(200) + ".txt", null)
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67" // 👨‍👩‍👧, 8 chars
+        for (prefix in 109..115) assertEquals("a".repeat(prefix) + ".txt", clamp(prefix, family))
+        assertEquals("a".repeat(108) + family + ".txt", clamp(108, family))
+        val scotland = "\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74\uDB40\uDC7F"
+        for (prefix in 103..115) assertEquals("a".repeat(prefix) + ".txt", clamp(prefix, scotland))
+        val thumbs = "\uD83D\uDC4D\uD83C\uDFFD" // 👍🏽
+        assertEquals("a".repeat(114) + ".txt", clamp(114, thumbs))
+        // Two flags back to back: the cut lands between the halves of the second.
+        val flags = "\uD83C\uDDE9\uD83C\uDDEA\uD83C\uDDEB\uD83C\uDDF7" // 🇩🇪🇫🇷
+        assertEquals("a".repeat(110) + "\uD83C\uDDE9\uD83C\uDDEA.txt", clamp(110, flags))
+        val accented = "e\u0301\u0301" // é with two marks
+        assertEquals("a".repeat(114) + ".txt", clamp(114, accented))
+    }
+
+    @Test
+    fun `a name that is one long cluster is still cut, never emptied`() {
+        // A real name can't get here any more (marks are capped at three a
+        // letter), but a cut inside one cluster still keeps the surrogate rule
+        // only rather than cutting to nothing.
+        val oneCluster = "e" + "\u0301".repeat(300)
+        assertEquals(116, clusterSafeCut(oneCluster, 116))
+        val flag = "\uD83C\uDFF4" + "\uDB40\uDC67".repeat(100) // 🏴 with 100 tags
+        assertEquals(116, clusterSafeCut(flag, 117)) // mid-surrogate: back one
+    }
+
+    @Test
+    fun `a stack of combining marks is capped at three on one letter`() {
+        // ~100 marks on one letter (in the 120-char clamp) paint ink over the prompt's other rows.
+        val zalgo = "a" + "\u0301\u0300\u0302\u0303".repeat(25) + "b.pdf"
+        assertEquals("a\u0301\u0300\u0302b.pdf", sanitizeFileName(zalgo))
+        assertEquals("a\u0301\u0300\u0302b.pdf", downloadFileName(null, "https://x.com/" + java.net.URLEncoder.encode(zalgo, "UTF-8"), null))
+        // An enclosing mark counts too.
+        assertEquals("x\u20DD\u20DD\u20DD.txt", sanitizeFileName("x" + "\u20DD".repeat(50) + ".txt"))
+        // A kept joiner or tag draws nothing, so it doesn't start a new stack…
+        assertEquals("a\u0301\u0301\u200D\u0301.txt", sanitizeFileName("a\u0301\u0301\u200D\u0301\u0301\u0301.txt"))
+        // …but a replaced character does: it is a visible `_` now.
+        assertEquals("a\u0301\u0301\u0301_\u0301\u0301\u0301.txt", sanitizeFileName("a" + "\u0301".repeat(5) + "\u2065" + "\u0301".repeat(5) + ".txt"))
+        // Real text keeps every mark: Vietnamese, Hebrew points, a keycap emoji.
+        for (real in listOf("Ti\u00EA\u0301ng Vi\u00EA\u0323t.txt", "\u05E9\u05C1\u05B8\u05DC\u05D5\u05B9\u05DD.txt", "1\uFE0F\u20E3.png")) {
+            assertEquals(real, sanitizeFileName(real))
+        }
+        // Stored names are capped the same way, and cleaning is idempotent.
+        val once = cleanStoredFileName(zalgo)
+        assertEquals("a\u0301\u0300\u0302b.pdf", once)
+        assertEquals(once, cleanStoredFileName(once))
+    }
+
+    @Test
+    fun `unassigned default-ignorable code points are replaced`() {
+        // They draw nothing: "report<U+2065>.pdf" would look just like "report.pdf".
+        assertEquals("report_.pdf", sanitizeFileName("report\u2065.pdf"))
+        for (cp in listOf(0xFFF0, 0xFFF8, 0xE0000, 0xE0002, 0xE001F, 0xE0080, 0xE01F0, 0xE0FFF)) {
+            assertEquals("a_b.txt", sanitizeFileName("a" + String(Character.toChars(cp)) + "b.txt"))
+        }
+        // The supplementary variation selectors in the same block stay (ideographic variants).
+        val ivs = "\u845B" + String(Character.toChars(0xE0100)) + ".txt" // 葛 + VS17
+        assertEquals(ivs, sanitizeFileName(ivs))
+    }
+
+    @Test
+    fun `a stored name is cleaned of hidden characters and nothing else`() {
+        assertEquals("invoice_fdp.apk", cleanStoredFileName("invoice\u202Efdp.apk"))
+        // What a picker named stays as it was otherwise: leading dot, spaces.
+        assertEquals(".notes _x .txt", cleanStoredFileName(".notes \u200Bx .txt"))
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67.png"
+        assertEquals(family, cleanStoredFileName(family))
+    }
+
+    @Test
     fun `overlong names are clamped keeping the extension`() {
         val name = downloadFileName(null, "https://x.com/" + "a".repeat(300) + ".tar.gz", null)
         assertEquals(120, name.length)

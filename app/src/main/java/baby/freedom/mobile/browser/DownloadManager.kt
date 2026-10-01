@@ -40,6 +40,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -285,6 +286,19 @@ class DownloadManager private constructor(context: Context) {
                     ),
                 )
             }
+        }
+        // A row from before names were cleaned of bidi/format characters
+        // keeps the name it was listed under — a finished one in the
+        // downloads list, a paused one also the name it is saved under on
+        // resume — so every such row is cleaned here, before either is
+        // read. A Save-as row (saveTo set) is left alone: its name is the
+        // picked document's own (queryDisplayName), the one the user gave
+        // it, and the list should keep matching what the document is
+        // really called.
+        for (row in dao.all().first()) {
+            if (row.saveTo != null) continue
+            val clean = cleanStoredFileName(row.fileName)
+            if (clean != row.fileName) dao.update(row.copy(fileName = clean))
         }
         val pausedRows = dao.withStatus(DownloadStatus.PAUSED)
         val paused = pausedRows.mapTo(HashSet()) { it.id }
@@ -834,6 +848,15 @@ class DownloadManager private constructor(context: Context) {
     ) {
         val dao = daoFor(id)
         var entry = dao.get(id) ?: return
+        if (resuming) {
+            // The startup sweep cleaned every paused row it found but a
+            // Save-as one (whose name is the picked document's); this one
+            // too, should one have slipped past it.
+            if (entry.saveTo == null) {
+                val clean = cleanStoredFileName(entry.fileName)
+                if (clean != entry.fileName) entry = entry.copy(fileName = clean).also { dao.update(it) }
+            }
+        }
         val partial = partialFile(id)
         var pending: Uri? = null
         // Set once the file is public: from then on it's the user's
