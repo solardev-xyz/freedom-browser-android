@@ -210,4 +210,39 @@ class LedgerUsbLinkTest {
         assertTrue(a != b)
         assertTrue(a.startsWith("baby.freedom.mobile.") && b.startsWith("baby.freedom.mobile."))
     }
+
+    private class Opened : LedgerLink {
+        val closes = AtomicInteger()
+        override suspend fun exchange(apdu: ByteArray, timeoutMs: Long): ByteArray = error("unused")
+        override fun close() { closes.incrementAndGet() }
+    }
+
+    @Test
+    fun `a route let go while its Ledger is opening closes the link it opened`() = runBlocking {
+        // R6-M1: a plain withContext would drop the opened link, leaving its connection open.
+        val link = Opened()
+        val opening = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val job = async(Dispatchers.Default) {
+            LedgerUsbLink.keptOrClosed(Dispatchers.IO) {
+                opening.complete(Unit)
+                release.await()
+                link
+            }
+        }
+        opening.await()
+        job.cancel()
+        release.complete(Unit)
+        job.join()
+        assertTrue(job.isCancelled)
+        assertEquals(1, link.closes.get())
+    }
+
+    @Test
+    fun `an opened link is handed back as is when nothing cancels it`() = runBlocking {
+        val link = Opened()
+        val got = LedgerUsbLink.keptOrClosed(Dispatchers.IO) { link }
+        assertTrue(got === link)
+        assertEquals(0, link.closes.get())
+    }
 }

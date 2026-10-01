@@ -18,8 +18,12 @@ import baby.freedom.mobile.l10n.Strings
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -171,7 +175,7 @@ internal class LedgerUsbLink(private val pipe: Pipe) : LedgerLink {
                 onPermission()
                 requestPermission(context.applicationContext, manager, device)
             }
-            return withContext(Dispatchers.IO) {
+            return keptOrClosed(Dispatchers.IO) {
                 val (intf, input, output) = hidInterface(device)
                     ?: throw LedgerException(LedgerException.Kind.NOT_FOUND, cannotTalk())
                 val connection = manager.openDevice(device)
@@ -183,6 +187,32 @@ internal class LedgerUsbLink(private val pipe: Pipe) : LedgerLink {
                 Log.i(TAG, "connected to a ${name(device)} over USB (interface ${intf.id})")
                 LedgerUsbLink(UsbPipe(manager, device, connection, intf, input, output))
             }
+        }
+
+        /**
+         * [open]s a link on [dispatcher] and hands it back, or closes it if
+         * the caller was cancelled meanwhile. A plain `withContext` would
+         * drop an opened link on the floor when the route is let go while
+         * it's opening (a claim by another Ledger right after Android's
+         * prompt was answered), leaving its connection open and its
+         * interface claimed until the GC got to it (#350 R6-M1).
+         */
+        internal suspend fun <L : LedgerLink> keptOrClosed(
+            dispatcher: CoroutineDispatcher,
+            open: suspend () -> L,
+        ): L {
+            // Kept outside the block: withContext checks for a cancel again
+            // on its way back to the caller's dispatcher, and would throw
+            // with the opened link still inside it.
+            var opened: L? = null
+            try {
+                withContext(dispatcher + NonCancellable) { opened = open() }
+                currentCoroutineContext().ensureActive()
+            } catch (e: CancellationException) {
+                opened?.close()
+                throw e
+            }
+            return opened!!
         }
 
         /**
