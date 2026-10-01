@@ -849,6 +849,51 @@ class TorRoutingTest {
     }
 
     @Test
+    fun `native onion fetches waiting on a check leave a page its held slots`() {
+        // #376 R2-F2: manifest discovery (awaitOnionRoute) holds count in
+        // their own pool, so a burst of them during a re-check can't fill
+        // MAX_HELD and get a page's onion document refused early.
+        val context = android.content.ContextWrapper(null)
+        val real = TorRouting.setOverride
+        val pending = java.util.Collections.synchronizedList(mutableListOf<Runnable>())
+        TorRouting.setOverride = { _, _, done -> pending += done }
+        val orbot = SocksEndpoint("127.0.0.1", 9050)
+        val pool = java.util.concurrent.Executors.newCachedThreadPool()
+        try {
+            TorRouting.resetForTest(supported = true)
+            TorRouting.setEnabled(context, true)
+            pending.removeAt(0).run()
+            TorRouting.setExternal(context, orbot, confirmed = false, pending = true)
+
+            // More native fetches than MAX_HELD: MAX_NATIVE_HELD wait, the rest are answered at once.
+            val fetches = (1..TorRouting.MAX_HELD + 2).map { pool.submit<Boolean> { TorRouting.awaitOnionRoute(10_000) } }
+            Thread.sleep(300)
+            assertEquals(TorRouting.MAX_NATIVE_HELD, fetches.count { !it.isDone })
+            var t0 = System.nanoTime()
+            assertFalse(TorRouting.awaitOnionRoute(5_000))
+            assertTrue(System.nanoTime() - t0 < 1_000_000_000L)
+
+            // Every page slot is still free: MAX_HELD page requests are held, not answered at once.
+            val pages = (1..TorRouting.MAX_HELD).map { pool.submit<Boolean> { TorRouting.awaitExternalVerdict(10_000) } }
+            Thread.sleep(300)
+            assertTrue(pages.none { it.isDone })
+            t0 = System.nanoTime()
+            assertFalse(TorRouting.awaitExternalVerdict(5_000)) // the (MAX_HELD + 1)th
+            assertTrue(System.nanoTime() - t0 < 1_000_000_000L)
+
+            // The check passes and the WebView confirms: every waiter, page and native, is let through.
+            TorRouting.setExternal(context, orbot, confirmed = true)
+            pending.removeAt(0).run()
+            pages.forEach { assertTrue(it.get(2, java.util.concurrent.TimeUnit.SECONDS)) }
+            assertEquals(TorRouting.MAX_NATIVE_HELD, fetches.count { it.get(2, java.util.concurrent.TimeUnit.SECONDS) })
+        } finally {
+            pool.shutdownNow()
+            TorRouting.setOverride = real
+            TorRouting.resetForTest(supported = null)
+        }
+    }
+
+    @Test
     fun `an onion request waits for a pending external check instead of being refused`() {
         // R1-F1: a link from another app (or a form posted on return from an
         // authenticator) arrives with the Activity's start, before the
