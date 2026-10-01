@@ -218,7 +218,7 @@ class X402StoreTest {
         s.grant(cap = 30)
         val p = paid("a", 20, auto = true)
         val done = s.commit(p, grant = null) as X402Store.Commit.Done
-        assertTrue(s.withdraw(p, done.allowanceCreated))
+        assertTrue(s.withdraw(p, done))
         assertEquals(BigInteger.ZERO, s.allowances.first().single().spent)
         assertEquals(emptyList<X402Store.Payment>(), s.history.first())
         // Revoked and granted again in between: the new allowance isn't touched.
@@ -226,7 +226,7 @@ class X402StoreTest {
         val again = s.commit(q, grant = null) as X402Store.Commit.Done
         now += 1
         s.grant(cap = 50, spent = 40)
-        assertTrue(s.withdraw(q, again.allowanceCreated))
+        assertTrue(s.withdraw(q, again))
         assertEquals(BigInteger.valueOf(40), s.allowances.first().single().spent)
     }
 
@@ -240,14 +240,14 @@ class X402StoreTest {
         assertEquals(BigInteger.valueOf(10), a.spent)
         assertEquals(BigInteger.valueOf(100), a.cap)
         assertEquals(listOf("a"), s.history.first().map { it.id })
-        assertTrue(s.withdraw(p, done.allowanceCreated))
+        assertTrue(s.withdraw(p, done))
         assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
         assertEquals(emptyList<X402Store.Payment>(), s.history.first())
         // A manual payment with no grant touches no allowance.
         s.grant(cap = 50)
         val plain = s.commit(paid("b", 10, auto = false), grant = null) as X402Store.Commit.Done
         assertNull(plain.allowanceCreated)
-        assertTrue(s.withdraw(paid("b", 10, auto = false), plain.allowanceCreated))
+        assertTrue(s.withdraw(paid("b", 10, auto = false), plain))
         assertEquals(BigInteger.ZERO, s.allowances.first().single().spent)
         // A grant below the payment is refused, nothing written.
         assertEquals(X402Store.Commit.Failed, s.commit(paid("c", 60, auto = false), X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(50), hour)))
@@ -255,10 +255,39 @@ class X402StoreTest {
     }
 
     @Test
+    fun `withdrawing a payment whose grant replaced an allowance puts that allowance back (#346)`() = runBlocking {
+        val s = store()
+        s.grant(cap = 50, spent = 20)
+        val before = s.allowances.first().single()
+        now += 1
+        val p = paid("a", 10, auto = false)
+        val done = s.commit(p, X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) as X402Store.Commit.Done
+        assertEquals(BigInteger.valueOf(100), s.allowances.first().single().cap)
+        assertTrue(s.withdraw(p, done))
+        assertEquals(listOf(before), s.allowances.first())
+        assertEquals(emptyList<X402Store.Payment>(), s.history.first())
+        // The new allowance was revoked before the withdraw: nothing comes back.
+        now += 1
+        val q = paid("b", 10, auto = false)
+        val again = s.commit(q, X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) as X402Store.Commit.Done
+        assertTrue(s.revoke(site, 8453, usdc, me))
+        assertTrue(s.withdraw(q, again))
+        assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
+        // An allowance that had already run out isn't brought back either.
+        s.grant(cap = 50)
+        now += hour + 1
+        val r = paid("c", 10, auto = false)
+        val third = s.commit(r, X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) as X402Store.Commit.Done
+        assertNull(third.replaced)
+        assertTrue(s.withdraw(r, third))
+        assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
+    }
+
+    @Test
     fun `a commit that can't be written reports it, and nothing is paid`() = runBlocking {
         val s = X402Store(BrokenStore(IOException("disk"))) { now }
         assertEquals(X402Store.Commit.Failed, s.commit(paid("a", 10, auto = false), grant = null))
-        assertFalse(s.withdraw(paid("a", 10, auto = false), null))
+        assertFalse(s.withdraw(paid("a", 10, auto = false), X402Store.Commit.Done(null)))
     }
 
     @Test

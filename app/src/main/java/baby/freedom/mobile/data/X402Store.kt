@@ -243,8 +243,10 @@ class X402Store internal constructor(
          * [Payment] recorded, and the allowance counted or granted.
          * [allowanceCreated] names the allowance touched (its
          * [Allowance.created]) for [withdraw]; null if none was.
+         * [replaced] is the allowance a grant replaced, as it was stored
+         * (null if there was none), for [withdraw] to put back (#346).
          */
-        data class Done(val allowanceCreated: Long?) : Commit
+        data class Done(val allowanceCreated: Long?, val replaced: String? = null) : Commit
 
         /** The payment was to come from an allowance that no longer covers it: nothing written. */
         data object NotCovered : Commit
@@ -277,6 +279,7 @@ class X402Store internal constructor(
             val now = clock()
             val key = allowKey(payment.origin, payment.chainId, payment.asset, payment.from)
             var created: Long? = null
+            var replaced: String? = null
             if (payment.auto) {
                 val a = prefs[key]?.let { decodeAllowance(key.name.removePrefix(ALLOW), it) }
                 if (a == null || !live(a, now) || !a.allows(payment.payTo, amount)) {
@@ -287,6 +290,7 @@ class X402Store internal constructor(
                 created = a.created
             } else if (grant != null) {
                 dropDead(prefs, now)
+                replaced = prefs[key]
                 val a = Allowance(
                     payment.origin, payment.chainId, payment.asset.lowercase(), payment.from.lowercase(),
                     grant.symbol, grant.decimals,
@@ -298,7 +302,7 @@ class X402Store internal constructor(
             }
             val list = prefs[HISTORY]?.let(::decodeHistory).orEmpty()
             prefs[HISTORY] = encodeHistory((listOf(payment) + list.filter { it.id != payment.id }).take(MAX_HISTORY))
-            result = Commit.Done(created)
+            result = Commit.Done(created, replaced)
         }
         return if (written) result else Commit.Failed
     }
@@ -306,11 +310,14 @@ class X402Store internal constructor(
     /**
      * Undo a [commit] whose payment was never sent: its history entry
      * goes, an allowance payment is given back to that allowance, and an
-     * allowance granted with it is taken away — only if it's still the
-     * one [commit] touched ([allowanceCreated]), never one the user has
-     * revoked or replaced since. `false` if it couldn't be written.
+     * allowance granted with it is taken away, and the allowance that
+     * grant replaced ([Commit.Done.replaced]) put back as it was (#346) —
+     * only if it's still the one [commit] touched ([Commit.Done.allowanceCreated]),
+     * never one the user has revoked or replaced since. `false` if it
+     * couldn't be written.
      */
-    suspend fun withdraw(payment: Payment, allowanceCreated: Long?): Boolean = write { prefs ->
+    suspend fun withdraw(payment: Payment, done: Commit.Done): Boolean = write { prefs ->
+        val allowanceCreated = done.allowanceCreated
         prefs[HISTORY]?.let(::decodeHistory)?.let { list ->
             prefs[HISTORY] = encodeHistory(list.filter { it.id != payment.id })
         }
@@ -320,6 +327,8 @@ class X402Store internal constructor(
         if (a.created != allowanceCreated) return@write
         if (payment.auto) {
             prefs[key] = encodeAllowance(a.copy(spent = (a.spent - payment.amount).max(BigInteger.ZERO)))
+        } else if (done.replaced != null) {
+            prefs[key] = done.replaced
         } else {
             prefs.remove(key)
         }
