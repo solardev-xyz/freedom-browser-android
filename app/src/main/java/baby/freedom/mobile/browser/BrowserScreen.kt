@@ -133,7 +133,7 @@ private val CHROME_MAX_WIDTH = 640.dp
  * cold starts on slow devices plus the handful of seconds it takes the
  * bee-lite gateway socket to bind after [NodeStatus.Running] flips on.
  */
-private const val NODE_READY_TIMEOUT_MS: Long = 90_000L
+internal const val NODE_READY_TIMEOUT_MS: Long = 90_000L
 
 /** Cross-fade of reserved mode's strip between two page colours (#66). */
 private const val STRIP_FADE_MS = 250

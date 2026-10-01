@@ -38,6 +38,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import baby.freedom.mobile.browser.BrowserScreen
+import baby.freedom.mobile.browser.NODE_READY_TIMEOUT_MS
 import baby.freedom.mobile.browser.IncomingLinks
 import baby.freedom.mobile.browser.KeyboardShortcutRouter
 import baby.freedom.mobile.browser.PageKeyEvents
@@ -72,6 +73,7 @@ import baby.freedom.mobile.node.IMyotisCallback
 import baby.freedom.mobile.node.IMyotisService
 import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
+import baby.freedom.mobile.node.IpfsStartRequest
 import baby.freedom.mobile.node.NodeLogSource
 import baby.freedom.mobile.node.MyotisChains
 import baby.freedom.mobile.node.MyotisLink
@@ -211,6 +213,10 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     @Volatile
     private var binder: INodeService? = null
     private var bound = false
+
+    // An IPFS start asked for before the binder connected (#373), sent
+    // on the next connect while the asking tab still waits for it.
+    private val ipfsStart = IpfsStartRequest(windowMs = NODE_READY_TIMEOUT_MS)
 
     /**
      * The Swarm node's mode (#114) from the light-mode setting and the
@@ -354,6 +360,9 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                 }
             }
             runCatching { b.radicleState?.let { radicleInfoFlow.value = it } }
+            // An `ipfs://` link that cold-started the app asked for IPFS
+            // before this bind connected (#373).
+            ipfsStart.onConnected { runCatching { b.ensureIpfsStarted() } }
             // The mode (#114) first, so the identity check below already
             // compares against it rather than restarting the node twice.
             relaySwarmMode(b, swarmMode)
@@ -481,8 +490,15 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         // the node enabled, start + bind right away; otherwise leave
         // the :node process dormant so we don't hold the state store
         // open unnecessarily.
+        // Until this read resumes `bound` is false whatever the setting, so
+        // an IPFS ask made before it is kept for the bind it may start,
+        // and dropped here if it doesn't (#373, #384 R1-F1).
         lifecycleScope.launch {
-            if (settings.runNodeEnabled.first()) startAndBindService()
+            try {
+                if (settings.runNodeEnabled.first()) startAndBindService()
+            } finally {
+                ipfsStart.settled(bound)
+            }
         }
 
         // The Swarm node's mode (#114) follows its setting and the Gnosis
@@ -938,10 +954,11 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
      * visits `ipfs://` / `ipns://` / an IPFS-resolved `ens://`.
      *
      * The AIDL stub in `:node` dedups repeat calls, so this is safe to
-     * invoke on every such navigation.
+     * invoke on every such navigation. On a cold start the binder isn't
+     * connected yet, so [ipfsStart] keeps the ask for the connect (#373).
      */
     private fun onEnsureIpfsStarted() {
-        runCatching { binder?.ensureIpfsStarted() }
+        ipfsStart.ask(bound) { runCatching { binder?.ensureIpfsStarted() } }
     }
 
     /**
@@ -996,8 +1013,12 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
      * state is derived from the live [IpfsInfo.status] broadcast.
      */
     private fun onIpfsToggle(enabled: Boolean) {
-        if (enabled) runCatching { binder?.ensureIpfsStarted() }
-        else runCatching { binder?.stopIpfs() }
+        if (enabled) {
+            ipfsStart.ask(bound) { runCatching { binder?.ensureIpfsStarted() } }
+        } else {
+            ipfsStart.forget()
+            runCatching { binder?.stopIpfs() }
+        }
     }
 
     /** Tell `:myotis` which chains to run ([MyotisChains]); it starts and stops them one by one. */
@@ -1421,6 +1442,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     }
 
     private fun unbindFromService() {
+        ipfsStart.forget()
         if (!bound) return
         runCatching { binder?.unregisterCallback(callback) }
         runCatching { unbindService(connection) }
