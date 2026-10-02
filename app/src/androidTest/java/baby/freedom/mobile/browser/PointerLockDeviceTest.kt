@@ -280,6 +280,58 @@ class PointerLockDeviceTest {
     }
 
     @Test
+    fun aSyntheticKeydownNeitherThrowsNorReleases() {
+        val r = run(
+            """
+            var errors = [];
+            window.addEventListener('error', function (e) { errors.push(String(e.message)); });
+            c.requestPointerLock().then(function () {
+              window.dispatchEvent(new Event('keydown'));
+              document.dispatchEvent(new Event('keydown', { bubbles: true }));
+              window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+              setTimeout(function () {
+                window.out = JSON.stringify({ errors: errors.join(' ; '), locked: document.pointerLockElement === c, log: log.join() });
+              }, 50);
+            });
+            """,
+        )
+        assertEquals("", r.getString("errors"))
+        assertTrue("only a real Escape releases the lock: $r", r.getBoolean("locked"))
+        assertEquals("change:c", r.getString("log"))
+    }
+
+    @Test
+    fun proxyTrapLookupsNeverReachObjectPrototype() {
+        val r = run(
+            """
+            var reads = [];
+            var traps = ['get', 'set', 'has', 'deleteProperty', 'ownKeys', 'apply', 'construct', 'getPrototypeOf',
+                         'setPrototypeOf', 'isExtensible', 'preventExtensions', 'getOwnPropertyDescriptor', 'defineProperty'];
+            traps.forEach(function (k) {
+              // Prototype-less, or defining 'set' would itself read the 'get' getter.
+              Object.defineProperty(Object.prototype, k, { __proto__: null, configurable: true, get: function () { reads.push(k); return undefined; } });
+            });
+            reads = [];
+            var touched = [];
+            [Element.prototype.requestPointerLock, Document.prototype.exitPointerLock,
+             Object.getOwnPropertyDescriptor(Document.prototype, 'pointerLockElement').get,
+             Object.getOwnPropertyDescriptor(ShadowRoot.prototype, 'pointerLockElement').get].forEach(function (f) {
+              touched.push(f.length, f.name, 'x' in f, Object.getPrototypeOf(f) === Function.prototype,
+                           Object.isExtensible(f), Object.keys(f).length, Object.getOwnPropertyDescriptor(f, 'length').value);
+            });
+            var p = c.requestPointerLock();
+            var el = document.pointerLockElement;
+            traps.forEach(function (k) { delete Object.prototype[k]; });
+            p.then(function () {
+              window.out = JSON.stringify({ reads: reads.join(' ; '), locked: document.pointerLockElement === c });
+            });
+            """,
+        )
+        assertEquals("", r.getString("reads"))
+        assertTrue(r.toString(), r.getBoolean("locked"))
+    }
+
+    @Test
     fun aCrossOriginFrameLocksItsOwnElement() {
         val r = run(
             """

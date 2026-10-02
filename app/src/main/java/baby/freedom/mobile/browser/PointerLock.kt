@@ -48,7 +48,13 @@ import androidx.webkit.WebViewFeature
  * no prototype and spell out every member, so Blink's dictionary
  * conversion never looks one up on a page-patched `Object.prototype`.
  *
- * Not emulated: the cursor itself (WebView has none to hide on a touch
+ * Not emulated: event trust — the shim's `pointerlockchange` and
+ * `pointerlockerror` are dispatched from script, so their `isTrusted` is
+ * `false`, where Chromium's are trusted; page script can't create a
+ * trusted event, and no WebView API dispatches one on its behalf. A page
+ * that ignores untrusted pointer-lock events won't see the lock
+ * (meinhard.eth's game doesn't check). Also
+ * not emulated: the cursor itself (WebView has none to hide on a touch
  * screen) — a physical mouse's `movementX/Y` are Chromium's own, which it
  * fills in on every `mousemove` anyway; and the user-activation
  * requirement, since an emulated lock captures nothing a page could abuse;
@@ -155,7 +161,12 @@ internal object PointerLock {
             }
           };
 
+          // Proxy handlers have no prototype either: V8 looks up every trap
+          // (get, has, getPrototypeOf, ...) on the handler, and on a plain
+          // literal the ones it lacks would reach page getters on
+          // Object.prototype, which would see the shim's handler object.
           const requestPointerLock = new Px(req.value, {
+            __proto__: null,
             apply(target, self, args) {
               // A foreign receiver gets Chromium's own TypeError, no side effects.
               try { apply(tagName, self, []); } catch (e) { return apply(target, self, args); }
@@ -188,6 +199,7 @@ internal object PointerLock {
           def(El.prototype, 'requestPointerLock', { value: requestPointerLock, writable: req.writable, enumerable: req.enumerable, configurable: req.configurable });
 
           const exitPointerLock = new Px(exit.value, {
+            __proto__: null,
             apply(target, self, args) {
               if (self !== doc) return apply(target, self, args);
               release();
@@ -197,6 +209,7 @@ internal object PointerLock {
           def(Doc.prototype, 'exitPointerLock', { value: exitPointerLock, writable: exit.writable, enumerable: exit.enumerable, configurable: exit.configurable });
 
           const lockedGetter = (d) => new Px(d.get, {
+            __proto__: null,
             apply(target, self, args) {
               const native = apply(target, self, args);
               if (!locked) return native;
@@ -213,8 +226,16 @@ internal object PointerLock {
             if (apply(visibility, doc, []) === 'hidden') release();
           }, true]);
           apply(listen, w, ['pagehide', release, true]);
+          // Only a real key press releases the lock, as in Chromium. A page's
+          // own `new Event('keydown')` isn't a KeyboardEvent, and the saved
+          // `key` getter would throw on it into the page's onerror, with a
+          // stack inside this listener; isTrusted is an own, unforgeable
+          // property of every event, so reading it runs no page code.
           if (keyOf) apply(listen, w, ['keydown', (e) => {
-            if (locked && apply(keyOf, e, []) === 'Escape') release();
+            if (!locked || e.isTrusted !== true) return;
+            let key;
+            try { key = apply(keyOf, e, []); } catch (x) { return; }
+            if (key === 'Escape') release();
           }, true]);
         })();
     """.trimIndent()
