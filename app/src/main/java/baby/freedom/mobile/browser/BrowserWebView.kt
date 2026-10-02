@@ -2611,6 +2611,10 @@ private fun buildRefreshableWebView(
         val scriptlets = TabScriptlets.install(this, state.private)
         (this as? PageWebView)?.scriptlets = scriptlets
 
+        // Pointer lock (#389): emulated in every frame, since WebView
+        // denies every real request and pointer-lock-gated games never start.
+        PointerLock.install(this)
+
         // `window.radicle` (#124): the provider's page object and channel.
         RadicleProviders.install(this, state)
 
