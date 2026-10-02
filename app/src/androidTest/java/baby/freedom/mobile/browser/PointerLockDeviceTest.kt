@@ -152,6 +152,65 @@ class PointerLockDeviceTest {
     }
 
     @Test
+    fun removingTheElementFromAShadowTreeReleasesTheLock() {
+        val r = run(
+            """
+            var host = document.getElementById('h');
+            var outer = host.attachShadow({ mode: 'closed' });
+            var innerHost = document.createElement('div');
+            outer.appendChild(innerHost);
+            var root = innerHost.attachShadow({ mode: 'open' });
+            var inner = document.createElement('canvas');
+            root.appendChild(inner);
+            inner.requestPointerLock().then(function () {
+              inner.remove();
+              setTimeout(function () {
+                var first = log.join();
+                // Again, removing an intermediate host from the outer shadow tree.
+                root.appendChild(inner);
+                inner.requestPointerLock().then(function () {
+                  innerHost.remove();
+                  setTimeout(function () {
+                    window.out = JSON.stringify({ first: first, second: log.join() });
+                  }, 50);
+                });
+              }, 50);
+            });
+            """,
+        )
+        assertEquals("change:h,change:null", r.getString("first"))
+        assertEquals("change:h,change:null,change:h,change:null", r.getString("second"))
+    }
+
+    @Test
+    fun pageGettersOnObjectPrototypeAreNeverReadAndChangeNothing() {
+        val r = run(
+            """
+            var reads = [];
+            var names = ['bubbles', 'cancelable', 'composed', 'childList', 'subtree', 'attributes',
+                         'attributeOldValue', 'attributeFilter', 'characterData', 'characterDataOldValue'];
+            names.forEach(function (k) {
+              Object.defineProperty(Object.prototype, k, { configurable: true, get: function () {
+                reads.push(k);
+                return k === 'attributeFilter' ? undefined : true;
+              } });
+            });
+            var composed;
+            document.addEventListener('pointerlockchange', function (e) { composed = e.composed + ',' + e.cancelable; }, { once: true, __proto__: null });
+            c.requestPointerLock().then(function () {
+              setTimeout(function () {
+                names.forEach(function (k) { delete Object.prototype[k]; });
+                window.out = JSON.stringify({ reads: reads.join(' ; '), composed: composed, locked: document.pointerLockElement === c });
+              }, 50);
+            });
+            """,
+        )
+        assertEquals("", r.getString("reads"))
+        assertEquals("false,false", r.getString("composed"))
+        assertTrue(r.toString(), r.getBoolean("locked"))
+    }
+
+    @Test
     fun aDisconnectedElementGetsAnErrorAndWrongDocumentError() {
         val r = run(
             """

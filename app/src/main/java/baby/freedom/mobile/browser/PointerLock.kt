@@ -31,7 +31,8 @@ import androidx.webkit.WebViewFeature
  *   hidden (`visibilitychange`, which WebView fires when the app is
  *   backgrounded or the tab is switched away), on `pagehide`, on Escape
  *   from a hardware keyboard, and when the element leaves the document
- *   (a `MutationObserver`, connected only while a lock is held).
+ *   (a `MutationObserver` on the document and on every shadow root
+ *   between it and the element, connected only while a lock is held).
  * - `pointerLockElement` on `Document` and `ShadowRoot` returns the locked
  *   element (retargeted to the shadow host outside its shadow tree), and
  *   otherwise whatever Chromium's own getter says.
@@ -42,12 +43,19 @@ import androidx.webkit.WebViewFeature
  * Nothing new appears on `window` (no global, no marker), and everything
  * the shim calls after document start was saved before the page ran, so
  * a page that later wraps `dispatchEvent`, `Promise` or `setTimeout`
- * neither sees the shim call them nor changes its answers.
+ * neither sees the shim call them nor changes its answers. The init
+ * dictionaries it hands Blink (`EventInit`, `MutationObserverInit`) have
+ * no prototype and spell out every member, so Blink's dictionary
+ * conversion never looks one up on a page-patched `Object.prototype`.
  *
  * Not emulated: the cursor itself (WebView has none to hide on a touch
  * screen) — a physical mouse's `movementX/Y` are Chromium's own, which it
  * fills in on every `mousemove` anyway; and the user-activation
- * requirement, since an emulated lock captures nothing a page could abuse.
+ * requirement, since an emulated lock captures nothing a page could abuse;
+ * and one lock per page: each frame keeps its own, so the top document and
+ * an iframe (same- or cross-origin) can both hold one at once, where
+ * Chromium allows a single lock per tab. Coordinating them would need a
+ * channel between frames that the page could see.
  */
 internal object PointerLock {
 
@@ -84,8 +92,18 @@ internal object PointerLock {
           const keyOf = w.KeyboardEvent ? getter(w.KeyboardEvent.prototype, 'key') : undefined;
           if (!tagName || !connected || !ownerDoc || !rootOf || !visibility) return;
 
+          // Blink converts an init dictionary by reading every member it
+          // knows, and a plain object literal would send the ones it lacks
+          // to Object.prototype, where page getters could watch the shim and
+          // change its answers. These have no prototype, and name every member.
+          const eventInit = { __proto__: null, bubbles: true, cancelable: false, composed: false };
+          const observeInit = {
+            __proto__: null, childList: true, subtree: true, attributes: false,
+            attributeOldValue: false, characterData: false, characterDataOldValue: false,
+          };
+
           let locked = null, pending = null, watcher = null;
-          const fire = (target, type) => apply(dispatch, target, [new Ev(type, { bubbles: true })]);
+          const fire = (target, type) => apply(dispatch, target, [new Ev(type, eventInit)]);
           const isConnected = (el) => apply(connected, el, []);
           const unwatch = () => { if (watcher) { apply(moDisconnect, watcher, []); watcher = null; } };
           const release = () => {
@@ -95,10 +113,33 @@ internal object PointerLock {
             unwatch();
             apply(later, w, [() => fire(doc, 'pointerlockchange'), 0]);
           };
+          // Observe every tree between the locked element and the document:
+          // its own (shadow) root, the root holding that root's host, and so
+          // on up to the document, since a document observer doesn't see
+          // into shadow trees. Re-done after each batch of mutations, as a
+          // host moved into another shadow tree changes the chain.
+          const observeChain = () => {
+            let n = locked;
+            for (;;) {
+              const root = apply(rootOf, n, []);
+              apply(moObserve, watcher, [root, observeInit]);
+              if (root === doc) return;
+              let next = null;
+              try { next = host ? apply(host, root, []) : null; } catch (e) { return; }
+              if (!next) return;
+              n = next;
+            }
+          };
           const watch = () => {
-            if (!MO || watcher) return;
-            watcher = new MO(() => { if (locked && !isConnected(locked)) release(); });
-            apply(moObserve, watcher, [doc, { childList: true, subtree: true }]);
+            if (!MO) return;
+            unwatch();
+            watcher = new MO(() => {
+              if (!locked) return;
+              if (!isConnected(locked)) { release(); return; }
+              apply(moDisconnect, watcher, []);
+              observeChain();
+            });
+            observeChain();
           };
           // The locked element as seen from [scope]: itself in its own tree,
           // the shadow host that contains it from outside, null elsewhere.
