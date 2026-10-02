@@ -66,10 +66,12 @@ enum class AdblockCategory(
 
     /**
      * The bundled-only lists the category also compiles (#318): uBlock
-     * Origin's own filters, under *Block ads* as on desktop. The update
-     * channel doesn't carry them; they refresh with each release.
+     * Origin's own filters, under *Block ads* as on desktop, and Freedom's
+     * own fixes (#391). The update channel doesn't carry them; they
+     * refresh with each release.
      */
-    val bundledExtras: List<BundledList> get() = if (this == ADS) listOf(BundledList.UBLOCK) else emptyList()
+    val bundledExtras: List<BundledList> get() =
+        if (this == ADS) listOf(BundledList.UBLOCK, BundledList.FREEDOM) else emptyList()
 
     /** Every list the category compiles, for its Settings line ("EasyList, uBlock filters"). */
     val listNames: List<String> get() = listOf(listName) + bundledExtras.map { it.listName }
@@ -77,11 +79,20 @@ enum class AdblockCategory(
 
 /**
  * A bundled-only filter list (#318), compiled with its category's
- * [AdblockCategory.bundledExtras]. [trustedScriptlets]: it may call the
- * `trusted-*` scriptlets — uBlock Origin's own list only, as in uBlock.
+ * [AdblockCategory.bundledExtras], always from the APK's assets — the
+ * update channel's lists live elsewhere and name categories, not these.
+ * [trustedScriptlets]: it may call the `trusted-*` scriptlets — uBlock
+ * Origin's own list, as in uBlock, and Freedom's, which this repository
+ * maintains.
  */
 enum class BundledList(val file: String, val listName: String, val trustedScriptlets: Boolean) {
     UBLOCK("ublock-filters.txt", "uBlock filters", true),
+
+    /**
+     * Freedom's own fixes for sites upstream doesn't handle yet (#391),
+     * maintained by hand: `vendor-lists.py` neither writes nor removes it.
+     */
+    FREEDOM("freedom-filters.txt", "Freedom filters", true),
 }
 
 /** The uBlock Origin scriptlets the `+js(…)` rules call (#318), under `assets/adblock/`. */

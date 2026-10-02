@@ -19,6 +19,10 @@ text both must travel with. Those three are bundled only — the update
 channel doesn't publish them — so they refresh with each release that
 re-runs this.
 
+It never touches freedom-filters.txt (#391), Freedom's own hand-maintained
+fixes compiled next to uBlock's filters: that file isn't vendored, so it
+is neither written nor removed here (FREEDOM_FILE below, checked at start).
+
 Filter list data is (c) the respective list authors: the EasyList family
 dual-licensed GPLv3+ / CC BY-SA 3.0+ (the app redistributes it under
 CC BY-SA), uBlock Origin's filters and scriptlets GPL-3.0; see
@@ -49,6 +53,9 @@ LISTS = {
 # uAssets' gh-pages branch (the site the Pages URLs serve), so the header
 # can name an exact, permanent source.
 UBLOCK_FILE = "ublock-filters.txt"
+
+# Freedom's own list (#391): maintained by hand, never written by this script.
+FREEDOM_FILE = "freedom-filters.txt"
 UBLOCK_REPO = "uBlockOrigin/uAssets"
 UBLOCK_BRANCH = "gh-pages"
 UBLOCK_PAGES = "https://ublockorigin.github.io/uAssets/"
@@ -211,6 +218,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if FREEDOM_FILE in LISTS or FREEDOM_FILE in (UBLOCK_FILE, RESOURCES_FILE, GPL_FILE):
+        raise SystemExit(f"{FREEDOM_FILE} is maintained by hand and must not be vendored")
     if len(sys.argv) > 1 and sys.argv[1] == "--ublock-only":
         # Refresh only the bundled-only uBlock files, keeping the
         # EasyList-family lists (and their Swarm-feed dates) as they are.

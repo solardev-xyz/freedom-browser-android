@@ -1,0 +1,16 @@
+! Title: Freedom filters
+! Description: Freedom Browser's own fixes for sites upstream lists don't
+!   (yet) handle. Compiled under Block ads, with the same trust as uBlock
+!   Origin's filters. Maintained by hand in this repository — not
+!   vendored, not refreshed by infra/adblock/vendor-lists.py and not
+!   carried by the Swarm list-update channel. Keep each rule with a
+!   comment naming its issue; drop it once upstream carries a fix.
+! Homepage: https://github.com/solardev-xyz/freedom-browser-android/blob/main/app/src/main/assets/adblock/README.md
+! License: GPL-3.0 (see COPYING.GPL-3.0.txt next to this file)
+
+! #391 spiegel.de: an inline, obfuscated ad-reinsertion script probes
+! brwsrfrm.com, criteo, ad-delivery.net, btloader.com and ag.dns-bait.com
+! and, when they fail, injects a first-party image ad ("Anzeige").
+! uBlock's `spiegel.de##+js(rmnt, script, homad)` no longer matches it;
+! its probe URLs are hard-coded, so match those.
+spiegel.de##+js(rmnt, script, /brwsrfrm|dns-bait/)

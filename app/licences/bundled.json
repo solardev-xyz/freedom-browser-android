@@ -1,6 +1,7 @@
 {
   "own": [
     "adblock/README.md",
+    "adblock/freedom-filters.txt",
     "error/error.html",
     "openlv/shell.html",
     "openlv/shim.js",
