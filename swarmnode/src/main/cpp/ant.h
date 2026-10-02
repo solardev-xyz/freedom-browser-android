@@ -585,9 +585,11 @@ char *ant_storage_discover(const AntHandle *handle,
  * to the wallet's balance) and BLOCKS until they confirm. Light-mode only (requires the `chain` cargo feature;
  * otherwise returns NULL + an error). Returns
  *   {"chequebookAddress":"0x<40hex>"}
- * (free with ant_free_string), or NULL with an error in *out_err. The
- * caller should restart the gateway (ant_stop_gateway + ant_start_gateway)
- * afterwards so /chequebook/address reflects the deployed chequebook.
+ * (free with ant_free_string), or NULL with an error in *out_err. A
+ * running in-process gateway picks the chequebook up at once:
+ * /chequebook/address and /wallet report it with no gateway restart.
+ * One the on-chain checks disqualify is cleared from them (and the call
+ * returns NULL with the reason).
  */
 char *ant_deploy_chequebook(const AntHandle *handle,
                             const char *gnosis_rpc,
