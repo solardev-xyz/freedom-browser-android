@@ -67,8 +67,9 @@ enum class AdblockCategory(
     /**
      * The bundled-only lists the category also compiles (#318): uBlock
      * Origin's own filters, under *Block ads* as on desktop, and Freedom's
-     * own fixes (#391). The update channel doesn't carry them; they
-     * refresh with each release.
+     * own fixes (#391). The update channel doesn't carry either: uBlock's
+     * is refreshed by `vendor-lists.py` before each release, Freedom's is
+     * edited by hand in this repository and nothing refreshes it.
      */
     val bundledExtras: List<BundledList> get() =
         if (this == ADS) listOf(BundledList.UBLOCK, BundledList.FREEDOM) else emptyList()

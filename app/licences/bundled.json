@@ -1,7 +1,6 @@
 {
   "own": [
     "adblock/README.md",
-    "adblock/freedom-filters.txt",
     "error/error.html",
     "openlv/shell.html",
     "openlv/shim.js",
@@ -229,6 +228,16 @@
       "url": "https://github.com/uBlockOrigin/uAssets",
       "notice": "© Raymond Hill and the uBlock Origin contributors. assets/adblock/ublock-filters.txt is built from uAssets' filters/filters.txt and filters/quick-fixes.txt at the commit named in its header: its !#if blocks evaluated for a Chromium mobile browser, its !#include files spliced in and the two lists concatenated; the rules themselves are unchanged. assets/adblock/resources.json is uBlock Origin's scriptlets as @ghostery/adblocker v2.18.2 publishes them, unmodified; their source is uBlock Origin's src/js/resources at https://github.com/gorhill/uBlock/tree/de31aee0fcd69dc89cde558f1a0638c1aa77b75e/src/js/resources. Both are data files the app reads at run time, shipped as separate files with the GPL's text next to them (assets/adblock/COPYING.GPL-3.0.txt).",
       "files": ["adblock/ublock-filters.txt", "adblock/resources.json", "adblock/COPYING.GPL-3.0.txt"],
+      "texts": ["texts/GPL-3.0.txt"]
+    },
+    {
+      "name": "Freedom filters",
+      "version": "",
+      "section": "data",
+      "licence": "GPL-3.0-only",
+      "url": "https://github.com/solardev-xyz/freedom-browser-android/blob/main/app/src/main/assets/adblock/freedom-filters.txt",
+      "notice": "© The Freedom Browser authors. Freedom's own filter rules for sites the upstream lists don't handle yet, maintained by hand in this repository and licensed under the GNU General Public License v3, as the uBlock filters they extend — unlike the rest of Freedom's own code, whose licence isn't decided yet. A data file the app reads at run time, assets/adblock/freedom-filters.txt, shipped with the GPL's text next to it (assets/adblock/COPYING.GPL-3.0.txt).",
+      "files": ["adblock/freedom-filters.txt"],
       "texts": ["texts/GPL-3.0.txt"]
     }
   ],
