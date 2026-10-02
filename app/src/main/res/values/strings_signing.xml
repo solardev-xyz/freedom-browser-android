@@ -27,6 +27,14 @@
     <!-- wallet/ledger/LedgerBleLink.kt -->
     <string name="signing_ledger_not_a_ble_ledger">This device isn’t a Bluetooth Ledger (Nano X, Stax or Flex).</string>
 
+    <!-- wallet/ledger/LedgerUsbLink.kt, Ledger.kt: a Ledger over USB (#319) -->
+    <string name="signing_ledger_usb_not_plugged_in">Plug your Ledger into the phone with a USB cable, unlock it and try again.</string>
+    <string name="signing_ledger_usb_or_bluetooth_not_found">Plug your Ledger into the phone with a USB cable, or pair it over Bluetooth on Connect a Ledger, then unlock it and try again.</string>
+    <string name="signing_ledger_usb_unplugged">The Ledger was unplugged. Plug it back in, unlock it and try again.</string>
+    <string name="signing_ledger_usb_cannot_tell">The Ledger reconnected while another Ledger of the same model was unplugged or reconnecting too, so Freedom couldn’t tell which one it was. Leave only this Ledger plugged in, unlock it, open the Ethereum app and try again.</string>
+    <string name="signing_ledger_usb_permission_refused">Freedom wasn’t given access to the Ledger over USB. Try again and allow it when Android asks.</string>
+    <string name="signing_ledger_usb_cannot_talk">Couldn’t talk to the Ledger over USB. Unplug it, plug it back in and try again.</string>
+
     <!-- wallet/ledger/Ledger.kt -->
     <string name="signing_ledger_scheme_live">Ledger Live</string>
     <string name="signing_ledger_scheme_legacy">Legacy (MEW / MyCrypto)</string>
@@ -38,9 +46,14 @@
     <!-- browser/LedgerUi.kt -->
     <string name="signing_ledger_connect_title">Connect a Ledger</string>
     <string name="signing_ledger_before_you_start">Before you start</string>
-    <string name="signing_ledger_before_you_start_body">Unlock your Ledger (Nano X, Stax or Flex), open its Ethereum app and keep it close. The first time, Android asks to pair: check that the same code is on the Ledger and the phone, and confirm it on both.</string>
+    <string name="signing_ledger_before_you_start_body">Unlock your Ledger and open its Ethereum app. Plug it into the phone with a USB cable (any Ledger, and the only way for a Nano S or Nano S Plus), or keep it close to use Bluetooth (Nano X, Stax or Flex). The first time over Bluetooth, Android asks to pair: check that the same code is on the Ledger and the phone, and confirm it on both.</string>
     <string name="signing_ledger_keys_never_leave">Your Ledger’s keys never leave it: every transaction and signature is shown and confirmed on the Ledger.</string>
     <string name="signing_ledger_bluetooth">Bluetooth</string>
+    <string name="signing_ledger_usb">USB</string>
+    <string name="signing_ledger_usb_none">No Ledger plugged in. Plug it into the phone with a USB cable (USB-C, or an OTG adapter).</string>
+    <string name="signing_ledger_device_usb">Plugged in over USB</string>
+    <string name="signing_ledger_open_on_plug_in">Open Freedom when a Ledger is plugged in</string>
+    <string name="signing_ledger_open_on_plug_in_detail">Android then offers to open Freedom when you plug in a Ledger, and can remember that Freedom may use it. Off, plugging in does nothing and Freedom asks for access when it first talks to the Ledger.</string>
     <string name="signing_ledger_nearby_devices">Nearby devices</string>
     <string name="signing_ledger_permission_blocked">Android won’t ask again for the permission to find and connect to your Ledger. Turn on Nearby devices for Freedom in Android settings.</string>
     <string name="signing_ledger_permission_rationale">Freedom needs Android’s permission to find and connect to your Ledger over Bluetooth. It’s used for nothing else.</string>
@@ -69,6 +82,8 @@
     <string name="signing_ledger_stage_connecting_detail">Keep it unlocked and close to the phone.</string>
     <string name="signing_ledger_stage_pairing">Pair with your Ledger</string>
     <string name="signing_ledger_stage_pairing_detail">Check that the same code is on the Ledger and on the phone, then confirm it on both.</string>
+    <string name="signing_ledger_stage_usb_permission">Allow USB access</string>
+    <string name="signing_ledger_stage_usb_permission_detail">Android asks whether Freedom may use the Ledger plugged into the phone. Allow it there.</string>
     <string name="signing_ledger_stage_unlock">Unlock your Ledger</string>
     <string name="signing_ledger_stage_unlock_detail">Enter your PIN on the Ledger. This waits for it.</string>
     <string name="signing_ledger_stage_open_app">Open the Ethereum app</string>
