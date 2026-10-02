@@ -152,6 +152,30 @@ class PointerLockDeviceTest {
     }
 
     @Test
+    fun movingTheElementIntoAnotherDocumentReleasesTheLock() {
+        val r = run(
+            """
+            var same = document.createElement('iframe');
+            document.body.appendChild(same);
+            var other = same.contentDocument;
+            c.requestPointerLock().then(function () {
+              other.body.appendChild(c);
+              setTimeout(function () {
+                window.out = JSON.stringify({
+                  moved: c.ownerDocument === other && c.isConnected,
+                  el: String(document.pointerLockElement),
+                  log: log.join(),
+                });
+              }, 50);
+            });
+            """,
+        )
+        assertTrue(r.toString(), r.getBoolean("moved"))
+        assertEquals("null", r.getString("el"))
+        assertEquals("pointerlockchange fires on adoption, not only on a read", "change:c,change:null", r.getString("log"))
+    }
+
+    @Test
     fun removingTheElementFromAShadowTreeReleasesTheLock() {
         val r = run(
             """

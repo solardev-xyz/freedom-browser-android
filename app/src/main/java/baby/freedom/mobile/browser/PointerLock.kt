@@ -32,7 +32,9 @@ import androidx.webkit.WebViewFeature
  *   backgrounded or the tab is switched away), on `pagehide`, on Escape
  *   from a hardware keyboard, and when the element leaves the document
  *   (a `MutationObserver` on the document and on every shadow root
- *   between it and the element, connected only while a lock is held).
+ *   between it and the element, connected only while a lock is held),
+ *   including when it moves into another document, such as a same-origin
+ *   iframe's, where it stays connected but is no longer in this one.
  * - `pointerLockElement` on `Document` and `ShadowRoot` returns the locked
  *   element (retargeted to the shadow host outside its shadow tree), and
  *   otherwise whatever Chromium's own getter says.
@@ -111,6 +113,10 @@ internal object PointerLock {
           let locked = null, pending = null, watcher = null;
           const fire = (target, type) => apply(dispatch, target, [new Ev(type, eventInit)]);
           const isConnected = (el) => apply(connected, el, []);
+          // Still lockable here: in this document's tree. An element adopted
+          // into another document (a same-origin iframe's) stays connected,
+          // but Chromium releases the lock once it leaves this one.
+          const held = (el) => isConnected(el) && apply(ownerDoc, el, []) === doc;
           const unwatch = () => { if (watcher) { apply(moDisconnect, watcher, []); watcher = null; } };
           const release = () => {
             pending = null;
@@ -141,7 +147,7 @@ internal object PointerLock {
             unwatch();
             watcher = new MO(() => {
               if (!locked) return;
-              if (!isConnected(locked)) { release(); return; }
+              if (!held(locked)) { release(); return; }
               apply(moDisconnect, watcher, []);
               observeChain();
             });
@@ -213,7 +219,7 @@ internal object PointerLock {
             apply(target, self, args) {
               const native = apply(target, self, args);
               if (!locked) return native;
-              if (!isConnected(locked)) { release(); return native; }
+              if (!held(locked)) { release(); return native; }
               return retarget(self) || native;
             },
           });
