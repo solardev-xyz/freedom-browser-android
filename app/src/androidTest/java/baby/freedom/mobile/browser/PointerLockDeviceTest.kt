@@ -152,6 +152,45 @@ class PointerLockDeviceTest {
     }
 
     @Test
+    fun movingTheElementWithinTheDocumentReleasesTheLock() {
+        val r = run(
+            """
+            var other = document.createElement('div');
+            var sib = document.createElement('span');
+            document.body.appendChild(other);
+            c.parentNode.appendChild(sib);
+            c.requestPointerLock().then(function () {
+              // An unrelated removal keeps it.
+              sib.remove();
+              setTimeout(function () {
+                var kept = log.join();
+                // Removed and re-inserted in one task: Chromium releases.
+                other.appendChild(c);
+                setTimeout(function () {
+                  var moved = log.join();
+                  // And again by moving an ancestor rather than the element.
+                  c.requestPointerLock().then(function () {
+                    document.body.appendChild(other);
+                    setTimeout(function () {
+                      window.out = JSON.stringify({
+                        kept: kept, moved: moved, ancestor: log.join(),
+                        connected: c.isConnected, el: String(document.pointerLockElement),
+                      });
+                    }, 50);
+                  });
+                }, 50);
+              }, 50);
+            });
+            """,
+        )
+        assertEquals("change:c", r.getString("kept"))
+        assertEquals("change:c,change:null", r.getString("moved"))
+        assertEquals("change:c,change:null,change:c,change:null", r.getString("ancestor"))
+        assertTrue(r.getBoolean("connected"))
+        assertEquals("null", r.getString("el"))
+    }
+
+    @Test
     fun movingTheElementIntoAnotherDocumentReleasesTheLock() {
         val r = run(
             """

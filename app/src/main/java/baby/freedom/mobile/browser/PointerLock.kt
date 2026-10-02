@@ -34,7 +34,11 @@ import androidx.webkit.WebViewFeature
  *   (a `MutationObserver` on the document and on every shadow root
  *   between it and the element, connected only while a lock is held),
  *   including when it moves into another document, such as a same-origin
- *   iframe's, where it stays connected but is no longer in this one.
+ *   iframe's, where it stays connected but is no longer in this one, and
+ *   when it (or an ancestor) is moved within the document, which removes
+ *   and re-inserts it in one task: Chromium releases on any removal.
+ *   (Removals that happen inside an already-detached subtree before it is
+ *   re-inserted are invisible to the observer and keep the lock.)
  * - `pointerLockElement` on `Document` and `ShadowRoot` returns the locked
  *   element (retargeted to the shadow host outside its shadow tree), and
  *   otherwise whatever Chromium's own getter says.
@@ -95,10 +99,15 @@ internal object PointerLock {
           const connected = getter(Nd.prototype, 'isConnected');
           const ownerDoc = getter(Nd.prototype, 'ownerDocument');
           const rootOf = Nd.prototype.getRootNode;
+          const parentOf = getter(Nd.prototype, 'parentNode');
+          const MR = w.MutationRecord, NL = w.NodeList;
+          const removedOf = MR ? getter(MR.prototype, 'removedNodes') : undefined;
+          const listLength = NL ? getter(NL.prototype, 'length') : undefined;
+          const listItem = NL && NL.prototype.item;
           const host = SR ? getter(SR.prototype, 'host') : undefined;
           const visibility = getter(Doc.prototype, 'visibilityState');
           const keyOf = w.KeyboardEvent ? getter(w.KeyboardEvent.prototype, 'key') : undefined;
-          if (!tagName || !connected || !ownerDoc || !rootOf || !visibility) return;
+          if (!tagName || !connected || !ownerDoc || !rootOf || !parentOf || !visibility) return;
 
           // Blink converts an init dictionary by reading every member it
           // knows, and a plain object literal would send the ones it lacks
@@ -142,12 +151,38 @@ internal object PointerLock {
               n = next;
             }
           };
+          // Is [r] the locked element, or a (shadow-including) ancestor of it?
+          const encloses = (r) => {
+            let n = locked;
+            while (n) {
+              if (n === r) return true;
+              let p = apply(parentOf, n, []);
+              if (!p && host) { try { p = apply(host, n, []); } catch (e) { p = null; } }
+              n = p;
+            }
+            return false;
+          };
+          // Chromium releases the lock whenever the element leaves the tree,
+          // even if the same task puts it straight back (a move with
+          // appendChild/insertBefore), so held() alone, read once the batch
+          // is done, isn't enough: look for the element, or an ancestor still
+          // holding it, among the nodes the batch removed.
+          const removedIn = (records) => {
+            if (!removedOf || !listLength || typeof listItem !== 'function') return false;
+            for (let i = 0; i < records.length; i++) {
+              let list;
+              try { list = apply(removedOf, records[i], []); } catch (e) { continue; }
+              const n = apply(listLength, list, []);
+              for (let j = 0; j < n; j++) if (encloses(apply(listItem, list, [j]))) return true;
+            }
+            return false;
+          };
           const watch = () => {
             if (!MO) return;
             unwatch();
-            watcher = new MO(() => {
+            watcher = new MO((records) => {
               if (!locked) return;
-              if (!held(locked)) { release(); return; }
+              if (!held(locked) || removedIn(records)) { release(); return; }
               apply(moDisconnect, watcher, []);
               observeChain();
             });
