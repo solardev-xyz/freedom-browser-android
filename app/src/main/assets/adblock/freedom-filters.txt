@@ -6,7 +6,7 @@
 !   carried by the Swarm list-update channel. Keep each rule with a
 !   comment naming its issue; drop it once upstream carries a fix.
 ! Homepage: https://github.com/solardev-xyz/freedom-browser-android/blob/main/app/src/main/assets/adblock/README.md
-! License: GPL-3.0 (see COPYING.GPL-3.0.txt next to this file)
+! License: GPL-3.0-only (see COPYING.GPL-3.0.txt next to this file)
 
 ! #391 spiegel.de: an inline, obfuscated ad-reinsertion script probes
 ! brwsrfrm.com, criteo, ad-delivery.net, btloader.com and ag.dns-bait.com

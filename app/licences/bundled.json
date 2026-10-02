@@ -236,7 +236,7 @@
       "section": "data",
       "licence": "GPL-3.0-only",
       "url": "https://github.com/solardev-xyz/freedom-browser-android/blob/main/app/src/main/assets/adblock/freedom-filters.txt",
-      "notice": "© The Freedom Browser authors. Freedom's own filter rules for sites the upstream lists don't handle yet, maintained by hand in this repository and licensed under the GNU General Public License v3, as the uBlock filters they extend — unlike the rest of Freedom's own code, whose licence isn't decided yet. A data file the app reads at run time, assets/adblock/freedom-filters.txt, shipped with the GPL's text next to it (assets/adblock/COPYING.GPL-3.0.txt).",
+      "notice": "© The Freedom Browser authors. Freedom's own filter rules for sites the upstream lists don't handle yet, maintained by hand in this repository and licensed under the GNU General Public License v3 only (GPL-3.0-only), as the uBlock filters they extend — unlike the rest of Freedom's own code, whose licence isn't decided yet. A data file the app reads at run time, assets/adblock/freedom-filters.txt, shipped with the GPL's text next to it (assets/adblock/COPYING.GPL-3.0.txt).",
       "files": ["adblock/freedom-filters.txt"],
       "texts": ["texts/GPL-3.0.txt"]
     }

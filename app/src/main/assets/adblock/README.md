@@ -46,7 +46,7 @@ scriptlets). `vendor-lists.py` never writes or removes it and the Swarm
 update channel (#127) doesn't carry it — like the uBlock files it is read
 from the APK's assets only — so edit it here, by hand. Written by the
 Freedom Browser authors and licensed under the GNU General Public License
-v3 (`COPYING.GPL-3.0.txt`), as the uBlock rules it extends — unlike the
+v3 only (GPL-3.0-only, `COPYING.GPL-3.0.txt`), as the uBlock rules it extends — unlike the
 rest of Freedom's own code, whose licence isn't decided yet — so
-`app/licences/bundled.json` lists it as a GPL-3.0 component (shown on the
+`app/licences/bundled.json` lists it as a GPL-3.0-only component (shown on the
 Open-source licences screen), not under `own`.
