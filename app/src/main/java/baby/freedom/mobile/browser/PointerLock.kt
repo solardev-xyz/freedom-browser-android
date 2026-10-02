@@ -41,7 +41,9 @@ import androidx.webkit.WebViewFeature
  *   re-inserted are invisible to the observer and keep the lock.)
  * - `pointerLockElement` on `Document` and `ShadowRoot` returns the locked
  *   element (retargeted to the shadow host outside its shadow tree), and
- *   otherwise whatever Chromium's own getter says.
+ *   otherwise whatever Chromium's own getter says. It first takes any
+ *   mutation records still queued for the observer, so a read in the
+ *   same task as a removal or move already answers `null`.
  *
  * Each replaced function or getter is Chromium's own behind a `Proxy`, so
  * it still reads as native code, still throws Chromium's own TypeError on
@@ -93,6 +95,7 @@ internal object PointerLock {
           const apply = Reflect.apply, P = Promise, Px = Proxy, Ev = Event, DE = w.DOMException;
           const later = w.setTimeout, MO = w.MutationObserver;
           const moObserve = MO && MO.prototype.observe, moDisconnect = MO && MO.prototype.disconnect;
+          const moTake = MO && MO.prototype.takeRecords;
           const dispatch = w.EventTarget.prototype.dispatchEvent;
           const listen = w.EventTarget.prototype.addEventListener;
           const tagName = getter(El.prototype, 'tagName');
@@ -177,16 +180,27 @@ internal object PointerLock {
             }
             return false;
           };
+          // Judge a batch of mutation records: release, or re-observe the
+          // (possibly changed) chain of trees.
+          const settle = (records) => {
+            if (!held(locked) || removedIn(records)) { release(); return; }
+            apply(moDisconnect, watcher, []);
+            observeChain();
+          };
           const watch = () => {
             if (!MO) return;
             unwatch();
-            watcher = new MO((records) => {
-              if (!locked) return;
-              if (!held(locked) || removedIn(records)) { release(); return; }
-              apply(moDisconnect, watcher, []);
-              observeChain();
-            });
+            watcher = new MO((records) => { if (locked) settle(records); });
             observeChain();
+          };
+          // Settle any records still queued for the observer, so a read in
+          // the same task as a move sees the release Chromium already made
+          // rather than waiting for the observer's microtask.
+          const flush = () => {
+            if (!locked || !watcher || typeof moTake !== 'function') return;
+            let records;
+            try { records = apply(moTake, watcher, []); } catch (e) { return; }
+            if (records.length) settle(records);
           };
           // The locked element as seen from [scope]: itself in its own tree,
           // the shadow host that contains it from outside, null elsewhere.
@@ -253,6 +267,7 @@ internal object PointerLock {
             __proto__: null,
             apply(target, self, args) {
               const native = apply(target, self, args);
+              flush();
               if (!locked) return native;
               if (!held(locked)) { release(); return native; }
               return retarget(self) || native;

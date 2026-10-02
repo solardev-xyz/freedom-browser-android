@@ -162,17 +162,22 @@ class PointerLockDeviceTest {
             c.requestPointerLock().then(function () {
               // An unrelated removal keeps it.
               sib.remove();
+              var syncKept = document.pointerLockElement === c;
               setTimeout(function () {
                 var kept = log.join();
-                // Removed and re-inserted in one task: Chromium releases.
+                // Removed and re-inserted in one task: Chromium releases,
+                // and a read in that same task already sees it.
                 other.appendChild(c);
+                var syncMoved = String(document.pointerLockElement);
                 setTimeout(function () {
                   var moved = log.join();
                   // And again by moving an ancestor rather than the element.
                   c.requestPointerLock().then(function () {
                     document.body.appendChild(other);
+                    var syncAncestor = String(document.pointerLockElement);
                     setTimeout(function () {
                       window.out = JSON.stringify({
+                        syncKept: syncKept, syncMoved: syncMoved, syncAncestor: syncAncestor,
                         kept: kept, moved: moved, ancestor: log.join(),
                         connected: c.isConnected, el: String(document.pointerLockElement),
                       });
@@ -184,6 +189,9 @@ class PointerLockDeviceTest {
             """,
         )
         assertEquals("change:c", r.getString("kept"))
+        assertTrue(r.getBoolean("syncKept"))
+        assertEquals("null", r.getString("syncMoved"))
+        assertEquals("null", r.getString("syncAncestor"))
         assertEquals("change:c,change:null", r.getString("moved"))
         assertEquals("change:c,change:null,change:c,change:null", r.getString("ancestor"))
         assertTrue(r.getBoolean("connected"))
