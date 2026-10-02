@@ -469,9 +469,10 @@ class SwarmNode internal constructor(
      * outside any [SpendGuard] permit, so nothing ant might try to send
      * meanwhile gets out. Returns `{"registered":[ids],"status":{…}}`.
      * ant's discover also sets up settlement, which adopts a chequebook
-     * this account already owns (a read, no transaction); the gateway is
-     * reloaded then, as after a buy, so the chequebook page (#117) sees
-     * it now. Settlement may also try to deploy a chequebook or (ant
+     * this account already owns (a read, no transaction), and (ant
+     * 0.5.52+) points the running gateway at it, so the chequebook page
+     * (#117) sees it now; [reloadGatewayForNewChequebook] is only a
+     * fallback for a gateway that still doesn't. Settlement may also try to deploy a chequebook or (ant
      * 0.5.51+) top up an adopted one's deposit: with no permit open,
      * [SpendGuard] refuses that broadcast, which is the "refused a
      * broadcast" log line a discover can leave behind.
@@ -496,15 +497,16 @@ class SwarmNode internal constructor(
                 SpendGuard.during(plan) { ops.storageBuyXdai(h, rpc, depth, amountPerChunk.toString(), immutable) }
             } finally {
                 // The first buy sets up the chequebook (deploys one, or adopts
-                // the one this account already owns), but the gateway only
-                // loads it when it starts — ant's contract is to restart the
-                // gateway then, or the chequebook (and a deposit into it,
-                // #117) waits for the next node restart. Also when the buy
-                // fails: it can set up the chequebook and then fail on the
-                // batch itself. Only then, though: a buy that failed before
-                // (no xDAI, another payment running) leaves ant with no
-                // chequebook, and restarting the gateway for it would only
-                // interrupt browsing.
+                // the one this account already owns). Since ant 0.5.52 the
+                // buy points the running gateway at it itself, so this finds
+                // the gateway already reporting it and does nothing; it stays
+                // as a fallback, should the gateway still report none while
+                // ant has one, so the chequebook (and a deposit into it,
+                // #117) doesn't wait for the next node restart. Also when the
+                // buy fails: it can set up the chequebook and then fail on
+                // the batch itself. A buy that failed before (no xDAI,
+                // another payment running) leaves ant with no chequebook,
+                // and nothing is reloaded.
                 reloadGatewayForNewChequebook(h)
             }
         }
@@ -534,8 +536,10 @@ class SwarmNode internal constructor(
      * bought for this node through SwarmNodeFunder (#115): ant checks on
      * chain that the node's account owns it and registers it, so the node
      * stamps with it. A first connect also sets up the chequebook, as a
-     * first buy does — the only transactions the permit lets out — and
-     * the gateway is reloaded to pick it up. Returns ant's storage status.
+     * first buy does — the only transactions the permit lets out — which
+     * (ant 0.5.52+) the running gateway picks up at once; the reload
+     * below is only a fallback for one that doesn't. Returns ant's
+     * storage status.
      */
     fun connectBatch(batchId: String): String {
         val id = normalizeBatchId(batchId) ?: throw IllegalArgumentException("not a batch id")
@@ -684,8 +688,8 @@ class SwarmNode internal constructor(
 
     /**
      * Whether ant has a chequebook set up for this account on this device
-     * (its persisted association, which the gateway reads only when it
-     * starts). If ant can't say, assume it may: a needless reload only
+     * (its persisted association; one ant's chain check disqualified reads
+     * as none). If ant can't say, assume it may: a needless reload only
      * interrupts browsing, a missing one strands the chequebook.
      */
     private fun antHasChequebook(h: Long): Boolean =
@@ -693,8 +697,13 @@ class SwarmNode internal constructor(
 
     /**
      * Reloads the gateway of [h] when ant has a chequebook set up that the
-     * gateway, which reads it only when it starts, doesn't report yet —
-     * after a buy or a discover may have set one up.
+     * gateway doesn't report yet — after a buy or a discover may have set
+     * one up. Since ant 0.5.52 (freedom-mobile-ffi v0.12.8) buy, connect
+     * and discover update the running gateway's chequebook themselves, so
+     * the gateway already reports it and this does nothing; it's kept as
+     * a fallback only. A restart would re-read the same slot (ant reloads
+     * the persisted chequebook and still refuses a disqualified one), so
+     * it can't bring back a chequebook ant has dropped.
      */
     private fun reloadGatewayForNewChequebook(h: Long) {
         if (antHasChequebook(h) && gatewayChequebook() == "") {
@@ -722,7 +731,7 @@ class SwarmNode internal constructor(
 
     /**
      * Stops and starts the gateway of [h] in [mode], so it loads what ant
-     * persisted meanwhile (a chequebook). Only while [h] is still the
+     * persisted meanwhile (a chequebook) — the fallback above. Only while [h] is still the
      * node's handle; a failure takes the node down into Error rather than
      * leaving it Running with no gateway.
      */

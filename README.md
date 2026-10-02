@@ -30,7 +30,7 @@ Building the embedded-node artifact (required — not checked in) additionally r
 
 | Component | Version | Notes |
 |---|---|---|
-| Rust | pinned by `rust-toolchain.toml` in freedom-mobile-ffi | Compiles `libfreedom_mobile_ffi.so` (ant + freedom-ipfs in one cdylib) — see [Building libfreedom_mobile_ffi.so](#building-libfreedom_mobile_ffiso). |
+| Rust | 1.99 at `FFI_REF` v0.12.9, pinned by `rust-toolchain.toml` in freedom-mobile-ffi (rustup installs it; release.yml and ffi-ref.yml install whatever channel that file names) | Compiles `libfreedom_mobile_ffi.so` (ant + freedom-ipfs in one cdylib) — see [Building libfreedom_mobile_ffi.so](#building-libfreedom_mobile_ffiso). |
 | cargo-ndk | 4.1.2 | `cargo install cargo-ndk --version 4.1.2 --locked` — the `CARGO_NDK_VERSION` release.yml pins (and keys its native-library cache on); used by freedom-mobile-ffi's `scripts/build-android.sh`. |
 | Android NDK | r27+ | Installed via `sdkmanager "ndk;27.2.12479018"` or similar. Also builds the JNI shims in `swarmnode/src/main/cpp/`. |
 
