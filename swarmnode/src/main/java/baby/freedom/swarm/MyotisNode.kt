@@ -123,7 +123,8 @@ class MyotisNode internal constructor(
         class Acquired(val network: MyotisNetwork, val token: Long, val result: Result<MyotisCheckpointRecord>) : Op
         class Retry(val network: MyotisNetwork) : Op
         class Repair(val network: MyotisNetwork) : Op
-        class Barrier(val done: CompletableDeferred<Unit>) : Op
+        /** Answers, from the queue, the chain stops still draining then ([awaitIdle]). */
+        class Barrier(val done: CompletableDeferred<List<Job>>) : Op
         class Stopped(val network: MyotisNetwork) : Op
     }
 
@@ -289,7 +290,7 @@ class MyotisNode internal constructor(
                             stopping.values.toList().forEach { it.join() }
                             done.complete(Unit)
                         }
-                        is Op.Barrier -> op.done.complete(Unit)
+                        is Op.Barrier -> op.done.complete(stopping.values.toList())
                         else -> Unit
                     }
                 }
@@ -390,10 +391,15 @@ class MyotisNode internal constructor(
     /** Wait until every op sent so far has run, and every chain's stop with it. Tests only. */
     internal suspend fun awaitIdle(stops: Boolean = true) {
         while (true) {
-            val done = CompletableDeferred<Unit>()
+            val done = CompletableDeferred<List<Job>>()
             ops.send(Op.Barrier(done))
-            done.await()
-            val pending = stopping.values.toList()
+            // The stops still draining, read on the queue, where [Op.Stopped]
+            // removes them. Read here, off it, the map could be caught
+            // mid-[Op.Stopped]: its entry already gone but the chain not
+            // booted yet (so this returned early), or the last entry going
+            // between toList()'s size() and its iterator's next()
+            // (NoSuchElementException, #394).
+            val pending = done.await()
             if (!stops || pending.isEmpty()) return
             pending.forEach { it.join() }
         }
