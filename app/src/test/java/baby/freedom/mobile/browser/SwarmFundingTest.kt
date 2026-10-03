@@ -20,6 +20,8 @@ import java.math.BigInteger
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -42,11 +44,31 @@ class SwarmFundingTest {
     private val connects: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
     private val payer = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
 
+    /**
+     * A dispatcher the test drives, on virtual time: a funding built with
+     * [driven] runs its collectors and lookups only in [settle] or
+     * [advance]. So "nothing more happens" is asserted after everything
+     * queued has run, not after a sleep that a loaded machine can outrun
+     * (#394), and a backoff is counted in exact virtual milliseconds.
+     */
+    private val scheduler = TestCoroutineScheduler()
+    private val driven = StandardTestDispatcher(scheduler)
+    private val virtualNow: () -> Long = { scheduler.currentTime }
+
+    /** Run everything the funding has queued, without moving the clock. */
+    private fun settle() = scheduler.runCurrent()
+
+    /** Move the virtual clock [ms] on, running everything due up to then. */
+    private fun advance(ms: Long) {
+        scheduler.advanceTimeBy(ms)
+        scheduler.runCurrent()
+    }
+
     /** The node's spend, idle: as the funding reads it, a [StateFlow][kotlinx.coroutines.flow.StateFlow]. */
     private fun idle() = kotlinx.coroutines.flow.MutableStateFlow<StampClient.Spend>(StampClient.Spend.Idle)
 
     private fun funding(file: File = File(tmp.root, "funding.json")) =
-        SwarmFunding(file, connect = { connects += it; true }, spends = idle())
+        SwarmFunding(file, connect = { connects += it; true }, spends = idle(), context = driven)
 
     private fun status(stage: SendStatus.Stage, l: SwarmFundLabel? = label): SendStatus {
         val gnosis = BuiltInChains.GNOSIS
@@ -139,24 +161,12 @@ class SwarmFundingTest {
         )
     }
 
-    /** Waits (bounded) for [f]'s background collectors to settle on [want]. */
-    private fun awaitPending(f: SwarmFunding, want: (SwarmFunding.Pending?) -> Boolean) {
-        val until = System.currentTimeMillis() + 5_000
-        while (!want(f.pending.value) && System.currentTimeMillis() < until) Thread.sleep(10)
-        assertTrue("pending was ${f.pending.value}", want(f.pending.value))
-    }
-
-    private fun awaitConnects(n: Int) {
-        val until = System.currentTimeMillis() + 5_000
-        while (synchronized(connects) { connects.size } < n && System.currentTimeMillis() < until) Thread.sleep(10)
-    }
-
     @Test
     fun `a send the wallet stopped following leaves a record offered for Connect and Dismiss, across restarts`() {
         val f = funding()
         // Stop tracking (or Remove wallet): the sender publishes null.
         f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
-        awaitPending(f) { it?.tracked == false }
+        settle()
         assertEquals(
             SwarmFunding.Pending(node, batch, 17, 2, hash, mined = false, tracked = false, from = payer, nonce = BigInteger.ONE),
             f.pending.value,
@@ -187,13 +197,14 @@ class SwarmFundingTest {
         // The sender's journal brought nothing back.
         val orphan = funding()
         orphan.start(emptyFlow()) { null }
-        awaitPending(orphan) { it?.tracked == false }
+        settle()
+        assertEquals(false, orphan.pending.value?.tracked)
 
         funding().noteSend(status(SendStatus.Stage.Pending))
         val followed = funding()
         assertTrue(followed.pending.value!!.tracked)
         followed.start(emptyFlow()) { status(SendStatus.Stage.Pending) }
-        Thread.sleep(200)
+        settle()
         assertTrue(followed.pending.value!!.tracked)
     }
 
@@ -227,7 +238,7 @@ class SwarmFundingTest {
         }
         return SwarmFunding(
             File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = idle(), chain = chain,
-            confirmAfterMs = 30_000, now = now,
+            confirmAfterMs = 30_000, now = now, context = driven,
         )
     }
 
@@ -423,32 +434,26 @@ class SwarmFundingTest {
         val chain = FakeChain()
         val f = SwarmFunding(
             File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = idle(), chain = chain,
-            checkEveryMs = 10, checkAtMostEveryMs = 60_000, confirmAfterMs = 10,
+            checkEveryMs = 10, checkAtMostEveryMs = 60_000, confirmAfterMs = 10, now = virtualNow, context = driven,
         )
-        val started = System.nanoTime()
         f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
-        awaitPending(f) { it?.tracked == false }
-        // Backing off from 10 ms (10, 20, 40, 80, 160, 320…): a handful of reads in 600 ms, not 60. Bounded by the
-        // time that really went by, which a loaded machine stretches past the 600 ms slept (#225 R5-F3).
-        Thread.sleep(600)
-        val backedOff = chain.reads
-        val elapsedMs = (System.nanoTime() - started) / 1_000_000
-        val atMost = 2 + (64 - java.lang.Long.numberOfLeadingZeros(elapsedMs / 10 + 1))
-        assertTrue("$backedOff reads in $elapsedMs ms (at most $atMost)", backedOff in 2..atMost)
+        settle()
+        assertEquals(false, f.pending.value?.tracked)
+        // Backing off from 10 ms: reads at 0, 10, 30, 70, 150 and 310 ms, six in 600 ms, not 60.
+        advance(600)
+        assertEquals(6, chain.reads)
 
-        // The nonce went elsewhere: confirmed at the next read, then nothing more is read.
+        // The nonce went elsewhere: seen at the next read (630 ms), confirmed one [confirmAfterMs] later, then nothing more is read.
         chain.minedCount = BigInteger.TWO
-        val until = System.currentTimeMillis() + 5_000
-        while (f.superseded.value == null && System.currentTimeMillis() < until) Thread.sleep(10)
+        advance(40)
         assertEquals(batch, f.superseded.value)
-        val reads = chain.reads
-        Thread.sleep(300)
-        assertEquals(reads, chain.reads)
+        assertEquals(8, chain.reads)
+        advance(600_000)
+        assertEquals(8, chain.reads)
         // A Connect still looks it up once.
         f.connectNow()
-        val until2 = System.currentTimeMillis() + 5_000
-        while (chain.reads == reads && System.currentTimeMillis() < until2) Thread.sleep(10)
-        assertEquals(reads + 1, chain.reads)
+        settle()
+        assertEquals(9, chain.reads)
         assertFalse(f.pending.value!!.mined)
     }
 
@@ -457,33 +462,33 @@ class SwarmFundingTest {
         val chain = FakeChain()
         val f = SwarmFunding(
             File(tmp.root, "funding.json"), connect = { connects += it; false }, spends = idle(), chain = chain,
-            checkEveryMs = 10, checkAtMostEveryMs = 40, confirmAfterMs = 10,
+            checkEveryMs = 10, checkAtMostEveryMs = 40, confirmAfterMs = 10, now = virtualNow, context = driven,
         )
         chain.minedCount = BigInteger.TWO
         f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
-        awaitPending(f) { it?.tracked == false }
-        val until = System.currentTimeMillis() + 5_000
-        while (f.superseded.value == null && System.currentTimeMillis() < until) Thread.sleep(10)
+        settle()
+        assertEquals(false, f.pending.value?.tracked)
+        // Seen superseded at 0 ms, confirmed at 10 ms: then no more reads.
+        advance(10)
         assertEquals(batch, f.superseded.value)
         val stopped = chain.reads
-        Thread.sleep(200)
+        advance(600_000)
         assertEquals(stopped, chain.reads)
 
         // A Connect (which fails: nothing changes in the record) reads at a height where the nonce isn't used yet.
         chain.minedCount = BigInteger.ONE
         f.connectNow()
-        val until2 = System.currentTimeMillis() + 5_000
-        while (f.superseded.value != null && System.currentTimeMillis() < until2) Thread.sleep(10)
+        settle()
         assertNull(f.superseded.value)
         // No longer certain it can never land: the app keeps checking, as the card says, and connects it once mined.
         val withdrawn = chain.reads
-        val until3 = System.currentTimeMillis() + 5_000
-        while (chain.reads < withdrawn + 2 && System.currentTimeMillis() < until3) Thread.sleep(10)
-        assertTrue("${chain.reads - withdrawn} reads", chain.reads >= withdrawn + 2)
+        advance(30)
+        assertEquals(withdrawn + 2, chain.reads)
         chain.receipt = receipt("0x1")
         chain.minedCount = BigInteger.TWO
-        awaitPending(f) { it?.mined == true }
-        awaitConnects(2)
+        advance(40)
+        assertEquals(true, f.pending.value?.mined)
+        // The Connect's, then the mined record's own (refused, so owed and retried as the node frees).
         assertTrue(connects.size >= 2)
         assertEquals(batch, connects.last())
     }
@@ -491,19 +496,23 @@ class SwarmFundingTest {
     @Test
     fun `once the wallet stops following the call, it's looked up on chain until it's mined`() {
         val chain = FakeChain()
-        val f = SwarmFunding(File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = idle(), chain = chain, checkEveryMs = 20)
+        val f = SwarmFunding(
+            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = idle(), chain = chain, checkEveryMs = 20,
+            now = virtualNow, context = driven,
+        )
         f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
-        awaitPending(f) { it?.tracked == false }
-        val until = System.currentTimeMillis() + 5_000
-        while (chain.reads < 2 && System.currentTimeMillis() < until) Thread.sleep(10)
-        assertTrue(chain.reads >= 2)
+        settle()
+        assertEquals(false, f.pending.value?.tracked)
+        // Reads at 0 and 20 ms.
+        advance(20)
+        assertEquals(2, chain.reads)
         chain.receipt = receipt("0x1")
-        awaitPending(f) { it?.mined == true }
-        // The connect follows the record's update, on the loop's own thread.
-        awaitConnects(1)
+        // The next, at 60 ms, finds it mined; the connect follows the record's update, on the loop's own thread.
+        advance(40)
+        assertEquals(true, f.pending.value?.mined)
         assertEquals(listOf(batch), connects)
         val reads = chain.reads
-        Thread.sleep(200)
+        advance(600_000)
         assertEquals(reads, chain.reads)
     }
 
@@ -511,7 +520,7 @@ class SwarmFundingTest {
     private fun busyFunding(free: kotlinx.coroutines.flow.MutableStateFlow<Boolean>, chain: FakeChain? = null) =
         SwarmFunding(
             File(tmp.root, "funding.json"), connect = { if (free.value) { connects += it; true } else false },
-            spends = idle(), chain = chain, confirmAfterMs = 30_000, now = { 0L }, connectFree = free,
+            spends = idle(), chain = chain, confirmAfterMs = 30_000, now = { 0L }, connectFree = free, context = driven,
         )
 
     @Test
@@ -519,6 +528,7 @@ class SwarmFundingTest {
         val free = kotlinx.coroutines.flow.MutableStateFlow(false)
         val f = busyFunding(free)
         f.start(emptyFlow())
+        settle()
         f.noteSend(status(SendStatus.Stage.Pending))
         // Mined during a publish's upload: the connect is refused, and owed.
         f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
@@ -531,12 +541,13 @@ class SwarmFundingTest {
 
         // The upload ends: connected, once.
         free.value = true
-        awaitConnects(1)
+        settle()
         assertEquals(listOf(batch), connects)
         assertNull(f.connectOwed.value)
         free.value = false
+        settle()
         free.value = true
-        Thread.sleep(100)
+        settle()
         assertEquals(1, connects.size)
         // Not owed any more (it ran; had it failed, the card offers Connect): no promise of connecting it.
         val waiting = pendingStampText(f.pending.value!!, light, StampClient.Spend.Idle, superseded = false, owed = false)
@@ -548,13 +559,14 @@ class SwarmFundingTest {
         val free = kotlinx.coroutines.flow.MutableStateFlow(false)
         val f = busyFunding(free)
         f.start(emptyFlow())
+        settle()
         f.noteSend(status(SendStatus.Stage.Pending))
         f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
         assertEquals(batch, f.connectOwed.value)
         f.forget()
         assertNull(f.connectOwed.value)
         free.value = true
-        Thread.sleep(100)
+        settle()
         assertTrue(connects.isEmpty())
     }
 
@@ -575,9 +587,10 @@ class SwarmFundingTest {
                     false
                 }
             },
-            spends = idle(), now = { 0L }, connectFree = free,
+            spends = idle(), now = { 0L }, connectFree = free, context = driven,
         )
         f.start(emptyFlow())
+        settle()
 
         // Dismissed: no record, nothing owed.
         onRefused = { f.forget() }
@@ -595,7 +608,7 @@ class SwarmFundingTest {
         f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
         assertEquals(listOf(batch), connects)
         assertNull(f.connectOwed.value)
-        Thread.sleep(100)
+        settle()
         assertEquals(1, connects.size)
     }
 
@@ -608,10 +621,19 @@ class SwarmFundingTest {
         }
         val free = kotlinx.coroutines.flow.MutableStateFlow(true)
         val spends = kotlinx.coroutines.flow.MutableStateFlow<StampClient.Spend>(StampClient.Spend.Idle)
+        val failed = StampClient.Spend.Failed(StampClient.Kind.Connect, batch, "batch not found")
+        // Set while the user's connect runs: it fails, freeing the node, just as the next connect is
+        // asked for — the moment between the record being marked mined and the app's own ask (#394).
+        var failsOnNextAsk = false
         // As StampClient does: a started connect holds the node until it ends.
         val f = SwarmFunding(
             File(tmp.root, "funding.json"),
             connect = {
+                if (failsOnNextAsk) {
+                    failsOnNextAsk = false
+                    spends.value = failed
+                    free.value = true
+                }
                 if (free.value) {
                     connects += it
                     free.value = false
@@ -621,21 +643,25 @@ class SwarmFundingTest {
                     false
                 }
             },
-            spends = spends, chain = chain, confirmAfterMs = 30_000, now = { 0L }, connectFree = free,
+            spends = spends, chain = chain, confirmAfterMs = 30_000, now = { 0L }, connectFree = free, context = driven,
         )
         f.start(emptyFlow())
-        // The user's Connect starts (ticket 1); the chain then shows the call mined, and the
-        // app's own connect (ticket 2) is refused because ticket 1 runs: nothing is owed.
+        settle()
+        // The user's Connect starts (ticket 1); the chain then shows the call mined while it
+        // runs. That connect is the batch's: the app asks for no second one, even with ticket 1
+        // failing the moment it would have asked, so nothing is owed either.
         assertTrue(f.connectNow())
+        failsOnNextAsk = true
         chain.receipt = receipt("0x1")
         chain.minedCount = BigInteger.TWO
         runBlocking { f.checkChain() }
         assertTrue(f.pending.value!!.mined)
         assertNull(f.connectOwed.value)
-        // The first connect fails: the card's Connect is offered, no automatic retry.
-        spends.value = StampClient.Spend.Failed(StampClient.Kind.Connect, batch, "batch not found")
+        // The first connect fails (if it didn't already): the card's Connect is offered, no automatic retry.
+        failsOnNextAsk = false
+        spends.value = failed
         free.value = true
-        Thread.sleep(100)
+        settle()
         assertEquals(listOf(batch), connects)
         assertNull(f.connectOwed.value)
 
@@ -667,9 +693,10 @@ class SwarmFundingTest {
                     false
                 }
             },
-            spends = spends, now = { 0L }, connectFree = free,
+            spends = spends, now = { 0L }, connectFree = free, context = driven,
         )
         f.start(emptyFlow())
+        settle()
         f.noteSend(status(SendStatus.Stage.Pending))
         f.noteSend(status(SendStatus.Stage.Unconfirmed))
         f.untrack()
@@ -680,7 +707,7 @@ class SwarmFundingTest {
         assertTrue(f.pending.value!!.mined)
         assertEquals(batch, f.connectOwed.value)
         free.value = true
-        awaitConnects(2)
+        settle()
         assertEquals(listOf(batch, batch), connects)
     }
 
@@ -701,7 +728,7 @@ class SwarmFundingTest {
         assertTrue(connects.isEmpty())
         assertEquals(batch, f.connectOwed.value)
         free.value = true
-        awaitConnects(1)
+        settle()
         assertEquals(listOf(batch), connects)
     }
 

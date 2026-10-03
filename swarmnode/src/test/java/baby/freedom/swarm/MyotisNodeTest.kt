@@ -42,8 +42,20 @@ class MyotisNodeTest {
         }
         /** A stop of a handle in here blocks until its latch opens. */
         val stopGates = java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.CountDownLatch>()
+        private val stopsEntered = java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.CountDownLatch>()
+        private fun entered(handle: Long) = stopsEntered.computeIfAbsent(handle) { java.util.concurrent.CountDownLatch(1) }
+
+        /**
+         * Wait for [handle]'s stop to be called: a chain's stop runs on its
+         * own coroutine, off the queue, so the queue going idle doesn't mean
+         * it has started yet (#394).
+         */
+        fun awaitStopCalled(handle: Long) =
+            assertTrue("stop $handle not called", entered(handle).await(5, java.util.concurrent.TimeUnit.SECONDS))
+
         override fun stop(handle: Long) {
             calls += "stop $handle"
+            entered(handle).countDown()
             stopGates[handle]?.let { gate ->
                 gate.await()
                 calls += "stopped $handle"
@@ -835,7 +847,7 @@ class MyotisNodeTest {
         engine.status[2L] = readyJson
         node.pollNow()
         runBlocking { withTimeout(5_000) { node.awaitIdle(stops = false) } }
-        assertTrue("stop 1" in engine.calls)
+        engine.awaitStopCalled(1L)
         assertTrue("stopped 1" !in engine.calls)
         assertEquals(true, node.state.value.chain(MyotisNetwork.Gnosis)?.ready)
         node.enterBackground()
