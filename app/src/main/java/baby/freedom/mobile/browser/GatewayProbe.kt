@@ -44,7 +44,7 @@ class GatewayProbe {
         /** Overall timeout elapsed without a 200 response. */
         data object NotFound : Outcome
 
-        /** HEAD returned some status other than 200/404/500. */
+        /** HEAD returned some status other than 200, 404 or a [TRANSIENT_5XX] one. */
         data class Other(val status: Int) : Outcome
 
         /** Coroutine was cancelled. */
@@ -91,7 +91,8 @@ class GatewayProbe {
             when (attemptResult) {
                 is AttemptResult.Ok -> return Outcome.Ok
                 is AttemptResult.TransientHttp -> {
-                    // 404/500 — keep polling until the overall budget runs out.
+                    // 404 or a transient 5xx — keep polling until the
+                    // overall budget runs out.
                 }
                 is AttemptResult.TransientTimeout -> {
                     Log.i(TAG, "attempt timed out (${attemptTimeoutMs}ms), retrying")
@@ -147,7 +148,7 @@ class GatewayProbe {
                     try {
                         when (val status = conn.responseCode) {
                             200 -> AttemptResult.Ok
-                            404, 500 -> AttemptResult.TransientHttp
+                            404, in TRANSIENT_5XX -> AttemptResult.TransientHttp
                             else -> AttemptResult.Other(status)
                         }
                     } finally {
@@ -176,6 +177,18 @@ class GatewayProbe {
 
     companion object {
         private const val TAG = "GatewayProbe"
+
+        /**
+         * 5xx statuses that mean "not yet", polled through like a 404.
+         * Ant v0.5.56 (freedom-hq/ant#124) answers 503 when its peers
+         * can't serve a chunk yet (a cold node right after start, or a
+         * miss from a starved peer pool); earlier releases answered 404,
+         * 500 or 502 there. Same set as `TRANSIENT_STATUSES` in
+         * BrowserWebView.kt and `RETRYABLE_STATUSES` in the desktop's
+         * `bzz-protocol.js`, and as `swarm-probe.js` since
+         * freedom-browser#489.
+         */
+        internal val TRANSIENT_5XX: Set<Int> = setOf(500, 502, 503, 504)
 
         /**
          * Default back-off schedule between HEAD attempts. First entry is

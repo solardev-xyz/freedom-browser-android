@@ -3975,8 +3975,9 @@ private fun buildRefreshableWebView(
                 if (!isDwebPageUrl(failed)) return
 
                 val status = errorResponse?.statusCode ?: 0
-                // The probe already waited out transient 404/500s — if we
-                // got one here, the gateway answered but the content
+                // The probe already waited out transient 404s and 5xx
+                // ([GatewayProbe.TRANSIENT_5XX]) — if we got one here,
+                // the gateway answered but the content
                 // genuinely isn't available (misspelled hash, etc). A
                 // synthesized 502 is the interceptor telling us the
                 // gateway socket itself is gone (node not running).
