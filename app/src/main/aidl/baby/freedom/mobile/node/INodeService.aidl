@@ -167,4 +167,13 @@ interface INodeService {
 
     /** Forget every node's kept log lines (#276): Clear cookies & site data. */
     oneway void clearLogs();
+
+    /**
+     * The *Colibri proofs* switch (Settings → Name resolution, #329),
+     * which also decides whether the chain-data router's Gnosis reads for
+     * the Swarm node go to the Colibri prover. The setting lives in the UI
+     * process's DataStore, so the UI relays it on every bind and change
+     * (ColibriReads); oneway, so they arrive in the order sent.
+     */
+    oneway void setColibriReads(boolean on);
 }

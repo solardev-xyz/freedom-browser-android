@@ -38,6 +38,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -63,6 +64,7 @@ import baby.freedom.mobile.chains.rpc.ChainAccessPolicy
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.ChainSource
+import baby.freedom.mobile.chains.rpc.ProofTierGap
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.data.ChainStore
@@ -72,6 +74,7 @@ import baby.freedom.mobile.l10n.pluralText
 import java.io.IOException
 import java.text.NumberFormat
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /*
@@ -226,6 +229,36 @@ internal fun readSteps(chain: Chain, policy: ChainAccessPolicy, wired: (ChainSou
         }
     }
 }
+
+/** How often the chain page re-reads [proofTierGaps] while it's open. */
+private const val PROOF_TIER_REFRESH_MS = 1_000L
+
+/** Why each proof tier isn't answering [chainId]'s reads right now; absent when it is. */
+internal fun proofTierGaps(router: ChainDataRouter, chainId: Long): Map<ChainSource, ProofTierGap> =
+    listOf(ChainSource.MYOTIS, ChainSource.COLIBRI)
+        .mapNotNull { source -> router.gap(source, chainId)?.let { source to it } }
+        .toMap()
+
+/**
+ * A line for each proof tier that covers [chain] but isn't answering its
+ * reads right now ([gaps]), saying why — so a tier missing from the read
+ * steps is never missing without a word.
+ */
+internal fun proofTierNotes(chain: Chain, gaps: Map<ChainSource, ProofTierGap>): List<String> =
+    listOf(ChainSource.MYOTIS, ChainSource.COLIBRI).mapNotNull { source ->
+        val res = when (gaps[source]) {
+            null, ProofTierGap.NOT_SERVED -> return@mapNotNull null
+            ProofTierGap.NOT_IN_BUILD ->
+                if (source == ChainSource.MYOTIS) R.string.names_light_client_tier_not_in_build else R.string.names_colibri_tier_not_in_build
+            ProofTierGap.OFF ->
+                if (source == ChainSource.MYOTIS) R.string.names_proof_tiers_missing else R.string.names_colibri_tier_off
+            ProofTierGap.UNREACHABLE ->
+                if (source == ChainSource.MYOTIS) R.string.names_proof_tiers_missing else R.string.names_colibri_tier_unreachable
+            ProofTierGap.NOT_READY ->
+                if (source == ChainSource.MYOTIS) R.string.names_proof_tiers_missing else R.string.names_colibri_tier_unreachable
+        }
+        Strings.get(res, chain.name)
+    }
 
 /** How a read was checked, in a line: who agreed, who didn't. Hosts only. */
 internal fun trustSummary(trust: ChainTrust): String {
@@ -440,17 +473,31 @@ internal fun ChainDetailPage(
                 }
             }
             SectionCard(title = stringResource(R.string.names_how_reads_are_checked)) {
-                val steps = readSteps(chain, router.policy(chain)) { router.isWired(it, chain.id) }
+                // Whether each proof tier answers lives outside Compose —
+                // the light client's published readiness, Colibri's switch
+                // and back-off (which ends on a clock) — so it's re-read
+                // while the page is open, and a change redraws the list.
+                val gaps by produceState(proofTierGaps(router, chain.id), router, chain.id) {
+                    while (true) {
+                        value = proofTierGaps(router, chain.id)
+                        delay(PROOF_TIER_REFRESH_MS)
+                    }
+                }
+                val steps = readSteps(chain, router.policy(chain)) { source ->
+                    when (source) {
+                        ChainSource.MYOTIS, ChainSource.COLIBRI -> gaps[source] == null
+                        ChainSource.QUORUM, ChainSource.DIRECT -> true
+                    }
+                }
                 steps.forEachIndexed { i, step ->
                     Text(stringResource(R.string.names_read_step_numbered, i + 1, step), style = MaterialTheme.typography.bodyMedium)
                 }
-                if (chain.id in ChainAccessPolicy.LIGHT_CLIENT_CHAIN_IDS &&
-                    !router.isWired(ChainSource.MYOTIS, chain.id)
-                ) {
+                for (note in proofTierNotes(chain, gaps)) {
                     Text(
-                        stringResource(R.string.names_proof_tiers_missing, chain.name),
+                        note,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
                     )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {

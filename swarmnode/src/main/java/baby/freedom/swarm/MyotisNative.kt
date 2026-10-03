@@ -4,8 +4,10 @@ package baby.freedom.swarm
  * Raw JNI surface over the embedded Myotis Ethereum light client (the
  * `myotis_*` C ABI inside `libfreedom_mobile_ffi.so`), bridged by the
  * shim in `src/main/cpp/myotis_jni.c`. The node lifecycle (and
- * checkpoint recovery's create) is bridged, plus one verified read,
- * [ethCall] (name resolution, #101); see [MyotisNode] for the wrapper the app uses.
+ * checkpoint recovery's create) is bridged, plus the verified reads the
+ * app asks: [ethCall] (name resolution, #101) and the chain-data router's
+ * account, code, call, receipt and block reads (#329); see [MyotisNode]
+ * for the wrapper the app uses.
  *
  * Handles are the engine's own `int64` ids (>= 1). Failures are the
  * engine's sentinels, not exceptions: a negative id from [create],
@@ -84,4 +86,32 @@ internal object MyotisNative {
      * Blocks for up to the engine's ~90 s budget.
      */
     external fun ethCall(handle: Long, to: String, data: String, block: String): ByteArray?
+
+    /**
+     * `myotis_request_account_json`: [address]'s account proven at [block]
+     * (`latest` = the verified head) — `nonce` (-1 when the account
+     * doesn't exist), `balanceWei` (decimal, null when it doesn't),
+     * `blockNumber`, and `failReason` set when the proof couldn't be
+     * anchored to the beacon chain; `{"error"}` when it can't read now.
+     */
+    external fun requestAccount(handle: Long, address: String, block: String): ByteArray?
+
+    /** `myotis_get_code_json`: `codeHex`, `exists`, `blockNumber`, `failReason`, as [requestAccount]. */
+    external fun getCode(handle: Long, address: String, block: String): ByteArray?
+
+    /**
+     * `myotis_eth_call_json` with a caller: [from] (`""` = anonymous),
+     * [value] in wei as a decimal string. Same answers as [ethCall].
+     */
+    external fun ethCallFrom(handle: Long, from: String, to: String, data: String, value: String, block: String): ByteArray?
+
+    /**
+     * `myotis_get_transaction_receipt_json`: the receipt, the literal
+     * `null` when the transaction wasn't seen in the window the engine
+     * scanned (not proof it doesn't exist), or `{"error"}`.
+     */
+    external fun transactionReceipt(handle: Long, txHash: String): ByteArray?
+
+    /** `myotis_get_block_by_number_json`: the block at [tag] (`latest`, `0x…`), `null`, or `{"error"}`. */
+    external fun blockByNumber(handle: Long, tag: String, fullTransactions: Boolean): ByteArray?
 }

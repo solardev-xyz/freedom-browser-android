@@ -5,9 +5,11 @@ import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainAccessPolicy
 import baby.freedom.mobile.chains.rpc.ChainSource
 import baby.freedom.mobile.chains.rpc.ChainTrust
+import baby.freedom.mobile.chains.rpc.ProofTierGap
 import baby.freedom.mobile.data.ChainStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** The chain page's wording (#108): read steps, trust lines, add errors. */
@@ -132,5 +134,32 @@ class ChainDetailPageTest {
         for (r in ChainStore.RpcAddResult.entries - ChainStore.RpcAddResult.ADDED) {
             assert(!userRpcAddError(r).isNullOrBlank()) { r }
         }
+    }
+
+    @Test
+    fun eachProofTierThatIsntAnsweringSaysWhy() {
+        val gnosis = BuiltInChains.GNOSIS
+        // Both answering: nothing to explain.
+        assertEquals(emptyList<String>(), proofTierNotes(gnosis, emptyMap()))
+        // Light client syncing, Colibri answering: one note, the light client's.
+        val syncing = proofTierNotes(gnosis, mapOf(ChainSource.MYOTIS to ProofTierGap.NOT_READY))
+        assertEquals(1, syncing.size)
+        assertTrue(syncing[0].contains("P2P light client"))
+        // Colibri missing from the steps is never silent, whatever the cause.
+        for ((gap, words) in listOf(
+            ProofTierGap.OFF to "Colibri proofs are off",
+            ProofTierGap.UNREACHABLE to "couldn't be reached",
+            ProofTierGap.NOT_IN_BUILD to "isn't available in this build",
+        )) {
+            val notes = proofTierNotes(gnosis, mapOf(ChainSource.MYOTIS to ProofTierGap.NOT_READY, ChainSource.COLIBRI to gap))
+            assertEquals(2, notes.size)
+            assertTrue("$gap: ${notes[1]}", notes[1].contains("Colibri") && notes[1].contains(words) && notes[1].contains("Gnosis"))
+        }
+        // A chain neither covers: no notes.
+        val polygon = gnosis.copy(id = 137, name = "Polygon")
+        assertEquals(
+            emptyList<String>(),
+            proofTierNotes(polygon, mapOf(ChainSource.MYOTIS to ProofTierGap.NOT_SERVED, ChainSource.COLIBRI to ProofTierGap.NOT_SERVED)),
+        )
     }
 }
