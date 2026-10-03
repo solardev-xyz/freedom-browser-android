@@ -108,9 +108,6 @@ class SwarmNodeTest {
         /** Run inside each spend, in place of ant's transactions. */
         @Volatile var onSpend: (String) -> String = { it }
         override fun storageStatus(handle: Long) = storageStatusJson
-        /** What [settlementStatus] answers: whether ant has set up a chequebook. */
-        @Volatile var settlementJson = """{"enabled":true,"chequebook":"0x${"cb".repeat(20)}"}"""
-        override fun settlementStatus(handle: Long) = settlementJson
         override fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String {
             calls += "quote:$handle:$gnosisRpc:$depth:$days"
             return """{"depth":$depth}"""
@@ -261,17 +258,13 @@ class SwarmNodeTest {
     }
 
     @Test
-    fun aStopRefusesChainReadsWhileTheGatewayStopsAndShutsDownAndAReloadDoesnt() {
+    fun aStopRefusesChainReadsWhileTheGatewayStopsAndShutsDown() {
         // #300 R2-M1: a read coming in during the stop would hold ant's
         // stopGateway/shutdown for the reader's whole deadline.
         AntChainTransport.install({ """{"result":"0x1"}""" })
         try {
             val ops = FakeOps()
             val node = lightNode(ops)
-            // A reload after a buy: other storage calls may be reading, so reads are served.
-            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
-            assertEquals(listOf("""{"result":"0x1"}"""), ops.readsWhileStopping.toList())
-            ops.readsWhileStopping.clear()
             node.stop()
             assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
             assertEquals(2, ops.readsWhileStopping.size)
@@ -544,27 +537,16 @@ class SwarmNodeTest {
     }
 
     @Test
-    fun findingOwnedStampsThatAdoptsAChequebookReloadsTheGatewayAndOtherwiseLeavesItAlone() {
+    fun findingOwnedStampsThatAdoptsAChequebookLeavesTheGatewayRunningAndItSeesTheChequebook() {
         val ops = FakeOps()
         val node = lightNode(ops)
-        fun reloads() = ops.calls.count { it.startsWith("stopGateway:") }
-        // ant had no chequebook and the discover set none up: no reload.
-        ops.settlementJson = """{"enabled":false}"""
+        // The discover adopted the account's own chequebook and (ant 0.5.52+)
+        // pointed the running gateway at it: no restart, and the chequebook
+        // page's read — and a deposit — find it on the same gateway.
+        ops.onDiscover = { ops.chequebookHex = chequebook }
         node.discoverStamps()
-        assertEquals(0, reloads())
-        // The discover adopted the account's own chequebook, which the
-        // gateway reads only when it starts: reload it, in the same mode.
-        ops.onDiscover = { ops.settlementJson = """{"enabled":true,"chequebook":"0x${"cb".repeat(20)}"}""" }
-        node.discoverStamps()
-        assertEquals(1, reloads())
-        assertEquals(listOf("light:https://rpc.example/key123", "light:https://rpc.example/key123"), ops.gatewayModes)
-        // The reload keeps the gateway's CORS allow-list empty, as the first start set it (#284).
-        assertEquals(listOf(emptyList<String>(), emptyList()), ops.gatewayCors.toList())
-        assertEquals(NodeStatus.Running, node.state.value.status)
-        // The gateway already reports it: no further reload.
-        ops.chequebookHex = chequebook
-        node.discoverStamps()
-        assertEquals(1, reloads())
+        assertNoGatewayRestart(ops)
+        assertGatewaySeesChequebook(ops, node)
         node.dispose()
     }
 
@@ -729,7 +711,7 @@ class SwarmNodeTest {
     }
 
     @Test
-    fun connectingABatchLetsOutOnlyTheChequebookSetupAndReloadsTheGatewayForIt() {
+    fun connectingABatchLetsOutOnlyTheChequebookSetupAndLeavesTheGatewayRunning() {
         // #115: the wallet bought the batch; ant connects it, and a first connect
         // sets up the chequebook — nothing else may get out meanwhile.
         val ops = FakeOps()
@@ -741,6 +723,8 @@ class SwarmNodeTest {
             verdicts += SpendGuard.admit(TestTx.request(TestTx.swap(java.math.BigInteger.ONE)))
             verdicts += SpendGuard.admit(TestTx.request(TestTx.deployChequebook()))
             verdicts += SpendGuard.admit(TestTx.request(TestTx.transfer("cc".repeat(20), milliBzz)))
+            // ant (0.5.52+) points the running gateway at the chequebook it set up.
+            ops.chequebookHex = chequebook
             """{"enabled":true}"""
         }
         assertThrows(IllegalArgumentException::class.java) { node.connectBatch("0x1234") }
@@ -748,33 +732,47 @@ class SwarmNodeTest {
         assertEquals(listOf(false, false, true, true), verdicts)
         assertTrue("connect:1:0x$id" in ops.calls)
         assertFalse(SpendGuard.admit(TestTx.request(TestTx.deployChequebook())))
-        // ant set up a chequebook the gateway didn't load at start: reload it.
-        val after = ops.calls.dropWhile { !it.startsWith("connect:") }
-        assertEquals(listOf("stopGateway:1", "gateway:1"), after.filter { it.startsWith("stopGateway:") || it.startsWith("gateway:") && !it.startsWith("gateway:GET") })
+        // The chequebook it set up is on the running gateway: no restart.
+        assertNoGatewayRestart(ops)
+        assertGatewaySeesChequebook(ops, node)
         node.dispose()
     }
 
     @Test
-    fun aBuyThatLeavesTheGatewayWithoutAChequebookReloadsItAndOneWithAChequebookDoesnt() {
+    fun aBuyThatSetsUpTheChequebookLeavesTheGatewayRunningAndItSeesTheChequebook() {
         val ops = FakeOps()
         val node = lightNode(ops)
-        // The gateway loaded no chequebook at start, and still reports none
-        // after the buy set one up (it reads it only when it starts): reload
-        // it, in the same mode, on the same node.
+        // The first buy deploys the chequebook and (ant 0.5.52+) points the
+        // running gateway at it: no stop and start of the gateway, and
+        // settlement's reads — the chequebook page's, a deposit's — see it.
+        ops.onSpend = { ops.chequebookHex = chequebook; it }
         node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
-        val afterBuy = ops.calls.dropWhile { !it.startsWith("buy:") }
-        assertEquals(
-            listOf("stopGateway:1", "gateway:1"),
-            afterBuy.filter { it.startsWith("stopGateway:") || it.startsWith("gateway:") && !it.startsWith("gateway:GET") },
-        )
-        assertEquals(listOf("light:https://rpc.example/key123", "light:https://rpc.example/key123"), ops.gatewayModes)
-        assertEquals(NodeStatus.Running, node.state.value.status)
+        assertNoGatewayRestart(ops)
+        assertGatewaySeesChequebook(ops, node)
 
-        // Already reporting one: no reload.
-        ops.chequebookHex = chequebook
+        // A buy that sets up none (or one the gateway doesn't report)
+        // doesn't restart the gateway either: nothing reads ant's
+        // settlement to second-guess it any more.
+        ops.chequebookHex = "0".repeat(40)
+        ops.onSpend = { it }
         node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
-        assertEquals(2, ops.gatewayModes.size)
+        assertNoGatewayRestart(ops)
         node.dispose()
+    }
+
+    /** The node's gateway was started once, at boot, and never stopped or started again. */
+    private fun assertNoGatewayRestart(ops: FakeOps) {
+        assertEquals(ops.calls.toString(), 0, ops.calls.count { it.startsWith("stopGateway:") })
+        assertEquals(ops.calls.toString(), listOf("gateway:1"), ops.calls.filter { it.startsWith("gateway:") && !it.startsWith("gateway:GET") && !it.startsWith("gateway:POST") })
+        assertEquals(1, ops.gatewayModes.size)
+    }
+
+    /** A deposit into [chequebook] — which reads the gateway's chequebook — goes ahead on the running node. */
+    private fun assertGatewaySeesChequebook(ops: FakeOps, node: SwarmNode) {
+        assertEquals(NodeStatus.Running, node.state.value.status)
+        ops.walletPlur = milliBzz.toString()
+        assertTrue(node.depositChequebook(chequebook, milliBzz).contains("transactionHash"))
+        assertTrue(ops.calls.contains("gateway:POST /chequebook/deposit?amount=$milliBzz"))
     }
 
     @Test
@@ -955,8 +953,7 @@ class SwarmNodeTest {
     fun aBuyThatFailsBeforeAntSetUpAChequebookLeavesTheGatewayAlone() {
         val ops = FakeOps()
         val node = lightNode(ops)
-        // Refused before anything went on-chain (no xDAI): ant has no chequebook.
-        ops.settlementJson = """{"enabled":false,"chequebook":null}"""
+        // Refused before anything went on-chain (no xDAI).
         ops.onSpend = { throw RuntimeException("insufficient xDAI") }
         assertThrows(RuntimeException::class.java) {
             node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
@@ -1022,50 +1019,19 @@ class SwarmNodeTest {
     }
 
     @Test
-    fun aBuyThatFailsAfterSettingUpTheChequebookStillReloadsTheGateway() {
+    fun aBuyWhoseBatchRevertsSetsUpNoChequebookAndLeavesTheGatewayRunning() {
         val ops = FakeOps()
         val node = lightNode(ops)
+        // ant (v0.5.56) sets up the chequebook only after createBatch and
+        // register_batch succeed, so a reverted batch leaves none behind.
+        val before = ops.chequebookHex
         ops.onSpend = { throw RuntimeException("createBatch reverted") }
         assertThrows(RuntimeException::class.java) {
             node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
         }
-        assertEquals(listOf("light:https://rpc.example/key123", "light:https://rpc.example/key123"), ops.gatewayModes)
+        assertEquals(before, ops.chequebookHex)
+        assertNoGatewayRestart(ops)
         assertEquals(NodeStatus.Running, node.state.value.status)
-        node.dispose()
-    }
-
-    @Test
-    fun aSearchWhoseGatewayReloadFailsSaysSoWithoutClaimingAPurchase() {
-        val ops = FakeOps()
-        ops.gatewayStartsLeft = 1 // the boot's start succeeds, the reload's fails
-        val node = lightNode(ops)
-        ops.onDiscover = { ops.settlementJson = """{"enabled":true,"chequebook":"0x${"cb".repeat(20)}"}""" }
-        node.discoverStamps()
-        assertEquals(NodeStatus.Error, node.state.value.status)
-        assertEquals(SwarmNode.GATEWAY_RELOAD_FAILED, node.state.value.errorMessage)
-        node.dispose()
-    }
-
-    @Test
-    fun aGatewayThatDoesntComeBackTakesTheNodeDownIntoError() {
-        val ops = FakeOps()
-        ops.gatewayStartsLeft = 1 // the boot's start succeeds, the reload's fails
-        val node = lightNode(ops)
-        node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
-        assertEquals(NodeStatus.Error, node.state.value.status)
-        assertEquals(SwarmNode.GATEWAY_RELOAD_FAILED, node.state.value.errorMessage)
-        assertFalse(SwarmNode.GATEWAY_RELOAD_FAILED.contains("purchase"))
-        // The handle is shut down (once the buy let go of it), not left live.
-        assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
-        assertTrue(ops.calls.contains("shutdown:1"))
-        assertThrows(IllegalStateException::class.java) { node.storageStatus() }
-        // A start from Error brings up a fresh node after that shutdown.
-        ops.gatewayStartsLeft = Int.MAX_VALUE
-        node.start()
-        awaitStatus(node, NodeStatus.Running)
-        val shutdownAt = ops.calls.indexOf("shutdown:1")
-        val initAt = ops.calls.indexOfFirst { it.startsWith("init") && it != "init:1" && it != "initWithIdentity:1" }
-        assertTrue(ops.calls.toString(), initAt > shutdownAt)
         node.dispose()
     }
 }

@@ -651,7 +651,8 @@ internal fun PendingStampCard(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = onConnect,
-                    // Not over a search or an upload: a connect may reload the gateway.
+                    // Not over a search or an upload: the #222 publish/stamp lock, kept from
+                    // when a connect could reload the gateway (it no longer does, ant 0.5.52+).
                     enabled = StampClient.canRestartGateway(spend, discovery, publishing) &&
                         !otherNode && stampSpendBlockedReason(nodeInfo) == null,
                 ) { Text(stringResource(R.string.stamps_connect)) }
