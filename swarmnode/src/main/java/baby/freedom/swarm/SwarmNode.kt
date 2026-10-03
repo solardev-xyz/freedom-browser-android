@@ -84,7 +84,6 @@ class SwarmNode internal constructor(
         fun stopGateway(handle: Long)
         fun shutdown(handle: Long)
         fun storageStatus(handle: Long): String
-        fun settlementStatus(handle: Long): String
         fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String
         fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long): String
         fun storageValidity(handle: Long, gnosisRpc: String): String
@@ -121,7 +120,6 @@ class SwarmNode internal constructor(
             override fun stopGateway(handle: Long) = AntNative.stopGateway(handle)
             override fun shutdown(handle: Long) = AntNative.shutdown(handle)
             override fun storageStatus(handle: Long) = AntNative.storageStatus(handle)
-            override fun settlementStatus(handle: Long) = AntNative.settlementStatus(handle)
             override fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long) =
                 AntNative.storageQuote(handle, gnosisRpc, depth, days)
             override fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long) =
@@ -469,46 +467,29 @@ class SwarmNode internal constructor(
      * outside any [SpendGuard] permit, so nothing ant might try to send
      * meanwhile gets out. Returns `{"registered":[ids],"status":{…}}`.
      * ant's discover also sets up settlement, which adopts a chequebook
-     * this account already owns (a read, no transaction), and (ant
-     * 0.5.52+) points the running gateway at it, so the chequebook page
-     * (#117) sees it now; [reloadGatewayForNewChequebook] is only a
-     * fallback for a gateway that still doesn't. Settlement may also try to deploy a chequebook or (ant
-     * 0.5.51+) top up an adopted one's deposit: with no permit open,
-     * [SpendGuard] refuses that broadcast, which is the "refused a
-     * broadcast" log line a discover can leave behind.
+     * this account already owns (a read, no transaction) and points the
+     * running gateway at it (ant 0.5.52+), so the chequebook page (#117)
+     * sees it with no gateway restart. Settlement may also try to deploy
+     * a chequebook or (ant 0.5.51+) top up an adopted one's deposit: with
+     * no permit open, [SpendGuard] refuses that broadcast, which is the
+     * "refused a broadcast" log line a discover can leave behind.
      */
-    fun discoverStamps(): String = withLightNode { h, rpc ->
-        try {
-            ops.storageDiscover(h, rpc)
-        } finally {
-            reloadGatewayForNewChequebook(h)
-        }
-    }
+    fun discoverStamps(): String = withLightNode { h, rpc -> ops.storageDiscover(h, rpc) }
 
     /**
      * Buys a batch as the user confirmed it: [depth], [amountPerChunk] from
      * the quote they saw, swapping at most [maxSwapWei] of xDAI for the
      * xBZZ it needs. SPENDS: only these transactions get out ([SpendGuard]).
+     * The first buy also sets up the chequebook (deploys one, or adopts the
+     * one this account already owns), and since ant 0.5.52 points the
+     * running gateway at it itself — settlement and the chequebook page
+     * (#117) see it with no gateway restart, even when the buy then fails
+     * on the batch.
      */
     fun buyStamp(depth: Int, amountPerChunk: BigInteger, immutable: Boolean, maxSwapWei: BigInteger): String =
         withLightNode { h, rpc ->
             val plan = SpendPlan.BuyStamp(owner(), depth, amountPerChunk, immutable, maxSwapWei)
-            try {
-                SpendGuard.during(plan) { ops.storageBuyXdai(h, rpc, depth, amountPerChunk.toString(), immutable) }
-            } finally {
-                // The first buy sets up the chequebook (deploys one, or adopts
-                // the one this account already owns). Since ant 0.5.52 the
-                // buy points the running gateway at it itself, so this finds
-                // the gateway already reporting it and does nothing; it stays
-                // as a fallback, should the gateway still report none while
-                // ant has one, so the chequebook (and a deposit into it,
-                // #117) doesn't wait for the next node restart. Also when the
-                // buy fails: it can set up the chequebook and then fail on
-                // the batch itself. A buy that failed before (no xDAI,
-                // another payment running) leaves ant with no chequebook,
-                // and nothing is reloaded.
-                reloadGatewayForNewChequebook(h)
-            }
+            SpendGuard.during(plan) { ops.storageBuyXdai(h, rpc, depth, amountPerChunk.toString(), immutable) }
         }
 
     /**
@@ -537,20 +518,13 @@ class SwarmNode internal constructor(
      * chain that the node's account owns it and registers it, so the node
      * stamps with it. A first connect also sets up the chequebook, as a
      * first buy does — the only transactions the permit lets out — which
-     * (ant 0.5.52+) the running gateway picks up at once; the reload
-     * below is only a fallback for one that doesn't. Returns ant's
-     * storage status.
+     * (ant 0.5.52+) the running gateway picks up at once, with no
+     * restart. Returns ant's storage status.
      */
     fun connectBatch(batchId: String): String {
         val id = normalizeBatchId(batchId) ?: throw IllegalArgumentException("not a batch id")
         return withLightNode { h, rpc ->
-            try {
-                SpendGuard.during(SpendPlan.ConnectBatch(owner())) { ops.storageConnectBatch(h, rpc, "0x$id") }
-            } finally {
-                if (antHasChequebook(h) && gatewayChequebook() == "") {
-                    reloadGateway(h, mode = synchronized(lock) { handleMode })
-                }
-            }
+            SpendGuard.during(SpendPlan.ConnectBatch(owner())) { ops.storageConnectBatch(h, rpc, "0x$id") }
         }
     }
 
@@ -686,31 +660,6 @@ class SwarmNode internal constructor(
         }.onFailure { Log.w(TAG, "couldn't persist the deposit hold: ${it.javaClass.simpleName}") }
     }
 
-    /**
-     * Whether ant has a chequebook set up for this account on this device
-     * (its persisted association; one ant's chain check disqualified reads
-     * as none). If ant can't say, assume it may: a needless reload only
-     * interrupts browsing, a missing one strands the chequebook.
-     */
-    private fun antHasChequebook(h: Long): Boolean =
-        runCatching { JSONObject(ops.settlementStatus(h)).getBoolean("enabled") }.getOrDefault(true)
-
-    /**
-     * Reloads the gateway of [h] when ant has a chequebook set up that the
-     * gateway doesn't report yet — after a buy or a discover may have set
-     * one up. Since ant 0.5.52 (freedom-mobile-ffi v0.12.8) buy, connect
-     * and discover update the running gateway's chequebook themselves, so
-     * the gateway already reports it and this does nothing; it's kept as
-     * a fallback only. A restart would re-read the same slot (ant reloads
-     * the persisted chequebook and still refuses a disqualified one), so
-     * it can't bring back a chequebook ant has dropped.
-     */
-    private fun reloadGatewayForNewChequebook(h: Long) {
-        if (antHasChequebook(h) && gatewayChequebook() == "") {
-            reloadGateway(h, mode = synchronized(lock) { handleMode })
-        }
-    }
-
     /** What the gateway's chequebook holds, in PLUR; null when it couldn't say. */
     private fun chequebookBalance(): BigInteger? =
         ops.gateway("GET", "/chequebook/balance", GATEWAY_READ_TIMEOUT_MS)?.takeIf { it.code == 200 }
@@ -727,46 +676,6 @@ class SwarmNode internal constructor(
         val address = runCatching { JSONObject(answer.body).getString("chequebookAddress") }.getOrNull() ?: return null
         val hex = normalizeAddress(address) ?: return null
         return if (hex.all { it == '0' }) "" else hex
-    }
-
-    /**
-     * Stops and starts the gateway of [h] in [mode], so it loads what ant
-     * persisted meanwhile (a chequebook) — the fallback above. Only while [h] is still the
-     * node's handle; a failure takes the node down into Error rather than
-     * leaving it Running with no gateway.
-     */
-    private fun reloadGateway(h: Long, mode: Mode) {
-        synchronized(lock) { if (handle != h) return }
-        try {
-            // Not under [AntChainTransport.whileStopping], unlike [stop]:
-            // other storage calls may be running (a spend reading its
-            // receipt), and failing their reads could turn a sent
-            // transaction into a reported failure. So this stop can wait
-            // behind a gateway handler's read, up to the reader's deadline
-            // (#300 R2-M1).
-            ops.stopGateway(h)
-            ops.startGateway(
-                handle = h,
-                apiAddr = GATEWAY_ADDR,
-                lightMode = mode.light,
-                gnosisRpc = mode.gnosisRpc,
-                corsOrigins = GATEWAY_CORS_ORIGINS,
-            )
-            Log.i(TAG, "reloaded the gateway so it reports the node's chequebook")
-        } catch (t: Throwable) {
-            Log.w(TAG, "reloading the gateway failed: ${t.javaClass.simpleName}")
-            synchronized(lock) {
-                if (handle == h) {
-                    // Take the node down as [stop] does (the peer poller, and
-                    // the handle once no call uses it), so a start from Error
-                    // doesn't init a second node on the same data dir.
-                    stop()
-                    _state.update {
-                        it.copy(status = NodeStatus.Error, errorMessage = GATEWAY_RELOAD_FAILED)
-                    }
-                }
-            }
-        }
     }
 
     /** The node's account, as [SpendPlan.owner]. */
@@ -812,13 +721,6 @@ class SwarmNode internal constructor(
     }
 
     companion object {
-        /**
-         * The node's error when its gateway doesn't come back from a reload
-         * for a new chequebook — after a buy or a search for owned stamps
-         * alike, so it names neither.
-         */
-        val GATEWAY_RELOAD_FAILED: String get() = SwarmStrings.get(R.string.swarmnode_gateway_reload_failed)
-
         /**
          * Listen address handed to `ant_start_gateway`. ant defaults to
          * the same bee-conventional `127.0.0.1:1633`, but we pass it
