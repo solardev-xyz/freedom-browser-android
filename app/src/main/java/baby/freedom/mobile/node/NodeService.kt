@@ -468,17 +468,18 @@ class NodeService : Service() {
             // Whether a discover still runs, and once it's over, how the
             // app's search [id] ended: the app asks once it has stopped
             // waiting for one, so it holds a publish back until the search
-            // (and any gateway reload it ends with) is over, and then says
-            // what it found or why it failed.
+            // is over (the #222 lock, from when a search could end by
+            // reloading the gateway — it no longer does, ant 0.5.52+), and
+            // then says what it found or why it failed.
             "discovering" -> {
                 val status = stopGate.discoverStatus(args.optString("id").ifEmpty { null })
                 JSONObject().put("running", status.running).apply {
                     status.outcome?.let { o -> runCatching { JSONObject(o) }.getOrNull()?.let { put("outcome", it) } }
                 }.toString()
             }
-            // Whether a buy (or connect) or a discover runs, any of which may end by
-            // reloading the gateway: a publish waits for it before sending
-            // (#222 R4-F1).
+            // Whether a buy (or connect) or a discover runs: a publish waits
+            // for it before sending (#222 R4-F1). Kept from when these could
+            // end by reloading the gateway; since ant 0.5.52 they don't.
             "gatewayWork" -> JSONObject().put("running", stopGate.gatewayWorkRunning).toString()
             "buy" -> spending(buy = true) {
                 spendable()
@@ -491,8 +492,9 @@ class NodeService : Service() {
                 Log.i(TAG, "extending a postage batch, as the user confirmed")
                 swarmNode.extendStamp(args.getString("batchId"), amount(), maxSwap())
             }
-            // Counted as a buy: a first connect sets up the chequebook and
-            // ends by reloading the gateway, which a publish waits out.
+            // Counted as a buy: a first connect sets up the chequebook, as a
+            // first buy does (the running gateway picks it up itself, ant
+            // 0.5.52+); a publish still waits it out, as for a buy.
             "connect" -> spending(buy = true) {
                 // A batch the wallet bought for the node (#115); ant checks the node owns it.
                 spendable()

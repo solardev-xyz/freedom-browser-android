@@ -1019,18 +1019,19 @@ class SwarmNodeTest {
     }
 
     @Test
-    fun aBuyThatFailsAfterSettingUpTheChequebookLeavesTheGatewayRunningAndItSeesTheChequebook() {
+    fun aBuyWhoseBatchRevertsSetsUpNoChequebookAndLeavesTheGatewayRunning() {
         val ops = FakeOps()
         val node = lightNode(ops)
-        ops.onSpend = {
-            ops.chequebookHex = chequebook
-            throw RuntimeException("createBatch reverted")
-        }
+        // ant (v0.5.56) sets up the chequebook only after createBatch and
+        // register_batch succeed, so a reverted batch leaves none behind.
+        val before = ops.chequebookHex
+        ops.onSpend = { throw RuntimeException("createBatch reverted") }
         assertThrows(RuntimeException::class.java) {
             node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
         }
+        assertEquals(before, ops.chequebookHex)
         assertNoGatewayRestart(ops)
-        assertGatewaySeesChequebook(ops, node)
+        assertEquals(NodeStatus.Running, node.state.value.status)
         node.dispose()
     }
 }

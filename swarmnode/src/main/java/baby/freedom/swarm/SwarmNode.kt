@@ -480,11 +480,13 @@ class SwarmNode internal constructor(
      * Buys a batch as the user confirmed it: [depth], [amountPerChunk] from
      * the quote they saw, swapping at most [maxSwapWei] of xDAI for the
      * xBZZ it needs. SPENDS: only these transactions get out ([SpendGuard]).
-     * The first buy also sets up the chequebook (deploys one, or adopts the
-     * one this account already owns), and since ant 0.5.52 points the
-     * running gateway at it itself — settlement and the chequebook page
-     * (#117) see it with no gateway restart, even when the buy then fails
-     * on the batch.
+     * Once the batch is bought and registered, the first buy also sets up
+     * the chequebook (deploys one, or adopts the one this account already
+     * owns), and since ant 0.5.52 points the running gateway at it itself —
+     * settlement and the chequebook page (#117) see it with no gateway
+     * restart. A buy that fails on the batch never gets that far (ant
+     * v0.5.56's activate_bought_batch runs ensure_settlement only after
+     * createBatch and register_batch succeed), so it sets up no chequebook.
      */
     fun buyStamp(depth: Int, amountPerChunk: BigInteger, immutable: Boolean, maxSwapWei: BigInteger): String =
         withLightNode { h, rpc ->
