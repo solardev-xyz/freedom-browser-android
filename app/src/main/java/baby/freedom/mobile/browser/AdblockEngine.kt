@@ -21,7 +21,7 @@ package baby.freedom.mobile.browser
  * and the options `third-party` / `first-party` (`3p`, `1p`, `~…`),
  * `domain=` (`from=`), `match-case`, `important`, the resource types,
  * `redirect=` / `redirect-rule=` / `rewrite=abp-resource:` ([redirectFor],
- * #393), and — on exceptions — `document`, `elemhide` and `generichide`.
+ * #405), and — on exceptions — `document`, `elemhide` and `generichide`.
  * A filter with any other option (`csp=`, `removeparam`, `replace=`, …)
  * is dropped whole: honouring half of a filter is how pages break. So is
  * one that only applies to `popup` or `document` loads, since the
@@ -44,7 +44,7 @@ package baby.freedom.mobile.browser
  * `#@#` exceptions and the `$elemhide` / `$generichide` exception filters
  * are honoured; a rule's domains may be uBlock entities (`example.*`), as
  * a scriptlet's may ([scriptletKeys]). What CSS can express of the
- * extended syntax runs as CSS ([parseCosmeticSelector], #393): `:has()`,
+ * extended syntax runs as CSS ([parseCosmeticSelector], #405): `:has()`,
  * `#?#` with `:-abp-has()`, `:style()`, `:remove()`. Procedural selectors
  * that need a script walking the DOM (`:has-text()`, `:upward()`,
  * `:xpath()`, `:-abp-contains()`, …), HTML filters (`##^`) and the
@@ -147,7 +147,7 @@ internal class AdblockEngine private constructor(
     }
 
     /**
-     * The redirect resource (#393) a request [shouldBlock] blocks gets
+     * The redirect resource (#405) a request [shouldBlock] blocks gets
      * instead of an empty 403 — its canonical name in the
      * [ScriptletCatalog] — or `null` for the plain 403. Asked only for a
      * blocked request, so it costs nothing on the others. As in uBlock:
@@ -802,7 +802,7 @@ internal class NetworkFilter(
     val exempts: Int,
     /**
      * A `$redirect=` / `$redirect-rule=` filter's resource name as
-     * written (#393), `""` on an exception naming none; else `null`.
+     * written (#405), `""` on an exception naming none; else `null`.
      */
     val redirect: String? = null,
     /** `$redirect-rule=`: names a stand-in for what other filters block, blocks nothing itself. */
@@ -979,7 +979,7 @@ internal fun parseNetworkFilter(line: String): NetworkFilter? {
                 name == "match-case" -> matchCase = true
                 name == "important" -> important = true
                 name == "popup" -> if (negated) Unit else popupOnly = true
-                // #393: uBlock's `redirect` / `redirect-rule` and Adblock
+                // #405: uBlock's `redirect` / `redirect-rule` and Adblock
                 // Plus's `rewrite=abp-resource:` (its names are aliases in
                 // uBlock's resources). `none` turns redirection off in
                 // uBlock: not something a filter here needs to say.
@@ -1086,7 +1086,7 @@ internal fun parseNetworkFilter(line: String): NetworkFilter? {
 }
 
 /**
- * The `$redirect=` / `$redirect-rule=` filters (#393) and their
+ * The `$redirect=` / `$redirect-rule=` filters (#405) and their
  * exceptions, for [AdblockEngine.redirectFor]: asked only once a
  * request is blocked. Filed under a token as the blocking filters are;
  * the token-less rest (mostly `*$script,redirect-rule=…,domain=…`)

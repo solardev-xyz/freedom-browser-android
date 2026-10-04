@@ -41,7 +41,7 @@ private const val TAG = "Adblock"
 /**
  * The filter-list categories (#126), as on desktop and iOS: ads and
  * trackers on by default, cookie notices and other annoyances opt-in —
- * plus, Android only so far, EasyList Germany (#393): EasyList covers
+ * plus, Android only so far, EasyList Germany (#405): EasyList covers
  * English-language sites, and German sites' ads are in the regional
  * list, on by default where the phone's languages include German or
  * its region is a German-speaking one ([germanListByDefault]), offered
@@ -120,7 +120,7 @@ private fun systemLocales(): List<Locale> {
 private val GERMAN_SPEAKING_REGIONS = setOf("DE", "AT", "CH", "LI", "LU")
 
 /**
- * Is EasyList Germany on by default (#393)? Where German is among the
+ * Is EasyList Germany on by default (#405)? Where German is among the
  * phone's languages (Settings → Languages), or its main locale's region
  * is a German-speaking country (an English UI in Vienna still reads
  * Austrian sites).
@@ -950,7 +950,7 @@ internal object Adblock {
 
     /**
      * What a subresource request gets if it is to be blocked — the empty
-     * 403, or the stand-in a `$redirect` filter names (#393) — or `null`
+     * 403, or the stand-in a `$redirect` filter names (#405) — or `null`
      * to let it through. As [shouldBlock], which it backs.
      */
     fun blockedResponseFor(
@@ -1025,7 +1025,7 @@ internal object Adblock {
             host == RadUrl.HOST
 
     /**
-     * A blocked request a `$redirect` filter names a stand-in for (#393):
+     * A blocked request a `$redirect` filter names a stand-in for (#405):
      * the stand-in, as a 200 the page's element loads (an empty script
      * runs, a 1×1 GIF decodes) — the point of the filter, where a failed
      * load would break the page or trip its blocker check. A cross-origin

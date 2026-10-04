@@ -15,7 +15,7 @@
 ! its probe URLs are hard-coded, so match those.
 spiegel.de##+js(rmnt, script, /brwsrfrm|dns-bait/)
 
-! #393 spiegel.de: every ad slot carries data-advertisement="pos_N …" and
+! #405 spiegel.de: every ad slot carries data-advertisement="pos_N …" and
 ! keeps a min-height (up to 632px on the front page, 352px in articles)
 ! empty once its ad is blocked. EasyList's
 ! spiegel.de##div[data-advertisement$=":mobile"] misses the front page's

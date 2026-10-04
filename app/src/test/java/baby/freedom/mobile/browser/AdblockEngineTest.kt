@@ -126,7 +126,7 @@ class AdblockEngineTest {
             "||page.example^\$document",
         )
         assertFalse(e.blocks("https://csp.example/a.js"))
-        // `$redirect-rule` only names a stand-in; it blocks nothing itself (#393).
+        // `$redirect-rule` only names a stand-in; it blocks nothing itself (#405).
         assertFalse(e.blocks("https://redirect-rule.example/a.js"))
         assertFalse(e.blocks("https://popup.example/a.js"))
         assertFalse(e.blocks("https://page.example/a.js"))
@@ -215,7 +215,7 @@ class AdblockEngineTest {
     }
 
     /**
-     * #393: the extended selectors CSS can take run as CSS — `#?#` with
+     * #405: the extended selectors CSS can take run as CSS — `#?#` with
      * `:-abp-has()` is `:has()`, `:style()` styles, `:remove()` hides —
      * and `#@#` exceptions name them as written.
      */
@@ -241,7 +241,7 @@ class AdblockEngineTest {
         assertEquals(".banner{height: 0 !important}\n", g.cosmeticsForTokens(listOf(".banner"), "https://a.example/", "a.example", null, null))
     }
 
-    /** #393: a `:style()` that could load something or escape its rule is dropped whole. */
+    /** #405: a `:style()` that could load something or escape its rule is dropped whole. */
     @Test
     fun `unsafe style declarations are dropped`() {
         val e = engine(
@@ -256,7 +256,7 @@ class AdblockEngineTest {
         assertEquals(".ok{color: red}\n", css(e, "news.example"))
     }
 
-    /** #393: cosmetic rules scoped to uBlock entities (`example.*`) apply under any public suffix, `~` entities excepted. */
+    /** #405: cosmetic rules scoped to uBlock entities (`example.*`) apply under any public suffix, `~` entities excepted. */
     @Test
     fun `cosmetic rules scoped to entities apply under any suffix`() {
         val e = engine(

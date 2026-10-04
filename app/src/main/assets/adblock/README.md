@@ -10,13 +10,13 @@ files below, which the update channel doesn't carry.
 | File | List | Source | Category |
 |---|---|---|---|
 | `easylist.txt` | EasyList | https://easylist.to/easylist/easylist.txt | Block ads |
-| `easylistgermany.txt` | EasyList Germany | https://easylist.to/easylistgermany/easylistgermany.txt (bundled only: the update channel doesn't publish it, #393) | Block ads on German-language sites |
+| `easylistgermany.txt` | EasyList Germany | https://easylist.to/easylistgermany/easylistgermany.txt (bundled only: the update channel doesn't publish it, #405) | Block ads on German-language sites |
 | `ublock-filters.txt` | uBlock filters (+ Quick fixes) | https://github.com/uBlockOrigin/uAssets (`filters/filters.txt`, `filters/quick-fixes.txt`, at the commit named in the file's header) | Block ads |
 | `freedom-filters.txt` | Freedom filters | This repository — maintained by hand, not vendored (see below) | Block ads |
 | `easyprivacy.txt` | EasyPrivacy | https://easylist.to/easylist/easyprivacy.txt | Block trackers |
 | `fanboy-cookiemonster.txt` | Fanboy's Cookiemonster (EasyList Cookie List) | https://secure.fanboy.co.nz/fanboy-cookiemonster.txt | Block cookie notices |
 | `fanboy-annoyance.txt` | Fanboy's Annoyance List | https://secure.fanboy.co.nz/fanboy-annoyance.txt | Block other annoyances |
-| `resources.json` | uBlock Origin's scriptlets (the code `+js(…)` rules call) and redirect resources (the stand-ins `$redirect` filters serve, #393), via @ghostery/adblocker v2.18.2 | https://raw.githubusercontent.com/ghostery/adblocker/v2.18.2/packages/adblocker/assets/ublock-origin/resources.json (sha256 `e14b498f…2348f5`, pinned in the script) | — |
+| `resources.json` | uBlock Origin's scriptlets (the code `+js(…)` rules call) and redirect resources (the stand-ins `$redirect` filters serve, #405), via @ghostery/adblocker v2.18.2 | https://raw.githubusercontent.com/ghostery/adblocker/v2.18.2/packages/adblocker/assets/ublock-origin/resources.json (sha256 `e14b498f…2348f5`, pinned in the script) | — |
 | `COPYING.GPL-3.0.txt` | The GNU General Public License v3 | https://www.gnu.org/licenses/gpl-3.0.txt | — |
 
 The EasyList-family lists are © The EasyList authors (https://easylist.to/),

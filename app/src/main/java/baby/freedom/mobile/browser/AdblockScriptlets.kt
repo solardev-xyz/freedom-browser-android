@@ -37,7 +37,7 @@ internal data class FilterListCounts(
 }
 
 /**
- * A redirect resource (#393): what a blocked request matching a
+ * A redirect resource (#405): what a blocked request matching a
  * `$redirect=` / `$redirect-rule=` filter gets instead of the empty 403 —
  * uBlock's no-op stand-ins (an empty script, a 1×1 GIF, a silent MP3, a
  * harmless `googletagservices_gpt.js` / `google-ima.js` shim), so a page
@@ -188,7 +188,7 @@ internal class ScriptletCatalog private constructor(
     private val redirects: Map<String, RedirectResource> = emptyMap(),
 ) {
     /**
-     * The neutered stand-in (#393) a `$redirect=` / `$redirect-rule=`
+     * The neutered stand-in (#405) a `$redirect=` / `$redirect-rule=`
      * filter serves for a blocked request, by its name or an alias
      * (`noop.js`, `noopjs`, `1x1.gif`, …); `null` for one there isn't.
      */

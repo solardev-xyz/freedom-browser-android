@@ -10,7 +10,7 @@ import org.junit.Test
 import java.io.File
 import java.util.Locale
 
-/** `$redirect=` / `$redirect-rule=` filters and their stand-ins (#393). */
+/** `$redirect=` / `$redirect-rule=` filters and their stand-ins (#405). */
 class AdblockRedirectTest {
 
     private val catalog: ScriptletCatalog = checkNotNull(
