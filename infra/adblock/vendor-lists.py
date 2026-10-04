@@ -43,6 +43,9 @@ OUT = Path(__file__).resolve().parents[2] / "app/src/main/assets/adblock"
 # file name -> source URL. The names are what Adblock.kt's categories load.
 LISTS = {
     "easylist.txt": "https://easylist.to/easylist/easylist.txt",
+    # #393: Android-only so far (freedom-adblock-service doesn't publish
+    # it, so the update channel doesn't refresh it: bundled, like uBlock's).
+    "easylistgermany.txt": "https://easylist.to/easylistgermany/easylistgermany.txt",
     "easyprivacy.txt": "https://easylist.to/easylist/easyprivacy.txt",
     "fanboy-cookiemonster.txt": "https://secure.fanboy.co.nz/fanboy-cookiemonster.txt",
     "fanboy-annoyance.txt": "https://secure.fanboy.co.nz/fanboy-annoyance.txt",

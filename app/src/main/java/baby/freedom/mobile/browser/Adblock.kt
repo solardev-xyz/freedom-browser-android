@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import android.content.Context
+import android.os.LocaleList
 import android.os.SystemClock
 import android.util.Log
 import android.webkit.WebResourceResponse
@@ -31,6 +32,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -38,8 +40,12 @@ private const val TAG = "Adblock"
 
 /**
  * The filter-list categories (#126), as on desktop and iOS: ads and
- * trackers on by default, cookie notices and other annoyances opt-in.
- * [file] is the list's name under `assets/adblock/`
+ * trackers on by default, cookie notices and other annoyances opt-in —
+ * plus, Android only so far, EasyList Germany (#393): EasyList covers
+ * English-language sites, and German sites' ads are in the regional
+ * list, on by default where the phone's languages include German or
+ * its region is a German-speaking one ([germanListByDefault]), offered
+ * to everyone else. [file] is the list's name under `assets/adblock/`
  * (`infra/adblock/vendor-lists.py` refreshes them).
  */
 enum class AdblockCategory(
@@ -47,19 +53,26 @@ enum class AdblockCategory(
     val file: String,
     @StringRes private val titleRes: Int,
     val listName: String,
-    val enabledByDefault: Boolean,
+    private val defaultOn: () -> Boolean,
 ) {
-    ADS("ads", "easylist.txt", R.string.settings_adblock_block_ads, "EasyList", true),
-    PRIVACY("privacy", "easyprivacy.txt", R.string.settings_adblock_block_trackers, "EasyPrivacy", true),
+    ADS("ads", "easylist.txt", R.string.settings_adblock_block_ads, "EasyList", { true }),
+    GERMAN(
+        "german", "easylistgermany.txt", R.string.settings_adblock_block_german, "EasyList Germany",
+        { germanListByDefault(systemLocales()) },
+    ),
+    PRIVACY("privacy", "easyprivacy.txt", R.string.settings_adblock_block_trackers, "EasyPrivacy", { true }),
     COOKIES(
         "cookies", "fanboy-cookiemonster.txt", R.string.settings_adblock_block_cookie_notices,
-        "Fanboy's Cookiemonster", false,
+        "Fanboy's Cookiemonster", { false },
     ),
     ANNOYANCES(
         "annoyances", "fanboy-annoyance.txt", R.string.settings_adblock_block_annoyances,
-        "Fanboy's Annoyances", false,
+        "Fanboy's Annoyances", { false },
     ),
     ;
+
+    /** On until the user switches it (the stored choice wins); for [GERMAN], read from the phone's locales each time. */
+    val enabledByDefault: Boolean get() = defaultOn()
 
     /** The category's switch in Settings ("Block ads"). */
     val title: String get() = Strings.get(titleRes)
@@ -95,6 +108,26 @@ enum class BundledList(val file: String, val listName: String, val trustedScript
      */
     FREEDOM("freedom-filters.txt", "Freedom filters", true),
 }
+
+/** The phone's (or, set per app, the app's) languages, in the user's order; the JVM default where there's no `LocaleList`. */
+private fun systemLocales(): List<Locale> {
+    val list: LocaleList? = runCatching { LocaleList.getDefault() }.getOrNull()
+    if (list == null || list.isEmpty) return listOf(Locale.getDefault())
+    return (0 until list.size()).map { list[it] }
+}
+
+/** Countries whose sites are largely in German, for [germanListByDefault]. */
+private val GERMAN_SPEAKING_REGIONS = setOf("DE", "AT", "CH", "LI", "LU")
+
+/**
+ * Is EasyList Germany on by default (#393)? Where German is among the
+ * phone's languages (Settings → Languages), or its main locale's region
+ * is a German-speaking country (an English UI in Vienna still reads
+ * Austrian sites).
+ */
+internal fun germanListByDefault(locales: List<Locale>): Boolean =
+    locales.any { it.language == "de" || it.language == "gsw" } ||
+        (locales.firstOrNull()?.country?.uppercase()?.let { it in GERMAN_SPEAKING_REGIONS } ?: false)
 
 /** The uBlock Origin scriptlets the `+js(…)` rules call (#318), under `assets/adblock/`. */
 internal const val SCRIPTLET_RESOURCES_FILE = "resources.json"
@@ -912,15 +945,31 @@ internal object Adblock {
      * main-frame load, the local nodes' gateways, or a virtual origin.
      * Before the first engine build lands, waits for it ([FirstBuildGate]).
      */
-    fun shouldBlock(url: String, headers: Map<String, String>?, pageUrl: String?, private: Boolean): Boolean {
-        if (!url.startsWith("http://") && !url.startsWith("https://")) return false
-        val host = hostOfUrl(url) ?: return false
-        if (isExempt(host) || Gateways.isLocalGateway(url)) return false
+    fun shouldBlock(url: String, headers: Map<String, String>?, pageUrl: String?, private: Boolean): Boolean =
+        blockedResponseFor(url, headers, pageUrl, private) != null
+
+    /**
+     * What a subresource request gets if it is to be blocked — the empty
+     * 403, or the stand-in a `$redirect` filter names (#393) — or `null`
+     * to let it through. As [shouldBlock], which it backs.
+     */
+    fun blockedResponseFor(
+        url: String,
+        headers: Map<String, String>?,
+        pageUrl: String?,
+        private: Boolean,
+    ): WebResourceResponse? {
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return null
+        val host = hostOfUrl(url) ?: return null
+        if (isExempt(host) || Gateways.isLocalGateway(url)) return null
         if (engine == null) firstBuild.await()
-        val e = engine ?: return false
+        val e = engine ?: return null
         val pageHost = pageUrl?.let(::hostOfUrl)
-        if (pageHost != null && isAllowlisted(pageHost, private)) return false
-        return e.shouldBlock(url, host, requestTypes(url, headers), pageUrl, pageHost)
+        if (pageHost != null && isAllowlisted(pageHost, private)) return null
+        val types = requestTypes(url, headers)
+        if (!e.shouldBlock(url, host, types, pageUrl, pageHost)) return null
+        val resource = e.redirectFor(url, host, types, pageHost)?.let { scriptletCatalog?.redirect(it) }
+        return if (resource == null) blockedResponse() else redirectResponse(resource, headers)
     }
 
     /**
@@ -974,6 +1023,33 @@ internal object Adblock {
     private fun isExempt(host: String): Boolean =
         host == "localhost" || host == "127.0.0.1" || host == "[::1]" || VirtualOrigin.isVirtualHost(host) ||
             host == RadUrl.HOST
+
+    /**
+     * A blocked request a `$redirect` filter names a stand-in for (#393):
+     * the stand-in, as a 200 the page's element loads (an empty script
+     * runs, a 1×1 GIF decodes) — the point of the filter, where a failed
+     * load would break the page or trip its blocker check. A cross-origin
+     * `fetch` / XHR may read it: it is our own no-op, not the site's.
+     */
+    private fun redirectResponse(resource: RedirectResource, headers: Map<String, String>?): WebResourceResponse {
+        val responseHeaders = HashMap<String, String>()
+        responseHeaders["Cache-Control"] = "no-store"
+        val origin = headers?.entries?.firstOrNull { it.key.equals("Origin", ignoreCase = true) }?.value
+        if (origin != null) {
+            responseHeaders["Access-Control-Allow-Origin"] = origin
+            responseHeaders["Access-Control-Allow-Credentials"] = "true"
+        }
+        val text = resource.mimeType.startsWith("text/") || resource.mimeType.endsWith("javascript") ||
+            resource.mimeType.endsWith("json") || resource.mimeType.endsWith("xml")
+        return WebResourceResponse(
+            resource.mimeType,
+            if (text) "utf-8" else null,
+            200,
+            "OK",
+            responseHeaders,
+            ByteArrayInputStream(resource.body),
+        )
+    }
 
     /**
      * What a blocked request gets: an empty 403, so the page's element

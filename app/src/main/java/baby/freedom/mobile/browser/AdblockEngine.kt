@@ -19,10 +19,11 @@ package baby.freedom.mobile.browser
  *
  * Supported: `||` / `|` anchors, `*`, `^`, `/regex/`, `@@` exceptions,
  * and the options `third-party` / `first-party` (`3p`, `1p`, `~…`),
- * `domain=` (`from=`), `match-case`, `important`, the resource types, and
- * — on exceptions — `document`, `elemhide` and `generichide`. A filter
- * with any other option (`csp=`, `redirect=`, `removeparam`, …) is
- * dropped whole: honouring half of a filter is how pages break. So is
+ * `domain=` (`from=`), `match-case`, `important`, the resource types,
+ * `redirect=` / `redirect-rule=` / `rewrite=abp-resource:` ([redirectFor],
+ * #393), and — on exceptions — `document`, `elemhide` and `generichide`.
+ * A filter with any other option (`csp=`, `removeparam`, `replace=`, …)
+ * is dropped whole: honouring half of a filter is how pages break. So is
  * one that only applies to `popup` or `document` loads, since the
  * browser never blocks a top-level navigation.
  *
@@ -41,9 +42,13 @@ package baby.freedom.mobile.browser
  * class or id, so a page doesn't pay for tens of thousands of selectors;
  * the few generic selectors with no such key are served to every page.
  * `#@#` exceptions and the `$elemhide` / `$generichide` exception filters
- * are honoured. Procedural selectors (`:has-text()`, `:-abp-…`,
- * `:xpath()`, `:style()`, …), HTML filters (`##^`) and the `#?#` /
- * `#$#` / `#%#` extensions are skipped: CSS can't express them.
+ * are honoured; a rule's domains may be uBlock entities (`example.*`), as
+ * a scriptlet's may ([scriptletKeys]). What CSS can express of the
+ * extended syntax runs as CSS ([parseCosmeticSelector], #393): `:has()`,
+ * `#?#` with `:-abp-has()`, `:style()`, `:remove()`. Procedural selectors
+ * that need a script walking the DOM (`:has-text()`, `:upward()`,
+ * `:xpath()`, `:-abp-contains()`, …), HTML filters (`##^`) and the
+ * `#$#` / `#%#` extensions are skipped.
  *
  * ## Scriptlets
  *
@@ -72,6 +77,7 @@ internal class AdblockEngine private constructor(
     private val genericUnkeyed: List<CosmeticRule>,
     private val scriptletRules: HashMap<String, MutableList<ScriptletRule>>,
     private val scriptletUnhide: HashMap<String, MutableSet<String>>,
+    private val redirects: RedirectIndex,
     /** How many filters made it in, for Settings and the logs. */
     val filterCount: Int,
     /** Per list, in the order given to [build]: its rules, and how many of them run. */
@@ -141,6 +147,23 @@ internal class AdblockEngine private constructor(
     }
 
     /**
+     * The redirect resource (#393) a request [shouldBlock] blocks gets
+     * instead of an empty 403 — its canonical name in the
+     * [ScriptletCatalog] — or `null` for the plain 403. Asked only for a
+     * blocked request, so it costs nothing on the others. As in uBlock:
+     * a `$redirect=` filter both blocks and names its stand-in, a
+     * `$redirect-rule=` one only names it for a request something else
+     * blocks; the highest `:priority` wins (the first listed on a tie);
+     * an `@@…$redirect-rule` / `@@…$redirect=name` exception lifts all
+     * of them, or that one, where it matches.
+     */
+    fun redirectFor(url: String, host: String, types: Int, pageHost: String?): String? {
+        if (redirects.isEmpty()) return null
+        val request = Request(url, url.lowercase(), host, types, pageHost, isThirdParty(host, pageHost))
+        return redirects.resolve(request)
+    }
+
+    /**
      * Is the whole page [pageUrl] exempt from blocking by an
      * `@@…$document` exception? (The allowlist is the user's own
      * version of the same thing, checked by the caller.)
@@ -157,19 +180,20 @@ internal class AdblockEngine private constructor(
     fun initialCosmetics(frameUrl: String, frameHost: String, pageUrl: String?, pageHost: String?): String {
         val mode = cosmeticMode(frameUrl, frameHost, pageUrl, pageHost)
         if (mode == CosmeticMode.NONE) return ""
-        val unhidden = unhiddenFor(frameHost)
-        val selectors = LinkedHashSet<String>()
-        forEachHostSuffix(frameHost) { suffix ->
-            specificHide[suffix]?.forEach { rule ->
-                if (rule.appliesTo(frameHost) && rule.selector !in unhidden) selectors += rule.selector
+        val keys = scriptletKeys(frameHost)
+        val unhidden = unhiddenFor(keys)
+        val rules = LinkedHashMap<String, CosmeticRule>()
+        for (key in keys) {
+            specificHide[key]?.forEach { rule ->
+                if (rule.appliesTo(keys) && rule.key !in unhidden) rules.putIfAbsent(rule.key, rule)
             }
         }
         if (mode == CosmeticMode.ALL) {
             for (rule in genericUnkeyed) {
-                if (rule.appliesTo(frameHost) && rule.selector !in unhidden) selectors += rule.selector
+                if (rule.appliesTo(keys) && rule.key !in unhidden) rules.putIfAbsent(rule.key, rule)
             }
         }
-        return cssFor(selectors)
+        return cssFor(rules.values)
     }
 
     /**
@@ -184,16 +208,18 @@ internal class AdblockEngine private constructor(
         pageHost: String?,
     ): String {
         if (cosmeticMode(frameUrl, frameHost, pageUrl, pageHost) != CosmeticMode.ALL) return ""
+        var keys: List<String>? = null
         var unhidden: Set<String>? = null
-        val selectors = LinkedHashSet<String>()
+        val out = LinkedHashMap<String, CosmeticRule>()
         for (token in tokens) {
             val rules = genericKeyed[token] ?: continue
-            val skip = unhidden ?: unhiddenFor(frameHost).also { unhidden = it }
+            val k = keys ?: scriptletKeys(frameHost).also { keys = it }
+            val skip = unhidden ?: unhiddenFor(k).also { unhidden = it }
             for (rule in rules) {
-                if (rule.appliesTo(frameHost) && rule.selector !in skip) selectors += rule.selector
+                if (rule.appliesTo(k) && rule.key !in skip) out.putIfAbsent(rule.key, rule)
             }
         }
-        return cssFor(selectors)
+        return cssFor(out.values)
     }
 
     private enum class CosmeticMode { NONE, SPECIFIC_ONLY, ALL }
@@ -207,10 +233,11 @@ internal class AdblockEngine private constructor(
         else CosmeticMode.ALL
     }
 
-    private fun unhiddenFor(host: String): Set<String> {
+    /** The `#@#` exceptions for a frame whose [scriptletKeys] are [keys]: its host, parents and entities. */
+    private fun unhiddenFor(keys: List<String>): Set<String> {
         var out: MutableSet<String>? = null
-        forEachHostSuffix(host) { suffix ->
-            specificUnhide[suffix]?.let { (out ?: HashSet<String>().also { s -> out = s }).addAll(it) }
+        for (key in keys) {
+            specificUnhide[key]?.let { (out ?: HashSet<String>().also { s -> out = s }).addAll(it) }
         }
         return out ?: emptySet()
     }
@@ -322,6 +349,7 @@ internal class AdblockEngine private constructor(
         val globallyUnhidden = HashSet<String>()
         val scriptletRules = HashMap<String, MutableList<ScriptletRule>>()
         val scriptletUnhide = HashMap<String, MutableSet<String>>()
+        val redirects = RedirectIndex()
         val counts = ArrayList<FilterListCounts>()
         var count = 0
 
@@ -366,6 +394,21 @@ internal class AdblockEngine private constructor(
             val cosmetic = if (line.contains('#')) COSMETIC_RE.find(line) else null
             if (cosmetic != null) return addCosmetic(cosmetic.groupValues[1], cosmetic.groupValues[2], cosmetic.groupValues[3])
             val filter = parseNetworkFilter(line) ?: return false
+            val redirect = filter.redirect
+            if (redirect != null) {
+                // `@@…$redirect-rule` / `@@…$redirect=name`: lifts the
+                // stand-in (all of them for no name), never the block.
+                if (filter.exception) {
+                    val canonical = if (redirect.isEmpty()) "" else (catalog?.redirect(redirect)?.canonical ?: return false)
+                    redirects.addException(filter, canonical)
+                    return true
+                }
+                val resource = catalog?.redirect(redirect)
+                if (resource != null) redirects.add(filter, resource.canonical)
+                // `$redirect-rule=` only names a stand-in; `$redirect=` blocks
+                // too (with the plain 403 if its stand-in isn't one we have).
+                if (filter.redirectOnly) return resource != null
+            }
             if (filter.exempts != 0) {
                 pageExceptions += filter
                 // A `$document` exception is also an ordinary exception.
@@ -384,47 +427,61 @@ internal class AdblockEngine private constructor(
             return true
         }
 
-        fun addCosmetic(domainsText: String, separator: String, selectorText: String): Boolean {
+        fun addCosmetic(domainsText: String, separatorText: String, selectorText: String): Boolean {
+            // `#?#` / `#@?#` (Adblock Plus's extended selectors, also
+            // uBlock's) are `##` / `#@#` once the selector is one CSS can
+            // take: `:-abp-has()` is `:has()`, which Chromium runs natively.
+            val separator = when (separatorText) {
+                "#?#" -> "##"
+                "#@?#" -> "#@#"
+                else -> separatorText
+            }
             if (separator != "##" && separator != "#@#") return false
-            val selector = selectorText.trim()
-            if (selector.startsWith("+js(")) return addScriptlet(domainsText, separator == "#@#", selector)
-            if (!isPlainCssSelector(selector)) return false
+            val raw = selectorText.trim()
+            if (raw.startsWith("+js(")) return addScriptlet(domainsText, separator == "#@#", raw)
+            val parsed = parseCosmeticSelector(raw) ?: return false
             val include = ArrayList<String>()
             val exclude = ArrayList<String>()
             if (domainsText.isNotEmpty()) {
                 var droppedInclude = false
-                for (raw in domainsText.split(',')) {
-                    val d = raw.trim().lowercase()
+                for (rawDomain in domainsText.split(',')) {
+                    val d = rawDomain.trim().lowercase()
                     val negated = d.startsWith("~")
                     val name = if (negated) d.substring(1) else d
-                    // `example.*` (uBlock's any-TLD form) isn't a host this can match.
-                    if (name.isEmpty() || name.endsWith(".*") || name.contains('/')) {
+                    // A host, or a uBlock entity (`example.*`, the name under
+                    // any public suffix), matched as scriptlets are
+                    // ([scriptletKeys]); anything else (`/regex/`, `>>`) is
+                    // one this can't match.
+                    if (!isScriptletDomain(name)) {
                         if (!negated) droppedInclude = true
                         continue
                     }
                     if (negated) exclude += name else include += name
                 }
                 if (include.isEmpty() && exclude.isEmpty()) return false
-                // A rule scoped to sites this can't match (`vipbox.*,~vipbox.pl##…`)
-                // must not fall back to every site but its `~` ones (#318 R6-F1).
+                // A rule scoped to sites this can't match must not fall
+                // back to every site but its `~` ones (#318 R6-F1).
                 if (include.isEmpty() && droppedInclude) return false
             }
+            // Exceptions name the rule as written (`sel:style(…)` included),
+            // as uBlock compares them.
+            val key = parsed.key
             if (separator == "#@#") {
                 if (include.isEmpty()) {
                     if (exclude.isNotEmpty()) return false
-                    globallyUnhidden += selector
+                    globallyUnhidden += key
                 } else {
-                    for (d in include) specificUnhide.getOrPut(d) { HashSet() } += selector
+                    for (d in include) specificUnhide.getOrPut(d) { HashSet() } += key
                 }
                 return true
             }
-            val rule = CosmeticRule(selector, exclude.takeIf { it.isNotEmpty() }?.toTypedArray())
+            val rule = CosmeticRule(parsed.selector, exclude.takeIf { it.isNotEmpty() }?.toTypedArray(), parsed.style, key)
             if (include.isNotEmpty()) {
                 for (d in include) specificHide.getOrPut(d) { ArrayList(1) } += rule
             } else {
-                val key = cosmeticKey(selector)
-                if (key == null) genericUnkeyed += rule
-                else genericKeyed.getOrPut(key) { ArrayList(1) } += rule
+                val token = cosmeticKey(parsed.selector)
+                if (token == null) genericUnkeyed += rule
+                else genericKeyed.getOrPut(token) { ArrayList(1) } += rule
             }
             return true
         }
@@ -474,14 +531,14 @@ internal class AdblockEngine private constructor(
 
         fun build(): AdblockEngine {
             if (globallyUnhidden.isNotEmpty()) {
-                genericUnkeyed.removeAll { it.selector in globallyUnhidden }
-                for (rules in genericKeyed.values) rules.removeAll { it.selector in globallyUnhidden }
-                for (rules in specificHide.values) rules.removeAll { it.selector in globallyUnhidden }
+                genericUnkeyed.removeAll { it.key in globallyUnhidden }
+                for (rules in genericKeyed.values) rules.removeAll { it.key in globallyUnhidden }
+                for (rules in specificHide.values) rules.removeAll { it.key in globallyUnhidden }
             }
             return AdblockEngine(
                 plainBlockedHosts, hostFilters, tokenFilters, untokened, pageExceptions,
                 specificHide, specificUnhide, genericKeyed, genericUnkeyed,
-                scriptletRules, scriptletUnhide, count, counts,
+                scriptletRules, scriptletUnhide, redirects, count, counts,
             )
         }
     }
@@ -623,13 +680,55 @@ private val PROCEDURAL = listOf(
     ":contains(", ":matches-path(", ":remove-attr(", ":remove-class(",
 )
 
-/** Is [selector] something a plain CSS rule can take (not a scriptlet / HTML / procedural filter)? */
-private fun isPlainCssSelector(selector: String): Boolean {
-    if (selector.isEmpty() || selector.length > 4096) return false
-    if (selector.startsWith("+js(") || selector.startsWith("^")) return false
+/** A cosmetic rule's selector as CSS can take it, what it does there, and its text as written ([key]). */
+internal class CosmeticSelector(val selector: String, val style: String?, val key: String)
+
+/**
+ * A `##` rule's selector as CSS can take it, or `null` when it can't be:
+ * scriptlets, HTML filters (`##^`), and procedural selectors CSS has no
+ * equivalent for (`:has-text()`, `:upward()`, `:xpath()`, …, which need
+ * a script walking the DOM). Translated on the way:
+ *
+ * - `:-abp-has(…)` (Adblock Plus, `#?#`) is CSS's own `:has(…)`;
+ * - a trailing `:style(declarations)` (uBlock) styles the elements with
+ *   those declarations instead of hiding them — never with ones that can
+ *   reach the network (`url(…)`, `image-set(…)`, `@import`) or escape
+ *   the rule (`{`, `}`, `\`, comments);
+ * - a trailing `:remove()` (uBlock: take the element out) hides it, which
+ *   is what the page sees of it as far as layout goes.
+ */
+internal fun parseCosmeticSelector(raw: String): CosmeticSelector? {
+    if (raw.isEmpty() || raw.length > 4096) return null
+    if (raw.startsWith("+js(") || raw.startsWith("^")) return null
     // A selector may not smuggle in a declaration block or a second rule.
-    if (selector.contains('{') || selector.contains('}')) return false
-    return PROCEDURAL.none { selector.contains(it) }
+    if (raw.contains('{') || raw.contains('}')) return null
+    var selector = if (raw.contains(":-abp-has(")) raw.replace(":-abp-has(", ":has(") else raw
+    var style: String? = null
+    if (selector.endsWith(":remove()")) {
+        selector = selector.dropLast(":remove()".length)
+    } else if (selector.endsWith(")")) {
+        val at = selector.lastIndexOf(":style(")
+        if (at > 0) {
+            val declarations = selector.substring(at + ":style(".length, selector.length - 1).trim()
+            if (!isSafeDeclarations(declarations)) return null
+            style = declarations
+            selector = selector.substring(0, at)
+        }
+    }
+    selector = selector.trim()
+    if (selector.isEmpty()) return null
+    if (PROCEDURAL.any { selector.contains(it) }) return null
+    return CosmeticSelector(selector, style, raw)
+}
+
+/** May a `:style(…)` rule set [declarations]? Only plain property values: nothing that loads, nothing that escapes the rule. */
+private fun isSafeDeclarations(declarations: String): Boolean {
+    if (declarations.isEmpty() || declarations.length > 1024) return false
+    if (declarations.any { it == '{' || it == '}' || it == '\\' || it == '<' || it == '>' || it == '@' || it.code < 0x20 }) {
+        return false
+    }
+    val lower = declarations.lowercase()
+    return "url(" !in lower && "image-set(" !in lower && "image(" !in lower && "/*" !in lower && "expression(" !in lower
 }
 
 /**
@@ -655,19 +754,33 @@ internal fun cosmeticKey(selector: String): String? {
 }
 
 /** One selector per rule: an invalid selector costs only its own rule, not the batch. */
-private fun cssFor(selectors: Collection<String>): String {
-    if (selectors.isEmpty()) return ""
-    val sb = StringBuilder(selectors.size * 48)
-    for (s in selectors) sb.append(s).append("{display:none!important}\n")
+private fun cssFor(rules: Collection<CosmeticRule>): String {
+    if (rules.isEmpty()) return ""
+    val sb = StringBuilder(rules.size * 48)
+    for (r in rules) {
+        sb.append(r.selector).append('{')
+        if (r.style == null) sb.append("display:none!important") else sb.append(r.style)
+        sb.append("}\n")
+    }
     return sb.toString()
 }
 
-internal class CosmeticRule(val selector: String, private val excludeDomains: Array<String>?) {
-    fun appliesTo(host: String): Boolean {
+/**
+ * A `##` rule: hide the elements [selector] matches there, or give them
+ * [style] (a `:style()` rule). [key] is the rule as written, which `#@#`
+ * exceptions name. [excludeDomains] are its `~` hosts and entities.
+ */
+internal class CosmeticRule(
+    val selector: String,
+    private val excludeDomains: Array<String>?,
+    val style: String? = null,
+    val key: String = selector,
+) {
+    /** Does the rule apply on a frame whose [scriptletKeys] (host, parents, entities) are [keys]? */
+    fun appliesTo(keys: List<String>): Boolean {
         val ex = excludeDomains ?: return true
-        var excluded = false
-        forEachHostSuffix(host) { if (it in ex) excluded = true }
-        return !excluded
+        for (k in keys) if (k in ex) return false
+        return true
     }
 }
 
@@ -687,6 +800,15 @@ internal class NetworkFilter(
     val important: Boolean,
     /** For page exceptions: which of `document` / `elemhide` / `generichide` it lifts. */
     val exempts: Int,
+    /**
+     * A `$redirect=` / `$redirect-rule=` filter's resource name as
+     * written (#393), `""` on an exception naming none; else `null`.
+     */
+    val redirect: String? = null,
+    /** `$redirect-rule=`: names a stand-in for what other filters block, blocks nothing itself. */
+    val redirectOnly: Boolean = false,
+    /** The `:priority` after a redirect's name (`noopjs:10`); 0 when none. */
+    val redirectPriority: Int = 0,
 ) {
     fun hasNoOptions() = types == RequestType.ALL_SUBRESOURCES && thirdParty == null &&
         includeDomains == null && excludeDomains == null && !important && !matchCase
@@ -840,6 +962,9 @@ internal fun parseNetworkFilter(line: String): NetworkFilter? {
     var important = false
     var exempts = 0
     var popupOnly = false
+    var redirect: String? = null
+    var redirectOnly = false
+    var redirectPriority = 0
     if (options != null) {
         for (raw in options.split(',')) {
             val opt = raw.trim().lowercase()
@@ -854,6 +979,25 @@ internal fun parseNetworkFilter(line: String): NetworkFilter? {
                 name == "match-case" -> matchCase = true
                 name == "important" -> important = true
                 name == "popup" -> if (negated) Unit else popupOnly = true
+                // #393: uBlock's `redirect` / `redirect-rule` and Adblock
+                // Plus's `rewrite=abp-resource:` (its names are aliases in
+                // uBlock's resources). `none` turns redirection off in
+                // uBlock: not something a filter here needs to say.
+                !negated && (name == "redirect" || name == "redirect-rule") -> {
+                    if (!exception) return null // a bare `$redirect` only lifts, on an exception
+                    redirect = ""
+                    redirectOnly = true
+                }
+                !negated && (name.startsWith("redirect=") || name.startsWith("redirect-rule=")) -> {
+                    val value = raw.trim().substringAfter('=')
+                    val colon = value.lastIndexOf(':')
+                    val resource = if (colon > 0) value.substring(0, colon) else value
+                    if (colon > 0) redirectPriority = value.substring(colon + 1).toIntOrNull() ?: return null
+                    if (resource.isEmpty() || resource == "none") return null
+                    redirect = resource
+                    redirectOnly = name.startsWith("redirect-rule=")
+                }
+                !negated && name.startsWith("rewrite=abp-resource:") -> redirect = raw.trim().substringAfter('=')
                 (name == "elemhide" || name == "ehide") && exception -> exempts = exempts or 2
                 (name == "generichide" || name == "ghide") && exception -> exempts = exempts or 4
                 (opt.startsWith("domain=") || opt.startsWith("from=")) -> {
@@ -935,5 +1079,77 @@ internal fun parseNetworkFilter(line: String): NetworkFilter? {
         excludeDomains = exclude?.toTypedArray(),
         important = important,
         exempts = exempts,
+        redirect = redirect,
+        redirectOnly = redirectOnly,
+        redirectPriority = redirectPriority,
     )
+}
+
+/**
+ * The `$redirect=` / `$redirect-rule=` filters (#393) and their
+ * exceptions, for [AdblockEngine.redirectFor]: asked only once a
+ * request is blocked. Filed under a token as the blocking filters are;
+ * the token-less rest (mostly `*$script,redirect-rule=…,domain=…`)
+ * under the `domain=` pages they apply on, so a blocked request walks
+ * only its own page's; the few with neither in one list it always walks.
+ */
+internal class RedirectIndex {
+    /** [order]: its place in the lists, for a priority tie. */
+    private class Directive(val filter: NetworkFilter, val resource: String, val order: Int)
+
+    private val byToken = HashMap<String, MutableList<Directive>>()
+
+    /** Token-less directives scoped by `domain=`, under each of their pages' domains: most of them. */
+    private val byPageDomain = HashMap<String, MutableList<Directive>>()
+    private val untokened = ArrayList<Directive>()
+    private val exceptions = ArrayList<Directive>()
+    private var order = 0
+
+    fun isEmpty() = byToken.isEmpty() && byPageDomain.isEmpty() && untokened.isEmpty()
+
+    fun add(filter: NetworkFilter, resource: String) {
+        val d = Directive(filter, resource, order++)
+        val token = filter.bestToken()
+        val domains = filter.includeDomains
+        when {
+            token != null -> byToken.getOrPut(token) { ArrayList(1) } += d
+            domains != null -> for (dom in domains) byPageDomain.getOrPut(dom) { ArrayList(1) } += d
+            else -> untokened += d
+        }
+    }
+
+    /** [resource] `""`: every stand-in. */
+    fun addException(filter: NetworkFilter, resource: String) {
+        exceptions += Directive(filter, resource, -1)
+    }
+
+    fun resolve(request: AdblockEngine.Request): String? {
+        var best: Directive? = null
+        fun consider(d: Directive) {
+            if (!d.filter.matches(request)) return
+            val b = best
+            if (b == null || d.filter.redirectPriority > b.filter.redirectPriority ||
+                (d.filter.redirectPriority == b.filter.redirectPriority && d.order < b.order)
+            ) {
+                best = d
+            }
+        }
+        val url = request.lowerUrl
+        var i = 0
+        val n = url.length
+        while (i < n) {
+            if (!isTokenChar(url[i])) { i++; continue }
+            val start = i
+            while (i < n && isTokenChar(url[i])) i++
+            if (i - start < AdblockEngine.MIN_TOKEN) continue
+            byToken[url.substring(start, i)]?.forEach(::consider)
+        }
+        request.pageHost?.let { page -> forEachHostSuffix(page) { byPageDomain[it]?.forEach(::consider) } }
+        untokened.forEach(::consider)
+        val chosen = best ?: return null
+        for (e in exceptions) {
+            if ((e.resource.isEmpty() || e.resource == chosen.resource) && e.filter.matches(request)) return null
+        }
+        return chosen.resource
+    }
 }
