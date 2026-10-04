@@ -34,17 +34,13 @@ import org.json.JSONObject
 
 /**
  * Persistent toggles the user controls from the node details panel and
- * the settings screen (search engine, and the hidden "Other" section).
+ * the settings screen.
  *
  * Backed by a single [DataStore] under `freedom_node_settings` living
  * in the app's files directory. Flows surface the current value; the
  * corresponding suspend setter writes-through to disk.
  *
  * ## IPFS keys
- *
- * `show_ipfs_ui` gates visibility of every IPFS-related control in the
- * UI. The Settings screen "Other" section reveals a single row the
- * user can tap to flip this on before a demo.
  *
  * `ipfs_low_power` and `ipfs_routing_mode` are read at `:node` process
  * startup and re-applied on the next restart — there is no live

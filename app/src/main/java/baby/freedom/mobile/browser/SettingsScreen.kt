@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import android.content.Context
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.runtime.LaunchedEffect
@@ -282,8 +283,10 @@ fun SettingsScreen(
         snapshotFlow { query }.drop(1).collect { listState.scrollToItem(0) }
     }
 
-    // The Chains sub-pages stand in for the list while open; everything
-    // above stays composed, so Back lands on the list as it was left.
+    // The Chains sub-pages stand in for the list while open. The scaffold
+    // below leaves composition meanwhile, so its scroll positions are
+    // hoisted here (listState above, pageState below) and Back lands on
+    // the list or sub-page as it was left.
     when (val chainSubPage = chainPage) {
         ChainPage.Search -> ChainlistPage(
             query = chainQuery,
@@ -501,6 +504,11 @@ fun SettingsScreen(
     }
 
     val openPage = page
+    // Held out here, not inside the scaffold: a Chains, Connected-site or
+    // Licences page replaces the whole scaffold while open, and Back must
+    // land on the sub-page scrolled where it was left. A new page (or the
+    // same one opened again from the top level) starts at the top.
+    val pageState = remember(openPage) { LazyListState() }
     if (chainPage == null && site == null && !licencesOpen) FullScreenScaffold(
         title = openPage?.title ?: stringResource(R.string.settings_title),
         // On a sub-page the ← goes up to the top level, as Back does.
@@ -559,7 +567,8 @@ fun SettingsScreen(
             }
         } else androidx.compose.runtime.key(openPage) {
             val sections = settingsSections(openPage, isDefaultBrowser)
-            val pageState = rememberLazyListState()
+            // Re-runs after a Chains/site/Licences page closes, by which
+            // time scrollTo is null, so it leaves the kept position alone.
             LaunchedEffect(Unit) {
                 val target = scrollTo
                 scrollTo = null
