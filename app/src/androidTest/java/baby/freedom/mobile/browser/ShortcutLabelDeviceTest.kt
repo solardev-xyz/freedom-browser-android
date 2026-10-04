@@ -36,6 +36,12 @@ class ShortcutLabelDeviceTest {
     }
 
     @Test
+    fun aLeadingJoinerRunIsDropped() {
+        assertEquals("Bank", homeScreenShortcutLabel("\u200D".repeat(300) + "Bank", url))
+        assertEquals("$man\u200D$man", homeScreenShortcutLabel(man + "\u200D".repeat(300) + man, url))
+    }
+
+    @Test
     fun thirtyTwoFamiliesAreThirtyTwoCharacters() {
         assertEquals(family.repeat(SHORTCUT_LABEL_MAX), homeScreenShortcutLabel(family.repeat(SHORTCUT_LABEL_MAX), url))
         assertEquals(family.repeat(SHORTCUT_LABEL_MAX) + "…", homeScreenShortcutLabel(family.repeat(SHORTCUT_LABEL_MAX) + "x", url))

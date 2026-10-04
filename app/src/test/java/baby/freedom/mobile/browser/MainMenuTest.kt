@@ -260,6 +260,16 @@ class MainMenuTest {
         }
         // Nothing left of the title: the host.
         assertEquals("example.org", homeScreenShortcutLabel("\u200B\u202E\n", "https://example.org/"))
+        // A joiner leading a word, or straight after another joiner, means
+        // nothing and is dropped — so a long run of them can't make one
+        // cluster that cuts the label down to a lone ellipsis (R4-M1).
+        assertEquals("Bank", homeScreenShortcutLabel("\u200D".repeat(300) + "Bank", "https://example.org/"))
+        assertEquals("a b", homeScreenShortcutLabel("a \u200D\u200C\uDB40\uDC67b", "https://example.org/"))
+        assertEquals("a\u200Db", homeScreenShortcutLabel("a" + "\u200D".repeat(300) + "b", "https://example.org/"))
+        assertEquals(family, homeScreenShortcutLabel(family.replace("\u200D", "\u200D\u200D\u200C"), "https://example.org/"))
+        // No joiner dangles before the ellipsis even with a space after it.
+        val cut = homeScreenShortcutLabel("x".repeat(SHORTCUT_LABEL_MAX - 1) + "\u200D y", "https://example.org/")
+        assertEquals("x".repeat(SHORTCUT_LABEL_MAX - 1) + "…", cut)
     }
 
     @Test

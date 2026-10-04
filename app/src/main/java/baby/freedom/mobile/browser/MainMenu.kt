@@ -267,7 +267,8 @@ private fun isMark(cp: Int): Boolean = when (Character.getType(cp)) {
  * (U+2028/U+2029) become spaces, and runs of spaces collapse; format
  * characters (bidi overrides and isolates, zero-width spaces, U+FEFF),
  * unassigned, private-use and lone surrogate code points are dropped —
- * keeping ZWJ, ZWNJ and the tag characters emoji are built from; so are
+ * keeping ZWJ, ZWNJ and the tag characters emoji are built from (but not
+ * one that starts a word, nor a joiner straight after another, R4-M1); so are
  * the code points that draw blank without being any of those (the rest of
  * Default_Ignorable_Code_Point — Hangul fillers U+115F/U+1160/U+3164/
  * U+FFA0, U+034F and the like — and U+2800), and every variation selector
@@ -278,7 +279,7 @@ private fun isMark(cp: Int): Boolean = when (Character.getType(cp)) {
  * [SHORTCUT_LABEL_MAX] characters and [SHORTCUT_LABEL_CHARS] UTF-16 chars,
  * whichever comes first, on a character boundary (inside a single
  * character only if that one alone is over the char cap), with an
- * ellipsis.
+ * ellipsis and no joiner or space left dangling before it.
  */
 internal fun homeScreenShortcutLabel(title: String, url: String): String {
     val t = shortcutLabelText(title)
@@ -317,9 +318,18 @@ private fun shortcutLabelText(text: String): String {
             }
             drawsBlank(cp) -> Unit
             // Not a run end: marks after a joiner still stack on the base.
+            // A joiner or tag only means something after a character, so
+            // one at the start of a word is dropped, and so is a joiner
+            // straight after another (no emoji sequence has two in a row):
+            // a run of them would otherwise make one grapheme cluster as
+            // long as the whole cap, cut back to nothing (R4-M1).
             cp == 0x200C || cp == 0x200D || cp in 0xE0020..0xE007F -> {
-                clean.appendCodePoint(cp)
-                afterVisible = false
+                val prev = if (clean.isEmpty()) -1 else clean.codePointBefore(clean.length)
+                val joiner = cp == 0x200C || cp == 0x200D
+                if (prev != -1 && prev != ' '.code && !(joiner && (prev == 0x200C || prev == 0x200D))) {
+                    clean.appendCodePoint(cp)
+                    afterVisible = false
+                }
             }
             when (Character.getType(cp)) {
                 Character.FORMAT.toInt(),
@@ -362,7 +372,10 @@ private fun shortcutLabelText(text: String): String {
         cut = SHORTCUT_LABEL_CHARS
         if (Character.isLowSurrogate(collapsed[cut]) && Character.isHighSurrogate(collapsed[cut - 1])) cut--
     }
-    // Don't leave a dangling joiner before the ellipsis.
-    while (cut > 0 && collapsed[cut - 1] == '\u200D') cut--
-    return collapsed.substring(0, cut).trimEnd() + "…"
+    // Don't leave a dangling joiner, or a space, before the ellipsis — in
+    // either order, so a joiner before a space is caught too.
+    while (cut > 0 && collapsed[cut - 1].let { it == '\u200D' || it == '\u200C' || it == ' ' }) cut--
+    // Nothing left before the ellipsis: let the caller fall back to the host.
+    if (cut == 0) return ""
+    return collapsed.substring(0, cut) + "…"
 }
