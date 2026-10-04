@@ -2543,6 +2543,9 @@ fun BrowserScreen(
             radicle = radicle,
             onOpenRadicle = { showRadicle = true },
             onOpenWallet = { showWallet = true },
+            // Settings → Nodes & networks → Node status: over Settings,
+            // like the Radicle page; Back returns there.
+            onOpenNodes = { showNode = true },
             // A newer release's page (#272): a new tab in front, never a
             // private one, with Settings closed so it's on screen.
             onOpenUrl = { url ->
@@ -2593,7 +2596,7 @@ fun BrowserScreen(
         )
     }
 
-    // Settings → Nodes → Radicle node (#73); over Settings, like NodeScreen.
+    // Settings → Nodes & networks → Radicle node (#73); over Settings, like NodeScreen.
     if (showRadicle) {
         RadicleScreen(
             radicle = radicle.copy(

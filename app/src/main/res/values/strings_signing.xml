@@ -248,7 +248,7 @@
     <!-- %1$d: seconds -->
     <string name="signing_x402_timed_out">Not paid: the site allows %1$d s to sign a payment, and that ran out. Reload the page to try again.</string>
     <!-- %1$d: the offer's number; %2$s: a chain ID -->
-    <string name="signing_x402_offer_unknown_chain">Offer %1$d: pays on chain %2$s, which isn\'t in Settings → Chains</string>
+    <string name="signing_x402_offer_unknown_chain">Offer %1$d: pays on chain %2$s, which isn\'t in Settings → Wallet &amp; chains</string>
     <!-- %1$d: the offer's number; %2$s: network -->
     <string name="signing_x402_offer_token_unverified">Offer %1$d: its token on %2$s isn\'t in the wallet\'s token list, and its decimals couldn\'t be verified, so the amount can\'t be shown</string>
     <!-- %1$d: the offer's number; %2$s: network -->
