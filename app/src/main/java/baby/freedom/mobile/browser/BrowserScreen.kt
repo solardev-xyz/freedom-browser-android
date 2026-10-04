@@ -573,12 +573,17 @@ fun BrowserScreen(
     // effect's own scope and cleared only by an answer: an Activity
     // relaunch while it's up cancels it, and the next screen shows it
     // again; Reopen closed tab or Clear history ends the offer, and the
-    // notice with it.
+    // notice with it. It waits on a host of its own: on the shared one
+    // its Indefinite notice would hold every later notice (a Close all's
+    // Undo, downloads, permission recovery) in the queue until answered.
+    // It's drawn only while the shared host has nothing up, so it steps
+    // aside for each of those notices and comes back after.
+    val heldTabsHostState = remember { SnackbarHostState() }
     val heldTabs = tabsSession.heldTabs
     LaunchedEffect(heldTabs) {
         val held = heldTabs ?: return@LaunchedEffect
         val n = held.group.tabs.size
-        val result = snackbarHostState.showSnackbar(
+        val result = heldTabsHostState.showSnackbar(
             message = Strings.plural(
                 if (held.afterCrash) R.plurals.browser_tabs_not_restored else R.plurals.browser_tabs_not_reopened,
                 n,
@@ -2540,6 +2545,15 @@ fun BrowserScreen(
                     .windowInsetsPadding(chromeInsets)
                     .padding(bottom = capsuleSlot + CapsuleBottomMargin + snackbarLift),
             ) { data -> Snackbar(snackbarData = data) }
+            if (snackbarHostState.currentSnackbarData == null) {
+                SnackbarHost(
+                    hostState = heldTabsHostState,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .windowInsetsPadding(chromeInsets)
+                        .padding(bottom = capsuleSlot + CapsuleBottomMargin + snackbarLift),
+                ) { data -> Snackbar(snackbarData = data) }
+            }
         }
     }
 
@@ -3027,6 +3041,15 @@ fun BrowserScreen(
                     .windowInsetsPadding(WindowInsets.systemBars)
                     .padding(bottom = 8.dp),
             ) { data -> Snackbar(snackbarData = data) }
+            if (snackbarHostState.currentSnackbarData == null) {
+                SnackbarHost(
+                    hostState = heldTabsHostState,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .windowInsetsPadding(WindowInsets.systemBars)
+                        .padding(bottom = 8.dp),
+                ) { data -> Snackbar(snackbarData = data) }
+            }
         }
     }
 

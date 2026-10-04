@@ -428,6 +428,39 @@ class TabsStoreTest {
     }
 
     @Test
+    fun `held tabs outlast the stack's cap through a later Close all and its Undo`() = runBlocking {
+        // A crashed restore of 15 tabs; the user opens 10 more and closes
+        // them all. The bulk close's Undo goes on screen, and together the
+        // two groups are past the cap — the held ones must still stay.
+        val many = TabsState(homepage = HOME_URL)
+        many.tabs[0].visit("h0")
+        for (i in 1 until 15) many.newTab().visit("h$i")
+        store().save(many.saveForProcessDeath())
+        restoreAndMark()
+        crashAt = now + 1_000
+        val session = session().also { withTimeout(5_000) { it.ready.await() } }
+        val group = session.heldTabs!!.group
+        session.tabs.tabs[0].visit("n0")
+        for (i in 1 until 10) session.tabs.newTab().visit("n$i")
+        val closed = session.tabs.closeAllTabs()
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        assertTrue(session.tabs.isOnReopenStack(group))
+        assertSame(group, session.heldTabs?.group)
+        // The Close all notice times out: its group may be trimmed now,
+        // the unanswered held one still not.
+        session.tabs.undoWithdrawn(closed.undo!!)
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        assertTrue(session.tabs.isOnReopenStack(group))
+        assertSame(group, session.heldTabs?.group)
+        assertTrue(File(dir, TabsStore.HELD).exists())
+        // A launch before the answer still offers them.
+        store().save(session.tabs.saveForProcessDeath())
+        crashAt = null
+        val next = session().also { withTimeout(5_000) { it.ready.await() } }
+        assertEquals(15, next.heldTabs!!.group.tabs.size)
+    }
+
+    @Test
     fun `an offer not yet answered is still up for a relaunched screen`() {
         val session = crashedRestoreSession()
         // A screen's notice cancelled by an Activity relaunch answers nothing.

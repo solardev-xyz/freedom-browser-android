@@ -159,12 +159,32 @@ class TabsState(
     private var offeredUndo: ClosedGroup? = null
 
     /**
+     * The entry of saved tabs a crashed restore skipped ([keepForReopen]),
+     * held until its offer is answered ([offerWithdrawn]). Its own slot,
+     * apart from [offeredUndo]: a bulk close's Undo going on screen
+     * meanwhile mustn't let the cap drop it — that would end the offer
+     * (and delete its disk copy) without the user ever answering it.
+     */
+    private var heldOffer: ClosedGroup? = null
+
+    /**
      * The Undo notice of [group] is gone (timed out, used, or replaced
      * by a newer one): it may be dropped by the stack's cap again.
      */
     fun undoWithdrawn(group: ClosedGroup) {
         if (offeredUndo === group) {
             offeredUndo = null
+            trimClosed()
+        }
+    }
+
+    /**
+     * The offer of [group] ([keepForReopen]) has been answered or has
+     * ended: it may be dropped by the stack's cap again.
+     */
+    fun offerWithdrawn(group: ClosedGroup) {
+        if (heldOffer === group) {
+            heldOffer = null
             trimClosed()
         }
     }
@@ -584,11 +604,13 @@ class TabsState(
         // would otherwise pile up. Oldest entries go first; the newest
         // always stays whole, so its Undo brings back every tab it
         // closed (those were all open a moment ago anyway). So does the
-        // entry whose Undo is on screen ([offeredUndo]).
+        // entry whose Undo is on screen ([offeredUndo]), and the held
+        // tabs whose offer is still unanswered ([heldOffer]).
         var held = closedTabs.sumOf { it.tabs.size }
         var i = 0
         while (i < closedTabs.size - 1 && held > MAX_CLOSED_TABS) {
-            if (closedTabs[i] === offeredUndo) i++ else held -= closedTabs.removeAt(i).tabs.size
+            val pinned = closedTabs[i].let { it === offeredUndo || it === heldOffer }
+            if (pinned) i++ else held -= closedTabs.removeAt(i).tabs.size
         }
     }
 
@@ -879,8 +901,9 @@ class TabsState(
             bulk = true,
         )
         closedTabs.add(group)
-        // Held while its notice is up, like a bulk close's Undo.
-        offeredUndo = group
+        // Held until its offer is answered, whatever else is closed and
+        // undone meanwhile.
+        heldOffer = group
         trimClosed()
         return group
     }
@@ -894,6 +917,7 @@ class TabsState(
     fun forgetClosedTabs() {
         closedTabs.clear()
         offeredUndo = null
+        heldOffer = null
     }
 
     /**

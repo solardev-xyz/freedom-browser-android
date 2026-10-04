@@ -131,7 +131,7 @@ class TabsSession(
         heldTabs = null
         heldWatch?.cancel()
         heldWatch = null
-        tabs.undoWithdrawn(group)
+        tabs.offerWithdrawn(group)
         store.releaseHeld()
     }
 
