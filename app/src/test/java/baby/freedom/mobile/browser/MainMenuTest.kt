@@ -238,6 +238,26 @@ class MainMenuTest {
         // Cut on a character boundary, never inside an emoji.
         val emoji = "\uD83D\uDE00".repeat(SHORTCUT_LABEL_MAX + 5)
         assertEquals("\uD83D\uDE00".repeat(SHORTCUT_LABEL_MAX) + "…", homeScreenShortcutLabel(emoji, "https://example.org/"))
+        // However many grapheme clusters a run of ZWJ chains or tag
+        // characters counts as, it is cut at the char cap, on a code point,
+        // with no dangling joiner (R3-M1). (Android's ICU-backed
+        // BreakIterator makes the 301-man chain one cluster; the JVM's may
+        // not — see ShortcutLabelDeviceTest for the device's own answer.)
+        val man = "\uD83D\uDC68"
+        for (title in listOf(
+            "$man\u200D".repeat(300) + man,
+            "\uD83C\uDFF4" + "\uDB40\uDC67".repeat(1000),
+            scotland.repeat(SHORTCUT_LABEL_MAX),
+            family.repeat(SHORTCUT_LABEL_MAX) + "x",
+        )) {
+            val label = homeScreenShortcutLabel(title, "https://example.org/")
+            assertTrue(label.endsWith("…"))
+            val body = label.dropLast(1)
+            assertTrue(body.length in 1..SHORTCUT_LABEL_CHARS)
+            assertTrue(title.startsWith(body))
+            assertFalse(body.endsWith("\u200D"))
+            assertFalse(Character.isHighSurrogate(body.last()))
+        }
         // Nothing left of the title: the host.
         assertEquals("example.org", homeScreenShortcutLabel("\u200B\u202E\n", "https://example.org/"))
     }

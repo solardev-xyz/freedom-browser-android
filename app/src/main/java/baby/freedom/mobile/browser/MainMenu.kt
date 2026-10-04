@@ -226,6 +226,14 @@ internal fun homeScreenShortcutId(url: String): String {
 /** At most this many characters (grapheme clusters) of a page title in a launcher label. */
 internal const val SHORTCUT_LABEL_MAX = 32
 
+/**
+ * And at most this many UTF-16 chars, whatever the character count: a
+ * ZWJ-joined chain of pictographs, or a base with a long run of tag
+ * characters, is one grapheme cluster however long it is (R3-M1). Room for
+ * 32 three-person family emoji (8 chars each).
+ */
+internal const val SHORTCUT_LABEL_CHARS = 8 * SHORTCUT_LABEL_MAX
+
 /** At most this many combining marks in a row on one character of a launcher label. */
 internal const val SHORTCUT_LABEL_MARKS = 3
 
@@ -267,7 +275,9 @@ private fun isMark(cp: Int): Boolean = when (Character.getType(cp)) {
  * combining marks on one character is cut at [SHORTCUT_LABEL_MARKS], so a
  * stack of them can't draw over the labels around it. A title left with
  * nothing that draws falls back to the host. It is cut to
- * [SHORTCUT_LABEL_MAX] characters, on a character boundary, with an
+ * [SHORTCUT_LABEL_MAX] characters and [SHORTCUT_LABEL_CHARS] UTF-16 chars,
+ * whichever comes first, on a character boundary (inside a single
+ * character only if that one alone is over the char cap), with an
  * ellipsis.
  */
 internal fun homeScreenShortcutLabel(title: String, url: String): String {
@@ -338,11 +348,21 @@ private fun shortcutLabelText(text: String): String {
     val chars = BreakIterator.getCharacterInstance()
     chars.setText(collapsed)
     var cut = chars.first()
-    repeat(SHORTCUT_LABEL_MAX) {
+    var clusters = 0
+    while (true) {
         val next = chars.next()
         if (next == BreakIterator.DONE) return collapsed
+        if (clusters == SHORTCUT_LABEL_MAX || next > SHORTCUT_LABEL_CHARS) break
         cut = next
+        clusters++
     }
-    if (chars.next() == BreakIterator.DONE) return collapsed
+    if (cut == 0) {
+        // One cluster longer than the whole char cap: cut it on a code
+        // point boundary.
+        cut = SHORTCUT_LABEL_CHARS
+        if (Character.isLowSurrogate(collapsed[cut]) && Character.isHighSurrogate(collapsed[cut - 1])) cut--
+    }
+    // Don't leave a dangling joiner before the ellipsis.
+    while (cut > 0 && collapsed[cut - 1] == '\u200D') cut--
     return collapsed.substring(0, cut).trimEnd() + "…"
 }
