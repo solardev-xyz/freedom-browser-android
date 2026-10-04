@@ -92,7 +92,7 @@ permissions:
   contents: read
 
 env:
-  FFI_REF: v0.12.11
+  FFI_REF: v0.12.12
   COLIBRI_REF: v3.0.0
   # Pinned (not "latest") so it can be part of the ffi cache key.
   CARGO_NDK_VERSION: 4.1.2

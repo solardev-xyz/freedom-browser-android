@@ -663,11 +663,25 @@ char *ant_storage_connect_batch(const AntHandle *handle,
  * Auto-discover and connect every funded storage plan this account owns
  * on Gnosis (an on-chain log scan — can take a while). Returns
  *   {"registered":[...ids],"status":<ant_storage_status object>}
- * Requires the `chain` cargo feature.
+ * Continues the scan saved in the data dir, so after the first call only
+ * the blocks since are read. Requires the `chain` cargo feature.
  */
 char *ant_storage_discover(const AntHandle *handle,
                            const char *gnosis_rpc,
                            char **out_err);
+
+/*
+ * ant_storage_discover, but reading the account's whole xBZZ transfer
+ * history again instead of continuing the saved scan, and replacing it.
+ * For a user's explicit "search again" when a plan they own is missing:
+ * an RPC that once answered part of the history incompletely (a backend
+ * far behind the head) leaves a hole the saved scan never revisits. As
+ * slow as the first scan behind a range-capped RPC (minutes), so don't
+ * call it at every start. Same return value; requires `chain`.
+ */
+char *ant_storage_discover_full(const AntHandle *handle,
+                                const char *gnosis_rpc,
+                                char **out_err);
 
 /*
  * Deploy (or return the already-persisted) node-owned chequebook so the
