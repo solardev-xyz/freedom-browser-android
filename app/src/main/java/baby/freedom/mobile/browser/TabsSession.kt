@@ -156,11 +156,12 @@ class TabsSession(
         // Back among the open tabs (Restore, or Reopen closed tab, R4-M1):
         // the held file goes only once the open list holding them and the
         // restore's mark are on disk (R4-F1), not a debounce later.
-        val saved = tabs.saveForProcessDeath()
-        viewModelScope.launch {
-            val at = withContext(Dispatchers.IO) { store.adoptHeld(saved) }
-            settleWhenLoaded(store, at)
-        }
+        // Its place among the saves is taken now, on this thread, ahead
+        // of any the debounce makes from here on — and those read the
+        // list as it is then, the reopened tabs in it (R5-M1).
+        val adopted = store.adoptHeld(tabs.saveForProcessDeath())
+        val restored = restoredIds()
+        viewModelScope.launch { settleWhenLoaded(store, adopted.await(), restored) }
     }
 
     /** The offer's Restore: bring the held tabs back, marked like any restore from disk. */
@@ -204,23 +205,39 @@ class TabsSession(
      * has no page to load, so its window starts at once.
      */
     private suspend fun markRestored(store: TabsStore) {
+        val restored = restoredIds()
         val at = withContext(Dispatchers.IO) { store.markRestored() }
-        settleWhenLoaded(store, at)
+        settleWhenLoaded(store, at, restored)
     }
+
+    /** The regular tabs open as a restore is marked: the ones it brought back, and any beside them. */
+    private fun restoredIds(): Set<Long> = tabs.tabs.filter { !it.private }.map { it.id }.toSet()
 
     /**
      * Settle the restore marked [at] once the tab on screen has loaded
-     * its page and [TabsStore.CRASH_WINDOW_MS] more have passed. Whichever
-     * tab is on screen at the time, not the one that was when the restore
-     * ran: a link the app was cold-started from opens a new tab over the
-     * restored ones, which then don't load until shown (R4-M3).
+     * its page, no [restored] tab is still loading the page it was
+     * restored to, and [TabsStore.CRASH_WINDOW_MS] more have passed.
+     *
+     * Whichever tab is on screen at the time, not the one that was when
+     * the restore ran: a link the app was cold-started from opens a new
+     * tab over the restored ones, which then don't load until shown
+     * (R4-M3) — a restored tab whose load never started isn't waited for.
+     * But one whose load did start keeps loading off screen: opening a
+     * new (home) tab over a restored dweb page still waiting on its node
+     * doesn't start the window, its load finishing does (R5-M2).
      */
-    private fun settleWhenLoaded(store: TabsStore, at: Long) {
+    private fun settleWhenLoaded(store: TabsStore, at: Long, restored: Set<Long>) {
         viewModelScope.launch {
             snapshotFlow {
                 val tab = tabs.active
-                // A home tab on screen loads no page: nothing to wait for (R3-M1).
-                tab.isHome || restoreLoaded(tab)
+                // A home tab on screen loads no page (R3-M1); a restored
+                // tab behind it may still be loading one, though.
+                val onScreen = tab.isHome || restoreLoaded(tab)
+                val behind = restored.all { id ->
+                    val other = tabs.tabs.firstOrNull { it.id == id }
+                    other == null || other.isHome || other.pendingRestore != null || restoreLoaded(other)
+                }
+                onScreen && behind
             }.first { it }
             delay(TabsStore.CRASH_WINDOW_MS)
             withContext(Dispatchers.IO) { store.settleRestore(at) }
@@ -246,9 +263,13 @@ class TabsSession(
             // tab's page, say) isn't a change. Written once it has
             // settled for a moment, so a page's loading doesn't write on
             // every title.
-            snapshotFlow { tabs.saveForProcessDeath() }.collectLatest { saved ->
+            snapshotFlow { tabs.saveForProcessDeath() }.collectLatest {
                 delay(TabsStore.SAVE_DEBOUNCE_MS)
-                store.saveLater(saved)
+                // The list as it is now, not as it was a second ago: a
+                // change whose emission is still on its way (a Restore of
+                // held tabs just now) is in it, so this save can't undo
+                // it on disk (R5-M1).
+                store.saveLater(tabs.saveForProcessDeath())
             }
         }
     }

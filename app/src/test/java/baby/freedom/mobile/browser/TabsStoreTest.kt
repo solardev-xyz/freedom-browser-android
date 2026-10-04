@@ -648,6 +648,65 @@ class TabsStoreTest {
     }
 
     @Test
+    fun `a debounced save due just after Restore can't drop the restored tabs from disk`() = runBlocking {
+        val session = crashedRestoreSession()
+        // The home tab's own save has gone by.
+        kotlinx.coroutines.delay(50)
+        main.scheduler.advanceTimeBy(2 * TabsStore.SAVE_DEBOUNCE_MS)
+        kotlinx.coroutines.delay(50)
+        // A change a moment before Restore leaves a save pending on the debounce…
+        session.tabs.tabs[0].visit("x")
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        kotlinx.coroutines.delay(50)
+        main.scheduler.advanceTimeBy(TabsStore.SAVE_DEBOUNCE_MS - 100)
+        kotlinx.coroutines.delay(50)
+        assertFalse(savedFile().exists())
+        // …the user taps Restore, and the debounce runs out before the
+        // tab list's change has reached it (R5-M1).
+        session.restoreHeld()
+        main.scheduler.advanceTimeBy(200)
+        main.scheduler.runCurrent()
+        awaitHeldGone()
+        kotlinx.coroutines.delay(200)
+        // The open list still holds them: a crash now loses nothing.
+        val onDisk = TabsStore.decode(savedFile().readText())!!.tabs.map { it.title }
+        assertTrue(onDisk.toString(), onDisk.containsAll(listOf("x", "a", "b", "c")))
+    }
+
+    @Test
+    fun `a restored page still loading behind a new home tab keeps the restore to blame`() = runBlocking {
+        store().save(threeTabs().saveForProcessDeath())
+        val session = session()
+        withTimeout(5_000) { session.ready.await() }
+        val mark = File(dir, TabsStore.RESTORE_MARK)
+        withTimeout(5_000) { while (!mark.exists()) kotlinx.coroutines.delay(10) }
+        // The restored page starts loading (a dweb page, waiting on its node)…
+        val restored = session.tabs.active.apply {
+            pendingRestore = null
+            url = "https://b.example/"
+            progress = 10
+        }
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        // …and the user opens a new tab over it (R5-M2).
+        session.tabs.newTab()
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        assertTrue(session.tabs.active.isHome)
+        kotlinx.coroutines.delay(50)
+        main.scheduler.advanceTimeBy(3 * TabsStore.CRASH_WINDOW_MS)
+        kotlinx.coroutines.delay(50)
+        assertTrue(mark.exists())
+        // It finishes off screen: the window starts from there.
+        restored.progress = -1
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        kotlinx.coroutines.delay(50)
+        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS - 1_000)
+        kotlinx.coroutines.delay(50)
+        assertTrue(mark.exists())
+        main.scheduler.advanceTimeBy(2_000)
+        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
+    }
+
+    @Test
     fun `nothing on disk leaves the fresh tab list`() = runBlocking {
         val session = session()
         withTimeout(5_000) { session.ready.await() }

@@ -5,8 +5,10 @@ import android.app.ApplicationExitInfo
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -166,10 +168,20 @@ class TabsStore internal constructor(
      * drop the held file — so there's no moment where a crash finds them
      * in neither file (R4-F1), nor one where they're open but unguarded
      * (R4-M1). If the list can't be written the held file stays, and
-     * they're offered again next time. Returns the mark. Blocking I/O.
+     * they're offered again next time. Completes with the mark.
+     *
+     * Its place in line among the saves is taken here, on the caller's
+     * thread, as [saveLater]'s is: a save the caller asked for before
+     * this (a list from before the restore) can't land after it and
+     * delete the list the held file was dropped for (R5-M1). Runs on the
+     * store's own scope, so it lands even if the caller goes away.
      */
-    suspend fun adoptHeld(saved: TabsState.SavedTabs): Long {
+    fun adoptHeld(saved: TabsState.SavedTabs): Deferred<Long> {
         val seq = nextSeq()
+        return writes.async { adopt(seq, saved) }
+    }
+
+    private suspend fun adopt(seq: Long, saved: TabsState.SavedTabs): Long {
         val at = clock()
         writeLock.withLock {
             // A newer list already on disk holds them too (unless the
