@@ -98,7 +98,9 @@ internal fun LedgerConnectPage(accounts: List<WalletAccount>, onAdded: () -> Uni
         if (device != null) device = null else onBack()
     }
     BackHandler(onBack = back)
-    FullScreenScaffold(title = stringResource(R.string.signing_ledger_connect_title), onDismiss = onBack) {
+    // The header's ← is this page's Back too: from a Ledger's accounts it
+    // returns to the list of Ledgers, as the system Back does.
+    FullScreenScaffold(title = stringResource(R.string.signing_ledger_connect_title), onDismiss = back) {
         val d = device
         if (d == null) {
             LedgerDevicesStep(ledger, onPick = { device = it })
