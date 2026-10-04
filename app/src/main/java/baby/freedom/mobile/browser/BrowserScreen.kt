@@ -1465,7 +1465,7 @@ fun BrowserScreen(
     // the site's cached favicon are taken at the tap, so a navigation
     // landing while the icon is drawn can't retarget it. Null where it
     // isn't offered — a private tab above all ([homeScreenShortcutTarget]).
-    val addToHomeScreen: (() -> Unit)? = homeScreenShortcutTarget(state.url, state.private)?.let { target ->
+    val addToHomeScreen: (() -> Unit)? = homeScreenShortcutTarget(state.url, state.private, state.showsErrorPage)?.let { target ->
         {
             val label = homeScreenShortcutLabel(state.title, target)
             val favicons = repo.favicon(target)
@@ -2365,11 +2365,12 @@ fun BrowserScreen(
                     // but never for a dweb page (no key). Toggling asks
                     // for the page again, as Reload does, and the load
                     // picks the user agent for its site.
-                    desktopSite = desktopSiteOf(state.zoomSite)
-                        ?.takeIf { state.url.isNotBlank() }
+                    // Nor on an error page, which has no site's page
+                    // to ask for again ([menuDesktopSite]).
+                    desktopSite = menuDesktopSite(state.zoomSite, state.url, state.showsErrorPage)
                         ?.let { desktopSites.isDesktop(it, state.private) },
                     onToggleDesktopSite = {
-                        desktopSiteOf(state.zoomSite)?.let { site ->
+                        menuDesktopSite(state.zoomSite, state.url, state.showsErrorPage)?.let { site ->
                             desktopSites.toggle(site, state.private)
                             val url = state.url.ifBlank { state.addressBarText }
                             if (url.isNotBlank()) submit(state, url)

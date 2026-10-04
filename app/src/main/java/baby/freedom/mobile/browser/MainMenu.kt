@@ -4,6 +4,7 @@ import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.Vault
 import java.security.MessageDigest
+import java.text.BreakIterator
 
 /**
  * The main menu's rows (#400), the popup from the ≡ in the address
@@ -181,22 +182,36 @@ internal fun walletMenuNote(state: Vault.State): String? = when (state) {
  * The address a Home-screen shortcut to the page on screen opens, or null
  * where the menu doesn't offer one: a private tab (a launcher icon is a
  * trace of the visit, and it would open in a regular tab anyway), the
- * home surface, the browser's own error page, and anything the incoming-
- * link path ([IncomingLinks.link]) wouldn't open — so the shortcut can
- * only ever ask for what a link from another app could. An address with a
- * bidi control in it is refused too: the launcher would show its label
- * in an order the address doesn't have.
+ * home surface, one of the browser's own error pages, and anything the
+ * incoming-link path ([IncomingLinks.link]) wouldn't open — so the
+ * shortcut can only ever ask for what a link from another app could. An
+ * address with a bidi control in it is refused too: the launcher would
+ * show its label in an order the address doesn't have.
  *
  * [url] is the tab's committed address in its display form (what the
- * address bar shows: `ens://name`, `bzz://…`, `https://…`).
+ * address bar shows: `ens://name`, `bzz://…`, `https://…`). On an error
+ * page that is the address that *failed* — the [ErrorPage] URL itself
+ * never reaches it — so [errorPage] ([BrowserState.showsErrorPage]) is
+ * what says the page is one (R1-F1).
  */
-internal fun homeScreenShortcutTarget(url: String, private: Boolean): String? {
-    if (private) return null
+internal fun homeScreenShortcutTarget(url: String, private: Boolean, errorPage: Boolean): String? {
+    if (private || errorPage) return null
     val u = url.trim()
     if (u.isEmpty() || ErrorPage.isErrorPage(u)) return null
     if (u.any(BidiControls::isBidiControl)) return null
     return IncomingLinks.link(u)
 }
+
+/**
+ * The menu's Desktop site switch for the page on screen: the site it
+ * applies to, or null where the row shows disabled — the home surface, a
+ * dweb page (no site key, [desktopSiteOf]) and an error page, where
+ * there is no site's page to ask for again (R1-M1). [zoomSite] is
+ * [BrowserState.zoomSite], which an error page served in a failed web
+ * load's own entry still has.
+ */
+internal fun menuDesktopSite(zoomSite: String?, url: String, errorPage: Boolean): String? =
+    desktopSiteOf(zoomSite)?.takeIf { url.isNotBlank() && !errorPage }
 
 /**
  * The shortcut's id: one per address, so pinning the same page again
@@ -208,15 +223,62 @@ internal fun homeScreenShortcutId(url: String): String {
     return "page-" + digest.take(16).joinToString("") { "%02x".format(it) }
 }
 
+/** At most this many characters (grapheme clusters) of a page title in a launcher label. */
+internal const val SHORTCUT_LABEL_MAX = 32
+
 /**
  * The launcher label: the page's title, or where it has none, its host
- * (or name, for a dweb address). Bidi controls are dropped, so a title
- * can't reorder the label around it.
+ * (or name, for a dweb address). The title is the page's own text, so it
+ * is made fit for a one-line label under an icon first (R1-M2): line
+ * breaks, tabs and other controls become spaces; format characters
+ * (bidi overrides and isolates, zero-width spaces, U+FEFF), line and
+ * paragraph separators, unassigned and lone surrogate code points are
+ * dropped — keeping ZWJ, ZWNJ and the tag characters emoji are built
+ * from; runs of spaces collapse; and it is cut to [SHORTCUT_LABEL_MAX]
+ * characters, on a character boundary, with an ellipsis.
  */
 internal fun homeScreenShortcutLabel(title: String, url: String): String {
-    val t = BidiControls.stripped(title).trim()
+    val t = shortcutLabelText(title)
     if (t.isNotEmpty()) return t
     val host = url.substringAfter("://", url)
         .substringBefore('/').substringBefore('?').substringBefore('#')
-    return host.ifEmpty { url }
+    return shortcutLabelText(host).ifEmpty { url.take(SHORTCUT_LABEL_MAX) }
+}
+
+private fun shortcutLabelText(text: String): String {
+    val clean = StringBuilder(minOf(text.length, 4 * SHORTCUT_LABEL_MAX + 16))
+    var i = 0
+    // Only so much of a multi-kB title is worth looking at.
+    val end = minOf(text.length, 64 * SHORTCUT_LABEL_MAX)
+    while (i < end) {
+        val cp = text.codePointAt(i)
+        i += Character.charCount(cp)
+        when {
+            cp == '\t'.code || cp == '\n'.code || cp == '\r'.code ||
+                Character.getType(cp) == Character.CONTROL.toInt() ||
+                Character.isWhitespace(cp) || Character.isSpaceChar(cp) -> clean.append(' ')
+            cp == 0x200C || cp == 0x200D || cp in 0xE0020..0xE007F -> clean.appendCodePoint(cp)
+            when (Character.getType(cp)) {
+                Character.FORMAT.toInt(),
+                Character.LINE_SEPARATOR.toInt(),
+                Character.PARAGRAPH_SEPARATOR.toInt(),
+                Character.SURROGATE.toInt(),
+                Character.UNASSIGNED.toInt(),
+                Character.PRIVATE_USE.toInt() -> true
+                else -> false
+            } -> Unit
+            else -> clean.appendCodePoint(cp)
+        }
+    }
+    val collapsed = clean.toString().replace(Regex(" {2,}"), " ").trim()
+    val chars = BreakIterator.getCharacterInstance()
+    chars.setText(collapsed)
+    var cut = chars.first()
+    repeat(SHORTCUT_LABEL_MAX) {
+        val next = chars.next()
+        if (next == BreakIterator.DONE) return collapsed
+        cut = next
+    }
+    if (chars.next() == BreakIterator.DONE) return collapsed
+    return collapsed.substring(0, cut).trimEnd() + "…"
 }

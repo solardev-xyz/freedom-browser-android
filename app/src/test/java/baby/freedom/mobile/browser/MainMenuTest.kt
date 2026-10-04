@@ -162,25 +162,25 @@ class MainMenuTest {
 
     @Test
     fun `a shortcut is offered for web and dweb pages in a regular tab`() {
-        assertEquals("https://example.org/a?b=c", homeScreenShortcutTarget("https://example.org/a?b=c", private = false))
-        assertEquals("ens://app.swarmit.eth", homeScreenShortcutTarget("ens://app.swarmit.eth", private = false))
-        assertEquals("bzz://abc/index.html", homeScreenShortcutTarget(" bzz://abc/index.html ", private = false))
+        assertEquals("https://example.org/a?b=c", homeScreenShortcutTarget("https://example.org/a?b=c", private = false, errorPage = false))
+        assertEquals("ens://app.swarmit.eth", homeScreenShortcutTarget("ens://app.swarmit.eth", private = false, errorPage = false))
+        assertEquals("bzz://abc/index.html", homeScreenShortcutTarget(" bzz://abc/index.html ", private = false, errorPage = false))
     }
 
     @Test
     fun `never a shortcut in a private tab`() {
-        assertNull(homeScreenShortcutTarget("https://example.org/", private = true))
-        assertNull(homeScreenShortcutTarget("ens://app.swarmit.eth", private = true))
+        assertNull(homeScreenShortcutTarget("https://example.org/", private = true, errorPage = false))
+        assertNull(homeScreenShortcutTarget("ens://app.swarmit.eth", private = true, errorPage = false))
     }
 
     @Test
     fun `no shortcut for home, error pages, other schemes or bidi tricks`() {
-        assertNull(homeScreenShortcutTarget("", private = false))
-        assertNull(homeScreenShortcutTarget("about:blank", private = false))
-        assertNull(homeScreenShortcutTarget(ErrorPage.URL + "?url=x", private = false))
-        assertNull(homeScreenShortcutTarget("javascript:alert(1)", private = false))
-        assertNull(homeScreenShortcutTarget("file:///sdcard/x.html", private = false))
-        assertNull(homeScreenShortcutTarget("https://example.org/‮gnp.exe", private = false))
+        assertNull(homeScreenShortcutTarget("", private = false, errorPage = false))
+        assertNull(homeScreenShortcutTarget("about:blank", private = false, errorPage = false))
+        assertNull(homeScreenShortcutTarget(ErrorPage.URL + "?url=x", private = false, errorPage = false))
+        assertNull(homeScreenShortcutTarget("javascript:alert(1)", private = false, errorPage = false))
+        assertNull(homeScreenShortcutTarget("file:///sdcard/x.html", private = false, errorPage = false))
+        assertNull(homeScreenShortcutTarget("https://example.org/‮gnp.exe", private = false, errorPage = false))
     }
 
     @Test
@@ -197,5 +197,48 @@ class MainMenuTest {
         assertEquals("example.org", homeScreenShortcutLabel("", "https://example.org/path?q#f"))
         assertEquals("app.swarmit.eth", homeScreenShortcutLabel(" ", "ens://app.swarmit.eth"))
         assertEquals("abc", homeScreenShortcutLabel("a‮bc", "https://example.org/"))
+    }
+
+    @Test
+    fun `no shortcut on an error page, which shows the address that failed`() {
+        // What `state.url` holds on each kind of error page: the failed
+        // address (ErrorPage's display URL, a failed web load's own
+        // entry, a name refusal) — never the ErrorPage URL (R1-F1).
+        assertNull(homeScreenShortcutTarget("http://10.0.2.2:8709/nothing", private = false, errorPage = true))
+        assertNull(homeScreenShortcutTarget("ens://missing.eth", private = false, errorPage = true))
+        assertEquals(
+            "http://10.0.2.2:8709/nothing",
+            homeScreenShortcutTarget("http://10.0.2.2:8709/nothing", private = false, errorPage = false),
+        )
+    }
+
+    @Test
+    fun `Desktop site is off on home, dweb pages and error pages`() {
+        assertEquals("example.org", menuDesktopSite("www.example.org", "https://www.example.org/", errorPage = false))
+        assertNull(menuDesktopSite("www.example.org", "https://www.example.org/", errorPage = true))
+        assertNull(menuDesktopSite("www.example.org", "", errorPage = false))
+        assertNull(menuDesktopSite(null, "ens://app.swarmit.eth", errorPage = false))
+    }
+
+    @Test
+    fun `the shortcut label is one capped line with no hidden characters`() {
+        assertEquals("Line one line two", homeScreenShortcutLabel("Line\none\u2028line\ttwo", "https://example.org/"))
+        assertEquals("Bank", homeScreenShortcutLabel("B\u200Ba\uFEFFn\u00ADk\u202E", "https://example.org/"))
+        assertEquals("a b", homeScreenShortcutLabel("a\u0000\u0085b", "https://example.org/"))
+        // ZWJ sequences and tag-character flags survive.
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67"
+        assertEquals(family, homeScreenShortcutLabel(family, "https://example.org/"))
+        val scotland = "\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74\uDB40\uDC7F"
+        assertEquals(scotland, homeScreenShortcutLabel(scotland, "https://example.org/"))
+        // A multi-kB title is cut, with an ellipsis.
+        val long = homeScreenShortcutLabel("x".repeat(10_000), "https://example.org/")
+        assertEquals("x".repeat(SHORTCUT_LABEL_MAX) + "…", long)
+        // Exactly at the cap: kept whole.
+        assertEquals("y".repeat(SHORTCUT_LABEL_MAX), homeScreenShortcutLabel("y".repeat(SHORTCUT_LABEL_MAX), "https://example.org/"))
+        // Cut on a character boundary, never inside an emoji.
+        val emoji = "\uD83D\uDE00".repeat(SHORTCUT_LABEL_MAX + 5)
+        assertEquals("\uD83D\uDE00".repeat(SHORTCUT_LABEL_MAX) + "…", homeScreenShortcutLabel(emoji, "https://example.org/"))
+        // Nothing left of the title: the host.
+        assertEquals("example.org", homeScreenShortcutLabel("\u200B\u202E\n", "https://example.org/"))
     }
 }
