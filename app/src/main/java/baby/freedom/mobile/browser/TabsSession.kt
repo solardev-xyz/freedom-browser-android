@@ -75,6 +75,9 @@ class TabsSession(
 
     private var heldWatch: Job? = null
 
+    /** How many times [forgetHeld] has run, so a disk read still in flight knows. */
+    private var clears = 0
+
     /** The disk has been read, so writing it can't lose what it held. */
     private var persisting = false
 
@@ -85,8 +88,24 @@ class TabsSession(
         when {
             store == null -> ready.complete(Unit)
             // Back from a process killed in the background: the saved
-            // instance state is the newer of the two.
-            bundle != null -> startPersisting(store)
+            // instance state is the newer of the two. What the previous
+            // process left on disk still counts, though: an offer it
+            // never answered is made again (so Clear history and the
+            // rest can end it, R3-F1), and a restore it hadn't settled
+            // is the same tabs loading again, so it's marked again and
+            // settled by this run's page load (R3-M2).
+            bundle != null -> {
+                startPersisting(store)
+                val clearsBefore = clears
+                viewModelScope.launch {
+                    val resumed = withContext(Dispatchers.IO) { store.resume() }
+                    if (resumed.unsettled) markRestored(store)
+                    val held = resumed.held ?: return@launch
+                    // History cleared while the file was being read: the
+                    // held tabs went with it.
+                    if (clears != clearsBefore) store.releaseHeld() else offer(store, held, afterCrash = true)
+                }
+            }
             else -> viewModelScope.launch {
                 val found = withContext(Dispatchers.IO) { store.load() }
                 restoreFromDisk(store, found)
@@ -153,18 +172,33 @@ class TabsSession(
     }
 
     /**
+     * Clear history / Clear cookies & site data: the held tabs are
+     * history too. Ends the offer if one is up, and drops the held file
+     * whether or not one is (a disk read may not have landed yet).
+     */
+    fun forgetHeld() {
+        clears++
+        val store = store ?: return
+        heldTabs?.let { releaseHeld(store, it.group) }
+        store.releaseHeld()
+    }
+
+    /**
      * Mark the restore just done ([TabsStore.markRestored]), and settle
      * it once the page on screen has loaded and [TabsStore.CRASH_WINDOW_MS]
      * more have passed without a crash: counted from the page, not from
      * the launch, so a dweb page that loads (and crashes) only once its
      * node is up is still caught. One that never loads stays to blame up
-     * to [TabsStore.MARK_MAX_MS] after the restore.
+     * to [TabsStore.MARK_MAX_MS] after the restore. A home tab on screen
+     * has no page to load, so its window starts at once.
      */
     private suspend fun markRestored(store: TabsStore) {
         val tab = tabs.active
+        // A home tab on screen loads no page: nothing to wait for (R3-M1).
+        val home = tab.isHome
         val at = withContext(Dispatchers.IO) { store.markRestored() }
         viewModelScope.launch {
-            snapshotFlow { restoreLoaded(tab) }.first { it }
+            snapshotFlow { home || restoreLoaded(tab) }.first { it }
             delay(TabsStore.CRASH_WINDOW_MS)
             withContext(Dispatchers.IO) { store.settleRestore(at) }
         }

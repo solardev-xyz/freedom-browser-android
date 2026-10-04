@@ -518,6 +518,82 @@ class TabsStoreTest {
         withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
     }
 
+    /** A session relaunched from saved instance state (a process killed in the background). */
+    private fun relaunchedSession(store: TabsStore = store()): TabsSession =
+        TabsSession(HOME_URL, SavedStateHandle(mapOf("tabs" to android.os.Bundle())), store).also { sessions += it }
+
+    @Test
+    fun `a relaunch from saved instance state offers the held tabs again, and Clear history drops them`() = runBlocking {
+        crashedRestoreSession().also { assertTrue(File(dir, TabsStore.HELD).exists()) }
+        // The process is killed in the background; the next one comes
+        // back from its saved instance state, not from the disk list.
+        val session = relaunchedSession()
+        withTimeout(5_000) { session.ready.await() }
+        withTimeout(5_000) { while (session.heldTabs == null) kotlinx.coroutines.delay(10) }
+        assertEquals(listOf("a", "b", "c"), session.heldTabs!!.group.tabs.map { it.title })
+        assertTrue(session.heldTabs!!.afterCrash)
+        // Clear history, as Settings runs it: the held tabs go too.
+        session.tabs.forgetClosedTabs()
+        session.forgetHeld()
+        assertNull(session.heldTabs)
+        awaitHeldGone()
+        // …so the next cold start has nothing to offer back.
+        crashAt = null
+        val next = session().also { withTimeout(5_000) { it.ready.await() } }
+        assertNull(next.heldTabs)
+    }
+
+    @Test
+    fun `Clear history drops the held tabs even before a relaunch has read them`() = runBlocking {
+        crashedRestoreSession()
+        val session = relaunchedSession()
+        session.forgetHeld()
+        awaitHeldGone()
+        withTimeout(5_000) { session.ready.await() }
+        kotlinx.coroutines.delay(100)
+        assertNull(session.heldTabs)
+        assertFalse(File(dir, TabsStore.HELD).exists())
+    }
+
+    @Test
+    fun `a relaunch from saved instance state takes the last run's unsettled mark and settles its own`() = runBlocking {
+        store().save(threeTabs().saveForProcessDeath())
+        restoreAndMark() // marked at `now`, never settled: killed in the background
+        now += 5_000
+        val session = relaunchedSession()
+        withTimeout(5_000) { session.ready.await() }
+        val mark = File(dir, TabsStore.RESTORE_MARK)
+        // The old mark is gone, replaced by this run's own…
+        withTimeout(5_000) { while (mark.takeIf { it.exists() }?.readText()?.trim() != now.toString()) kotlinx.coroutines.delay(10) }
+        kotlinx.coroutines.delay(50)
+        // …which settles like any restore's (home on screen: nothing to load).
+        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS + 1_000)
+        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
+        // An unrelated crash now doesn't hold the tabs back next time.
+        session.viewModelScope.cancel()
+        store().save(threeTabs().saveForProcessDeath())
+        crashAt = now + 1_000
+        assertTrue(store().load() is TabsStore.Found.Tabs)
+    }
+
+    @Test
+    fun `a restore with a home tab on screen settles once the crash window passes`() = runBlocking {
+        val tabs = threeTabs()
+        tabs.newTab() // a New tab, left active
+        store().save(tabs.saveForProcessDeath())
+        val session = session()
+        withTimeout(5_000) { session.ready.await() }
+        assertTrue(session.tabs.active.isHome)
+        val mark = File(dir, TabsStore.RESTORE_MARK)
+        withTimeout(5_000) { while (!mark.exists()) kotlinx.coroutines.delay(10) }
+        kotlinx.coroutines.delay(50)
+        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS - 1_000)
+        kotlinx.coroutines.delay(50)
+        assertTrue(mark.exists())
+        main.scheduler.advanceTimeBy(2_000)
+        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
+    }
+
     @Test
     fun `nothing on disk leaves the fresh tab list`() = runBlocking {
         val session = session()

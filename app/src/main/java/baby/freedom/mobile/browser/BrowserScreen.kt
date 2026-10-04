@@ -2577,11 +2577,13 @@ fun BrowserScreen(
             // alone, so nothing closed lingers in it.
             onClearHistory = {
                 tabs.forgetClosedTabs()
+                tabsSession.forgetHeld()
                 tabsSession.persistNow()
             },
             onClearWebViewData = {
                 // Closed tabs carry their saved back/forward history.
                 tabs.forgetClosedTabs()
+                tabsSession.forgetHeld()
                 tabsSession.persistNow()
                 tabs.clearWebViewData?.invoke()
                 // The nodes' logs can name what was browsed (#276).

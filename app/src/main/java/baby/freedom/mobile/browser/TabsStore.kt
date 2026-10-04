@@ -113,6 +113,23 @@ class TabsStore internal constructor(
     }
 
     /**
+     * What a relaunch from saved instance state finds on disk: whether
+     * the previous process left an unsettled restore mark ([unsettled],
+     * taken here like [load] takes it), and tabs still held from an
+     * offer it never answered ([held]).
+     */
+    class Resumed(val unsettled: Boolean, val held: TabsState.SavedTabs?)
+
+    /**
+     * Read what a relaunch from saved instance state needs ([Resumed]).
+     * The open-tabs file isn't read: the saved instance state is newer.
+     * Blocking: call off the main thread.
+     */
+    fun resume(): Resumed = synchronized(this) {
+        Resumed(unsettled = takeMark() != null, held = read(heldFile)?.takeUnless { it.isJustHome() })
+    }
+
+    /**
      * Add [saved] to the held tabs (see [HELD]) — tabs read from disk
      * that this run isn't loading after all — and return everything held
      * now. Blocking I/O: call on [Dispatchers.IO].
