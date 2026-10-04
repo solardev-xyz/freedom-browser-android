@@ -53,8 +53,12 @@ import java.io.IOException
  */
 class TabsStore internal constructor(
     private val dir: File,
-    /** When the previous run of the app's main process crashed, if it did (wall clock ms). */
-    private val lastCrashAt: () -> Long? = { null },
+    /**
+     * When the run of the app's main process that was going at [since]
+     * (wall clock ms) ended, if it ended in a crash — the first exit of
+     * that process from then on, not merely the latest one (R4-M2).
+     */
+    private val crashAfter: (since: Long) -> Long? = { null },
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val file = File(dir, FILE)
@@ -66,7 +70,13 @@ class TabsStore internal constructor(
     @Volatile
     private var latest = 0L
 
+    /** The newest save sequence number that reached the disk (under [writeLock]). */
+    private var written = 0L
+
     private val writes = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** An exit of the main process: when, and whether it was a crash or an ANR. */
+    class Exit(val at: Long, val crashed: Boolean)
 
     /** What a cold start finds on disk. */
     sealed interface Found {
@@ -97,7 +107,8 @@ class TabsStore internal constructor(
         val markAt = takeMark()
         val saved = read(file)?.takeUnless { it.isJustHome() }
         var held = read(heldFile)?.takeUnless { it.isJustHome() }
-        if (saved != null && skipsRestore(markAt, runCatching { lastCrashAt() }.getOrNull())) {
+        val crashAt = markAt?.let { runCatching { crashAfter(it) }.getOrNull() }
+        if (saved != null && skipsRestore(markAt, crashAt)) {
             Log.w(TAG, "the last restore crashed the app; starting on a home tab")
             // Moved, not copied: the next launch offers them again
             // rather than loading them (if the move failed, they're
@@ -146,6 +157,35 @@ class TabsStore internal constructor(
         writes.launch {
             writeLock.withLock { if (!heldFile.delete() && heldFile.exists()) Log.w(TAG, "couldn't drop the held tabs") }
         }
+    }
+
+    /**
+     * The held tabs were brought back (the offer's Restore, or Reopen
+     * closed tab): they're [saved] among the open tabs now. In one go,
+     * write that list, mark the restore ([markRestored]) and only then
+     * drop the held file — so there's no moment where a crash finds them
+     * in neither file (R4-F1), nor one where they're open but unguarded
+     * (R4-M1). If the list can't be written the held file stays, and
+     * they're offered again next time. Returns the mark. Blocking I/O.
+     */
+    suspend fun adoptHeld(saved: TabsState.SavedTabs): Long {
+        val seq = nextSeq()
+        val at = clock()
+        writeLock.withLock {
+            // A newer list already on disk holds them too (unless the
+            // user closed them since, which is theirs to do).
+            val listed = seq < written || try {
+                if (saved.isJustHome()) delete() else writeAtomically(file, encode(saved))
+                written = seq
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "couldn't save the restored tabs", e)
+                false
+            }
+            writeMark(at)
+            if (listed && !heldFile.delete() && heldFile.exists()) Log.w(TAG, "couldn't drop the held tabs")
+        }
+        return at
     }
 
     /**
@@ -210,6 +250,7 @@ class TabsStore internal constructor(
             if (seq < latest) return
             try {
                 if (saved.isJustHome()) delete() else writeAtomically(file, encode(saved))
+                written = seq
             } catch (e: Exception) {
                 Log.w(TAG, "couldn't save the open tabs", e)
             }
@@ -318,7 +359,7 @@ class TabsStore internal constructor(
                 val app = context.applicationContext
                 TabsStore(
                     dir = File(app.noBackupFilesDir, "tabs"),
-                    lastCrashAt = { lastMainProcessCrash(app) },
+                    crashAfter = { since -> mainProcessCrashAfter(app, since) },
                 ).also { instance = it }
             }
         }
@@ -335,17 +376,26 @@ class TabsStore internal constructor(
         }
 
         /**
-         * When the app's main process last ended in a crash (Java or
-         * native) or an ANR, if its most recent exit was one. Other
+         * When the app's main process ended in a crash (Java or native)
+         * or an ANR, if the run that was going at [since] ended in one:
+         * the first exit of that process from [since] on. Later exits
+         * (a start in the background for a job or an alarm, reclaimed
+         * for memory) are other runs and don't mask it (R4-M2). Other
          * processes of the app (the nodes') don't count.
          */
-        private fun lastMainProcessCrash(context: Context): Long? {
+        private fun mainProcessCrashAfter(context: Context, since: Long): Long? {
             val am = context.getSystemService(ActivityManager::class.java) ?: return null
             val main = context.applicationInfo.processName ?: context.packageName
-            val last = am.getHistoricalProcessExitReasons(context.packageName, 0, 0)
+            val exits = am.getHistoricalProcessExitReasons(context.packageName, 0, 0)
                 .filter { it.processName == main }
-                .maxByOrNull { it.timestamp } ?: return null
-            return last.timestamp.takeIf { last.reason in CRASH_REASONS }
+                .map { Exit(it.timestamp, it.reason in CRASH_REASONS) }
+            return firstExitCrash(exits, since)
+        }
+
+        /** The time of the first of [exits] at or after [since], if that one was a crash. */
+        fun firstExitCrash(exits: List<Exit>, since: Long): Long? {
+            val first = exits.filter { it.at >= since }.minByOrNull { it.at } ?: return null
+            return first.at.takeIf { first.crashed }
         }
 
         /**

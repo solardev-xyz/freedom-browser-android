@@ -138,7 +138,8 @@ class TabsSession(
         heldTabs = HeldTabs(group, afterCrash)
         // However it leaves the reopen stack — the offer's Restore, Reopen
         // closed tab, Clear history — the offer is over and the disk copy
-        // goes: reopened, they're open tabs saved as such.
+        // goes: reopened, they're open tabs saved (and marked) as such
+        // first; forgotten, it just goes.
         heldWatch = viewModelScope.launch {
             snapshotFlow { tabs.isOnReopenStack(group) }.first { !it }
             releaseHeld(store, group)
@@ -151,14 +152,24 @@ class TabsSession(
         heldWatch?.cancel()
         heldWatch = null
         tabs.offerWithdrawn(group)
-        store.releaseHeld()
+        if (!group.reopened) return store.releaseHeld()
+        // Back among the open tabs (Restore, or Reopen closed tab, R4-M1):
+        // the held file goes only once the open list holding them and the
+        // restore's mark are on disk (R4-F1), not a debounce later.
+        val saved = tabs.saveForProcessDeath()
+        viewModelScope.launch {
+            val at = withContext(Dispatchers.IO) { store.adoptHeld(saved) }
+            settleWhenLoaded(store, at)
+        }
     }
 
     /** The offer's Restore: bring the held tabs back, marked like any restore from disk. */
     fun restoreHeld() {
         val held = heldTabs ?: return
         val store = store ?: return
-        if (tabs.reopenClosed(held.group)) viewModelScope.launch { markRestored(store) }
+        // Ended here, with the whole group back, not by the watcher.
+        heldWatch?.cancel()
+        tabs.reopenClosed(held.group)
         releaseHeld(store, held.group)
     }
 
@@ -193,12 +204,24 @@ class TabsSession(
      * has no page to load, so its window starts at once.
      */
     private suspend fun markRestored(store: TabsStore) {
-        val tab = tabs.active
-        // A home tab on screen loads no page: nothing to wait for (R3-M1).
-        val home = tab.isHome
         val at = withContext(Dispatchers.IO) { store.markRestored() }
+        settleWhenLoaded(store, at)
+    }
+
+    /**
+     * Settle the restore marked [at] once the tab on screen has loaded
+     * its page and [TabsStore.CRASH_WINDOW_MS] more have passed. Whichever
+     * tab is on screen at the time, not the one that was when the restore
+     * ran: a link the app was cold-started from opens a new tab over the
+     * restored ones, which then don't load until shown (R4-M3).
+     */
+    private fun settleWhenLoaded(store: TabsStore, at: Long) {
         viewModelScope.launch {
-            snapshotFlow { home || restoreLoaded(tab) }.first { it }
+            snapshotFlow {
+                val tab = tabs.active
+                // A home tab on screen loads no page: nothing to wait for (R3-M1).
+                tab.isHome || restoreLoaded(tab)
+            }.first { it }
             delay(TabsStore.CRASH_WINDOW_MS)
             withContext(Dispatchers.IO) { store.settleRestore(at) }
         }

@@ -132,7 +132,11 @@ class TabsState(
         internal val activeAt: Int?,
         internal val placeholderId: Long?,
         internal val bulk: Boolean = false,
-    )
+    ) {
+        /** Brought back by [reopenClosed] or [reopenClosedTab], not forgotten. Observable. */
+        var reopened by mutableStateOf(false)
+            internal set
+    }
 
     /**
      * What a bulk close ([closeAllTabs], [closeOtherTabs],
@@ -644,6 +648,7 @@ class TabsState(
     }
 
     private fun reopen(group: ClosedGroup): BrowserState {
+        group.reopened = true
         val activeId = active.id
         // Undoing the close of the last tabs: the blank tab put in their
         // place was only there so the list isn't empty. If it's still
