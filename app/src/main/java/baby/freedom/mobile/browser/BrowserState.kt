@@ -809,6 +809,19 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
+     * The document on screen is one of Freedom's error pages rather than
+     * the page [url] names: [ErrorPage] itself, or a page served in
+     * place in the failed entry — a failed web load (#259), the
+     * certificate page, a name or onion refusal (#99, #143). [url] can't
+     * say so: on all of them it holds the address that failed. Set by
+     * the tab's WebView at navigation commit (and when a failed load's
+     * page goes up); what offers to act on "the page" (Add to Home
+     * screen, Desktop site) reads it.
+     */
+    var showsErrorPage: Boolean by mutableStateOf(false)
+        internal set
+
+    /**
      * The document on screen's provider origin key ([providerOriginKey]):
      * what the Wallet's publisher identities page offers to set up
      * (#119). Null for home and for anything that isn't a secure origin.

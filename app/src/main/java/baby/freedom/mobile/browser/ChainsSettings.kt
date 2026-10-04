@@ -777,6 +777,9 @@ internal fun AddChainPage(
     FullScreenScaffold(
         title = ROW_ADD_CHAIN,
         onDismiss = onBack,
+        // A full-screen dialog: Add commits it from the header, and the way
+        // out drops what was typed, so it closes with × rather than going back.
+        exit = PageExit.Close,
         trailing = {
             TextButton(onClick = { submit() }, enabled = chain != null && !saving) {
                 Text(stringResource(R.string.common_add))

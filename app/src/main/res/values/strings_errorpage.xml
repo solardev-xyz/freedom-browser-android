@@ -37,7 +37,7 @@
     <!-- HTML. -->
     <string name="errorpage_tezos_rpc_unreachable_description">Couldn\'t reach a Tezos RPC endpoint to resolve this name. Check your connection and try again.</string>
     <!-- HTML. -->
-    <string name="errorpage_ethereum_rpc_unreachable_description">Couldn\'t reach an Ethereum RPC endpoint to resolve this name. Check your connection, or the endpoints in Settings &amp;rarr; RPC providers, and try again.</string>
+    <string name="errorpage_ethereum_rpc_unreachable_description">Couldn\'t reach an Ethereum RPC endpoint to resolve this name. Check your connection, or the endpoints in Settings &amp;rarr; Name resolution &amp;rarr; RPC providers, and try again.</string>
 
     <!-- A certificate error (#259). -->
     <string name="errorpage_cert_title">Connection isn\'t secure</string>

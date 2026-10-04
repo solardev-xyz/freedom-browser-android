@@ -52,7 +52,7 @@ import org.json.JSONObject
  *    phone (4902 otherwise). It only picks the chain the next
  *    transaction's sheet is priced on, and names, so it asks nothing
  *    itself; `wallet_addEthereumChain` is refused — chains are added in
- *    Settings → Chains;
+ *    Settings → Wallet & chains;
  *  - `eth_requestAccounts`: a sheet to pick the account to share;
  *  - `personal_sign`, `eth_signTypedData_v4`: a sheet showing exactly
  *    what's signed, for an account of this wallet ([MessageSigning],
@@ -305,7 +305,7 @@ class OpenLvSession internal constructor(
             "wallet_switchEthereumChain" -> switchChain(params)
             "wallet_addEthereumChain" -> OpenLvResponse.Error(
                 UNSUPPORTED,
-                "The phone can’t add chains this way. Add the chain in Freedom’s Settings → Chains on the phone, then try again.",
+                "The phone can’t add chains this way. Add the chain in Freedom’s Settings → Wallet & chains on the phone, then try again.",
             )
             else -> OpenLvResponse.Error(UNSUPPORTED, "The phone doesn’t support $method.")
         }
@@ -488,7 +488,7 @@ class OpenLvSession internal constructor(
         val id = (params.opt(0) as? JSONObject)?.opt("chainId")?.let(::quantity)?.takeIf { it.signum() > 0 && it.bitLength() < 63 }?.toLong()
             ?: return invalid("Expected [{chainId}].")
         if (chains().none { it.id == id }) {
-            return OpenLvResponse.Error(UNKNOWN_CHAIN, "Chain $id isn’t set up on the phone. Add it in Freedom’s Settings → Chains there.")
+            return OpenLvResponse.Error(UNKNOWN_CHAIN, "Chain $id isn’t set up on the phone. Add it in Freedom’s Settings → Wallet & chains there.")
         }
         chainId = id
         return OpenLvResponse.Result(JSONObject.NULL)

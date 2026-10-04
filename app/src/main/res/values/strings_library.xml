@@ -229,7 +229,7 @@
     <string name="library_site_permissions_none">This site has no permissions. It will ask again if it needs one.</string>
     <string name="library_site_permissions_nothing_saved">Nothing is saved for this site any more.</string>
     <string name="library_site_permissions_private">Private tab: these last until you close your private tabs.</string>
-    <string name="library_site_permissions_removing_hint">Removing one lets the site ask again. Settings › Site permissions lists every site.</string>
+    <string name="library_site_permissions_removing_hint">Removing one lets the site ask again. Settings › Privacy &amp; security lists every site.</string>
     <string name="library_site_permissions_reload">Reload page</string>
     <!-- %1$s: "Allowed", "Blocked (this session)", … -->
     <string name="library_site_permissions_in_use_now">%1$s · in use now</string>

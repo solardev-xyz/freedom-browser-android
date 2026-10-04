@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -18,6 +19,9 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Visibility
@@ -39,6 +43,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
@@ -220,6 +226,7 @@ internal fun NameResolutionSection(
         if ("colibri" in visible) {
             if ("about" in visible || "order" in visible) Spacer(Modifier.height(12.dp))
             SwitchRow(
+                icon = Icons.Filled.Verified,
                 title = ROW_COLIBRI,
                 help = COLIBRI_HELP,
                 checked = config.colibri,
@@ -230,6 +237,7 @@ internal fun NameResolutionSection(
         if ("ccip" in visible) {
             if ("about" in visible || "order" in visible || "colibri" in visible) Spacer(Modifier.height(12.dp))
             SwitchRow(
+                icon = Icons.Filled.Link,
                 title = ROW_CCIP,
                 help = CCIP_HELP,
                 checked = config.ccipRead,
@@ -273,9 +281,13 @@ internal fun RpcProvidersSection(
             val custom = config.customEndpoints
             custom.forEachIndexed { i, url ->
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .padding(start = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    LeadingIcon(Icons.Filled.Dns)
                     Text(
                         url,
                         fontFamily = FontFamily.Monospace,
@@ -348,11 +360,10 @@ internal fun RpcProvidersSection(
                     }
                 }
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .switchRow(checked = on, onCheckedChange = onToggle, enabled = !locked),
+                    modifier = Modifier.settingsSwitchRow(checked = on, onCheckedChange = onToggle, enabled = !locked),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    LeadingIcon(Icons.Filled.Public, enabled = !locked)
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             url,
@@ -476,6 +487,7 @@ private fun HelpText(text: String) {
 
 @Composable
 private fun SwitchRow(
+    icon: ImageVector,
     title: String,
     help: String,
     checked: Boolean,
@@ -484,10 +496,10 @@ private fun SwitchRow(
 ) {
     Row(
         modifier = Modifier
-            .fillMaxWidth()
-            .switchRow(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled),
+            .settingsSwitchRow(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        LeadingIcon(icon)
         Column(modifier = Modifier.weight(1f)) {
             Text(title, fontWeight = FontWeight.Medium)
             HelpText(help)
@@ -495,6 +507,34 @@ private fun SwitchRow(
         Spacer(Modifier.width(8.dp))
         Switch(checked = checked, enabled = enabled, onCheckedChange = null)
     }
+}
+
+/**
+ * A switch row laid out like the rest of Settings' rows (#400 item 9):
+ * the [PageRow] padding, so its icon lines up with theirs, and at least
+ * 48 dp tall, so neighbouring switches aren't packed under the minimum
+ * touch target.
+ */
+@Composable
+private fun Modifier.settingsSwitchRow(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    enabled: Boolean,
+): Modifier = fillMaxWidth()
+    .heightIn(min = 48.dp)
+    .clip(MaterialTheme.shapes.small)
+    .switchRow(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
+    .padding(horizontal = 12.dp, vertical = 10.dp)
+
+/** The leading-icon column of a Settings row ([PageRow]'s). */
+@Composable
+private fun LeadingIcon(icon: ImageVector, enabled: Boolean = true) {
+    Icon(
+        icon,
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) 1f else 0.45f),
+    )
+    Spacer(Modifier.width(12.dp))
 }
 
 /** Why a name-resolution write didn't happen, for the user; `null` once it did. */

@@ -34,17 +34,13 @@ import org.json.JSONObject
 
 /**
  * Persistent toggles the user controls from the node details panel and
- * the settings screen (search engine, and the hidden "Other" section).
+ * the settings screen.
  *
  * Backed by a single [DataStore] under `freedom_node_settings` living
  * in the app's files directory. Flows surface the current value; the
  * corresponding suspend setter writes-through to disk.
  *
  * ## IPFS keys
- *
- * `show_ipfs_ui` gates visibility of every IPFS-related control in the
- * UI. The Settings screen "Other" section reveals a single row the
- * user can tap to flip this on before a demo.
  *
  * `ipfs_low_power` and `ipfs_routing_mode` are read at `:node` process
  * startup and re-applied on the next restart — there is no live
@@ -226,19 +222,6 @@ class NodeSettings private constructor(
 
     suspend fun setTorExternalProxy(value: String) {
         store.edit { it[Keys.TOR_EXTERNAL_PROXY] = value }
-    }
-
-    /**
-     * Whether any IPFS UI is rendered. Off by default — IPFS support
-     * is a hidden capability surfaced only from Settings → Other. The
-     * IPFS node still runs regardless of this flag.
-     */
-    val showIpfsUi: Flow<Boolean> = store.data.map { prefs ->
-        prefs[Keys.SHOW_IPFS_UI] ?: false
-    }
-
-    suspend fun setShowIpfsUi(enabled: Boolean) {
-        store.edit { it[Keys.SHOW_IPFS_UI] = enabled }
     }
 
     /**
@@ -745,7 +728,6 @@ class NodeSettings private constructor(
         val TOR_ENABLED = booleanPreferencesKey("tor_enabled")
         val TOR_START_ON_LAUNCH = booleanPreferencesKey("tor_start_on_launch")
         val TOR_EXTERNAL_PROXY = stringPreferencesKey("tor_external_proxy")
-        val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
         val RADICLE_ENABLED = booleanPreferencesKey("radicle_enabled")
         val IPFS_LOW_POWER = booleanPreferencesKey("ipfs_low_power")
         val IPFS_ROUTING_MODE = stringPreferencesKey("ipfs_routing_mode")

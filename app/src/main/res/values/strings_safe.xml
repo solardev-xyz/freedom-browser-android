@@ -45,7 +45,7 @@
     <string name="safe_action_sign">sign</string>
     <string name="safe_action_add_signature">add the signature</string>
     <string name="safe_action_discard">discard it</string>
-    <string name="safe_gnosis_not_set_up">Gnosis isn’t set up in Settings → Chains.</string>
+    <string name="safe_gnosis_not_set_up">Gnosis isn’t set up in Settings → Wallet &amp; chains.</string>
     <string name="safe_fee_stale_notice">The fee estimate was over a minute old, so it’s been priced again. Check it and confirm.</string>
     <string name="safe_keep_it">Keep it</string>
     <string name="safe_scan">Scan</string>
@@ -125,7 +125,7 @@
 
     <!-- browser/SafeScreen.kt: activation -->
     <string name="safe_not_active_title">Not active yet</string>
-    <string name="safe_activation_no_chain">Gnosis isn’t set up in Settings → Chains, so this Safe can’t be activated.</string>
+    <string name="safe_activation_no_chain">Gnosis isn’t set up in Settings → Wallet &amp; chains, so this Safe can’t be activated.</string>
     <string name="safe_activation_no_executor">None of its owners is an account in this wallet, so nothing here can pay to activate it.</string>
     <string name="safe_activation_pricing">Pricing the activation…</string>
     <string name="safe_activation_needs_funds_title">Needs funds</string>

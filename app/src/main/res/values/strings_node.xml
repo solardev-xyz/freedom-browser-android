@@ -24,7 +24,7 @@
     <!-- The Swarm node's error when the wallet's node keys are on the device but couldn't be opened (#357): it doesn't start as the device's own identity instead. Unlocking the wallet seals the keys again. -->
     <string name="node_swarm_identity_unreadable">Couldn\'t open your wallet\'s Swarm identity, so the node isn\'t running (it won\'t start as this device\'s own instead). Reopening the app or unlocking the wallet tries again.</string>
     <!-- The Swarm node's error when the wallet file itself can't be read (#357): the wallet can't be unlocked, so the only ways out are the file becoming readable again or Settings › Wallet › Remove wallet -->
-    <string name="node_swarm_wallet_unreadable">Couldn\'t read your wallet, so the Swarm node isn\'t running (it won\'t start as this device\'s own identity instead). Reopening the app tries again. If the wallet still can\'t be read, removing it in Settings › Wallet starts the node as this device\'s own.</string>
+    <string name="node_swarm_wallet_unreadable">Couldn\'t read your wallet, so the Swarm node isn\'t running (it won\'t start as this device\'s own identity instead). Reopening the app tries again. If the wallet still can\'t be read, removing it in Settings › Wallet &amp; chains starts the node as this device\'s own.</string>
     <string name="node_status">Status</string>
     <string name="node_mode_light">Light</string>
     <string name="node_mode_ultra_light">Ultra-light</string>
@@ -116,7 +116,7 @@
     <string name="node_logs_share_title">Share %1$s logs?</string>
     <string name="node_logs_button">Logs</string>
     <string name="node_logs_not_running">%1$s isn\'t running, so there are no logs to show. They\'re shown only while it runs, and kept in memory only, never written to storage.</string>
-    <string name="node_logs_external_tor">Tor runs in an external app (Orbot, say), set in Settings → Tor. Its logs are in that app.</string>
+    <string name="node_logs_external_tor">Tor runs in an external app (Orbot, say), set in Settings → Privacy &amp; security → Tor. Its logs are in that app.</string>
     <string name="node_logs_share_warning">Logs can contain this device\'s node addresses and peer IDs, the addresses of the peers and servers the node talked to, and the IDs of Radicle repositories. The addresses and names of the pages you visited are taken out before a line is kept. Share them only with someone you trust.</string>
     <!-- Subject of the shared logs; %1$s is the node. -->
     <string name="node_logs_share_subject">Freedom %1$s logs</string>
@@ -183,18 +183,18 @@
     <string name="node_tor_refusal_unsupported_title">Tor needs a newer WebView</string>
     <string name="node_tor_refusal_unsupported">This is an onion site, reachable only over Tor. This device\'s Android System WebView can\'t send just &lt;code>.onion&lt;/code> sites through Tor, so Freedom doesn\'t open them. Update Android System WebView, then try again.</string>
     <string name="node_tor_refusal_checking_title">Checking the Tor proxy</string>
-    <string name="node_tor_refusal_checking">This is an onion site, reachable only over Tor. Freedom is still checking the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Tor); this page loads by itself once it passes. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_checking">This is an onion site, reachable only over Tor. Freedom is still checking the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor); this page loads by itself once it passes. Freedom never opens onion sites without Tor.</string>
     <string name="node_tor_refusal_paused_title">Tor proxy not checked yet</string>
-    <string name="node_tor_refusal_paused">This is an onion site, reachable only over Tor. Freedom checks the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Tor) only while Freedom is on screen, and hasn\'t since it went to the background. Try again once you\'re back in Freedom. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_paused">This is an onion site, reachable only over Tor. Freedom checks the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor) only while Freedom is on screen, and hasn\'t since it went to the background. Try again once you\'re back in Freedom. Freedom never opens onion sites without Tor.</string>
     <string name="node_tor_refusal_unreached_title">Tor can\'t reach onion sites</string>
-    <string name="node_tor_refusal_unreached">This is an onion site, reachable only over Tor. The Tor client at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Tor) answers, but couldn\'t reach an onion site when Freedom last checked: its connection may be down or slow. Freedom is checking again; try again in a moment. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_unreached">This is an onion site, reachable only over Tor. The Tor client at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor) answers, but couldn\'t reach an onion site when Freedom last checked: its connection may be down or slow. Freedom is checking again; try again in a moment. Freedom never opens onion sites without Tor.</string>
     <string name="node_tor_refusal_proxy_down_title">Tor proxy isn\'t reachable</string>
-    <string name="node_tor_refusal_proxy_down">This is an onion site, reachable only over Tor. Freedom sends onion sites to the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Tor), and no Tor client answers there right now. Start Orbot (or your Tor app), then try again. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_proxy_down">This is an onion site, reachable only over Tor. Freedom sends onion sites to the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor), and no Tor client answers there right now. Start Orbot (or your Tor app), then try again. Freedom never opens onion sites without Tor.</string>
     <string name="node_tor_refusal_off_title">Tor is off</string>
-    <string name="node_tor_refusal_off">This is an onion site, reachable only over Tor. Turn on Tor in Settings &amp;rarr; Tor and start it, then try again. Only &lt;code>.onion&lt;/code> sites use Tor; every other site connects directly.</string>
+    <string name="node_tor_refusal_off">This is an onion site, reachable only over Tor. Turn on Tor in Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor and start it, then try again. Only &lt;code>.onion&lt;/code> sites use Tor; every other site connects directly.</string>
     <string name="node_tor_refusal_not_running_title">Tor isn\'t running</string>
     <string name="node_tor_refusal_failed">Tor couldn\'t start, so this onion site wasn\'t opened. Try starting it again on the Nodes page.</string>
-    <string name="node_tor_refusal_not_running">This is an onion site, reachable only over Tor, and Tor isn\'t running. Start it on the Nodes page (or turn on &lt;em>Start Tor at launch&lt;/em> in Settings &amp;rarr; Tor), then try again. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_not_running">This is an onion site, reachable only over Tor, and Tor isn\'t running. Start it on the Nodes page (or turn on &lt;em>Start Tor at launch&lt;/em> in Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor), then try again. Freedom never opens onion sites without Tor.</string>
 
     <!-- browser/TorProxy.kt: what the check of the external Tor proxy found; %1$s is the proxy (host:port). -->
     <string name="node_tor_probe_tor">Tor reached a .onion site through %1$s</string>
