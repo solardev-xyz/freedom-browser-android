@@ -375,7 +375,7 @@ fun SettingsScreen(
             },
         )
         SettingsSection.DefaultBrowser ->
-            if (isDefaultBrowser) DefaultBrowserLine() else DefaultBrowserSection(defaultBrowser)
+            if (isDefaultBrowser) DefaultBrowserLine(onClick = defaultBrowser.onClick) else DefaultBrowserSection(defaultBrowser)
         SettingsSection.Adblock -> AdblockSection(
             visible = visible,
             enabled = adblockCategories,

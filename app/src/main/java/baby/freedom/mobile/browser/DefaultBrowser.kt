@@ -10,9 +10,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.OpenInBrowser
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -21,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -78,11 +82,12 @@ internal object DefaultBrowser {
 /**
  * The section's one row for Settings search (the section title matches
  * "default" and "browser" too): the top-level row while Freedom isn't the
- * default browser, the muted [DefaultBrowserLine] once it is (#400).
+ * default browser, the muted [DefaultBrowserLine] once it is (#400), which
+ * still opens Android's Default apps page.
  */
 internal fun defaultBrowserRows(isDefault: Boolean) = listOf(
     if (isDefault) {
-        settingsRow("default", DefaultBrowser.ROW_IS)
+        settingsRow("default", DefaultBrowser.ROW_IS, DefaultBrowser.ROW_IS_SUBTITLE)
     } else {
         settingsRow("default", DefaultBrowser.ROW_SET, DefaultBrowser.ROW_SET_SUBTITLE)
     },
@@ -131,17 +136,13 @@ internal fun rememberDefaultBrowserState(): DefaultBrowserState {
     }
 }
 
+/** The top-level row, only composed while Freedom isn't the default browser. */
 @Composable
 internal fun DefaultBrowserSection(state: DefaultBrowserState) {
     SectionCard(title = stringResource(R.string.settings_default_browser)) {
         PageRow(
-            title = stringResource(
-                if (state.isDefault) R.string.settings_default_browser_is else R.string.settings_default_browser_set,
-            ),
-            subtitle = stringResource(
-                if (state.isDefault) R.string.settings_default_browser_is_subtitle
-                else R.string.settings_default_browser_set_subtitle,
-            ),
+            title = stringResource(R.string.settings_default_browser_set),
+            subtitle = stringResource(R.string.settings_default_browser_set_subtitle),
             style = PageRowStyle.Inset,
             leadingIcon = Icons.Filled.OpenInBrowser,
             thirdLine = if (state.declined) stringResource(R.string.settings_default_browser_declined) else null,
@@ -152,28 +153,39 @@ internal fun DefaultBrowserSection(state: DefaultBrowserState) {
 
 /**
  * Settings → About Freedom, once Freedom holds the browser role (#400
- * item 12): a muted line rather than a section of its own, since there
- * is nothing left to do.
+ * item 12): a muted line rather than a section of its own. Still a row
+ * the user can tap to pick another browser on Android's Default apps
+ * page — the hint is in the text, not only in a TalkBack label.
  */
 @Composable
-internal fun DefaultBrowserLine() {
+internal fun DefaultBrowserLine(onClick: () -> Unit) {
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp),
+            .heightIn(min = 48.dp)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             Icons.Filled.CheckCircle,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            tint = muted,
             modifier = Modifier.size(18.dp),
         )
         Spacer(Modifier.width(8.dp))
-        Text(
-            stringResource(R.string.settings_default_browser_is),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Column {
+            Text(
+                stringResource(R.string.settings_default_browser_is),
+                style = MaterialTheme.typography.bodyMedium,
+                color = muted,
+            )
+            Text(
+                stringResource(R.string.settings_default_browser_is_subtitle),
+                style = MaterialTheme.typography.bodySmall,
+                color = muted,
+            )
+        }
     }
 }

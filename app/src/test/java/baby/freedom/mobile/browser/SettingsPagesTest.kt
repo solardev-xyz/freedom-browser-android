@@ -50,6 +50,15 @@ class SettingsPagesTest {
     }
 
     @Test
+    fun `the default-browser line on About still says how to change it`() {
+        // R2-M1: once Freedom is the default, the About line is the only
+        // way back to Android's Default apps page, and it says so.
+        val rows = defaultBrowserRows(isDefault = true)
+        assertEquals(setOf<Any>("default"), visibleSettingsRows("android settings", "Default browser", rows))
+        assertEquals(emptySet<Any>(), visibleSettingsRows("android settings", "Default browser", defaultBrowserRows(false)))
+    }
+
+    @Test
     fun `top level is grouped basics, privacy, web3, about`() {
         val top = settingsTopLevel(isDefaultBrowser = false)
         assertEquals(
