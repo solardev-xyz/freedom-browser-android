@@ -68,18 +68,19 @@ class ExternalEndpointsTest {
 
     @Test
     fun `the ipfs row carries the unverified warning only while external`() {
-        val embedded = nodeRows("", "", showIpfsUi = true).single { it.key == "ipfs" }
+        val embedded = nodeRows("", "").single { it.key == "ipfs" }
         assertFalse(embedded.texts.any { it.startsWith("Unverified") })
-        val external = nodeRows("", "https://gw.example", showIpfsUi = true).single { it.key == "ipfs" }
+        val external = nodeRows("", "https://gw.example").single { it.key == "ipfs" }
         assertTrue(external.texts.contains(ExternalEndpoints.IPFS_UNVERIFIED_WARNING))
     }
 
     @Test
-    fun `the ipfs row stays listed while an external gateway is in use`() {
-        assertEquals(listOf("swarm"), nodeRows("", "", showIpfsUi = false).map { it.key })
+    fun `the node rows list the nodes page then swarm and ipfs, embedded or external`() {
+        // #400 item 8: IPFS is no longer behind "Show advanced options".
+        assertEquals(listOf("nodes-page", "swarm", "ipfs"), nodeRows("", "").map { it.key })
         assertEquals(
-            listOf("swarm", "ipfs"),
-            nodeRows("", "https://gw.example", showIpfsUi = false).map { it.key },
+            listOf("nodes-page", "swarm", "ipfs"),
+            nodeRows("", "https://gw.example").map { it.key },
         )
     }
 }

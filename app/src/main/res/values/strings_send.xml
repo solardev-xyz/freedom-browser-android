@@ -158,7 +158,7 @@
     <string name="send_interrupted">The app closed while this was going out, so it may or may not have gone out. Try again sends the very same transaction, so it can’t be paid twice.</string>
     <string name="send_stale_while_signing">The network fee was worked out over three minutes ago, before this was signed, so it may no longer get the transaction in. Nothing was sent; review the new fee and confirm again.</string>
     <string name="send_stale_before_signing">The network fee was worked out over a minute ago, so it may no longer get the transaction in. Nothing was signed or sent; review the new fee and confirm again.</string>
-    <string name="send_read_unknown_chain">This chain isn’t set up in Settings → Chains.</string>
+    <string name="send_read_unknown_chain">This chain isn’t set up in Settings → Wallet &amp; chains.</string>
     <string name="send_read_no_rpc">No RPC answered for this chain. Check the connection and try again.</string>
     <string name="send_read_rpc_error">The RPC answered with an error: %1$s</string>
     <string name="send_read_nonsense">The RPC’s answer made no sense. Try again.</string>
@@ -227,7 +227,7 @@
     <string name="send_eth_no_wallet">There\'s no wallet on this device yet. Set one up to connect — or reject, and keep browsing without one.</string>
     <string name="send_eth_set_up_wallet">Set up a wallet</string>
     <string name="send_eth_account_to_share">Account to share</string>
-    <string name="send_eth_connect_note">The site will see this account\'s address and can read its balances. It can ask you to sign messages and send transactions, and each one asks you here first (unless you later turn on auto-approve for a call). Disconnect it any time on the wallet page or in Settings → Site permissions.</string>
+    <string name="send_eth_connect_note">The site will see this account\'s address and can read its balances. It can ask you to sign messages and send transactions, and each one asks you here first (unless you later turn on auto-approve for a call). Disconnect it any time on the wallet page or in Settings → Privacy &amp; security.</string>
     <string name="send_eth_message">Message</string>
     <string name="send_eth_message_whole">The signature covers the whole message.</string>
     <string name="send_eth_message_hex">This message isn\'t readable text; it\'s shown as hex bytes.</string>
@@ -267,7 +267,7 @@
     </plurals>
     <string name="send_eth_rpc">RPC</string>
     <string name="send_eth_explorer">Explorer</string>
-    <string name="send_eth_add_chain_note">The site chose these RPCs. They\'ll see your addresses and what you read and send on this network, and their answers aren\'t checked against other RPCs. You can change or remove the network in Settings → Chains.</string>
+    <string name="send_eth_add_chain_note">The site chose these RPCs. They\'ll see your addresses and what you read and send on this network, and their answers aren\'t checked against other RPCs. You can change or remove the network in Settings → Wallet &amp; chains.</string>
     <!-- %1$s: the Ledger's name. -->
     <string name="send_eth_ledger_note_hashes">You’ll confirm this on your Ledger (%1$s) next, where it shows only the two hashes above.</string>
     <string name="send_eth_ledger_note">You’ll check and confirm this on your Ledger (%1$s) next.</string>
@@ -339,7 +339,7 @@
 
     <!-- Payment links (EIP-681 ethereum: links, #317): a page's link or the address bar opening Send. -->
     <string name="send_link_private">Payment links open in the wallet, which private tabs don’t use. Open this link in a normal tab to pay it.</string>
-    <string name="send_link_no_wallet">This is a payment link. To pay it, set up a wallet first in Settings → Wallet.</string>
+    <string name="send_link_no_wallet">This is a payment link. To pay it, set up a wallet first in Settings → Wallet &amp; chains.</string>
     <!-- %1$s: why, a sentence (e.g. “This payment request has no valid address in it.”). -->
     <string name="send_link_refused">Can’t open this payment link. %1$s</string>
     <string name="send_link_token_no_network">This token payment request doesn’t say which network the token is on.</string>

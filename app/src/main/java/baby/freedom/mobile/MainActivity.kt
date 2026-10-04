@@ -131,10 +131,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  * tears that process down so no native state (ant's tokio runtime,
  * the freedom-ipfs block store) survives, letting a future toggle-on boot clean.
  *
- * IPFS state is hidden from the default UI — see `SettingsScreen`'s
- * "Other" section for the reveal gate — but the flow is plumbed all
- * the way through so `ipfs://` / `ens→ipfs` navigation works even
- * when the user has never opened the advanced settings panel.
+ * IPFS state is plumbed all the way through, so `ipfs://` / `ens→ipfs`
+ * navigation works whether or not the user ever opens Settings →
+ * Nodes & networks, where the IPFS node's controls live.
  */
 class MainActivity : ComponentActivity(), PageKeyEvents {
 

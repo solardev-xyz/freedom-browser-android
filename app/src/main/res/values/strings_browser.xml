@@ -52,7 +52,7 @@
     <!-- BlockedPopupNotice.kt -->
     <string name="browser_popup_close_notice">Close the pop-up notice</string>
     <string name="browser_popup_and_more">and %1$d more</string>
-    <string name="browser_popup_allowed">Pop-ups from this site will open from now on. Settings → Site permissions can undo it.</string>
+    <string name="browser_popup_allowed">Pop-ups from this site will open from now on. Settings → Privacy &amp; security can undo it.</string>
     <string name="browser_popup_allowed_private">Pop-ups from this site will open from now on, until you close your private tabs.</string>
     <string name="browser_popup_always_allow">Always allow pop-ups on this site</string>
     <string name="browser_popup_scroll_through">Scroll through the whole of a long address to use its button.</string>
@@ -140,6 +140,11 @@
     <string name="browser_menu_bookmarks">Bookmarks</string>
     <string name="browser_menu_downloads">Downloads</string>
     <string name="browser_menu_settings">Settings</string>
+    <string name="browser_menu_wallet">Wallet</string>
+    <!-- The menu's Wallet row's sub-line when there is no wallet on the device yet. -->
+    <string name="browser_menu_wallet_not_set_up">Not set up</string>
+    <string name="browser_menu_add_to_home_screen">Add to Home screen</string>
+    <string name="browser_add_to_home_screen_failed">Couldn\'t add to Home screen</string>
     <plurals name="browser_menu_peers">
         <item quantity="one">%d peer</item>
         <item quantity="other">%d peers</item>

@@ -109,6 +109,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Sentinel URL for the home tab. We load `about:blank` into the
@@ -1459,6 +1460,27 @@ fun BrowserScreen(
         null
     }
 
+    // The menu's Add to Home screen (#400): a launcher shortcut to the
+    // page on screen, through the incoming-link path. Address, title and
+    // the site's cached favicon are taken at the tap, so a navigation
+    // landing while the icon is drawn can't retarget it. Null where it
+    // isn't offered — a private tab above all ([homeScreenShortcutTarget]).
+    val addToHomeScreen: (() -> Unit)? = homeScreenShortcutTarget(state.url, state.private, state.showsErrorPage)?.let { target ->
+        {
+            val label = homeScreenShortcutLabel(state.title, target)
+            val favicons = repo.favicon(target)
+            scope.launch {
+                val favicon = runCatching { withTimeoutOrNull(1_000) { favicons.first() } }.getOrNull()
+                val icon = withContext(Dispatchers.Default) { HomeScreenShortcuts.icon(target, label, favicon) }
+                if (!HomeScreenShortcuts.request(context, target, label, icon)) {
+                    snackbarHostState.showSnackbar(Strings.get(R.string.browser_add_to_home_screen_failed))
+                }
+            }
+        }
+    }
+    // The menu's Wallet row (#400) says "Not set up" while that holds.
+    val walletState by remember(context) { Vault.get(context) }.state.collectAsState()
+
     // The bar's New tab, and Ctrl+T (#270).
     val openNewTab: () -> Unit = {
         val fresh = tabs.newTab()
@@ -2306,6 +2328,9 @@ fun BrowserScreen(
                         showBookmarks = true
                     },
                     onOpenDownloads = { showDownloads = true },
+                    onOpenWallet = { showWallet = true },
+                    walletNote = walletMenuNote(walletState),
+                    onAddToHomeScreen = addToHomeScreen,
                     onReload = reloadPage,
                     onHardReload = hardReloadPage,
                     // Stop covers both halves of a load: the WebView's
@@ -2340,11 +2365,12 @@ fun BrowserScreen(
                     // but never for a dweb page (no key). Toggling asks
                     // for the page again, as Reload does, and the load
                     // picks the user agent for its site.
-                    desktopSite = desktopSiteOf(state.zoomSite)
-                        ?.takeIf { state.url.isNotBlank() }
+                    // Nor on an error page, which has no site's page
+                    // to ask for again ([menuDesktopSite]).
+                    desktopSite = menuDesktopSite(state.zoomSite, state.url, state.showsErrorPage)
                         ?.let { desktopSites.isDesktop(it, state.private) },
                     onToggleDesktopSite = {
-                        desktopSiteOf(state.zoomSite)?.let { site ->
+                        menuDesktopSite(state.zoomSite, state.url, state.showsErrorPage)?.let { site ->
                             desktopSites.toggle(site, state.private)
                             val url = state.url.ifBlank { state.addressBarText }
                             if (url.isNotBlank()) submit(state, url)
@@ -2517,6 +2543,9 @@ fun BrowserScreen(
             radicle = radicle,
             onOpenRadicle = { showRadicle = true },
             onOpenWallet = { showWallet = true },
+            // Settings → Nodes & networks → Node status: over Settings,
+            // like the Radicle page; Back returns there.
+            onOpenNodes = { showNode = true },
             // A newer release's page (#272): a new tab in front, never a
             // private one, with Settings closed so it's on screen.
             onOpenUrl = { url ->
@@ -2567,7 +2596,7 @@ fun BrowserScreen(
         )
     }
 
-    // Settings → Nodes → Radicle node (#73); over Settings, like NodeScreen.
+    // Settings → Nodes & networks → Radicle node (#73); over Settings, like NodeScreen.
     if (showRadicle) {
         RadicleScreen(
             radicle = radicle.copy(

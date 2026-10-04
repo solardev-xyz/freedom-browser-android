@@ -2929,6 +2929,15 @@ private fun buildRefreshableWebView(
                 failedLoad = null
                 pendingCertErrors.clear()
                 certRefusal.committed(url)
+                // Whether this document is one of our error pages (the
+                // menu's Add to Home screen and Desktop site read it):
+                // `state.url` will hold the address that failed, so the
+                // raw URL and the in-place refusal slots are what can
+                // tell. A failed web load's page is marked when it goes
+                // up, in `onReceivedError`.
+                state.showsErrorPage = ErrorPage.isErrorPage(url) ||
+                    nameRefusal.isRefused(url) ||
+                    certRefusal.isServed(url)
                 mainFrameChain.committed()
                 (view as? PageWebView)?.historyStepCommitted()
                 // A Hard reload's load committed: its finish ends the
@@ -3262,6 +3271,7 @@ private fun buildRefreshableWebView(
                     state.progress = -1
                     // …and no site to zoom as (#88), for the same reason.
                     state.zoomSite = null
+                    state.showsErrorPage = false
                     state.providerOrigin = null
                     state.permissionOrigin = null
                     // …and no page colour behind the status bar (#92) —
@@ -3908,6 +3918,7 @@ private fun buildRefreshableWebView(
                         rawError = error?.description?.toString(),
                     )
                     failedLoad = FailedLoad(failed, req.method.equals("POST", ignoreCase = true), netErrorPageScript(html))
+                    state.showsErrorPage = true
                     showFailedLoadPage(view, failed)
                     return
                 }
