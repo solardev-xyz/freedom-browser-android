@@ -169,9 +169,14 @@ unsigned char *ant_download(AntHandle *handle,
                             char **out_err);
 
 /*
- * Number of BZZ peers currently connected (post-handshake). Cheap —
- * reads the last-published status snapshot without blocking. Returns
- * -1 if `handle` is NULL.
+ * Number of connected peers whose connection answers pings (libp2p
+ * connections, including peers still in the BZZ handshake). A connection
+ * that stops answering (a socket reaped during an OS suspension, an
+ * expired NAT mapping) stops being counted within ~20 s of its last pong
+ * and is closed ~10 s later; after the process was frozen, a connection
+ * that doesn't answer within ~12 s of the node running again is
+ * uncounted. Cheap — reads the last-published status snapshot without
+ * blocking. Returns -1 if `handle` is NULL.
  */
 int ant_peer_count(const AntHandle *handle);
 
@@ -181,13 +186,16 @@ int ant_peer_count(const AntHandle *handle);
  * peers, WITHOUT a full ant_shutdown / ant_init. Cheap and idempotent —
  * safe to call on every foreground transition.
  *
- * After a long suspension the in-process node's libp2p connections are
- * half-open (sockets reaped, but the peer counter still looks healthy) and
- * nothing re-dials, so the next bzz:// retrieval hangs and the page renders
- * blank. This re-opens live sockets to the bootnodes in parallel so
- * retrieval has working routes again. It recovers the swarm only — if the
- * gateway's localhost listener was also torn down, rebind it separately
- * with ant_stop_gateway + ant_start_gateway.
+ * After a long suspension the in-process node's libp2p connections can be
+ * half-open (sockets reaped, no FIN seen). The node notices that on its
+ * own: connections that stop answering pings are closed ~20-30 s after
+ * it runs again, and a streak of retrievals failing on the link makes it
+ * do what this call does (at most once a minute). This call skips that
+ * wait: it re-opens live sockets to the bootnodes in parallel at once, so
+ * retrieval has working routes on foreground instead of after a failed
+ * retrieval. It recovers the swarm only — if the gateway's localhost
+ * listener was also torn down, rebind it separately with
+ * ant_stop_gateway + ant_start_gateway.
  *
  * Returns 0 on success, -1 if `handle` is NULL, and -2 if the node loop
  * didn't ack (already shut down) — in which case an allocated error string
@@ -195,6 +203,74 @@ int ant_peer_count(const AntHandle *handle);
  * NULL to opt out of error reporting.
  */
 int ant_resume(const AntHandle *handle, char **out_err);
+
+/*
+ * Bee's swap-enable: switch SWAP settlement on or off for the running
+ * node, for downloads (issue #121) and uploads (issue #127) alike. On
+ * (the default), the node pays peers with SWAP cheques from its
+ * chequebook once the debt to a peer reaches half its payment threshold,
+ * after the free pseudosettle refresh, as bee does: one balance per
+ * peer, cheques worth units x exchange + deduction at bee's oracle rate
+ * (up to ~0.75 xBZZ per GB), never more than the chequebook holds. That
+ * lifts downloads past the free tier's ~5-6 Mbit/s. Off keeps downloads
+ * and uploads on the free tier even with a funded chequebook.
+ *
+ * Payments also need a chequebook with funds the node has read from the
+ * chain: they start after the first settlement setup that has an RPC
+ * (ant_start_gateway's chain init, a storage call,
+ * ant_deploy_chequebook), not at ant_init. The switch is not persisted;
+ * set it after every ant_init.
+ *
+ * Returns 0 on success, -1 if `handle` is NULL, and -2 if the node loop
+ * didn't ack (already shut down) — in which case an allocated error
+ * string is written into *out_err (free with ant_free_string).
+ */
+int ant_set_swap_enabled(const AntHandle *handle, bool enabled, char **out_err);
+
+/*
+ * The node's SWAP settlement state as a JSON object — what the gateway's
+ * GET /v0/settlement/swap and GET /node's "settlement" report, for a host
+ * that doesn't run the gateway:
+ *   {"supported":bool,"swap_switch":true,"swap_enabled":bool,
+ *    "paying":bool,"chequebook":"0x…"|null,"persisted":false}
+ * supported: this build pays peers with SWAP cheques once a funded
+ * chequebook backs settlement (the `chain` feature). swap_switch: the
+ * switch can be changed at runtime (ant_set_swap_enabled). swap_enabled:
+ * bee's swap-enable as the node runs it now, for downloads and uploads
+ * alike. paying: cheques are being paid right now (switch on, chequebook
+ * funds read from the chain and not spent), otherwise the free
+ * pseudosettle tier. persisted: always false, the switch resets at
+ * ant_init. Never blocks on the network. Free with ant_free_string.
+ */
+char *ant_swap_status(const AntHandle *handle, char **out_err);
+
+/*
+ * Confirm the outstanding liability of `chequebook` ("0x…" hex) after
+ * its cheque figures were lost, and let the node pay cheques from it
+ * again, for downloads and uploads alike.
+ * When the node's outbound cheque ledger (pushsync_outbound.json) is
+ * found unparseable it is moved aside and a ".lost" marker is left;
+ * while that marker names a loss, the node pays no cheques (downloads
+ * or uploads; both stay on the free pseudosettle tier) from any
+ * chequebook that used the file (logged at warn, and /chequebook/balance
+ * reports chequeLedgerLost). Only this call (or antd
+ * --confirm-cheque-liability) clears it, never time or a restart.
+ * Confirming accepts that peers paid before the loss hold cheques the
+ * node can't see: they may refuse new cheques, and disconnect the node,
+ * until its restarted cumulatives pass what they hold. A running node
+ * picks it up at its next chequebook-funds read (within a minute). A
+ * marker that can't be parsed is replaced by one that confirms only this
+ * chequebook (every other one stays lost), so it never has to be deleted
+ * by hand. A chequebook deployed after the loss, and one whose ledger was
+ * open when the file was lost, aren't affected and need no confirmation.
+ *
+ * Returns 0 once confirmed, 1 when there was nothing to confirm (no loss
+ * on record, or this chequebook already confirmed), -1 if `handle` is
+ * NULL or `chequebook` is malformed, -2 if the marker can't be read (an
+ * I/O error, not a parse error) or written; on -1/-2 an allocated error string is written into *out_err
+ * (free with ant_free_string).
+ */
+int ant_confirm_cheque_liability(const AntHandle *handle, const char *chequebook, char **out_err);
 
 /*
  * System-suspend the upload subsystem — call when the app is moving to
@@ -451,7 +527,11 @@ char *ant_storage_settlement_deposit(const AntHandle *handle,
  * this call runs before spending (and again right before the transfer)
  * — it never funds that one — or when those checks can't be read, or a
  * chequebook deployed moments ago isn't visible to the RPC yet (retry;
- * nothing spent). Returns the
+ * nothing spent). On success the node re-reads the chequebook's funds
+ * over `gnosis_rpc` and pays cheques from them at once (ant_swap_status
+ * paying, when the switch is on), and keeps re-reading them every
+ * minute, even after an ant_init that reloaded the chequebook without an
+ * RPC. Returns the
  * refreshed ant_storage_settlement_deposit JSON. SUBMITS REAL
  * TRANSACTIONS AND SPENDS REAL FUNDS, and BLOCKS until they confirm.
  * Requires the `chain` cargo feature.
@@ -459,6 +539,23 @@ char *ant_storage_settlement_deposit(const AntHandle *handle,
 char *ant_storage_settlement_topup(const AntHandle *handle,
                                    const char *gnosis_rpc,
                                    char **out_err);
+
+/*
+ * Like ant_storage_settlement_topup, but deposits `amount_plur` more (a
+ * decimal PLUR string, 1 xBZZ = 10^16 PLUR) whatever the deposit's
+ * target: how a host tops up browsing credit beyond the node's default
+ * deposit. The same product flow and guards: the chain checks run before
+ * anything is spent, and the node swaps xDAI only for the xBZZ the wallet
+ * lacks. Errors on an amount that isn't a positive integer. Mirrors the
+ * gateway's POST /v0/settlement/deposit?amount=. Returns the refreshed
+ * ant_storage_settlement_deposit JSON. SUBMITS REAL TRANSACTIONS AND
+ * SPENDS REAL FUNDS, and BLOCKS until they confirm. Requires the `chain`
+ * cargo feature.
+ */
+char *ant_storage_settlement_topup_amount(const AntHandle *handle,
+                                          const char *gnosis_rpc,
+                                          const char *amount_plur,
+                                          char **out_err);
 
 /*
  * Deep read-back propagation check for an uploaded reference. Resolves
