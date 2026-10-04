@@ -10,8 +10,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -58,11 +60,20 @@ class TabsSession(
     val ready = CompletableDeferred<Unit>()
 
     /**
-     * Tabs the last restore crashed the app with ([TabsStore.load]), put
-     * on the reopen stack rather than loaded; the screen offers them
-     * back once, then clears this.
+     * Saved tabs this run didn't load — the last restore crashed the app
+     * ([TabsStore.load]), or the tab list was already in use when the
+     * disk read landed — put on the reopen stack as [group], and held on
+     * disk ([TabsStore.HELD]) until the user answers the screen's offer
+     * ([restoreHeld], [dismissHeld]) or the group leaves the stack some
+     * other way (Reopen closed tab, Clear history).
      */
-    var skippedAfterCrash by mutableStateOf<TabsState.ClosedGroup?>(null)
+    class HeldTabs(val group: TabsState.ClosedGroup, val afterCrash: Boolean)
+
+    /** The offer that's up, if any. Survives an Activity relaunch, so its notice is shown again. */
+    var heldTabs by mutableStateOf<HeldTabs?>(null)
+        private set
+
+    private var heldWatch: Job? = null
 
     /** The disk has been read, so writing it can't lose what it held. */
     private var persisting = false
@@ -78,22 +89,96 @@ class TabsSession(
             bundle != null -> startPersisting(store)
             else -> viewModelScope.launch {
                 val found = withContext(Dispatchers.IO) { store.load() }
-                restoreFromDisk(found)
+                restoreFromDisk(store, found)
                 startPersisting(store)
             }
         }
     }
 
-    private fun restoreFromDisk(found: TabsStore.Found) {
+    private suspend fun restoreFromDisk(store: TabsStore, found: TabsStore.Found) {
         when (found) {
             TabsStore.Found.Nothing -> Unit
             is TabsStore.Found.Tabs ->
-                // Nothing can have happened yet (the first load waits for
-                // [ready]); if something did, the tabs aren't thrown over
-                // it but wait on the reopen stack.
-                if (tabs.pristine) tabs.restoreAfterProcessDeath(found.saved) else tabs.keepForReopen(found.saved)
-            is TabsStore.Found.SkippedAfterCrash -> skippedAfterCrash = tabs.keepForReopen(found.saved)
+                if (tabs.pristine) {
+                    tabs.restoreAfterProcessDeath(found.saved)
+                    markRestored(store)
+                    found.held?.let { offer(store, it, afterCrash = true) }
+                } else {
+                    // Nothing should have happened yet (the first load
+                    // waits for [ready]); if something did, the tabs
+                    // aren't thrown over it but held and offered back.
+                    val held = withContext(Dispatchers.IO) { store.hold(found.saved) }
+                    offer(store, held, afterCrash = found.held != null)
+                }
+            is TabsStore.Found.SkippedAfterCrash -> offer(store, found.saved, afterCrash = true)
         }
+    }
+
+    private fun offer(store: TabsStore, saved: TabsState.SavedTabs, afterCrash: Boolean) {
+        val group = tabs.keepForReopen(saved) ?: return store.releaseHeld()
+        heldTabs = HeldTabs(group, afterCrash)
+        // However it leaves the reopen stack — the offer's Restore, Reopen
+        // closed tab, Clear history — the offer is over and the disk copy
+        // goes: reopened, they're open tabs saved as such.
+        heldWatch = viewModelScope.launch {
+            snapshotFlow { tabs.isOnReopenStack(group) }.first { !it }
+            releaseHeld(store, group)
+        }
+    }
+
+    private fun releaseHeld(store: TabsStore, group: TabsState.ClosedGroup) {
+        if (heldTabs?.group !== group) return
+        heldTabs = null
+        heldWatch?.cancel()
+        heldWatch = null
+        tabs.undoWithdrawn(group)
+        store.releaseHeld()
+    }
+
+    /** The offer's Restore: bring the held tabs back, marked like any restore from disk. */
+    fun restoreHeld() {
+        val held = heldTabs ?: return
+        val store = store ?: return
+        if (tabs.reopenClosed(held.group)) viewModelScope.launch { markRestored(store) }
+        releaseHeld(store, held.group)
+    }
+
+    /**
+     * The offer's ×: the user doesn't want them back now. They stay on
+     * this run's reopen stack like any closed tabs, but no longer on disk.
+     */
+    fun dismissHeld() {
+        val held = heldTabs ?: return
+        releaseHeld(store ?: return, held.group)
+    }
+
+    /**
+     * Mark the restore just done ([TabsStore.markRestored]), and settle
+     * it once the page on screen has loaded and [TabsStore.CRASH_WINDOW_MS]
+     * more have passed without a crash: counted from the page, not from
+     * the launch, so a dweb page that loads (and crashes) only once its
+     * node is up is still caught. One that never loads stays to blame up
+     * to [TabsStore.MARK_MAX_MS] after the restore.
+     */
+    private suspend fun markRestored(store: TabsStore) {
+        val tab = tabs.active
+        val at = withContext(Dispatchers.IO) { store.markRestored() }
+        viewModelScope.launch {
+            snapshotFlow { restoreLoaded(tab) }.first { it }
+            delay(TabsStore.CRASH_WINDOW_MS)
+            withContext(Dispatchers.IO) { store.settleRestore(at) }
+        }
+    }
+
+    /** [tab]'s restored page has loaded (or won't: it was closed, or its load had been stopped). */
+    private fun restoreLoaded(tab: BrowserState): Boolean {
+        // Every state this depends on is read each time, so the snapshot
+        // flow above sees each of them change ([BrowserState.pendingRestore]
+        // itself isn't observable; it's cleared as the load starts).
+        val closed = tabs.tabs.none { it.id == tab.id }
+        val stopped = tab.loadAborted
+        val loaded = tab.url.isNotBlank() && tab.progress < 0 && !tab.resolving
+        return closed || (tab.pendingRestore == null && (stopped || loaded))
     }
 
     private fun startPersisting(store: TabsStore) {

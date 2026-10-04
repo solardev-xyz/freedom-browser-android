@@ -36,10 +36,20 @@ import java.io.IOException
  *
  * A restore that brings back a page which crashes the app would crash it
  * again on every launch. So every restore leaves a mark ([RESTORE_MARK])
- * with its time; the next launch reads and removes it, and if the
- * previous process died of a crash or an ANR within [CRASH_WINDOW_MS] of
- * that restore ([skipsRestore]), the tabs aren't loaded: the app starts
- * on a home tab, and offers them back on the reopen stack instead.
+ * with its time ([markRestored]), which stays until the restored page has
+ * loaded and then [CRASH_WINDOW_MS] more have passed ([settleRestore]).
+ * The next launch reads and removes it, and if the previous process died
+ * of a crash or an ANR while it was still there (and at most
+ * [MARK_MAX_MS] after the restore, [skipsRestore]), the tabs aren't
+ * loaded: the app starts on a home tab, and offers them back instead.
+ *
+ * Tabs held back like that move to a file of their own ([HELD]) at once,
+ * before anything else is written: the open list is about to become the
+ * lone home tab. They stay there until the user acts on the offer
+ * ([releaseHeld]) — restores them, dismisses it, or clears history — so
+ * a launch that ends before that (another crash, a swipe) offers them
+ * again rather than losing them. A held list is never loaded on its own,
+ * so it can't crash-loop the app.
  */
 class TabsStore internal constructor(
     private val dir: File,
@@ -49,6 +59,7 @@ class TabsStore internal constructor(
 ) {
     private val file = File(dir, FILE)
     private val mark = File(dir, RESTORE_MARK)
+    private val heldFile = File(dir, HELD)
     private val writeLock = Mutex()
 
     /** The newest [save] asked for; older ones still queued are skipped. */
@@ -62,29 +73,97 @@ class TabsStore internal constructor(
         /** Nothing saved, or only a home tab. */
         data object Nothing : Found
 
-        /** The tabs to bring back. */
-        class Tabs(val saved: TabsState.SavedTabs) : Found
+        /**
+         * The tabs to bring back — the caller marks the restore
+         * ([markRestored]) once it has — and [held], tabs still held back
+         * from an earlier crashed restore, to offer beside them.
+         */
+        class Tabs(val saved: TabsState.SavedTabs, val held: TabsState.SavedTabs? = null) : Found
 
-        /** The last restore crashed the app (see [skipsRestore]): don't load these. */
+        /**
+         * Nothing to load, but tabs held back ([HELD]): the last restore
+         * crashed the app (see [skipsRestore]), now or on an earlier
+         * launch whose offer the user never answered.
+         */
         class SkippedAfterCrash(val saved: TabsState.SavedTabs) : Found
     }
 
     /**
      * Read the saved tabs for a cold start. Blocking: call off the main
-     * thread. When it returns [Found.Tabs], the caller is about to load
-     * them, and the restore is marked so a crash it causes is caught on
-     * the next launch.
+     * thread. Tabs a crash skips are moved to the held file before this
+     * returns, so the list written next can't lose them.
      */
-    fun load(): Found {
+    fun load(): Found = synchronized(this) {
         val markAt = takeMark()
-        val saved = read() ?: return Found.Nothing
-        if (saved.isJustHome()) return Found.Nothing
-        if (skipsRestore(markAt, runCatching { lastCrashAt() }.getOrNull())) {
+        val saved = read(file)?.takeUnless { it.isJustHome() }
+        var held = read(heldFile)?.takeUnless { it.isJustHome() }
+        if (saved != null && skipsRestore(markAt, runCatching { lastCrashAt() }.getOrNull())) {
             Log.w(TAG, "the last restore crashed the app; starting on a home tab")
-            return Found.SkippedAfterCrash(saved)
+            // Moved, not copied: the next launch offers them again
+            // rather than loading them (if the move failed, they're
+            // still where they were — loaded next time, as before).
+            held = holdNow(saved)?.also { delete() } ?: merged(held, saved)
+            return Found.SkippedAfterCrash(held)
         }
-        writeMark(clock())
-        return Found.Tabs(saved)
+        return when {
+            saved != null -> Found.Tabs(saved, held)
+            held != null -> Found.SkippedAfterCrash(held)
+            else -> Found.Nothing
+        }
+    }
+
+    /**
+     * Add [saved] to the held tabs (see [HELD]) — tabs read from disk
+     * that this run isn't loading after all — and return everything held
+     * now. Blocking I/O: call on [Dispatchers.IO].
+     */
+    suspend fun hold(saved: TabsState.SavedTabs): TabsState.SavedTabs =
+        writeLock.withLock { synchronized(this) { holdNow(saved) ?: merged(read(heldFile), saved) } }
+
+    /**
+     * The held tabs' offer is answered (restored, dismissed, or the
+     * reopen stack cleared): forget them on disk. If restored, they're
+     * open tabs now and saved as such.
+     */
+    fun releaseHeld() {
+        writes.launch {
+            writeLock.withLock { if (!heldFile.delete() && heldFile.exists()) Log.w(TAG, "couldn't drop the held tabs") }
+        }
+    }
+
+    /**
+     * Tabs were just loaded from disk (or from the held ones): mark it,
+     * so a crash before [settleRestore] skips them on the next launch.
+     * Returns the mark, for [settleRestore]. Blocking I/O.
+     */
+    suspend fun markRestored(): Long {
+        val at = clock()
+        writeLock.withLock { writeMark(at) }
+        return at
+    }
+
+    /**
+     * The restore marked [at] got through its page's load and the crash
+     * window after it: a crash from now on isn't its fault. Leaves a
+     * newer restore's mark alone. Blocking I/O.
+     */
+    suspend fun settleRestore(at: Long) {
+        writeLock.withLock {
+            val current = runCatching { mark.takeIf { it.isFile }?.readText()?.trim()?.toLongOrNull() }.getOrNull()
+            if (current == at) mark.delete()
+        }
+    }
+
+    /** Merge [saved] into the held file; null (and the merged list unwritten) if that failed. */
+    private fun holdNow(saved: TabsState.SavedTabs): TabsState.SavedTabs? {
+        val all = merged(read(heldFile)?.takeUnless { it.isJustHome() }, saved)
+        return try {
+            writeAtomically(heldFile, encode(all))
+            all
+        } catch (e: Exception) {
+            Log.w(TAG, "couldn't hold the skipped tabs", e)
+            null
+        }
     }
 
     /**
@@ -113,14 +192,14 @@ class TabsStore internal constructor(
         writeLock.withLock {
             if (seq < latest) return
             try {
-                if (saved.isJustHome()) delete() else writeAtomically(encode(saved))
+                if (saved.isJustHome()) delete() else writeAtomically(file, encode(saved))
             } catch (e: Exception) {
                 Log.w(TAG, "couldn't save the open tabs", e)
             }
         }
     }
 
-    private fun read(): TabsState.SavedTabs? = try {
+    private fun read(file: File): TabsState.SavedTabs? = try {
         if (!file.isFile || file.length() > MAX_FILE_BYTES) null else decode(file.readText())
     } catch (e: Exception) {
         Log.w(TAG, "couldn't read the saved tabs", e)
@@ -132,9 +211,9 @@ class TabsStore internal constructor(
         File(dir, "$FILE.tmp").delete()
     }
 
-    private fun writeAtomically(text: String) {
+    private fun writeAtomically(file: File, text: String) {
         if (!dir.isDirectory && !dir.mkdirs()) throw IOException("no directory $dir")
-        val tmp = File(dir, "$FILE.tmp")
+        val tmp = File(dir, "${file.name}.tmp")
         FileOutputStream(tmp).use { out ->
             out.write(text.toByteArray(Charsets.UTF_8))
             out.fd.sync()
@@ -184,15 +263,26 @@ class TabsStore internal constructor(
         private const val TAG = "TabsStore"
         const val FILE = "open-tabs.json"
         const val RESTORE_MARK = "restore-mark"
+
+        /** Tabs a crashed restore held back, until the user answers their offer. */
+        const val HELD = "held-tabs.json"
         private const val VERSION = 1
 
         /**
-         * A crash this soon after a restore counts as caused by it: long
-         * enough for a slow dweb page to load (and crash), short enough
-         * that a crash much later, while the user was browsing, still
-         * restores their tabs.
+         * A crash this soon after the restored page has loaded still
+         * counts as caused by it ([settleRestore]): a page can crash the
+         * app a while after its load finishes. A crash later than that,
+         * while the user was browsing, restores their tabs.
          */
         const val CRASH_WINDOW_MS = 60_000L
+
+        /**
+         * The longest a restore stays to blame when its page never
+         * finishes loading (a dweb page waiting on a node that doesn't
+         * start, say). Long enough for a slow node start; a crash after
+         * that, even unsettled, isn't pinned on the restore.
+         */
+        const val MARK_MAX_MS = 10 * 60_000L
 
         /**
          * A saved list is at most [TabsState.MAX_SAVED_CHARS] chars of
@@ -217,11 +307,12 @@ class TabsStore internal constructor(
         }
 
         /**
-         * Skip the restore: the previous run restored tabs at [markAt],
-         * and its process then died of a crash or an ANR at [crashAt],
-         * within [CRASH_WINDOW_MS] of it.
+         * Skip the restore: the previous run restored tabs at [markAt]
+         * and hadn't settled that restore yet ([settleRestore]), and its
+         * process then died of a crash or an ANR at [crashAt], within
+         * [MARK_MAX_MS] of it.
          */
-        fun skipsRestore(markAt: Long?, crashAt: Long?, windowMs: Long = CRASH_WINDOW_MS): Boolean {
+        fun skipsRestore(markAt: Long?, crashAt: Long?, windowMs: Long = MARK_MAX_MS): Boolean {
             if (markAt == null || crashAt == null) return false
             return crashAt - markAt in 0..windowMs
         }
@@ -238,6 +329,23 @@ class TabsStore internal constructor(
                 .filter { it.processName == main }
                 .maxByOrNull { it.timestamp } ?: return null
             return last.timestamp.takeIf { last.reason in CRASH_REASONS }
+        }
+
+        /**
+         * [older] held tabs, then [newer] ones, the newer list's active
+         * tab active. Bounded like a saved list ([TabsState.MAX_SAVED_CHARS]),
+         * the oldest dropped first, so repeated crashes can't grow it
+         * past what [read] accepts.
+         */
+        fun merged(older: TabsState.SavedTabs?, newer: TabsState.SavedTabs): TabsState.SavedTabs {
+            if (older == null || older.tabs.isEmpty()) return newer
+            var all = older.tabs + newer.tabs
+            var active = older.tabs.size + newer.activeIndex
+            while (all.size > newer.tabs.size && all.sumOf { it.address.length + it.title.length } > TabsState.MAX_SAVED_CHARS) {
+                all = all.drop(1)
+                active--
+            }
+            return TabsState.SavedTabs(all, active.coerceIn(0, all.lastIndex))
         }
 
         private val CRASH_REASONS = setOf(

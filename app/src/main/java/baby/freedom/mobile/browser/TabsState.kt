@@ -169,6 +169,12 @@ class TabsState(
         }
     }
 
+    /**
+     * [group] is still on the reopen stack: not reopened (by its notice
+     * or Reopen) or forgotten ([forgetClosedTabs]) yet. Observable.
+     */
+    fun isOnReopenStack(group: ClosedGroup): Boolean = closedTabs.any { it === group }
+
     /** There is a closed tab [reopenClosedTab] can bring back. */
     val canReopenClosedTab: Boolean
         get() = closedTabs.isNotEmpty()

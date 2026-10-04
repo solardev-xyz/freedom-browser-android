@@ -1,7 +1,9 @@
 package baby.freedom.mobile.browser
 
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -33,11 +35,22 @@ class TabsStoreTest {
     @get:Rule
     val folder = TemporaryFolder()
 
+    private val main = UnconfinedTestDispatcher()
+
     @Before
-    fun setUp() = Dispatchers.setMain(UnconfinedTestDispatcher())
+    fun setUp() = Dispatchers.setMain(main)
+
+    /** Every session a test made, stopped before the next test swaps Main. */
+    private val sessions = mutableListOf<TabsSession>()
+
+    private fun session(store: TabsStore = store()): TabsSession =
+        TabsSession(HOME_URL, SavedStateHandle(), store).also { sessions += it }
 
     @After
-    fun tearDown() = Dispatchers.resetMain()
+    fun tearDown() {
+        sessions.forEach { it.viewModelScope.cancel() }
+        Dispatchers.resetMain()
+    }
 
     private val dir: File get() = File(folder.root, "tabs")
 
@@ -177,31 +190,62 @@ class TabsStoreTest {
         assertEquals(2, TabsStore.decode(text)!!.activeIndex)
     }
 
+    /** A launch that loads what it finds and marks the restore, as [TabsSession] does. */
+    private suspend fun restoreAndMark(store: TabsStore = store()): Long {
+        assertTrue(store.load() is TabsStore.Found.Tabs)
+        return store.markRestored()
+    }
+
     @Test
-    fun `a crash soon after a restore skips the next one, once`() = runBlocking {
+    fun `a crash soon after a restore skips the next one, and holds the tabs until answered`() = runBlocking {
         store().save(threeTabs().saveForProcessDeath())
-        assertTrue(store().load() is TabsStore.Found.Tabs) // restored at `now`, and marked
+        restoreAndMark() // restored at `now`, and marked
         crashAt = now + 5_000 // …and the app crashed five seconds later
         now += 10_000
         val skipped = store().load()
         assertTrue(skipped is TabsStore.Found.SkippedAfterCrash)
         assertEquals(listOf("a", "b", "c"), (skipped as TabsStore.Found.SkippedAfterCrash).saved.tabs.map { it.title })
-        // The skip loaded nothing, so it left no mark: the same crash
-        // doesn't count against the launch after.
+        assertTrue(File(dir, TabsStore.HELD).exists())
+        // The skip loaded nothing, so it left no mark — but the tabs
+        // are only offered, never loaded, until the user answers.
+        assertTrue(store().load() is TabsStore.Found.SkippedAfterCrash)
+        store().releaseHeld()
+        awaitHeldGone()
+        assertSame(TabsStore.Found.Nothing, store().load())
+    }
+
+    @Test
+    fun `a crash long after the restore, or none, or after it settled, still restores`() = runBlocking {
+        store().save(threeTabs().saveForProcessDeath())
+        restoreAndMark()
+        crashAt = now + TabsStore.MARK_MAX_MS + 1
+        assertTrue(store().load() is TabsStore.Found.Tabs)
+        // A crash from before this restore (an older run) isn't its fault.
+        restoreAndMark()
+        crashAt = now - 1
+        assertTrue(store().load() is TabsStore.Found.Tabs)
+        restoreAndMark()
+        crashAt = null
+        assertTrue(store().load() is TabsStore.Found.Tabs)
+        // The restored page loaded and the window after it passed: a
+        // crash after that is the user's browsing, not the restore.
+        val store = store()
+        val at = restoreAndMark(store)
+        store.settleRestore(at)
+        crashAt = now + 1_000
         assertTrue(store().load() is TabsStore.Found.Tabs)
     }
 
     @Test
-    fun `a crash long after the restore, or none, still restores`() = runBlocking {
+    fun `settling an older restore leaves a newer one's mark`() = runBlocking {
         store().save(threeTabs().saveForProcessDeath())
-        assertTrue(store().load() is TabsStore.Found.Tabs)
-        crashAt = now + TabsStore.CRASH_WINDOW_MS + 1
-        assertTrue(store().load() is TabsStore.Found.Tabs)
-        // A crash from before this restore (an older run) isn't its fault.
-        crashAt = now - 1
-        assertTrue(store().load() is TabsStore.Found.Tabs)
-        crashAt = null
-        assertTrue(store().load() is TabsStore.Found.Tabs)
+        val store = store()
+        val older = store.markRestored()
+        now += 1
+        store.markRestored()
+        store.settleRestore(older)
+        crashAt = now + 1
+        assertTrue(store().load() is TabsStore.Found.SkippedAfterCrash)
     }
 
     @Test
@@ -209,9 +253,28 @@ class TabsStoreTest {
         assertFalse(TabsStore.skipsRestore(markAt = null, crashAt = 10))
         assertFalse(TabsStore.skipsRestore(markAt = 10, crashAt = null))
         assertTrue(TabsStore.skipsRestore(markAt = 10, crashAt = 10))
-        assertTrue(TabsStore.skipsRestore(markAt = 10, crashAt = 10 + TabsStore.CRASH_WINDOW_MS))
-        assertFalse(TabsStore.skipsRestore(markAt = 10, crashAt = 11 + TabsStore.CRASH_WINDOW_MS))
+        // Unsettled, a restore stays to blame well past a minute: a dweb
+        // page can need its node first.
+        assertTrue(TabsStore.skipsRestore(markAt = 10, crashAt = 10 + 5 * TabsStore.CRASH_WINDOW_MS))
+        assertTrue(TabsStore.skipsRestore(markAt = 10, crashAt = 10 + TabsStore.MARK_MAX_MS))
+        assertFalse(TabsStore.skipsRestore(markAt = 10, crashAt = 11 + TabsStore.MARK_MAX_MS))
         assertFalse(TabsStore.skipsRestore(markAt = 10, crashAt = 9))
+    }
+
+    @Test
+    fun `held tabs from repeated crashes add up, bounded`() {
+        val a = TabsState.SavedTabs(listOf(TabsState.SavedTab("a", "https://a.example/", true, false)), 0)
+        val bc = TabsState.SavedTabs(
+            listOf(TabsState.SavedTab("b", "https://b.example/", true, false), TabsState.SavedTab("c", "https://c.example/", true, false)),
+            1,
+        )
+        val both = TabsStore.merged(a, bc)
+        assertEquals(listOf("a", "b", "c"), both.tabs.map { it.title })
+        assertEquals(2, both.activeIndex)
+        val big = TabsState.SavedTabs(listOf(TabsState.SavedTab("big", "https://x.example/?" + "x".repeat(TabsState.MAX_SAVED_CHARS - 40), true, false)), 0)
+        val bounded = TabsStore.merged(TabsStore.merged(a, big), bc)
+        assertEquals(listOf("b", "c"), bounded.tabs.map { it.title })
+        assertEquals(1, bounded.activeIndex)
     }
 
     @Test
@@ -255,30 +318,176 @@ class TabsStoreTest {
     @Test
     fun `a cold start's session brings the saved tabs back before its first load`() = runBlocking {
         store().save(threeTabs().saveForProcessDeath())
-        val session = TabsSession(HOME_URL, SavedStateHandle(), store())
+        val session = session()
         withTimeout(5_000) { session.ready.await() }
         assertEquals(listOf("a", "b", "c"), session.tabs.tabs.map { it.title })
         assertEquals(1, session.tabs.activeIndex)
         assertTrue(session.tabs.initialLoadDone)
-        assertNull(session.skippedAfterCrash)
+        assertNull(session.heldTabs)
+        // Marked: a crash now skips the next launch's restore.
+        crashAt = now + 1_000
+        assertTrue(store().load() is TabsStore.Found.SkippedAfterCrash)
     }
 
     @Test
     fun `a cold start after a crashed restore starts on home and offers the tabs`() = runBlocking {
         store().save(threeTabs().saveForProcessDeath())
-        store().load()
+        restoreAndMark()
         crashAt = now + 1_000
-        val session = TabsSession(HOME_URL, SavedStateHandle(), store())
+        val session = session()
         withTimeout(5_000) { session.ready.await() }
         assertEquals(1, session.tabs.tabs.size)
         assertTrue(session.tabs.active.isHome)
         assertFalse(session.tabs.initialLoadDone)
-        assertEquals(3, session.skippedAfterCrash!!.tabs.size)
+        assertEquals(3, session.heldTabs!!.group.tabs.size)
+        assertTrue(session.heldTabs!!.afterCrash)
+    }
+
+    /** A cold start whose last restore crashed, as far as its session's ready. */
+    private fun crashedRestoreSession(): TabsSession = runBlocking {
+        store().save(threeTabs().saveForProcessDeath())
+        restoreAndMark()
+        crashAt = now + 1_000
+        session().also { withTimeout(5_000) { it.ready.await() } }
+    }
+
+    @Test
+    fun `tabs held after a crash survive the home tab being saved and another launch`() = runBlocking {
+        val session = crashedRestoreSession()
+        // The session saves its lone home tab (the debounce, or ON_STOP)…
+        store().save(session.tabs.saveForProcessDeath())
+        assertFalse(savedFile().exists())
+        // …and the app dies before the user answers the offer: the
+        // next launch offers the same tabs again, without loading them.
+        val next = session()
+        withTimeout(5_000) { next.ready.await() }
+        assertTrue(next.tabs.active.isHome)
+        assertEquals(listOf("a", "b", "c"), next.heldTabs!!.group.tabs.map { it.title })
+    }
+
+    @Test
+    fun `tabs opened after a crash restore normally, the held ones offered beside them`() = runBlocking {
+        val session = crashedRestoreSession()
+        session.tabs.tabs[0].visit("x")
+        session.tabs.newTab().visit("y")
+        store().save(session.tabs.saveForProcessDeath())
+        crashAt = null
+        val next = session()
+        withTimeout(5_000) { next.ready.await() }
+        assertEquals(listOf("x", "y"), next.tabs.tabs.map { it.title })
+        assertEquals(listOf("a", "b", "c"), next.heldTabs!!.group.tabs.map { it.title })
+    }
+
+    /** The held-tabs file is gone, once the store's background release has run. */
+    private fun awaitHeldGone() = runBlocking {
+        withTimeout(5_000) { while (File(dir, TabsStore.HELD).exists()) kotlinx.coroutines.delay(10) }
+    }
+
+    @Test
+    fun `restoring the held tabs opens them, ends the offer and marks the restore`() = runBlocking {
+        val session = crashedRestoreSession()
+        val group = session.heldTabs!!.group
+        session.restoreHeld()
+        assertNull(session.heldTabs)
+        assertFalse(session.tabs.isOnReopenStack(group))
+        assertEquals(listOf("a", "b", "c"), session.tabs.tabs.map { it.title })
+        awaitHeldGone()
+        // The tabs are open now: saved like any others…
+        store().save(session.tabs.saveForProcessDeath())
+        // …and a crash soon after this restore holds them back again.
+        withTimeout(5_000) { while (!File(dir, TabsStore.RESTORE_MARK).exists()) kotlinx.coroutines.delay(10) }
+        crashAt = now + 1_000
+        assertTrue(store().load() is TabsStore.Found.SkippedAfterCrash)
+    }
+
+    @Test
+    fun `dismissing the offer, Reopen closed tab or Clear history each end it and drop the held copy`() {
+        // The ×: still on this run's reopen stack, no longer pinned or on disk.
+        crashedRestoreSession().apply {
+            val group = heldTabs!!.group
+            dismissHeld()
+            assertNull(heldTabs)
+            assertTrue(tabs.isOnReopenStack(group))
+            awaitHeldGone()
+        }
+        // Reopen closed tab (Ctrl+Shift+T) while the notice is up.
+        crashedRestoreSession().apply {
+            assertNotNull(tabs.reopenClosedTab())
+            androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+            runBlocking { withTimeout(5_000) { while (heldTabs != null) kotlinx.coroutines.delay(10) } }
+            assertEquals(3, tabs.tabs.size)
+            awaitHeldGone()
+        }
+        // Clear history forgets the reopen stack, and the held tabs with it.
+        crashedRestoreSession().apply {
+            tabs.forgetClosedTabs()
+            androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+            runBlocking { withTimeout(5_000) { while (heldTabs != null) kotlinx.coroutines.delay(10) } }
+            awaitHeldGone()
+        }
+    }
+
+    @Test
+    fun `an offer not yet answered is still up for a relaunched screen`() {
+        val session = crashedRestoreSession()
+        // A screen's notice cancelled by an Activity relaunch answers nothing.
+        assertNotNull(session.heldTabs)
+        assertTrue(File(dir, TabsStore.HELD).exists())
+    }
+
+    @Test
+    fun `tabs the disk read finds after the list was already used are held and offered, not lost`() = runBlocking {
+        store().save(threeTabs().saveForProcessDeath())
+        // Hold the IO thread's read back until the list has been touched.
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val store = TabsStore(dir, lastCrashAt = { gate.await(); null }, clock = { now })
+        val session = session(store)
+        session.tabs.tabs[0].visit("x")
+        gate.countDown()
+        withTimeout(5_000) { session.ready.await() }
+        assertEquals(listOf("x"), session.tabs.tabs.map { it.title })
+        assertFalse(session.heldTabs!!.afterCrash)
+        assertEquals(listOf("a", "b", "c"), session.heldTabs!!.group.tabs.map { it.title })
+        assertTrue(File(dir, TabsStore.HELD).exists())
+        // Not loaded, so not marked: a crash now doesn't count against a restore.
+        assertFalse(File(dir, TabsStore.RESTORE_MARK).exists())
+        // Answered, it lets go of its place on the reopen stack.
+        session.dismissHeld()
+        awaitHeldGone()
+    }
+
+    @Test
+    fun `a restore settles only once its page has loaded and the crash window passed`() = runBlocking {
+        store().save(threeTabs().saveForProcessDeath())
+        val session = session()
+        withTimeout(5_000) { session.ready.await() }
+        val mark = File(dir, TabsStore.RESTORE_MARK)
+        withTimeout(5_000) { while (!mark.exists()) kotlinx.coroutines.delay(10) }
+        // Long after launch, the page still hasn't loaded (its node is slow): still to blame.
+        main.scheduler.advanceTimeBy(5 * TabsStore.CRASH_WINDOW_MS)
+        kotlinx.coroutines.delay(50)
+        assertTrue(mark.exists())
+        // It loads…
+        session.tabs.active.apply {
+            pendingRestore = null
+            url = "https://b.example/"
+            progress = 50
+        }
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        session.tabs.active.progress = -1
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        // …and a crash within the window after that still counts…
+        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS - 1_000)
+        kotlinx.coroutines.delay(50)
+        assertTrue(mark.exists())
+        // …but not once it has passed.
+        main.scheduler.advanceTimeBy(2_000)
+        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
     }
 
     @Test
     fun `nothing on disk leaves the fresh tab list`() = runBlocking {
-        val session = TabsSession(HOME_URL, SavedStateHandle(), store())
+        val session = session()
         withTimeout(5_000) { session.ready.await() }
         assertTrue(session.tabs.pristine)
     }

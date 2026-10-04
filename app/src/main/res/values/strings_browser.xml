@@ -217,6 +217,10 @@
         <item quantity="one">Freedom closed unexpectedly, so %d tab wasn\'t reopened</item>
         <item quantity="other">Freedom closed unexpectedly, so %d tabs weren\'t reopened</item>
     </plurals>
+    <plurals name="browser_tabs_not_reopened">
+        <item quantity="one">%d tab from last time wasn\'t reopened</item>
+        <item quantity="other">%d tabs from last time weren\'t reopened</item>
+    </plurals>
     <string name="browser_tabs_restore">Restore</string>
     <string name="browser_tabs_move_earlier">Move tab earlier</string>
     <string name="browser_tabs_move_to_start">Move tab to start</string>

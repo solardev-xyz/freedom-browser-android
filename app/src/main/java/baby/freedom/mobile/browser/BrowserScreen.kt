@@ -569,23 +569,26 @@ fun BrowserScreen(
     // The Undo notice of the switcher's last bulk close (#320).
     var tabsClosedNotice by remember { mutableStateOf<Job?>(null) }
     // The tabs the last restore crashed the app with (#400): not loaded,
-    // but one tap away. Offered once; the reopen stack keeps them after.
-    LaunchedEffect(tabsSession.skippedAfterCrash) {
-        val skipped = tabsSession.skippedAfterCrash ?: return@LaunchedEffect
-        tabsSession.skippedAfterCrash = null
-        scope.launch {
-            try {
-                val result = snackbarHostState.showSnackbar(
-                    message = Strings.plural(R.plurals.browser_tabs_not_restored, skipped.tabs.size, skipped.tabs.size),
-                    actionLabel = Strings.get(R.string.browser_tabs_restore),
-                    withDismissAction = true,
-                    duration = SnackbarDuration.Indefinite,
-                )
-                if (result == SnackbarResult.ActionPerformed) tabs.reopenClosed(skipped)
-            } finally {
-                tabs.undoWithdrawn(skipped)
-            }
-        }
+    // but one tap away, and held on disk until answered. Run in the
+    // effect's own scope and cleared only by an answer: an Activity
+    // relaunch while it's up cancels it, and the next screen shows it
+    // again; Reopen closed tab or Clear history ends the offer, and the
+    // notice with it.
+    val heldTabs = tabsSession.heldTabs
+    LaunchedEffect(heldTabs) {
+        val held = heldTabs ?: return@LaunchedEffect
+        val n = held.group.tabs.size
+        val result = snackbarHostState.showSnackbar(
+            message = Strings.plural(
+                if (held.afterCrash) R.plurals.browser_tabs_not_restored else R.plurals.browser_tabs_not_reopened,
+                n,
+                n,
+            ),
+            actionLabel = Strings.get(R.string.browser_tabs_restore),
+            withDismissAction = true,
+            duration = SnackbarDuration.Indefinite,
+        )
+        if (result == SnackbarResult.ActionPerformed) tabsSession.restoreHeld() else tabsSession.dismissHeld()
     }
 
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
