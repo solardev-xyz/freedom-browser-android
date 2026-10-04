@@ -13,6 +13,18 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.material.icons.filled.AccountBalanceWallet
+import androidx.compose.material.icons.filled.AddToHomeScreen
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.PlainTooltip
+import androidx.compose.material3.TooltipAnchorPosition
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberTooltipState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -1454,6 +1466,16 @@ internal fun BottomToolbar(
      */
     sitePermissionsSummary: String? = null,
     onOpenSitePermissions: () -> Unit = {},
+    /** The menu's Wallet row (#400): the wallet page Settings → Wallet opens. */
+    onOpenWallet: () -> Unit = {},
+    /** The Wallet row's sub-line ([walletMenuNote]), or null for none. */
+    walletNote: String? = null,
+    /**
+     * The menu's **Add to Home screen** (#400), or null where it isn't
+     * offered (a private tab, the home surface, an address the
+     * incoming-link path wouldn't open — [homeScreenShortcutTarget]).
+     */
+    onAddToHomeScreen: (() -> Unit)? = null,
     /** "New private tab" (#86); null where private tabs can't run, and the menu doesn't offer it. */
     onNewPrivateTab: (() -> Unit)? = null,
     onExpandCapsule: () -> Unit,
@@ -1735,6 +1757,7 @@ internal fun BottomToolbar(
                     state = state,
                     nodeInfo = nodeInfo,
                     isBookmarked = isBookmarked,
+                    onForward = onForward,
                     onHome = onHome,
                     onToggleBookmark = onToggleBookmark,
                     onOpenSettings = onOpenSettings,
@@ -1742,7 +1765,10 @@ internal fun BottomToolbar(
                     onOpenHistory = onOpenHistory,
                     onOpenBookmarks = onOpenBookmarks,
                     onOpenDownloads = onOpenDownloads,
+                    onOpenWallet = onOpenWallet,
+                    walletNote = walletNote,
                     onReload = onReload,
+                    onStop = onStop,
                     onHardReload = onHardReload,
                     onNewTab = onNewTab,
                     onNewPrivateTab = onNewPrivateTab,
@@ -1756,6 +1782,7 @@ internal fun BottomToolbar(
                     onToggleAdblock = onToggleAdblock,
                     sitePermissionsSummary = sitePermissionsSummary,
                     onOpenSitePermissions = onOpenSitePermissions,
+                    onAddToHomeScreen = onAddToHomeScreen,
                 )
             },
             modifier = Modifier
@@ -3004,6 +3031,7 @@ private fun OverflowMenuButton(
     state: BrowserState,
     nodeInfo: NodeInfo,
     isBookmarked: Boolean,
+    onForward: () -> Unit,
     onHome: () -> Unit,
     onToggleBookmark: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -3011,7 +3039,10 @@ private fun OverflowMenuButton(
     onOpenHistory: () -> Unit,
     onOpenBookmarks: () -> Unit,
     onOpenDownloads: () -> Unit,
+    onOpenWallet: () -> Unit,
+    walletNote: String?,
     onReload: () -> Unit,
+    onStop: () -> Unit,
     onHardReload: () -> Unit,
     onNewTab: () -> Unit,
     onNewPrivateTab: (() -> Unit)?,
@@ -3025,7 +3056,9 @@ private fun OverflowMenuButton(
     onToggleAdblock: () -> Unit,
     sitePermissionsSummary: String?,
     onOpenSitePermissions: () -> Unit,
+    onAddToHomeScreen: (() -> Unit)?,
 ) {
+    val context = LocalContext.current
     var menuExpanded by remember { mutableStateOf(false) }
     // The trust shield's details (#97), opened from the menu's first row.
     var trustShown by remember { mutableStateOf(false) }
@@ -3075,6 +3108,31 @@ private fun OverflowMenuButton(
             )
         }
         if (menuExpanded && anchorBounds != null) {
+            // Asked each time the menu opens: the user can change launchers.
+            val pinSupported = remember { HomeScreenShortcuts.isSupported(context) }
+            val groups = mainMenuGroups(
+                MainMenuContext(
+                    isHome = state.isHome,
+                    hasNameTrust = nameTrust != null,
+                    canOpenPrivateTab = onNewPrivateTab != null,
+                    hasAdblock = adblockState != null,
+                    hasSitePermissions = sitePermissionsSummary != null,
+                    canAddToHomeScreen = onAddToHomeScreen != null && pinSupported,
+                ),
+            )
+            val icons = mainMenuIconsFor(
+                canGoBack = state.canGoBack,
+                canGoForward = state.canGoForward,
+                isHome = state.isHome,
+                url = state.url,
+                addressBarText = state.addressBarText,
+                isBookmarked = isBookmarked,
+                loading = isCapsuleLoading(state),
+            )
+            val close: (() -> Unit) -> Unit = { action ->
+                menuExpanded = false
+                action()
+            }
             Popup(
                 popupPositionProvider = AnchoredAboveProvider(anchorBounds!!, popupGapPx),
                 onDismissRequest = { menuExpanded = false },
@@ -3108,250 +3166,348 @@ private fun OverflowMenuButton(
                             .verticalScroll(rememberScrollState())
                             .padding(vertical = 8.dp),
                     ) {
-                        // How the page's name was checked (#97) — the
-                        // shield on the protocol badge, in words, and
-                        // the way to its evidence. The badge itself is
-                        // no hit target (a tap there edits the address),
-                        // so this row is where the shield opens.
-                        if (nameTrust != null) {
-                            DropdownMenuItem(
-                                text = { MenuItemLabel(nameTrust.tier.title) },
-                                leadingIcon = { TrustShieldIcon(nameTrust) },
-                                onClick = {
-                                    menuExpanded = false
-                                    trustShown = true
-                                },
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = {
-                                MenuItemLabel(
-                                    if (isBookmarked) stringResource(R.string.browser_menu_remove_bookmark) else stringResource(R.string.browser_menu_add_bookmark),
+                        MainMenuIconRow(
+                            icons = icons,
+                            onForward = { close(onForward) },
+                            onToggleBookmark = { close(onToggleBookmark) },
+                            onShare = {
+                                close { icons.shareUrl?.let { shareUrl(context, it, state.title) } }
+                            },
+                            onReload = { close(onReload) },
+                            onStop = { close(onStop) },
+                        )
+                        for (group in groups) {
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                            for (row in group) {
+                                MainMenuRowItem(
+                                    row = row,
+                                    state = state,
+                                    peerCount = peerCount,
+                                    close = close,
+                                    onShowTrust = { trustShown = true },
+                                    onHome = onHome,
+                                    onNewTab = onNewTab,
+                                    onNewPrivateTab = onNewPrivateTab,
+                                    onFindInPage = onFindInPage,
+                                    zoomLevel = zoomLevel,
+                                    onZoom = onZoom,
+                                    desktopSite = desktopSite,
+                                    onToggleDesktopSite = onToggleDesktopSite,
+                                    onPrint = onPrint,
+                                    adblockState = adblockState,
+                                    onToggleAdblock = onToggleAdblock,
+                                    sitePermissionsSummary = sitePermissionsSummary,
+                                    onOpenSitePermissions = onOpenSitePermissions,
+                                    onHardReload = onHardReload,
+                                    onAddToHomeScreen = onAddToHomeScreen,
+                                    onOpenHistory = onOpenHistory,
+                                    onOpenBookmarks = onOpenBookmarks,
+                                    onOpenDownloads = onOpenDownloads,
+                                    onOpenWallet = onOpenWallet,
+                                    walletNote = walletNote,
+                                    onOpenSettings = onOpenSettings,
+                                    onOpenNode = onOpenNode,
                                 )
-                            },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = if (isBookmarked) Icons.Filled.Star
-                                    else Icons.Filled.StarBorder,
-                                    contentDescription = null,
-                                    tint = if (isBookmarked) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurface,
-                                )
-                            },
-                            enabled = state.url.isNotBlank(),
-                            onClick = {
-                                menuExpanded = false
-                                onToggleBookmark()
-                            },
-                        )
-                        // Home lives here now that Back owns the
-                        // capsule's left control slot.
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_home)) },
-                            leadingIcon = { Icon(Icons.Filled.Home, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onHome()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_new_tab)) },
-                            leadingIcon = { Icon(Icons.Filled.Add, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onNewTab()
-                            },
-                        )
-                        if (onNewPrivateTab != null) {
-                            DropdownMenuItem(
-                                text = { MenuItemLabel(stringResource(R.string.browser_menu_new_private_tab)) },
-                                leadingIcon = { Icon(PrivateTabIcon, contentDescription = null) },
-                                onClick = {
-                                    menuExpanded = false
-                                    onNewPrivateTab()
-                                },
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_reload)) },
-                            leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onReload()
-                            },
-                        )
-                        // Reload past the caches (#262): what a site that
-                        // just deployed new files, or a gateway that served
-                        // a stale answer, needs. Nothing to reload on the
-                        // home surface, nor in a tab whose renderer went
-                        // away (#260) — its Reload rebuilds the page.
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_hard_reload)) },
-                            leadingIcon = { Icon(Icons.Filled.Cached, contentDescription = null) },
-                            enabled = state.hasPageToActOn,
-                            onClick = {
-                                menuExpanded = false
-                                onHardReload()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_find_in_page)) },
-                            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                            // Nothing to search on the home surface, nor
-                            // on a tab whose renderer went away (#260).
-                            enabled = state.hasPageToActOn,
-                            onClick = {
-                                menuExpanded = false
-                                onFindInPage()
-                            },
-                        )
-                        // − / + and the percentage, which resets. The
-                        // menu stays open across presses so the user
-                        // can watch the page settle between steps.
-                        ZoomMenuRow(level = zoomLevel, onZoom = onZoom)
-                        // Request desktop site (#180), per site, with a
-                        // checkmark. Disabled where there is no site to
-                        // ask as a desktop one (home, an error page, a
-                        // dweb page). The page reloads, so the menu closes.
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_desktop_site)) },
-                            leadingIcon = { Icon(Icons.Filled.Computer, contentDescription = null) },
-                            trailingIcon = {
-                                Checkbox(
-                                    checked = desktopSite == true,
-                                    onCheckedChange = null,
-                                    enabled = desktopSite != null,
-                                )
-                            },
-                            enabled = desktopSite != null,
-                            onClick = {
-                                menuExpanded = false
-                                onToggleDesktopSite()
-                            },
-                            modifier = Modifier.semantics {
-                                role = Role.Checkbox
-                                toggleableState = ToggleableState(desktopSite == true)
-                            },
-                        )
-                        // Print or save as PDF (#89). Same rule as Find
-                        // in page: the home tab is Compose rather than a
-                        // page, so there is no document behind it to print
-                        // (nor is there on a tab whose renderer went away).
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_print)) },
-                            leadingIcon = { Icon(Icons.Filled.Print, contentDescription = null) },
-                            enabled = state.hasPageToActOn,
-                            onClick = {
-                                menuExpanded = false
-                                onPrint()
-                            },
-                        )
-                        // Ad blocking on this site (#126): the switch is on
-                        // only where filters really apply; a tap allowlists
-                        // the site (or lifts that) and reloads the page.
-                        // Where nothing is filtered for another reason (no
-                        // lists on, still loading, a list exempts the page)
-                        // it is off and disabled, and says why in a
-                        // sub-line. Only on a web page.
-                        if (adblockState != null) {
-                            DropdownMenuItem(
-                                text = {
-                                    Column(modifier = Modifier.padding(end = 32.dp)) {
-                                        Text(stringResource(R.string.browser_menu_block_ads))
-                                        adblockState.note?.let { note ->
-                                            Text(
-                                                text = note,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        }
-                                    }
-                                },
-                                leadingIcon = { Icon(Icons.Filled.Shield, contentDescription = null) },
-                                trailingIcon = {
-                                    Switch(
-                                        checked = adblockState.checked,
-                                        onCheckedChange = null,
-                                        enabled = adblockState.toggleable,
-                                        modifier = Modifier.scale(0.8f),
-                                    )
-                                },
-                                enabled = adblockState.toggleable,
-                                onClick = {
-                                    menuExpanded = false
-                                    onToggleAdblock()
-                                },
-                                // Read out as the switch it looks like.
-                                modifier = Modifier.semantics {
-                                    role = Role.Switch
-                                    toggleableState = ToggleableState(adblockState.checked)
-                                },
-                            )
-                        }
-                        // What the site on screen is allowed or blocked
-                        // from (#266), listed and removable in a sheet;
-                        // only while it holds something.
-                        if (sitePermissionsSummary != null) {
-                            DropdownMenuItem(
-                                text = {
-                                    Column(modifier = Modifier.padding(end = 32.dp)) {
-                                        Text(stringResource(R.string.browser_menu_site_permissions))
-                                        Text(
-                                            text = sitePermissionsSummary,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                },
-                                leadingIcon = { Icon(Icons.Filled.Tune, contentDescription = null) },
-                                onClick = {
-                                    menuExpanded = false
-                                    onOpenSitePermissions()
-                                },
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_history)) },
-                            leadingIcon = { Icon(Icons.Filled.History, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onOpenHistory()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_bookmarks)) },
-                            leadingIcon = { Icon(Icons.Filled.Bookmark, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onOpenBookmarks()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_downloads)) },
-                            leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onOpenDownloads()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_settings)) },
-                            leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onOpenSettings()
-                            },
-                        )
-                        val peersLabel = pluralText(R.plurals.browser_menu_peers, peerCount.toInt(), peerCount)
-                        NodesMenuItem(peersLabel) {
-                            menuExpanded = false
-                            onOpenNode()
+                            }
                         }
                     }
                 }
             }
         }
     }
+}
+
+/**
+ * The menu's top row (#400): Forward · Bookmark · Share · Reload, the
+ * page actions people reach for most, as Chrome puts them. Each is a full
+ * 48 dp target with its name as its content description, and the same
+ * name in a tooltip on a long press, since an icon alone doesn't say it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MainMenuIconRow(
+    icons: MainMenuIcons,
+    onForward: () -> Unit,
+    onToggleBookmark: () -> Unit,
+    onShare: () -> Unit,
+    onReload: () -> Unit,
+    onStop: () -> Unit,
+) {
+    Row(
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp),
+    ) {
+        MainMenuIconButton(
+            icon = Icons.AutoMirrored.Filled.ArrowForward,
+            label = stringResource(R.string.browser_forward),
+            enabled = icons.forwardEnabled,
+            onClick = onForward,
+        )
+        MainMenuIconButton(
+            icon = if (icons.bookmarked) Icons.Filled.Star else Icons.Filled.StarBorder,
+            label = stringResource(
+                if (icons.bookmarked) R.string.browser_menu_remove_bookmark
+                else R.string.browser_menu_add_bookmark,
+            ),
+            enabled = icons.bookmarkEnabled,
+            tint = if (icons.bookmarked) MaterialTheme.colorScheme.primary else null,
+            onClick = onToggleBookmark,
+        )
+        MainMenuIconButton(
+            icon = Icons.Filled.Share,
+            label = stringResource(R.string.common_share),
+            enabled = icons.shareUrl != null,
+            onClick = onShare,
+        )
+        val stop = icons.reload == MainMenuReload.Stop
+        MainMenuIconButton(
+            icon = if (stop) Icons.Filled.Close else Icons.Filled.Refresh,
+            label = stringResource(if (stop) R.string.browser_stop_loading else R.string.browser_reload),
+            enabled = icons.reload != MainMenuReload.None,
+            onClick = if (stop) onStop else onReload,
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MainMenuIconButton(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    tint: Color? = null,
+) {
+    TooltipBox(
+        positionProvider = TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Above),
+        tooltip = { PlainTooltip { Text(label) } },
+        state = rememberTooltipState(),
+    ) {
+        IconButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = Modifier.size(48.dp),
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = if (enabled && tint != null) tint else LocalContentColor.current,
+            )
+        }
+    }
+}
+
+/** One of the menu's list rows ([MainMenuRow]); every row but Zoom closes the menu. */
+@Composable
+private fun MainMenuRowItem(
+    row: MainMenuRow,
+    state: BrowserState,
+    peerCount: Long,
+    close: (() -> Unit) -> Unit,
+    onShowTrust: () -> Unit,
+    onHome: () -> Unit,
+    onNewTab: () -> Unit,
+    onNewPrivateTab: (() -> Unit)?,
+    onFindInPage: () -> Unit,
+    zoomLevel: Int?,
+    onZoom: (ZoomAction) -> Unit,
+    desktopSite: Boolean?,
+    onToggleDesktopSite: () -> Unit,
+    onPrint: () -> Unit,
+    adblockState: AdblockSiteState?,
+    onToggleAdblock: () -> Unit,
+    sitePermissionsSummary: String?,
+    onOpenSitePermissions: () -> Unit,
+    onHardReload: () -> Unit,
+    onAddToHomeScreen: (() -> Unit)?,
+    onOpenHistory: () -> Unit,
+    onOpenBookmarks: () -> Unit,
+    onOpenDownloads: () -> Unit,
+    onOpenWallet: () -> Unit,
+    walletNote: String?,
+    onOpenSettings: () -> Unit,
+    onOpenNode: () -> Unit,
+) {
+    when (row) {
+        // How the page's name was checked (#97) — the shield on the
+        // protocol badge, in words, and the way to its evidence. The
+        // badge itself is no hit target (a tap there edits the address),
+        // so this row is where the shield opens.
+        MainMenuRow.NameTrust -> state.nameTrust?.let { trust ->
+            DropdownMenuItem(
+                text = { MenuItemLabel(trust.tier.title) },
+                leadingIcon = { TrustShieldIcon(trust) },
+                onClick = { close(onShowTrust) },
+            )
+        }
+        // Home lives here now that Back owns the capsule's left control slot.
+        MainMenuRow.Home -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_home)) },
+            leadingIcon = { Icon(Icons.Filled.Home, contentDescription = null) },
+            onClick = { close(onHome) },
+        )
+        MainMenuRow.NewTab -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_new_tab)) },
+            leadingIcon = { Icon(Icons.Filled.Add, contentDescription = null) },
+            onClick = { close(onNewTab) },
+        )
+        MainMenuRow.NewPrivateTab -> onNewPrivateTab?.let { open ->
+            DropdownMenuItem(
+                text = { MenuItemLabel(stringResource(R.string.browser_menu_new_private_tab)) },
+                leadingIcon = { Icon(PrivateTabIcon, contentDescription = null) },
+                onClick = { close(open) },
+            )
+        }
+        MainMenuRow.FindInPage -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_find_in_page)) },
+            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+            // Nothing to search on a tab whose renderer went away (#260).
+            enabled = state.hasPageToActOn,
+            onClick = { close(onFindInPage) },
+        )
+        // − / + and the percentage, which resets. The menu stays open
+        // across presses so the user can watch the page settle between steps.
+        MainMenuRow.Zoom -> ZoomMenuRow(level = zoomLevel, onZoom = onZoom)
+        // Request desktop site (#180), per site, with a checkmark.
+        // Disabled where there is no site to ask as a desktop one (an
+        // error page, a dweb page). The page reloads, so the menu closes.
+        MainMenuRow.DesktopSite -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_desktop_site)) },
+            leadingIcon = { Icon(Icons.Filled.Computer, contentDescription = null) },
+            trailingIcon = {
+                Checkbox(
+                    checked = desktopSite == true,
+                    onCheckedChange = null,
+                    enabled = desktopSite != null,
+                )
+            },
+            enabled = desktopSite != null,
+            onClick = { close(onToggleDesktopSite) },
+            modifier = Modifier.semantics {
+                role = Role.Checkbox
+                toggleableState = ToggleableState(desktopSite == true)
+            },
+        )
+        // Print or save as PDF (#89). Nothing to print on a tab whose
+        // renderer went away.
+        MainMenuRow.Print -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_print)) },
+            leadingIcon = { Icon(Icons.Filled.Print, contentDescription = null) },
+            enabled = state.hasPageToActOn,
+            onClick = { close(onPrint) },
+        )
+        // Ad blocking on this site (#126): the switch is on only where
+        // filters really apply; a tap allowlists the site (or lifts that)
+        // and reloads the page. Where nothing is filtered for another
+        // reason (no lists on, still loading, a list exempts the page) it
+        // is off and disabled, and says why in a sub-line. Only on a web page.
+        MainMenuRow.BlockAds -> adblockState?.let { ads ->
+            DropdownMenuItem(
+                text = {
+                    Column(modifier = Modifier.padding(end = 32.dp)) {
+                        Text(stringResource(R.string.browser_menu_block_ads))
+                        ads.note?.let { note -> MenuItemNote(note) }
+                    }
+                },
+                leadingIcon = { Icon(Icons.Filled.Shield, contentDescription = null) },
+                trailingIcon = {
+                    Switch(
+                        checked = ads.checked,
+                        onCheckedChange = null,
+                        enabled = ads.toggleable,
+                        modifier = Modifier.scale(0.8f),
+                    )
+                },
+                enabled = ads.toggleable,
+                onClick = { close(onToggleAdblock) },
+                // Read out as the switch it looks like.
+                modifier = Modifier.semantics {
+                    role = Role.Switch
+                    toggleableState = ToggleableState(ads.checked)
+                },
+            )
+        }
+        // What the site on screen is allowed or blocked from (#266),
+        // listed and removable in a sheet; only while it holds something.
+        MainMenuRow.SitePermissions -> sitePermissionsSummary?.let { summary ->
+            DropdownMenuItem(
+                text = {
+                    Column(modifier = Modifier.padding(end = 32.dp)) {
+                        Text(stringResource(R.string.browser_menu_site_permissions))
+                        MenuItemNote(summary)
+                    }
+                },
+                leadingIcon = { Icon(Icons.Filled.Tune, contentDescription = null) },
+                onClick = { close(onOpenSitePermissions) },
+            )
+        }
+        // Reload past the caches (#262): what a site that just deployed
+        // new files, or a gateway that served a stale answer, needs.
+        // Nothing to reload in a tab whose renderer went away (#260) —
+        // its Reload rebuilds the page.
+        MainMenuRow.HardReload -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_hard_reload)) },
+            leadingIcon = { Icon(Icons.Filled.Cached, contentDescription = null) },
+            enabled = state.hasPageToActOn,
+            onClick = { close(onHardReload) },
+        )
+        // A launcher shortcut to the page (#400); never in a private tab.
+        MainMenuRow.AddToHomeScreen -> onAddToHomeScreen?.let { add ->
+            DropdownMenuItem(
+                text = { MenuItemLabel(stringResource(R.string.browser_menu_add_to_home_screen)) },
+                leadingIcon = { Icon(Icons.Filled.AddToHomeScreen, contentDescription = null) },
+                onClick = { close(add) },
+            )
+        }
+        MainMenuRow.History -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_history)) },
+            leadingIcon = { Icon(Icons.Filled.History, contentDescription = null) },
+            onClick = { close(onOpenHistory) },
+        )
+        MainMenuRow.Bookmarks -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_bookmarks)) },
+            leadingIcon = { Icon(Icons.Filled.Bookmark, contentDescription = null) },
+            onClick = { close(onOpenBookmarks) },
+        )
+        MainMenuRow.Downloads -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_downloads)) },
+            leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null) },
+            onClick = { close(onOpenDownloads) },
+        )
+        // The wallet page (#400), the one Settings → Wallet opens.
+        MainMenuRow.Wallet -> DropdownMenuItem(
+            text = {
+                Column(modifier = Modifier.padding(end = 32.dp)) {
+                    Text(stringResource(R.string.browser_menu_wallet))
+                    walletNote?.let { MenuItemNote(it) }
+                }
+            },
+            leadingIcon = { Icon(Icons.Filled.AccountBalanceWallet, contentDescription = null) },
+            onClick = { close(onOpenWallet) },
+        )
+        MainMenuRow.Settings -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_settings)) },
+            leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+            onClick = { close(onOpenSettings) },
+        )
+        MainMenuRow.Nodes -> {
+            val peersLabel = pluralText(R.plurals.browser_menu_peers, peerCount.toInt(), peerCount)
+            NodesMenuItem(peersLabel) { close(onOpenNode) }
+        }
+    }
+}
+
+/** A menu row's sub-line, under its label (a summary, a reason it's off). */
+@Composable
+private fun MenuItemNote(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 /**
