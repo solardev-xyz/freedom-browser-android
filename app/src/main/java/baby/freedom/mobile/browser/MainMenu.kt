@@ -226,16 +226,49 @@ internal fun homeScreenShortcutId(url: String): String {
 /** At most this many characters (grapheme clusters) of a page title in a launcher label. */
 internal const val SHORTCUT_LABEL_MAX = 32
 
+/** At most this many combining marks in a row on one character of a launcher label. */
+internal const val SHORTCUT_LABEL_MARKS = 3
+
+/**
+ * Code points that draw nothing but aren't format, control or unassigned
+ * characters: the Default_Ignorable_Code_Point ones of other categories
+ * (Hangul fillers, combining grapheme joiner, Khmer inherent vowels,
+ * Mongolian variation selectors, U+FFF0–FFF8 are unassigned anyway), and
+ * U+2800, the blank Braille pattern. Variation selectors are handled
+ * separately.
+ */
+private fun drawsBlank(cp: Int): Boolean =
+    cp == 0x034F || cp == 0x115F || cp == 0x1160 || cp in 0x17B4..0x17B5 ||
+        cp in 0x180B..0x180F || cp == 0x2800 || cp == 0x3164 || cp == 0xFFA0 ||
+        cp in 0x1BCA0..0x1BCA3 || cp in 0x1D173..0x1D17A || cp in 0xE0000..0xE0FFF && cp !in 0xE0020..0xE007F
+
+private fun isVariationSelector(cp: Int): Boolean =
+    cp in 0xFE00..0xFE0F || cp in 0xE0100..0xE01EF
+
+private fun isMark(cp: Int): Boolean = when (Character.getType(cp)) {
+    // Spacing marks (Mc) advance like letters; these stack on their base.
+    Character.NON_SPACING_MARK.toInt(), Character.ENCLOSING_MARK.toInt() -> true
+    else -> false
+}
+
 /**
  * The launcher label: the page's title, or where it has none, its host
  * (or name, for a dweb address). The title is the page's own text, so it
  * is made fit for a one-line label under an icon first (R1-M2): line
- * breaks, tabs and other controls become spaces; format characters
- * (bidi overrides and isolates, zero-width spaces, U+FEFF), line and
- * paragraph separators, unassigned and lone surrogate code points are
- * dropped — keeping ZWJ, ZWNJ and the tag characters emoji are built
- * from; runs of spaces collapse; and it is cut to [SHORTCUT_LABEL_MAX]
- * characters, on a character boundary, with an ellipsis.
+ * breaks, tabs, other controls and the line and paragraph separators
+ * (U+2028/U+2029) become spaces, and runs of spaces collapse; format
+ * characters (bidi overrides and isolates, zero-width spaces, U+FEFF),
+ * unassigned, private-use and lone surrogate code points are dropped —
+ * keeping ZWJ, ZWNJ and the tag characters emoji are built from; so are
+ * the code points that draw blank without being any of those (the rest of
+ * Default_Ignorable_Code_Point — Hangul fillers U+115F/U+1160/U+3164/
+ * U+FFA0, U+034F and the like — and U+2800), and every variation selector
+ * but one straight after a character that draws (R2-M1). A run of
+ * combining marks on one character is cut at [SHORTCUT_LABEL_MARKS], so a
+ * stack of them can't draw over the labels around it. A title left with
+ * nothing that draws falls back to the host. It is cut to
+ * [SHORTCUT_LABEL_MAX] characters, on a character boundary, with an
+ * ellipsis.
  */
 internal fun homeScreenShortcutLabel(title: String, url: String): String {
     val t = shortcutLabelText(title)
@@ -250,14 +283,34 @@ private fun shortcutLabelText(text: String): String {
     var i = 0
     // Only so much of a multi-kB title is worth looking at.
     val end = minOf(text.length, 64 * SHORTCUT_LABEL_MAX)
+    // What was last appended, for the selector and mark rules: whether it
+    // was a character that draws (not a space, mark, joiner or selector),
+    // and how many marks have followed it. Dropped code points append
+    // nothing, so they don't end a run either.
+    var afterVisible = false
+    var marks = 0
+    var visible = false
     while (i < end) {
         val cp = text.codePointAt(i)
         i += Character.charCount(cp)
         when {
             cp == '\t'.code || cp == '\n'.code || cp == '\r'.code ||
                 Character.getType(cp) == Character.CONTROL.toInt() ||
-                Character.isWhitespace(cp) || Character.isSpaceChar(cp) -> clean.append(' ')
-            cp == 0x200C || cp == 0x200D || cp in 0xE0020..0xE007F -> clean.appendCodePoint(cp)
+                Character.isWhitespace(cp) || Character.isSpaceChar(cp) -> {
+                clean.append(' ')
+                afterVisible = false
+                marks = 0
+            }
+            isVariationSelector(cp) -> if (afterVisible) {
+                clean.appendCodePoint(cp)
+                afterVisible = false
+            }
+            drawsBlank(cp) -> Unit
+            // Not a run end: marks after a joiner still stack on the base.
+            cp == 0x200C || cp == 0x200D || cp in 0xE0020..0xE007F -> {
+                clean.appendCodePoint(cp)
+                afterVisible = false
+            }
             when (Character.getType(cp)) {
                 Character.FORMAT.toInt(),
                 Character.LINE_SEPARATOR.toInt(),
@@ -267,9 +320,20 @@ private fun shortcutLabelText(text: String): String {
                 Character.PRIVATE_USE.toInt() -> true
                 else -> false
             } -> Unit
-            else -> clean.appendCodePoint(cp)
+            isMark(cp) -> if (marks < SHORTCUT_LABEL_MARKS) {
+                clean.appendCodePoint(cp)
+                marks++
+                afterVisible = false
+            }
+            else -> {
+                clean.appendCodePoint(cp)
+                afterVisible = true
+                visible = true
+                marks = 0
+            }
         }
     }
+    if (!visible) return ""
     val collapsed = clean.toString().replace(Regex(" {2,}"), " ").trim()
     val chars = BreakIterator.getCharacterInstance()
     chars.setText(collapsed)

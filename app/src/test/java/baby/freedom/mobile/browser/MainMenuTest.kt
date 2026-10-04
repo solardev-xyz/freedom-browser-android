@@ -241,4 +241,27 @@ class MainMenuTest {
         // Nothing left of the title: the host.
         assertEquals("example.org", homeScreenShortcutLabel("\u200B\u202E\n", "https://example.org/"))
     }
+
+    @Test
+    fun `the shortcut label drops what draws blank and caps stacked marks`() {
+        val url = "https://example.org/"
+        // A title of only blank-drawing code points falls back to the host.
+        for (blank in listOf("\u3164", "\uFFA0", "\u115F\u1160", "\u2800", "\uFE0F\uFE0F", "\u034F",
+            "\uDB40\uDD00", "\u200D\u200C", "\u0301\u0301", " \u3164 \u2800 ")) {
+            assertEquals("example.org", homeScreenShortcutLabel(blank, url))
+        }
+        assertEquals("ab", homeScreenShortcutLabel("a\u3164\u2800b\uFFA0", url))
+        // One variation selector after a character that draws stays (emoji presentation).
+        assertEquals("\u2764\uFE0F", homeScreenShortcutLabel("\u2764\uFE0F", url))
+        assertEquals("\u2764\uFE0F", homeScreenShortcutLabel("\u2764\uFE0F\uFE0F\uDB40\uDD00", url))
+        assertEquals("a b", homeScreenShortcutLabel("a \uFE0Fb", url))
+        // A run of combining marks is cut at the cap, however long; dropped
+        // code points and joiners between marks don't restart it.
+        val e = "e" + "\u0301".repeat(SHORTCUT_LABEL_MARKS)
+        assertEquals(e, homeScreenShortcutLabel("e" + "\u0301".repeat(2000), url))
+        assertEquals(e, homeScreenShortcutLabel("e\u0301\u3164\u0301\u2065\u0301\u0301\u0301", url))
+        assertEquals(e + "\u200D", homeScreenShortcutLabel("e\u0301\u0301\u0301\u200D\u0301\u0301", url))
+        // A new character starts a new run: ordinary accented text is untouched.
+        assertEquals("re\u0301sume\u0301 e\u0323\u0302", homeScreenShortcutLabel("re\u0301sume\u0301 e\u0323\u0302", url))
+    }
 }
