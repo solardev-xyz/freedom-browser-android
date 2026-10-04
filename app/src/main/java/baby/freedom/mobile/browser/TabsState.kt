@@ -660,6 +660,13 @@ class TabsState(
         )
     }
 
+    /**
+     * Nothing has happened to this tab list yet: the one regular tab it
+     * was created with, untouched, and no first load submitted.
+     */
+    val pristine: Boolean
+        get() = !initialLoadDone && tabs.size == 1 && !tabs[0].private && tabs[0].isUntouched()
+
     /** Still the fresh home overlay it was created as. */
     private fun BrowserState.isUntouched(): Boolean =
         isHome && !canGoBack && !canGoForward && !resolving && progress < 0
@@ -754,9 +761,12 @@ class TabsState(
      * [BrowserState.url]: [committed] only says there was a page, whose
      * [address] loads again.
      */
-    class SavedTabs(val tabs: List<SavedTab>, val activeIndex: Int)
+    data class SavedTabs(val tabs: List<SavedTab>, val activeIndex: Int) {
+        /** Nothing worth bringing back: no tab, or one on the home page. */
+        fun isJustHome(): Boolean = tabs.isEmpty() || (tabs.size == 1 && tabs[0].address.isBlank())
+    }
 
-    class SavedTab(
+    data class SavedTab(
         val title: String,
         val address: String,
         val committed: Boolean,
@@ -830,6 +840,43 @@ class TabsState(
         tabs.addAll(restored)
         activeIndex = saved.activeIndex.coerceIn(0, tabs.lastIndex)
         initialLoadDone = true
+    }
+
+    /**
+     * Saved tabs that aren't loaded — the last restore from disk crashed
+     * the app ([TabsStore]) — go on the reopen stack instead, as one
+     * entry, so the user can still bring them back (Reopen closed tab,
+     * or the notice's Restore) once they're past whatever crashed. They
+     * come back as [restoreAfterProcessDeath] would have brought them,
+     * in place of the home tab if it's still untouched. Returns the
+     * entry, or null if there was nothing to keep.
+     */
+    fun keepForReopen(saved: SavedTabs): ClosedGroup? {
+        // Home tabs among them don't come back; the rest close up.
+        val kept = saved.tabs.withIndex().filter { it.value.address.isNotBlank() }
+        if (kept.isEmpty()) return null
+        val group = ClosedGroup(
+            tabs = kept.mapIndexed { i, (_, s) ->
+                ClosedTab(
+                    index = i,
+                    url = if (s.committed) s.address else "",
+                    title = s.title,
+                    addressBarText = s.address,
+                    override = null,
+                    thumbnail = null,
+                    webViewState = null,
+                    loadStopped = s.loadStopped,
+                )
+            },
+            activeAt = kept.indexOfFirst { it.index == saved.activeIndex }.takeIf { it >= 0 },
+            placeholderId = tabs.singleOrNull()?.takeIf { it.isUntouched() && !it.private }?.id,
+            bulk = true,
+        )
+        closedTabs.add(group)
+        // Held while its notice is up, like a bulk close's Undo.
+        offeredUndo = group
+        trimClosed()
+        return group
     }
 
     /**

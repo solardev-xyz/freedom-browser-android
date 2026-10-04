@@ -80,6 +80,8 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import baby.freedom.mobile.R
@@ -482,8 +484,14 @@ fun BrowserScreen(
     shortcuts: KeyboardShortcutRouter? = null,
 ) {
     // Outside composition, so the tabs survive an Activity relaunch
-    // (#183, see [TabsSession]).
-    val tabs = viewModel { TabsSession(HOME_URL, createSavedStateHandle()) }.tabs
+    // (#183, see [TabsSession]) — and on disk, so they survive the app
+    // being closed (#400).
+    val tabsStore = TabsStore.get(LocalContext.current)
+    val tabsSession = viewModel { TabsSession(HOME_URL, createSavedStateHandle(), tabsStore) }
+    val tabs = tabsSession.tabs
+    // Going to the background is the last word the app may get before
+    // it's swiped away or killed: the tab list goes to disk now.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { tabsSession.persistNow() }
     // Shared with the request interceptor (which resolves
     // `<name>.ens.…` virtual hosts) so both sides use one cache.
     val ensResolver = Gateways.ensResolver
@@ -560,6 +568,25 @@ fun BrowserScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     // The Undo notice of the switcher's last bulk close (#320).
     var tabsClosedNotice by remember { mutableStateOf<Job?>(null) }
+    // The tabs the last restore crashed the app with (#400): not loaded,
+    // but one tap away. Offered once; the reopen stack keeps them after.
+    LaunchedEffect(tabsSession.skippedAfterCrash) {
+        val skipped = tabsSession.skippedAfterCrash ?: return@LaunchedEffect
+        tabsSession.skippedAfterCrash = null
+        scope.launch {
+            try {
+                val result = snackbarHostState.showSnackbar(
+                    message = Strings.plural(R.plurals.browser_tabs_not_restored, skipped.tabs.size, skipped.tabs.size),
+                    actionLabel = Strings.get(R.string.browser_tabs_restore),
+                    withDismissAction = true,
+                    duration = SnackbarDuration.Indefinite,
+                )
+                if (result == SnackbarResult.ActionPerformed) tabs.reopenClosed(skipped)
+            } finally {
+                tabs.undoWithdrawn(skipped)
+            }
+        }
+    }
 
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
@@ -1703,6 +1730,10 @@ fun BrowserScreen(
         // the link ([onDeepLinkHandled]) restarts this effect, so that
         // comes last, after the link has its tab.
         val url = link?.let { deepLinkUrl(it) }
+        // The tabs the app had, if it's coming back from being closed
+        // (#400): read from disk first, so the homepage isn't submitted
+        // into a tab they replace, and a link opens beside them.
+        tabsSession.ready.await()
         if (!tabs.initialLoadDone) {
             tabs.initialLoadDone = true
             if (link == null || url == null) {
@@ -2525,10 +2556,16 @@ fun BrowserScreen(
             },
             // The reopen stack keeps closed tabs' pages, titles and
             // back/forward lists — history by any other name.
-            onClearHistory = { tabs.forgetClosedTabs() },
+            // The saved tab list (#400) is rewritten from the open tabs
+            // alone, so nothing closed lingers in it.
+            onClearHistory = {
+                tabs.forgetClosedTabs()
+                tabsSession.persistNow()
+            },
             onClearWebViewData = {
                 // Closed tabs carry their saved back/forward history.
                 tabs.forgetClosedTabs()
+                tabsSession.persistNow()
                 tabs.clearWebViewData?.invoke()
                 // The nodes' logs can name what was browsed (#276).
                 clearNodeLogs()
@@ -2604,7 +2641,10 @@ fun BrowserScreen(
                 // Close all / Close other tabs (#320): say how many went,
                 // with an Undo that brings back the ones that are kept
                 // (none of a private tab's). A newer bulk close replaces
-                // the notice of the last one.
+                // the notice of the last one. Gone from disk at once
+                // (#400): an app killed while the notice is up doesn't
+                // bring them back. Undo writes them again.
+                tabsSession.persistNow()
                 tabsClosedNotice?.cancel()
                 if (closed.count > 0) {
                     tabsClosedNotice = scope.launch {
