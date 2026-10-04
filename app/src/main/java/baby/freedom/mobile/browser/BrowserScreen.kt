@@ -109,6 +109,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Sentinel URL for the home tab. We load `about:blank` into the
@@ -1459,6 +1460,27 @@ fun BrowserScreen(
         null
     }
 
+    // The menu's Add to Home screen (#400): a launcher shortcut to the
+    // page on screen, through the incoming-link path. Address, title and
+    // the site's cached favicon are taken at the tap, so a navigation
+    // landing while the icon is drawn can't retarget it. Null where it
+    // isn't offered — a private tab above all ([homeScreenShortcutTarget]).
+    val addToHomeScreen: (() -> Unit)? = homeScreenShortcutTarget(state.url, state.private)?.let { target ->
+        {
+            val label = homeScreenShortcutLabel(state.title, target)
+            val favicons = repo.favicon(target)
+            scope.launch {
+                val favicon = runCatching { withTimeoutOrNull(1_000) { favicons.first() } }.getOrNull()
+                val icon = withContext(Dispatchers.Default) { HomeScreenShortcuts.icon(target, label, favicon) }
+                if (!HomeScreenShortcuts.request(context, target, label, icon)) {
+                    snackbarHostState.showSnackbar(Strings.get(R.string.browser_add_to_home_screen_failed))
+                }
+            }
+        }
+    }
+    // The menu's Wallet row (#400) says "Not set up" while that holds.
+    val walletState by remember(context) { Vault.get(context) }.state.collectAsState()
+
     // The bar's New tab, and Ctrl+T (#270).
     val openNewTab: () -> Unit = {
         val fresh = tabs.newTab()
@@ -2306,6 +2328,9 @@ fun BrowserScreen(
                         showBookmarks = true
                     },
                     onOpenDownloads = { showDownloads = true },
+                    onOpenWallet = { showWallet = true },
+                    walletNote = walletMenuNote(walletState),
+                    onAddToHomeScreen = addToHomeScreen,
                     onReload = reloadPage,
                     onHardReload = hardReloadPage,
                     // Stop covers both halves of a load: the WebView's

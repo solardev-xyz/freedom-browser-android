@@ -703,9 +703,10 @@ private fun RecentList(
 /**
  * First printable letter we'll stamp on a bookmark tile. Prefers the
  * title (what the user sees in the bookmarks list) and falls back to
- * the scheme-stripped URL.
+ * the scheme-stripped URL. Also the letter on a Home-screen shortcut
+ * for a page with no favicon ([HomeScreenShortcuts]).
  */
-private fun initialChar(title: String, url: String): Char {
+internal fun initialChar(title: String, url: String): Char {
     val source = title.ifBlank { url.substringAfter("://", url) }
     return source.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar() ?: '•'
 }
@@ -721,7 +722,7 @@ private val TILE_PALETTE: List<Color> = listOf(
     Color(0xFF14B8A6), // teal
 )
 
-private fun tileAccentFor(url: String): Color {
+internal fun tileAccentFor(url: String): Color {
     // `hashCode` is fine here — we only need a stable bucket per URL,
     // not cryptographic distribution. `absoluteValue` because
     // `hashCode` can legitimately return `Int.MIN_VALUE`, whose

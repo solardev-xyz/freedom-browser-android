@@ -1,0 +1,222 @@
+package baby.freedom.mobile.browser
+
+import baby.freedom.mobile.R
+import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.wallet.Vault
+import java.security.MessageDigest
+
+/**
+ * The main menu's rows (#400), the popup from the ≡ in the address
+ * capsule. Above them sits a row of icons for the page actions people
+ * use most ([MainMenuIcons]); the rows themselves come in groups, with a
+ * divider between each, in the order Chrome uses.
+ */
+internal enum class MainMenuRow {
+    /** How the page's name was checked (#97); opens the shield's details. */
+    NameTrust,
+
+    // Tabs.
+    Home,
+    NewTab,
+    NewPrivateTab,
+
+    // The page.
+    FindInPage,
+    Zoom,
+    DesktopSite,
+    Print,
+    BlockAds,
+    SitePermissions,
+    HardReload,
+    AddToHomeScreen,
+
+    // Library.
+    History,
+    Bookmarks,
+    Downloads,
+    Wallet,
+
+    // The app.
+    Settings,
+    Nodes,
+}
+
+/** What decides which of [MainMenuRow] the menu shows. */
+internal data class MainMenuContext(
+    /** The tab is on its home surface: there's no page to act on. */
+    val isHome: Boolean,
+    /** The page has a name-trust shield (#97). */
+    val hasNameTrust: Boolean = false,
+    /** Private tabs can run here (#86). */
+    val canOpenPrivateTab: Boolean = true,
+    /** The page has an ad-blocking switch (#126). */
+    val hasAdblock: Boolean = false,
+    /** The site holds a permission (#266). */
+    val hasSitePermissions: Boolean = false,
+    /**
+     * The page can be pinned to the launcher: not a private tab, an
+     * address another app could open, and a launcher that takes pins.
+     */
+    val canAddToHomeScreen: Boolean = false,
+)
+
+/**
+ * The menu's groups, top to bottom, each a non-empty list of rows; the
+ * menu draws a divider between groups.
+ *
+ * On the home surface the page group's rows are *hidden* rather than
+ * shown disabled — there is no page there for any of them, as on Chrome's
+ * New Tab Page. Where a page exists but a row can't apply to it (Desktop
+ * site on a dweb page, Find in a tab whose renderer went away) the row
+ * stays, disabled, so the menu doesn't change shape from page to page.
+ * Home itself goes too: the tab is already there.
+ */
+internal fun mainMenuGroups(c: MainMenuContext): List<List<MainMenuRow>> {
+    val trust = listOfNotNull(MainMenuRow.NameTrust.takeIf { c.hasNameTrust && !c.isHome })
+    val tabs = listOfNotNull(
+        MainMenuRow.Home.takeIf { !c.isHome },
+        MainMenuRow.NewTab,
+        MainMenuRow.NewPrivateTab.takeIf { c.canOpenPrivateTab },
+    )
+    val page = if (c.isHome) {
+        emptyList()
+    } else {
+        listOfNotNull(
+            MainMenuRow.FindInPage,
+            MainMenuRow.Zoom,
+            MainMenuRow.DesktopSite,
+            MainMenuRow.Print,
+            MainMenuRow.BlockAds.takeIf { c.hasAdblock },
+            MainMenuRow.SitePermissions.takeIf { c.hasSitePermissions },
+            MainMenuRow.HardReload,
+            MainMenuRow.AddToHomeScreen.takeIf { c.canAddToHomeScreen },
+        )
+    }
+    val library = listOf(
+        MainMenuRow.History,
+        MainMenuRow.Bookmarks,
+        MainMenuRow.Downloads,
+        MainMenuRow.Wallet,
+    )
+    val app = listOf(MainMenuRow.Settings, MainMenuRow.Nodes)
+    return listOf(trust, tabs, page, library, app).filter { it.isNotEmpty() }
+}
+
+/** What the icon row's last button does. */
+internal enum class MainMenuReload {
+    Reload,
+
+    /** A load is running: the button stops it, as the capsule's own × does. */
+    Stop,
+
+    /** Nothing to reload (the home surface): Reload, disabled. */
+    None,
+}
+
+/**
+ * The icon row at the top of the menu: Forward · Bookmark · Share ·
+ * Reload. Always all four, in the same places, disabled where they can't
+ * act, so a finger that learned where Reload is finds it on every page.
+ */
+internal data class MainMenuIcons(
+    val forwardEnabled: Boolean,
+    val bookmarkEnabled: Boolean,
+    val bookmarked: Boolean,
+    /** What Share hands to the share sheet, or null (disabled). */
+    val shareUrl: String?,
+    val reload: MainMenuReload,
+)
+
+/**
+ * The icon row for a tab. Forward follows the capsule's own rule
+ * ([navControlsFor]: the pill grows a Forward half exactly then), Share
+ * shares what the address field's long-press Share does
+ * ([urlActionTarget]), and Reload/Stop is the capsule's trailing control
+ * ([capsuleTrailingControl]) as it reads at rest — the menu only opens
+ * while the field isn't being edited.
+ */
+internal fun mainMenuIconsFor(
+    canGoBack: Boolean,
+    canGoForward: Boolean,
+    isHome: Boolean,
+    url: String,
+    addressBarText: String,
+    isBookmarked: Boolean,
+    loading: Boolean,
+): MainMenuIcons {
+    val reload = when (
+        capsuleTrailingControl(
+            addressFocused = false,
+            addressBarEdited = false,
+            editBufferEmpty = false,
+            loading = loading,
+            canReload = url.isNotBlank() || addressBarText.isNotBlank(),
+        )
+    ) {
+        CapsuleTrailingControl.Stop -> MainMenuReload.Stop
+        CapsuleTrailingControl.Reload -> MainMenuReload.Reload
+        else -> MainMenuReload.None
+    }
+    return MainMenuIcons(
+        forwardEnabled = navControlsFor(canGoBack, canGoForward, isHome).showsForward,
+        bookmarkEnabled = url.isNotBlank(),
+        bookmarked = isBookmarked,
+        shareUrl = urlActionTarget(addressBarText, url),
+        reload = reload,
+    )
+}
+
+/**
+ * The Wallet row's sub-line: only what needs saying and is already known
+ * without unlocking anything — that there is no wallet yet, or that the
+ * one on the device can't be read. Locked/unlocked isn't news.
+ */
+internal fun walletMenuNote(state: Vault.State): String? = when (state) {
+    Vault.State.Empty -> Strings.get(R.string.browser_menu_wallet_not_set_up)
+    Vault.State.Unreadable -> Strings.get(R.string.wallet_summary_unreadable)
+    is Vault.State.Locked, is Vault.State.Unlocked -> null
+}
+
+/**
+ * The address a Home-screen shortcut to the page on screen opens, or null
+ * where the menu doesn't offer one: a private tab (a launcher icon is a
+ * trace of the visit, and it would open in a regular tab anyway), the
+ * home surface, the browser's own error page, and anything the incoming-
+ * link path ([IncomingLinks.link]) wouldn't open — so the shortcut can
+ * only ever ask for what a link from another app could. An address with a
+ * bidi control in it is refused too: the launcher would show its label
+ * in an order the address doesn't have.
+ *
+ * [url] is the tab's committed address in its display form (what the
+ * address bar shows: `ens://name`, `bzz://…`, `https://…`).
+ */
+internal fun homeScreenShortcutTarget(url: String, private: Boolean): String? {
+    if (private) return null
+    val u = url.trim()
+    if (u.isEmpty() || ErrorPage.isErrorPage(u)) return null
+    if (u.any(BidiControls::isBidiControl)) return null
+    return IncomingLinks.link(u)
+}
+
+/**
+ * The shortcut's id: one per address, so pinning the same page again
+ * finds that shortcut rather than adding another. Hashed to a fixed
+ * length, however long the address.
+ */
+internal fun homeScreenShortcutId(url: String): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(url.toByteArray(Charsets.UTF_8))
+    return "page-" + digest.take(16).joinToString("") { "%02x".format(it) }
+}
+
+/**
+ * The launcher label: the page's title, or where it has none, its host
+ * (or name, for a dweb address). Bidi controls are dropped, so a title
+ * can't reorder the label around it.
+ */
+internal fun homeScreenShortcutLabel(title: String, url: String): String {
+    val t = BidiControls.stripped(title).trim()
+    if (t.isNotEmpty()) return t
+    val host = url.substringAfter("://", url)
+        .substringBefore('/').substringBefore('?').substringBefore('#')
+    return host.ifEmpty { url }
+}
