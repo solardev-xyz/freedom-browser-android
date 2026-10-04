@@ -542,7 +542,8 @@ fun SettingsScreen(
                     for ((p, sections) in resultGroups) {
                         // A page's name over its matches, which opens it
                         // at the first; a row with no page of its own
-                        // (Search engine, Default browser) needs none.
+                        // (Search engine, Default browser) needs none, and
+                        // comes first so it never sits under another page's.
                         if (p.hasSubPage) item("page:${p.name}") {
                             SettingsResultHeading(p.title) {
                                 scrollTo = sections.first()

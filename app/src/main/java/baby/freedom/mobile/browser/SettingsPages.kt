@@ -129,6 +129,11 @@ internal fun settingsTopLevel(isDefaultBrowser: Boolean): List<Pair<SettingsGrou
  * each card to its matching rows' keys), grouped under the page it
  * lives on — pages in top-level order, cards in page order. A card with
  * no match, and a page with none left, is dropped.
+ *
+ * A page with no sub-page (Search engine, Default browser) gets no
+ * heading in the results, so its card comes first: placed in top-level
+ * order it would sit straight under the previous page's heading (Default
+ * browser under "Downloads ›") and read as part of that page.
  */
 internal fun settingsResultGroups(
     visible: Map<SettingsSection, Set<Any>>,
@@ -139,7 +144,7 @@ internal fun settingsResultGroups(
             .filter { visible[it].orEmpty().isNotEmpty() }
             .takeIf { it.isNotEmpty() }
             ?.let { page to it }
-    }
+    }.sortedBy { (page, _) -> page.hasSubPage }
 
 // One-line summaries of each top-level row's current state.
 

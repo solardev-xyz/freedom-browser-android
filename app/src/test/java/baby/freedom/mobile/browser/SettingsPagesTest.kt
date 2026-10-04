@@ -133,6 +133,29 @@ class SettingsPagesTest {
     }
 
     @Test
+    fun `cards with no page of their own come before every page heading`() {
+        // R3-M1: Default browser has no heading, so after Downloads it
+        // read as part of the Downloads page.
+        val visible = mapOf<SettingsSection, Set<Any>>(
+            SettingsSection.Downloads to setOf("ask"),
+            SettingsSection.DefaultBrowser to setOf("default"),
+            SettingsSection.Appearance to setOf("theme"),
+            SettingsSection.Search to setOf("engine"),
+        )
+        assertEquals(
+            listOf(
+                SettingsPage.SearchEngine to listOf(SettingsSection.Search),
+                SettingsPage.DefaultBrowser to listOf(SettingsSection.DefaultBrowser),
+                SettingsPage.Appearance to listOf(SettingsSection.Appearance),
+                SettingsPage.Downloads to listOf(SettingsSection.Downloads),
+            ),
+            settingsResultGroups(visible, isDefaultBrowser = false),
+        )
+        val groups = settingsResultGroups(SettingsSection.entries.associateWith { setOf<Any>("x") }, false)
+        assertEquals(groups.sortedBy { it.first.hasSubPage }, groups)
+    }
+
+    @Test
     fun `a query naming a page shows every row of its cards`() {
         val rows = torRows(enabled = false, startOnLaunch = false)
         assertEquals(emptySet<Any>(), visibleSettingsRows("privacy", "Tor", rows))
