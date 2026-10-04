@@ -174,7 +174,7 @@
     <string name="names_ccip_title">Off-chain lookups (CCIP-Read)</string>
     <string name="names_ccip_help">Some names (base.eth and cb.id subnames, NameStone names) are answered by a gateway their resolver names. The gateway sees the name you look up. Off: those names don\'t resolve.</string>
     <string name="names_custom_title">Your endpoints</string>
-    <string name="names_custom_help">First in the resolution order, as listed here. These are Ethereum\'s own RPCs (Settings → Chains → Ethereum), so every mainnet read uses them too.</string>
+    <string name="names_custom_help">First in the resolution order, as listed here. These are Ethereum\'s own RPCs (Settings → Wallet &amp; chains → Ethereum), so every mainnet read uses them too.</string>
     <string name="names_add_endpoint">Add endpoint</string>
     <string name="names_keyed_title">Keyed providers</string>
     <string name="names_keyed_help">Next in the resolution order, with your own API key.</string>
@@ -325,7 +325,7 @@
     <string name="names_gate_block">Block: %1$s</string>
     <string name="names_gate_block_latest">latest</string>
     <!-- %1$d: endpoints needed -->
-    <string name="names_gate_too_few">Fewer than %1$d RPC endpoints are enabled in Settings → RPC providers, so no answer can be cross-checked.</string>
+    <string name="names_gate_too_few">Fewer than %1$d RPC endpoints are enabled in Settings → Name resolution → RPC providers, so no answer can be cross-checked.</string>
     <!-- %1$s: hosts or names_trust_one_rpc_server, %2$s: #block or names_gate_block_latest -->
     <string name="names_gate_not_cross_checked">Not cross-checked: only %1$s answered (block %2$s)</string>
     <!-- %1$s: #block, or names_conflict_anchor_block -->

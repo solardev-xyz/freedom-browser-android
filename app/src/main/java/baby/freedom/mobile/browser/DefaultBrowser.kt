@@ -8,7 +8,20 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.OpenInBrowser
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -62,10 +75,14 @@ internal object DefaultBrowser {
     }
 }
 
-/** The section's one row for Settings search (the section title matches "default" and "browser" too). */
+/**
+ * The section's one row for Settings search (the section title matches
+ * "default" and "browser" too): the top-level row while Freedom isn't the
+ * default browser, the muted [DefaultBrowserLine] once it is (#400).
+ */
 internal fun defaultBrowserRows(isDefault: Boolean) = listOf(
     if (isDefault) {
-        settingsRow("default", DefaultBrowser.ROW_IS, DefaultBrowser.ROW_IS_SUBTITLE)
+        settingsRow("default", DefaultBrowser.ROW_IS)
     } else {
         settingsRow("default", DefaultBrowser.ROW_SET, DefaultBrowser.ROW_SET_SUBTITLE)
     },
@@ -129,6 +146,34 @@ internal fun DefaultBrowserSection(state: DefaultBrowserState) {
             leadingIcon = Icons.Filled.OpenInBrowser,
             thirdLine = if (state.declined) stringResource(R.string.settings_default_browser_declined) else null,
             onClick = state.onClick,
+        )
+    }
+}
+
+/**
+ * Settings → About Freedom, once Freedom holds the browser role (#400
+ * item 12): a muted line rather than a section of its own, since there
+ * is nothing left to do.
+ */
+@Composable
+internal fun DefaultBrowserLine() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Filled.CheckCircle,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            stringResource(R.string.settings_default_browser_is),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

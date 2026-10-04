@@ -186,7 +186,7 @@ class EthereumProvider(
         /** Disconnect every site (the wallet was removed); true if it's written. */
         suspend fun clear(): Boolean
 
-        /** Add a custom chain (Settings → Chains); true if it's there now. */
+        /** Add a custom chain (Settings → Wallet & chains); true if it's there now. */
         suspend fun addChain(chain: Chain): Boolean
     }
 
@@ -299,7 +299,7 @@ class EthereumProvider(
     } catch (e: BadParams) {
         Reply.Err(INVALID_PARAMS, e.message ?: "Invalid params")
     } catch (e: ChainUnavailable) {
-        Reply.Err(CHAIN_DISCONNECTED, "Chain ${e.id} isn't set up in this wallet (Settings → Chains)")
+        Reply.Err(CHAIN_DISCONNECTED, "Chain ${e.id} isn't set up in this wallet (Settings → Wallet & chains)")
     } catch (e: GrantsUnreadable) {
         // Not "unconnected, on Gnosis": answering that would flip a connected site's accounts
         // and chain with no event, and back once the store reads again (#215 R6-M1).
@@ -822,7 +822,7 @@ class EthereumProvider(
         } catch (e: ChainRpcException.Rpc) {
             Reply.Err(e.code, e.rpcMessage, e.data)
         } catch (e: ChainRpcException.UnknownChain) {
-            Reply.Err(CHAIN_DISCONNECTED, "${chain.name} isn't set up in Settings → Chains")
+            Reply.Err(CHAIN_DISCONNECTED, "${chain.name} isn't set up in Settings → Wallet & chains")
         } catch (e: ChainRpcException.AllSourcesFailed) {
             e.nodeError?.let { Reply.Err(it.code, it.rpcMessage, it.data) }
                 ?: Reply.Err(RESOURCE_UNAVAILABLE, "No RPC answered for ${chain.name}")

@@ -52,7 +52,7 @@
     <!-- BlockedPopupNotice.kt -->
     <string name="browser_popup_close_notice">Close the pop-up notice</string>
     <string name="browser_popup_and_more">and %1$d more</string>
-    <string name="browser_popup_allowed">Pop-ups from this site will open from now on. Settings → Site permissions can undo it.</string>
+    <string name="browser_popup_allowed">Pop-ups from this site will open from now on. Settings → Privacy &amp; security can undo it.</string>
     <string name="browser_popup_allowed_private">Pop-ups from this site will open from now on, until you close your private tabs.</string>
     <string name="browser_popup_always_allow">Always allow pop-ups on this site</string>
     <string name="browser_popup_scroll_through">Scroll through the whole of a long address to use its button.</string>

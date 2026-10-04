@@ -102,8 +102,8 @@ class EnsGateTest {
         val ref = "ab".repeat(32)
         val lone = EnsTrust(verified = false, agreed = listOf("my.node"), tooFewServers = true)
         val ok = EnsResult.Ok("swarm.eth", "bzz", "bzz://$ref", ref, lone)
-        assertTrue(EnsGate.unverifiedDetail(ok).contains("Settings → RPC providers"))
-        assertTrue(EnsGate.withTrustNote("NO_RESOLVER", lone).contains("Settings → RPC providers"))
+        assertTrue(EnsGate.unverifiedDetail(ok).contains("Settings → Name resolution → RPC providers"))
+        assertTrue(EnsGate.withTrustNote("NO_RESOLVER", lone).contains("Settings → Name resolution → RPC providers"))
         // Too few *answering* isn't the user's setting to fix.
         val unlucky = lone.copy(tooFewServers = false)
         assertFalse(EnsGate.unverifiedDetail(ok.copy(trust = unlucky)).contains("Settings"))

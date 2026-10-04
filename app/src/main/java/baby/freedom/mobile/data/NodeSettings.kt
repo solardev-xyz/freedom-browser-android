@@ -229,19 +229,6 @@ class NodeSettings private constructor(
     }
 
     /**
-     * Whether any IPFS UI is rendered. Off by default — IPFS support
-     * is a hidden capability surfaced only from Settings → Other. The
-     * IPFS node still runs regardless of this flag.
-     */
-    val showIpfsUi: Flow<Boolean> = store.data.map { prefs ->
-        prefs[Keys.SHOW_IPFS_UI] ?: false
-    }
-
-    suspend fun setShowIpfsUi(enabled: Boolean) {
-        store.edit { it[Keys.SHOW_IPFS_UI] = enabled }
-    }
-
-    /**
      * Legacy Kubo "lowpower" toggle, retained for settings compatibility;
      * freedom-ipfs ignores it — its defaults are already mobile-budgeted.
      * Default `true`.
@@ -745,7 +732,6 @@ class NodeSettings private constructor(
         val TOR_ENABLED = booleanPreferencesKey("tor_enabled")
         val TOR_START_ON_LAUNCH = booleanPreferencesKey("tor_start_on_launch")
         val TOR_EXTERNAL_PROXY = stringPreferencesKey("tor_external_proxy")
-        val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
         val RADICLE_ENABLED = booleanPreferencesKey("radicle_enabled")
         val IPFS_LOW_POWER = booleanPreferencesKey("ipfs_low_power")
         val IPFS_ROUTING_MODE = stringPreferencesKey("ipfs_routing_mode")
