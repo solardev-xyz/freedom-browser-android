@@ -30,7 +30,7 @@ Building the embedded-node artifact (required — not checked in) additionally r
 
 | Component | Version | Notes |
 |---|---|---|
-| Rust | 1.99 at `FFI_REF` v0.12.11, pinned by `rust-toolchain.toml` in freedom-mobile-ffi (rustup installs it; release.yml and ffi-ref.yml install whatever channel that file names) | Compiles `libfreedom_mobile_ffi.so` (ant + freedom-ipfs in one cdylib) — see [Building libfreedom_mobile_ffi.so](#building-libfreedom_mobile_ffiso). |
+| Rust | 1.99 at `FFI_REF` v0.12.12, pinned by `rust-toolchain.toml` in freedom-mobile-ffi (rustup installs it; release.yml and ffi-ref.yml install whatever channel that file names) | Compiles `libfreedom_mobile_ffi.so` (ant + freedom-ipfs in one cdylib) — see [Building libfreedom_mobile_ffi.so](#building-libfreedom_mobile_ffiso). |
 | cargo-ndk | 4.1.2 | `cargo install cargo-ndk --version 4.1.2 --locked` — the `CARGO_NDK_VERSION` release.yml pins (and keys its native-library cache on); used by freedom-mobile-ffi's `scripts/build-android.sh`. |
 | Android NDK | r27+ | Installed via `sdkmanager "ndk;27.2.12479018"` or similar. Also builds the JNI shims in `swarmnode/src/main/cpp/`. |
 
@@ -68,7 +68,7 @@ source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 #    libfreedom_mobile_ffi.so" below). Chained with && so a failed step
 #    stops before a stale or chain-less .so is copied.
 git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
-  git -C /tmp/freedom-mobile-ffi checkout v0.12.11 &&
+  git -C /tmp/freedom-mobile-ffi checkout v0.12.12 &&
   scripts/build-ffi.sh /tmp/freedom-mobile-ffi &&
   mkdir -p swarmnode/src/main/jniLibs &&
   cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
@@ -262,7 +262,7 @@ FREEDOM_ANDROID="$PWD"
 # 1. Clone freedom-mobile-ffi at the ref release.yml pins as FFI_REF,
 #    somewhere outside this repo.
 git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
-  git -C /tmp/freedom-mobile-ffi checkout v0.12.11
+  git -C /tmp/freedom-mobile-ffi checkout v0.12.12
 
 # 2. Cross-compile both ABIs. Needs cargo-ndk + ANDROID_NDK_HOME; rustup
 #    installs the pinned toolchain + targets from rust-toolchain.toml.
