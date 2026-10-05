@@ -835,13 +835,16 @@ object TorRouting {
      * Returns how many routes the connection may try in turn — each under
      * its own connect and handshake timeouts, so the connect clock scales
      * with it (PR #409 R5-M1, R6-M1): [connectRoutes] of the selector's
-     * choice; one for an explicit [route] proxy (Tor's, or a cross-origin
-     * hop's system proxy), which has no direct fallback; and 1 when the
-     * selector fails or the lookup does.
+     * choice; for an explicit [route] proxy (Tor's, a cross-origin hop's
+     * system proxy, or one of the system proxy's routes dialed on its
+     * own), which has no direct fallback, how many addresses the proxy's
+     * own name resolves to ([lookUpProxy]) — okhttp tries each in turn,
+     * and that lookup, too, is done here off the clock (PR #409 R5-M1);
+     * and 1 when the selector fails or the lookup does.
      */
     private fun lookUpAhead(hop: URL, route: Proxy?): Int {
         if (fetchMayReachOnion(hop)) return 1
-        if (route != null) return if (route.type() == Proxy.Type.DIRECT) lookUpDirect(hop) else 1
+        if (route != null) return if (route.type() == Proxy.Type.DIRECT) lookUpDirect(hop) else lookUpProxy(route)
         val uri = selectorUri(hop) ?: return 1
         val selected = runCatching { proxiesFor(uri) }.getOrNull() ?: return 1
         return connectRoutes(selected) { lookUpDirect(hop) }
@@ -1024,6 +1027,30 @@ object TorRouting {
     internal fun connectRoutes(selected: List<Proxy>, directAddresses: () -> Int): Int {
         val proxies = selected.count { it.type() != Proxy.Type.DIRECT }
         return if (proxies == 0) directAddresses().coerceAtLeast(1) else proxies + 1
+    }
+
+    /**
+     * [lookUpAhead] for a route through [proxy]: how many addresses the
+     * connection will dial the proxy at, looked up now so its own lookup
+     * inside `connect()` finds the name cached. okhttp's `RouteSelector`
+     * resolves an HTTP proxy's name on this device (the proxy's name, not
+     * the hop's — nothing about the destination is looked up) and tries
+     * every address in turn, each under its own connect timeout; a SOCKS
+     * proxy is one unresolved route, its name left to the socket — 1, as
+     * for an IP literal or a failed lookup. On a dual-stack proxy whose
+     * first address drops SYNs, the connect clock then still holds a full
+     * share for the address that answers (PR #409 R5-M1).
+     */
+    private fun lookUpProxy(proxy: Proxy): Int {
+        if (proxy.type() != Proxy.Type.HTTP) return 1
+        val a = proxy.address() as? InetSocketAddress ?: return 1
+        val name = a.hostString?.takeIf { it.isNotEmpty() } ?: return 1
+        if (name.startsWith("[") || name.contains(':')) return 1
+        val bare = name.trimEnd('.')
+        if (bare.isEmpty() || bare.split('.').let { p -> p.size == 4 && p.all { o -> o.isNotEmpty() && o.all { it in '0'..'9' } } }) {
+            return 1
+        }
+        return runCatching { resolve(name).size }.getOrNull()?.coerceAtLeast(1) ?: 1
     }
 
     /**

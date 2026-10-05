@@ -754,6 +754,92 @@ class TorRoutingTest {
     }
 
     /**
+     * PR #409 R5-M1: a system proxy named by a host is looked up ahead,
+     * off the connect clock, and its route is timed for every address the
+     * name resolves to (okhttp dials each in turn), not as one.
+     */
+    @Test
+    fun `a system proxy's own addresses are looked up ahead and size its clock`() {
+        val realProxies = TorRouting.proxiesFor
+        val realResolve = TorRouting.resolve
+        val events = java.util.Collections.synchronizedList(mutableListOf<String>())
+        try {
+            TorRouting.resolve = { name ->
+                events += "lookup $name"
+                if (name == "dualstack.proxy.test") {
+                    arrayOf(java.net.InetAddress.getByName("::1"), java.net.InetAddress.getByName("127.0.0.1"))
+                } else {
+                    realResolve(name)
+                }
+            }
+            val closed = java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
+            TorRouting.proxiesFor = {
+                listOf(java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress.createUnresolved("dualstack.proxy.test", closed)))
+            }
+            val inner = HeaderDeadline(800, patience = PatientWaits(0), connectMs = 300, graceMs = 0)
+            val deadline = object : TorRouting.HopWatcher by inner {
+                override fun connecting(conn: java.net.HttpURLConnection, routes: Int, fallback: Boolean, tunnel: Boolean) {
+                    events += "connecting tunnel=$tunnel routes=$routes"
+                    inner.connecting(conn, routes, fallback, tunnel)
+                }
+            }
+            runCatching {
+                TorRouting.openFollowingRedirects(URL("https://127.0.0.1:$closed/x"), hops = deadline) {
+                    connectTimeout = 2_000; readTimeout = 20_000
+                }
+            }
+            val tunnelAt = events.indexOf("connecting tunnel=true routes=2")
+            assertTrue("the proxy route wasn't timed for its two addresses: $events", tunnelAt >= 0)
+            assertTrue("the proxy's name wasn't looked up ahead: $events", events.indexOf("lookup dualstack.proxy.test") in 0 until tunnelAt)
+        } finally {
+            TorRouting.proxiesFor = realProxies
+            TorRouting.resolve = realResolve
+            TorRouting.forgetFailedRoutes()
+        }
+    }
+
+    /**
+     * A SOCKS proxy, or one given as an IP literal, is one route: nothing
+     * is looked up for it.
+     */
+    @Test
+    fun `a literal or SOCKS system proxy is one route`() {
+        val realProxies = TorRouting.proxiesFor
+        val realResolve = TorRouting.resolve
+        val lookups = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val seen = java.util.Collections.synchronizedList(mutableListOf<Int>())
+        try {
+            TorRouting.resolve = { name -> lookups += name; realResolve(name) }
+            val closed = java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
+            for (proxy in listOf(
+                java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress.createUnresolved("127.0.0.1", closed)),
+                java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress.createUnresolved("socks.proxy.test", closed)),
+            )) {
+                TorRouting.proxiesFor = { listOf(proxy) }
+                val inner = HeaderDeadline(800, patience = PatientWaits(0), connectMs = 300, graceMs = 0)
+                val deadline = object : TorRouting.HopWatcher by inner {
+                    override fun connecting(conn: java.net.HttpURLConnection, routes: Int, fallback: Boolean, tunnel: Boolean) {
+                        if (tunnel) seen += routes
+                        inner.connecting(conn, routes, fallback, tunnel)
+                    }
+                }
+                runCatching {
+                    TorRouting.openFollowingRedirects(URL("https://127.0.0.1:$closed/x"), hops = deadline) {
+                        connectTimeout = 2_000; readTimeout = 20_000
+                    }
+                }
+                TorRouting.forgetFailedRoutes()
+            }
+            assertEquals(listOf(1, 1), seen)
+            assertTrue("looked up $lookups", lookups.none { it.contains("proxy") || it == "127.0.0.1" })
+        } finally {
+            TorRouting.proxiesFor = realProxies
+            TorRouting.resolve = realResolve
+            TorRouting.forgetFailedRoutes()
+        }
+    }
+
+    /**
      * PR #409 R4-M1: once a failed proxy route's window is over, one
      * request at a time dials it first again; requests that start while
      * that re-probe runs keep it last, so a proxy still stalled is paid by

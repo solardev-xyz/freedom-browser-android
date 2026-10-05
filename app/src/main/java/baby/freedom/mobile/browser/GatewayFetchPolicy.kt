@@ -207,9 +207,18 @@ internal fun connectStretchMs(connectMs: Int, handshakeMs: Int, routes: Int, gra
  * the reply share one wait, so a proxy slow at both — each inside its own
  * `main` limit, together past this — is left for the direct route, a
  * second earlier than the cut on `main`'s worst case.
+ *
+ * okhttp dials an HTTP proxy at each address its name resolves to, in
+ * turn, each under its own connect timeout, so every address before the
+ * last adds `connectMs + replyMs` — `main`'s per-address bound — and the
+ * one that answers still gets the full 11 s: a dual-stack proxy whose
+ * IPv6 address drops SYNs doesn't eat the IPv4 address's share and push
+ * the hop around the user's proxy ([addresses], the proxy's own name
+ * looked up ahead, off the clock, by [TorRouting.openFollowingRedirects];
+ * PR #409 R5-M1).
  */
-internal fun tunnelStretchMs(connectMs: Int, replyMs: Int, graceMs: Int = CONNECT_GRACE_MS): Long =
-    maxOf(connectMs, replyMs).toLong() + graceMs
+internal fun tunnelStretchMs(connectMs: Int, replyMs: Int, addresses: Int = 1, graceMs: Int = CONNECT_GRACE_MS): Long =
+    (connectMs.toLong() + replyMs) * (addresses.coerceAtLeast(1) - 1) + maxOf(connectMs, replyMs) + graceMs
 
 /**
  * Enforces [GatewayFetchPolicy]'s header limits from outside the thread
@@ -282,6 +291,7 @@ internal class HeaderDeadline(
     private var patient = false
     private var cutting = false // a connect-stretch disconnect is still running
     private var connectingFallback: Boolean? = null // set while [current] is connecting: its `fallback`
+    private var connectingAddresses = 1 // [current]'s `routes` while connecting: a tunnel's proxy addresses
     private var task: ScheduledFuture<*>? = null
 
     /** Did a hop's deadline pass before its headers arrived? */
@@ -301,20 +311,26 @@ internal class HeaderDeadline(
             current = conn
             val mine = ++hop
             connectingFallback = fallback
-            val limit = if (tunnel) tunnelStretchMs(connectMs, baseMs, graceMs) else connectStretchMs(connectMs, baseMs, routes, graceMs)
+            connectingAddresses = routes
+            val limit = if (tunnel) tunnelStretchMs(connectMs, baseMs, routes, graceMs) else connectStretchMs(connectMs, baseMs, routes, graceMs)
             task = watchdog.schedule({ cutConnect(mine, fallback) }, limit, TimeUnit.MILLISECONDS)
         }
     }
 
     // A proxy route's tunnel is up: its TLS handshake gets a clock of its
     // own, [baseMs] (its socket's own limit) plus the grace (PR #409 R4-M2).
+    // A handshake that fails there sends okhttp to the proxy's next
+    // address, whose connect, reply and handshake come under this clock
+    // too, so each address the proxy has left adds its share (each new
+    // tunnel re-arms it; PR #409 R5-M1).
     override fun tunnelled(conn: HttpURLConnection) {
         synchronized(lock) {
             val fallback = connectingFallback ?: return
             if (current !== conn || cutting) return
             task?.cancel(false)
             val mine = ++hop
-            task = watchdog.schedule({ cutConnect(mine, fallback) }, baseMs.toLong() + graceMs, TimeUnit.MILLISECONDS)
+            val limit = baseMs.toLong() + graceMs + (connectMs.toLong() + baseMs) * (connectingAddresses.coerceAtLeast(1) - 1)
+            task = watchdog.schedule({ cutConnect(mine, fallback) }, limit, TimeUnit.MILLISECONDS)
         }
     }
 
@@ -384,6 +400,7 @@ internal class HeaderDeadline(
         task = null
         current = null
         connectingFallback = null
+        connectingAddresses = 1
         hop++
         release()
     }

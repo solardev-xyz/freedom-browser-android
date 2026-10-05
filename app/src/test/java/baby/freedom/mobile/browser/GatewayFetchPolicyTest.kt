@@ -336,6 +336,44 @@ class GatewayFetchPolicyTest {
         other.headersReceived()
     }
 
+    /**
+     * PR #409 R5-M1: a proxy whose name resolves to several addresses is
+     * dialed at each in turn, so every address before the last adds main's
+     * per-address `connect + reply` share — a dual-stack proxy whose IPv6
+     * address drops SYNs still leaves the IPv4 one its full 11 s — and so
+     * does its handshake clock, under which a failed handshake sends okhttp
+     * on to the next address.
+     */
+    @Test
+    fun `a proxy route's clocks scale with the proxy's addresses`() {
+        assertEquals(11_000L, tunnelStretchMs(5_000, 10_000, addresses = 1))
+        assertEquals(26_000L, tunnelStretchMs(5_000, 10_000, addresses = 2))
+        assertEquals(11_000L, tunnelStretchMs(5_000, 10_000, addresses = 0))
+        assertTrue(tunnelStretchMs(5_000, 10_000, addresses = 2) - 5_000 >= tunnelStretchMs(5_000, 10_000))
+
+        // Two addresses: reply's wait 300 + (100 + 300) = 700 ms, not 300.
+        val cuts = AtomicInteger(0)
+        val deadline = HeaderDeadline(300, patience = PatientWaits(0), connectMs = 100, graceMs = 0)
+        deadline.connecting(FakeConnection { cuts.incrementAndGet() }, routes = 2, fallback = true, tunnel = true)
+        Thread.sleep(500)
+        assertEquals("the second address had no share of its own", 0, cuts.get())
+        Thread.sleep(400) // 900 ms in
+        assertTrue("the two-address proxy wasn't cut", cuts.get() >= 1)
+        deadline.headersReceived()
+
+        // Its handshake clock: 300 + (100 + 300) = 700 ms from the tunnel.
+        val hs = AtomicInteger(0)
+        val tunnelDeadline = HeaderDeadline(300, patience = PatientWaits(0), connectMs = 100, graceMs = 0)
+        val conn = FakeConnection { hs.incrementAndGet() }
+        tunnelDeadline.connecting(conn, routes = 2, fallback = true, tunnel = true)
+        tunnelDeadline.tunnelled(conn)
+        Thread.sleep(500)
+        assertEquals("the handshake left the next address nothing", 0, hs.get())
+        Thread.sleep(400)
+        assertTrue("the stalled handshake wasn't cut", hs.get() >= 1)
+        tunnelDeadline.headersReceived()
+    }
+
     /** The per-route handshake limit is the policy's base header wait: main's read timeout. */
     @Test
     fun `each route's handshake gets main's read timeout`() {
