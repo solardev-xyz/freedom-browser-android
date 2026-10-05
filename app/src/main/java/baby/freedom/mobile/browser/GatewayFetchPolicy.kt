@@ -3,6 +3,8 @@ package baby.freedom.mobile.browser
 import java.io.FilterInputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
@@ -15,8 +17,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * (`https://<label>.bzz.freedom.baby/…` and the other virtual suffixes,
  * plus `bzz://…` scheme subresources) waits on the local gateway.
  *
- * [headerTimeoutMs] bounds the wait for the response headers (time to
- * first byte), connect included; [bodyStallTimeoutMs] bounds a single
+ * [headerTimeoutMs] bounds each hop's wait for its response headers
+ * (time to first byte, counted from that hop's connect, as the read
+ * timeout always did — [HeaderDeadline]); [bodyStallTimeoutMs] bounds a single
  * body read — how long the body may go silent, not how long it may take
  * in total. Those are the limits for a request holding one of the few
  * [PatientWaits] slots: past [baseHeaderTimeoutMs] / [baseBodyStallMs] a
@@ -134,87 +137,114 @@ private val watchdog: ScheduledExecutorService =
     }
 
 /**
+ * Runs the watchdog's disconnects, each on a thread of its own: a
+ * [HttpURLConnection.disconnect] can block (an https or SOCKS hop
+ * mid-handshake), and on the single [watchdog] thread one such call
+ * would hold up every other deadline and stall cut in the process
+ * (PR #409 R2-M2). The watchdog only decides; the cut happens here.
+ */
+private val disconnector: ExecutorService =
+    Executors.newCachedThreadPool { r ->
+        Thread(r, "gateway-wait-disconnect").apply { isDaemon = true }
+    }
+
+private fun disconnectAside(conn: HttpURLConnection) {
+    disconnector.execute { runCatching { conn.disconnect() } }
+}
+
+/**
  * Enforces [GatewayFetchPolicy]'s header limits from outside the thread
  * waiting on the headers: [HttpURLConnection.setReadTimeout] can only be
  * one value for the whole exchange, and is set to the (longer) body stall
- * limit. At [baseMs] a wait with no headers yet takes a [patience] slot
- * and goes on to [timeoutMs], or — no slot free, or no longer limit — has
- * every connection [track]ed for it (each redirect hop's) disconnected
- * from the watchdog thread. A disconnect from another thread fails the
- * blocked `responseCode` at once.
+ * limit. Watches each hop of [TorRouting.openFollowingRedirects]: the
+ * clock starts when a hop's connection is up ([connected]) and stops when
+ * its headers are in ([answered]), so each hop gets the same [baseMs] the
+ * read timeout always gave it, and name lookups and connects stay outside
+ * it as they always were (each connect bounded by its own connect
+ * timeout) — a subresource with no slot fails where it always did, not
+ * earlier because its redirect hops add up (PR #409 R2-M1). At [baseMs] a
+ * hop with no headers yet takes a [patience] slot and goes on to
+ * [timeoutMs], or — no slot free, or no longer limit — has its connection
+ * disconnected, which fails the blocked `responseCode` at once.
  *
- * Not covered: a DNS lookup [TorRouting.openFollowingRedirects] makes
- * before it has a connection to [track] (pinning a direct hop to an
- * external gateway, checking a redirect target isn't this device) can't
- * be interrupted, so an attempt can run past its deadline by that
- * lookup's own time. A connection tracked after the deadline is
- * disconnected there and then, so it ends as soon as the lookup returns.
- * The local node needs no lookup.
+ * Only a connection that is up is ever cut: a disconnect before
+ * `connect()` is a no-op on Android's [HttpURLConnection], and the
+ * connection would then wait out its whole read timeout with no slot
+ * (PR #409 R2-F1). Starting the clock at [connected] means the
+ * connection the deadline cuts always exists. A hop connected after the
+ * attempt already expired is refused outright.
  */
 internal class HeaderDeadline(
     private val baseMs: Int,
     private val timeoutMs: Int = baseMs,
     private val patience: PatientWaits = PatientWaits.shared,
-) {
+) : TorRouting.HopWatcher {
     private val lock = Any()
-    private val connections = mutableListOf<HttpURLConnection>()
-    private var done = false
+    private var current: HttpURLConnection? = null // the hop waiting on its headers
+    private var hop = 0 // which hop that is
     private var patient = false
     private var task: ScheduledFuture<*>? = null
 
-    /** Did the deadline pass before the headers arrived? */
+    /** Did a hop's deadline pass before its headers arrived? */
     @Volatile
     var expired = false
         private set
 
-    /** Has this wait gone on past [baseMs] on a [patience] slot? */
-    val extended: Boolean get() = synchronized(lock) { patient }
+    /** Has a hop gone on past [baseMs] on a [patience] slot? */
+    @Volatile
+    var extended = false
+        private set
 
-    init {
-        synchronized(lock) { task = watchdog.schedule(::atBase, baseMs.toLong(), TimeUnit.MILLISECONDS) }
+    override fun connected(conn: HttpURLConnection) {
+        synchronized(lock) {
+            if (expired) throw SocketTimeoutException("no headers in time")
+            stop()
+            current = conn
+            val mine = ++hop
+            task = watchdog.schedule({ atBase(mine) }, baseMs.toLong(), TimeUnit.MILLISECONDS)
+        }
     }
 
-    private fun atBase() {
+    override fun answered(conn: HttpURLConnection) = headersReceived()
+
+    private fun atBase(mine: Int) {
         synchronized(lock) {
-            if (done) return
+            if (mine != hop || current == null) return
             if (timeoutMs > baseMs && patience.tryTake()) {
                 patient = true
-                task = watchdog.schedule(::expire, (timeoutMs - baseMs).toLong(), TimeUnit.MILLISECONDS)
+                extended = true
+                task = watchdog.schedule({ expire(mine) }, (timeoutMs - baseMs).toLong(), TimeUnit.MILLISECONDS)
                 return
             }
         }
-        expire()
+        expire(mine)
     }
 
-    private fun expire() {
+    private fun expire(mine: Int) {
         val doomed = synchronized(lock) {
-            if (done) return
-            done = true
+            if (mine != hop) return
+            val conn = current ?: return
             expired = true
+            current = null
+            task = null
             release()
-            connections.toList()
+            conn
         }
-        doomed.forEach { runCatching { it.disconnect() } }
+        disconnectAside(doomed)
     }
 
-    fun track(conn: HttpURLConnection) {
-        val late = synchronized(lock) {
-            if (!done) connections += conn
-            expired
-        }
-        if (late) runCatching { conn.disconnect() }
-    }
-
-    /** The headers are in (or the attempt is over): stop the clock, give back any slot. */
+    /** The hop's headers are in (or the attempt is over): stop its clock, give back any slot. */
     fun headersReceived() {
-        synchronized(lock) {
-            if (!done) {
-                done = true
-                task?.cancel(false)
-            }
-            connections.clear()
-            release()
-        }
+        synchronized(lock) { stop() }
+    }
+
+    // Under [lock].
+    private fun stop() {
+        task?.cancel(false)
+        task = null
+        current = null
+        hop++
+        release()
     }
 
     // Under [lock].
@@ -289,7 +319,7 @@ internal class BodyStallGuard(
             }
             cutOff = true
         }
-        runCatching { conn.disconnect() }
+        disconnectAside(conn)
     }
 
     fun close() {
@@ -321,24 +351,43 @@ internal class BodyStallGuard(
  * retrieval (ant does since freedom-hq/ant#145) instead of fetching, and
  * paying for, chunks nobody will read. Every read and skip goes through
  * [stall], when given, so a silent body is held to its stall limits.
+ *
+ * The body counts as ended — closed normally, its connection kept alive
+ * for the next request — once a read returns -1, but also when there is
+ * no body to read ([noBody]: a HEAD, 1xx, 204 or 304 answer, which
+ * WebView may close without ever reading) or every one of a known
+ * [length]'s bytes has been read, since a reader that got exactly the
+ * `Content-Length` needn't read on to -1 (PR #409 R2-M3).
  */
 internal class DisconnectOnCloseInputStream(
     body: InputStream,
     private val conn: HttpURLConnection,
     private val stall: BodyStallGuard? = null,
+    length: Long = -1L,
+    noBody: Boolean = false,
 ) : FilterInputStream(body) {
-    private val ended = AtomicBoolean(false)
+    private val ended = AtomicBoolean(noBody || length == 0L)
     private val closed = AtomicBoolean(false)
+    private var remaining = length // only the reading thread touches it
 
     private inline fun <T> guarded(crossinline block: () -> T): T =
         if (stall == null) block() else stall.reading { block() }
 
-    override fun read(): Int = guarded { super.read() }.also { if (it < 0) ended.set(true) }
+    private fun consumed(n: Long) {
+        if (n < 0) {
+            ended.set(true)
+        } else if (remaining > 0) {
+            remaining -= n
+            if (remaining <= 0L) ended.set(true)
+        }
+    }
+
+    override fun read(): Int = guarded { super.read() }.also { consumed(if (it < 0) -1L else 1L) }
 
     override fun read(b: ByteArray, off: Int, len: Int): Int =
-        guarded { super.read(b, off, len) }.also { if (it < 0) ended.set(true) }
+        guarded { super.read(b, off, len) }.also { consumed(it.toLong()) }
 
-    override fun skip(n: Long): Long = guarded { super.skip(n) }
+    override fun skip(n: Long): Long = guarded { super.skip(n) }.also { consumed(it) }
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return

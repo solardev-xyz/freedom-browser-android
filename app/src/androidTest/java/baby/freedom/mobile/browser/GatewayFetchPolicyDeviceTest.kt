@@ -203,7 +203,8 @@ class GatewayFetchPolicyDeviceTest {
         val conn = URL("$base/slow").openConnection() as HttpURLConnection
         conn.readTimeout = SUBRESOURCE_BODY_STALL_MS
         val deadline = HeaderDeadline(2_000)
-        deadline.track(conn)
+        conn.connect()
+        deadline.connected(conn)
         val started = System.nanoTime()
         try {
             conn.responseCode
@@ -229,7 +230,8 @@ class GatewayFetchPolicyDeviceTest {
         val conn = URL("$base/x").openConnection() as HttpURLConnection
         conn.readTimeout = SUBRESOURCE_BODY_STALL_MS
         val deadline = HeaderDeadline(1_000)
-        deadline.track(conn)
+        conn.connect()
+        deadline.connected(conn)
         assertEquals(200, conn.responseCode)
         deadline.headersReceived()
         assertEquals("ok", conn.inputStream.use { it.readBytes().decodeToString() })
@@ -244,7 +246,8 @@ class GatewayFetchPolicyDeviceTest {
         val conn = URL("$base/a").openConnection() as HttpURLConnection
         conn.readTimeout = SUBRESOURCE_BODY_STALL_MS
         val quick = HeaderDeadline(1_000, 4_000, none)
-        quick.track(conn)
+        conn.connect()
+        quick.connected(conn)
         var started = System.nanoTime()
         runCatching { conn.responseCode }
         assertTrue("took ${elapsedMs(started)} ms", elapsedMs(started) in 800..2_500)
@@ -255,7 +258,8 @@ class GatewayFetchPolicyDeviceTest {
         val conn2 = URL("$base/b").openConnection() as HttpURLConnection
         conn2.readTimeout = SUBRESOURCE_BODY_STALL_MS
         val patient = HeaderDeadline(1_000, 3_000, one)
-        patient.track(conn2)
+        conn2.connect()
+        patient.connected(conn2)
         started = System.nanoTime()
         runCatching { conn2.responseCode }
         assertTrue("took ${elapsedMs(started)} ms", elapsedMs(started) in 2_700..4_500)
@@ -275,7 +279,8 @@ class GatewayFetchPolicyDeviceTest {
         val conn = URL("$base/x").openConnection() as HttpURLConnection
         conn.readTimeout = SUBRESOURCE_BODY_STALL_MS
         val deadline = HeaderDeadline(1_000, 10_000, one)
-        deadline.track(conn)
+        conn.connect()
+        deadline.connected(conn)
         assertEquals(200, conn.responseCode)
         assertTrue(deadline.extended)
         deadline.headersReceived()
@@ -324,6 +329,108 @@ class GatewayFetchPolicyDeviceTest {
         assertEquals(1, guards.count { it!!.cutOff })
         assertEquals(1, guards.sumOf { it!!.extensions })
         assertTrue("the slot wasn't given back", one.tryTake())
+    }
+
+    /**
+     * PR #409 R2-F1: a lookup before the connection exists (pinning an
+     * external gateway's hop) is outside the clock, and the connection
+     * that comes up after it is still cut at the base limit; before, a
+     * deadline that ran out during the lookup "disconnected" a connection
+     * not yet connected, a no-op, and it waited out its read timeout.
+     */
+    @Test
+    fun aHopConnectedAfterALongLookupIsStillCutAtTheBase() {
+        script = { _, _, _ -> Thread.sleep(30_000) } // never answer
+        val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(0))
+        Thread.sleep(1_500) // a name lookup longer than the base
+        val conn = URL("$base/late").openConnection() as HttpURLConnection
+        conn.readTimeout = 8_000
+        val started = System.nanoTime()
+        conn.connect()
+        deadline.connected(conn)
+        try {
+            conn.responseCode
+            fail("headers arrived from a silent server")
+        } catch (e: java.io.IOException) {
+            // expected: cut by the deadline, not the 8 s read timeout
+        }
+        val ms = elapsedMs(started)
+        assertTrue("the deadline didn't fire", deadline.expired)
+        assertTrue("took $ms ms", ms in 800..2_500)
+        // Once expired, a later hop isn't started at all.
+        val next = URL("$base/next").openConnection() as HttpURLConnection
+        next.connect()
+        try {
+            deadline.connected(next)
+            fail("a hop started on an expired attempt")
+        } catch (e: java.net.SocketTimeoutException) {
+            // expected
+        } finally {
+            next.disconnect()
+        }
+    }
+
+    /**
+     * PR #409 R2-M1: each redirect hop gets the base limit to its own
+     * headers, as main's read timeout gave it; two hops of 0.7 s each on
+     * a 1 s base, with no slot free, arrive.
+     */
+    @Test
+    fun eachRedirectHopGetsTheBaseLimitOfItsOwn() {
+        script = { n, out, _ ->
+            Thread.sleep(700)
+            if (n == 0) {
+                out.write("HTTP/1.1 302 Found\r\nLocation: /second\r\nContent-Length: 0\r\n\r\n".toByteArray())
+            } else {
+                out.write(head(200, "OK", 2))
+                out.write("ok".toByteArray())
+            }
+            out.flush()
+        }
+        val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(0))
+        val conn = TorRouting.openFollowingRedirects(URL("$base/first"), hops = deadline) {
+            readTimeout = SUBRESOURCE_BODY_STALL_MS
+        }
+        deadline.headersReceived()
+        assertEquals(200, conn.responseCode)
+        assertEquals("ok", conn.inputStream.use { it.readBytes().decodeToString() })
+        assertTrue(!deadline.expired)
+        assertEquals(2, connections.get())
+    }
+
+    /**
+     * PR #409 R2-M3: a body closed after exactly its Content-Length, or a
+     * HEAD answer closed unread, keeps its connection for the next request.
+     */
+    @Test
+    fun aBodyClosedAtItsLengthOrAHeadKeepsTheConnection() {
+        script = { _, out, input ->
+            out.write(head(200, "OK", 2))
+            out.write("ok".toByteArray())
+            out.flush()
+            readRequestHead(input) // the HEAD
+            out.write(head(200, "OK", 2))
+            out.flush()
+            readRequestHead(input) // the third request
+            out.write(head(200, "OK", 2))
+            out.write("ok".toByteArray())
+            out.flush()
+            Thread.sleep(1_000)
+        }
+        val first = URL("$base/a").openConnection() as HttpURLConnection
+        assertEquals(200, first.responseCode)
+        val body = DisconnectOnCloseInputStream(first.inputStream, first, length = first.contentLengthLong)
+        assertEquals(2, body.read(ByteArray(2), 0, 2)) // exactly the length; no read to -1
+        body.close()
+
+        val head = URL("$base/b").openConnection() as HttpURLConnection
+        head.requestMethod = "HEAD"
+        assertEquals(200, head.responseCode)
+        DisconnectOnCloseInputStream(head.inputStream, head, length = head.contentLengthLong, noBody = true).close()
+
+        val third = URL("$base/c").openConnection() as HttpURLConnection
+        assertEquals("ok", third.inputStream.use { it.readBytes().decodeToString() })
+        assertEquals("all three over one connection", 1, connections.get())
     }
 
     private fun fetch(mainFrame: Boolean) = fetchWithRetry(

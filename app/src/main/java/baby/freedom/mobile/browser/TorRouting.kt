@@ -643,10 +643,16 @@ object TorRouting {
      * name can't be looked up isn't followed either, but it's thrown as a
      * [RedirectUnresolvedException] — an [java.net.UnknownHostException],
      * worth retrying like any other failed lookup — not as a refusal.
+     *
+     * [hops], when given, is told when each hop's connection is up
+     * ([HopWatcher.connected], after an explicit `connect()`) and when its
+     * response headers are in ([HopWatcher.answered]) — the stretch a
+     * header deadline should time, without the name lookups in between.
      */
     fun openFollowingRedirects(
         url: URL,
         body: ByteArray? = null,
+        hops: HopWatcher? = null,
         configure: HttpURLConnection.(hop: URL) -> Unit,
     ): HttpURLConnection {
         var current = url
@@ -704,8 +710,13 @@ object TorRouting {
                     }
                 }
                 val c = conn ?: throw IOException(Strings.get(R.string.node_fetch_not_http, current))
+                if (hops != null) {
+                    c.connect()
+                    hops.connected(c)
+                }
                 payload?.let { bytes -> c.outputStream.use { it.write(bytes) } }
                 val code = c.responseCode
+                hops?.answered(c)
                 val next = redirectFor(current, code, c.requestMethod, c.getHeaderField("Location"))
                 if (next == null) {
                     keep = true
@@ -732,6 +743,18 @@ object TorRouting {
             }
         }
         throw IOException(Strings.get(R.string.node_fetch_too_many_redirects))
+    }
+
+    /**
+     * Watches the hops of [openFollowingRedirects]: [connected] once a
+     * hop's connection is up — a [HttpURLConnection.disconnect] from
+     * another thread then fails its blocked `responseCode` at once, which
+     * it doesn't before the connection exists — and [answered] once its
+     * headers are in. Either may throw to abandon the fetch.
+     */
+    interface HopWatcher {
+        fun connected(conn: HttpURLConnection)
+        fun answered(conn: HttpURLConnection)
     }
 
     /**

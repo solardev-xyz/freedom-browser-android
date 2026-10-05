@@ -1,5 +1,10 @@
 package baby.freedom.mobile.browser
 
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -117,5 +122,50 @@ class GatewayFetchPolicyTest {
         assertTrue(subresource().headerTimeoutMs < subresource().bodyStallTimeoutMs)
         assertTrue(subresource(media = true).headerTimeoutMs < subresource(media = true).bodyStallTimeoutMs)
         assertEquals(navigation().headerTimeoutMs, navigation().bodyStallTimeoutMs)
+    }
+
+    /**
+     * PR #409 R2-M2: the watchdog hands each cut to a thread of its own,
+     * so one disconnect that blocks doesn't hold up another deadline.
+     */
+    @Test
+    fun `a blocking disconnect doesn't hold up other deadlines`() {
+        val release = CountDownLatch(1)
+        val stuckEntered = CountDownLatch(1)
+        val stuck = FakeConnection { stuckEntered.countDown(); release.await(10, TimeUnit.SECONDS) }
+        val otherCut = CountDownLatch(1)
+        val other = FakeConnection { otherCut.countDown() }
+        try {
+            HeaderDeadline(100, patience = PatientWaits(0)).connected(stuck)
+            assertTrue("the first cut never started", stuckEntered.await(2, TimeUnit.SECONDS))
+            val second = HeaderDeadline(200, patience = PatientWaits(0))
+            second.connected(other)
+            assertTrue("the second cut waited on the first", otherCut.await(2, TimeUnit.SECONDS))
+            assertTrue(second.expired)
+        } finally {
+            release.countDown()
+        }
+    }
+
+    @Test
+    fun `headers in time stop a hop's clock, and the next hop starts its own`() {
+        val cuts = AtomicInteger(0)
+        val deadline = HeaderDeadline(300, patience = PatientWaits(0))
+        deadline.connected(FakeConnection { cuts.incrementAndGet() })
+        Thread.sleep(200)
+        deadline.answered(FakeConnection {})
+        deadline.connected(FakeConnection { cuts.incrementAndGet() })
+        Thread.sleep(200) // 400 ms since the first hop began, 200 ms into the second
+        deadline.headersReceived()
+        Thread.sleep(300)
+        assertEquals(0, cuts.get())
+        assertFalse(deadline.expired)
+    }
+
+    private class FakeConnection(private val onDisconnect: () -> Unit) :
+        HttpURLConnection(URL("http://127.0.0.1/")) {
+        override fun disconnect() = onDisconnect()
+        override fun usingProxy() = false
+        override fun connect() {}
     }
 }

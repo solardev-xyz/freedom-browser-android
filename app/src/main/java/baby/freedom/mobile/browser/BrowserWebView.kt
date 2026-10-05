@@ -6264,8 +6264,7 @@ private fun fetchOnce(
     return try {
         val target = URL(targetUrl)
         // Redirects are followed hop by hop through TorRouting.
-        val conn = TorRouting.openFollowingRedirects(target) { hop ->
-            deadline?.track(this)
+        val conn = TorRouting.openFollowingRedirects(target, hops = deadline) { hop ->
             requestMethod = if (req.method == "HEAD") "HEAD" else "GET"
             connectTimeout = 5_000
             readTimeout = policy.bodyStallTimeoutMs
@@ -6304,13 +6303,15 @@ private fun fetchOnce(
 
         val headers = gatewayResponseHeaders(conn.headerFields)
 
+        val raw = if (status in 200..399) conn.inputStream else conn.errorStream
         val body = DisconnectOnCloseInputStream(
-            when {
-                status in 200..399 -> conn.inputStream
-                else -> conn.errorStream ?: ByteArrayInputStream(ByteArray(0))
-            },
+            raw ?: ByteArrayInputStream(ByteArray(0)),
             conn,
             if (policy.baseBodyStallMs < policy.bodyStallTimeoutMs) BodyStallGuard(conn, policy.baseBodyStallMs) else null,
+            // A body WebView closes without reading on to -1 (a HEAD, a
+            // 304, exactly Content-Length bytes) keeps its connection.
+            length = conn.contentLengthLong,
+            noBody = raw == null || conn.requestMethod == "HEAD" || status in 100..199 || status == 204 || status == 304,
         )
         // Page-controlled: [mediaReplyFor] and [webViewSeekProof] never throw.
         val range = req.requestHeaders?.entries
