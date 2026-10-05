@@ -44,35 +44,43 @@ internal interface AbandonSignal {
  * The page knows, though: Chromium writes a Resource Timing entry for
  * every request a document finishes with — loaded, failed or aborted,
  * before its headers too. A document-start script on the dweb origins
- * ([dwebAbortsJs]) passes the URL of each to [pageDone], and that is
- * matched against the tab's interceptor calls for the same URL
- * ([begin]/[finished]):
+ * ([dwebAbortsJs]) passes each entry's URL and start time to [pageDone].
+ * The start time comes as a range on this side's clock ([now]): the page's
+ * `performance.now()` and `System.nanoTime()` both run on the system's
+ * monotonic clock, so they differ by a constant per document, which a
+ * round trip with the page brackets ([parseDoneReport]).
  *
- * - a call already answered: the page is done with its answer — nothing
- *   to do (the body's own close handles a body aborted midway);
- * - else a call still working: it was abandoned before its headers —
- *   the oldest is told to stop ([Ticket.abandon]);
- * - else no call yet: WebView hasn't got round to calling the
- *   interceptor for it — the next call for the URL, within
- *   [ABANDONED_TTL_MS], is answered at once without a fetch.
+ * An interceptor call for a request begins after the page started the
+ * request, so the entry's own call — if it has begun — is one of the
+ * URL's calls ([begin], answered or still working) that didn't begin
+ * before the entry's start. WebView begins its calls in the order the
+ * requests were made, so the earliest of those is the entry's own:
  *
- * Every non-main-frame request on a virtual origin is counted, whatever
- * its method, so the counts line up with the page's entries. What only
- * ever errs towards doing the fetch anyway: a request with no entry (a
- * worker's, a frame's on a non-dweb origin, a media element's range
- * requests) just leaves an answered call that a later entry is matched
- * to first; the script leaves out entries no interceptor call made (a
- * service worker's answer, a cached one). Two calls for the same URL in
- * flight at once, one of them abandoned, are told apart by order only:
- * the one WebView called first is taken as the one the page gave up on
- * first.
+ * - it began after the entry's request for certain: an answered one is
+ *   simply matched; a working one was abandoned before its headers and
+ *   is told to stop ([Ticket.abandon]);
+ * - it may have begun just before the entry's request, inside the range:
+ *   it could be another request's, still wanted — nothing is done;
+ * - there is none: WebView hasn't got round to the entry's call — the
+ *   next call for the URL, within [ABANDONED_TTL_MS], is answered at once
+ *   without a fetch.
+ *
+ * So a call that began before an aborted duplicate of its URL was even
+ * started is never the one cut, and anything uncertain errs towards
+ * doing the fetch anyway: a call with no entry (a worker's, a frame's on
+ * a non-dweb origin, a media element's range request) leaves an answered
+ * record that later entries, starting after it, never match; a record
+ * forgotten to keep the ledger small makes every entry that could have
+ * been its own do nothing ([forgotUpTo]). One order WebView itself could
+ * still get wrong: two requests for one URL whose calls it hasn't begun
+ * yet, the later aborted — the earlier call is the one answered at once.
  */
 internal class DwebAborts(
     private val now: () -> Long = { System.nanoTime() / 1_000_000 },
     private val ttlMs: Long = ABANDONED_TTL_MS,
 ) {
-    /** One interceptor call, from [begin] to [finished]. */
-    class Ticket internal constructor(val url: String) : AbandonSignal {
+    /** One interceptor call, from [begin] to [finished]; it began at [beganAt] ([now]). */
+    class Ticket internal constructor(val url: String, internal val beganAt: Long) : AbandonSignal {
         private val latch = CountDownLatch(1)
         private val actions = ArrayList<() -> Unit>()
 
@@ -110,17 +118,31 @@ internal class DwebAborts(
     }
 
     private class Calls {
-        val working = ArrayDeque<Ticket>()
-        var answered = 0
+        val working = ArrayList<Ticket>()
+        val answered = ArrayList<Long>() // when each answered call began, its entry still to come
         val abandonedAt = ArrayDeque<Long>() // entries ahead of their call
-        fun idle() = working.isEmpty() && answered == 0 && abandonedAt.isEmpty()
+        fun idle() = working.isEmpty() && answered.isEmpty() && abandonedAt.isEmpty()
     }
 
     private val lock = Any()
+
+    /**
+     * Under [lock]: the latest [Ticket.beganAt] of an answered record
+     * dropped to keep the ledger small. An entry whose request started
+     * before it may have been that record's, so it does nothing.
+     */
+    private var forgotUpTo = Long.MIN_VALUE
+
     private val byUrl = object : LinkedHashMap<String, Calls>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Calls>): Boolean =
-            size > MAX_URLS && eldest.value.working.isEmpty()
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Calls>): Boolean {
+            if (size <= MAX_URLS || eldest.value.working.isNotEmpty()) return false
+            eldest.value.answered.maxOrNull()?.let { forget(it) }
+            return true
+        }
     }
+
+    /** This side's clock, the one [pageDone]'s start times are on. */
+    fun clock(): Long = now()
 
     /**
      * An interceptor call for [url] begins. Already [Ticket.abandoned]
@@ -128,7 +150,7 @@ internal class DwebAborts(
      */
     fun begin(url: String): Ticket {
         val key = keyOf(url)
-        val ticket = Ticket(key)
+        val ticket = Ticket(key, now())
         val gone = synchronized(lock) {
             val calls = byUrl.getOrPut(key) { Calls() }
             prune(calls)
@@ -137,7 +159,7 @@ internal class DwebAborts(
                 if (calls.idle()) byUrl.remove(key)
                 true
             } else {
-                calls.working.addLast(ticket)
+                calls.working.add(ticket)
                 false
             }
         }
@@ -150,24 +172,50 @@ internal class DwebAborts(
         synchronized(lock) {
             val calls = byUrl[ticket.url] ?: return
             if (!calls.working.remove(ticket)) return // abandoned: its entry is spent
-            if (!ticket.abandoned) calls.answered = minOf(calls.answered + 1, MAX_COUNT)
+            if (!ticket.abandoned) {
+                if (calls.answered.size >= MAX_COUNT) {
+                    val oldest = calls.answered.minOrNull()!!
+                    calls.answered.remove(oldest)
+                    forget(oldest)
+                }
+                calls.answered.add(ticket.beganAt)
+            }
             if (calls.idle()) byUrl.remove(ticket.url)
         }
     }
 
-    /** The page is done with a request for [url] (a Resource Timing entry). */
-    fun pageDone(url: String) {
+    /**
+     * The page is done with a request for [url] (a Resource Timing entry)
+     * that it started no earlier than [startedLo] and no later than
+     * [startedHi], on [now]'s clock; [Double.NEGATIVE_INFINITY] for an
+     * unknown lower bound.
+     */
+    fun pageDone(url: String, startedLo: Double, startedHi: Double) {
+        if (startedHi.isNaN() || startedLo.isNaN() || startedLo > startedHi + 2 * CLOCK_SLACK_MS) return
+        // [Ticket.beganAt] is whole milliseconds, rounded down: a call may
+        // have begun after the request started if it's at most a
+        // millisecond before the lower bound, and certainly did if it's
+        // past the upper one.
+        val lo = startedLo - 1 - CLOCK_SLACK_MS
+        val hi = startedHi + CLOCK_SLACK_MS
         val key = keyOf(url)
         val stop: Ticket? = synchronized(lock) {
+            // A dropped record may have been this entry's own call.
+            if (forgotUpTo != Long.MIN_VALUE && forgotUpTo.toDouble() >= lo) return
             val calls = byUrl.getOrPut(key) { Calls() }
             prune(calls)
+            // The earliest call that may have begun after the request started.
+            val working = calls.working.filter { it.beganAt >= lo }.minByOrNull { it.beganAt }
+            val answered = calls.answered.filter { it >= lo }.minOrNull()
+            val first = listOfNotNull(working?.beganAt, answered).minOrNull()
             when {
-                calls.answered > 0 -> { calls.answered--; null }
-                calls.working.isNotEmpty() -> calls.working.removeFirst()
-                else -> {
+                first == null -> {
                     if (calls.abandonedAt.size < MAX_COUNT) calls.abandonedAt.addLast(now())
                     null
                 }
+                first <= hi -> null // maybe another request's, still wanted
+                answered == first -> { calls.answered.remove(answered); null }
+                else -> working!!.also { calls.working.remove(it) }
             }.also { if (calls.idle()) byUrl.remove(key) }
         }
         stop?.abandon()
@@ -175,6 +223,11 @@ internal class DwebAborts(
 
     /** Calls in flight, for tests. */
     internal fun working(url: String): Int = synchronized(lock) { byUrl[keyOf(url)]?.working?.size ?: 0 }
+
+    // Under [lock].
+    private fun forget(beganAt: Long) {
+        if (beganAt > forgotUpTo) forgotUpTo = beganAt
+    }
 
     // Under [lock]: entries whose call never came are forgotten.
     private fun prune(calls: Calls) {
@@ -194,6 +247,9 @@ internal class DwebAborts(
         const val ABANDONED_TTL_MS = 10_000L
         private const val MAX_URLS = 512
         private const val MAX_COUNT = 64
+
+        /** `performance.now()`'s coarsening (0.1 ms, jittered), with room to spare. */
+        internal const val CLOCK_SLACK_MS = 1.0
 
         /** The URL a request and its Resource Timing entry are matched by: no fragment. */
         fun keyOf(url: String): String = url.substringBefore('#')
@@ -221,11 +277,16 @@ internal class DwebAborts(
             val channel = newBottomUiChannelName()
             val rules = VirtualOrigin.SUFFIXES.map { "https://*.$it" }.toSet()
             runCatching {
-                WebViewCompat.addWebMessageListener(webView, channel, rules) { _, message, sourceOrigin, _, _ ->
+                WebViewCompat.addWebMessageListener(webView, channel, rules) { _, message, sourceOrigin, _, reply ->
+                    val at = aborts.clock()
                     if (sourceOrigin.scheme != "https") return@addWebMessageListener
                     if (VirtualOrigin.parseHostOfUrl("$sourceOrigin/") == null) return@addWebMessageListener
                     if (message.type != WebMessageCompat.TYPE_STRING) return@addWebMessageListener
-                    for (url in parseDoneReport(message.data ?: return@addWebMessageListener)) aborts.pageDone(url)
+                    val report = parseDoneReport(message.data ?: return@addWebMessageListener, at)
+                        ?: return@addWebMessageListener
+                    // The page brackets its clock against ours with this.
+                    runCatching { reply.postMessage(report.reply) }
+                    for (e in report.entries) aborts.pageDone(e.url, e.startedLo, e.startedHi)
                 }
                 WebViewCompat.addDocumentStartJavaScript(webView, dwebAbortsJs(channel), rules)
             }.onFailure { return null }
@@ -234,16 +295,51 @@ internal class DwebAborts(
     }
 }
 
+/** A request the page is done with, started between [startedLo] and [startedHi] on [DwebAborts]' clock. */
+internal data class DoneEntry(val url: String, val startedLo: Double, val startedHi: Double)
+
+/** A parsed [dwebAbortsJs] report, and the [reply] that tells the page when it came. */
+internal class DoneReport(val entries: List<DoneEntry>, val reply: String)
+
 /**
- * The URLs in a [dwebAbortsJs] report: one per line, each a subresource
- * on a virtual origin ([DwebAborts.tracks]); anything else, and anything
- * past [MAX_REPORT_URLS], is left out.
+ * A [dwebAbortsJs] report, received at [receivedAt] on [DwebAborts]' clock.
+ *
+ * The first line is `sent lo hi`: the page's `performance.now()` when it
+ * sent the report, and the bounds it has so far on our clock minus its
+ * own (`-` for none yet), from earlier replies. Each later line is
+ * `start url`, the entry's `startTime` and URL. Our clock minus the
+ * page's is a constant `c`; a reply carries `receivedAt` and `sent` back,
+ * and since a message arrives after it's sent, `receivedAt - sent` is an
+ * upper bound on `c` and `receivedAt` minus the page's time on getting
+ * the reply a lower one. Bounds that cross, a header that doesn't parse:
+ * null, nothing done. Entries not on a virtual origin
+ * ([DwebAborts.tracks]), and any past [MAX_REPORT_URLS], are left out.
  */
-internal fun parseDoneReport(data: String): List<String> =
-    data.lineSequence()
-        .filter { it.length <= MAX_REPORT_URL_LENGTH && DwebAborts.tracks(it, mainFrame = false) }
+internal fun parseDoneReport(data: String, receivedAt: Long): DoneReport? {
+    val lines = data.lineSequence().iterator()
+    if (!lines.hasNext()) return null
+    val head = lines.next().split(' ')
+    if (head.size != 3) return null
+    val sent = head[0].toDoubleOrNull()?.takeIf { it.isFinite() } ?: return null
+    fun bound(s: String) = if (s == "-") null else s.toDoubleOrNull()?.takeIf { it.isFinite() }
+    val lo = if (head[1] == "-") Double.NEGATIVE_INFINITY else bound(head[1]) ?: return null
+    val pageHi = if (head[2] == "-") Double.POSITIVE_INFINITY else bound(head[2]) ?: return null
+    // [receivedAt] is rounded down to the millisecond: + 1 keeps it an upper bound.
+    val hi = minOf(pageHi, receivedAt + 1 - sent)
+    if (lo > hi + 2 * DwebAborts.CLOCK_SLACK_MS) return null
+    val entries = lines.asSequence()
+        .mapNotNull { line ->
+            val space = line.indexOf(' ')
+            if (space < 0) return@mapNotNull null
+            val start = line.substring(0, space).toDoubleOrNull()?.takeIf { it.isFinite() } ?: return@mapNotNull null
+            val url = line.substring(space + 1)
+            if (url.length > MAX_REPORT_URL_LENGTH || !DwebAborts.tracks(url, mainFrame = false)) return@mapNotNull null
+            DoneEntry(url, start + lo, start + hi)
+        }
         .take(MAX_REPORT_URLS)
         .toList()
+    return DoneReport(entries, "$receivedAt ${head[0]}")
+}
 
 private const val MAX_REPORT_URLS = 1024
 private const val MAX_REPORT_URL_LENGTH = 8192
@@ -251,13 +347,19 @@ private const val MAX_REPORT_URL_LENGTH = 8192
 /**
  * The page side of [DwebAborts]: a `PerformanceObserver` for `resource`
  * entries, set up before the page's own scripts run with the natives it
- * needs saved, that posts the URLs of the requests the document is done
- * with — those on a virtual origin only, one per line, a batch per
- * callback. Left out are entries no interceptor call made: answered by a
- * service worker (`workerStart`) or from a cache (`deliveryType`). The
- * channel object is taken off `window` at once, so the page never sees
- * it; it only exists on the dweb origins, which name this browser
- * already.
+ * needs saved, that posts the start time and URL of each request the
+ * document is done with — those on a virtual origin only, a batch per
+ * callback, in [parseDoneReport]'s format. Each reply brackets the
+ * native clock against `performance.now()`; one empty report at document
+ * start gets the first. Left out are entries no interceptor call made:
+ * answered by a service worker (`workerStart`) or from a cache
+ * (`deliveryType`). A WebView too old to say `deliveryType` (before
+ * Chromium 109) can't tell a memory-cache hit from a request, so there
+ * the script does nothing. It builds its report as a string only, never
+ * in a page-realm array or object, and reads entries through saved
+ * getters only, so no page-defined accessor sees it. The channel object
+ * is taken off `window` at once, so the page never sees it; it only
+ * exists on the dweb origins, which name this browser already.
  */
 internal fun dwebAbortsJs(channel: String): String {
     require(Regex("[a-z]{8,64}").matches(channel)) { "channel must be lower-case letters" }
@@ -268,23 +370,24 @@ internal fun dwebAbortsJs(channel: String): String {
   if (port === undefined) return;
   try { delete w[N]; } catch (e) {}
   if (!port || typeof port.postMessage !== 'function') return;
-  var PO = w.PerformanceObserver;
-  if (typeof PO !== 'function' || !PO.prototype) return;
+  var PO = w.PerformanceObserver, perf = w.performance, Perf = w.Performance, ME = w.MessageEvent;
+  if (typeof PO !== 'function' || !PO.prototype || !perf || !Perf || !ME) return;
   var fcall = Function.prototype.call, fbind = Function.prototype.bind, gopd = Object.getOwnPropertyDescriptor,
       gpo = Object.getPrototypeOf;
   var un = function (f) { return typeof f === 'function' ? fbind.call(fcall, f) : null; };
   var prop = function (P, n) {
     var x = null;
     for (var p = P; p && !x; p = gpo(p)) x = gopd(p, n);
-    return (x && un(x.get)) || function (o) { return o[n]; };
+    return x ? un(x.get) : null;
   };
   var RT = w.PerformanceResourceTiming && w.PerformanceResourceTiming.prototype;
-  var send = un(port.postMessage), observe = un(PO.prototype.observe),
+  var send = un(port.postMessage), observe = un(PO.prototype.observe), clock = un(Perf.prototype.now),
       list = un(w.PerformanceObserverEntryList && w.PerformanceObserverEntryList.prototype.getEntries),
-      name = prop(RT, 'name'), workerStart = prop(RT, 'workerStart'), delivery = prop(RT, 'deliveryType'),
-      at = un(String.prototype.indexOf), cut = un(String.prototype.substring), join = un(Array.prototype.join);
-  if (!send || !observe || !list || !at || !cut || !join) return;
-  var suffixes = [$suffixes];
+      name = prop(RT, 'name'), start = prop(RT, 'startTime'), workerStart = prop(RT, 'workerStart'),
+      delivery = prop(RT, 'deliveryType'), data = prop(ME.prototype, 'data'),
+      at = un(String.prototype.indexOf), cut = un(String.prototype.substring);
+  if (!send || !observe || !clock || !list || !name || !start || !workerStart || !delivery || !data || !at || !cut) return;
+  var suffixes = [$suffixes], lo = '-', hi = '-';
   function dweb(u) {
     if (typeof u !== 'string' || cut(u, 0, 8) !== 'https://') return false;
     var slash = at(u, '/', 8);
@@ -295,19 +398,36 @@ internal fun dwebAbortsJs(channel: String): String {
     }
     return false;
   }
+  function post(body) { send(port, clock(perf) + ' ' + lo + ' ' + hi + body); }
   try {
+    port.onmessage = function (ev) {
+      try {
+        // The platform hands the channel a plain object with its own
+        // `data` (read as it is, which runs nothing of the page's); a
+        // real MessageEvent's goes through the getter saved here.
+        var got = clock(perf), own = ev ? gopd(ev, 'data') : null, d = own ? own.value : ev ? data(ev) : null;
+        if (typeof d !== 'string') return;
+        var sp = at(d, ' ');
+        if (sp < 0) return;
+        var t = +cut(d, 0, sp), sent = +cut(d, sp + 1), l = t - got, h = t + 1 - sent;
+        if (t !== t || sent !== sent) return;
+        if (lo === '-' || l > lo) lo = l;
+        if (hi === '-' || h < hi) hi = h;
+      } catch (x) {}
+    };
     var po = new PO(function (l) {
       try {
-        var es = list(l), done = [], n = 0;
+        var es = list(l), body = '';
         for (var i = 0; i < es.length; i++) {
-          var e = es[i], u = name(e), d = delivery(e);
-          if (workerStart(e) > 0 || d === 'cache' || d === 'navigational-prefetch' || !dweb(u)) continue;
-          done[n++] = u;
+          var e = es[i], u = name(e), dt = delivery(e);
+          if (workerStart(e) > 0 || dt === 'cache' || dt === 'navigational-prefetch' || !dweb(u)) continue;
+          body += '\n' + start(e) + ' ' + u;
         }
-        if (n) send(port, join(done, '\n'));
+        if (body) post(body);
       } catch (x) {}
     });
     observe(po, { type: 'resource' });
+    post('');
   } catch (e) {}
 })();
 """
