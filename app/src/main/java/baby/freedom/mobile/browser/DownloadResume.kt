@@ -170,6 +170,8 @@ internal object DownloadNote {
         "blob_unreachable" to R.string.library_download_blob_unreachable,
         "blob_gone" to R.string.library_download_blob_gone,
         "blob_page_closed" to R.string.library_download_blob_page_closed,
+        "blob_refused" to R.string.library_download_blob_refused,
+        "blob_too_big" to R.string.library_download_blob_too_big,
         "gateway_no_answer" to R.string.library_download_gateway_no_answer,
         "content_not_found" to R.string.library_download_content_not_found,
         "gateway_error" to R.string.library_download_gateway_error,

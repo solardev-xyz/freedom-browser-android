@@ -13,6 +13,7 @@ import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -73,6 +74,11 @@ class BlobDownloadsDeviceTest {
         </script>
     """.trimIndent()
 
+    private val framed = "<!doctype html><html><head>$watcher</head><body><script>var loaded = 0;" +
+        "var child = location.pathname === '/csp-framed' ? '/csp-child' : '/child';" +
+        "for (var i = 0; i < 2; i++) { var f = document.createElement('iframe'); f.src = child;" +
+        " f.onload = function () { loaded++; }; document.body.appendChild(f); }</script></body></html>"
+
     private val content = "0123456789abcdef".repeat(80_000) // 1,280,000 bytes: three chunks
 
     private fun pages(url: String): WebResourceResponse? {
@@ -87,16 +93,26 @@ class BlobDownloadsDeviceTest {
                     "</body></html>",
             )
             many != null -> html("<!doctype html><p>${many.groupValues[1]}</p>")
+            // A main frame with two same-origin iframes, each with the reader and the watcher.
+            url == "http://a.test/framed" -> html(framed)
+            url == "http://a.test/csp-framed" -> html(framed, csp)
+            url == "http://a.test/child" -> html("<!doctype html><html><head>$watcher</head><body></body></html>")
+            url == "http://a.test/csp-child" -> html("<!doctype html><html><head>$watcher</head><body></body></html>", csp)
             else -> WebResourceResponse("text/plain", "utf-8", 404, "Not Found", emptyMap(), ByteArrayInputStream(ByteArray(0)))
         }
     }
 
     @Before
-    fun setUp() {
+    fun setUp() = install(BLOB_COPY_MAX_BYTES)
+
+    /** A fresh WebView, its reader copying files up to [copyMaxBytes]. */
+    private fun install(copyMaxBytes: Long) {
         instrumentation.runOnMainSync {
+            if (::webView.isInitialized) webView.destroy()
             webView = WebView(instrumentation.targetContext)
             webView.settings.javaScriptEnabled = true
-            downloads = BlobDownloads.install(webView) ?: error("WebView lacks WEB_MESSAGE_LISTENER / DOCUMENT_START_SCRIPT")
+            downloads = BlobDownloads.install(webView, copyMaxBytes)
+                ?: error("WebView lacks WEB_MESSAGE_LISTENER / DOCUMENT_START_SCRIPT")
             webView.webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? =
                     request?.url?.toString()?.let(::pages)
@@ -128,9 +144,9 @@ class BlobDownloadsDeviceTest {
     }
 
     /** Run [script], which must eventually set `window.out`; returns it parsed. */
-    private fun run(script: String): JSONObject {
+    private fun run(script: String, timeoutMs: Long = 20_000): JSONObject {
         js("window.out = undefined; $script")
-        val deadline = System.currentTimeMillis() + 20_000
+        val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             val v = js("window.out || ''")
             if (v != "\"\"" && v != "null") return JSONObject(JSONObject("{\"v\":$v}").getString("v"))
@@ -144,7 +160,7 @@ class BlobDownloadsDeviceTest {
         val got = AtomicReference<BlobSource>()
         val latch = CountDownLatch(1)
         instrumentation.runOnMainSync { downloads.prepare(url) { got.set(it); latch.countDown() } }
-        assertTrue("prepare answers", latch.await(10, TimeUnit.SECONDS))
+        assertTrue("prepare answers", latch.await(40, TimeUnit.SECONDS))
         return got.get()
     }
 
@@ -263,5 +279,146 @@ class BlobDownloadsDeviceTest {
         assertNull(source.failure)
         assertEquals(3L, source.size)
         assertArrayEquals("abc".toByteArray(), source.open().use { it.readBytes() })
+    }
+
+    private fun waitForFrames() {
+        run("(function w() { if (loaded >= 2) window.out = '{}'; else setTimeout(w, 50); })();")
+        Thread.sleep(500)
+    }
+
+    /**
+     * #408 R3-M1: a same-origin iframe can read the main frame's `blob:`
+     * URL too, but the frame that saw the link clicked is asked first,
+     * so the link's `download` name isn't lost to the iframe's answer.
+     */
+    @Test
+    fun aSameOriginIframeDoesntTakeTheClickedName() {
+        load("http://a.test/framed")
+        waitForFrames()
+        repeat(5) {
+            val source = prepare(makeAndClick(revoke = false))
+            assertNull(source.failure)
+            assertEquals("export.json", source.name)
+            source.release()
+        }
+    }
+
+    /**
+     * #408 R3-M1: under a policy refusing `blob:` reads, a download offered
+     * in a page with two same-origin iframes is tried in one frame only:
+     * one violation (one CSP report) across the three, not three.
+     */
+    @Test
+    fun aRefusedBlobDownloadWithSameOriginFramesReportsOnce() {
+        load("http://a.test/csp-framed")
+        waitForFrames()
+        val url = run(
+            """
+            var a = link(new Blob(['y'], { type: 'text/plain' }), '');
+            window.out = JSON.stringify({ url: a.href });
+            """,
+        ).getString("url")
+        assertEquals(DownloadNote.of(R.string.library_download_blob_refused), prepare(url).failure)
+        val r = run(
+            """
+            setTimeout(function () {
+              var all = seen.violations.concat(frames[0].seen.violations, frames[1].seen.violations);
+              window.out = JSON.stringify({ violations: all });
+            }, 1000);
+            """,
+        )
+        assertEquals(r.toString(), 1, r.getJSONArray("violations").length())
+    }
+
+    /**
+     * #408 R3-F1: a file over the copy limit that the page still holds
+     * isn't copied — it's read in ranges from its URL — and arrives whole,
+     * with its name, and no promise trace.
+     */
+    @Test
+    fun aFileOverTheCopyLimitIsReadFromItsUrl() {
+        install(copyMaxBytes = 1_000)
+        load("http://a.test/")
+        val source = prepare(makeAndClick(revoke = false))
+        assertNull(source.failure)
+        assertEquals("export.json", source.name)
+        assertEquals("application/json", source.mimeType)
+        assertEquals(content.length.toLong(), source.size)
+        assertArrayEquals(content.toByteArray(), source.open().use { it.readBytes() })
+        val seen = run("window.out = JSON.stringify(seen);")
+        assertEquals(seen.toString(), 0, seen.getInt("reads"))
+        assertEquals(seen.toString(), 0, seen.getInt("thens"))
+    }
+
+    /**
+     * Such a file revoked by the page before it's saved really was
+     * withdrawn by the page — and says so.
+     */
+    @Test
+    fun aFileOverTheCopyLimitRevokedBeforeItsSavedFailsAsWithdrawn() {
+        install(copyMaxBytes = 1_000)
+        load("http://a.test/")
+        val url = makeAndClick(revoke = false)
+        val source = prepare(url)
+        assertNull(source.failure)
+        js("URL.revokeObjectURL('$url')")
+        val e = assertThrows(BlobReadException::class.java) { source.open().use { it.readBytes() } }
+        assertEquals(DownloadNote.of(R.string.library_download_blob_gone), e.note)
+    }
+
+    /**
+     * Revoked right at its click, a file over the copy limit has only the
+     * request opened at the click left, so that is copied whatever its size.
+     */
+    @Test
+    fun aFileOverTheCopyLimitRevokedAtItsClickIsStillCopied() {
+        install(copyMaxBytes = 1_000)
+        load("http://a.test/")
+        val source = prepare(makeAndClick(revoke = true))
+        assertNull(source.failure)
+        assertEquals("export.json", source.name)
+        assertArrayEquals(content.toByteArray(), source.open().use { it.readBytes() })
+    }
+
+    /**
+     * #408 R3-F1, the reported case: a 200 MB blob the page still holds,
+     * on an in-document `<a download>`, clicked and never revoked. A
+     * second copy of it fails in WebView (ERR_ABORTED), so it's read from
+     * its URL: prepared with its name and size and saved whole.
+     */
+    @Test
+    fun a200MbBlobThePageStillHoldsIsSaved() {
+        load("http://a.test/")
+        val mb = 1024 * 1024
+        val url = run(
+            """
+            var u = new Uint8Array($mb);
+            for (var i = 0; i < u.length; i++) u[i] = (i * 7) & 255;
+            var parts = [];
+            for (var j = 0; j < 200; j++) parts.push(u);
+            var a = link(new Blob(parts, { type: 'application/octet-stream' }), 'big200.bin');
+            a.click();
+            window.out = JSON.stringify({ url: a.href });
+            """,
+            timeoutMs = 60_000,
+        ).getString("url")
+        val source = prepare(url)
+        assertNull(source.failure)
+        assertEquals("big200.bin", source.name)
+        assertEquals(200L * mb, source.size)
+        var at = 0L
+        val buf = ByteArray(64 * 1024)
+        source.open().use { input ->
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                for (i in 0 until n) {
+                    val want = ((((at + i) % mb) * 7) and 255).toByte()
+                    if (buf[i] != want) throw AssertionError("byte ${at + i}: ${buf[i]} != $want")
+                }
+                at += n
+            }
+        }
+        assertEquals(200L * mb, at)
     }
 }

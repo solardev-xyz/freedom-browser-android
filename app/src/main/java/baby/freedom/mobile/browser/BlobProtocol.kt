@@ -11,10 +11,16 @@ import java.util.Base64
  *
  * Page → Kotlin, over the tab's own channel:
  * - [BLOB_HELLO]: a frame's reader is there (sent once, at document start).
+ * - `c⏎url`: the frame took hold of a clicked `blob:` link's file, so a
+ *   download of that URL is asked of it first ([BlobMessage.Captured]).
+ * - `a⏎token`: the frame can read the file and is taking hold of it
+ *   (copying it can take a while), so no other frame need be asked.
  * - `o⏎token⏎size⏎type⏎name`: the file is held, under that token.
  * - `e⏎token⏎code`: it isn't ([BLOB_GONE]: no such file — revoked, or
  *   another frame's; [BLOB_READ_FAILED]: a chunk couldn't be read;
- *   [BLOB_REFUSED]: the page's CSP doesn't let it be read).
+ *   [BLOB_REFUSED]: the page's CSP doesn't let it be read;
+ *   [BLOB_TOO_BIG]: the page revoked it and the copy taken at the click
+ *   couldn't be made).
  * - a chunk: an `ArrayBuffer` of `token:offset:` then the bytes, or the
  *   text `d⏎token⏎offset⏎base64` where `ArrayBuffer` messages aren't
  *   supported.
@@ -49,6 +55,28 @@ internal const val BLOB_READ_FAILED = "read"
  */
 internal const val BLOB_REFUSED = "csp"
 
+/**
+ * `e` code: the page revoked the URL right after the click, and the one
+ * way left to the file — copying it whole through the request opened at
+ * the click — failed, which WebView's limited blob memory makes it do
+ * for a big file (#408 R3-F1).
+ */
+internal const val BLOB_TOO_BIG = "big"
+
+/**
+ * Files up to this size are copied inside the page when Kotlin asks for
+ * them, so the download survives the page revoking the URL while the
+ * prompt is up. Bigger ones are read in ranges straight from the page's
+ * own URL (no second copy, which WebView's limited blob memory can't
+ * make: a 200 MB copy fails on a 2.5 GB device, #408 R3-F1), and so need
+ * the page to keep the URL until they're saved. A copy that fails is
+ * read that way too.
+ */
+internal const val BLOB_COPY_MAX_BYTES = 64L * 1024 * 1024
+
+/** Longest `blob:` URL taken from a [BlobMessage.Captured] note. */
+private const val BLOB_MAX_URL_CHARS = 4096
+
 /** Bytes per chunk: a 100 MB file is 200 messages, and never more than one chunk is in memory. */
 internal const val BLOB_CHUNK_BYTES = 512 * 1024
 
@@ -71,6 +99,8 @@ private fun isToken(s: String) = s.length == BLOB_TOKEN_LENGTH && s.all { it in 
 /** What a page sent, parsed; null for anything malformed. */
 internal sealed class BlobMessage {
     object Hello : BlobMessage()
+    data class Captured(val url: String) : BlobMessage()
+    data class Working(val token: String) : BlobMessage()
     data class Ready(val token: String, val size: Long, val mimeType: String?, val name: String?) : BlobMessage()
     data class Failed(val token: String, val code: String) : BlobMessage()
     class Chunk(val token: String, val offset: Long, val bytes: ByteArray) : BlobMessage()
@@ -79,6 +109,10 @@ internal sealed class BlobMessage {
 /** Parse a text message from the page. */
 internal fun parseBlobMessage(data: String): BlobMessage? {
     if (data == BLOB_HELLO) return BlobMessage.Hello
+    if (data.startsWith("c\n")) {
+        val url = data.substring(2)
+        return if (url.startsWith("blob:") && url.length <= BLOB_MAX_URL_CHARS && '\n' !in url) BlobMessage.Captured(url) else null
+    }
     val parts = data.split('\n', limit = 5)
     return when (parts[0]) {
         "o" -> {
@@ -87,6 +121,10 @@ internal fun parseBlobMessage(data: String): BlobMessage? {
             val type = parts[3].takeIf { it.isNotBlank() && it.length <= BLOB_MAX_TYPE_CHARS }
             val name = parts[4].takeIf { it.isNotBlank() }?.take(BLOB_MAX_NAME_CHARS)
             BlobMessage.Ready(parts[1], size, type, name)
+        }
+        "a" -> {
+            if (parts.size != 2 || !isToken(parts[1])) return null
+            BlobMessage.Working(parts[1])
         }
         "e" -> {
             if (parts.size != 3 || !isToken(parts[1])) return null

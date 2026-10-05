@@ -146,4 +146,24 @@ class BlobProtocolTest {
         assertNotEquals(0, BLOB_CHUNK_BYTES)
         assertEquals(512 * 1024, BLOB_CHUNK_BYTES)
     }
+
+    @Test
+    fun `capture and working notes parse, and malformed ones don't`() {
+        assertEquals(BlobMessage.Captured("blob:https://a.example/u"), parseBlobMessage("c\nblob:https://a.example/u"))
+        assertEquals(BlobMessage.Working(token), parseBlobMessage("a\n$token"))
+        assertEquals(BlobMessage.Failed(token, BLOB_TOO_BIG), parseBlobMessage("e\n$token\n$BLOB_TOO_BIG"))
+        for (m in listOf(
+            "c\nhttps://a.example/u", // not blob:
+            "c\nblob:https://a.example/u\nmore",
+            "c\nblob:" + "x".repeat(5000),
+            "a\nshort",
+            "a\n$token\nextra",
+        )) assertNull(m, parseBlobMessage(m))
+    }
+
+    @Test
+    fun `the copy limit is far below what a second copy fails at`() {
+        // A 200 MB second copy fails on a 2.5 GB device (#408 R3-F1); 120 MB works.
+        assertEquals(64L * 1024 * 1024, BLOB_COPY_MAX_BYTES)
+    }
 }
