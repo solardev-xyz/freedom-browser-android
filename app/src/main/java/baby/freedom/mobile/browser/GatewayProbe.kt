@@ -183,8 +183,8 @@ class GatewayProbe {
          * Ant v0.5.56 (freedom-hq/ant#124) answers 503 when its peers
          * can't serve a chunk yet (a cold node right after start, or a
          * miss from a starved peer pool); earlier releases answered 404,
-         * 500 or 502 there. Same set as `TRANSIENT_STATUSES` in
-         * BrowserWebView.kt and `RETRYABLE_STATUSES` in the desktop's
+         * 500 or 502 there. Same set as `SUBRESOURCE_RETRY_STATUSES` in
+         * GatewayFetchPolicy.kt and `RETRYABLE_STATUSES` in the desktop's
          * `bzz-protocol.js`, and as `swarm-probe.js` since
          * freedom-browser#489.
          */

@@ -441,6 +441,37 @@ class VirtualOriginContractTest {
         harness.awaitJsTrue("window.results.xStatus === 200")
     }
 
+    @Test
+    fun aSubresourceBodyThatPausesFor15sIsNotAborted() {
+        harness.load(originA)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        harness.js(
+            "fetch('/slow-segment').then(r => r.arrayBuffer())" +
+                ".then(b => { window.results.slowLen = b.byteLength; })" +
+                ".catch(e => { window.results.slowLen = 'error: ' + e; })",
+        )
+        harness.awaitJsTrue("window.results.slowLen !== undefined", timeoutSeconds = 60)
+        assertEquals("${FixtureGateway.SLOW_SEGMENT_BYTES}", harness.js("String(window.results.slowLen)").trim('"'))
+        // Fetched once: not thrown away and fetched again after the pause.
+        assertEquals(1, gateway.requests["/bzz/${FixtureGateway.REF_A}/slow-segment"]?.get())
+    }
+
+    @Test
+    fun aSubresource404IsPassedThroughAtOnce() {
+        harness.load(originA)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        harness.js(
+            "window.results.t0 = Date.now();" +
+                "fetch('/no-such-file').then(r => { window.results.missing = r.status; " +
+                "window.results.missingMs = Date.now() - window.results.t0; })",
+        )
+        harness.awaitJsTrue("window.results.missing !== undefined")
+        assertEquals("404", harness.js("String(window.results.missing)").trim('"'))
+        val ms = harness.js("window.results.missingMs").toLong()
+        assertTrue("took $ms ms", ms < 3_000)
+        assertEquals(1, gateway.requests["/bzz/${FixtureGateway.REF_A}/no-such-file"]?.get())
+    }
+
     // ------------------------------------------------------------------
     // Media
     // ------------------------------------------------------------------
