@@ -84,6 +84,17 @@ class DeleteBrowsingDataTest {
     }
 
     @Test
+    fun `all-time note mentions the history range only with history checked`() {
+        for (siteData in listOf(false, true)) for (cache in listOf(false, true)) {
+            if (!siteData && !cache) continue
+            val with = allTimeOnlyNote(DeleteChoice(DeleteRange.LastHour, history = true, siteData, cache))!!
+            val without = allTimeOnlyNote(DeleteChoice(DeleteRange.LastHour, history = false, siteData, cache))!!
+            assertTrue(with, with.endsWith("Browsing history keeps to the range."))
+            assertFalse(without, without.contains("history", ignoreCase = true))
+        }
+    }
+
+    @Test
     fun `history line counts visits in the range`() {
         assertEquals("1 visit, plus recently closed tabs", historyCountLine(1))
         assertEquals("42 visits, plus recently closed tabs", historyCountLine(42))

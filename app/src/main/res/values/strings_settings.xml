@@ -188,9 +188,11 @@
     <string name="delete_data_cache_subtitle">Pages may load more slowly on your next visit</string>
     <string name="delete_data_cache_detail">Also photos taken with the camera for a site\'s upload.</string>
     <!-- Shown when a time range other than All time is picked with cookies and/or cache checked -->
-    <string name="delete_data_all_time_cookies">Cookies and site data are deleted for all time: Android\'s WebView can\'t delete them by date. Browsing history keeps to the range.</string>
-    <string name="delete_data_all_time_cache">Cached images and files are deleted for all time: Android\'s WebView can\'t delete them by date. Browsing history keeps to the range.</string>
-    <string name="delete_data_all_time_both">Cookies, site data and cached files are deleted for all time: Android\'s WebView can\'t delete them by date. Browsing history keeps to the range.</string>
+    <string name="delete_data_all_time_cookies">Cookies and site data are deleted for all time: Android\'s WebView can\'t delete them by date.</string>
+    <string name="delete_data_all_time_cache">Cached images and files are deleted for all time: Android\'s WebView can\'t delete them by date.</string>
+    <!-- Appended to the all-time note only when Browsing history is checked. -->
+    <string name="delete_data_all_time_history_range">Browsing history keeps to the range.</string>
+    <string name="delete_data_all_time_both">Cookies, site data and cached files are deleted for all time: Android\'s WebView can\'t delete them by date.</string>
     <string name="delete_data_button">Delete data</string>
     <string name="delete_data_nothing_selected">Pick at least one kind of data to delete.</string>
     <!-- Toast after Delete data: short, as Android cuts a toast at two lines -->

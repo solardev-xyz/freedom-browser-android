@@ -134,7 +134,11 @@ class TabsState(
         internal val activeAt: Int?,
         internal val placeholderId: Long?,
         internal val bulk: Boolean = false,
-    )
+    ) {
+        /** Brought back by [reopenClosed] or [reopenClosedTab], not forgotten. Observable. */
+        var reopened by mutableStateOf(false)
+            internal set
+    }
 
     /**
      * What a bulk close ([closeAllTabs], [closeOtherTabs],
@@ -161,6 +165,15 @@ class TabsState(
     private var offeredUndo: ClosedGroup? = null
 
     /**
+     * The entry of saved tabs a crashed restore skipped ([keepForReopen]),
+     * held until its offer is answered ([offerWithdrawn]). Its own slot,
+     * apart from [offeredUndo]: a bulk close's Undo going on screen
+     * meanwhile mustn't let the cap drop it — that would end the offer
+     * (and delete its disk copy) without the user ever answering it.
+     */
+    private var heldOffer: ClosedGroup? = null
+
+    /**
      * The Undo notice of [group] is gone (timed out, used, or replaced
      * by a newer one): it may be dropped by the stack's cap again.
      */
@@ -170,6 +183,23 @@ class TabsState(
             trimClosed()
         }
     }
+
+    /**
+     * The offer of [group] ([keepForReopen]) has been answered or has
+     * ended: it may be dropped by the stack's cap again.
+     */
+    fun offerWithdrawn(group: ClosedGroup) {
+        if (heldOffer === group) {
+            heldOffer = null
+            trimClosed()
+        }
+    }
+
+    /**
+     * [group] is still on the reopen stack: not reopened (by its notice
+     * or Reopen) or forgotten ([forgetClosedTabs]) yet. Observable.
+     */
+    fun isOnReopenStack(group: ClosedGroup): Boolean = closedTabs.any { it === group }
 
     /** There is a closed tab [reopenClosedTab] can bring back. */
     val canReopenClosedTab: Boolean
@@ -580,11 +610,13 @@ class TabsState(
         // would otherwise pile up. Oldest entries go first; the newest
         // always stays whole, so its Undo brings back every tab it
         // closed (those were all open a moment ago anyway). So does the
-        // entry whose Undo is on screen ([offeredUndo]).
+        // entry whose Undo is on screen ([offeredUndo]), and the held
+        // tabs whose offer is still unanswered ([heldOffer]).
         var held = closedTabs.sumOf { it.tabs.size }
         var i = 0
         while (i < closedTabs.size - 1 && held > MAX_CLOSED_TABS) {
-            if (closedTabs[i] === offeredUndo) i++ else held -= closedTabs.removeAt(i).tabs.size
+            val pinned = closedTabs[i].let { it === offeredUndo || it === heldOffer }
+            if (pinned) i++ else held -= closedTabs.removeAt(i).tabs.size
         }
     }
 
@@ -618,6 +650,7 @@ class TabsState(
     }
 
     private fun reopen(group: ClosedGroup): BrowserState {
+        group.reopened = true
         val activeId = active.id
         // Undoing the close of the last tabs: the blank tab put in their
         // place was only there so the list isn't empty. If it's still
@@ -661,6 +694,13 @@ class TabsState(
             webViewState = closed.webViewState,
         )
     }
+
+    /**
+     * Nothing has happened to this tab list yet: the one regular tab it
+     * was created with, untouched, and no first load submitted.
+     */
+    val pristine: Boolean
+        get() = !initialLoadDone && tabs.size == 1 && !tabs[0].private && tabs[0].isUntouched()
 
     /** Still the fresh home overlay it was created as. */
     private fun BrowserState.isUntouched(): Boolean =
@@ -756,9 +796,12 @@ class TabsState(
      * [BrowserState.url]: [committed] only says there was a page, whose
      * [address] loads again.
      */
-    class SavedTabs(val tabs: List<SavedTab>, val activeIndex: Int)
+    data class SavedTabs(val tabs: List<SavedTab>, val activeIndex: Int) {
+        /** Nothing worth bringing back: no tab, or one on the home page. */
+        fun isJustHome(): Boolean = tabs.isEmpty() || (tabs.size == 1 && tabs[0].address.isBlank())
+    }
 
-    class SavedTab(
+    data class SavedTab(
         val title: String,
         val address: String,
         val committed: Boolean,
@@ -835,6 +878,44 @@ class TabsState(
     }
 
     /**
+     * Saved tabs that aren't loaded — the last restore from disk crashed
+     * the app ([TabsStore]) — go on the reopen stack instead, as one
+     * entry, so the user can still bring them back (Reopen closed tab,
+     * or the notice's Restore) once they're past whatever crashed. They
+     * come back as [restoreAfterProcessDeath] would have brought them,
+     * in place of the home tab if it's still untouched. Returns the
+     * entry, or null if there was nothing to keep.
+     */
+    fun keepForReopen(saved: SavedTabs): ClosedGroup? {
+        // Home tabs among them don't come back; the rest close up.
+        val kept = saved.tabs.withIndex().filter { it.value.address.isNotBlank() }
+        if (kept.isEmpty()) return null
+        val group = ClosedGroup(
+            tabs = kept.mapIndexed { i, (_, s) ->
+                ClosedTab(
+                    index = i,
+                    url = if (s.committed) s.address else "",
+                    title = s.title,
+                    addressBarText = s.address,
+                    override = null,
+                    thumbnail = null,
+                    webViewState = null,
+                    loadStopped = s.loadStopped,
+                )
+            },
+            activeAt = kept.indexOfFirst { it.index == saved.activeIndex }.takeIf { it >= 0 },
+            placeholderId = tabs.singleOrNull()?.takeIf { it.isUntouched() && !it.private }?.id,
+            bulk = true,
+        )
+        closedTabs.add(group)
+        // Held until its offer is answered, whatever else is closed and
+        // undone meanwhile.
+        heldOffer = group
+        trimClosed()
+        return group
+    }
+
+    /**
      * Forget every closed tab. Their saved WebView state carries
      * back/forward history (and the entries keep page titles, URLs and
      * thumbnails), so Delete browsing data drops it with either browsing
@@ -843,6 +924,7 @@ class TabsState(
     fun forgetClosedTabs() {
         closedTabs.clear()
         offeredUndo = null
+        heldOffer = null
     }
 
     /**

@@ -16,7 +16,6 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
-import baby.freedom.mobile.l10n.pluralText
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.DragIndicator
 import androidx.compose.material.icons.filled.MoreVert
@@ -59,6 +58,7 @@ import androidx.compose.ui.zIndex
 import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BookmarkEntry
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.l10n.pluralText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -96,7 +96,10 @@ fun BookmarksScreen(
 ) {
     BackHandler(onBack = onDismiss)
 
-    val entries by remember { repo.bookmarks }.collectAsState(initial = emptyList())
+    // Null until Room's first answer, so nothing reads "no bookmarks"
+    // before the list has loaded (the Delete all confirmation below).
+    val loaded by remember { repo.bookmarks }.collectAsState(initial = null)
+    val entries = loaded.orEmpty()
     var editingId by rememberSaveable { mutableStateOf<Long?>(null) }
     // The row whose menu is open, from its ⋮ or a long-press.
     var menuFor by remember { mutableStateOf<Long?>(null) }
@@ -207,11 +210,15 @@ fun BookmarksScreen(
         }
     }
 
-    if (confirmDeleteAll) {
+    // The confirmation survives recreation, but waits for the list to load
+    // before it names a count, and closes if the list empties some other way.
+    val bookmarkCount = loaded?.size
+    LaunchedEffect(bookmarkCount) { if (bookmarkCount == 0) confirmDeleteAll = false }
+    if (confirmDeleteAll && bookmarkCount != null && bookmarkCount > 0) {
         ConfirmDialog(
             title = stringResource(R.string.library_bookmarks_delete_all_title),
             message = pluralText(
-                R.plurals.library_bookmarks_delete_all_message, entries.size, entries.size,
+                R.plurals.library_bookmarks_delete_all_message, bookmarkCount, bookmarkCount,
             ),
             confirmLabel = stringResource(R.string.library_bookmarks_delete_all_confirm),
             onConfirm = {

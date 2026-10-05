@@ -99,16 +99,18 @@ data class DeleteChoice(
  * The line saying a picked range doesn't reach cookies, site data or the
  * cache — they go for all time, since neither `CookieManager`,
  * `WebStorage` nor `WebView.clearCache` take a date. Null when the range
- * is all time anyway, or neither of those boxes is checked.
+ * is all time anyway, or neither of those boxes is checked. It says
+ * history keeps to the range only when history is checked too.
  */
 internal fun allTimeOnlyNote(choice: DeleteChoice): String? {
     if (choice.range == DeleteRange.AllTime) return null
-    return when {
+    val note = when {
         choice.siteData && choice.cache -> Strings.get(R.string.delete_data_all_time_both)
         choice.siteData -> Strings.get(R.string.delete_data_all_time_cookies)
         choice.cache -> Strings.get(R.string.delete_data_all_time_cache)
-        else -> null
+        else -> return null
     }
+    return if (choice.history) "$note ${Strings.get(R.string.delete_data_all_time_history_range)}" else note
 }
 
 /** The history box's sub-line: how many visits the range holds. */
