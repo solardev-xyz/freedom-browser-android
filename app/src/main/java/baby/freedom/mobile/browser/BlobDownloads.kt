@@ -20,9 +20,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 private const val LOG_TAG = "BlobDownloads"
 
 /**
- * How long the frames of a blob's origin get to say whether they hold it,
- * and — once one said it's taking hold of it ([BlobMessage.Working]),
- * which for a big file copied in the page takes a while — to finish.
+ * How long the frames of a blob's origin get to say whether they hold it
+ * — counted from when the last of them was asked, since they're asked
+ * one at a time ([PREPARE_STEP_MS]; #408 R4-M2) — and, once one said
+ * it's taking hold of it ([BlobMessage.Working]), which for a big file
+ * copied in the page takes a while, to finish. At most
+ * [FRAMES_PER_ORIGIN] frames are asked, so the first wait is at most
+ * 7 s + 5 s.
  */
 private const val PREPARE_TIMEOUT_MS = 5_000L
 private const val PREPARE_WORKING_TIMEOUT_MS = 30_000L
@@ -78,7 +82,8 @@ private const val CAPTURES_PER_TAB = 16
  * #408 R3-F1): a file up to that size is copied in the page, so the
  * download survives the page revoking the URL while the prompt is up; a
  * bigger one isn't copied — WebView's limited blob memory can't make a
- * second copy of a 200 MB file the page still holds — and is read in
+ * second copy of a 200 MB file the page still holds, and other tabs'
+ * blobs use that same memory — and is read in
  * byte ranges from the page's own URL, which the page must then keep
  * until it's saved. Then the usual offer goes up, and once the user
  * accepts, [DownloadManager] reads the file through [BlobSource.open]:
@@ -92,7 +97,9 @@ private const val CAPTURES_PER_TAB = 16
  * of it can be told apart) or in a frame whose reader isn't there
  * ("Couldn't reach…"); one under a CSP refusing `blob:` reads ("This
  * site's security policy…"); a link revoked right at its click whose
- * copy WebView couldn't make ([BLOB_TOO_BIG]); and one the page revoked
+ * copy WebView couldn't make ([BLOB_TOO_BIG] — WebView's blob memory is
+ * shared by every tab, so that depends on what else is open as much as
+ * on the file's size, #408 R4-M3); and one the page revoked
  * before Freedom asked for it or, for a big file read from its URL,
  * before it was saved ("The page withdrew this file…") — the click of a
  * link never put in the document (FileSaver.js's detached `<a>`) isn't
@@ -143,6 +150,7 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
         private val working = HashSet<JavaScriptReplyProxy>()
         private var current: JavaScriptReplyProxy? = null
         private val startedAt = SystemClock.uptimeMillis()
+        private var lastAskedAt = startedAt
         var resolved = false
 
         /** A frame said the page's CSP refuses reading `blob:` URLs ([BLOB_REFUSED]). */
@@ -156,6 +164,7 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
             val frame = queue.removeFirstOrNull() ?: return false
             current = frame
             asked += frame
+            lastAskedAt = SystemClock.uptimeMillis()
             post(frame, blobPrepareMessage(token, binary, url))
             main.postDelayed({
                 if (!resolved && current === frame && frame !in answered && frame !in working) askNext()
@@ -189,8 +198,24 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
             working -= frame
         }
 
-        /** The deadline: [PREPARE_TIMEOUT_MS], or longer while a frame is taking hold of the file. */
+        /**
+         * The deadline: [PREPARE_TIMEOUT_MS] after the last frame was
+         * asked — not before every frame has been (#408 R4-M2) — or
+         * longer while a frame is taking hold of the file.
+         */
         fun expire() {
+            if (!resolved && working.isEmpty() && queue.isNotEmpty()) {
+                // Frames still to ask: the step timers ask them.
+                main.postDelayed(::expire, PREPARE_STEP_MS)
+                return
+            }
+            if (!resolved && working.isEmpty()) {
+                val left = lastAskedAt + PREPARE_TIMEOUT_MS - SystemClock.uptimeMillis()
+                if (left > 0) {
+                    main.postDelayed(::expire, left)
+                    return
+                }
+            }
             if (!resolved && working.isNotEmpty()) {
                 val left = startedAt + PREPARE_WORKING_TIMEOUT_MS - SystemClock.uptimeMillis()
                 if (left > 0) {
@@ -198,8 +223,8 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
                     return
                 }
             }
-            // Kept until now, so a late "I have it" from a frame is told
-            // to let go rather than holding the file for nothing.
+            // Gone from here on: a frame's "I have it" after this is told
+            // to let go by [onReady] all the same.
             preparing.remove(token)
             if (!resolved) {
                 finish(
@@ -262,7 +287,18 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
     }
 
     private fun onReady(ready: BlobMessage.Ready, reply: JavaScriptReplyProxy) {
-        val ask = preparing[ready.token] ?: return
+        val ask = preparing[ready.token]
+        if (ask == null) {
+            // Too late — the ask expired (a copy that took longer than
+            // [PREPARE_WORKING_TIMEOUT_MS]) — or a token nobody asked
+            // this frame about: either way, it lets go now rather than
+            // holding the file for the page's whole hold time (#408
+            // R4-M1). Only the file this frame holds under the token
+            // goes: one held for a download is another frame's, or not
+            // this token's.
+            if (held[ready.token]?.proxy !== reply) post(reply, blobReleaseMessage(ready.token))
+            return
+        }
         if (reply !in ask.asked) return
         ask.ready(reply)
         if (ask.resolved) {
@@ -540,7 +576,7 @@ internal fun blobReaderJs(channel: String, copyMaxBytes: Long = BLOB_COPY_MAX_BY
   var FR = w.FileReader, U8 = w.Uint8Array, AB = w.ArrayBuffer, TA = gpo(P(U8));
   var B = P(w.Blob), S = String.prototype, X = w.XMLHttpRequest, XP = P(X), RP = P(FR);
   var n = {
-    slice: method(B, 'slice'), size: prop(B, 'size'), type: prop(B, 'type'),
+    slice: method(B, 'slice'), size: prop(B, 'size'),
     path: method(P(w.Event), 'composedPath'), tag: prop(P(w.Element), 'tagName'),
     aHref: prop(P(w.HTMLAnchorElement), 'href'), aName: prop(P(w.HTMLAnchorElement), 'download'),
     areaHref: prop(P(w.HTMLAreaElement), 'href'), areaName: prop(P(w.HTMLAreaElement), 'download'),
@@ -646,15 +682,20 @@ internal fun blobReaderJs(channel: String, copyMaxBytes: Long = BLOB_COPY_MAX_BY
   // on a refusal by the page's CSP, done(false), told apart by the
   // securitypolicyviolation event, which Chromium queues before the
   // request's own error.
+  // done(b, type): the copy, and the file's own type — the response's
+  // Content-Type, which is empty for an untyped blob, where the copy's
+  // own type would say text/plain (#408 R4-F1).
   function readOpened(x, done) {
     var over = false;
-    function end(b) { if (!over) { over = true; done(b); } }
+    function end(b, t) { if (!over) { over = true; done(b, t); } }
     if (!x) { end(null); return; }
     try {
       n.on(x, 'loadend', function () {
-        var b = null;
-        try { if (n.xStatus(x) === 200) { b = n.xBody(x); n.size(b); } } catch (e) { b = null; }
-        if (b) { end(b); return; }
+        var b = null, t = '';
+        try {
+          if (n.xStatus(x) === 200) { b = n.xBody(x); n.size(b); t = n.xGet(x, 'Content-Type'); }
+        } catch (e) { b = null; }
+        if (b) { end(b, typeof t === 'string' ? t : ''); return; }
         // Let a violation event queued with the error be seen first.
         later(function () { end(refused ? false : null); }, 0);
       });
@@ -706,7 +747,7 @@ internal fun blobReaderJs(channel: String, copyMaxBytes: Long = BLOB_COPY_MAX_BY
       keep(token, h);
       post('o\n' + token + '\n' + size + '\n' + type + '\n' + name);
     }
-    function copied(b) { hold(b, null, n.size(b), n.type(b)); }
+    function copied(b, type) { hold(b, null, n.size(b), type); }
     // Already refused once: don't try (and have the site sent another report).
     if (refused) { fail('$BLOB_REFUSED'); return; }
     // Copying can take a while: tell Kotlin not to ask another frame.
@@ -716,16 +757,16 @@ internal fun blobReaderJs(channel: String, copyMaxBytes: Long = BLOB_COPY_MAX_BY
       if (info === null) {
         // Revoked: only the request opened at the click still has the file.
         if (!x) { fail('$BLOB_GONE'); return; }
-        readOpened(x, function (b) {
-          if (b) copied(b); else fail(b === false ? '$BLOB_REFUSED' : '$BLOB_TOO_BIG');
+        readOpened(x, function (b, t) {
+          if (b) copied(b, t); else fail(b === false ? '$BLOB_REFUSED' : '$BLOB_TOO_BIG');
         });
         return;
       }
       if (!x) post('a\n' + token);
       // Too big to copy: read from the URL, which the page still holds.
       if (info.size > $copyMaxBytes) { hold(null, url, info.size, info.type); return; }
-      readOpened(x || openUrl(url), function (b) {
-        if (b) copied(b);
+      readOpened(x || openUrl(url), function (b, t) {
+        if (b) copied(b, t);
         else if (b === false) fail('$BLOB_REFUSED');
         else if (info.size >= 0) hold(null, url, info.size, info.type);
         else fail('$BLOB_GONE');

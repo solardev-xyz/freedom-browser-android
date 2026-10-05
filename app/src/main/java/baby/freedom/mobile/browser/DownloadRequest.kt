@@ -147,6 +147,19 @@ internal fun blobContentDisposition(name: String?): String? {
     return "attachment; filename*=UTF-8''$encoded"
 }
 
+/**
+ * The type a `blob:` download is saved under: the blob's own [type]
+ * when it has one, else what its `download` [name]'s extension stands
+ * for, else `application/octet-stream` — never what `DownloadListener`
+ * said, which for an untyped blob is `text/plain`, and would have
+ * MediaStore save `export.zip` as `export.zip.txt` (#408 R4-F1).
+ */
+internal fun blobMimeType(type: String?, name: String?, mimeForExtension: (String) -> String? = { null }): String {
+    type?.substringBefore(';')?.trim()?.lowercase()?.takeIf { '/' in it && '*' !in it }?.let { return it }
+    val ext = name?.substringAfterLast('/')?.takeIf { '.' in it }?.substringAfterLast('.')?.trim()?.lowercase()
+    return ext?.takeIf { it.isNotEmpty() }?.let(mimeForExtension) ?: "application/octet-stream"
+}
+
 /** A decoded `data:` URI. */
 internal class DataUriPayload(val mimeType: String, val bytes: ByteArray)
 

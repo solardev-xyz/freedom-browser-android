@@ -92,6 +92,28 @@ class DownloadRequestTest {
     }
 
     @Test
+    fun `an untyped blob is saved by its name's type, never DownloadListener's text plain`() {
+        val types = mapOf("zip" to "application/zip", "json" to "application/json")
+        // The blob's own type wins.
+        assertEquals("image/png", blobMimeType("image/png", "export.zip", types::get))
+        assertEquals("text/csv", blobMimeType("Text/CSV; charset=utf-8", null, types::get))
+        // An untyped blob (new Blob([bytes])): its download name's extension.
+        assertEquals("application/zip", blobMimeType(null, "export.zip", types::get))
+        assertEquals("application/zip", blobMimeType("", "EXPORT.ZIP", types::get))
+        // Nothing to go by: octet-stream, which MediaStore adds no extension to.
+        assertEquals("application/octet-stream", blobMimeType(null, "big100.bin", types::get))
+        assertEquals("application/octet-stream", blobMimeType(null, null, types::get))
+        assertEquals("application/octet-stream", blobMimeType(null, "README", types::get))
+        assertEquals("application/octet-stream", blobMimeType("garbage", "x.", types::get))
+        // The name an untyped blob's prompt shows is the one saved.
+        val url = "blob:https://example.com/0f2b8c2e-1111-2222-3333-444455556666"
+        assertEquals(
+            "export.zip",
+            downloadFileName(blobContentDisposition("export.zip"), url, blobMimeType(null, "export.zip", types::get)) { null },
+        )
+    }
+
+    @Test
     fun `malformed dweb url is unsupported, not a crash`() {
         assertTrue(classifyDownloadUrl("bzz://nothex") is DownloadTarget.Unsupported)
     }

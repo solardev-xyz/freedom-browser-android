@@ -59,7 +59,10 @@ internal const val BLOB_REFUSED = "csp"
  * `e` code: the page revoked the URL right after the click, and the one
  * way left to the file — copying it whole through the request opened at
  * the click — failed, which WebView's limited blob memory makes it do
- * for a big file (#408 R3-F1).
+ * for a big file (#408 R3-F1). That memory is shared by every tab, so
+ * whether a copy fits depends on what else is open, not on this file's
+ * size alone: a 100 MB copy that fails beside other tabs' ~520 MB of
+ * blobs is made once they're gone (#408 R4-M3).
  */
 internal const val BLOB_TOO_BIG = "big"
 

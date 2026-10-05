@@ -93,6 +93,24 @@ class BlobDownloadsDeviceTest {
                     "</body></html>",
             )
             many != null -> html("<!doctype html><p>${many.groupValues[1]}</p>")
+            // A frame of b.test that says hello, then six more that say
+            // hello after it and are removed (stale frames that never answer).
+            url == "http://a.test/stale" -> html(
+                "<!doctype html><html><head>$watcher</head><body><script>var loaded = 0, blobUrl = '';" +
+                    "addEventListener('message', function (e) { blobUrl = e.data; });" +
+                    "var live = document.createElement('iframe'); live.src = 'http://b.test/live';" +
+                    "live.onload = function () { gone(0); }; document.body.appendChild(live);" +
+                    "function gone(i) { if (i >= 6) { loaded = 1; return; }" +
+                    " var f = document.createElement('iframe'); f.src = 'http://b.test/gone';" +
+                    " f.onload = function () { setTimeout(function () { f.remove(); gone(i + 1); }, 100); };" +
+                    " document.body.appendChild(f); }" +
+                    "</script></body></html>",
+            )
+            url == "http://b.test/live" -> html(
+                "<!doctype html><script>onmessage = function () {" +
+                    " parent.postMessage(URL.createObjectURL(new Blob(['abc'])), '*'); };</script>",
+            )
+            url == "http://b.test/gone" -> html("<!doctype html><p>gone</p>")
             // A main frame with two same-origin iframes, each with the reader and the watcher.
             url == "http://a.test/framed" -> html(framed)
             url == "http://a.test/csp-framed" -> html(framed, csp)
@@ -279,6 +297,61 @@ class BlobDownloadsDeviceTest {
         assertNull(source.failure)
         assertEquals(3L, source.size)
         assertArrayEquals("abc".toByteArray(), source.open().use { it.readBytes() })
+    }
+
+    /**
+     * #408 R4-M2: frames are asked one at a time, a second each when they
+     * don't answer, so six removed same-origin frames asked before the
+     * one holding the file used to run out the 5 s deadline first. The
+     * deadline now counts from the last frame asked: the file is found.
+     */
+    @Test
+    fun staleSameOriginFramesDontRunOutTheDeadline() {
+        load("http://a.test/stale")
+        run("(function w() { if (loaded) window.out = '{}'; else setTimeout(w, 50); })();", timeoutMs = 30_000)
+        Thread.sleep(500)
+        val url = run(
+            """
+            live.contentWindow.postMessage('go', '*');
+            (function w() { if (blobUrl) window.out = JSON.stringify({ url: blobUrl }); else setTimeout(w, 50); })();
+            """,
+        ).getString("url")
+        assertTrue(url, url.startsWith("blob:http://b.test/"))
+        val startedAt = System.currentTimeMillis()
+        val source = prepare(url)
+        val took = System.currentTimeMillis() - startedAt
+        assertNull(source.failure)
+        // Asked after the six stale frames (most recent first).
+        assertTrue("took $took ms", took >= 5_000)
+        assertNull(source.mimeType)
+        assertArrayEquals("abc".toByteArray(), source.open().use { it.readBytes() })
+    }
+
+    /**
+     * #408 R4-F1: an untyped blob (`new Blob([bytes])`) has no type —
+     * not the `text/plain` WebView gives its copy — whether it's copied
+     * at a click it was revoked in or read from its URL, so it's saved
+     * under its `download` name and not as `export.zip.txt`.
+     */
+    @Test
+    fun anUntypedBlobHasNoType() {
+        load("http://a.test/")
+        for (revoke in listOf(true, false)) {
+            val url = run(
+                """
+                var a = link(new Blob([new Uint8Array([80, 75, 3, 4])]), 'export.zip');
+                a.click();
+                ${if (revoke) "URL.revokeObjectURL(a.href);" else ""}
+                window.out = JSON.stringify({ url: a.href });
+                """,
+            ).getString("url")
+            val source = prepare(url)
+            assertNull(source.failure)
+            assertEquals("export.zip", source.name)
+            assertNull("revoke=$revoke", source.mimeType)
+            assertEquals("application/zip", blobMimeType(source.mimeType, source.name) { if (it == "zip") "application/zip" else null })
+            assertArrayEquals(byteArrayOf(80, 75, 3, 4), source.open().use { it.readBytes() })
+        }
     }
 
     private fun waitForFrames() {

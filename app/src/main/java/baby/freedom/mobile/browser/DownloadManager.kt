@@ -357,7 +357,7 @@ class DownloadManager private constructor(context: Context) {
         @Suppress("NAME_SHADOWING")
         val contentDisposition = blob?.let { blobContentDisposition(it.name) } ?: contentDisposition
         @Suppress("NAME_SHADOWING")
-        val mimeType = blob?.mimeType ?: mimeType
+        val mimeType = if (blob != null) blobMimeType(blob.mimeType, blob.name, ::mimeForExtension) else mimeType
         val name = downloadFileName(contentDisposition, url, normalizeMime(mimeType), ::extensionForMime)
         val refererOrigin = downloadRefererOrigin(pageUrl)
         // Who asked, as the prompt names them. A page with no usable
@@ -1344,7 +1344,7 @@ class DownloadManager private constructor(context: Context) {
                     if (e is BlobReadException) DownloadFailure(e.note) else e
                 },
                 length = source.size,
-                mimeType = normalizeMime(source.mimeType),
+                mimeType = blobMimeType(source.mimeType, source.name, ::mimeForExtension),
                 contentDisposition = blobContentDisposition(source.name) ?: contentDisposition,
                 nameUrl = target.url,
             )
@@ -1684,6 +1684,9 @@ private fun normalizeMime(raw: String?): String? =
 
 private fun extensionForMime(mime: String): String? =
     MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
+
+private fun mimeForExtension(ext: String): String? =
+    MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
 
 /** What [DownloadManager.open] found behind a completed row's URI. */
 internal enum class DownloadFileState {
