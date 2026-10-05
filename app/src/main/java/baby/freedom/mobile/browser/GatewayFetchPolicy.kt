@@ -179,8 +179,11 @@ internal const val GATEWAY_CONNECT_TIMEOUT_MS = 5_000
  * under the read timeout — which is the long body stall limit now, so on
  * its own a handshake that stalls would hold a pool thread for it, past
  * `main`'s bound and with no [PatientWaits] slot (PR #409 R3-F1). So the
- * connect gets [connectMs] (the connect timeout plus `main`'s read
- * timeout, `main`'s own bound) and no more: then it is disconnected from
+ * connect gets `main`'s own bound and no more: the connection tries each
+ * address the name resolved to in turn, each under its own connect
+ * timeout, so that is [connectMs] (one connect timeout) per address
+ * [TorRouting.openFollowingRedirects] reports, plus [baseMs] (`main`'s
+ * read timeout) for the handshake (PR #409 R5-M1). Then it is disconnected from
  * another thread, which aborts a `connect()` mid-handshake, and cut again
  * every [RECUT_MS] until it returns, in case a cut lands between steps of
  * the connect and a later one blocks again. The name is looked up before
@@ -207,7 +210,7 @@ internal class HeaderDeadline(
     private val baseMs: Int,
     private val timeoutMs: Int = baseMs,
     private val patience: PatientWaits = PatientWaits.shared,
-    private val connectMs: Int = GATEWAY_CONNECT_TIMEOUT_MS + baseMs,
+    private val connectMs: Int = GATEWAY_CONNECT_TIMEOUT_MS,
 ) : TorRouting.HopWatcher {
     private val lock = Any()
     private var current: HttpURLConnection? = null // the hop connecting or waiting on its headers
@@ -226,13 +229,14 @@ internal class HeaderDeadline(
     var extended = false
         private set
 
-    override fun connecting(conn: HttpURLConnection) {
+    override fun connecting(conn: HttpURLConnection, addresses: Int) {
         synchronized(lock) {
             if (expired) throw SocketTimeoutException("no headers in time")
             stop()
             current = conn
             val mine = ++hop
-            task = watchdog.schedule({ cutConnect(mine) }, connectMs.toLong(), TimeUnit.MILLISECONDS)
+            val limit = connectMs.toLong() * addresses.coerceAtLeast(1) + baseMs
+            task = watchdog.schedule({ cutConnect(mine) }, limit, TimeUnit.MILLISECONDS)
         }
     }
 

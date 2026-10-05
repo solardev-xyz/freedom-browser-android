@@ -167,7 +167,7 @@ class GatewayFetchPolicyTest {
     fun `a connect that hangs is cut at its limit, and again until it returns`() {
         val cuts = AtomicInteger(0)
         val slot = PatientWaits(1)
-        val deadline = HeaderDeadline(100, 5_000, slot, connectMs = 200)
+        val deadline = HeaderDeadline(100, 5_000, slot, connectMs = 100) // one address: 100 + 100
         deadline.connecting(FakeConnection { cuts.incrementAndGet() })
         Thread.sleep(120)
         assertEquals("cut before the connect limit", 0, cuts.get())
@@ -188,6 +188,26 @@ class GatewayFetchPolicyTest {
         } catch (e: java.net.SocketTimeoutException) {
             // expected
         }
+    }
+
+    /**
+     * PR #409 R5-M1: the connection tries each address the name resolved to
+     * in turn, each under its own connect timeout, as on main — so the
+     * connect clock is one connect timeout per address, plus the read
+     * timeout for the handshake.
+     */
+    @Test
+    fun `the connect clock allows one connect timeout per address`() {
+        val cuts = AtomicInteger(0)
+        val deadline = HeaderDeadline(100, patience = PatientWaits(0), connectMs = 200)
+        deadline.connecting(FakeConnection { cuts.incrementAndGet() }, addresses = 3) // 3 x 200 + 100
+        Thread.sleep(550)
+        assertEquals("cut before three addresses' worth", 0, cuts.get())
+        assertFalse(deadline.expired)
+        Thread.sleep(400)
+        assertTrue(deadline.expired)
+        assertTrue(cuts.get() >= 1)
+        deadline.headersReceived()
     }
 
     @Test

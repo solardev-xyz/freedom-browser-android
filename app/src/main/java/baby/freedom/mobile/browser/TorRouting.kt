@@ -722,8 +722,11 @@ object TorRouting {
                     // connect then finds it cached and the stretch the
                     // watcher times is the connect and handshake alone, with
                     // lookup time on top, as on main (PR #409 R4-M1).
-                    if (pinned == null) lookUpAhead(current, route)
-                    hops.connecting(c)
+                    // How many addresses it found is how many the connect
+                    // may try, each under its own connect timeout, as on
+                    // main (PR #409 R5-M1); a pinned hop dials one.
+                    val addresses = if (pinned == null) lookUpAhead(current, route) else 1
+                    hops.connecting(c, addresses)
                     c.connect()
                     hops.connected(c)
                 }
@@ -769,22 +772,38 @@ object TorRouting {
      * mustn't be looked up on this device. Nothing for an IP literal. A
      * failed lookup is left for the connection to meet and report as it
      * always did.
+     *
+     * The name looked up is the one the connection will look up — OkHttp's
+     * canonical host, a trailing dot and all, since the system's caches are
+     * keyed by that exact string (PR #409 R5-M2).
+     *
+     * Best effort only: libcore keeps a positive answer for 2 s, so a
+     * connect that starts later than that (or a lookup through a test
+     * [resolve] that caches nothing) looks the name up again inside the
+     * connect clock — the `main`-like behaviour this exists to avoid, but
+     * no worse than it was before it, and the clock's limit still holds.
+     *
+     * Returns how many addresses the connection may try in turn — each
+     * under its own connect timeout, so the connect clock scales with it
+     * (PR #409 R5-M1) — or 1 when nothing was looked up (through a proxy
+     * the connection dials the proxy's one address) or the lookup failed.
      */
-    private fun lookUpAhead(hop: URL, route: Proxy?) {
-        if (fetchMayReachOnion(hop)) return
+    private fun lookUpAhead(hop: URL, route: Proxy?): Int {
+        if (fetchMayReachOnion(hop)) return 1
         val direct = if (route != null) {
             route.type() == Proxy.Type.DIRECT
         } else {
-            val uri = selectorUri(hop) ?: return
+            val uri = selectorUri(hop) ?: return 1
             runCatching { proxiesFor(uri) }.getOrNull()?.all { it.type() == Proxy.Type.DIRECT } ?: false
         }
-        if (!direct) return
-        val raw = okHttpHost(hop.toString())?.takeIf { it.isNotEmpty() && !it.startsWith("[") } ?: return
-        val name = runCatching { IDN.toASCII(percentDecodeUtf8(raw)) }.getOrNull()?.lowercase()?.trimEnd('.') ?: return
-        if (name.isEmpty() || name.split('.').let { p -> p.size == 4 && p.all { o -> o.isNotEmpty() && o.all { it in '0'..'9' } } }) {
-            return
+        if (!direct) return 1
+        val raw = okHttpHost(hop.toString())?.takeIf { it.isNotEmpty() && !it.startsWith("[") } ?: return 1
+        val name = runCatching { IDN.toASCII(percentDecodeUtf8(raw)) }.getOrNull()?.lowercase(java.util.Locale.US) ?: return 1
+        val bare = name.trimEnd('.')
+        if (bare.isEmpty() || bare.split('.').let { p -> p.size == 4 && p.all { o -> o.isNotEmpty() && o.all { it in '0'..'9' } } }) {
+            return 1
         }
-        runCatching { resolve(name) }
+        return runCatching { resolve(name).size }.getOrNull()?.coerceAtLeast(1) ?: 1
     }
 
     /**
@@ -798,7 +817,8 @@ object TorRouting {
      * in. Any of them may throw to abandon the fetch.
      */
     interface HopWatcher {
-        fun connecting(conn: HttpURLConnection)
+        /** [addresses]: how many addresses the connect may try in turn, each under its own connect timeout. */
+        fun connecting(conn: HttpURLConnection, addresses: Int = 1)
         fun connected(conn: HttpURLConnection)
         fun answered(conn: HttpURLConnection)
     }

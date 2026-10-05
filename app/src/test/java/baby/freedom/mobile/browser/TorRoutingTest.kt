@@ -573,7 +573,7 @@ class TorRoutingTest {
         val port = server.address.port
         val events = java.util.Collections.synchronizedList(mutableListOf<String>())
         val watcher = object : TorRouting.HopWatcher {
-            override fun connecting(conn: java.net.HttpURLConnection) { events += "connecting" }
+            override fun connecting(conn: java.net.HttpURLConnection, addresses: Int) { events += if (addresses == 1) "connecting" else "connecting $addresses" }
             override fun connected(conn: java.net.HttpURLConnection) { events += "connected" }
             override fun answered(conn: java.net.HttpURLConnection) { events += "answered" }
         }
@@ -606,6 +606,20 @@ class TorRoutingTest {
             TorRouting.resolve = { host -> events += "lookup $host"; throw java.net.UnknownHostException(host) }
             fetch("http://localhost:$port/e")
             assertEquals(listOf("lookup localhost", "connecting", "connected", "answered"), events.toList())
+            // PR #409 R5-M1/M2: the name is looked up as the connection will
+            // look it up — trailing dot kept, so it's the same cache entry —
+            // and every address it resolved to gets its own connect timeout.
+            TorRouting.resolve = { host ->
+                events += "lookup $host"
+                arrayOf("127.0.0.1", "127.0.0.2", "127.0.0.3").map { java.net.InetAddress.getByName(it) }.toTypedArray()
+            }
+            events.clear()
+            runCatching {
+                TorRouting.openFollowingRedirects(URL("http://LocalHost.:$port/f"), hops = watcher) {
+                    connectTimeout = 2_000; readTimeout = 2_000
+                }.disconnect()
+            }
+            assertEquals(listOf("lookup localhost.", "connecting 3"), events.take(2))
         } finally {
             TorRouting.resolve = realResolve
             TorRouting.proxiesFor = realProxies

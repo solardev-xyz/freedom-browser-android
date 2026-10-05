@@ -441,7 +441,7 @@ class GatewayFetchPolicyDeviceTest {
     @Test
     fun aStalledTlsHandshakeIsCutAtTheConnectLimit() {
         script = { _, _, _ -> Thread.sleep(30_000) } // never answer the ClientHello
-        val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(1), connectMs = 1_500)
+        val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(1), connectMs = 500) // one address: 500 + 1 000
         val started = System.nanoTime()
         try {
             TorRouting.openFollowingRedirects(URL("https://127.0.0.1:${server.localPort}/tls"), hops = deadline) {
