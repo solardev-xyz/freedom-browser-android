@@ -555,6 +555,64 @@ class TorRoutingTest {
         }
     }
 
+    /**
+     * PR #409 R4-M1: the name a connection would look up inside its own
+     * `connect()` is looked up first, before the watcher's connect clock
+     * starts — so a slow resolver isn't timed as a slow connect — and only
+     * when the hop is dialed from here: through a proxy the name is the
+     * proxy's, and an IP literal has nothing to look up.
+     */
+    @Test
+    fun `a watched hop's name is looked up before its connect clock starts, only when dialed from here`() {
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { ex ->
+            ex.sendResponseHeaders(200, 2)
+            ex.responseBody.use { it.write("ok".toByteArray()) }
+        }
+        server.start()
+        val port = server.address.port
+        val events = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val watcher = object : TorRouting.HopWatcher {
+            override fun connecting(conn: java.net.HttpURLConnection) { events += "connecting" }
+            override fun connected(conn: java.net.HttpURLConnection) { events += "connected" }
+            override fun answered(conn: java.net.HttpURLConnection) { events += "answered" }
+        }
+        val realResolve = TorRouting.resolve
+        val realProxies = TorRouting.proxiesFor
+        TorRouting.resolve = { host -> events += "lookup $host"; realResolve(host) }
+        fun fetch(url: String) {
+            events.clear()
+            TorRouting.openFollowingRedirects(URL(url), hops = watcher) { connectTimeout = 2_000; readTimeout = 2_000 }
+                .disconnect()
+        }
+        try {
+            TorRouting.proxiesFor = { listOf(java.net.Proxy.NO_PROXY) }
+            fetch("http://localhost:$port/a")
+            assertEquals(listOf("lookup localhost", "connecting", "connected", "answered"), events.toList())
+            // An IP literal: nothing to look up.
+            fetch("http://127.0.0.1:$port/b")
+            assertEquals(listOf("connecting", "connected", "answered"), events.toList())
+            // A system proxy resolves the name itself; nothing is looked up here.
+            val http = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress.createUnresolved("127.0.0.1", 8080))
+            TorRouting.proxiesFor = { listOf(http) }
+            fetch("http://localhost:$port/c")
+            assertFalse(events.toList().toString(), events.any { it.startsWith("lookup") })
+            // A selector that fails: not known to be direct, so not looked up either.
+            TorRouting.proxiesFor = { throw IllegalArgumentException("bad uri") }
+            fetch("http://localhost:$port/d")
+            assertFalse(events.toList().toString(), events.any { it.startsWith("lookup") })
+            // A failed lookup ahead is left to the connection to report, as it always did.
+            TorRouting.proxiesFor = { listOf(java.net.Proxy.NO_PROXY) }
+            TorRouting.resolve = { host -> events += "lookup $host"; throw java.net.UnknownHostException(host) }
+            fetch("http://localhost:$port/e")
+            assertEquals(listOf("lookup localhost", "connecting", "connected", "answered"), events.toList())
+        } finally {
+            TorRouting.resolve = realResolve
+            TorRouting.proxiesFor = realProxies
+            server.stop(0)
+        }
+    }
+
     /** Run [block] with [TorRouting.resolve] answering from [names] (anything else unresolvable). */
     private fun <T> withResolver(vararg names: Pair<String, String>, block: () -> T): T {
         val table = mapOf(

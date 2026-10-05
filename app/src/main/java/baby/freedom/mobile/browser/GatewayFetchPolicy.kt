@@ -182,9 +182,14 @@ internal const val GATEWAY_CONNECT_TIMEOUT_MS = 5_000
  * connect gets [connectMs] (the connect timeout plus `main`'s read
  * timeout, `main`'s own bound) and no more: then it is disconnected from
  * another thread, which aborts a `connect()` mid-handshake, and cut again
- * every [RECUT_MS] until it returns, since a cut landing before the
- * connection object exists (still looking the name up) is missed. No
- * slot extends this stretch.
+ * every [RECUT_MS] until it returns, in case a cut lands between steps of
+ * the connect and a later one blocks again. The name is looked up before
+ * this stretch starts ([TorRouting.openFollowingRedirects] does it ahead
+ * of [connecting], so the connect finds it cached): lookup time comes on
+ * top, as on `main`, where no limit covered it. (A cut that does land
+ * during the connection's own lookup isn't lost — the connection is
+ * marked cancelled and fails once the lookup returns.) No slot extends
+ * this stretch.
  *
  * **Headers** ([connected] to [answered]): each hop gets the same
  * [baseMs] the read timeout always gave it, and name lookups between hops

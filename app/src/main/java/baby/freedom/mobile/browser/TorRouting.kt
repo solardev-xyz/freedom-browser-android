@@ -649,7 +649,10 @@ object TorRouting {
      * takes in the TLS handshake and a SOCKS proxy's reply), when it is up
      * ([HopWatcher.connected]) and when its response headers are in
      * ([HopWatcher.answered]) — the stretches a header deadline should
-     * time, without the name lookups between hops.
+     * time, without name lookups: those between hops, and the one the
+     * connection itself would run inside `connect()`, which is done ahead
+     * of [HopWatcher.connecting] ([lookUpAhead]) so the connect finds the
+     * name cached.
      */
     fun openFollowingRedirects(
         url: URL,
@@ -714,6 +717,12 @@ object TorRouting {
                 }
                 val c = conn ?: throw IOException(Strings.get(R.string.node_fetch_not_http, current))
                 if (hops != null) {
+                    // The connection's own lookup of the name runs inside
+                    // its connect(), so look it up first, off the clock: the
+                    // connect then finds it cached and the stretch the
+                    // watcher times is the connect and handshake alone, with
+                    // lookup time on top, as on main (PR #409 R4-M1).
+                    if (pinned == null) lookUpAhead(current, route)
                     hops.connecting(c)
                     c.connect()
                     hops.connected(c)
@@ -747,6 +756,35 @@ object TorRouting {
             }
         }
         throw IOException(Strings.get(R.string.node_fetch_too_many_redirects))
+    }
+
+    /**
+     * Look up the name [hop]'s connection would look up itself inside its
+     * `connect()`, so that a [HopWatcher] timing the connect doesn't time
+     * a slow resolver too: the connection, right after, finds the answer in
+     * the system's cache (libcore's and netd's), as it would any name it had
+     * just resolved. Only for a hop dialed straight from here — through
+     * [route], or the system proxy selector's choice when `null` — since
+     * through a proxy, or to Tor, the name is the proxy's to resolve and
+     * mustn't be looked up on this device. Nothing for an IP literal. A
+     * failed lookup is left for the connection to meet and report as it
+     * always did.
+     */
+    private fun lookUpAhead(hop: URL, route: Proxy?) {
+        if (fetchMayReachOnion(hop)) return
+        val direct = if (route != null) {
+            route.type() == Proxy.Type.DIRECT
+        } else {
+            val uri = selectorUri(hop) ?: return
+            runCatching { proxiesFor(uri) }.getOrNull()?.all { it.type() == Proxy.Type.DIRECT } ?: false
+        }
+        if (!direct) return
+        val raw = okHttpHost(hop.toString())?.takeIf { it.isNotEmpty() && !it.startsWith("[") } ?: return
+        val name = runCatching { IDN.toASCII(percentDecodeUtf8(raw)) }.getOrNull()?.lowercase()?.trimEnd('.') ?: return
+        if (name.isEmpty() || name.split('.').let { p -> p.size == 4 && p.all { o -> o.isNotEmpty() && o.all { it in '0'..'9' } } }) {
+            return
+        }
+        runCatching { resolve(name) }
     }
 
     /**
