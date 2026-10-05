@@ -20,13 +20,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 private const val LOG_TAG = "BlobDownloads"
 
 /**
- * How long the frames of a blob's origin get to say whether they hold it
- * — counted from when the last of them was asked, since they're asked
- * one at a time ([PREPARE_STEP_MS]; #408 R4-M2) — and, once one said
- * it's taking hold of it ([BlobMessage.Working]), which for a big file
- * copied in the page takes a while, to finish. At most
- * [FRAMES_PER_ORIGIN] frames are asked, so the first wait is at most
- * 7 s + 5 s.
+ * The deadlines of a [BlobDownloads.prepare]. The frames of a blob's
+ * origin are asked one at a time, the next [PREPARE_STEP_MS] after the
+ * last unless it answered first; the ask fails [PREPARE_TIMEOUT_MS]
+ * after the last frame was asked (#408 R4-M2) — at most
+ * [FRAMES_PER_ORIGIN] are, so at most 7 s + 5 s = 12 s while no frame
+ * says it's working. A frame that says it's taking hold of the file
+ * ([BlobMessage.Working]; a big copy takes a while) gets
+ * [PREPARE_WORKING_TIMEOUT_MS] counted from when *it* said so, not from
+ * the start (#408 R5-M1). If that frame then fails, the next frame is
+ * asked and the 5 s count starts again from that ask; so each frame adds
+ * at most 1 s, or 30 s if it works on the file and then fails.
  */
 private const val PREPARE_TIMEOUT_MS = 5_000L
 private const val PREPARE_WORKING_TIMEOUT_MS = 30_000L
@@ -149,8 +153,10 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
         private val answered = HashSet<JavaScriptReplyProxy>()
         private val working = HashSet<JavaScriptReplyProxy>()
         private var current: JavaScriptReplyProxy? = null
-        private val startedAt = SystemClock.uptimeMillis()
-        private var lastAskedAt = startedAt
+        private var lastAskedAt = SystemClock.uptimeMillis()
+
+        /** When a frame last said it's working on the file. */
+        private var workingSince = 0L
         var resolved = false
 
         /** A frame said the page's CSP refuses reading `blob:` URLs ([BLOB_REFUSED]). */
@@ -173,7 +179,7 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
         }
 
         fun working(frame: JavaScriptReplyProxy) {
-            if (frame in asked && frame !in answered) working += frame
+            if (frame in asked && frame !in answered && working.add(frame)) workingSince = SystemClock.uptimeMillis()
         }
 
         /** [frame] can't hand the file over ([code]). */
@@ -199,25 +205,20 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
         }
 
         /**
-         * The deadline: [PREPARE_TIMEOUT_MS] after the last frame was
-         * asked — not before every frame has been (#408 R4-M2) — or
-         * longer while a frame is taking hold of the file.
+         * The deadline ([PREPARE_TIMEOUT_MS]): [PREPARE_WORKING_TIMEOUT_MS]
+         * after a frame last said it's working, while one is; otherwise
+         * [PREPARE_TIMEOUT_MS] after the last frame was asked — not before
+         * every frame has been (#408 R4-M2).
          */
         fun expire() {
-            if (!resolved && working.isEmpty() && queue.isNotEmpty()) {
-                // Frames still to ask: the step timers ask them.
-                main.postDelayed(::expire, PREPARE_STEP_MS)
-                return
-            }
-            if (!resolved && working.isEmpty()) {
-                val left = lastAskedAt + PREPARE_TIMEOUT_MS - SystemClock.uptimeMillis()
-                if (left > 0) {
-                    main.postDelayed(::expire, left)
-                    return
+            if (!resolved) {
+                val now = SystemClock.uptimeMillis()
+                val left = when {
+                    working.isNotEmpty() -> workingSince + PREPARE_WORKING_TIMEOUT_MS - now
+                    // Frames still to ask: the step timers ask them.
+                    queue.isNotEmpty() -> PREPARE_STEP_MS
+                    else -> lastAskedAt + PREPARE_TIMEOUT_MS - now
                 }
-            }
-            if (!resolved && working.isNotEmpty()) {
-                val left = startedAt + PREPARE_WORKING_TIMEOUT_MS - SystemClock.uptimeMillis()
                 if (left > 0) {
                     main.postDelayed(::expire, left)
                     return
@@ -290,7 +291,8 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
         val ask = preparing[ready.token]
         if (ask == null) {
             // Too late — the ask expired (a copy that took longer than
-            // [PREPARE_WORKING_TIMEOUT_MS]) — or a token nobody asked
+            // [PREPARE_WORKING_TIMEOUT_MS]) or its document went
+            // ([documentChanged], #408 R5-M2) — or a token nobody asked
             // this frame about: either way, it lets go now rather than
             // holding the file for the page's whole hold time (#408
             // R4-M1). Only the file this frame holds under the token
@@ -320,9 +322,10 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
     /**
      * The tab offers [url], a `blob:` download: find the frame that can
      * read it and have it hold the file. [answer] gets what it said (or
-     * why nothing could), on the main thread, once — within
-     * [PREPARE_TIMEOUT_MS], or [PREPARE_WORKING_TIMEOUT_MS] once a frame
-     * is taking hold of it. Main thread.
+     * why nothing could), on the main thread, once — by the deadlines
+     * of [PREPARE_TIMEOUT_MS] (12 s at most while no frame is working on
+     * the file), or at once if the document changes first
+     * ([documentChanged]). Main thread.
      */
     fun prepare(url: String, answer: (BlobSource) -> Unit) {
         val origin = blobUrlOrigin(url)
@@ -349,12 +352,19 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
      * The tab's main frame committed a new document (`onPageStarted`):
      * every frame of the old one — and every file one of them held — is
      * gone. Downloads reading one fail at once ("The page that made this
-     * file is closed") instead of after [CHUNK_TIMEOUT_MS]. The frames
+     * file is closed") instead of after [CHUNK_TIMEOUT_MS], and so do
+     * asks still waiting for an answer: an old frame's "I have it" that
+     * crosses the commit is told to let go ([onReady]) instead of making
+     * an offer whose Accept would wait out [CHUNK_TIMEOUT_MS] (#408
+     * R5-M2). The frames
      * list stays: the new document's frames may already have said hello
      * (it's emptied by the new main frame's own hello, [hello]).
      * Main thread.
      */
     fun documentChanged() {
+        val asks = preparing.values.toList()
+        preparing.clear()
+        for (ask in asks) finish(ask, FailedBlob(DownloadNote.of(R.string.library_download_blob_page_closed)))
         for (blob in held.values.toList()) blob.pageGone()
         held.clear()
     }

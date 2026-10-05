@@ -300,6 +300,31 @@ class BlobDownloadsDeviceTest {
     }
 
     /**
+     * #408 R5-M2: a main-frame commit (`onPageStarted`) while an ask is
+     * still waiting fails it at once as "closed", and the old frame's
+     * "I have it" that crosses the commit makes no offer: the answer
+     * comes once, and it's the failure.
+     */
+    @Test
+    fun aDocumentChangeFailsAnOpenAskAtOnce() {
+        load("http://a.test/")
+        val url = makeAndClick(revoke = false)
+        val answers = java.util.Collections.synchronizedList(ArrayList<BlobSource>())
+        val startedAt = System.currentTimeMillis()
+        instrumentation.runOnMainSync {
+            downloads.prepare(url) { answers += it }
+            downloads.documentChanged()
+        }
+        val took = System.currentTimeMillis() - startedAt
+        // Long enough for the frame's own answer to have come back.
+        Thread.sleep(3_000)
+        instrumentation.runOnMainSync { }
+        assertEquals(answers.toString(), 1, answers.size)
+        assertTrue("took $took ms", took < 1_000)
+        assertEquals(DownloadNote.of(R.string.library_download_blob_page_closed), answers[0].failure)
+    }
+
+    /**
      * #408 R4-M2: frames are asked one at a time, a second each when they
      * don't answer, so six removed same-origin frames asked before the
      * one holding the file used to run out the 5 s deadline first. The
