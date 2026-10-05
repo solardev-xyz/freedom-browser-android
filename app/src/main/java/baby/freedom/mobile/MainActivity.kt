@@ -225,6 +225,17 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
      */
     private var swarmMode: SwarmRelay? = null
 
+    /**
+     * "Pay peers from the chequebook", relayed to `:node` on every bind and
+     * every change; null until first read. Main thread only.
+     */
+    private var swapEnabled: Boolean? = null
+
+    private fun relaySwapEnabled(b: INodeService?, enabled: Boolean?) {
+        enabled ?: return
+        runCatching { b?.setSwapEnabled(enabled) }
+    }
+
     private fun relaySwarmMode(b: INodeService?, relay: SwarmRelay?) {
         relay ?: return
         val gnosis = relay.gnosis
@@ -365,6 +376,9 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
             // The mode (#114) first, so the identity check below already
             // compares against it rather than restarting the node twice.
             relaySwarmMode(b, swarmMode)
+            // ant forgets the pay-peers switch at every init: `:node`
+            // applies the latest relayed value after each one.
+            relaySwapEnabled(b, swapEnabled)
             // A wallet change made while unbound (#77).
             runCatching { b.reloadIdentity() }
             // The Radicle on/off setting lives here, in the UI process's
@@ -510,6 +524,15 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                     swarmMode = mode
                     relaySwarmMode(binder, mode)
                 }
+        }
+
+        // "Pay peers from the chequebook" follows its setting live: `:node`
+        // flips the running node at once and re-applies it after every init.
+        lifecycleScope.launch {
+            settings.swarmSwapEnabled.distinctUntilChanged().collect { enabled ->
+                swapEnabled = enabled
+                relaySwapEnabled(binder, enabled)
+            }
         }
 
         // The Myotis light client (#72, off by default) follows its

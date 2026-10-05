@@ -147,6 +147,44 @@ class NodeSettings private constructor(
     }
 
     /**
+     * Whether the Swarm node pays peers from its chequebook ("Pay peers
+     * from the chequebook" on the Chequebook page): bee's swap-enable,
+     * for faster downloads and uploads than the free tier. On by default,
+     * as in bee, ant and desktop (`antSwapEnable`). ant doesn't persist
+     * it, so this is the record: `MainActivity` relays it to the `:node`
+     * process on every bind and every change
+     * ([baby.freedom.mobile.node.INodeService.setSwapEnabled]), and the
+     * node applies it after every init.
+     */
+    val swarmSwapEnabled: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.SWARM_SWAP_ENABLED] ?: true
+    }
+
+    suspend fun setSwarmSwapEnabled(enabled: Boolean) {
+        store.edit { it[Keys.SWARM_SWAP_ENABLED] = enabled }
+    }
+
+    /**
+     * Chequebooks (lowercase `0x` addresses) whose lost cheque ledger the
+     * user confirmed on the Chequebook page. Once confirmed, ant stops
+     * reporting the loss and counts only the cheques written since, so its
+     * `availableBalance` reads higher than what is really left; ant keeps
+     * no sign of that the page can read, so this is the record the page
+     * uses to keep calling the credit an upper bound. Written *before* the
+     * node is asked to confirm ([baby.freedom.mobile.browser.confirmLostLedger]),
+     * so a confirmation that lands late or unseen is still on record; an
+     * entry for one that never landed is ignored while the loss is reported.
+     */
+    val swarmConfirmedLedgers: Flow<Set<String>> = store.data.map { prefs ->
+        prefs[Keys.SWARM_CONFIRMED_LEDGERS].orEmpty()
+    }
+
+    suspend fun addSwarmConfirmedLedger(chequebook: String) {
+        val key = chequebook.lowercase()
+        store.edit { it[Keys.SWARM_CONFIRMED_LEDGERS] = it[Keys.SWARM_CONFIRMED_LEDGERS].orEmpty() + key }
+    }
+
+    /**
      * Whether the embedded Radicle node should run (#73). Off by default,
      * as on iOS: it's a publish-capable node that creates an identity key
      * and dials Radicle seeds, so it starts only once the user asks. The UI
@@ -723,6 +761,8 @@ class NodeSettings private constructor(
         val ASK_WHERE_TO_SAVE = booleanPreferencesKey("ask_where_to_save")
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SWARM_NODE_MODE = stringPreferencesKey("swarm_node_mode")
+        val SWARM_SWAP_ENABLED = booleanPreferencesKey("swarm_swap_enabled")
+        val SWARM_CONFIRMED_LEDGERS = stringSetPreferencesKey("swarm_confirmed_ledgers")
         /** Both chains' start at launch before #274; see [myotisStartOnLaunch]. */
         val LEGACY_MYOTIS_ENABLED = booleanPreferencesKey("myotis_enabled")
         private val MYOTIS_START_ON_LAUNCH = MyotisNetwork.entries.associateWith {

@@ -94,6 +94,14 @@ class NodeService : Service() {
     /** The newest [modeRelays] number applied to [relayedMode]. Guarded by [modeRelays]. */
     private var appliedModeRelay = 0L
 
+    /**
+     * "Pay peers from the chequebook" as the UI last relayed it through
+     * [INodeService.setSwapEnabled]; null until it has, when a boot reads
+     * the persisted setting itself ([swapEnabled]).
+     */
+    @Volatile
+    private var relayedSwap: Boolean? = null
+
     /** The mode the launch now booting read, handed to [SwarmNode.Config.mode] right after its identity. */
     @Volatile
     private var launchMode: SwarmNode.Mode = SwarmNode.Mode.ULTRA_LIGHT
@@ -282,6 +290,11 @@ class NodeService : Service() {
             }
         }
 
+        override fun setSwapEnabled(enabled: Boolean) {
+            relayedSwap = enabled
+            swarmNode.setSwapEnabled(enabled)
+        }
+
         override fun getRadicleState(): RadicleInfo = radicleNode.state.value
 
         override fun startRadicle() {
@@ -435,6 +448,14 @@ class NodeService : Service() {
         }
         return when (method) {
             "status" -> swarmNode.storageStatus()
+            "swapStatus" -> swarmNode.swapStatus()
+            // Not a spend, but it lets the node pay again: the Chequebook
+            // page sends it only from its warning's confirmation.
+            "confirmLiability" -> {
+                Log.i(TAG, "confirming a lost cheque ledger's outstanding cheques, as the user confirmed")
+                val confirmed = swarmNode.confirmChequeLiability(args.getString("chequebook"))
+                JSONObject().put("confirmed", confirmed).toString()
+            }
             "quote" -> {
                 val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }
                 swarmNode.storageQuote(depth, days())
@@ -562,6 +583,20 @@ class NodeService : Service() {
     } catch (e: Exception) {
         Log.w(TAG, "reading the swarm mode failed (${e.javaClass.simpleName}); ultra-light")
         SwarmNode.Mode.ULTRA_LIGHT
+    }
+
+    /**
+     * "Pay peers from the chequebook": the UI's latest
+     * [INodeService.setSwapEnabled], or — before this process has heard
+     * one, as on its first boot — the persisted setting, read here as
+     * [swarmMode] reads the mode. On (ant's default) when it can't be read.
+     * Blocking: called from a launch's IO thread.
+     */
+    private fun swapEnabled(): Boolean = relayedSwap ?: try {
+        runBlocking { NodeSettings.get(this@NodeService).swarmSwapEnabled.first() }
+    } catch (e: Exception) {
+        Log.w(TAG, "reading the pay-peers setting failed (${e.javaClass.simpleName}); on")
+        true
     }
 
     /**
@@ -714,6 +749,7 @@ class NodeService : Service() {
                     }
                 },
                 mode = { launchMode },
+                swapEnabled = ::swapEnabled,
             ),
         )
 

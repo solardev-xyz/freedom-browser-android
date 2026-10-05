@@ -465,6 +465,47 @@ Java_baby_freedom_swarm_AntNative_settlementStatus(JNIEnv *env, jobject thiz, jl
     return json_or_throw(env, json, err, "ant_storage_settlement_status failed");
 }
 
+/*
+ * Paid downloads (browsing credit): bee's swap-enable for the running node — not
+ * persisted by ant, so SwarmNode sets it after every init — its SWAP
+ * state, and the operator's confirmation after a lost cheque ledger.
+ */
+JNIEXPORT void JNICALL
+Java_baby_freedom_swarm_AntNative_setSwapEnabled(JNIEnv *env, jobject thiz, jlong handle, jboolean enabled) {
+    (void)thiz;
+    char *err = NULL;
+    int rc = ant_set_swap_enabled((const AntHandle *)(uintptr_t)handle, enabled == JNI_TRUE, &err);
+    if (rc != 0) {
+        throw_runtime(env, err, "ant_set_swap_enabled failed");
+    }
+}
+
+JNIEXPORT jstring JNICALL
+Java_baby_freedom_swarm_AntNative_swapStatus(JNIEnv *env, jobject thiz, jlong handle) {
+    (void)thiz;
+    char *err = NULL;
+    char *json = ant_swap_status((const AntHandle *)(uintptr_t)handle, &err);
+    return json_or_throw(env, json, err, "ant_swap_status failed");
+}
+
+/* 0 confirmed, 1 nothing to confirm; throws on -1/-2. */
+JNIEXPORT jint JNICALL
+Java_baby_freedom_swarm_AntNative_confirmChequeLiability(JNIEnv *env, jobject thiz, jlong handle,
+                                                         jstring chequebook) {
+    (void)thiz;
+    const char *cb = (*env)->GetStringUTFChars(env, chequebook, NULL);
+    if (cb == NULL) return -1; /* OOM — exception already pending */
+    char *err = NULL;
+    int rc = ant_confirm_cheque_liability((const AntHandle *)(uintptr_t)handle, cb, &err);
+    (*env)->ReleaseStringUTFChars(env, chequebook, cb);
+    if (rc < 0) {
+        throw_runtime(env, err, "ant_confirm_cheque_liability failed");
+        return rc;
+    }
+    ant_free_string(err);
+    return rc;
+}
+
 JNIEXPORT jstring JNICALL
 Java_baby_freedom_swarm_AntNative_storageQuote(JNIEnv *env, jobject thiz, jlong handle,
                                                jstring gnosis_rpc, jint depth, jlong days) {

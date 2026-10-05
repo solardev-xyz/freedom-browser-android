@@ -73,6 +73,26 @@ internal object AntNative {
      */
     external fun settlementStatus(handle: Long): String
 
+    /**
+     * `ant_set_swap_enabled` (paid downloads): bee's swap-enable, paying peers with
+     * cheques from the chequebook for downloads and uploads. Not persisted
+     * by ant: it resets at every [init].
+     */
+    external fun setSwapEnabled(handle: Long, enabled: Boolean)
+
+    /**
+     * `ant_swap_status`: `{"supported","swap_switch","swap_enabled",
+     * "paying","chequebook","persisted"}`. Never blocks on the network.
+     */
+    external fun swapStatus(handle: Long): String
+
+    /**
+     * `ant_confirm_cheque_liability`: accept [chequebook]'s outstanding
+     * cheques after the node's cheque ledger was lost, so it pays again.
+     * 0 confirmed, 1 nothing to confirm; throws otherwise.
+     */
+    external fun confirmChequeLiability(handle: Long, chequebook: String): Int
+
     /** `ant_storage_quote`: what a [depth]-deep batch lasting [days] costs. No transaction. */
     external fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String
 

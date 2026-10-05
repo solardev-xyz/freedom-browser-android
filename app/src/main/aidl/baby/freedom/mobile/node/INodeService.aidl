@@ -95,6 +95,15 @@ interface INodeService {
      */
     void setSwarmMode(boolean light, String gnosisRpc, in List<String> gnosisUserRpcs, in List<String> gnosisRpcs);
 
+    /**
+     * "Pay peers from the chequebook" (bee's swap-enable, for downloads
+     * and uploads): the setting lives in the UI process's DataStore, so
+     * the UI relays it on every bind and whenever it changes. The service
+     * sets it on the running node at once, and after every later init
+     * (ant doesn't persist it).
+     */
+    void setSwapEnabled(boolean enabled);
+
     RadicleInfo getRadicleState();
 
     /**
@@ -135,8 +144,10 @@ interface INodeService {
 
     /**
      * Postage stamps (#116) and the chequebook (#117): `method` is one of
-     * `status`, `quote`, `extendQuote`, `discover`
-     * (no transaction) or `buy`, `extend`, `deposit` (SPEND, from the stamp
+     * `status`, `quote`, `extendQuote`, `discover`,
+     * `swapStatus` (no transaction), `confirmLiability` (accepts a lost
+     * cheque ledger's outstanding cheques, from the Chequebook page's
+     * confirmation only; no transaction) or `buy`, `extend`, `deposit` (SPEND, from the stamp
      * and chequebook screens' confirmation only), or `connect` (#115:
      * registers a batch the wallet bought for the node; a first one also
      * sets up the chequebook) — with

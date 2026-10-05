@@ -60,6 +60,7 @@ class SwarmNodeTest {
         val gatewayCors: MutableList<List<String>> = Collections.synchronizedList(mutableListOf())
         override fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String, corsOrigins: List<String>) {
             calls += "gateway:$handle"
+            gatewayStarted += handle
             gatewayCors += corsOrigins
             if (gatewayStartsLeft-- <= 0) throw RuntimeException("bind failed")
             gatewayModes += if (lightMode) "light:$gnosisRpc" else "ultra-light:$gnosisRpc"
@@ -132,6 +133,30 @@ class SwarmNodeTest {
             calls += "discover:$handle:$gnosisRpc"
             onDiscover()
             return """{"registered":[]}"""
+        }
+
+        /** Handles whose gateway has started. */
+        val gatewayStarted: MutableSet<Long> = Collections.synchronizedSet(mutableSetOf())
+        /**
+         * Each [setSwapEnabled], as `handle:enabled`, with `+gw` when that
+         * handle's gateway had already started. Apart from [calls], whose
+         * exact sequence other tests pin.
+         */
+        val swapCalls: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        /** Whether [setSwapEnabled] throws, as ant's -2 does. */
+        @Volatile var swapFails = false
+        @Volatile var swapStatusJson = """{"supported":true,"swap_switch":true,"swap_enabled":true,"paying":false,"chequebook":null,"persisted":false}"""
+        /** What [confirmChequeLiability] returns; each call recorded as `handle:chequebook`. */
+        @Volatile var confirmResult = 0
+        val confirms: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        override fun setSwapEnabled(handle: Long, enabled: Boolean) {
+            swapCalls += "$handle:$enabled" + if (handle in gatewayStarted) "+gw" else ""
+            if (swapFails) throw RuntimeException("node loop gone")
+        }
+        override fun swapStatus(handle: Long) = swapStatusJson
+        override fun confirmChequeLiability(handle: Long, chequebook: String): Int {
+            confirms += "$handle:$chequebook"
+            return confirmResult
         }
 
         /** The gateway's chequebook, 40 hex (all zeros for none), and the account's xBZZ in PLUR. */
@@ -1032,6 +1057,120 @@ class SwarmNodeTest {
         assertEquals(before, ops.chequebookHex)
         assertNoGatewayRestart(ops)
         assertEquals(NodeStatus.Running, node.state.value.status)
+        node.dispose()
+    }
+
+    private fun awaitSwapCalls(ops: FakeOps, n: Int) {
+        val until = System.currentTimeMillis() + 5_000
+        while (ops.swapCalls.size < n && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertEquals(ops.swapCalls.toString(), n, ops.swapCalls.size)
+    }
+
+    @Test
+    fun theSavedPayPeersSettingIsAppliedAtEveryInitBeforeTheGatewayStarts() {
+        // ant doesn't persist swap-enable: a node the user switched off
+        // must be set off again after each init, before the gateway's
+        // chain init lets it start paying.
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config.copy(swapEnabled = { false }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        awaitSwapCalls(ops, 2)
+        assertEquals(listOf("1:false", "1:false+gw"), ops.swapCalls.toList())
+        ops.nextHandle = 2
+        node.restart()
+        awaitStatus(node, NodeStatus.Running)
+        awaitSwapCalls(ops, 4)
+        assertEquals(listOf("2:false", "2:false+gw"), ops.swapCalls.drop(2))
+        node.dispose()
+    }
+
+    @Test
+    fun theSwitchFlipsTheRunningNodeLiveAndOutlivesARestart() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config.copy(swapEnabled = { true }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        awaitSwapCalls(ops, 2)
+        node.setSwapEnabled(false)
+        awaitSwapCalls(ops, 3)
+        assertEquals("1:false+gw", ops.swapCalls[2])
+        // The setting store (still on here) isn't re-read over the user's
+        // latest choice, which the app also saved.
+        ops.nextHandle = 2
+        node.restart()
+        awaitStatus(node, NodeStatus.Running)
+        awaitSwapCalls(ops, 5)
+        assertEquals(listOf("2:false", "2:false+gw"), ops.swapCalls.drop(3))
+        node.dispose()
+    }
+
+    @Test
+    fun aSwitchFlippedWhileStoppedReachesNoNodeUntilTheNextStart() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        node.setSwapEnabled(false)
+        Thread.sleep(200)
+        assertTrue(ops.swapCalls.toString(), ops.swapCalls.isEmpty())
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        awaitSwapCalls(ops, 2)
+        assertTrue(ops.swapCalls.toString(), ops.swapCalls.all { it.contains(":false") })
+        node.dispose()
+    }
+
+    @Test
+    fun aSwitchFlippedDuringStartupIsAppliedOnceTheNodeIsUp() {
+        // The first apply (before the gateway) read the old value; the
+        // toggle found no published handle; the apply after publishing
+        // must catch it up.
+        val ops = FakeOps()
+        val node = SwarmNode(config.copy(swapEnabled = { true }), ops)
+        node.start()
+        ops.releaseSeed.countDown()
+        assertTrue(ops.initEntered.await(5, TimeUnit.SECONDS))
+        node.setSwapEnabled(false)
+        ops.releaseInit.countDown()
+        awaitStatus(node, NodeStatus.Running)
+        val until = System.currentTimeMillis() + 5_000
+        while (ops.swapCalls.lastOrNull() != "1:false+gw" && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertEquals(ops.swapCalls.toString(), "1:false+gw", ops.swapCalls.last())
+        node.dispose()
+    }
+
+    @Test
+    fun aFailedSwitchDoesNotFailTheStart() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown(); swapFails = true }
+        val node = SwarmNode(config.copy(swapEnabled = { false }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        node.dispose()
+    }
+
+    @Test
+    fun swapStatusIsAntsAnswerAndNeedsARunningNode() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        assertThrows(IllegalStateException::class.java) { node.swapStatus() }
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(ops.swapStatusJson, node.swapStatus())
+        node.dispose()
+    }
+
+    @Test
+    fun confirmingALostLedgerIsOnlyForTheChequebookTheNodeRuns() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown(); chequebookHex = "ab".repeat(20) }
+        val node = SwarmNode(config.copy(mode = { SwarmNode.Mode.light("https://rpc.example") }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertThrows(IllegalArgumentException::class.java) { node.confirmChequeLiability("0x1234") }
+        assertThrows(IllegalStateException::class.java) { node.confirmChequeLiability("0x" + "cd".repeat(20)) }
+        assertTrue(ops.confirms.isEmpty())
+        assertTrue(node.confirmChequeLiability("0x" + "AB".repeat(20)))
+        assertEquals(listOf("1:0x" + "ab".repeat(20)), ops.confirms.toList())
+        ops.confirmResult = 1
+        assertFalse(node.confirmChequeLiability("0x" + "ab".repeat(20)))
         node.dispose()
     }
 }
