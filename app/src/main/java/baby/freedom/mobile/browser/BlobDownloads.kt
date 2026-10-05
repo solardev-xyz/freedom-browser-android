@@ -93,6 +93,14 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
     ) {
         var answered = 0
         var resolved = false
+
+        /** A frame said the page's CSP refuses reading `blob:` URLs ([BLOB_REFUSED]). */
+        var refused = false
+
+        /** Why no frame could hand the file over, once some answered. */
+        fun whyNot(): String = DownloadNote.of(
+            if (refused) R.string.library_download_blob_refused else R.string.library_download_blob_gone,
+        )
     }
 
     private fun onMessage(message: WebMessageCompat, sourceOrigin: Uri, isMainFrame: Boolean, reply: JavaScriptReplyProxy) {
@@ -109,11 +117,10 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
                 // frame couldn't read, even within the prepare window —
                 // is the held file's.
                 val ask = preparing[parsed.token]
-                if (parsed.code == BLOB_GONE && ask != null && !ask.resolved && reply in ask.asked) {
+                if ((parsed.code == BLOB_GONE || parsed.code == BLOB_REFUSED) && ask != null && !ask.resolved && reply in ask.asked) {
                     ask.answered++
-                    if (ask.answered >= ask.asked.size) {
-                        finish(ask, FailedBlob(DownloadNote.of(R.string.library_download_blob_gone)))
-                    }
+                    if (parsed.code == BLOB_REFUSED) ask.refused = true
+                    if (ask.answered >= ask.asked.size) finish(ask, FailedBlob(ask.whyNot()))
                     return
                 }
                 held[parsed.token]?.takeIf { it.proxy === reply }?.pageFailed()
@@ -180,9 +187,7 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
                 finish(
                     ask,
                     FailedBlob(
-                        DownloadNote.of(
-                            if (ask.answered > 0) R.string.library_download_blob_gone else R.string.library_download_blob_unreachable,
-                        ),
+                        if (ask.answered > 0) ask.whyNot() else DownloadNote.of(R.string.library_download_blob_unreachable),
                     ),
                 )
             }
@@ -340,17 +345,32 @@ private val BLOB_ORIGIN_RULES: Set<String> = setOf("*")
  * It does nothing until the page clicks a `blob:` link or Kotlin asks:
  * a capture-phase `click` listener on `window` (registered first, before
  * any of the page's) takes hold of a clicked `<a>`/`<area>`'s `blob:`
- * file at once — an `XMLHttpRequest` resolves a blob URL at `open()`, so
- * a revoke after the click doesn't matter — and keeps it, with the
- * link's `download` attribute, for [BLOB_CAPTURE_MS]; a file Kotlin asked
- * it to hold is kept until Kotlin lets go, or [BLOB_HOLD_MS] after its
- * last chunk at most.
+ * file at once by *opening* (not sending) an `XMLHttpRequest` for it —
+ * `open()` resolves a blob URL then, so a revoke after the click doesn't
+ * matter — and keeps it, with the link's `download` attribute, for
+ * [BLOB_CAPTURE_MS]; a file Kotlin asked it to hold is kept until Kotlin
+ * lets go, or [BLOB_HOLD_MS] after its last chunk at most.
+ *
+ * **Nothing is fetched on a click** (#408 R2-F1): reading a `blob:` URL
+ * is checked against the page's `connect-src`, which a plain
+ * `default-src 'self'` refuses, and a refusal fires a
+ * `securitypolicyviolation` event and sends the site a CSP report — no
+ * other browser reads a clicked link's file, so that would tell any such
+ * site it runs in Freedom. `open()` checks nothing; the request is only
+ * sent once Kotlin asks for the file, which it does only for a download
+ * the tab actually offered (`DownloadListener`). On a site whose CSP
+ * refuses it, that one read is refused (the site's own report names a
+ * download it has just started) and the download fails as
+ * [BLOB_REFUSED]; the reader then tries no further read in that
+ * document. Its own `securitypolicyviolation` listener only notes the
+ * refusal; it doesn't hide it from the page.
  *
  * **Nothing the page wraps later sees it** (the cosmetic script's
  * technique, #368): every native it calls after document start was saved
  * then and is called through a `Function.prototype.call` bound then —
  * `XMLHttpRequest`'s `open` / `send` / `responseType` / `status` /
- * `response`, `Blob.prototype.slice` and the `size` / `type` getters,
+ * `response`, `SecurityPolicyViolationEvent`'s `blockedURI` /
+ * `effectiveDirective`, `Blob.prototype.slice` and the `size` / `type` getters,
  * `FileReader`'s `readAsArrayBuffer` / `readAsDataURL` / `result`,
  * `ArrayBuffer`'s `byteLength`, `Event.prototype.composedPath`, the
  * `tagName`, `href` and `download` getters, `String.prototype.indexOf` /
@@ -389,7 +409,7 @@ internal fun blobReaderJs(channel: String): String {
     return (x && un(x.set)) || function (o, v) { o[n] = v; };
   };
   var P = function (C) { return C && C.prototype; };
-  var send = un(port.postMessage), setT = w.setTimeout, clearT = w.clearTimeout, now = Date.now;
+  var send = un(port.postMessage), setT = w.setTimeout, clearT = w.clearTimeout;
   var FR = w.FileReader, U8 = w.Uint8Array, AB = w.ArrayBuffer, TA = gpo(P(U8));
   var B = P(w.Blob), S = String.prototype, X = w.XMLHttpRequest, XP = P(X), RP = P(FR);
   var n = {
@@ -399,48 +419,72 @@ internal fun blobReaderJs(channel: String): String {
     areaHref: prop(P(w.HTMLAreaElement), 'href'), areaName: prop(P(w.HTMLAreaElement), 'download'),
     on: method(P(w.EventTarget), 'addEventListener'), u8set: method(TA, 'set'), len: prop(TA, 'length'),
     data: prop(P(w.MessageEvent), 'data'),
+    vUri: prop(P(w.SecurityPolicyViolationEvent), 'blockedURI'),
+    vDir: prop(P(w.SecurityPolicyViolationEvent), 'effectiveDirective'),
     xOpen: method(XP, 'open'), xSend: method(XP, 'send'), xType: setter(XP, 'responseType'),
     xStatus: prop(XP, 'status'), xBody: prop(XP, 'response'),
     abLen: prop(P(AB), 'byteLength'),
     asData: method(RP, 'readAsDataURL'), asBytes: method(RP, 'readAsArrayBuffer'), result: prop(RP, 'result'),
-    at: un(S.indexOf), cut: un(S.substring), code: un(S.charCodeAt), call: un(fcall), clock: un(now)
+    at: un(S.indexOf), cut: un(S.substring), code: un(S.charCodeAt), call: un(fcall)
   };
   function post(m) { try { send(port, m); } catch (e) {} }
-  function time() { return n.clock ? n.clock(Date) : 0; }
   function later(f, ms) { return n.call(setT, w, f, ms); }
   function cancel(t) { if (t) n.call(clearT, w, t); }
   function starts(s, p) { return typeof s === 'string' && n.cut(s, 0, p.length) === p; }
-  // Clicked blob: links (url -> {name, t, blob, done, wait}) and files held for Kotlin (token -> {b, mode, timer}).
+  // Clicked blob: links (url -> {name, x}) and files held for Kotlin (token -> {b, mode, timer}).
   var caps = mk(null), held = mk(null);
-  // url's file, to done(blob) or done(null). An XMLHttpRequest, not
-  // fetch(): nothing here makes or awaits a promise, so a page watching
-  // Promise.prototype (its constructor, then) sees nothing of it.
-  // XMLHttpRequest resolves a blob: URL at open(), as fetch() does at
-  // its call, so a revoke right after still reads the file.
-  function readUrl(url, done) {
-    var x = null, over = false;
-    function end(b) { if (!over) { over = true; done(b); } }
+  // Set once this document's Content-Security-Policy is seen refusing a
+  // blob: read (connect-src): no read is tried after that.
+  var refused = false;
+  n.on(w, 'securitypolicyviolation', function (e) {
     try {
-      x = new X();
+      if (n.vUri(e) === 'blob' && starts(n.vDir(e), 'connect-src')) refused = true;
+    } catch (x) {}
+  }, true);
+  // An XMLHttpRequest for url's file, opened but not sent: open()
+  // resolves a blob: URL at once, so a revoke after it doesn't matter,
+  // and it doesn't fetch anything — no Content-Security-Policy check
+  // (connect-src, which refuses blob: under a plain default-src 'self'),
+  // so no securitypolicyviolation event and no CSP report for a click
+  // that never becomes a download (#408 R2-F1). Null if it can't be.
+  // An XMLHttpRequest, not fetch(): nothing here makes or awaits a
+  // promise, so a page watching Promise.prototype (its constructor,
+  // then) sees nothing of it.
+  function openUrl(url) {
+    try {
+      var x = new X();
       n.xOpen(x, 'GET', url);
       n.xType(x, 'blob');
+      return x;
+    } catch (e) { return null; }
+  }
+  // Send x (from openUrl): its file, to done(blob), or done(null) — and
+  // on a refusal by the page's CSP, done(false), told apart by the
+  // securitypolicyviolation event, which Chromium queues before the
+  // request's own error.
+  function readOpened(x, done) {
+    var over = false;
+    function end(b) { if (!over) { over = true; done(b); } }
+    if (!x) { end(null); return; }
+    try {
       n.on(x, 'loadend', function () {
         var b = null;
         try { if (n.xStatus(x) === 200) { b = n.xBody(x); n.size(b); } } catch (e) { b = null; }
-        end(b || null);
+        if (b) { end(b); return; }
+        // Let a violation event queued with the error be seen first.
+        later(function () { end(refused ? false : null); }, 0);
       });
       n.xSend(x);
     } catch (e) { end(null); }
   }
+  // Nothing is read on a click: the request is only opened, and sent
+  // once Kotlin asks for the file — which it does only for a download
+  // the tab actually offered (DownloadListener), never for a click the
+  // page cancelled or one that leads nowhere.
   function capture(url, name) {
     var c = mk(null);
     c.name = typeof name === 'string' ? name : '';
-    c.t = time(); c.blob = null; c.done = false; c.wait = null;
-    readUrl(url, function (b) {
-      c.blob = b; c.done = true;
-      var f = c.wait; c.wait = null;
-      if (f) f(b);
-    });
+    c.x = openUrl(url);
     caps[url] = c;
     later(function () { if (caps[url] === c) delete caps[url]; }, $BLOB_CAPTURE_MS);
   }
@@ -465,7 +509,9 @@ internal fun blobReaderJs(channel: String): String {
   }
   function prepare(token, mode, url) {
     var c = caps[url];
+    if (c) delete caps[url];
     function got(blob, name) {
+      if (blob === false) { post('e\n' + token + '\n$BLOB_REFUSED'); return; }
       if (!blob) { post('e\n' + token + '\n$BLOB_GONE'); return; }
       var h = mk(null);
       h.b = blob; h.mode = mode; h.timer = 0;
@@ -473,11 +519,11 @@ internal fun blobReaderJs(channel: String): String {
       keep(token, h);
       post('o\n' + token + '\n' + n.size(blob) + '\n' + n.type(blob) + '\n' + name);
     }
-    function fresh(name) { readUrl(url, function (b) { got(b, name); }); }
-    if (!c) { fresh(''); return; }
-    delete caps[url];
-    function captured(b) { if (b) got(b, c.name); else fresh(c.name); }
-    if (c.done) captured(c.blob); else c.wait = captured;
+    // Already refused once: don't try (and have the site sent another report).
+    if (refused) { got(false, ''); return; }
+    function fresh(name) { readOpened(openUrl(url), function (b) { got(b, name); }); }
+    if (!c || !c.x) { fresh(c ? c.name : ''); return; }
+    readOpened(c.x, function (b) { if (b === null) fresh(c.name); else got(b, c.name); });
   }
   function keep(token, h) {
     cancel(h.timer);

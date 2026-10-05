@@ -28,6 +28,7 @@
     <!-- A blob: download: the file only exists inside the page that made it, which Freedom reads it from. -->
     <string name="library_download_blob_unreachable">Couldn\'t reach the part of the page that made this file</string>
     <string name="library_download_blob_gone">The page withdrew this file before it could be saved</string>
+    <string name="library_download_blob_refused">This site\'s security policy doesn\'t let Freedom read files it makes</string>
     <string name="library_download_blob_page_closed">The page that made this file is closed or stopped answering</string>
     <string name="library_download_gateway_no_answer">Gateway didn\'t answer</string>
     <string name="library_download_content_not_found">Content not found</string>

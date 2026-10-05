@@ -7,6 +7,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import baby.freedom.mobile.R
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -36,8 +37,13 @@ class BlobDownloadsDeviceTest {
     private lateinit var downloads: BlobDownloads
     private var finished = CountDownLatch(1)
 
-    private fun html(body: String) = WebResourceResponse(
-        "text/html", "utf-8", 200, "OK", emptyMap(), ByteArrayInputStream(body.toByteArray()),
+    private fun html(body: String, headers: Map<String, String> = emptyMap()) = WebResourceResponse(
+        "text/html", "utf-8", 200, "OK", headers, ByteArrayInputStream(body.toByteArray()),
+    )
+
+    /** A common policy that refuses reading `blob:` URLs (`connect-src` falls back to `'self'`). */
+    private val csp = mapOf(
+        "Content-Security-Policy" to "default-src 'self'; script-src 'self' 'unsafe-inline'; report-uri /report",
     )
 
     /**
@@ -48,7 +54,10 @@ class BlobDownloadsDeviceTest {
      */
     private val watcher = """
         <script>
-        var seen = { reads: 0, thens: 0 };
+        var seen = { reads: 0, thens: 0, violations: [] };
+        document.addEventListener('securitypolicyviolation', function (e) {
+          seen.violations.push(e.effectiveDirective + ' ' + e.blockedURI);
+        });
         var ctor = Object.getOwnPropertyDescriptor(Promise.prototype, 'constructor');
         Object.defineProperty(Promise.prototype, 'constructor', { configurable: true, get: function () { seen.reads++; return ctor.value; } });
         Object.defineProperty(Object.prototype, 'then', { configurable: true, get: function () { seen.thens++; return undefined; } });
@@ -70,6 +79,7 @@ class BlobDownloadsDeviceTest {
         val many = Regex("http://f(\\d+)\\.test/").matchEntire(url)
         return when {
             url == "http://a.test/" -> html("<!doctype html><html><head>$watcher</head><body></body></html>")
+            url == "http://a.test/csp" -> html("<!doctype html><html><head>$watcher</head><body></body></html>", csp)
             // The main frame, then frames of 33 other origins saying hello after it.
             url == "http://a.test/many" -> html(
                 "<!doctype html><html><head>$watcher</head><body><script>var loaded = 0;</script>" +
@@ -166,6 +176,50 @@ class BlobDownloadsDeviceTest {
         )
         assertEquals(r.toString(), 0, r.getInt("reads"))
         assertEquals(r.toString(), 0, r.getInt("thens"))
+    }
+
+    /**
+     * #408 R2-F1: under a Content-Security-Policy whose `connect-src`
+     * refuses `blob:` (here through `default-src 'self'`), a page that
+     * clicks a `blob:` link of its own — cancelled, or leading to no
+     * download — sees no `securitypolicyviolation` (and so the site gets
+     * no CSP report): nothing is read until a download is offered.
+     */
+    @Test
+    fun aBlobClickUnderCspFiresNoViolation() {
+        load("http://a.test/csp")
+        val r = run(
+            """
+            var a = link(new Blob(['{"x":1}'], { type: 'application/json' }), 'x.json');
+            a.addEventListener('click', function (e) { e.preventDefault(); });
+            a.click();
+            var b = link(new Blob(['y'], { type: 'text/plain' }), '');
+            b.addEventListener('click', function (e) { e.preventDefault(); });
+            b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            setTimeout(function () { window.out = JSON.stringify(seen); }, 1500);
+            """,
+        )
+        assertEquals(r.toString(), 0, r.getJSONArray("violations").length())
+        assertEquals(r.toString(), 0, r.getInt("reads"))
+        assertEquals(r.toString(), 0, r.getInt("thens"))
+    }
+
+    /**
+     * #408 R2-F1: a download offered under such a policy fails with its
+     * own reason (not "the page withdrew this file"), and a second one in
+     * the same document isn't tried at all — the one refused read is all
+     * the site ever sees.
+     */
+    @Test
+    fun aBlobDownloadUnderCspFailsAsRefused() {
+        load("http://a.test/csp")
+        val url = makeAndClick(revoke = true)
+        val source = prepare(url)
+        assertEquals(DownloadNote.of(R.string.library_download_blob_refused), source.failure)
+        val url2 = makeAndClick(revoke = false)
+        assertEquals(DownloadNote.of(R.string.library_download_blob_refused), prepare(url2).failure)
+        val seen = run("setTimeout(function () { window.out = JSON.stringify(seen); }, 500);")
+        assertEquals(seen.toString(), 1, seen.getJSONArray("violations").length())
     }
 
     /**

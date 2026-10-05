@@ -526,7 +526,7 @@ class DownloadManager private constructor(context: Context) {
                     dao.insert(row)
                 }
                 _events.tryEmit(DownloadEvent.Started(id, initialName))
-                launchJob(id, resuming = false) {
+                launchJob(id, resuming = false, abandoned = { blob?.release() }) {
                     run(id, target, userAgent, contentDisposition, refererOrigin, cookies, resuming = false)
                 }
             }
@@ -537,9 +537,17 @@ class DownloadManager private constructor(context: Context) {
      * Start [id]'s (RUNNING) row's job [block]. Called under
      * [transitions]. A stop that got there first — possible only before
      * a new row's insert is seen, as the Cancel button appears with it —
-     * leaves the row the way run() would have.
+     * leaves the row the way run() would have — and, as run()'s own
+     * `finally` would, lets go of what it was to read ([abandoned]: a
+     * `blob:` download's file, which its page would otherwise go on
+     * holding until its own timer runs out).
      */
-    private suspend fun launchJob(id: Long, resuming: Boolean, block: suspend () -> Unit) {
+    private suspend fun launchJob(
+        id: Long,
+        resuming: Boolean,
+        abandoned: () -> Unit = {},
+        block: suspend () -> Unit,
+    ) {
         val job = scope.launch(start = CoroutineStart.LAZY) { block() }
         if (cancellation.register(id, job)) {
             job.start()
@@ -547,6 +555,7 @@ class DownloadManager private constructor(context: Context) {
         }
         val stop = cancellation.stopOf(id)
         job.cancel()
+        abandoned()
         val row = daoFor(id).get(id) ?: return
         if (stop != DownloadStop.PAUSE) endSaveTo(row, discard = true)
         daoFor(id).update(

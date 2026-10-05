@@ -13,7 +13,8 @@ import java.util.Base64
  * - [BLOB_HELLO]: a frame's reader is there (sent once, at document start).
  * - `o⏎token⏎size⏎type⏎name`: the file is held, under that token.
  * - `e⏎token⏎code`: it isn't ([BLOB_GONE]: no such file — revoked, or
- *   another frame's; [BLOB_READ_FAILED]: a chunk couldn't be read).
+ *   another frame's; [BLOB_READ_FAILED]: a chunk couldn't be read;
+ *   [BLOB_REFUSED]: the page's CSP doesn't let it be read).
  * - a chunk: an `ArrayBuffer` of `token:offset:` then the bytes, or the
  *   text `d⏎token⏎offset⏎base64` where `ArrayBuffer` messages aren't
  *   supported.
@@ -41,6 +42,12 @@ internal const val BLOB_MODE_TEXT = "t"
 /** `e` codes. */
 internal const val BLOB_GONE = "gone"
 internal const val BLOB_READ_FAILED = "read"
+
+/**
+ * `e` code: the page's Content-Security-Policy refuses `blob:` in
+ * `connect-src`, so no frame of it can read the file (#408 R2-F1).
+ */
+internal const val BLOB_REFUSED = "csp"
 
 /** Bytes per chunk: a 100 MB file is 200 messages, and never more than one chunk is in memory. */
 internal const val BLOB_CHUNK_BYTES = 512 * 1024
