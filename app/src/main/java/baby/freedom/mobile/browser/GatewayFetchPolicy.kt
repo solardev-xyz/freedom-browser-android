@@ -389,6 +389,21 @@ internal class HeaderDeadline(
         disconnectAside(doomed)
     }
 
+    /**
+     * The page gave up on the request ([AbandonSignal]): the attempt ends
+     * now — the hop connecting or waiting on its headers is cut (off this
+     * thread, as every cut is), and a hop not started yet is refused.
+     */
+    fun abandon() {
+        val doomed = synchronized(lock) {
+            expired = true
+            val conn = current
+            stop()
+            conn
+        }
+        doomed?.let { disconnectAside(it) }
+    }
+
     /** The hop's headers are in (or the attempt is over): stop its clock, give back any slot. */
     fun headersReceived() {
         synchronized(lock) { stop() }
