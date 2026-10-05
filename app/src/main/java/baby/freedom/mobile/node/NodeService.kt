@@ -992,7 +992,9 @@ class NodeService : Service() {
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.node_notification_title))
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+            // The peer-network mark from the menu's Nodes row, not the
+            // system's download arrow: a running node isn't a download.
+            .setSmallIcon(R.drawable.ic_nodes)
             .setOngoing(true)
             .build()
     }
