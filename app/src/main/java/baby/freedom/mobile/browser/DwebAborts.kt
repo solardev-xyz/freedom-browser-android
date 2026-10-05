@@ -66,9 +66,10 @@ internal interface AbandonSignal {
  *   within [ABANDONED_TTL_MS], is answered at once without a fetch — if
  *   it began after the entry's start for certain; one that did begin
  *   before is another request's, merely slow to reach [begin], and one
- *   inside the range spends the entry but is fetched anyway. That call is then kept as answered, so should the
- *   entry have been another request's after all, this request's own
- *   entry is matched to it rather than stopping yet another call.
+ *   inside the range spends the entry but is fetched anyway. That call
+ *   is then kept as answered, so should the entry have been another
+ *   request's after all, this request's own entry is matched to it
+ *   rather than stopping yet another call.
  *
  * An entry with no call of its own is what could misfire, so the page
  * leaves out every entry it can tell no call made — a cache hit included,
