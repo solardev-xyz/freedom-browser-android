@@ -269,6 +269,7 @@
     <string name="stamps_credit_lost_nothing">Nothing to confirm: no lost payment record is on file for this chequebook.</string>
     <!-- %1$s: why. -->
     <string name="stamps_credit_lost_failed">Couldn\'t confirm: %1$s</string>
+    <string name="stamps_credit_lost_not_recorded">the app couldn\'t save a note of it, so the node wasn\'t asked. Try again.</string>
     <string name="stamps_credit_fund_node_note">A deposit moves xBZZ the node\'s account already holds. Send xBZZ on Gnosis Chain to this address first, from any wallet, then deposit.</string>
     <string name="stamps_chequebook_wallet_note">In the node\'s own account: what a deposit moves into the chequebook.</string>
     <string name="stamps_deposit">Deposit</string>

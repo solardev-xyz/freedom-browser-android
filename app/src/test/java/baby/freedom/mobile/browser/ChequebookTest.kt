@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import java.math.BigInteger
+import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -306,6 +307,43 @@ class ChequebookTest {
         // ant's 1 is "no loss on record": it says nothing about paying (the switch may be off).
         assertFalse(liabilityOutcomeText(StampClient.Answer.Ok(JSONObject().put("confirmed", false))).contains("pays"))
         assertEquals("Couldn't confirm: boom", liabilityOutcomeText(StampClient.Answer.Failed("boom")))
+    }
+
+    @Test
+    fun `a lost ledger is recorded as confirmed before the node is asked, and a late or unseen confirmation keeps it`() = runBlocking {
+        val events = mutableListOf<String>()
+        val record: suspend (String) -> Unit = { events += "record $it" }
+        // The node's answer didn't come in time: ant may still confirm late.
+        val timedOut = confirmLostLedger(chequebook, record) {
+            events += "confirm $it"
+            StampClient.Answer.Failed("no answer", timedOut = true)
+        }
+        assertEquals(listOf("record $chequebook", "confirm $chequebook"), events)
+        assertTrue(timedOut is StampClient.Answer.Failed)
+        // The retry is "nothing to confirm" — the record is already there,
+        // and the page reads the credit as an upper bound once the loss is gone.
+        val retry = confirmLostLedger(chequebook, record) { StampClient.Answer.Ok(JSONObject().put("confirmed", false)) }
+        assertTrue(retry is StampClient.Answer.Ok)
+        val recorded = events.filter { it.startsWith("record") }.map { it.removePrefix("record ") }.toSet()
+        val afterwards = ChequebookState(address = chequebook, availablePlur = milli).withConfirmedLedgers(recorded)
+        assertTrue(afterwards.availableUpperBound)
+        // A record whose confirmation didn't land is ignored while the loss is still reported.
+        assertFalse(ChequebookState(address = chequebook, ledgerLost = true).withConfirmedLedgers(recorded).ledgerConfirmed)
+    }
+
+    @Test
+    fun `a lost ledger isn't confirmed when its record can't be saved`() = runBlocking {
+        var asked = false
+        val answer = confirmLostLedger(chequebook, record = { throw java.io.IOException("disk full") }) {
+            asked = true
+            StampClient.Answer.Ok(JSONObject().put("confirmed", true))
+        }
+        assertFalse(asked)
+        assertTrue(answer is StampClient.Answer.Failed)
+        assertEquals(
+            "Couldn't confirm: the app couldn't save a note of it, so the node wasn't asked. Try again.",
+            liabilityOutcomeText(answer),
+        )
     }
 
     @Test

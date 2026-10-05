@@ -8,6 +8,7 @@ import baby.freedom.swarm.SpendPermit
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
+import kotlin.coroutines.cancellation.CancellationException
 import org.json.JSONObject
 
 /*
@@ -81,6 +82,32 @@ internal fun ChequebookState.withConfirmedLedgers(confirmed: Set<String>): Chequ
     val chequebook = address?.lowercase()
     if (chequebook.isNullOrEmpty() || ledgerLost || chequebook !in confirmed) return this
     return copy(availableUpperBound = true, ledgerConfirmed = true)
+}
+
+/**
+ * Confirm [chequebook]'s lost cheque ledger: [record] it as confirmed
+ * first, and only then ask the node ([confirm]). The record goes first
+ * because only ant knows whether its confirmation landed: a 60 s timeout
+ * while `:node` confirms late (a gateway restart holding its lock), or the
+ * app killed before an after-the-answer write, would lose it for good, and
+ * a retry then gets "nothing to confirm". A record whose confirmation
+ * never landed costs nothing: [withConfirmedLedgers] ignores it while ant
+ * still reports the loss, and an upper bound on the credit stays true.
+ * If the record can't be saved the node isn't asked at all.
+ */
+internal suspend fun confirmLostLedger(
+    chequebook: String,
+    record: suspend (String) -> Unit,
+    confirm: suspend (String) -> StampClient.Answer,
+): StampClient.Answer {
+    try {
+        record(chequebook)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        return StampClient.Answer.Failed(Strings.get(R.string.stamps_credit_lost_not_recorded))
+    }
+    return confirm(chequebook)
 }
 
 /** What a `/chequebook/balance` body says, beyond [chequebookBalanceFrom]'s total. */

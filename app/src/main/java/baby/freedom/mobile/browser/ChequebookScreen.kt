@@ -226,15 +226,16 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
             onConfirm = {
                 confirmingLiability = null
                 scope.launch {
-                    // Once ant confirmed, the record must follow even if
-                    // the page is left meanwhile: without it the credit
-                    // would read as exact.
+                    // Recorded before ant is asked (see confirmLostLedger),
+                    // and the whole thing runs on even if the page is left
+                    // meanwhile: without the record the credit would read
+                    // as exact.
                     val answer = withContext(NonCancellable + Dispatchers.IO) {
-                        StampClient.call("confirmLiability", JSONObject().put("chequebook", chequebook)).also {
-                            if (it is StampClient.Answer.Ok && it.json.optBoolean("confirmed")) {
-                                runCatching { settings.addSwarmConfirmedLedger(chequebook) }
-                            }
-                        }
+                        confirmLostLedger(
+                            chequebook,
+                            record = settings::addSwarmConfirmedLedger,
+                            confirm = { StampClient.call("confirmLiability", JSONObject().put("chequebook", it)) },
+                        )
                     }
                     liabilityOutcome = liabilityOutcomeText(answer)
                     swapRefresh++

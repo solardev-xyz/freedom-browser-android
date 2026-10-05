@@ -170,7 +170,10 @@ class NodeSettings private constructor(
      * reporting the loss and counts only the cheques written since, so its
      * `availableBalance` reads higher than what is really left; ant keeps
      * no sign of that the page can read, so this is the record the page
-     * uses to keep calling the credit an upper bound.
+     * uses to keep calling the credit an upper bound. Written *before* the
+     * node is asked to confirm ([baby.freedom.mobile.browser.confirmLostLedger]),
+     * so a confirmation that lands late or unseen is still on record; an
+     * entry for one that never landed is ignored while the loss is reported.
      */
     val swarmConfirmedLedgers: Flow<Set<String>> = store.data.map { prefs ->
         prefs[Keys.SWARM_CONFIRMED_LEDGERS].orEmpty()
