@@ -48,13 +48,15 @@ class TabsState(
     var captureActiveThumbnail: (() -> Unit)? = null
 
     /**
-     * Hook installed by the [BrowserWebViewHost] so the settings screen
-     * can wipe every tab's WebView-side state (cache, form data, back/
-     * forward stack, cookies, site storage) in one shot. `null` before
-     * the host has composed, or after it disposes.
+     * Hook installed by the [BrowserWebViewHost] so Delete browsing data
+     * (#400) can wipe every tab's WebView-side state in one shot:
+     * `siteData` — cookies, site storage, form data, back/forward stacks,
+     * zoom levels, desktop-site choices, unfinished downloads; `cache` —
+     * the HTTP cache and the camera captures handed to pages. `null`
+     * before the host has composed, or after it disposes.
      */
     @Volatile
-    var clearWebViewData: (() -> Unit)? = null
+    var clearWebViewData: ((siteData: Boolean, cache: Boolean) -> Unit)? = null
 
     /**
      * Hook installed by the [BrowserWebViewHost] so the capsule's Stop
@@ -434,7 +436,7 @@ class TabsState(
      *
      * Only a window a page opened can be closed this way. Chromium also
      * honours `window.close()` in a tab whose session history has a
-     * single entry (e.g. right after "Clear cookies & site data" clears
+     * single entry (e.g. right after *Delete browsing data* clears
      * every tab's history), which would let any page's script silently
      * close a tab the user opened — so a tab with no opener ignores it.
      */
@@ -916,8 +918,8 @@ class TabsState(
     /**
      * Forget every closed tab. Their saved WebView state carries
      * back/forward history (and the entries keep page titles, URLs and
-     * thumbnails), so both "Clear history" and "Clear cookies & site
-     * data" drop it.
+     * thumbnails), so Delete browsing data drops it with either browsing
+     * history or cookies and site data.
      */
     fun forgetClosedTabs() {
         closedTabs.clear()

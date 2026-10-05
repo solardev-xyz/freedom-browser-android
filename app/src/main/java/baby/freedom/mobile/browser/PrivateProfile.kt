@@ -129,9 +129,10 @@ object PrivateProfile {
     }
 
     /**
-     * "Clear cookies & site data" while private tabs are open: the
-     * private session's cookies and site storage go too. (Its cache
-     * is cleared per WebView, with every other tab's.)
+     * *Delete browsing data*'s *Cookies and site data* while private tabs
+     * are open: the private session's cookies and site storage go too.
+     * (Its cache goes with *Cached images and files*, per WebView, with
+     * every other tab's.)
      */
     @MainThread
     fun clearData() {

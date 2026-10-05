@@ -65,7 +65,7 @@ class TabsSession(
      * disk read landed — put on the reopen stack as [group], and held on
      * disk ([TabsStore.HELD]) until the user answers the screen's offer
      * ([restoreHeld], [dismissHeld]) or the group leaves the stack some
-     * other way (Reopen closed tab, Clear history).
+     * other way (Reopen closed tab, *Delete browsing data*).
      */
     class HeldTabs(val group: TabsState.ClosedGroup, val afterCrash: Boolean)
 
@@ -90,8 +90,8 @@ class TabsSession(
             // Back from a process killed in the background: the saved
             // instance state is the newer of the two. What the previous
             // process left on disk still counts, though: an offer it
-            // never answered is made again (so Clear history and the
-            // rest can end it, R3-F1), and a restore it hadn't settled
+            // never answered is made again (so *Delete browsing data* and
+            // the rest can end it, R3-F1), and a restore it hadn't settled
             // is the same tabs loading again, so it's marked again and
             // settled by this run's page load (R3-M2).
             bundle != null -> {
@@ -137,7 +137,7 @@ class TabsSession(
         val group = tabs.keepForReopen(saved) ?: return store.releaseHeld()
         heldTabs = HeldTabs(group, afterCrash)
         // However it leaves the reopen stack — the offer's Restore, Reopen
-        // closed tab, Clear history — the offer is over and the disk copy
+        // closed tab, *Delete browsing data* — the offer is over and the disk copy
         // goes: reopened, they're open tabs saved (and marked) as such
         // first; forgotten, it just goes.
         heldWatch = viewModelScope.launch {
@@ -184,7 +184,8 @@ class TabsSession(
     }
 
     /**
-     * Clear history / Clear cookies & site data: the held tabs are
+     * *Delete browsing data*, with Browsing history or Cookies and site
+     * data checked: the held tabs are
      * history too. Ends the offer if one is up, and drops the held file
      * whether or not one is (a disk read may not have landed yet).
      */

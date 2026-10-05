@@ -588,7 +588,8 @@ class DesktopSites internal constructor(
     }
 
     /**
-     * Forget every desktop site (part of "Clear cookies & site data"):
+     * Forget every desktop site (part of *Delete browsing data*'s
+     * *Cookies and site data*):
      * the file lists sites the user visited, so it goes with the rest of
      * the browsing trail.
      */

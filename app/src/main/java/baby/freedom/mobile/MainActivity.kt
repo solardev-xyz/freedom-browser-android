@@ -991,7 +991,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     }.getOrNull()
 
     /**
-     * Part of *Clear cookies & site data* (#276): every node process that's
+     * Part of *Delete browsing data*'s *Cookies and site data* (#276): every node process that's
      * running forgets the log lines it kept. One-way calls — nothing waits.
      * A process that isn't bound isn't running, and keeps no lines.
      */

@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import android.content.Context
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -40,7 +41,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Contrast
-import androidx.compose.material.icons.filled.Cookie
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Sync
@@ -48,12 +48,11 @@ import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Hub
@@ -120,8 +119,8 @@ import java.text.NumberFormat
  *
  *  - **Appearance** — the theme ([Appearance], #269) and language (#280).
  *  - **Downloads** — *Ask where to save each file* (#322).
- *  - **Privacy & security** — Browsing data (each wipe guarded by a
- *    confirmation); Site permissions: every camera / microphone /
+ *  - **Privacy & security** — Browsing data: one row to Delete browsing
+ *    data ([DeleteBrowsingDataPage], #400); Site permissions: every camera / microphone /
  *    location decision (#81), "open in another app" (#85), and the sites
  *    connected to the wallet (#110, #111); Tor (#143, #275).
  *  - **Ad blocking** — filter-list categories, updates and the sites
@@ -153,8 +152,12 @@ fun SettingsScreen(
     repo: BrowsingRepository,
     ipfsInfo: IpfsInfo,
     onIpfsToggle: (Boolean) -> Unit,
-    onClearHistory: () -> Unit,
-    onClearWebViewData: () -> Unit,
+    /**
+     * Delete browsing data (#400): history in the range is deleted here;
+     * the host deletes the rest [DeleteChoice] names — closed tabs,
+     * WebView state, node logs.
+     */
+    onDeleteBrowsingData: (DeleteChoice) -> Unit,
     onDismiss: () -> Unit,
     radicle: RadicleControls = RadicleControls(),
     onOpenRadicle: () -> Unit = {},
@@ -165,6 +168,11 @@ fun SettingsScreen(
     onOpenIpfsLogs: () -> Unit = {},
     /** A newer release's page (#272), in a new tab in front of Settings. */
     onOpenUrl: (String) -> Unit = {},
+    /**
+     * The Bookmarks page, from the search-only hint that Delete all
+     * bookmarks moved there (#400).
+     */
+    onOpenBookmarks: () -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     // Settings search (#93). Registered after the dismiss handler so it
@@ -179,9 +187,6 @@ fun SettingsScreen(
     var scrollTo by remember { mutableStateOf<SettingsSection?>(null) }
     BackHandler(enabled = query.isNotEmpty() && page == null) { query = "" }
     BackHandler(enabled = page != null) { page = null }
-
-    val history by remember { repo.history }.collectAsState(initial = emptyList())
-    val bookmarks by remember { repo.bookmarks }.collectAsState(initial = emptyList())
 
     val context = LocalContext.current
     val settings = remember(context) { NodeSettings.get(context) }
@@ -207,9 +212,8 @@ fun SettingsScreen(
     val torExternalProxy by settings.torExternalProxy.collectAsState(initial = "")
     var editTorClient by remember { mutableStateOf(false) }
 
-    var confirmClearHistory by remember { mutableStateOf(false) }
-    var confirmClearBookmarks by remember { mutableStateOf(false) }
-    var confirmClearSiteData by remember { mutableStateOf(false) }
+    // Delete browsing data (#400), a page standing in for the list like Licences.
+    var deleteDataOpen by rememberSaveable { mutableStateOf(false) }
 
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     val permissionEntries by remember(sitePermissions) { sitePermissions.entries }
@@ -255,7 +259,7 @@ fun SettingsScreen(
         SettingsSection.DefaultBrowser to defaultBrowserRows(isDefaultBrowser),
         SettingsSection.Appearance to appearanceSectionRows(appearance, appLanguage),
         SettingsSection.Downloads to downloadSettingsRows(askWhereToSave),
-        SettingsSection.Browsing to browsingDataRows(history.size, bookmarks.size),
+        SettingsSection.Browsing to browsingDataRows(),
         SettingsSection.Permissions to sitePermissionRows(permissionEntries, dappGrants, walletAccounts, chains),
         SettingsSection.Tor to torRows(torEnabled, torStartOnLaunch, torExternalProxy),
         SettingsSection.Adblock to
@@ -353,6 +357,17 @@ fun SettingsScreen(
     if (licencesOpen && chainPage == null && site == null) {
         OpenSourceLicencesPage(onBack = { licencesOpen = false })
     }
+    if (deleteDataOpen && chainPage == null && site == null && !licencesOpen) {
+        DeleteBrowsingDataPage(
+            repo = repo,
+            onDelete = { choice ->
+                onDeleteBrowsingData(choice)
+                deleteDataOpen = false
+                Toast.makeText(context, deleteDoneMessage(choice), Toast.LENGTH_LONG).show()
+            },
+            onBack = { deleteDataOpen = false },
+        )
+    }
 
     /** One card, showing the rows in [visible] — the same composables on a sub-page and in search results. */
     @Composable
@@ -403,11 +418,10 @@ fun SettingsScreen(
         )
         SettingsSection.Browsing -> BrowsingDataSection(
             visible = visible,
-            historyCount = history.size,
-            bookmarkCount = bookmarks.size,
-            onClearHistoryRequested = { confirmClearHistory = true },
-            onClearBookmarksRequested = { confirmClearBookmarks = true },
-            onClearSiteDataRequested = { confirmClearSiteData = true },
+            // Only among search results, not on the Privacy page itself.
+            searching = searching && page == null,
+            onOpen = { deleteDataOpen = true },
+            onOpenBookmarks = onOpenBookmarks,
         )
         SettingsSection.Downloads -> DownloadSettingsSection(
             askWhereToSave = askWhereToSave,
@@ -509,7 +523,7 @@ fun SettingsScreen(
     // land on the sub-page scrolled where it was left. A new page (or the
     // same one opened again from the top level) starts at the top.
     val pageState = remember(openPage) { LazyListState() }
-    if (chainPage == null && site == null && !licencesOpen) FullScreenScaffold(
+    if (chainPage == null && site == null && !licencesOpen && !deleteDataOpen) FullScreenScaffold(
         title = openPage?.title ?: stringResource(R.string.settings_title),
         // On a sub-page the ← goes up to the top level, as Back does.
         onDismiss = { if (page != null) page = null else onDismiss() },
@@ -671,43 +685,6 @@ fun SettingsScreen(
                 addAllowlistSite = false
             },
             onDismiss = { addAllowlistSite = false },
-        )
-    }
-    if (confirmClearHistory) {
-        ConfirmDialog(
-            title = stringResource(R.string.settings_clear_history_title),
-            message = stringResource(R.string.settings_clear_history_message),
-            confirmLabel = stringResource(R.string.settings_clear_history),
-            onConfirm = {
-                repo.clearHistory()
-                onClearHistory()
-                confirmClearHistory = false
-            },
-            onDismiss = { confirmClearHistory = false },
-        )
-    }
-    if (confirmClearBookmarks) {
-        ConfirmDialog(
-            title = stringResource(R.string.settings_clear_bookmarks_title),
-            message = stringResource(R.string.settings_clear_bookmarks_message),
-            confirmLabel = stringResource(R.string.settings_clear_bookmarks),
-            onConfirm = {
-                repo.clearBookmarks()
-                confirmClearBookmarks = false
-            },
-            onDismiss = { confirmClearBookmarks = false },
-        )
-    }
-    if (confirmClearSiteData) {
-        ConfirmDialog(
-            title = stringResource(R.string.settings_clear_site_data_title),
-            message = stringResource(R.string.settings_clear_site_data_message),
-            confirmLabel = stringResource(R.string.settings_clear_site_data_confirm),
-            onConfirm = {
-                onClearWebViewData()
-                confirmClearSiteData = false
-            },
-            onDismiss = { confirmClearSiteData = false },
         )
     }
 }
@@ -1926,62 +1903,77 @@ private fun AllowlistSiteDialog(onAdd: (String) -> Unit, onDismiss: () -> Unit) 
     )
 }
 
-private val ROW_CLEAR_HISTORY: String get() = Strings.get(R.string.settings_clear_history)
-private val ROW_CLEAR_BOOKMARKS: String get() = Strings.get(R.string.settings_clear_bookmarks)
-private val ROW_CLEAR_SITE_DATA: String get() = Strings.get(R.string.settings_clear_site_data)
-private val ROW_CLEAR_SITE_DATA_SUBTITLE: String get() = Strings.get(R.string.settings_clear_site_data_subtitle)
+private val ROW_DELETE_DATA: String get() = Strings.get(R.string.settings_delete_browsing_data)
+private val ROW_DELETE_DATA_SUBTITLE: String get() = Strings.get(R.string.settings_delete_browsing_data_subtitle)
+private val ROW_BOOKMARKS_MOVED: String get() = Strings.get(R.string.settings_bookmarks_moved)
+private val ROW_BOOKMARKS_MOVED_SUBTITLE: String get() = Strings.get(R.string.settings_bookmarks_moved_subtitle)
 
-private fun historySubtitle(count: Int) =
-    if (count == 0) {
-        Strings.get(R.string.settings_nothing_to_clear)
-    } else {
-        Strings.plural(R.plurals.settings_history_visits, count, count)
-    }
-
-private fun bookmarksSubtitle(count: Int) =
-    if (count == 0) {
-        Strings.get(R.string.settings_nothing_to_clear)
-    } else {
-        Strings.plural(R.plurals.settings_bookmarks_count, count, count)
-    }
-
-internal fun browsingDataRows(historyCount: Int, bookmarkCount: Int) = listOf(
-    settingsRow("history", ROW_CLEAR_HISTORY, historySubtitle(historyCount)),
-    settingsRow("bookmarks", ROW_CLEAR_BOOKMARKS, bookmarksSubtitle(bookmarkCount)),
-    settingsRow("site-data", ROW_CLEAR_SITE_DATA, ROW_CLEAR_SITE_DATA_SUBTITLE),
+/**
+ * Privacy & security → Browsing data (#400): the one row that opens
+ * [DeleteBrowsingDataPage], found by what it deletes ("history",
+ * "cookies", "cache", "desktop site" …) and by "clear" and "delete".
+ * Plus a hint shown only in search results: Delete all bookmarks used to
+ * sit here and moved to the Bookmarks page, so a search for "bookmarks"
+ * points there (and opens it) instead of finding nothing.
+ */
+internal fun browsingDataRows() = listOf(
+    settingsRow(
+        "delete-data",
+        ROW_DELETE_DATA,
+        ROW_DELETE_DATA_SUBTITLE,
+        *searchKeywords(R.string.settings_delete_browsing_data_keywords),
+    ),
+    settingsRow(
+        BOOKMARKS_MOVED,
+        ROW_BOOKMARKS_MOVED,
+        ROW_BOOKMARKS_MOVED_SUBTITLE,
+        *searchKeywords(R.string.settings_bookmarks_moved_keywords),
+    ),
 )
+
+/** Key of the search-only "Delete all bookmarks is on the Bookmarks page" hint. */
+internal const val BOOKMARKS_MOVED = "bookmarks-moved"
 
 @Composable
 private fun BrowsingDataSection(
     visible: Set<Any>,
-    historyCount: Int,
-    bookmarkCount: Int,
-    onClearHistoryRequested: () -> Unit,
-    onClearBookmarksRequested: () -> Unit,
-    onClearSiteDataRequested: () -> Unit,
+    searching: Boolean,
+    onOpen: () -> Unit,
+    onOpenBookmarks: () -> Unit,
 ) {
     SectionCard(title = stringResource(R.string.settings_section_browsing)) {
-        if ("history" in visible) ActionRow(
-            icon = Icons.Filled.History,
-            title = ROW_CLEAR_HISTORY,
-            subtitle = historySubtitle(historyCount),
-            enabled = historyCount > 0,
-            onClick = onClearHistoryRequested,
-        )
-        if ("bookmarks" in visible) ActionRow(
-            icon = Icons.Filled.Star,
-            title = ROW_CLEAR_BOOKMARKS,
-            subtitle = bookmarksSubtitle(bookmarkCount),
-            enabled = bookmarkCount > 0,
-            onClick = onClearBookmarksRequested,
-        )
-        if ("site-data" in visible) ActionRow(
-            icon = Icons.Filled.Cookie,
-            title = ROW_CLEAR_SITE_DATA,
-            subtitle = ROW_CLEAR_SITE_DATA_SUBTITLE,
-            enabled = true,
-            onClick = onClearSiteDataRequested,
-        )
+        if ("delete-data" in visible) {
+            PageRow(
+                title = ROW_DELETE_DATA,
+                subtitle = ROW_DELETE_DATA_SUBTITLE,
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.DeleteForever,
+                onClick = onOpen,
+                trailing = {
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+            )
+        }
+        if (searching && BOOKMARKS_MOVED in visible) {
+            PageRow(
+                title = ROW_BOOKMARKS_MOVED,
+                subtitle = ROW_BOOKMARKS_MOVED_SUBTITLE,
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.Bookmark,
+                onClick = onOpenBookmarks,
+                trailing = {
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+            )
+        }
     }
 }
 
@@ -2483,35 +2475,9 @@ private fun RoutingModePicker(
     }
 }
 
+/** A yes/no question whose yes is destructive (shown in the error colour). */
 @Composable
-private fun ActionRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    enabled: Boolean,
-    onClick: () -> Unit,
-) {
-    PageRow(
-        title = title,
-        subtitle = subtitle,
-        style = PageRowStyle.Inset,
-        leadingIcon = icon,
-        enabled = enabled,
-        onClick = onClick,
-        trailing = if (enabled) {
-            {
-                Icon(
-                    Icons.Filled.DeleteForever,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        } else null,
-    )
-}
-
-@Composable
-private fun ConfirmDialog(
+internal fun ConfirmDialog(
     title: String,
     message: String,
     confirmLabel: String,

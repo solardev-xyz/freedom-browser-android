@@ -165,6 +165,6 @@ interface INodeService {
      */
     String getLogs(int source);
 
-    /** Forget every node's kept log lines (#276): Clear cookies & site data. */
+    /** Forget every node's kept log lines (#276): Delete browsing data → Cookies and site data. */
     oneway void clearLogs();
 }

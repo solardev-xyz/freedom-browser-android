@@ -689,7 +689,7 @@ class DownloadManager private constructor(context: Context) {
     }
 
     /**
-     * Part of *Clear cookies & site data* (#265): no unfinished download
+     * Part of *Delete browsing data*'s *Cookies and site data* (#265): no unfinished download
      * keeps a partial file. Running and paused downloads are cancelled
      * (running ones delete theirs as they stop), and any partial file
      * no running download is writing goes.

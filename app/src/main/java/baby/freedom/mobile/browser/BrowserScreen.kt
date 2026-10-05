@@ -479,7 +479,7 @@ fun BrowserScreen(
     onPanelShown: (Boolean) -> Unit = {},
     /** A node's recent log lines (#276), or null while its process isn't running. Blocking. */
     readNodeLogs: (NodeLogSource) -> String? = { null },
-    /** Every running node forgets its kept log lines (part of Clear cookies & site data). */
+    /** Every running node forgets its kept log lines (part of Delete browsing data → Cookies and site data). */
     clearNodeLogs: () -> Unit = {},
     /** Hardware-keyboard shortcuts (#270): this screen is their target while composed. */
     shortcuts: KeyboardShortcutRouter? = null,
@@ -573,7 +573,7 @@ fun BrowserScreen(
     // but one tap away, and held on disk until answered. Run in the
     // effect's own scope and cleared only by an answer: an Activity
     // relaunch while it's up cancels it, and the next screen shows it
-    // again; Reopen closed tab or Clear history ends the offer, and the
+    // again; Reopen closed tab or Delete browsing data ends the offer, and the
     // notice with it. It waits on a host of its own: on the shared one
     // its Indefinite notice would hold every later notice (a Close all's
     // Undo, downloads, permission recovery) in the queue until answered.
@@ -2600,26 +2600,30 @@ fun BrowserScreen(
                 showSettings = false
                 tabs.requestOpenInNewTab?.invoke(url, false, false)
             },
-            // The reopen stack keeps closed tabs' pages, titles and
-            // back/forward lists — history by any other name.
-            // The saved tab list (#400) is rewritten from the open tabs
-            // alone, so nothing closed lingers in it.
-            onClearHistory = {
-                tabs.forgetClosedTabs()
-                tabsSession.forgetHeld()
-                tabsSession.persistNow()
-            },
-            onClearWebViewData = {
-                // Closed tabs carry their saved back/forward history.
-                tabs.forgetClosedTabs()
-                tabsSession.forgetHeld()
-                tabsSession.persistNow()
-                tabs.clearWebViewData?.invoke()
+            onDeleteBrowsingData = { choice ->
+                // The reopen stack keeps closed tabs' pages, titles and
+                // back/forward lists — history by any other name. It has
+                // no dates, so a ranged delete takes all of it. So do the
+                // tabs a crashed restore held back (#402): the saved tab
+                // list is rewritten from the open tabs alone, now.
+                if (choice.forgetsClosedTabs) {
+                    tabs.forgetClosedTabs()
+                    tabsSession.forgetHeld()
+                    tabsSession.persistNow()
+                }
+                if (choice.siteData || choice.cache) tabs.clearWebViewData?.invoke(choice.siteData, choice.cache)
                 // The nodes' logs can name what was browsed (#276).
-                clearNodeLogs()
+                if (choice.siteData) clearNodeLogs()
             },
             onDismiss = { showSettings = false },
             onOpenIpfsLogs = { showLogs = NodeLogSource.Ipfs },
+            // Settings search's "Delete all bookmarks is on the Bookmarks
+            // page" hint (#400): Settings closes and Bookmarks opens.
+            onOpenBookmarks = {
+                showSettings = false
+                bookmarksPrivate = state.private
+                showBookmarks = true
+            },
         )
     }
 

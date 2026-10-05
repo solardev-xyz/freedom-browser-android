@@ -161,27 +161,52 @@
     <string name="settings_adblock_allow_site_invalid">Not a site: e.g. example.com</string>
     <string name="settings_adblock_allow_site_helper">Its subdomains are included.</string>
 
-    <!-- SettingsScreen.kt: Browsing data -->
-    <string name="settings_clear_history">Clear history</string>
-    <string name="settings_clear_history_title">Clear history?</string>
-    <string name="settings_clear_history_message">Removes every entry from the browsing history on this device.</string>
-    <string name="settings_clear_bookmarks">Clear bookmarks</string>
-    <string name="settings_clear_bookmarks_title">Clear bookmarks?</string>
-    <string name="settings_clear_bookmarks_message">Removes every saved bookmark on this device.</string>
-    <string name="settings_clear_site_data">Clear cookies &amp; site data</string>
-    <string name="settings_clear_site_data_subtitle">Cookies, DOM storage, cache, form data, zoom levels, and desktop sites</string>
-    <string name="settings_clear_site_data_title">Clear cookies and site data?</string>
-    <string name="settings_clear_site_data_message">Signs you out of most sites and wipes cached page data, cookies, form autofill, remembered page zoom levels and desktop-site choices from every open tab, and the nodes\' recent logs. Unfinished downloads are cancelled.</string>
-    <string name="settings_clear_site_data_confirm">Clear site data</string>
-    <string name="settings_nothing_to_clear">Nothing to clear</string>
-    <plurals name="settings_history_visits">
-        <item quantity="one">%d visit</item>
-        <item quantity="other">%d visits</item>
+    <!-- SettingsScreen.kt: Browsing data (#400) -->
+    <string name="settings_delete_browsing_data">Delete browsing data</string>
+    <string name="settings_delete_browsing_data_subtitle">History, cookies and site data, cached images and files</string>
+    <!-- Comma-separated, not shown: more words Settings search finds the Delete browsing data row by. -->
+    <string name="settings_delete_browsing_data_keywords">clear, delete, wipe, erase, history, cookies, cache, cached, site data, DOM storage, local storage, form data, autofill, zoom levels, desktop sites, sign out</string>
+    <!-- Shown only in Settings search results: Delete all bookmarks moved out of Settings (#400). Tapping it opens the Bookmarks page. -->
+    <string name="settings_bookmarks_moved">Delete all bookmarks</string>
+    <string name="settings_bookmarks_moved_subtitle">Now on the Bookmarks page: open it and tap ⋮ at the top</string>
+    <!-- Comma-separated, not shown: more words Settings search finds the hint above by. -->
+    <string name="settings_bookmarks_moved_keywords">bookmarks, bookmark, saved pages, favorites, favourites</string>
+
+    <!-- DeleteBrowsingData.kt: the Delete browsing data page -->
+    <string name="delete_data_title">Delete browsing data</string>
+    <string name="delete_data_range">Time range</string>
+    <string name="delete_data_range_hour">Last hour</string>
+    <string name="delete_data_range_day">Last 24 hours</string>
+    <string name="delete_data_range_week">Last 7 days</string>
+    <string name="delete_data_range_four_weeks">Last 4 weeks</string>
+    <string name="delete_data_range_all">All time</string>
+    <string name="delete_data_history">Browsing history</string>
+    <plurals name="delete_data_history_count">
+        <item quantity="one">%d visit, plus closed tabs and tabs waiting to be restored</item>
+        <item quantity="other">%d visits, plus closed tabs and tabs waiting to be restored</item>
     </plurals>
-    <plurals name="settings_bookmarks_count">
-        <item quantity="one">%d bookmark</item>
-        <item quantity="other">%d bookmarks</item>
-    </plurals>
+    <string name="delete_data_history_none">No visits in this range, plus closed tabs and tabs waiting to be restored</string>
+    <string name="delete_data_cookies">Cookies and site data</string>
+    <string name="delete_data_cookies_subtitle">Signs you out of every site</string>
+    <string name="delete_data_cookies_detail">Also site storage, form autofill, remembered zoom levels, desktop-site choices, open tabs\' back and forward pages and the nodes\' recent logs. Unfinished downloads are cancelled.</string>
+    <string name="delete_data_cache">Cached images and files</string>
+    <string name="delete_data_cache_subtitle">Pages may load more slowly on your next visit</string>
+    <string name="delete_data_cache_detail">Also photos taken with the camera for a site\'s upload.</string>
+    <!-- Shown when a time range other than All time is picked with cookies and/or cache checked -->
+    <string name="delete_data_all_time_cookies">Cookies and site data are deleted for all time: Android\'s WebView can\'t delete them by date.</string>
+    <string name="delete_data_all_time_cache">Cached images and files are deleted for all time: Android\'s WebView can\'t delete them by date.</string>
+    <!-- Appended to the all-time note only when Browsing history is checked. -->
+    <string name="delete_data_all_time_history_range">Browsing history keeps to the range.</string>
+    <string name="delete_data_all_time_both">Cookies, site data and cached files are deleted for all time: Android\'s WebView can\'t delete them by date.</string>
+    <string name="delete_data_button">Delete data</string>
+    <string name="delete_data_confirm_title">Delete cookies and site data?</string>
+    <string name="delete_data_confirm_ranged">This signs you out of every site and deletes every site\'s stored data for all time, not only for the %1$s. It can\'t be undone.</string>
+    <string name="delete_data_confirm_all_time">This signs you out of every site and deletes every site\'s stored data. It can\'t be undone.</string>
+    <string name="delete_data_confirm_button">Delete</string>
+    <string name="delete_data_nothing_selected">Pick at least one kind of data to delete.</string>
+    <!-- Toast after Delete data: short, as Android cuts a toast at two lines -->
+    <string name="delete_data_done">Browsing data deleted</string>
+    <string name="delete_data_done_history">Browsing history deleted</string>
 
     <!-- SettingsScreen.kt: Site permissions -->
     <string name="settings_permissions_empty">Sites you allow or block from using your camera, microphone or location, from sending system-exclusive messages to your MIDI devices, or from opening links in other apps, and sites you connect your wallet to, appear here.</string>

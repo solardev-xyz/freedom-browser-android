@@ -323,7 +323,7 @@ class NodeSettings private constructor(
      *
      * [settleIntro] decides it once, at the app's first start with this
      * build; Got it ([dismissIntro]) sets it to `true`. Nothing but clearing
-     * the app's data removes the key — Clear cookies & site data leaves it.
+     * the app's data removes the key — Delete browsing data leaves it.
      *
      * A read error doesn't end the flow (same reasoning and back-off as
      * [appearance]); the home page shows the card only once a read has said
