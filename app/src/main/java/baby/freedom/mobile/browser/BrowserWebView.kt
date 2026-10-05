@@ -3757,6 +3757,9 @@ private fun buildRefreshableWebView(
                 view: WebView?,
                 request: WebResourceRequest?,
             ): WebResourceResponse? {
+                // When this call began, for [DwebAborts]: read first, as
+                // the work below can block (R3-M2).
+                val calledAt = dwebAborts?.clock()
                 val mainFrame = request?.isForMainFrame == true
                 // A page's tapped navigation across the desktop/mobile
                 // line (#180): its first request is answered here with a
@@ -3853,7 +3856,7 @@ private fun buildRefreshableWebView(
                 // while it's fetched (see [DwebAborts]).
                 val ticket = request?.url?.toString()
                     ?.takeIf { DwebAborts.tracks(it, mainFrame) }
-                    ?.let { dwebAborts?.begin(it) }
+                    ?.let { url -> dwebAborts?.let { a -> a.begin(url, calledAt ?: a.clock()) } }
                 if (ticket?.abandoned == true) {
                     dwebAborts?.finished(ticket)
                     return abandonedResponse()

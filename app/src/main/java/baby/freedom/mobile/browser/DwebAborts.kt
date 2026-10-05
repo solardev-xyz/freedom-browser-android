@@ -152,12 +152,19 @@ internal class DwebAborts(
     fun clock(): Long = now()
 
     /**
-     * An interceptor call for [url] begins. Already [Ticket.abandoned]
-     * when the page gave up on it before WebView got round to the call.
+     * An interceptor call for [url] begins; it was entered at [calledAt]
+     * ([clock]). Already [Ticket.abandoned] when the page gave up on it
+     * before WebView got round to the call.
+     *
+     * [calledAt] is read as the interceptor is entered, before any of its
+     * other per-request work, some of which can block: a stamp taken
+     * after that would put a live call later than it began, and an
+     * aborted duplicate's entry could then take it for its own (R3-M2).
+     * Never later than [now] here, and never before the request started.
      */
-    fun begin(url: String): Ticket {
+    fun begin(url: String, calledAt: Long = now()): Ticket {
         val key = keyOf(url)
-        val ticket = Ticket(key, now())
+        val ticket = Ticket(key, minOf(calledAt, now()))
         val gone = synchronized(lock) {
             val calls = byUrl.getOrPut(key) { Calls() }
             prune(calls)
@@ -286,15 +293,26 @@ internal class DwebAborts(
          * the next real request for the URL (R2-F1). With it the hit
          * says `cache` and is left out ([dwebAbortsJs]); a request
          * aborted before its headers has no response, so it stays
-         * opaque and is still reported. It shows a page no more than
-         * the `Access-Control-Allow-Origin: *` dweb content carries
-         * already does.
+         * opaque and is still reported.
+         *
+         * Timing-Allow-Origin also opens an entry's `serverTiming` to
+         * a cross-origin page, which CORS never did (`Server-Timing`
+         * isn't a CORS-safelisted header). So any `Server-Timing` a
+         * gateway passed through is dropped from the answer (R3-M1):
+         * it's the gateway's own metadata (a CDN's round-trip time to
+         * the user, say), not the content's. What's left — sizes and
+         * timings of a body any page may already read whole under the
+         * `Access-Control-Allow-Origin: *` dweb content carries — shows
+         * a page nothing new.
          */
         fun timingAllowed(headers: Map<String, String>?): Map<String, String> =
-            (headers.orEmpty().filterKeys { !it.equals(TIMING_ALLOW_ORIGIN, ignoreCase = true) }) +
-                (TIMING_ALLOW_ORIGIN to "*")
+            headers.orEmpty().filterKeys {
+                !it.equals(TIMING_ALLOW_ORIGIN, ignoreCase = true) &&
+                    !it.equals(SERVER_TIMING, ignoreCase = true)
+            } + (TIMING_ALLOW_ORIGIN to "*")
 
         private const val TIMING_ALLOW_ORIGIN = "Timing-Allow-Origin"
+        private const val SERVER_TIMING = "Server-Timing"
 
         fun isSupported(): Boolean = runCatching {
             WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) &&

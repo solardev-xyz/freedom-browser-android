@@ -198,6 +198,47 @@ class DwebAbortsTest {
     }
 
     @Test
+    fun `a gateway's Server-Timing never rides on a tracked answer`() {
+        // Timing-Allow-Origin would open it to any cross-origin page (R3-M1).
+        assertEquals(
+            mapOf("Content-Type" to "image/png", "Timing-Allow-Origin" to "*"),
+            DwebAborts.timingAllowed(
+                mapOf(
+                    "Content-Type" to "image/png",
+                    "Server-Timing" to "cfL4;desc=\"?proto=TCP&rtt=12345\"",
+                    "server-timing" to "edge;dur=3",
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `a live call is stamped when the interceptor was entered, not when it got to begin`() {
+        // The live call is entered at 1_000, before the duplicate's
+        // request started (1_002–1_004), but its other per-request work
+        // blocks until 1_050 before it begins its ticket (R3-M2).
+        val c = Clocked()
+        c.now = 1_050
+        val live = c.aborts.begin(SEG, calledAt = 1_000)
+        c.done(lo = 1_002, hi = 1_004)
+        assertFalse(live.abandoned)
+        // Stamped at 1_050 instead, it reads as certainly after: cut.
+        val d = Clocked()
+        val stale = d.begin(at = 1_050)
+        d.done(lo = 1_002, hi = 1_004)
+        assertTrue(stale.abandoned)
+    }
+
+    @Test
+    fun `a stamp is never later than begin itself`() {
+        val c = Clocked()
+        c.now = 1_000
+        val t = c.aborts.begin(SEG, calledAt = 5_000)
+        c.done(lo = 1_010, hi = 1_012) // a later request, never this call's
+        assertFalse(t.abandoned)
+    }
+
+    @Test
     fun `an entry whose call never comes is forgotten`() {
         val c = Clocked()
         c.done(lo = 990)
