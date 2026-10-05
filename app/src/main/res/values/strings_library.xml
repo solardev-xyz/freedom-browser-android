@@ -29,7 +29,6 @@
     <string name="library_download_blob_unreachable">Couldn\'t reach the part of the page that made this file</string>
     <string name="library_download_blob_gone">The page withdrew this file before it could be saved</string>
     <string name="library_download_blob_page_closed">The page that made this file is closed or stopped answering</string>
-    <string name="library_download_blob_partial">The page sent only part of the file</string>
     <string name="library_download_gateway_no_answer">Gateway didn\'t answer</string>
     <string name="library_download_content_not_found">Content not found</string>
     <!-- %1$d: an HTTP status code -->

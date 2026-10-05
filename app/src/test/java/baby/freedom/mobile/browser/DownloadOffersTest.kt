@@ -249,4 +249,20 @@ class DownloadOffersTest {
         assertFalse(offer(4, "while-blocked"))
         assertEquals(listOf("declined", "declined-with-all", "closed-tab", "declined-on-4"), discarded)
     }
+
+    @Test
+    fun aLateOfferFromAClosedTabIsRefused() {
+        // A blob: offer comes once its page answers, a big data: one once
+        // its size is told: either can land after its tab closed (#408 R1-M5).
+        val offers = DownloadOffers()
+        offers.retainTabs(setOf(1, 2))
+        offers.retainTabs(setOf(2))
+        assertFalse(offers.offer(1, PAGE, "late.json", "x", -1) {})
+        assertFalse(offers.offer(1, null, "late-own.json", "x", -1) {})
+        assertTrue(offers.pending.value.isEmpty())
+        // Open tabs, and tabs never seen yet (just opened), still offer.
+        assertTrue(offers.offer(2, PAGE, "open.json", "x", -1) {})
+        assertTrue(offers.offer(5, PAGE, "new-tab.json", "x", -1) {})
+        assertEquals(listOf("open.json", "new-tab.json"), offers.pending.value.map { it.fileName })
+    }
 }

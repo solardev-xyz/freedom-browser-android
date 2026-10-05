@@ -45,8 +45,8 @@ private const val ORIGINS_PER_TAB = 32
  *
  * When the tab offers a `blob:` download ([prepare]), the frames of the
  * blob's origin are asked to hold the file under a fresh one-time token
- * ([newBlobToken]): the frame that can read it (`fetch(url)` →
- * `Blob`) answers with its size, type and — when the reader saw the link
+ * ([newBlobToken]): the frame that can read it (an `XMLHttpRequest`
+ * for a `Blob`) answers with its size, type and — when the reader saw the link
  * clicked — its `download` attribute; the others answer [BLOB_GONE]. The
  * reader also takes hold of a `blob:` link's file the moment it's
  * clicked, so a page that revokes the URL right after its `a.click()`
@@ -68,8 +68,17 @@ private const val ORIGINS_PER_TAB = 32
 internal class BlobDownloads private constructor(private val binary: Boolean) {
     private val main = Handler(Looper.getMainLooper())
 
-    /** Frames that said hello, by origin. Main thread only. */
+    /**
+     * The current document's frames that said hello, by origin. Main
+     * thread only. Emptied when a new top-level document says hello —
+     * its own reader runs before any of its frames', so what's left is
+     * the old document's — and never trimmed of [top] or its origin.
+     */
     private val frames = LinkedHashMap<String, ArrayList<JavaScriptReplyProxy>>(16, 0.75f, true)
+
+    /** The main frame of the current document, and its origin, once it said hello. */
+    private var top: JavaScriptReplyProxy? = null
+    private var topOrigin: String? = null
 
     /** Asks still waiting for the frames' answers, by token. Main thread only. */
     private val preparing = HashMap<String, Preparing>()
@@ -86,25 +95,23 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
         var resolved = false
     }
 
-    private fun onMessage(message: WebMessageCompat, sourceOrigin: Uri, reply: JavaScriptReplyProxy) {
+    private fun onMessage(message: WebMessageCompat, sourceOrigin: Uri, isMainFrame: Boolean, reply: JavaScriptReplyProxy) {
         val parsed = when (message.type) {
             WebMessageCompat.TYPE_ARRAY_BUFFER -> runCatching { message.arrayBuffer }.getOrNull()?.let(::parseBlobChunk)
             else -> message.data?.let(::parseBlobMessage)
         } ?: return
         when (parsed) {
-            BlobMessage.Hello -> {
-                val origin = webOrigin(sourceOrigin.toString()) ?: return
-                val list = frames.getOrPut(origin) { ArrayList() }
-                if (reply !in list) list += reply
-                while (list.size > FRAMES_PER_ORIGIN) list.removeAt(0)
-                while (frames.size > ORIGINS_PER_TAB) frames.remove(frames.keys.first())
-            }
+            BlobMessage.Hello -> hello(webOrigin(sourceOrigin.toString()) ?: return, isMainFrame, reply)
             is BlobMessage.Ready -> onReady(parsed, reply)
             is BlobMessage.Failed -> {
+                // A frame's answer to a prepare ("I don't have it"), while
+                // that ask is open. Anything else — a chunk the holding
+                // frame couldn't read, even within the prepare window —
+                // is the held file's.
                 val ask = preparing[parsed.token]
-                if (ask != null && reply in ask.asked) {
+                if (parsed.code == BLOB_GONE && ask != null && !ask.resolved && reply in ask.asked) {
                     ask.answered++
-                    if (!ask.resolved && ask.answered >= ask.asked.size) {
+                    if (ask.answered >= ask.asked.size) {
                         finish(ask, FailedBlob(DownloadNote.of(R.string.library_download_blob_gone)))
                     }
                     return
@@ -113,6 +120,19 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
             }
             is BlobMessage.Chunk -> held[parsed.token]?.takeIf { it.proxy === reply }?.chunk(parsed)
         }
+    }
+
+    private fun hello(origin: String, isMainFrame: Boolean, reply: JavaScriptReplyProxy) {
+        if (isMainFrame) {
+            // A new top-level document: the old one's frames are gone.
+            frames.clear()
+            top = reply
+            topOrigin = origin
+        }
+        val list = frames.getOrPut(origin) { ArrayList() }
+        if (reply !in list) list += reply
+        while (list.size > FRAMES_PER_ORIGIN) list.remove(list.first { it !== top })
+        while (frames.size > ORIGINS_PER_TAB) frames.remove(frames.keys.first { it != topOrigin })
     }
 
     private fun onReady(ready: BlobMessage.Ready, reply: JavaScriptReplyProxy) {
@@ -174,7 +194,8 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
      * every frame of the old one — and every file one of them held — is
      * gone. Downloads reading one fail at once ("The page that made this
      * file is closed") instead of after [CHUNK_TIMEOUT_MS]. The frames
-     * list stays: the new document's frames may already have said hello.
+     * list stays: the new document's frames may already have said hello
+     * (it's emptied by the new main frame's own hello, [hello]).
      * Main thread.
      */
     fun documentChanged() {
@@ -289,8 +310,8 @@ internal class BlobDownloads private constructor(private val binary: Boolean) {
                 .getOrDefault(false)
             val downloads = BlobDownloads(binary)
             val channel = newBottomUiChannelName()
-            WebViewCompat.addWebMessageListener(webView, channel, BLOB_ORIGIN_RULES) { _, message, sourceOrigin, _, reply ->
-                downloads.onMessage(message, sourceOrigin, reply)
+            WebViewCompat.addWebMessageListener(webView, channel, BLOB_ORIGIN_RULES) { _, message, sourceOrigin, isMainFrame, reply ->
+                downloads.onMessage(message, sourceOrigin, isMainFrame, reply)
             }
             WebViewCompat.addDocumentStartJavaScript(webView, blobReaderJs(channel), BLOB_ORIGIN_RULES)
             return downloads
@@ -319,24 +340,27 @@ private val BLOB_ORIGIN_RULES: Set<String> = setOf("*")
  * It does nothing until the page clicks a `blob:` link or Kotlin asks:
  * a capture-phase `click` listener on `window` (registered first, before
  * any of the page's) takes hold of a clicked `<a>`/`<area>`'s `blob:`
- * file at once — `fetch()` resolves a blob URL when it's called, so a
- * revoke after the click doesn't matter — and keeps it, with the link's
- * `download` attribute, for [BLOB_CAPTURE_MS]; a file Kotlin asked it to
- * hold is kept until Kotlin lets go, or [BLOB_HOLD_MS] after its last
- * chunk at most.
+ * file at once — an `XMLHttpRequest` resolves a blob URL at `open()`, so
+ * a revoke after the click doesn't matter — and keeps it, with the
+ * link's `download` attribute, for [BLOB_CAPTURE_MS]; a file Kotlin asked
+ * it to hold is kept until Kotlin lets go, or [BLOB_HOLD_MS] after its
+ * last chunk at most.
  *
  * **Nothing the page wraps later sees it** (the cosmetic script's
  * technique, #368): every native it calls after document start was saved
  * then and is called through a `Function.prototype.call` bound then —
- * `fetch`, `Response.prototype.blob`, `Blob.prototype.slice` /
- * `arrayBuffer` and the `size` / `type` getters, `Event.prototype.composedPath`,
- * the `tagName`, `href` and `download` getters, `String.prototype.indexOf`
- * / `substring` / `charCodeAt`, `FileReader`'s `readAsDataURL` and
- * `result`, `addEventListener`, the timers and the `Uint8Array` /
- * `ArrayBuffer` constructors. Its maps have no prototype. It awaits
- * native promises (no `then` is looked up on them), and the one thing it
- * can't avoid reading is `Promise.prototype.constructor`, which `await`
- * checks.
+ * `XMLHttpRequest`'s `open` / `send` / `responseType` / `status` /
+ * `response`, `Blob.prototype.slice` and the `size` / `type` getters,
+ * `FileReader`'s `readAsArrayBuffer` / `readAsDataURL` / `result`,
+ * `ArrayBuffer`'s `byteLength`, `Event.prototype.composedPath`, the
+ * `tagName`, `href` and `download` getters, `String.prototype.indexOf` /
+ * `substring` / `charCodeAt`, `addEventListener`, the timers and the
+ * `Uint8Array` / `ArrayBuffer` constructors. Its maps have no prototype.
+ * And it makes, resolves and awaits **no promise**: every read finishes
+ * in an event on an object only it holds (`loadend`), so a page hooking
+ * `Promise.prototype` (`constructor`, `then`) or `Object.prototype.then`
+ * sees nothing, not even when it clicks a `blob:` link of its own and
+ * cancels the click (#408 R1-F1).
  */
 internal fun blobReaderJs(channel: String): String {
     require(Regex("[a-z]{8,64}").matches(channel)) { "channel must be lower-case letters" }
@@ -359,19 +383,26 @@ internal fun blobReaderJs(channel: String): String {
     for (var p = P; p && !x; p = gpo(p)) x = gopd(p, n);
     return (x && un(x.get)) || function (o) { return o[n]; };
   };
+  var setter = function (P, n) {
+    var x = null;
+    for (var p = P; p && !x; p = gpo(p)) x = gopd(p, n);
+    return (x && un(x.set)) || function (o, v) { o[n] = v; };
+  };
   var P = function (C) { return C && C.prototype; };
   var send = un(port.postMessage), setT = w.setTimeout, clearT = w.clearTimeout, now = Date.now;
-  var fetchN = w.fetch, FR = w.FileReader, U8 = w.Uint8Array, AB = w.ArrayBuffer, Prom = w.Promise, TA = gpo(P(U8));
-  var B = P(w.Blob), S = String.prototype;
+  var FR = w.FileReader, U8 = w.Uint8Array, AB = w.ArrayBuffer, TA = gpo(P(U8));
+  var B = P(w.Blob), S = String.prototype, X = w.XMLHttpRequest, XP = P(X), RP = P(FR);
   var n = {
-    blob: method(P(w.Response), 'blob'), slice: method(B, 'slice'), bytes: method(B, 'arrayBuffer'),
-    size: prop(B, 'size'), type: prop(B, 'type'), path: method(P(w.Event), 'composedPath'),
-    tag: prop(P(w.Element), 'tagName'),
+    slice: method(B, 'slice'), size: prop(B, 'size'), type: prop(B, 'type'),
+    path: method(P(w.Event), 'composedPath'), tag: prop(P(w.Element), 'tagName'),
     aHref: prop(P(w.HTMLAnchorElement), 'href'), aName: prop(P(w.HTMLAnchorElement), 'download'),
     areaHref: prop(P(w.HTMLAreaElement), 'href'), areaName: prop(P(w.HTMLAreaElement), 'download'),
     on: method(P(w.EventTarget), 'addEventListener'), u8set: method(TA, 'set'), len: prop(TA, 'length'),
     data: prop(P(w.MessageEvent), 'data'),
-    asData: method(P(FR), 'readAsDataURL'), result: prop(P(FR), 'result'),
+    xOpen: method(XP, 'open'), xSend: method(XP, 'send'), xType: setter(XP, 'responseType'),
+    xStatus: prop(XP, 'status'), xBody: prop(XP, 'response'),
+    abLen: prop(P(AB), 'byteLength'),
+    asData: method(RP, 'readAsDataURL'), asBytes: method(RP, 'readAsArrayBuffer'), result: prop(RP, 'result'),
     at: un(S.indexOf), cut: un(S.substring), code: un(S.charCodeAt), call: un(fcall), clock: un(now)
   };
   function post(m) { try { send(port, m); } catch (e) {} }
@@ -379,16 +410,37 @@ internal fun blobReaderJs(channel: String): String {
   function later(f, ms) { return n.call(setT, w, f, ms); }
   function cancel(t) { if (t) n.call(clearT, w, t); }
   function starts(s, p) { return typeof s === 'string' && n.cut(s, 0, p.length) === p; }
-  // Clicked blob: links (url -> {p, name, t}) and files held for Kotlin (token -> {b, mode, timer}).
+  // Clicked blob: links (url -> {name, t, blob, done, wait}) and files held for Kotlin (token -> {b, mode, timer}).
   var caps = mk(null), held = mk(null);
-  async function readUrl(url) { return await n.blob(await n.call(fetchN, w, url)); }
+  // url's file, to done(blob) or done(null). An XMLHttpRequest, not
+  // fetch(): nothing here makes or awaits a promise, so a page watching
+  // Promise.prototype (its constructor, then) sees nothing of it.
+  // XMLHttpRequest resolves a blob: URL at open(), as fetch() does at
+  // its call, so a revoke right after still reads the file.
+  function readUrl(url, done) {
+    var x = null, over = false;
+    function end(b) { if (!over) { over = true; done(b); } }
+    try {
+      x = new X();
+      n.xOpen(x, 'GET', url);
+      n.xType(x, 'blob');
+      n.on(x, 'loadend', function () {
+        var b = null;
+        try { if (n.xStatus(x) === 200) { b = n.xBody(x); n.size(b); } } catch (e) { b = null; }
+        end(b || null);
+      });
+      n.xSend(x);
+    } catch (e) { end(null); }
+  }
   function capture(url, name) {
     var c = mk(null);
     c.name = typeof name === 'string' ? name : '';
-    c.t = time();
-    c.p = readUrl(url);
-    // An unread capture rejecting must not reach the page's unhandledrejection.
-    (async function () { try { await c.p; } catch (e) {} })();
+    c.t = time(); c.blob = null; c.done = false; c.wait = null;
+    readUrl(url, function (b) {
+      c.blob = b; c.done = true;
+      var f = c.wait; c.wait = null;
+      if (f) f(b);
+    });
     caps[url] = c;
     later(function () { if (caps[url] === c) delete caps[url]; }, $BLOB_CAPTURE_MS);
   }
@@ -411,45 +463,59 @@ internal fun blobReaderJs(channel: String): String {
     var end = n.at(m, '\n', from);
     return end < 0 ? null : end;
   }
-  async function prepare(token, mode, url) {
-    var c = caps[url], blob = null, name = '';
-    if (c) { delete caps[url]; name = c.name; try { blob = await c.p; } catch (e) {} }
-    if (!blob) { try { blob = await readUrl(url); } catch (e) {} }
-    if (!blob) { post('e\n' + token + '\n$BLOB_GONE'); return; }
-    var h = mk(null);
-    h.b = blob; h.mode = mode; h.timer = 0;
-    held[token] = h;
-    keep(token, h);
-    post('o\n' + token + '\n' + n.size(blob) + '\n' + n.type(blob) + '\n' + name);
+  function prepare(token, mode, url) {
+    var c = caps[url];
+    function got(blob, name) {
+      if (!blob) { post('e\n' + token + '\n$BLOB_GONE'); return; }
+      var h = mk(null);
+      h.b = blob; h.mode = mode; h.timer = 0;
+      held[token] = h;
+      keep(token, h);
+      post('o\n' + token + '\n' + n.size(blob) + '\n' + n.type(blob) + '\n' + name);
+    }
+    function fresh(name) { readUrl(url, function (b) { got(b, name); }); }
+    if (!c) { fresh(''); return; }
+    delete caps[url];
+    function captured(b) { if (b) got(b, c.name); else fresh(c.name); }
+    if (c.done) captured(c.blob); else c.wait = captured;
   }
   function keep(token, h) {
     cancel(h.timer);
     h.timer = later(function () { if (held[token] === h) delete held[token]; }, $BLOB_HOLD_MS);
   }
-  function dataUrl(part) {
-    return new Prom(function (ok, fail) {
+  // part's bytes (or data: URL), to done(value) or done(null).
+  function readPart(part, binary, done) {
+    try {
       var r = new FR();
-      n.on(r, 'loadend', function () { var v = n.result(r); if (typeof v === 'string') ok(v); else fail(); });
-      n.asData(r, part);
-    });
+      n.on(r, 'loadend', function () {
+        var v = null;
+        try { v = n.result(r); } catch (e) {}
+        if (binary) { try { n.abLen(v); } catch (e) { v = null; } } else if (typeof v !== 'string') v = null;
+        done(v);
+      });
+      if (binary) n.asBytes(r, part); else n.asData(r, part);
+    } catch (e) { done(null); }
   }
-  async function chunk(token, off, len) {
+  function chunk(token, off, len) {
     var h = held[token];
     if (!h) { post('e\n' + token + '\n$BLOB_READ_FAILED'); return; }
     keep(token, h);
-    try {
-      var part = n.slice(h.b, off, off + len);
-      if (h.mode === '$BLOB_MODE_BINARY') {
-        var data = new U8(await n.bytes(part)), head = token + ':' + off + ':';
-        var buf = new AB(head.length + n.len(data)), out = new U8(buf);
-        for (var i = 0; i < head.length; i++) out[i] = n.code(head, i);
-        n.u8set(out, data, head.length);
-        post(buf);
-      } else {
-        var u = await dataUrl(part);
-        post('d\n' + token + '\n' + off + '\n' + n.cut(u, n.at(u, ',') + 1));
-      }
-    } catch (e) { post('e\n' + token + '\n$BLOB_READ_FAILED'); }
+    var binary = h.mode === '$BLOB_MODE_BINARY', part;
+    try { part = n.slice(h.b, off, off + len); } catch (e) { post('e\n' + token + '\n$BLOB_READ_FAILED'); return; }
+    readPart(part, binary, function (v) {
+      try {
+        if (v === null) throw 0;
+        if (binary) {
+          var data = new U8(v), head = token + ':' + off + ':';
+          var buf = new AB(head.length + n.len(data)), out = new U8(buf);
+          for (var i = 0; i < head.length; i++) out[i] = n.code(head, i);
+          n.u8set(out, data, head.length);
+          post(buf);
+        } else {
+          post('d\n' + token + '\n' + off + '\n' + n.cut(v, n.at(v, ',') + 1));
+        }
+      } catch (e) { post('e\n' + token + '\n$BLOB_READ_FAILED'); }
+    });
   }
   port.onmessage = function (e) {
     var m = null;

@@ -114,6 +114,9 @@ sealed class DownloadEvent {
     data class Failed(override val id: Long, override val fileName: String, val reason: String) : DownloadEvent()
 }
 
+/** A `data:` download up to this long has its size told on the UI thread ([DownloadManager.start]); about a millisecond's scan. */
+private const val DATA_URI_INLINE_SCAN_CHARS = 1_000_000
+
 /**
  * The browser's download manager (#79).
  *
@@ -355,13 +358,6 @@ class DownloadManager private constructor(context: Context) {
         val contentDisposition = blob?.let { blobContentDisposition(it.name) } ?: contentDisposition
         @Suppress("NAME_SHADOWING")
         val mimeType = blob?.mimeType ?: mimeType
-        @Suppress("NAME_SHADOWING")
-        val contentLength = when {
-            blob != null && blob.failure == null -> blob.size
-            // WebView says 0 for every data: URI; its payload tells.
-            target is DownloadTarget.Data && contentLength <= 0 -> openDataUri(url)?.length ?: -1
-            else -> contentLength
-        }
         val name = downloadFileName(contentDisposition, url, normalizeMime(mimeType), ::extensionForMime)
         val refererOrigin = downloadRefererOrigin(pageUrl)
         // Who asked, as the prompt names them. A page with no usable
@@ -371,15 +367,32 @@ class DownloadManager private constructor(context: Context) {
         // A private offer belongs to the session live when it was made:
         // accepted after that session ended, it's dropped ([enqueue]).
         val session = if (private) privateSession() else null
-        val queued = offerQueue.offer(
-            tabId, requestedBy, name, target.displayUrl, contentLength.coerceAtLeast(-1), private,
-            mimeType = saveAsMimeType(normalizeMime(mimeType)),
-            discard = { blob?.release() },
-        ) { saveTo ->
-            enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, session, saveTo, blob)
+        fun offer(contentLength: Long) {
+            val queued = offerQueue.offer(
+                tabId, requestedBy, name, target.displayUrl, contentLength.coerceAtLeast(-1), private,
+                mimeType = saveAsMimeType(normalizeMime(mimeType)),
+                discard = { blob?.release() },
+            ) { saveTo ->
+                enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, session, saveTo, blob)
+            }
+            if (!queued) blob?.release()
+            if (!queued) Log.i(LOG_TAG, "download offer from tab $tabId dropped (tab blocked or closed, or $MAX_PENDING_OFFERS waiting)")
         }
-        if (!queued) blob?.release()
-        if (!queued) Log.i(LOG_TAG, "download offer from tab $tabId dropped (tab blocked or $MAX_PENDING_OFFERS waiting)")
+        when {
+            blob != null -> offer(if (blob.failure == null) blob.size else contentLength)
+            // WebView says 0 for every data: URI; its payload tells. A
+            // short one is told at once; a long one can be tens of
+            // millions of characters to scan, so not on the UI thread.
+            target is DownloadTarget.Data && contentLength <= 0 && url.length <= DATA_URI_INLINE_SCAN_CHARS ->
+                offer(openDataUri(url)?.length ?: -1)
+            target is DownloadTarget.Data && contentLength <= 0 ->
+                scope.launch(Dispatchers.Default) {
+                    // Unwatched: a failure to tell only costs the size.
+                    val length = try { openDataUri(url)?.length } catch (_: Throwable) { null }
+                    offer(length ?: -1)
+                }
+            else -> offer(contentLength)
+        }
     }
 
     /**
