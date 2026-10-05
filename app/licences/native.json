@@ -1,6 +1,6 @@
 {
  "generatedBy": "scripts/native-licences.sh",
- "ffiRef": "v0.12.12",
+ "ffiRef": "v0.12.13",
  "features": [
   "chain",
   "radicle",
@@ -2985,15 +2985,6 @@
    "url": "https://crates.io/crates/is_terminal_polyfill/1.70.2",
    "texts": [
     13
-   ]
-  },
-  {
-   "name": "itertools",
-   "version": "0.10.5",
-   "licence": "MIT OR Apache-2.0",
-   "url": "https://crates.io/crates/itertools/0.10.5",
-   "texts": [
-    31
    ]
   },
   {

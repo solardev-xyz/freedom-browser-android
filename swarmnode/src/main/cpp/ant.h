@@ -228,6 +228,39 @@ int ant_resume(const AntHandle *handle, char **out_err);
 int ant_set_swap_enabled(const AntHandle *handle, bool enabled, char **out_err);
 
 /*
+ * Give the wallet's transfer scan an explicitly unverified source: one
+ * provider that serves the whole xBZZ history in a single eth_getLogs
+ * (e.g. https://rpc.gnosischain.com), for a host whose transport
+ * (ant_set_chain_transport) is a verified route that can only serve a
+ * few thousand blocks at a time. A span the transport can't serve in a
+ * few requests (a first scan, a long time offline) is read from it once
+ * instead of window by window, which is about an hour of verified
+ * windows for a wallet's whole history. What it finds is still checked
+ * through the transport, batch by batch and chequebook by chequebook;
+ * GET /health's walletScan reads "confirming", and the gateway's chain
+ * init confirms the span in the background through the transport: each
+ * try reads at most 64 windows (one request once the transport serves
+ * the whole span), retried after 1 minute, doubling, at most 30 minutes.
+ * A "no chequebook" it backs never leads to a deploy until it's
+ * confirmed. While the source fails (down, rate-limited), the scan reads
+ * on window by window through the transport — the slow crawl it would
+ * otherwise avoid, about an hour for a whole history — and tries the
+ * source again every 64 windows, so a scan neither stalls nor fails
+ * while it's down. antd's --gnosis-unverified-logs-rpc-url is the same.
+ *
+ * `url` NULL or empty clears it. Call it after ant_init and before
+ * ant_start_gateway: it reaches the chain reads started after it. It is
+ * not persisted; set it after every ant_init.
+ *
+ * Returns 0 on success, -1 if `handle` is NULL, -2 if `url` isn't valid
+ * UTF-8 (an allocated error string is written into *out_err; free with
+ * ant_free_string), and -3 when built without the `chain` feature.
+ */
+int ant_set_unverified_logs_rpc(const AntHandle *handle,
+                                const char *url,
+                                char **out_err);
+
+/*
  * The node's SWAP settlement state as a JSON object — what the gateway's
  * GET /v0/settlement/swap and GET /node's "settlement" report, for a host
  * that doesn't run the gateway:
@@ -677,7 +710,9 @@ char *ant_storage_discover(const AntHandle *handle,
  * an RPC that once answered part of the history incompletely (a backend
  * far behind the head) leaves a hole the saved scan never revisits. As
  * slow as the first scan behind a range-capped RPC (minutes), so don't
- * call it at every start. Same return value; requires `chain`.
+ * call it at every start. It reads through the transport only, never
+ * from ant_set_unverified_logs_rpc's unverified source: the scan it
+ * replaces may be confirmed. Same return value; requires `chain`.
  */
 char *ant_storage_discover_full(const AntHandle *handle,
                                 const char *gnosis_rpc,
@@ -887,8 +922,12 @@ void ant_free_string(char *ptr);
  * adoption that already succeeded is not repeated in this process (a
  * batch bought on another device needs ant_storage_discover, or a fresh
  * ant_init followed by ant_start_gateway with a `gnosis_rpc` — ant_init
- * alone only reloads persisted state and never rescans). Run off the
- * main thread.
+ * alone only reloads persisted state and never rescans). A failed
+ * rediscovery is also retried in the background with backoff (15 s,
+ * doubling, at most 5 minutes) until it succeeds, through the latest
+ * start's `gnosis_rpc`, while the gateway runs: it ends at
+ * ant_stop_gateway. /health.walletScan reports where it stands (a stop
+ * drops it unless done or confirming). Run off the main thread.
  */
 bool ant_start_gateway(const AntHandle *handle,
                        const char *api_addr,
@@ -968,7 +1007,14 @@ bool ant_set_gateway_cors(const AntHandle *handle,
 /*
  * Stop the in-process HTTP gateway started by ant_start_gateway.
  * Returns true if a gateway was running and was stopped, false if none
- * was running (or `handle` is NULL). Safe to call repeatedly.
+ * was running (or `handle` is NULL). Safe to call repeatedly. A
+ * background rediscovery retry stops with it, before its next attempt;
+ * the next start with a `gnosis_rpc` tries again. An unfinished
+ * /health.walletScan (pending, scanning, retrying) is dropped with it,
+ * so a next start without a `gnosis_rpc` reports none rather than a
+ * status nothing moves on; a finished one (done, or confirming: the
+ * batches are registered and the history read from the unverified source
+ * is still being confirmed, which ant_stop_gateway doesn't stop) is kept.
  */
 bool ant_stop_gateway(const AntHandle *handle);
 
