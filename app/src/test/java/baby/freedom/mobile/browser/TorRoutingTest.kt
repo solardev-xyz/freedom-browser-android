@@ -573,7 +573,7 @@ class TorRoutingTest {
         val port = server.address.port
         val events = java.util.Collections.synchronizedList(mutableListOf<String>())
         val watcher = object : TorRouting.HopWatcher {
-            override fun connecting(conn: java.net.HttpURLConnection, addresses: Int) { events += if (addresses == 1) "connecting" else "connecting $addresses" }
+            override fun connecting(conn: java.net.HttpURLConnection, routes: Int) { events += if (routes == 1) "connecting" else "connecting $routes" }
             override fun connected(conn: java.net.HttpURLConnection) { events += "connected" }
             override fun answered(conn: java.net.HttpURLConnection) { events += "answered" }
         }
@@ -592,11 +592,14 @@ class TorRoutingTest {
             // An IP literal: nothing to look up.
             fetch("http://127.0.0.1:$port/b")
             assertEquals(listOf("connecting", "connected", "answered"), events.toList())
-            // A system proxy resolves the name itself; nothing is looked up here.
+            // A system proxy resolves the name itself; nothing is looked up
+            // here. The proxy and okhttp's direct fallback after it are two
+            // routes (PR #409 R6-M1).
             val http = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress.createUnresolved("127.0.0.1", 8080))
             TorRouting.proxiesFor = { listOf(http) }
             fetch("http://localhost:$port/c")
             assertFalse(events.toList().toString(), events.any { it.startsWith("lookup") })
+            assertEquals(listOf("connecting 2"), events.filter { it.startsWith("connecting") })
             // A selector that fails: not known to be direct, so not looked up either.
             TorRouting.proxiesFor = { throw IllegalArgumentException("bad uri") }
             fetch("http://localhost:$port/d")
@@ -625,6 +628,28 @@ class TorRoutingTest {
             TorRouting.proxiesFor = realProxies
             server.stop(0)
         }
+    }
+
+    /**
+     * PR #409 R6-M1: the routes a connect may try, as okhttp's
+     * `RouteSelector` builds them — every address of a direct hop, or each
+     * proxy the selector names plus the one direct fallback after them
+     * (counted as one route: its name isn't looked up here).
+     */
+    @Test
+    fun `connect routes count each address direct, each proxy plus the direct fallback otherwise`() {
+        val http = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress.createUnresolved("proxy.example", 8080))
+        val socks = java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress.createUnresolved("socks.example", 1080))
+        var looked = 0
+        val three = { looked++; 3 }
+        assertEquals(3, TorRouting.connectRoutes(listOf(java.net.Proxy.NO_PROXY), three))
+        assertEquals(3, TorRouting.connectRoutes(emptyList(), three))
+        assertEquals(1, TorRouting.connectRoutes(listOf(java.net.Proxy.NO_PROXY)) { 0 })
+        assertEquals(2, looked)
+        assertEquals(2, TorRouting.connectRoutes(listOf(http), three))
+        assertEquals(3, TorRouting.connectRoutes(listOf(http, socks), three))
+        assertEquals(2, TorRouting.connectRoutes(listOf(http, java.net.Proxy.NO_PROXY), three))
+        assertEquals("a proxied hop's name was looked up", 2, looked)
     }
 
     /** Run [block] with [TorRouting.resolve] answering from [names] (anything else unresolvable). */

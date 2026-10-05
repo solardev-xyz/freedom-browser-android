@@ -652,7 +652,9 @@ object TorRouting {
      * time, without name lookups: those between hops, and the one the
      * connection itself would run inside `connect()`, which is done ahead
      * of [HopWatcher.connecting] ([lookUpAhead]) so the connect finds the
-     * name cached.
+     * name cached. An https hop's every route then gets
+     * [HopWatcher.handshakeTimeoutMs] for its TLS handshake
+     * ([HandshakeTimeoutFactory]).
      */
     fun openFollowingRedirects(
         url: URL,
@@ -698,6 +700,13 @@ object TorRouting {
                     if (local && pinned == null && c is HttpsURLConnection) {
                         c.sslSocketFactory = DevicePeerRefusingFactory(c.sslSocketFactory, current, requireDevice = true)
                     }
+                    hops?.handshakeTimeoutMs?.let { ms ->
+                        // Each route's TLS handshake gets its own limit, so
+                        // one that stalls fails there and the connection
+                        // tries the next, as under main's read timeout
+                        // (PR #409 R6-M1).
+                        if (c is HttpsURLConnection) c.sslSocketFactory = HandshakeTimeoutFactory(c.sslSocketFactory, ms)
+                    }
                     method?.let { c.requestMethod = it }
                     c.instanceFollowRedirects = false
                     if (payload != null) c.doOutput = true
@@ -722,11 +731,11 @@ object TorRouting {
                     // connect then finds it cached and the stretch the
                     // watcher times is the connect and handshake alone, with
                     // lookup time on top, as on main (PR #409 R4-M1).
-                    // How many addresses it found is how many the connect
-                    // may try, each under its own connect timeout, as on
-                    // main (PR #409 R5-M1); a pinned hop dials one.
-                    val addresses = if (pinned == null) lookUpAhead(current, route) else 1
-                    hops.connecting(c, addresses)
+                    // How many routes the connect may try in turn, each
+                    // under its own connect and handshake timeouts, as on
+                    // main (PR #409 R5-M1, R6-M1); a pinned hop dials one.
+                    val routes = if (pinned == null) lookUpAhead(current, route) else 1
+                    hops.connecting(c, routes)
                     c.connect()
                     hops.connected(c)
                 }
@@ -783,20 +792,43 @@ object TorRouting {
      * connect clock — the `main`-like behaviour this exists to avoid, but
      * no worse than it was before it, and the clock's limit still holds.
      *
-     * Returns how many addresses the connection may try in turn — each
-     * under its own connect timeout, so the connect clock scales with it
-     * (PR #409 R5-M1) — or 1 when nothing was looked up (through a proxy
-     * the connection dials the proxy's one address) or the lookup failed.
+     * Returns how many routes the connection may try in turn — each under
+     * its own connect and handshake timeouts, so the connect clock scales
+     * with it (PR #409 R5-M1, R6-M1): [connectRoutes] of the selector's
+     * choice; one for an explicit [route] proxy (Tor's, or a cross-origin
+     * hop's system proxy), which has no direct fallback; and 1 when the
+     * selector fails or the lookup does.
      */
     private fun lookUpAhead(hop: URL, route: Proxy?): Int {
         if (fetchMayReachOnion(hop)) return 1
-        val direct = if (route != null) {
-            route.type() == Proxy.Type.DIRECT
-        } else {
-            val uri = selectorUri(hop) ?: return 1
-            runCatching { proxiesFor(uri) }.getOrNull()?.all { it.type() == Proxy.Type.DIRECT } ?: false
-        }
-        if (!direct) return 1
+        if (route != null) return if (route.type() == Proxy.Type.DIRECT) lookUpDirect(hop) else 1
+        val uri = selectorUri(hop) ?: return 1
+        val selected = runCatching { proxiesFor(uri) }.getOrNull() ?: return 1
+        return connectRoutes(selected) { lookUpDirect(hop) }
+    }
+
+    /**
+     * How many routes Android's HttpURLConnection tries for a hop whose
+     * proxy is the system selector's choice ([selected]): okhttp's
+     * `RouteSelector` tries each proxy the selector named, then — "only
+     * once" — a direct connection, to every address the name resolves to.
+     * All-direct (or nothing named): just those [directAddresses]. With a
+     * proxy: one route per proxy, plus the direct fallback counted as one,
+     * since its name isn't looked up here (it's the proxy's to resolve, and
+     * a lookup on this device mustn't happen just to size a clock) — a
+     * fallback to a name with several addresses is held to the watchdog's
+     * one-route share.
+     */
+    internal fun connectRoutes(selected: List<Proxy>, directAddresses: () -> Int): Int {
+        val proxies = selected.count { it.type() != Proxy.Type.DIRECT }
+        return if (proxies == 0) directAddresses().coerceAtLeast(1) else proxies + 1
+    }
+
+    /**
+     * [lookUpAhead] for a hop dialed straight from here: how many addresses
+     * its name resolves to (1 for an IP literal, or a failed lookup).
+     */
+    private fun lookUpDirect(hop: URL): Int {
         val raw = okHttpHost(hop.toString())?.takeIf { it.isNotEmpty() && !it.startsWith("[") } ?: return 1
         val name = runCatching { IDN.toASCII(percentDecodeUtf8(raw)) }.getOrNull()?.lowercase(java.util.Locale.US) ?: return 1
         val bare = name.trimEnd('.')
@@ -817,8 +849,15 @@ object TorRouting {
      * in. Any of them may throw to abandon the fetch.
      */
     interface HopWatcher {
-        /** [addresses]: how many addresses the connect may try in turn, each under its own connect timeout. */
-        fun connecting(conn: HttpURLConnection, addresses: Int = 1)
+        /**
+         * Each route's own TLS handshake limit, set on its socket before
+         * the handshake (null: the read timeout's, as ever). okhttp moves
+         * on to the next route when it fires.
+         */
+        val handshakeTimeoutMs: Int? get() = null
+
+        /** [routes]: how many routes the connect may try in turn, each under its own connect and handshake timeouts. */
+        fun connecting(conn: HttpURLConnection, routes: Int = 1)
         fun connected(conn: HttpURLConnection)
         fun answered(conn: HttpURLConnection)
     }
@@ -1177,6 +1216,45 @@ object TorRouting {
         override fun createSocket(host: InetAddress?, port: Int): Socket = checked(delegate.createSocket(host, port))
         override fun createSocket(address: InetAddress?, port: Int, local: InetAddress?, localPort: Int): Socket =
             checked(delegate.createSocket(address, port, local, localPort))
+    }
+
+    /**
+     * An https hop's [SSLSocketFactory] that gives each route's TLS
+     * handshake a read timeout of [timeoutMs]: okhttp layers TLS over each
+     * route's connected socket here, after setting that socket's read
+     * timeout to the connection's own (the long body stall limit) and
+     * before the handshake, so this is where a handshake can get a shorter
+     * one. When it fires, okhttp tries the next route (a
+     * `SocketTimeoutException` is recoverable), as it did under `main`'s
+     * 10 s read timeout (PR #409 R6-M1). Once a route is up okhttp sets the
+     * socket's timeout back to the connection's own before any request is
+     * written, so the body stall limits are untouched. Equal to any other
+     * with the same delegate and timeout, so an https gateway's pooled
+     * connections stay reusable (okhttp keys its pool by the factory too).
+     */
+    private class HandshakeTimeoutFactory(
+        private val delegate: SSLSocketFactory,
+        private val timeoutMs: Int,
+    ) : SSLSocketFactory() {
+        private fun timed(socket: Socket): Socket = socket.apply { soTimeout = timeoutMs }
+
+        override fun getDefaultCipherSuites(): Array<String> = delegate.defaultCipherSuites
+        override fun getSupportedCipherSuites(): Array<String> = delegate.supportedCipherSuites
+        override fun createSocket(s: Socket, host: String?, port: Int, autoClose: Boolean): Socket {
+            timed(s)
+            return timed(delegate.createSocket(s, host, port, autoClose))
+        }
+        override fun createSocket(host: String?, port: Int): Socket = timed(delegate.createSocket(host, port))
+        override fun createSocket(host: String?, port: Int, local: InetAddress?, localPort: Int): Socket =
+            timed(delegate.createSocket(host, port, local, localPort))
+        override fun createSocket(host: InetAddress?, port: Int): Socket = timed(delegate.createSocket(host, port))
+        override fun createSocket(address: InetAddress?, port: Int, local: InetAddress?, localPort: Int): Socket =
+            timed(delegate.createSocket(address, port, local, localPort))
+
+        override fun equals(other: Any?): Boolean =
+            other is HandshakeTimeoutFactory && other.delegate == delegate && other.timeoutMs == timeoutMs
+
+        override fun hashCode(): Int = delegate.hashCode() * 31 + timeoutMs
     }
 
     /**

@@ -160,11 +160,38 @@ private fun disconnectAside(conn: HttpURLConnection, then: () -> Unit = {}) {
 }
 
 /**
- * The connect timeout of a gateway fetch ([fetchWithRetry]); with the TLS
- * handshake on top, a hop's connect gets this plus `main`'s read timeout
- * ([HeaderDeadline]).
+ * The connect timeout of a gateway fetch ([fetchWithRetry]): each route
+ * (address) the connection tries gets this for its TCP connect, then its
+ * TLS handshake bounded on its own ([HeaderDeadline], [connectStretchMs]).
  */
 internal const val GATEWAY_CONNECT_TIMEOUT_MS = 5_000
+
+/**
+ * What [HeaderDeadline]'s watchdog adds to the routes' own bounds before
+ * it cuts a connect ([connectStretchMs]), so each route's own socket
+ * timeouts — which move the connection on to the next address, as on
+ * `main` — fire first, and the watchdog is only the backstop for a stall
+ * no socket timeout covers.
+ */
+internal const val CONNECT_GRACE_MS = 1_000
+
+/**
+ * How long [HeaderDeadline] lets a hop's `connect()` run before cutting
+ * it: `(connectMs + handshakeMs) × routes + graceMs`.
+ *
+ * That is `main`'s per-route bound for each of [routes] (as
+ * [TorRouting.connectRoutes] counts them), plus [graceMs]: on `main`, Android's
+ * HttpURLConnection tried each route in turn, each with its TCP connect
+ * under the connect timeout and its TLS handshake (or a SOCKS proxy's
+ * reply) under the read timeout, and moved on to the next route when
+ * either timed out (okhttp's `RouteException` / `isRecoverable`). Here the
+ * handshake of every route still has its own limit ([handshakeMs], the
+ * hop's base read timeout, set on each route's socket by
+ * [TorRouting.openFollowingRedirects]), so the routes add up the same way.
+ * [routes] at least 1.
+ */
+internal fun connectStretchMs(connectMs: Int, handshakeMs: Int, routes: Int, graceMs: Int = CONNECT_GRACE_MS): Long =
+    (connectMs.toLong() + handshakeMs) * routes.coerceAtLeast(1) + graceMs
 
 /**
  * Enforces [GatewayFetchPolicy]'s header limits from outside the thread
@@ -174,20 +201,26 @@ internal const val GATEWAY_CONNECT_TIMEOUT_MS = 5_000
  * stretches.
  *
  * **Connecting** ([connecting] to [connected]): Android's
- * [HttpURLConnection.connect] runs the TCP connect (its own connect
- * timeout), then an https hop's TLS handshake and a SOCKS proxy's reply
- * under the read timeout — which is the long body stall limit now, so on
- * its own a handshake that stalls would hold a pool thread for it, past
- * `main`'s bound and with no [PatientWaits] slot (PR #409 R3-F1). So the
- * connect gets `main`'s own bound and no more: the connection tries each
- * address the name resolved to in turn, each under its own connect
- * timeout, so that is [connectMs] (one connect timeout) per address
- * [TorRouting.openFollowingRedirects] reports, plus [baseMs] (`main`'s
- * read timeout) for the handshake (PR #409 R5-M1). Then it is disconnected from
- * another thread, which aborts a `connect()` mid-handshake, and cut again
- * every [RECUT_MS] until it returns, in case a cut lands between steps of
- * the connect and a later one blocks again. The name is looked up before
- * this stretch starts ([TorRouting.openFollowingRedirects] does it ahead
+ * [HttpURLConnection.connect] tries each route (each address the name
+ * resolved to; a proxy, then the direct fallback) in turn: its TCP connect
+ * under its own connect timeout, then an https hop's TLS handshake and a
+ * SOCKS proxy's reply under the read timeout. The read timeout is the
+ * long body stall limit now, so each route's TLS handshake is given
+ * [baseMs] (`main`'s read timeout: 10 s, 60 s for media) of its own
+ * instead ([handshakeTimeoutMs], set on each route's socket by
+ * [TorRouting.openFollowingRedirects]): a route whose handshake stalls
+ * fails there and the connection moves on to the next, as on `main`
+ * (PR #409 R6-M1). The whole stretch is watched too: at
+ * [connectStretchMs] — `(connectMs + baseMs) × routes + graceMs`, `main`'s
+ * per-route bound for every route [TorRouting.openFollowingRedirects]
+ * reports, plus a [CONNECT_GRACE_MS] grace — the connection is
+ * disconnected from another thread, which aborts a `connect()`
+ * mid-handshake, and cut again every [RECUT_MS] until it returns, in case
+ * a cut lands between steps of the connect and a later one blocks again.
+ * That is the backstop for what no per-route socket timeout covers: a
+ * SOCKS proxy's reply and an HTTP proxy's CONNECT reply, both read under
+ * the long read timeout (PR #409 R3-F1). The name is looked up before this
+ * stretch starts ([TorRouting.openFollowingRedirects] does it ahead
  * of [connecting], so the connect finds it cached): lookup time comes on
  * top, as on `main`, where no limit covered it. (A cut that does land
  * during the connection's own lookup isn't lost — the connection is
@@ -211,7 +244,11 @@ internal class HeaderDeadline(
     private val timeoutMs: Int = baseMs,
     private val patience: PatientWaits = PatientWaits.shared,
     private val connectMs: Int = GATEWAY_CONNECT_TIMEOUT_MS,
+    private val graceMs: Int = CONNECT_GRACE_MS,
 ) : TorRouting.HopWatcher {
+    /** Each route's own TLS handshake limit: `main`'s read timeout. */
+    override val handshakeTimeoutMs: Int get() = baseMs
+
     private val lock = Any()
     private var current: HttpURLConnection? = null // the hop connecting or waiting on its headers
     private var hop = 0 // which hop that is
@@ -229,13 +266,13 @@ internal class HeaderDeadline(
     var extended = false
         private set
 
-    override fun connecting(conn: HttpURLConnection, addresses: Int) {
+    override fun connecting(conn: HttpURLConnection, routes: Int) {
         synchronized(lock) {
             if (expired) throw SocketTimeoutException("no headers in time")
             stop()
             current = conn
             val mine = ++hop
-            val limit = connectMs.toLong() * addresses.coerceAtLeast(1) + baseMs
+            val limit = connectStretchMs(connectMs, baseMs, routes, graceMs)
             task = watchdog.schedule({ cutConnect(mine) }, limit, TimeUnit.MILLISECONDS)
         }
     }

@@ -167,7 +167,7 @@ class GatewayFetchPolicyTest {
     fun `a connect that hangs is cut at its limit, and again until it returns`() {
         val cuts = AtomicInteger(0)
         val slot = PatientWaits(1)
-        val deadline = HeaderDeadline(100, 5_000, slot, connectMs = 100) // one address: 100 + 100
+        val deadline = HeaderDeadline(100, 5_000, slot, connectMs = 100, graceMs = 0) // one route: 100 + 100
         deadline.connecting(FakeConnection { cuts.incrementAndGet() })
         Thread.sleep(120)
         assertEquals("cut before the connect limit", 0, cuts.get())
@@ -191,18 +191,18 @@ class GatewayFetchPolicyTest {
     }
 
     /**
-     * PR #409 R5-M1: the connection tries each address the name resolved to
-     * in turn, each under its own connect timeout, as on main — so the
-     * connect clock is one connect timeout per address, plus the read
-     * timeout for the handshake.
+     * PR #409 R5-M1, R6-M1: the connection tries each route in turn, each
+     * under its own connect timeout and its own handshake timeout, as on
+     * main — so the connect clock is both per route, plus the grace.
      */
     @Test
-    fun `the connect clock allows one connect timeout per address`() {
+    fun `the connect clock allows a connect and a handshake timeout per route`() {
         val cuts = AtomicInteger(0)
-        val deadline = HeaderDeadline(100, patience = PatientWaits(0), connectMs = 200)
-        deadline.connecting(FakeConnection { cuts.incrementAndGet() }, addresses = 3) // 3 x 200 + 100
-        Thread.sleep(550)
-        assertEquals("cut before three addresses' worth", 0, cuts.get())
+        val deadline = HeaderDeadline(100, patience = PatientWaits(0), connectMs = 200, graceMs = 100)
+        assertEquals(100, deadline.handshakeTimeoutMs)
+        deadline.connecting(FakeConnection { cuts.incrementAndGet() }, routes = 3) // 3 x (200 + 100) + 100
+        Thread.sleep(900)
+        assertEquals("cut before three routes' worth", 0, cuts.get())
         assertFalse(deadline.expired)
         Thread.sleep(400)
         assertTrue(deadline.expired)
@@ -213,7 +213,7 @@ class GatewayFetchPolicyTest {
     @Test
     fun `a connect in time hands over to the header clock`() {
         val cuts = AtomicInteger(0)
-        val deadline = HeaderDeadline(300, patience = PatientWaits(0), connectMs = 300)
+        val deadline = HeaderDeadline(300, patience = PatientWaits(0), connectMs = 300, graceMs = 0)
         deadline.connecting(FakeConnection { cuts.incrementAndGet() })
         Thread.sleep(200)
         deadline.connected(FakeConnection { cuts.incrementAndGet() })
@@ -222,6 +222,35 @@ class GatewayFetchPolicyTest {
         Thread.sleep(400)
         assertEquals(0, cuts.get())
         assertFalse(deadline.expired)
+    }
+
+    /**
+     * PR #409 R6-M1: the connect limit is main's per-route bound — a
+     * connect timeout and a handshake timeout for every route, not one
+     * handshake for them all — plus the grace that lets each route's own
+     * socket timeouts fire first.
+     */
+    @Test
+    fun `the connect limit is a connect and a handshake timeout per route, plus the grace`() {
+        assertEquals(16_000L, connectStretchMs(5_000, 10_000, 1))
+        assertEquals(31_000L, connectStretchMs(5_000, 10_000, 2))
+        assertEquals(46_000L, connectStretchMs(5_000, 10_000, 3))
+        // Media: main's 60 s read timeout bounds each route's handshake.
+        assertEquals(131_000L, connectStretchMs(5_000, 60_000, 2))
+        // No routes known still means one.
+        assertEquals(16_000L, connectStretchMs(5_000, 10_000, 0))
+        assertEquals(30_000L, connectStretchMs(5_000, 10_000, 2, graceMs = 0))
+        assertEquals(1_000, CONNECT_GRACE_MS)
+        assertEquals(5_000, GATEWAY_CONNECT_TIMEOUT_MS)
+    }
+
+    /** The per-route handshake limit is the policy's base header wait: main's read timeout. */
+    @Test
+    fun `each route's handshake gets main's read timeout`() {
+        for (media in listOf(false, true)) {
+            val policy = subresource(media)
+            assertEquals(if (media) 60_000 else 10_000, HeaderDeadline(policy.baseHeaderTimeoutMs, policy.headerTimeoutMs).handshakeTimeoutMs)
+        }
     }
 
     /**

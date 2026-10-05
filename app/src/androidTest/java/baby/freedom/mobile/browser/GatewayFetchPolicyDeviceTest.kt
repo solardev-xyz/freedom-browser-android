@@ -434,14 +434,16 @@ class GatewayFetchPolicyDeviceTest {
     }
 
     /**
-     * PR #409 R3-F1: an https hop whose TLS handshake never completes
-     * (the server accepts and says nothing) is cut at the connect limit,
-     * not left to the long read timeout the body stall needs.
+     * PR #409 R3-F1, R6-M1: an https hop whose TLS handshake never
+     * completes (the server accepts and says nothing) fails at its route's
+     * own handshake limit — main's read timeout — not the long read timeout
+     * the body stall needs; the socket's own timeout ends it, so the
+     * connection could try a next address, as on main.
      */
     @Test
-    fun aStalledTlsHandshakeIsCutAtTheConnectLimit() {
+    fun aStalledTlsHandshakeFailsAtTheHandshakeLimit() {
         script = { _, _, _ -> Thread.sleep(30_000) } // never answer the ClientHello
-        val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(1), connectMs = 500) // one address: 500 + 1 000
+        val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(1), connectMs = 500) // one route: 500 + 1 000 + 1 000
         val started = System.nanoTime()
         try {
             TorRouting.openFollowingRedirects(URL("https://127.0.0.1:${server.localPort}/tls"), hops = deadline) {
@@ -449,15 +451,219 @@ class GatewayFetchPolicyDeviceTest {
                 readTimeout = 8_000
             }
             fail("a silent TLS server completed a handshake")
+        } catch (e: java.net.SocketTimeoutException) {
+            // expected: the handshake's own timeout, not the 8 s read timeout
+        } finally {
+            deadline.headersReceived()
+        }
+        val ms = elapsedMs(started)
+        assertTrue("took $ms ms", ms in 800..2_000)
+        assertTrue("the watchdog cut it, not the handshake timeout", !deadline.expired)
+        assertTrue("the server never saw the connection", connections.get() >= 1)
+    }
+
+    /**
+     * PR #409 R3-F1, R6-M1: what no per-route socket timeout covers — a
+     * SOCKS proxy that accepts and never replies, under the long read
+     * timeout — is cut by the watchdog at the connect limit.
+     */
+    @Test
+    fun aStalledSocksReplyIsCutByTheWatchdog() {
+        script = { _, _, _ -> Thread.sleep(30_000) } // never answer the greeting
+        val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(1), connectMs = 500, graceMs = 200) // 500 + 1 000 + 200
+        val proxy = java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress("127.0.0.1", server.localPort))
+        val conn = URL("http://127.0.0.1:9/socks").openConnection(proxy) as HttpURLConnection
+        conn.connectTimeout = GATEWAY_CONNECT_TIMEOUT_MS
+        conn.readTimeout = 8_000
+        val started = System.nanoTime()
+        deadline.connecting(conn)
+        try {
+            conn.connect()
+            fail("a silent SOCKS proxy connected")
         } catch (e: java.io.IOException) {
-            // expected: cut by the deadline, not the 8 s read timeout
+            // expected: cut by the watchdog, not the 8 s read timeout
         } finally {
             deadline.headersReceived()
         }
         val ms = elapsedMs(started)
         assertTrue("the deadline didn't fire", deadline.expired)
-        assertTrue("took $ms ms", ms in 1_300..3_000)
-        assertTrue("the server never saw the connection", connections.get() >= 1)
+        assertTrue("took $ms ms", ms in 1_500..3_500)
+    }
+
+    /**
+     * PR #409 R6-M1: a gateway host with two addresses, the first of which
+     * accepts TCP and stalls the TLS handshake (a broken middlebox, a dead
+     * backend behind an L4 balancer). Through the real subresource policy
+     * the first address's handshake fails at main's 10 s and the
+     * connection goes on to the second, which serves — about main's
+     * per-route bound, in one attempt, not cut with the stalled address
+     * when the whole connect's clock runs out.
+     */
+    @Test
+    fun aStalledHandshakeOnTheFirstAddressFallsThroughToTheSecond() {
+        val tls = TlsFixture()
+        val (stalled, _) = tls.twoAddresses { input, out ->
+            readRequestHead(input)
+            out.write(head(200, "OK", 2))
+            out.write("ok".toByteArray())
+            out.flush()
+        }
+        val realFactory = javax.net.ssl.HttpsURLConnection.getDefaultSSLSocketFactory()
+        javax.net.ssl.HttpsURLConnection.setDefaultSSLSocketFactory(tls.clientFactory)
+        try {
+            val url = "https://${TlsFixture.NAME}:${stalled.localPort}/segment"
+            val started = System.nanoTime()
+            val response = fetchWithRetry(
+                FakeRequest(url, mainFrame = false), url, url,
+                fresh = false, policy = gatewayFetchPolicy(mainFrame = false, media = false),
+            )
+            val ms = elapsedMs(started)
+            assertNotNull("no answer at all", response)
+            assertEquals(200, response!!.statusCode)
+            assertEquals("ok", response.data.use { it.readBytes().decodeToString() })
+            assertEquals("the first address never saw the connection", 1, tls.accepted(stalled))
+            assertEquals("answered by the second address, in one attempt", 1, tls.served.get())
+            // 10 s on the stalled handshake, then the second address; main's
+            // per-route bound is 5 + 10 s, the connect watchdog's limit 31 s.
+            assertTrue("took $ms ms", ms in 9_500..15_000)
+        } finally {
+            javax.net.ssl.HttpsURLConnection.setDefaultSSLSocketFactory(realFactory)
+            tls.close()
+        }
+    }
+
+    /**
+     * PR #409 R6-M1: the handshake's own limit is the socket's only for the
+     * handshake — a body pausing past it once the route is up is still
+     * under the connection's long read timeout.
+     */
+    @Test
+    fun theHandshakeLimitDoesNotReachTheBody() {
+        val tls = TlsFixture()
+        val (_, serving) = tls.twoAddresses(stallFirst = false) { input, out ->
+            readRequestHead(input)
+            out.write(head(200, "OK", 4))
+            out.write("ok".toByteArray())
+            out.flush()
+            Thread.sleep(2_500) // past the 1 s handshake limit
+            out.write("ok".toByteArray())
+            out.flush()
+        }
+        try {
+            val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(0), connectMs = 500)
+            val conn = TorRouting.openFollowingRedirects(URL("https://${TlsFixture.NAME}:${serving.localPort}/body"), hops = deadline) {
+                (this as javax.net.ssl.HttpsURLConnection).sslSocketFactory = tls.clientFactory
+                connectTimeout = GATEWAY_CONNECT_TIMEOUT_MS
+                readTimeout = 8_000
+            }
+            deadline.headersReceived()
+            assertEquals(200, conn.responseCode)
+            val started = System.nanoTime()
+            assertEquals("okok", conn.inputStream.use { it.readBytes().decodeToString() })
+            assertTrue(elapsedMs(started) >= 2_000)
+            assertTrue(!deadline.expired)
+        } finally {
+            tls.close()
+        }
+    }
+
+    /**
+     * Two TLS servers on one port of two loopback addresses, 127.0.0.1 and
+     * 127.0.0.2, which [NAME] resolves to in that order — `InetAddress`
+     * (and so the connection's own lookup) answers it from libcore's
+     * address cache, where it's planted while the fixture is open: the
+     * emulator's `localhost` is 127.0.0.1 alone, and its DNS isn't ours to
+     * script. The first ([twoAddresses]'
+     * `stallFirst`) accepts TCP and never answers the ClientHello, the
+     * second serves with `serve`.
+     */
+    private class TlsFixture {
+        private val cert = okhttp3.tls.HeldCertificate.Builder().addSubjectAlternativeName(NAME).build()
+        private val serverCerts = okhttp3.tls.HandshakeCertificates.Builder().heldCertificate(cert).build()
+        val clientFactory: javax.net.ssl.SSLSocketFactory =
+            okhttp3.tls.HandshakeCertificates.Builder().addTrustedCertificate(cert.certificate).build().sslSocketFactory()
+        val served = AtomicInteger(0)
+        private val accepts = java.util.concurrent.ConcurrentHashMap<ServerSocket, AtomicInteger>()
+        private val open = java.util.Collections.synchronizedList(mutableListOf<java.io.Closeable>())
+        private val addresses = arrayOf(InetAddress.getByName("127.0.0.1"), InetAddress.getByName("127.0.0.2"))
+
+        // The planted entry in libcore's address cache, and the cache's lock and map.
+        private val planted: Triple<Any, Any, MutableMap<Any?, Any?>>
+
+        init {
+            // Its constructors are blocked hidden APIs, its fields aren't:
+            // take the entry a real lookup of `localhost` leaves, and re-key
+            // it to [NAME] with our addresses and no expiry.
+            InetAddress.getAllByName("localhost")
+            fun field(owner: Class<*>, name: String) = owner.getDeclaredField(name).apply { isAccessible = true }
+            val addressCache = field(Class.forName("java.net.Inet6AddressImpl"), "addressCache").get(null)!!
+            val lru = field(addressCache.javaClass, "cache").get(addressCache)!!
+            @Suppress("UNCHECKED_CAST")
+            val map = field(lru.javaClass, "map").get(lru) as MutableMap<Any?, Any?>
+            val keyClass = Class.forName("java.net.AddressCache\$AddressCacheKey")
+            val entryClass = Class.forName("java.net.AddressCache\$AddressCacheEntry")
+            planted = synchronized(lru) {
+                val key = map.keys.first { it != null && field(keyClass, "mHostname").get(it) == "localhost" }!!
+                val entry = map.remove(key)!!
+                field(keyClass, "mHostname").set(key, NAME)
+                field(entryClass, "value").set(entry, addresses)
+                field(entryClass, "expiryNanos").setLong(entry, Long.MAX_VALUE)
+                map[key] = entry
+                Triple(lru, key, map)
+            }
+            assertEquals(addresses.toList(), InetAddress.getAllByName(NAME).toList())
+        }
+
+        fun accepted(server: ServerSocket) = accepts[server]?.get() ?: 0
+
+        fun twoAddresses(stallFirst: Boolean = true, serve: (InputStream, OutputStream) -> Unit): Pair<ServerSocket, ServerSocket> {
+            repeat(20) {
+                val first = if (stallFirst) ServerSocket(0, 16, addresses[0]) else
+                    serverCerts.sslContext().serverSocketFactory.createServerSocket(0, 16, addresses[0])
+                val second = runCatching {
+                    serverCerts.sslContext().serverSocketFactory.createServerSocket(first.localPort, 16, addresses[1])
+                }.getOrNull()
+                if (second == null) {
+                    first.close()
+                    return@repeat
+                }
+                listen(first, serve.takeIf { !stallFirst })
+                listen(second, serve)
+                return first to second
+            }
+            fail("no port free on both of ${addresses.toList()}")
+            throw IllegalStateException()
+        }
+
+        private fun listen(server: ServerSocket, serve: ((InputStream, OutputStream) -> Unit)?) {
+            open += server
+            accepts[server] = AtomicInteger(0)
+            Thread {
+                while (!server.isClosed) {
+                    val s = runCatching { server.accept() }.getOrNull() ?: break
+                    open += s
+                    accepts[server]!!.incrementAndGet()
+                    if (serve == null) continue // accept TCP, never say a word
+                    Thread {
+                        runCatching {
+                            (s as javax.net.ssl.SSLSocket).startHandshake()
+                            served.incrementAndGet()
+                            serve(s.getInputStream(), s.getOutputStream())
+                        }
+                        runCatching { s.close() }
+                    }.apply { isDaemon = true; start() }
+                }
+            }.apply { isDaemon = true; start() }
+        }
+
+        fun close() {
+            synchronized(planted.first) { planted.third.remove(planted.second) }
+            synchronized(open) { open.forEach { runCatching { it.close() } } }
+        }
+
+        companion object {
+            const val NAME = "two-addresses.gateway.test"
+        }
     }
 
     private fun fetch(mainFrame: Boolean) = fetchWithRetry(
