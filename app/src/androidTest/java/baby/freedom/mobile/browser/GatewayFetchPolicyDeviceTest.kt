@@ -579,7 +579,117 @@ class GatewayFetchPolicyDeviceTest {
             assertTrue("took $ms ms", ms in 1_500..3_000)
         } finally {
             TorRouting.proxiesFor = realProxies
+            TorRouting.forgetFailedRoutes()
             java.net.ProxySelector.setDefault(realSelector)
+            tls.close()
+        }
+    }
+
+    /**
+     * PR #409 R2-F1: a stalled system proxy is paid once, not by every
+     * request. On main the first request's connection went direct after
+     * the CONNECT timed out and later ones reused that pooled direct
+     * connection; here the failed proxy route is remembered (okhttp's
+     * RouteDatabase), so the second and third fetch dial direct first and
+     * reuse the first one's connection — the proxy sees one CONNECT, the
+     * server one TLS connection.
+     */
+    @Test
+    fun aStalledSystemProxyIsPaidOnceNotByEveryRequest() {
+        script = { _, _, _ -> Thread.sleep(30_000) } // read the CONNECT, never answer it
+        val tls = TlsFixture()
+        val (serving, _) = tls.twoAddresses(stallFirst = false) { input, out ->
+            repeat(10) { // keep-alive: answer requests on this connection until it closes
+                readRequestHead(input)
+                out.write(head(200, "OK", 2))
+                out.write("ok".toByteArray())
+                out.flush()
+            }
+        }
+        val proxy = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress("127.0.0.1", server.localPort))
+        val realProxies = TorRouting.proxiesFor
+        TorRouting.proxiesFor = { listOf(proxy) }
+        try {
+            val times = (1..3).map { n ->
+                val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(0), connectMs = 500, graceMs = 200)
+                val started = System.nanoTime()
+                val conn = TorRouting.openFollowingRedirects(URL("https://${TlsFixture.NAME}:${serving.localPort}/r$n"), hops = deadline) {
+                    (this as javax.net.ssl.HttpsURLConnection).sslSocketFactory = tls.clientFactory
+                    connectTimeout = GATEWAY_CONNECT_TIMEOUT_MS
+                    readTimeout = 8_000
+                }
+                deadline.headersReceived()
+                assertEquals(200, conn.responseCode)
+                assertEquals("ok", conn.inputStream.use { it.readBytes().decodeToString() })
+                elapsedMs(started)
+            }
+            assertEquals("the stalled proxy was dialed again", 1, connections.get())
+            assertEquals("the direct connection wasn't reused", 1, tls.served.get())
+            assertTrue("took $times ms", times[0] in 1_500..3_000)
+            assertTrue("later fetches re-paid the proxy: $times ms", times.drop(1).all { it < 1_000 })
+        } finally {
+            TorRouting.proxiesFor = realProxies
+            TorRouting.forgetFailedRoutes()
+            tls.close()
+        }
+    }
+
+    /**
+     * PR #409 R2-M1: a certificate refused through the system proxy fails
+     * the fetch, as okhttp's own route walk did on main — it isn't retried
+     * directly from the device. The proxy answers CONNECT and then
+     * presents a certificate the client doesn't trust.
+     */
+    @Test
+    fun aCertificateRefusedThroughTheProxyIsNotRetriedDirect() {
+        val tls = TlsFixture()
+        val (serving, _) = tls.twoAddresses(stallFirst = false) { input, out ->
+            readRequestHead(input)
+            out.write(head(200, "OK", 2))
+            out.write("ok".toByteArray())
+            out.flush()
+        }
+        val untrusted = okhttp3.tls.HandshakeCertificates.Builder()
+            .heldCertificate(okhttp3.tls.HeldCertificate.Builder().addSubjectAlternativeName(TlsFixture.NAME).build())
+            .build().sslContext().socketFactory
+        val proxyServer = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+        val tunnels = AtomicInteger(0)
+        Thread {
+            while (!proxyServer.isClosed) {
+                val s = runCatching { proxyServer.accept() }.getOrNull() ?: break
+                synchronized(sockets) { sockets += s }
+                Thread {
+                    runCatching {
+                        readRequestHead(s.getInputStream())
+                        tunnels.incrementAndGet()
+                        s.getOutputStream().apply { write("HTTP/1.1 200 Connection established\r\n\r\n".toByteArray()); flush() }
+                        val tunneled = untrusted.createSocket(s, "127.0.0.1", s.port, true) as javax.net.ssl.SSLSocket
+                        tunneled.useClientMode = false
+                        tunneled.startHandshake()
+                    }
+                    runCatching { s.close() }
+                }.apply { isDaemon = true; start() }
+            }
+        }.apply { isDaemon = true; start() }
+        val proxy = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress("127.0.0.1", proxyServer.localPort))
+        val realProxies = TorRouting.proxiesFor
+        TorRouting.proxiesFor = { listOf(proxy) }
+        try {
+            val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(0), connectMs = 500, graceMs = 200)
+            val e = runCatching {
+                TorRouting.openFollowingRedirects(URL("https://${TlsFixture.NAME}:${serving.localPort}/cert"), hops = deadline) {
+                    (this as javax.net.ssl.HttpsURLConnection).sslSocketFactory = tls.clientFactory
+                    connectTimeout = GATEWAY_CONNECT_TIMEOUT_MS
+                    readTimeout = 8_000
+                }
+            }.exceptionOrNull()
+            assertEquals("the proxy wasn't dialed", 1, tunnels.get())
+            assertTrue("expected the certificate refusal, got $e", e is javax.net.ssl.SSLHandshakeException)
+            assertEquals("retried directly from the device", 0, tls.accepted(serving))
+        } finally {
+            TorRouting.proxiesFor = realProxies
+            TorRouting.forgetFailedRoutes()
+            runCatching { proxyServer.close() }
             tls.close()
         }
     }

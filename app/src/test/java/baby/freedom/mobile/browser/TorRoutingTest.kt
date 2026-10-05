@@ -604,6 +604,16 @@ class TorRoutingTest {
             TorRouting.proxiesFor = { listOf(http) }
             fetch("http://localhost:$port/c")
             assertEquals(listOf("connecting fallback", "lookup localhost", "connecting", "connected", "answered"), events.toList())
+            // PR #409 R2-F1: the failed proxy route is remembered, as
+            // okhttp's RouteDatabase does — the next fetch dials the
+            // direct route first and never the proxy.
+            fetch("http://localhost:$port/c2")
+            assertEquals("lookup localhost", events.first())
+            assertTrue(events.toList().toString(), events[1].startsWith("connecting") && events[1].endsWith(" fallback"))
+            assertEquals(listOf("connected", "answered"), events.drop(2))
+            // Another host's routes are its own: the proxy is dialed first there.
+            fetch("http://127.0.0.1:$port/c3")
+            assertEquals(listOf("connecting fallback", "connecting", "connected", "answered"), events.toList())
             // A selector that fails: not known to be direct, so not looked up either.
             TorRouting.proxiesFor = { throw IllegalArgumentException("bad uri") }
             fetch("http://localhost:$port/d")
@@ -630,6 +640,7 @@ class TorRoutingTest {
         } finally {
             TorRouting.resolve = realResolve
             TorRouting.proxiesFor = realProxies
+            TorRouting.forgetFailedRoutes()
             server.stop(0)
         }
     }
@@ -676,10 +687,33 @@ class TorRoutingTest {
             assertFalse("the proxy route's cut expired the attempt", inner.expired)
         } finally {
             TorRouting.proxiesFor = realProxies
+            TorRouting.forgetFailedRoutes()
             proxy.close()
             accepted.forEach { runCatching { it.close() } }
             acceptor.join(1_000)
         }
+    }
+
+    /**
+     * PR #409 R2-M1: a proxy route falls through to the next only on a
+     * failure okhttp's route selection recovers from
+     * (`StreamAllocation.isRecoverable`) — not a certificate refused, an
+     * unverified peer, a protocol error or an interruption.
+     */
+    @Test
+    fun `only a failure okhttp would recover from falls through to the next route`() {
+        assertTrue(TorRouting.routeFailureRecoverable(java.net.ConnectException("refused")))
+        assertTrue(TorRouting.routeFailureRecoverable(java.net.SocketTimeoutException("timed out")))
+        assertTrue(TorRouting.routeFailureRecoverable(java.net.SocketException("Socket closed")))
+        assertTrue(TorRouting.routeFailureRecoverable(java.io.IOException("Unexpected response code for CONNECT: 502")))
+        assertTrue(TorRouting.routeFailureRecoverable(javax.net.ssl.SSLHandshakeException("connection reset")))
+        val certRefused = javax.net.ssl.SSLHandshakeException("untrusted").apply {
+            initCause(java.security.cert.CertificateException("no trust anchor"))
+        }
+        assertFalse(TorRouting.routeFailureRecoverable(certRefused))
+        assertFalse(TorRouting.routeFailureRecoverable(javax.net.ssl.SSLPeerUnverifiedException("hostname mismatch")))
+        assertFalse(TorRouting.routeFailureRecoverable(java.net.ProtocolException("bad")))
+        assertFalse(TorRouting.routeFailureRecoverable(java.io.InterruptedIOException("interrupted")))
     }
 
     /**

@@ -691,6 +691,9 @@ object TorRouting {
                 ?: proxied?.map { current to it }
                 ?: listOf(current to route)
             var conn: HttpURLConnection? = null
+            // The route [conn] goes by: the one a proxied hop dialed last.
+            var connRoute: Proxy? = route
+            var dialed = false // connected as a fallback-able route already
             var keep = false
             try {
                 for ((i, pair) in candidates.withIndex()) {
@@ -698,6 +701,7 @@ object TorRouting {
                     val c = openConnection(candidate, candidateRoute) as? HttpURLConnection
                         ?: throw IOException(Strings.get(R.string.node_fetch_not_http, current))
                     conn = c
+                    connRoute = candidateRoute
                     c.configure(current)
                     pinned?.hostHeader?.let { c.setRequestProperty("Host", it) }
                     if (direct && pinned == null && c is HttpsURLConnection) {
@@ -726,9 +730,17 @@ object TorRouting {
                     hops?.connecting(c, if (proxied == null || candidateRoute == null) 1 else lookUpAhead(current, candidateRoute), fallback = true)
                     try {
                         c.connect()
+                        if (proxied != null) proxyRouteConnected(current, candidateRoute)
+                        dialed = true
                         break
                     } catch (e: IOException) {
+                        // A proxy route falls through to the next only on
+                        // what okhttp's route selection would (PR #409
+                        // R2-M1): a certificate refused through the proxy
+                        // fails the fetch, as it did on main.
+                        if (proxied != null && !routeFailureRecoverable(e)) throw e
                         Log.w(TAG, "${if (proxied != null) "proxy route $candidateRoute" else "pinned address ${candidate.host}"} unreachable, trying the next: $e")
+                        if (proxied != null) proxyRouteFailed(current, candidateRoute)
                         runCatching { c.disconnect() }
                         conn = null
                     }
@@ -743,9 +755,12 @@ object TorRouting {
                     // How many routes the connect may try in turn, each
                     // under its own connect and handshake timeouts, as on
                     // main (PR #409 R5-M1, R6-M1); a pinned hop dials one.
-                    val routes = if (pinned == null) lookUpAhead(current, candidates.last().second) else 1
-                    hops.connecting(c, routes)
-                    c.connect()
+                    if (!dialed) {
+                        val routes = if (pinned == null) lookUpAhead(current, connRoute) else 1
+                        hops.connecting(c, routes)
+                        c.connect()
+                        if (proxied != null) proxyRouteConnected(current, connRoute)
+                    }
                     hops.connected(c)
                 }
                 payload?.let { bytes -> c.outputStream.use { it.write(bytes) } }
@@ -834,7 +849,11 @@ object TorRouting {
      * the watchdog's cut, which ended the whole connect, the direct
      * fallback with it. `main` gave that reply 10 s and then went direct.
      * Dialed one by one, a stalled proxy route is cut at its own share of
-     * the clock and the next route still gets dialed.
+     * the clock and the next route still gets dialed. A route that failed
+     * before ([failedRoutes]) is dialed last, so the stall is paid once,
+     * not by every later request (PR #409 R2-F1), and only a failure
+     * okhttp would recover from falls through to the next route
+     * ([routeFailureRecoverable], R2-M1).
      */
     private fun proxyRoutes(hop: URL): List<Proxy>? {
         if (fetchMayReachOnion(hop)) return null
@@ -842,7 +861,59 @@ object TorRouting {
         val selected = runCatching { proxiesFor(uri) }.getOrNull() ?: return null
         val proxies = selected.filter { it.type() != Proxy.Type.DIRECT }
         if (proxies.isEmpty()) return null
-        return proxies + Proxy.NO_PROXY
+        // Routes that failed before go last, as okhttp's RouteDatabase
+        // postpones them (PR #409 R2-F1).
+        val (fresh, failed) = (proxies + Proxy.NO_PROXY).partition { routeKey(hop, it) !in failedRoutes }
+        return fresh + failed
+    }
+
+    /**
+     * Proxy routes ([proxyRoutes]) that failed to connect, by hop and
+     * route, process-wide — okhttp's `RouteDatabase`, which Android's
+     * HttpURLConnection keeps for its one shared client (PR #409 R2-F1).
+     * A route here is dialed after the others, until it connects again.
+     * On `main` a stalled system proxy cost the first request its
+     * route's timeout; every later one was answered on the pooled direct
+     * connection (the selector's `Address` is shared) or, with nothing
+     * pooled, dialed direct first. Without this every subresource dialed
+     * the stalled proxy again — ≥ 16 s each, on a Chromium pool thread.
+     * Dialed direct first, a later request reuses the pooled direct
+     * connection: its explicit `NO_PROXY` route is one `Address` across
+     * requests. Bounded: cleared when it reaches [MAX_FAILED_ROUTES].
+     */
+    private val failedRoutes: MutableSet<String> = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
+
+    private const val MAX_FAILED_ROUTES = 256
+
+    private fun routeKey(hop: URL, route: Proxy?): String =
+        "${hop.protocol}://${hop.host.lowercase()}:${if (hop.port == -1) hop.defaultPort else hop.port} via $route"
+
+    private fun proxyRouteFailed(hop: URL, route: Proxy?) {
+        if (failedRoutes.size >= MAX_FAILED_ROUTES) failedRoutes.clear()
+        failedRoutes += routeKey(hop, route)
+    }
+
+    private fun proxyRouteConnected(hop: URL, route: Proxy?) {
+        failedRoutes -= routeKey(hop, route)
+    }
+
+    /** Forget every failed proxy route ([failedRoutes]); tests. */
+    internal fun forgetFailedRoutes() = failedRoutes.clear()
+
+    /**
+     * Whether a failed connect is one okhttp's route selection moves on to
+     * the next route after (`StreamAllocation.isRecoverable`), so dialing
+     * the system proxy's routes one by one falls through exactly as the
+     * connection's own walk did on `main` (PR #409 R2-M1): not a protocol
+     * error, an interruption other than a timeout, a handshake refused
+     * over its certificate, or an unverified peer.
+     */
+    internal fun routeFailureRecoverable(e: IOException): Boolean = when {
+        e is java.net.ProtocolException -> false
+        e is java.io.InterruptedIOException -> e is java.net.SocketTimeoutException
+        e is javax.net.ssl.SSLHandshakeException && e.cause is java.security.cert.CertificateException -> false
+        e is javax.net.ssl.SSLPeerUnverifiedException -> false
+        else -> true
     }
 
     /**
