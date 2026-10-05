@@ -450,12 +450,6 @@ private val REQUEST_HEADERS_TO_STRIP = setOf(
     "te", "trailer", "transfer-encoding", "upgrade", "cookie",
 )
 
-// HTTP status codes we treat as transient — a cold Swarm node regularly
-// answers 404 for a chunk that's still being fetched, and brief 5xx
-// from the node itself resolve on retry too. Matches the retry set
-// used by freedom-browser's `bzz-protocol.js` on desktop.
-private val TRANSIENT_STATUSES = setOf(404, 500, 502, 503, 504)
-
 /**
  * Apply the Swarm-specific request headers that give the node extra
  * server-side runway on transient chunk-retrieval failures. Measured on
@@ -5751,9 +5745,11 @@ private fun syntheticResponse(
  *    gateway, and proxy — main frames *included*: these hostnames never
  *    resolve in DNS, so nothing loads unless we answer here. Media is
  *    streamed with its Range header ([fetchMediaWithRangeSupport]); all
- *    of it retries transient 404/500s ([fetchWithRetry]) because a cold
+ *    of it retries transient answers ([fetchWithRetry]) because a cold
  *    Swarm node regularly answers the manifest before every chunk is
- *    retrievable. `<name>.ens.…` hosts resolve the *name* per request
+ *    retrievable — a main frame's 404s and 5xx, a subresource's 5xx
+ *    only, with a few subresources at a time allowed to wait far longer
+ *    ([gatewayFetchPolicy], [PatientWaits]). `<name>.ens.…` hosts resolve the *name* per request
  *    (the origin is name-derived so storage survives content updates).
  *
  * 2. **Scheme-URL subresources** (`bzz://…` / `ipfs://…` / `ipns://…`
@@ -6099,7 +6095,7 @@ private fun interceptVirtualRequestFor(
             // the gateway, with nothing kept from the fetch before.
             fetchMediaWithRangeSupport(req, target, url, fresh || freshDocument(target))
         } else {
-            fetchWithRetry(req, target, url, fresh)
+            fetchWithRetry(req, target, url, fresh, gatewayFetchPolicy(req.isForMainFrame, media = false))
         }
         // Fetched from a gateway a sweep switched away from meanwhile:
         // the origin was already wiped, so this must not land there.
@@ -6198,7 +6194,10 @@ private fun fetchMediaWithRangeSupport(
     originalUrl: String,
     noCache: Boolean,
 ): WebResourceResponse? =
-    fetchWithRetry(req, targetUrl, originalUrl, noCache, MEDIA_READ_TIMEOUT_MS, media = true)
+    fetchWithRetry(
+        req, targetUrl, originalUrl, noCache,
+        gatewayFetchPolicy(req.isForMainFrame, media = true), media = true,
+    )
 
 private sealed class FetchAttempt {
     data class Response(
@@ -6214,15 +6213,19 @@ private sealed class FetchAttempt {
     object Unreachable : FetchAttempt()
 }
 
-/** Media reads: a Swarm chunk can take well past the subresource 10 s. */
-private const val MEDIA_READ_TIMEOUT_MS = 60_000
-
-private fun fetchWithRetry(
+/**
+ * Fetch [targetUrl] for [req], fetching it again with the
+ * [ESCAPE_RETRY_DELAYS_MS] backoff while the gateway answers one of
+ * [policy]'s retry statuses or the attempt fails on the way (a timeout, a
+ * dropped connection). The last answer is handed back once the attempts
+ * are spent; null when the gateway can't be reached at all.
+ */
+internal fun fetchWithRetry(
     req: WebResourceRequest,
     targetUrl: String,
     originalUrl: String,
-    fresh: Boolean = false,
-    readTimeoutMs: Int = 10_000,
+    fresh: Boolean,
+    policy: GatewayFetchPolicy,
     media: Boolean = false,
 ): WebResourceResponse? {
     var lastResponse: WebResourceResponse? = null
@@ -6236,7 +6239,7 @@ private fun fetchWithRetry(
             }
         }
 
-        when (val attempt = fetchOnce(req, targetUrl, fresh, readTimeoutMs, media)) {
+        when (val attempt = fetchOnce(req, targetUrl, fresh, policy, media)) {
             is FetchAttempt.Response -> {
                 // The earlier transient answer is superseded: close its
                 // body (and with it the connection) before dropping it.
@@ -6259,25 +6262,41 @@ private fun fetchWithRetry(
 /**
  * Single network attempt against [targetUrl]; [fresh]: past any cache in
  * front of it (#262); [media]: answered as a media stream
- * ([mediaReplyFor]).
+ * ([mediaReplyFor]). The headers must arrive within [policy]'s header
+ * timeout, and each body read within its stall limit; a body closed
+ * before its end drops the connection ([DisconnectOnCloseInputStream]).
  */
 private fun fetchOnce(
     req: WebResourceRequest,
     targetUrl: String,
-    fresh: Boolean = false,
-    readTimeoutMs: Int = 10_000,
+    fresh: Boolean,
+    policy: GatewayFetchPolicy,
     media: Boolean = false,
 ): FetchAttempt {
+    // A header wait shorter than the body's is enforced from outside: the
+    // connection's own read timeout is one value for both. Past the base
+    // limits only a [PatientWaits] slot holder goes on waiting.
+    val deadline = if (policy.baseHeaderTimeoutMs < policy.bodyStallTimeoutMs) {
+        HeaderDeadline(policy.baseHeaderTimeoutMs, policy.headerTimeoutMs)
+    } else {
+        null
+    }
     return try {
         val target = URL(targetUrl)
         // Redirects are followed hop by hop through TorRouting.
-        val conn = TorRouting.openFollowingRedirects(target) { hop ->
+        val conn = TorRouting.openFollowingRedirects(target, hops = deadline) { hop ->
             requestMethod = if (req.method == "HEAD") "HEAD" else "GET"
-            connectTimeout = 5_000
-            readTimeout = readTimeoutMs
+            connectTimeout = GATEWAY_CONNECT_TIMEOUT_MS
+            readTimeout = policy.bodyStallTimeoutMs
             forwardProxiedHeaders(req, crossOrigin = !TorRouting.sameOrigin(hop, target), noCache = fresh)
         }
         val status = conn.responseCode
+        deadline?.headersReceived()
+        if (deadline?.expired == true) {
+            // Disconnected by the deadline just as the headers came in.
+            runCatching { conn.disconnect() }
+            throw java.net.SocketTimeoutException("no headers in time")
+        }
         val reason = conn.responseMessage?.ifBlank { null } ?: "OK"
         val rawCt = conn.contentType
         val mime = rawCt
@@ -6304,10 +6323,16 @@ private fun fetchOnce(
 
         val headers = gatewayResponseHeaders(conn.headerFields)
 
-        val body = when {
-            status in 200..399 -> conn.inputStream
-            else -> conn.errorStream ?: ByteArrayInputStream(ByteArray(0))
-        }
+        val raw = if (status in 200..399) conn.inputStream else conn.errorStream
+        val body = DisconnectOnCloseInputStream(
+            raw ?: ByteArrayInputStream(ByteArray(0)),
+            conn,
+            if (policy.baseBodyStallMs < policy.bodyStallTimeoutMs) BodyStallGuard(conn, policy.baseBodyStallMs) else null,
+            // A body WebView closes without reading on to -1 (a HEAD, a
+            // 304, exactly Content-Length bytes) keeps its connection.
+            length = conn.contentLengthLong,
+            noBody = raw == null || conn.requestMethod == "HEAD" || status in 100..199 || status == 204 || status == 304,
+        )
         // Page-controlled: [mediaReplyFor] and [webViewSeekProof] never throw.
         val range = req.requestHeaders?.entries
             ?.firstOrNull { it.key.equals("Range", ignoreCase = true) }
@@ -6343,22 +6368,40 @@ private fun fetchOnce(
                 webViewSeekProof(body, range),
             )
         }
-        FetchAttempt.Response(response, transient = status in TRANSIENT_STATUSES)
-    } catch (t: TorRouting.RefusedException) {
-        // Refused by policy, not by a failing node: no retry will change it.
-        Log.w(LOG_TAG, "gateway fetch refused: $targetUrl", t)
-        if (media) FetchAttempt.Unreachable else FetchAttempt.Retry
-    } catch (t: java.net.ConnectException) {
-        Log.w(LOG_TAG, "gateway unreachable: $targetUrl", t)
-        FetchAttempt.Unreachable
-    } catch (t: IOException) {
-        Log.w(LOG_TAG, "gateway fetch failed: $targetUrl", t)
-        FetchAttempt.Retry
+        FetchAttempt.Response(response, transient = status in policy.retryStatuses)
     } catch (t: Throwable) {
-        Log.w(LOG_TAG, "gateway fetch unexpected failure: $targetUrl", t)
-        FetchAttempt.Unreachable
+        if (deadline?.expired == true) {
+            // The header deadline disconnected it: a timeout, worth another attempt.
+            Log.w(LOG_TAG, "gateway sent no headers in time (${policy.baseHeaderTimeoutMs}/${policy.headerTimeoutMs} ms): $targetUrl")
+            FetchAttempt.Retry
+        } else {
+            failedAttempt(t, targetUrl, media)
+        }
+    } finally {
+        deadline?.headersReceived()
     }
 }
+
+private fun failedAttempt(t: Throwable, targetUrl: String, media: Boolean): FetchAttempt =
+    when (t) {
+        // Refused by policy, not by a failing node: no retry will change it.
+        is TorRouting.RefusedException -> {
+            Log.w(LOG_TAG, "gateway fetch refused: $targetUrl", t)
+            if (media) FetchAttempt.Unreachable else FetchAttempt.Retry
+        }
+        is java.net.ConnectException -> {
+            Log.w(LOG_TAG, "gateway unreachable: $targetUrl", t)
+            FetchAttempt.Unreachable
+        }
+        is IOException -> {
+            Log.w(LOG_TAG, "gateway fetch failed: $targetUrl", t)
+            FetchAttempt.Retry
+        }
+        else -> {
+            Log.w(LOG_TAG, "gateway fetch unexpected failure: $targetUrl", t)
+            FetchAttempt.Unreachable
+        }
+    }
 
 /**
  * Does a download that just started end the tab's pending navigation?
