@@ -210,6 +210,39 @@ class GatewayFetchPolicyTest {
         deadline.headersReceived()
     }
 
+    /**
+     * PR #409 R1-M1: a connect with another route after it (one of the
+     * system proxy's routes, a pinned address) is cut at its own limit
+     * without expiring the attempt, so the next route's connect still runs
+     * on a clock of its own; only a cut of the last route expires it.
+     */
+    @Test
+    fun `a cut route with a fallback after it doesn't end the attempt`() {
+        val firstCuts = AtomicInteger(0)
+        val deadline = HeaderDeadline(100, patience = PatientWaits(0), connectMs = 100, graceMs = 0) // 200 per route
+        deadline.connecting(FakeConnection { firstCuts.incrementAndGet() }, fallback = true)
+        Thread.sleep(400)
+        assertTrue("the stalled route wasn't cut", firstCuts.get() >= 1)
+        assertFalse("a fallback route's cut expired the attempt", deadline.expired)
+        val lastCuts = AtomicInteger(0)
+        deadline.connecting(FakeConnection { lastCuts.incrementAndGet() }) // the direct fallback
+        val before = firstCuts.get()
+        Thread.sleep(120)
+        assertEquals("the first route was cut on after the next began", before, firstCuts.get())
+        assertEquals("the next route didn't get a clock of its own", 0, lastCuts.get())
+        deadline.connected(FakeConnection {})
+        deadline.headersReceived()
+        assertFalse(deadline.expired)
+        // The last route cut: the attempt is over.
+        val last = HeaderDeadline(100, patience = PatientWaits(0), connectMs = 100, graceMs = 0)
+        last.connecting(FakeConnection {}, fallback = true)
+        Thread.sleep(300)
+        last.connecting(FakeConnection {})
+        Thread.sleep(300)
+        assertTrue(last.expired)
+        last.headersReceived()
+    }
+
     @Test
     fun `a connect in time hands over to the header clock`() {
         val cuts = AtomicInteger(0)

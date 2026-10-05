@@ -533,6 +533,58 @@ class GatewayFetchPolicyDeviceTest {
     }
 
     /**
+     * PR #409 R1-M1: a system HTTP proxy that accepts TCP and never answers
+     * an https hop's CONNECT (read under the long read timeout, so no
+     * per-route socket timeout covers it). The proxy route is cut at its
+     * own share of the connect clock and the direct fallback — which
+     * serves — is still dialed, in the same attempt; main got there after
+     * the reply's 10 s read timeout. Before the fix the watchdog cut the
+     * whole connect at both routes' worth and the direct route with it.
+     */
+    @Test
+    fun aSystemProxyThatNeverAnswersConnectFallsBackToTheDirectRoute() {
+        script = { _, _, _ -> Thread.sleep(30_000) } // read the CONNECT, never answer it
+        val tls = TlsFixture()
+        val (serving, _) = tls.twoAddresses(stallFirst = false) { input, out ->
+            readRequestHead(input)
+            out.write(head(200, "OK", 2))
+            out.write("ok".toByteArray())
+            out.flush()
+        }
+        val proxy = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress("127.0.0.1", server.localPort))
+        val realProxies = TorRouting.proxiesFor
+        val realSelector = java.net.ProxySelector.getDefault()
+        // Both what openFollowingRedirects asks and what the connection
+        // itself would follow if handed no explicit route.
+        TorRouting.proxiesFor = { listOf(proxy) }
+        java.net.ProxySelector.setDefault(object : java.net.ProxySelector() {
+            override fun select(uri: java.net.URI?) = listOf(proxy)
+            override fun connectFailed(uri: java.net.URI?, sa: java.net.SocketAddress?, ioe: java.io.IOException?) {}
+        })
+        val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(0), connectMs = 500, graceMs = 200) // 1.7 s per route
+        try {
+            val started = System.nanoTime()
+            val conn = TorRouting.openFollowingRedirects(URL("https://${TlsFixture.NAME}:${serving.localPort}/via-proxy"), hops = deadline) {
+                (this as javax.net.ssl.HttpsURLConnection).sslSocketFactory = tls.clientFactory
+                connectTimeout = GATEWAY_CONNECT_TIMEOUT_MS
+                readTimeout = 8_000
+            }
+            deadline.headersReceived()
+            val ms = elapsedMs(started)
+            assertEquals(200, conn.responseCode)
+            assertEquals("ok", conn.inputStream.use { it.readBytes().decodeToString() })
+            assertEquals("the proxy never saw the CONNECT", 1, connections.get())
+            assertEquals("not answered by the direct route", 1, tls.served.get())
+            assertTrue("the proxy route's cut expired the attempt", !deadline.expired)
+            assertTrue("took $ms ms", ms in 1_500..3_000)
+        } finally {
+            TorRouting.proxiesFor = realProxies
+            java.net.ProxySelector.setDefault(realSelector)
+            tls.close()
+        }
+    }
+
+    /**
      * PR #409 R6-M1: the handshake's own limit is the socket's only for the
      * handshake — a body pausing past it once the route is up is still
      * under the connection's long read timeout.

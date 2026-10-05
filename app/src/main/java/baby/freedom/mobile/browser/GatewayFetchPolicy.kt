@@ -219,7 +219,11 @@ internal fun connectStretchMs(connectMs: Int, handshakeMs: Int, routes: Int, gra
  * a cut lands between steps of the connect and a later one blocks again.
  * That is the backstop for what no per-route socket timeout covers: a
  * SOCKS proxy's reply and an HTTP proxy's CONNECT reply, both read under
- * the long read timeout (PR #409 R3-F1). The name is looked up before this
+ * the long read timeout (PR #409 R3-F1). A hop on the system proxy has
+ * each of its routes (each proxy, then the direct fallback) dialed as a
+ * connect of its own, so a cut there ends that route only and the next is
+ * still tried, as on `main` (`fallback`, PR #409 R1-M1); only a cut of the
+ * hop's last route expires the attempt. The name is looked up before this
  * stretch starts ([TorRouting.openFollowingRedirects] does it ahead
  * of [connecting], so the connect finds it cached): lookup time comes on
  * top, as on `main`, where no limit covered it. (A cut that does land
@@ -266,14 +270,14 @@ internal class HeaderDeadline(
     var extended = false
         private set
 
-    override fun connecting(conn: HttpURLConnection, routes: Int) {
+    override fun connecting(conn: HttpURLConnection, routes: Int, fallback: Boolean) {
         synchronized(lock) {
             if (expired) throw SocketTimeoutException("no headers in time")
             stop()
             current = conn
             val mine = ++hop
             val limit = connectStretchMs(connectMs, baseMs, routes, graceMs)
-            task = watchdog.schedule({ cutConnect(mine) }, limit, TimeUnit.MILLISECONDS)
+            task = watchdog.schedule({ cutConnect(mine, fallback) }, limit, TimeUnit.MILLISECONDS)
         }
     }
 
@@ -289,14 +293,16 @@ internal class HeaderDeadline(
 
     override fun answered(conn: HttpURLConnection) = headersReceived()
 
-    // The connect stretch ran out: cut, and keep cutting until [connected]
-    // or the end of the attempt moves [hop] on.
-    private fun cutConnect(mine: Int) {
+    // The connect stretch ran out: cut, and keep cutting until [connected],
+    // the next route's [connecting] or the end of the attempt moves [hop]
+    // on. A connect with a [fallback] route after it ends alone: the
+    // attempt goes on to that route (PR #409 R1-M1).
+    private fun cutConnect(mine: Int, fallback: Boolean) {
         val doomed = synchronized(lock) {
             if (mine != hop) return
             val conn = current ?: return
-            expired = true
-            task = watchdog.schedule({ cutConnect(mine) }, RECUT_MS, TimeUnit.MILLISECONDS)
+            if (!fallback) expired = true
+            task = watchdog.schedule({ cutConnect(mine, fallback) }, RECUT_MS, TimeUnit.MILLISECONDS)
             if (cutting) return // the last cut is still blocked; don't pile up threads
             cutting = true
             conn

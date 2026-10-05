@@ -573,7 +573,9 @@ class TorRoutingTest {
         val port = server.address.port
         val events = java.util.Collections.synchronizedList(mutableListOf<String>())
         val watcher = object : TorRouting.HopWatcher {
-            override fun connecting(conn: java.net.HttpURLConnection, routes: Int) { events += if (routes == 1) "connecting" else "connecting $routes" }
+            override fun connecting(conn: java.net.HttpURLConnection, routes: Int, fallback: Boolean) {
+                events += (if (routes == 1) "connecting" else "connecting $routes") + if (fallback) " fallback" else ""
+            }
             override fun connected(conn: java.net.HttpURLConnection) { events += "connected" }
             override fun answered(conn: java.net.HttpURLConnection) { events += "answered" }
         }
@@ -593,13 +595,15 @@ class TorRoutingTest {
             fetch("http://127.0.0.1:$port/b")
             assertEquals(listOf("connecting", "connected", "answered"), events.toList())
             // A system proxy resolves the name itself; nothing is looked up
-            // here. The proxy and okhttp's direct fallback after it are two
-            // routes (PR #409 R6-M1).
-            val http = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress.createUnresolved("127.0.0.1", 8080))
+            // for its route. It and okhttp's direct fallback after it are
+            // dialed as two connects (PR #409 R1-M1): the proxy (nothing
+            // listening) fails, then the direct fallback — looked up now,
+            // as it's dialed from here — answers.
+            val closed = java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
+            val http = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress("127.0.0.1", closed))
             TorRouting.proxiesFor = { listOf(http) }
             fetch("http://localhost:$port/c")
-            assertFalse(events.toList().toString(), events.any { it.startsWith("lookup") })
-            assertEquals(listOf("connecting 2"), events.filter { it.startsWith("connecting") })
+            assertEquals(listOf("connecting fallback", "lookup localhost", "connecting", "connected", "answered"), events.toList())
             // A selector that fails: not known to be direct, so not looked up either.
             TorRouting.proxiesFor = { throw IllegalArgumentException("bad uri") }
             fetch("http://localhost:$port/d")
@@ -627,6 +631,54 @@ class TorRoutingTest {
             TorRouting.resolve = realResolve
             TorRouting.proxiesFor = realProxies
             server.stop(0)
+        }
+    }
+
+    /**
+     * PR #409 R1-M1: a system HTTP proxy that accepts TCP and never answers
+     * an https hop's CONNECT costs that route its own share of the connect
+     * clock, and the direct fallback is still dialed — on main the reply
+     * timed out under the 10 s read timeout and the connection went direct;
+     * a watchdog cut of the whole connect took the fallback down with it.
+     */
+    @Test
+    fun `a system proxy that never answers CONNECT falls back to the direct route`() {
+        val proxy = java.net.ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))
+        val accepted = java.util.Collections.synchronizedList(mutableListOf<java.net.Socket>())
+        val acceptor = Thread {
+            runCatching { while (true) accepted += proxy.accept() } // read nothing, answer nothing
+        }.apply { isDaemon = true; start() }
+        val realProxies = TorRouting.proxiesFor
+        val directs = java.util.concurrent.atomic.AtomicInteger(0)
+        try {
+            TorRouting.proxiesFor = { listOf(java.net.Proxy(java.net.Proxy.Type.HTTP, proxy.localSocketAddress)) }
+            // Direct: the https server's port is closed, so the fallback
+            // fails fast with a refusal — what matters is that it's dialed.
+            val closed = java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
+            val inner = HeaderDeadline(100, patience = PatientWaits(0), connectMs = 100, graceMs = 0) // 200 ms per route
+            val deadline = object : TorRouting.HopWatcher by inner {
+                override fun connecting(conn: java.net.HttpURLConnection, routes: Int, fallback: Boolean) {
+                    if (!fallback) directs.incrementAndGet()
+                    inner.connecting(conn, routes, fallback)
+                }
+            }
+            val started = System.nanoTime()
+            val e = runCatching {
+                TorRouting.openFollowingRedirects(URL("https://127.0.0.1:$closed/x"), hops = deadline) {
+                    connectTimeout = 2_000; readTimeout = 20_000
+                }
+            }.exceptionOrNull()
+            val ms = (System.nanoTime() - started) / 1_000_000
+            assertTrue("the proxy was never dialed", accepted.isNotEmpty())
+            assertEquals("the direct fallback wasn't dialed", 1, directs.get())
+            assertTrue("expected the direct route's refusal, got $e", e is java.net.ConnectException)
+            assertTrue("took $ms ms: the stalled CONNECT held the connect", ms < 5_000)
+            assertFalse("the proxy route's cut expired the attempt", inner.expired)
+        } finally {
+            TorRouting.proxiesFor = realProxies
+            proxy.close()
+            accepted.forEach { runCatching { it.close() } }
+            acceptor.join(1_000)
         }
     }
 

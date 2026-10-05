@@ -684,12 +684,18 @@ object TorRouting {
             }
             val direct = !local && route?.type() == Proxy.Type.DIRECT
             val pinned = if (local) pinLocalhost(current) else if (direct) pin(current) else null
-            val candidates = pinned?.urls ?: listOf(current)
+            // A watched hop on the system proxy has each of the selector's
+            // routes dialed as a connect of its own (PR #409 R1-M1).
+            val proxied = if (pinned == null && route == null && hops != null) proxyRoutes(current) else null
+            val candidates: List<Pair<URL, Proxy?>> = pinned?.urls?.map { it to route }
+                ?: proxied?.map { current to it }
+                ?: listOf(current to route)
             var conn: HttpURLConnection? = null
             var keep = false
             try {
-                for ((i, candidate) in candidates.withIndex()) {
-                    val c = openConnection(candidate, route) as? HttpURLConnection
+                for ((i, pair) in candidates.withIndex()) {
+                    val (candidate, candidateRoute) = pair
+                    val c = openConnection(candidate, candidateRoute) as? HttpURLConnection
                         ?: throw IOException(Strings.get(R.string.node_fetch_not_http, current))
                     conn = c
                     c.configure(current)
@@ -711,15 +717,18 @@ object TorRouting {
                     c.instanceFollowRedirects = false
                     if (payload != null) c.doOutput = true
                     if (i == candidates.lastIndex) break
-                    // Not the last address the name resolved to: one that
-                    // can't be reached falls back to the next, as the
-                    // connection's own lookup would have (R4-F2).
-                    hops?.connecting(c)
+                    // Not the last address the name resolved to (or the
+                    // last of the system proxy's routes): one that can't be
+                    // reached falls back to the next, as the connection's
+                    // own lookup (or route selection) would have (R4-F2).
+                    // A watchdog cut here ends this route only, not the
+                    // attempt (PR #409 R1-M1).
+                    hops?.connecting(c, if (proxied == null || candidateRoute == null) 1 else lookUpAhead(current, candidateRoute), fallback = true)
                     try {
                         c.connect()
                         break
                     } catch (e: IOException) {
-                        Log.w(TAG, "pinned address ${candidate.host} unreachable, trying the next: $e")
+                        Log.w(TAG, "${if (proxied != null) "proxy route $candidateRoute" else "pinned address ${candidate.host}"} unreachable, trying the next: $e")
                         runCatching { c.disconnect() }
                         conn = null
                     }
@@ -734,7 +743,7 @@ object TorRouting {
                     // How many routes the connect may try in turn, each
                     // under its own connect and handshake timeouts, as on
                     // main (PR #409 R5-M1, R6-M1); a pinned hop dials one.
-                    val routes = if (pinned == null) lookUpAhead(current, route) else 1
+                    val routes = if (pinned == null) lookUpAhead(current, candidates.last().second) else 1
                     hops.connecting(c, routes)
                     c.connect()
                     hops.connected(c)
@@ -808,6 +817,35 @@ object TorRouting {
     }
 
     /**
+     * The routes Android's HttpURLConnection would try in turn for [hop]
+     * on the system proxy selector's choice — each proxy the selector
+     * names, then "only once" a direct connection (okhttp's
+     * `RouteSelector`) — as explicit routes, for [openFollowingRedirects]
+     * to dial one by one, each a connect of its own; `null` when the
+     * selector names no proxy (the connection dials the name directly, its
+     * addresses one by one: [lookUpAhead]), for an onion hop (Tor's), or
+     * when the selector can't be asked (left to the connection, as ever).
+     *
+     * Why not let the connection walk them itself (PR #409 R1-M1): an HTTP
+     * proxy's CONNECT reply is read under the connection's read timeout —
+     * the long body stall limit here — not each route's handshake limit
+     * ([HandshakeTimeoutFactory] only sees the socket after the tunnel is
+     * up), so a proxy that accepts TCP and never answers CONNECT left only
+     * the watchdog's cut, which ended the whole connect, the direct
+     * fallback with it. `main` gave that reply 10 s and then went direct.
+     * Dialed one by one, a stalled proxy route is cut at its own share of
+     * the clock and the next route still gets dialed.
+     */
+    private fun proxyRoutes(hop: URL): List<Proxy>? {
+        if (fetchMayReachOnion(hop)) return null
+        val uri = selectorUri(hop) ?: return null
+        val selected = runCatching { proxiesFor(uri) }.getOrNull() ?: return null
+        val proxies = selected.filter { it.type() != Proxy.Type.DIRECT }
+        if (proxies.isEmpty()) return null
+        return proxies + Proxy.NO_PROXY
+    }
+
+    /**
      * How many routes Android's HttpURLConnection tries for a hop whose
      * proxy is the system selector's choice ([selected]): okhttp's
      * `RouteSelector` tries each proxy the selector named, then — "only
@@ -856,8 +894,14 @@ object TorRouting {
          */
         val handshakeTimeoutMs: Int? get() = null
 
-        /** [routes]: how many routes the connect may try in turn, each under its own connect and handshake timeouts. */
-        fun connecting(conn: HttpURLConnection, routes: Int = 1)
+        /**
+         * [routes]: how many routes the connect may try in turn, each under
+         * its own connect and handshake timeouts. [fallback]: if this
+         * connect fails, [openFollowingRedirects] goes on to another (the
+         * next pinned address, the next of the system proxy's routes), so
+         * running out of time ends this connect only, not the fetch.
+         */
+        fun connecting(conn: HttpURLConnection, routes: Int = 1, fallback: Boolean = false)
         fun connected(conn: HttpURLConnection)
         fun answered(conn: HttpURLConnection)
     }
