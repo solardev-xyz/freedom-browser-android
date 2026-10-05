@@ -92,6 +92,10 @@ class FixtureGateway {
             // credit: half the body, then 15 s of silence, then the rest.
             "slow-segment" -> return binaryResponse(ByteArray(SLOW_SEGMENT_BYTES) { 7 }, "application/octet-stream")
                 .throttleBody(SLOW_SEGMENT_BYTES / 2L, 15, java.util.concurrent.TimeUnit.SECONDS)
+            // A node that hangs mid-body: 32 KB, then a minute of silence
+            // (PR #409 R1-F1, many of these must not freeze the browser).
+            "stalled-segment" -> return binaryResponse(ByteArray(64 * 1024) { 7 }, "application/octet-stream")
+                .throttleBody(32 * 1024L, 60, java.util.concurrent.TimeUnit.SECONDS)
             // A link that downloads instead of navigating (#99 R1-F1).
             "file.bin" -> return binaryResponse(ByteArray(64), "application/octet-stream")
         }

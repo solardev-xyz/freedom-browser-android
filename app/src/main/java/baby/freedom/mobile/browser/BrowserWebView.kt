@@ -5728,8 +5728,8 @@ private fun syntheticResponse(
  *    of it retries transient answers ([fetchWithRetry]) because a cold
  *    Swarm node regularly answers the manifest before every chunk is
  *    retrievable — a main frame's 404s and 5xx, a subresource's 5xx
- *    only, with a subresource's body allowed to pause far longer
- *    ([gatewayFetchPolicy]). `<name>.ens.…` hosts resolve the *name* per request
+ *    only, with a few subresources at a time allowed to wait far longer
+ *    ([gatewayFetchPolicy], [PatientWaits]). `<name>.ens.…` hosts resolve the *name* per request
  *    (the origin is name-derived so storage survives content updates).
  *
  * 2. **Scheme-URL subresources** (`bzz://…` / `ipfs://…` / `ipns://…`
@@ -6254,9 +6254,10 @@ private fun fetchOnce(
     media: Boolean = false,
 ): FetchAttempt {
     // A header wait shorter than the body's is enforced from outside: the
-    // connection's own read timeout is one value for both.
-    val deadline = if (policy.headerTimeoutMs < policy.bodyStallTimeoutMs) {
-        HeaderDeadline(policy.headerTimeoutMs)
+    // connection's own read timeout is one value for both. Past the base
+    // limits only a [PatientWaits] slot holder goes on waiting.
+    val deadline = if (policy.baseHeaderTimeoutMs < policy.bodyStallTimeoutMs) {
+        HeaderDeadline(policy.baseHeaderTimeoutMs, policy.headerTimeoutMs)
     } else {
         null
     }
@@ -6275,7 +6276,7 @@ private fun fetchOnce(
         if (deadline?.expired == true) {
             // Disconnected by the deadline just as the headers came in.
             runCatching { conn.disconnect() }
-            throw java.net.SocketTimeoutException("no headers within ${policy.headerTimeoutMs} ms")
+            throw java.net.SocketTimeoutException("no headers in time")
         }
         val reason = conn.responseMessage?.ifBlank { null } ?: "OK"
         val rawCt = conn.contentType
@@ -6309,6 +6310,7 @@ private fun fetchOnce(
                 else -> conn.errorStream ?: ByteArrayInputStream(ByteArray(0))
             },
             conn,
+            if (policy.baseBodyStallMs < policy.bodyStallTimeoutMs) BodyStallGuard(conn, policy.baseBodyStallMs) else null,
         )
         // Page-controlled: [mediaReplyFor] and [webViewSeekProof] never throw.
         val range = req.requestHeaders?.entries
@@ -6349,7 +6351,7 @@ private fun fetchOnce(
     } catch (t: Throwable) {
         if (deadline?.expired == true) {
             // The header deadline disconnected it: a timeout, worth another attempt.
-            Log.w(LOG_TAG, "gateway sent no headers within ${policy.headerTimeoutMs} ms: $targetUrl")
+            Log.w(LOG_TAG, "gateway sent no headers in time (${policy.baseHeaderTimeoutMs}/${policy.headerTimeoutMs} ms): $targetUrl")
             FetchAttempt.Retry
         } else {
             failedAttempt(t, targetUrl, media)

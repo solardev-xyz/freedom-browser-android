@@ -236,6 +236,96 @@ class GatewayFetchPolicyDeviceTest {
         assertTrue(!deadline.expired)
     }
 
+    @Test
+    fun headersPastTheBaseWaitOnlyOnAFreeSlot() {
+        script = { _, _, _ -> Thread.sleep(30_000) } // never answer
+        // No slot free: cut at the base limit, as main always did.
+        val none = PatientWaits(0)
+        val conn = URL("$base/a").openConnection() as HttpURLConnection
+        conn.readTimeout = SUBRESOURCE_BODY_STALL_MS
+        val quick = HeaderDeadline(1_000, 4_000, none)
+        quick.track(conn)
+        var started = System.nanoTime()
+        runCatching { conn.responseCode }
+        assertTrue("took ${elapsedMs(started)} ms", elapsedMs(started) in 800..2_500)
+        assertTrue(quick.expired)
+
+        // A free slot: waits on to the long limit, then gives the slot back.
+        val one = PatientWaits(1)
+        val conn2 = URL("$base/b").openConnection() as HttpURLConnection
+        conn2.readTimeout = SUBRESOURCE_BODY_STALL_MS
+        val patient = HeaderDeadline(1_000, 3_000, one)
+        patient.track(conn2)
+        started = System.nanoTime()
+        runCatching { conn2.responseCode }
+        assertTrue("took ${elapsedMs(started)} ms", elapsedMs(started) in 2_700..4_500)
+        assertTrue(patient.expired)
+        assertTrue("the slot wasn't given back", one.tryTake())
+    }
+
+    @Test
+    fun headersInTimeGiveTheSlotBack() {
+        script = { _, out, _ ->
+            Thread.sleep(2_000)
+            out.write(head(200, "OK", 2))
+            out.write("ok".toByteArray())
+            out.flush()
+        }
+        val one = PatientWaits(1)
+        val conn = URL("$base/x").openConnection() as HttpURLConnection
+        conn.readTimeout = SUBRESOURCE_BODY_STALL_MS
+        val deadline = HeaderDeadline(1_000, 10_000, one)
+        deadline.track(conn)
+        assertEquals(200, conn.responseCode)
+        assertTrue(deadline.extended)
+        deadline.headersReceived()
+        assertTrue(!deadline.expired)
+        assertTrue("the slot wasn't given back", one.tryTake())
+    }
+
+    /**
+     * PR #409 R1-F1: every stalled read blocks a thread of Chromium's
+     * shared pool, so only a slot holder may stall past the base limit;
+     * the others fail there, as on main.
+     */
+    @Test
+    fun ofTwoStalledBodiesOnlyTheSlotHolderWaitsPastTheBase() {
+        script = { _, out, _ ->
+            out.write(head(200, "OK", 32))
+            out.write(ByteArray(16))
+            out.flush()
+            Thread.sleep(3_000) // longer than the 1 s base, well within the long limit
+            out.write(ByteArray(16))
+            out.flush()
+        }
+        val one = PatientWaits(1)
+        val results = arrayOfNulls<Any>(2)
+        val guards = arrayOfNulls<BodyStallGuard>(2)
+        val threads = (0..1).map { i ->
+            val conn = URL("$base/s$i").openConnection() as HttpURLConnection
+            conn.readTimeout = SUBRESOURCE_BODY_STALL_MS
+            assertEquals(200, conn.responseCode)
+            val guard = BodyStallGuard(conn, 1_000, one)
+            guards[i] = guard
+            val body = DisconnectOnCloseInputStream(conn.inputStream, conn, guard)
+            Thread {
+                val started = System.nanoTime()
+                results[i] = runCatching { body.use { it.readBytes().size } }
+                    .fold({ it to elapsedMs(started) }, { it to elapsedMs(started) })
+            }.apply { start() }
+        }
+        threads.forEach { it.join(10_000) }
+        val outcomes = results.map { it as Pair<*, *> }
+        val whole = outcomes.filter { it.first == 32 }
+        val failed = outcomes.filter { it.first is Throwable }
+        assertEquals("$outcomes", 1, whole.size)
+        assertEquals("$outcomes", 1, failed.size)
+        assertTrue("$outcomes", (failed[0].second as Long) in 800..2_500)
+        assertEquals(1, guards.count { it!!.cutOff })
+        assertEquals(1, guards.sumOf { it!!.extensions })
+        assertTrue("the slot wasn't given back", one.tryTake())
+    }
+
     private fun fetch(mainFrame: Boolean) = fetchWithRetry(
         FakeRequest("$base/segment", mainFrame), "$base/segment", "$base/segment",
         fresh = false, policy = gatewayFetchPolicy(mainFrame, "GET", media = false),

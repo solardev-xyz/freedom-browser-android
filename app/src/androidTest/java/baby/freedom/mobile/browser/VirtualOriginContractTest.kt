@@ -456,6 +456,29 @@ class VirtualOriginContractTest {
         assertEquals(1, gateway.requests["/bzz/${FixtureGateway.REF_A}/slow-segment"]?.get())
     }
 
+    /**
+     * PR #409 R1-F1: a stalled dweb body blocks a thread of Chromium's
+     * process-wide worker pool, which every request in every tab needs.
+     * However many stall, only a few may wait past main's 10 s; the
+     * rest fail there, so another request is held up no longer than on
+     * main (it was ~57 s with 6+ bodies stalled 60 s).
+     */
+    @Test
+    fun manyStalledSubresourcesDontHoldUpOtherRequests() {
+        harness.load(originA)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        harness.js(
+            "window.results.stalled = 0;" +
+                "for (let i = 0; i < 8; i++) fetch('/stalled-segment?n=' + i)" +
+                ".then(r => r.arrayBuffer()).catch(() => {}).finally(() => window.results.stalled++);" +
+                "setTimeout(() => { const t0 = Date.now(); fetch('/index.html?probe=1')" +
+                ".then(r => r.text()).then(() => { window.results.probeMs = Date.now() - t0; }) }, 3000);",
+        )
+        harness.awaitJsTrue("window.results.probeMs !== undefined", timeoutSeconds = 60)
+        val ms = harness.js("window.results.probeMs").toLong()
+        assertTrue("an unrelated fetch took $ms ms", ms < 15_000)
+    }
+
     @Test
     fun aSubresource404IsPassedThroughAtOnce() {
         harness.load(originA)

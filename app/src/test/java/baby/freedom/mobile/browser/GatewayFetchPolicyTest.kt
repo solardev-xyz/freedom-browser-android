@@ -73,6 +73,45 @@ class GatewayFetchPolicyTest {
     }
 
     @Test
+    fun `past main's own limits a subresource waits only on a patient slot`() {
+        // What main always gave; beyond it, PatientWaits decides.
+        assertEquals(10_000, subresource().baseHeaderTimeoutMs)
+        assertEquals(10_000, subresource().baseBodyStallMs)
+        assertEquals(60_000, subresource(media = true).baseHeaderTimeoutMs)
+        assertEquals(60_000, subresource(media = true).baseBodyStallMs)
+        assertTrue(subresource().baseHeaderTimeoutMs < subresource().headerTimeoutMs)
+        assertTrue(subresource().baseBodyStallMs < subresource().bodyStallTimeoutMs)
+    }
+
+    @Test
+    fun `a navigation never waits on a patient slot`() {
+        for (p in listOf(navigation(), navigation(media = true))) {
+            assertEquals(p.headerTimeoutMs, p.baseHeaderTimeoutMs)
+            assertEquals(p.bodyStallTimeoutMs, p.baseBodyStallMs)
+        }
+    }
+
+    @Test
+    fun `patient slots are taken and given back`() {
+        val slots = PatientWaits(2)
+        assertTrue(slots.tryTake())
+        assertTrue(slots.tryTake())
+        assertFalse(slots.tryTake())
+        slots.give()
+        assertTrue(slots.tryTake())
+    }
+
+    @Test
+    fun `the shared pool leaves most of Chromium's workers free`() {
+        val slots = PatientWaits.shared
+        var n = 0
+        while (slots.tryTake()) n++
+        repeat(n) { slots.give() }
+        val workers = maxOf(3, Runtime.getRuntime().availableProcessors() - 1)
+        assertTrue("$n of $workers", n in 1..maxOf(1, workers / 3))
+    }
+
+    @Test
     fun `only a subresource gets a header deadline separate from the body`() {
         // fetchOnce arms its outside header deadline only when the two differ.
         assertTrue(subresource().headerTimeoutMs < subresource().bodyStallTimeoutMs)
