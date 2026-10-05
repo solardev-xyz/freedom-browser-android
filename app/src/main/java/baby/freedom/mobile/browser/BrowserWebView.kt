@@ -6075,7 +6075,7 @@ private fun interceptVirtualRequestFor(
             // the gateway, with nothing kept from the fetch before.
             fetchMediaWithRangeSupport(req, target, url, fresh || freshDocument(target))
         } else {
-            fetchWithRetry(req, target, url, fresh, gatewayFetchPolicy(req.isForMainFrame, req.method, media = false))
+            fetchWithRetry(req, target, url, fresh, gatewayFetchPolicy(req.isForMainFrame, media = false))
         }
         // Fetched from a gateway a sweep switched away from meanwhile:
         // the origin was already wiped, so this must not land there.
@@ -6176,7 +6176,7 @@ private fun fetchMediaWithRangeSupport(
 ): WebResourceResponse? =
     fetchWithRetry(
         req, targetUrl, originalUrl, noCache,
-        gatewayFetchPolicy(req.isForMainFrame, req.method, media = true), media = true,
+        gatewayFetchPolicy(req.isForMainFrame, media = true), media = true,
     )
 
 private sealed class FetchAttempt {
@@ -6266,7 +6266,7 @@ private fun fetchOnce(
         // Redirects are followed hop by hop through TorRouting.
         val conn = TorRouting.openFollowingRedirects(target, hops = deadline) { hop ->
             requestMethod = if (req.method == "HEAD") "HEAD" else "GET"
-            connectTimeout = 5_000
+            connectTimeout = GATEWAY_CONNECT_TIMEOUT_MS
             readTimeout = policy.bodyStallTimeoutMs
             forwardProxiedHeaders(req, crossOrigin = !TorRouting.sameOrigin(hop, target), noCache = fresh)
         }

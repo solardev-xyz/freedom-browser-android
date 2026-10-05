@@ -11,11 +11,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class GatewayFetchPolicyTest {
-    private fun subresource(method: String = "GET", media: Boolean = false) =
-        gatewayFetchPolicy(mainFrame = false, method = method, media = media)
+    private fun subresource(media: Boolean = false) =
+        gatewayFetchPolicy(mainFrame = false, media = media)
 
-    private fun navigation(method: String = "GET", media: Boolean = false) =
-        gatewayFetchPolicy(mainFrame = true, method = method, media = media)
+    private fun navigation(media: Boolean = false) =
+        gatewayFetchPolicy(mainFrame = true, media = media)
 
     @Test
     fun `a subresource waits 30 s for its headers`() {
@@ -32,27 +32,22 @@ class GatewayFetchPolicyTest {
     fun `a subresource 404 is passed through, not retried`() {
         assertFalse(404 in subresource().retryStatuses)
         assertFalse(404 in subresource(media = true).retryStatuses)
-        assertFalse(404 in subresource(method = "HEAD").retryStatuses)
     }
 
+    /**
+     * PR #409 R3-M2: whatever the page's method, the gateway is sent a GET
+     * or HEAD, so a subresource's transient 5xx is always retried.
+     */
     @Test
-    fun `a subresource GET or HEAD retries the transient 5xx`() {
-        for (method in listOf("GET", "HEAD", "get")) {
-            assertEquals(setOf(500, 502, 503, 504), subresource(method).retryStatuses)
-        }
+    fun `a subresource retries the transient 5xx`() {
+        assertEquals(setOf(500, 502, 503, 504), subresource().retryStatuses)
+        assertEquals(setOf(500, 502, 503, 504), subresource(media = true).retryStatuses)
     }
 
     @Test
     fun `other statuses are never retried for a subresource`() {
         for (status in listOf(200, 206, 301, 304, 400, 401, 403, 405, 410, 416, 429, 501, 505)) {
             assertFalse("$status", status in subresource().retryStatuses)
-        }
-    }
-
-    @Test
-    fun `a non-idempotent subresource is never retried`() {
-        for (method in listOf("POST", "PUT", "PATCH", "DELETE")) {
-            assertTrue(method, subresource(method).retryStatuses.isEmpty())
         }
     }
 
@@ -160,6 +155,77 @@ class GatewayFetchPolicyTest {
         Thread.sleep(300)
         assertEquals(0, cuts.get())
         assertFalse(deadline.expired)
+    }
+
+    /**
+     * PR #409 R3-F1: a connect that hangs (a TLS handshake or SOCKS reply
+     * under the long read timeout) is cut at the connect limit, with no
+     * slot, and cut again until it returns — a first cut can land before
+     * the connection object exists and do nothing.
+     */
+    @Test
+    fun `a connect that hangs is cut at its limit, and again until it returns`() {
+        val cuts = AtomicInteger(0)
+        val slot = PatientWaits(1)
+        val deadline = HeaderDeadline(100, 5_000, slot, connectMs = 200)
+        deadline.connecting(FakeConnection { cuts.incrementAndGet() })
+        Thread.sleep(120)
+        assertEquals("cut before the connect limit", 0, cuts.get())
+        Thread.sleep(500) // the limit and a recut or two
+        assertTrue(deadline.expired)
+        assertFalse("a slot extended the connect", deadline.extended)
+        assertTrue("cut ${cuts.get()} times", cuts.get() >= 2)
+        assertTrue("took the slot", slot.tryTake())
+        slot.give()
+        deadline.headersReceived() // the attempt is over: no more cuts
+        Thread.sleep(100)
+        val after = cuts.get()
+        Thread.sleep(600)
+        assertEquals(after, cuts.get())
+        try {
+            deadline.connected(FakeConnection {})
+            org.junit.Assert.fail("a hop went on after its connect expired")
+        } catch (e: java.net.SocketTimeoutException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun `a connect in time hands over to the header clock`() {
+        val cuts = AtomicInteger(0)
+        val deadline = HeaderDeadline(300, patience = PatientWaits(0), connectMs = 300)
+        deadline.connecting(FakeConnection { cuts.incrementAndGet() })
+        Thread.sleep(200)
+        deadline.connected(FakeConnection { cuts.incrementAndGet() })
+        Thread.sleep(200) // 400 ms since connecting, 200 ms since connected
+        deadline.headersReceived()
+        Thread.sleep(400)
+        assertEquals(0, cuts.get())
+        assertFalse(deadline.expired)
+    }
+
+    /**
+     * PR #409 R3-M1: closing a body before its end drops the connection
+     * off the closing thread (a Chromium pool worker), so a disconnect
+     * that blocks doesn't hold it.
+     */
+    @Test
+    fun `closing a body early doesn't wait on a blocking disconnect`() {
+        val release = CountDownLatch(1)
+        val disconnected = CountDownLatch(1)
+        val closed = CountDownLatch(1)
+        val conn = FakeConnection { release.await(10, TimeUnit.SECONDS); disconnected.countDown() }
+        val raw = object : java.io.ByteArrayInputStream(ByteArray(10)) {
+            override fun close() = closed.countDown()
+        }
+        val body = DisconnectOnCloseInputStream(raw, conn, length = 10)
+        val started = System.nanoTime()
+        body.close()
+        assertTrue("close blocked", (System.nanoTime() - started) / 1_000_000 < 500)
+        assertEquals("the stream closed before the disconnect", 1L, closed.count)
+        release.countDown()
+        assertTrue(disconnected.await(2, TimeUnit.SECONDS))
+        assertTrue("the stream was never closed", closed.await(2, TimeUnit.SECONDS))
     }
 
     private class FakeConnection(private val onDisconnect: () -> Unit) :

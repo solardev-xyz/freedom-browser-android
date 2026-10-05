@@ -433,9 +433,36 @@ class GatewayFetchPolicyDeviceTest {
         assertEquals("all three over one connection", 1, connections.get())
     }
 
+    /**
+     * PR #409 R3-F1: an https hop whose TLS handshake never completes
+     * (the server accepts and says nothing) is cut at the connect limit,
+     * not left to the long read timeout the body stall needs.
+     */
+    @Test
+    fun aStalledTlsHandshakeIsCutAtTheConnectLimit() {
+        script = { _, _, _ -> Thread.sleep(30_000) } // never answer the ClientHello
+        val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(1), connectMs = 1_500)
+        val started = System.nanoTime()
+        try {
+            TorRouting.openFollowingRedirects(URL("https://127.0.0.1:${server.localPort}/tls"), hops = deadline) {
+                connectTimeout = GATEWAY_CONNECT_TIMEOUT_MS
+                readTimeout = 8_000
+            }
+            fail("a silent TLS server completed a handshake")
+        } catch (e: java.io.IOException) {
+            // expected: cut by the deadline, not the 8 s read timeout
+        } finally {
+            deadline.headersReceived()
+        }
+        val ms = elapsedMs(started)
+        assertTrue("the deadline didn't fire", deadline.expired)
+        assertTrue("took $ms ms", ms in 1_300..3_000)
+        assertTrue("the server never saw the connection", connections.get() >= 1)
+    }
+
     private fun fetch(mainFrame: Boolean) = fetchWithRetry(
         FakeRequest("$base/segment", mainFrame), "$base/segment", "$base/segment",
-        fresh = false, policy = gatewayFetchPolicy(mainFrame, "GET", media = false),
+        fresh = false, policy = gatewayFetchPolicy(mainFrame, media = false),
     )
 
     private fun readFully(input: InputStream, n: Int): Int {

@@ -63,22 +63,26 @@ internal val SUBRESOURCE_RETRY_STATUSES: Set<Int> = setOf(500, 502, 503, 504)
  * the headers, a body that may pause for up to [SUBRESOURCE_BODY_STALL_MS]
  * between bytes (a node short on peer credit stops sending for well over
  * 10 s, and a segment thrown away then is fetched — and paid for — a
- * second time), transient 5xx retried on GET/HEAD only, and a 404 passed
- * straight through: past the page's own load a 404 is almost always a
+ * second time), transient 5xx retried, and a 404 passed straight through: past the page's own load a 404 is almost always a
  * real "not there", and a page probing for an optional file must not wait
  * out the whole backoff for it. A media file keeps its longer 60 s header
  * wait. The waits past `main`'s own limits (10 s, 60 s for media) are
  * [PatientWaits]-gated: only a few requests at a time get them, the rest
  * time out where they always did.
+ *
+ * Desktop retries only GET and HEAD, but the page's method doesn't matter
+ * here: the gateway is only ever sent a GET or a HEAD (`fetchOnce`; a
+ * `WebResourceRequest` carries no body to forward), so every request it
+ * answers is idempotent and its transient 5xx is retried whatever the
+ * page asked for — as `main` did (PR #409 R3-M2).
  */
-internal fun gatewayFetchPolicy(mainFrame: Boolean, method: String, media: Boolean): GatewayFetchPolicy {
+internal fun gatewayFetchPolicy(mainFrame: Boolean, media: Boolean): GatewayFetchPolicy {
     val base = if (media) MEDIA_READ_TIMEOUT_MS else NAVIGATION_READ_TIMEOUT_MS
     if (mainFrame) return GatewayFetchPolicy(base, base, NAVIGATION_RETRY_STATUSES)
-    val idempotent = method.equals("GET", ignoreCase = true) || method.equals("HEAD", ignoreCase = true)
     return GatewayFetchPolicy(
         headerTimeoutMs = if (media) MEDIA_READ_TIMEOUT_MS else SUBRESOURCE_HEADER_TIMEOUT_MS,
         bodyStallTimeoutMs = SUBRESOURCE_BODY_STALL_MS,
-        retryStatuses = if (idempotent) SUBRESOURCE_RETRY_STATUSES else emptySet(),
+        retryStatuses = SUBRESOURCE_RETRY_STATUSES,
         baseHeaderTimeoutMs = base,
         baseBodyStallMs = base,
     )
@@ -148,41 +152,63 @@ private val disconnector: ExecutorService =
         Thread(r, "gateway-wait-disconnect").apply { isDaemon = true }
     }
 
-private fun disconnectAside(conn: HttpURLConnection) {
-    disconnector.execute { runCatching { conn.disconnect() } }
+private fun disconnectAside(conn: HttpURLConnection, then: () -> Unit = {}) {
+    disconnector.execute {
+        runCatching { conn.disconnect() }
+        then()
+    }
 }
+
+/**
+ * The connect timeout of a gateway fetch ([fetchWithRetry]); with the TLS
+ * handshake on top, a hop's connect gets this plus `main`'s read timeout
+ * ([HeaderDeadline]).
+ */
+internal const val GATEWAY_CONNECT_TIMEOUT_MS = 5_000
 
 /**
  * Enforces [GatewayFetchPolicy]'s header limits from outside the thread
  * waiting on the headers: [HttpURLConnection.setReadTimeout] can only be
  * one value for the whole exchange, and is set to the (longer) body stall
- * limit. Watches each hop of [TorRouting.openFollowingRedirects]: the
- * clock starts when a hop's connection is up ([connected]) and stops when
- * its headers are in ([answered]), so each hop gets the same [baseMs] the
- * read timeout always gave it, and name lookups and connects stay outside
- * it as they always were (each connect bounded by its own connect
- * timeout) — a subresource with no slot fails where it always did, not
- * earlier because its redirect hops add up (PR #409 R2-M1). At [baseMs] a
- * hop with no headers yet takes a [patience] slot and goes on to
- * [timeoutMs], or — no slot free, or no longer limit — has its connection
- * disconnected, which fails the blocked `responseCode` at once.
+ * limit. Watches each hop of [TorRouting.openFollowingRedirects] in two
+ * stretches.
  *
- * Only a connection that is up is ever cut: a disconnect before
- * `connect()` is a no-op on Android's [HttpURLConnection], and the
- * connection would then wait out its whole read timeout with no slot
- * (PR #409 R2-F1). Starting the clock at [connected] means the
- * connection the deadline cuts always exists. A hop connected after the
- * attempt already expired is refused outright.
+ * **Connecting** ([connecting] to [connected]): Android's
+ * [HttpURLConnection.connect] runs the TCP connect (its own connect
+ * timeout), then an https hop's TLS handshake and a SOCKS proxy's reply
+ * under the read timeout — which is the long body stall limit now, so on
+ * its own a handshake that stalls would hold a pool thread for it, past
+ * `main`'s bound and with no [PatientWaits] slot (PR #409 R3-F1). So the
+ * connect gets [connectMs] (the connect timeout plus `main`'s read
+ * timeout, `main`'s own bound) and no more: then it is disconnected from
+ * another thread, which aborts a `connect()` mid-handshake, and cut again
+ * every [RECUT_MS] until it returns, since a cut landing before the
+ * connection object exists (still looking the name up) is missed. No
+ * slot extends this stretch.
+ *
+ * **Headers** ([connected] to [answered]): each hop gets the same
+ * [baseMs] the read timeout always gave it, and name lookups between hops
+ * stay outside it — a subresource with no slot fails where it always did,
+ * not earlier because its redirect hops add up (PR #409 R2-M1). At
+ * [baseMs] a hop with no headers yet takes a [patience] slot and goes on
+ * to [timeoutMs], or — no slot free, or no longer limit — has its
+ * connection disconnected, which fails the blocked `responseCode` at once.
+ * The connection is up by then, so the cut always lands (a disconnect
+ * before `connect()` is a no-op, PR #409 R2-F1).
+ *
+ * A hop started after the attempt already expired is refused outright.
  */
 internal class HeaderDeadline(
     private val baseMs: Int,
     private val timeoutMs: Int = baseMs,
     private val patience: PatientWaits = PatientWaits.shared,
+    private val connectMs: Int = GATEWAY_CONNECT_TIMEOUT_MS + baseMs,
 ) : TorRouting.HopWatcher {
     private val lock = Any()
-    private var current: HttpURLConnection? = null // the hop waiting on its headers
+    private var current: HttpURLConnection? = null // the hop connecting or waiting on its headers
     private var hop = 0 // which hop that is
     private var patient = false
+    private var cutting = false // a connect-stretch disconnect is still running
     private var task: ScheduledFuture<*>? = null
 
     /** Did a hop's deadline pass before its headers arrived? */
@@ -195,9 +221,19 @@ internal class HeaderDeadline(
     var extended = false
         private set
 
-    override fun connected(conn: HttpURLConnection) {
+    override fun connecting(conn: HttpURLConnection) {
         synchronized(lock) {
             if (expired) throw SocketTimeoutException("no headers in time")
+            stop()
+            current = conn
+            val mine = ++hop
+            task = watchdog.schedule({ cutConnect(mine) }, connectMs.toLong(), TimeUnit.MILLISECONDS)
+        }
+    }
+
+    override fun connected(conn: HttpURLConnection) {
+        synchronized(lock) {
+            if (expired) throw SocketTimeoutException("no connection in time")
             stop()
             current = conn
             val mine = ++hop
@@ -206,6 +242,21 @@ internal class HeaderDeadline(
     }
 
     override fun answered(conn: HttpURLConnection) = headersReceived()
+
+    // The connect stretch ran out: cut, and keep cutting until [connected]
+    // or the end of the attempt moves [hop] on.
+    private fun cutConnect(mine: Int) {
+        val doomed = synchronized(lock) {
+            if (mine != hop) return
+            val conn = current ?: return
+            expired = true
+            task = watchdog.schedule({ cutConnect(mine) }, RECUT_MS, TimeUnit.MILLISECONDS)
+            if (cutting) return // the last cut is still blocked; don't pile up threads
+            cutting = true
+            conn
+        }
+        disconnectAside(doomed) { synchronized(lock) { cutting = false } }
+    }
 
     private fun atBase(mine: Int) {
         synchronized(lock) {
@@ -253,6 +304,10 @@ internal class HeaderDeadline(
             patient = false
             patience.give()
         }
+    }
+
+    private companion object {
+        const val RECUT_MS = 250L
     }
 }
 
@@ -395,8 +450,16 @@ internal class DisconnectOnCloseInputStream(
         if (ended.get()) {
             runCatching { super.close() }
         } else {
-            runCatching { conn.disconnect() }
-            runCatching { super.close() }
+            // Off this thread, as the watchdog's cuts are (PR #409 R3-M1):
+            // the closing thread is one of Chromium's pool workers, and a
+            // disconnect can block (an https or SOCKS hop). Disconnect
+            // before closing the stream, which would otherwise try to
+            // drain the rest first.
+            val body = `in`
+            disconnector.execute {
+                runCatching { conn.disconnect() }
+                runCatching { body.close() }
+            }
         }
     }
 }

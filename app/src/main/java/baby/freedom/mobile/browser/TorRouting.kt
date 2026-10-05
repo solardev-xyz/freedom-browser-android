@@ -644,10 +644,12 @@ object TorRouting {
      * [RedirectUnresolvedException] — an [java.net.UnknownHostException],
      * worth retrying like any other failed lookup — not as a refusal.
      *
-     * [hops], when given, is told when each hop's connection is up
-     * ([HopWatcher.connected], after an explicit `connect()`) and when its
-     * response headers are in ([HopWatcher.answered]) — the stretch a
-     * header deadline should time, without the name lookups in between.
+     * [hops], when given, is told when each hop's connection starts
+     * ([HopWatcher.connecting], before every explicit `connect()`, which
+     * takes in the TLS handshake and a SOCKS proxy's reply), when it is up
+     * ([HopWatcher.connected]) and when its response headers are in
+     * ([HopWatcher.answered]) — the stretches a header deadline should
+     * time, without the name lookups between hops.
      */
     fun openFollowingRedirects(
         url: URL,
@@ -700,6 +702,7 @@ object TorRouting {
                     // Not the last address the name resolved to: one that
                     // can't be reached falls back to the next, as the
                     // connection's own lookup would have (R4-F2).
+                    hops?.connecting(c)
                     try {
                         c.connect()
                         break
@@ -711,6 +714,7 @@ object TorRouting {
                 }
                 val c = conn ?: throw IOException(Strings.get(R.string.node_fetch_not_http, current))
                 if (hops != null) {
+                    hops.connecting(c)
                     c.connect()
                     hops.connected(c)
                 }
@@ -746,13 +750,17 @@ object TorRouting {
     }
 
     /**
-     * Watches the hops of [openFollowingRedirects]: [connected] once a
-     * hop's connection is up — a [HttpURLConnection.disconnect] from
-     * another thread then fails its blocked `responseCode` at once, which
-     * it doesn't before the connection exists — and [answered] once its
-     * headers are in. Either may throw to abandon the fetch.
+     * Watches the hops of [openFollowingRedirects]: [connecting] just
+     * before a hop's `connect()` — which on Android's [HttpURLConnection]
+     * runs the TLS handshake (and a SOCKS proxy's reply) under the read
+     * timeout, and which a [HttpURLConnection.disconnect] from another
+     * thread aborts — [connected] once the connection is up — a disconnect
+     * then fails its blocked `responseCode` at once, which it doesn't
+     * before `connect()` was called — and [answered] once its headers are
+     * in. Any of them may throw to abandon the fetch.
      */
     interface HopWatcher {
+        fun connecting(conn: HttpURLConnection)
         fun connected(conn: HttpURLConnection)
         fun answered(conn: HttpURLConnection)
     }
