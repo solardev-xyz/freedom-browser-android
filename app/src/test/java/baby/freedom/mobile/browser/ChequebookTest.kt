@@ -3,7 +3,9 @@ package baby.freedom.mobile.browser
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import java.math.BigInteger
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -163,5 +165,115 @@ class ChequebookTest {
         assertEquals(StepStatus.Done, step.status)
         val unread = publishSteps(r.copy(chequebookBalancePlur = null)).single { it.key == PublishStepKey.Chequebook }
         assertEquals("Deployed at $chequebook.", unread.detail)
+    }
+
+    // Paid downloads (browsing credit): mocked ant answers for the states
+    // the page shows — funded and paying, empty, switched off, lost.
+
+    private fun swap(supported: Boolean = true, enabled: Boolean = true, paying: Boolean = false) =
+        swapStatusFrom(
+            JSONObject(
+                """{"supported":$supported,"swap_switch":true,"swap_enabled":$enabled,"paying":$paying,""" +
+                    """"chequebook":"$chequebook","persisted":false}""",
+            ),
+        )
+
+    private val funded = ChequebookState(
+        address = chequebook,
+        balancePlur = BigInteger("110000000000000"), // 0.011 xBZZ on chain
+        walletPlur = BigInteger.ZERO,
+        availablePlur = BigInteger("80000000000000"), // 0.008 xBZZ left
+    )
+
+    @Test
+    fun `reads ant's swap status`() {
+        assertEquals(SwapStatus(supported = true, swapEnabled = false, paying = false), swap(enabled = false))
+        assertEquals(SwapStatus(supported = true, swapEnabled = true, paying = true), swap(paying = true))
+        // Not ant's swap status: nothing to show rather than a guess.
+        assertNull(swapStatusFrom(JSONObject("""{"enabled":false}""")))
+    }
+
+    @Test
+    fun `spendable credit is availableBalance, an upper bound when ant can't count its cheques`() {
+        // 0.011 xBZZ on chain, nearly all of it written away in uncashed cheques.
+        val f = chequebookFundsFrom("""{"totalBalance":"110000000000000","availableBalance":"9000000"}""")!!
+        assertEquals(BigInteger("110000000000000"), f.totalPlur)
+        assertEquals(BigInteger("9000000"), f.availablePlur)
+        assertFalse(f.availableUpperBound)
+        assertFalse(f.ledgerLost)
+        val unsure = chequebookFundsFrom(
+            """{"totalBalance":"110000000000000","availableBalance":"110000000000000",""" +
+                """"availableBalanceError":"chequebook.totalPaidOut timed out"}""",
+        )!!
+        assertTrue(unsure.availableUpperBound)
+        // An older gateway with no availableBalance: the total, as an upper bound.
+        val old = chequebookFundsFrom("""{"totalBalance":"10000000000000"}""")!!
+        assertEquals(milli, old.availablePlur)
+        assertTrue(old.availableUpperBound)
+        val lost = chequebookFundsFrom(
+            """{"totalBalance":"110000000000000","availableBalance":"110000000000000",""" +
+                """"availableBalanceError":"…lost…","chequeLedgerLost":"the outbound cheque ledger was unparseable…"}""",
+        )!!
+        assertTrue(lost.ledgerLost)
+        assertTrue(lost.availableUpperBound)
+        assertNull(chequebookFundsFrom("""{"code":503,"message":"chain initializing"}"""))
+    }
+
+    @Test
+    fun `paying peers comes from ant's own paying flag`() {
+        assertEquals(CreditStatus.Paying(low = false), creditStatus(swap(paying = true), funded))
+        assertEquals("Paying peers", creditStatusText(CreditStatus.Paying(low = false)))
+        // Below half the default deposit: still paying, but low.
+        assertEquals(
+            CreditStatus.Paying(low = true),
+            creditStatus(swap(paying = true), funded.copy(availablePlur = BigInteger("4000000000000"))),
+        )
+        assertEquals(CreditStatus.Checking, creditStatus(null, funded))
+    }
+
+    @Test
+    fun `free tier says why`() {
+        fun why(s: SwapStatus?, st: ChequebookState = funded) = (creditStatus(s, st) as CreditStatus.FreeTier).reason
+        assertEquals(FreeTierReason.NotSupported, why(swap(supported = false, paying = true)))
+        assertEquals(FreeTierReason.SwitchedOff, why(swap(enabled = false)))
+        assertEquals(FreeTierReason.NoChequebook, why(swap(), ChequebookState(address = "")))
+        assertEquals(FreeTierReason.LedgerLost, why(swap(), funded.copy(ledgerLost = true)))
+        // Used up: below one cheque, whatever ant's last funds read said.
+        assertEquals(FreeTierReason.NoCredit, why(swap(paying = true), funded.copy(availablePlur = BigInteger("8999999999"))))
+        assertEquals(FreeTierReason.NoCredit, why(swap(), funded.copy(availablePlur = BigInteger.ZERO)))
+        // Credit left and the switch on, but ant hasn't read the funds yet.
+        assertEquals(FreeTierReason.NotSetUp, why(swap()))
+        assertEquals(
+            "Free tier: paying peers is switched off.",
+            creditStatusText(CreditStatus.FreeTier(FreeTierReason.SwitchedOff)),
+        )
+        assertTrue(creditStatusText(CreditStatus.FreeTier(FreeTierReason.NoCredit)).contains("used up"))
+    }
+
+    @Test
+    fun `a deposit beyond the node's xBZZ asks to fund the node first`() {
+        val holds = funded.copy(walletPlur = milli)
+        assertFalse(depositNeedsFunding(holds, milli))
+        assertFalse(depositNeedsFunding(holds, null))
+        assertTrue(depositNeedsFunding(holds, milli.multiply(BigInteger.TEN)))
+        assertTrue(depositNeedsFunding(funded, null)) // holds nothing at all
+        assertFalse(depositNeedsFunding(funded.copy(walletPlur = null), milli)) // not read yet
+    }
+
+    @Test
+    fun `a lost ledger's confirmation says how it went`() {
+        assertTrue(liabilityOutcomeText(StampClient.Answer.Ok(JSONObject().put("confirmed", true))).startsWith("Confirmed"))
+        assertTrue(liabilityOutcomeText(StampClient.Answer.Ok(JSONObject().put("confirmed", false))).startsWith("Nothing to confirm"))
+        assertEquals("Couldn't confirm: boom", liabilityOutcomeText(StampClient.Answer.Failed("boom")))
+    }
+
+    @Test
+    fun `the copy says the chequebook also pays for faster downloads, at measured costs, capped by the deposit`() {
+        val intro = baby.freedom.mobile.l10n.Strings.get(baby.freedom.mobile.R.string.stamps_chequebook_intro)
+        assertTrue(intro.contains("faster downloads"))
+        assertTrue(intro.contains("never goes past what is deposited"))
+        val cost = baby.freedom.mobile.l10n.Strings.get(baby.freedom.mobile.R.string.stamps_credit_cost_note)
+        assertTrue(cost.contains("0.59 xBZZ per GB"))
+        assertTrue(depositConfirmText(milli, chequebook).contains("faster downloads"))
     }
 }

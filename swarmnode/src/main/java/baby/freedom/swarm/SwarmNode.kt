@@ -91,6 +91,9 @@ class SwarmNode internal constructor(
         fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String): String
         fun storageConnectBatch(handle: Long, gnosisRpc: String, batchId: String): String
         fun storageDiscover(handle: Long, gnosisRpc: String): String
+        fun setSwapEnabled(handle: Long, enabled: Boolean)
+        fun swapStatus(handle: Long): String
+        fun confirmChequeLiability(handle: Long, chequebook: String): Int
 
         /**
          * One request to the node's own gateway ([GATEWAY_URL] + [path]),
@@ -132,6 +135,10 @@ class SwarmNode internal constructor(
             override fun storageConnectBatch(handle: Long, gnosisRpc: String, batchId: String) =
                 AntNative.storageConnectBatch(handle, gnosisRpc, batchId)
             override fun storageDiscover(handle: Long, gnosisRpc: String) = AntNative.storageDiscover(handle, gnosisRpc)
+            override fun setSwapEnabled(handle: Long, enabled: Boolean) = AntNative.setSwapEnabled(handle, enabled)
+            override fun swapStatus(handle: Long) = AntNative.swapStatus(handle)
+            override fun confirmChequeLiability(handle: Long, chequebook: String) =
+                AntNative.confirmChequeLiability(handle, chequebook)
             override fun gateway(method: String, path: String, timeoutMs: Int): GatewayAnswer? = try {
                 val conn = java.net.URL(GATEWAY_URL + path).openConnection() as java.net.HttpURLConnection
                 try {
@@ -175,6 +182,14 @@ class SwarmNode internal constructor(
          * the pair it read together.
          */
         val mode: () -> Mode = { Mode.ULTRA_LIGHT },
+        /**
+         * Whether the node pays peers from its chequebook (bee's
+         * swap-enable, for downloads and uploads), read at every start
+         * until [setSwapEnabled] has said otherwise. ant doesn't persist
+         * it, so the node applies it after every init. On by default, as
+         * in bee and ant.
+         */
+        val swapEnabled: () -> Boolean = { true },
     )
 
     /**
@@ -291,6 +306,10 @@ class SwarmNode internal constructor(
             } finally {
                 identity?.fill(0)
             }
+            // ant's switch resets at every init (it isn't persisted): set
+            // it before the gateway's chain init, which is when payments
+            // can start, so a node the user switched off never pays.
+            applySwap(h)
             try {
                 ops.startGateway(
                     handle = h,
@@ -330,7 +349,11 @@ class SwarmNode internal constructor(
                 startPeerPolling()
                 true
             }
-            if (!published) {
+            if (published) {
+                // Again on the published handle: a [setSwapEnabled] that
+                // landed since the first apply found no handle to set.
+                applySwap()
+            } else {
                 Log.i(TAG, "stopped while starting; shutting the new node down")
                 runCatching {
                     AntChainTransport.whileStopping {
@@ -440,6 +463,91 @@ class SwarmNode internal constructor(
                         .onFailure { Log.w(TAG, "$what failed", it) }
                 }
             }
+        }
+    }
+
+    /**
+     * What [setSwapEnabled] last asked for; null until it has, when the
+     * node applies [Config.swapEnabled]. Guarded by [swapLock].
+     */
+    private var swapWanted: Boolean? = null
+
+    /** Orders every apply of the switch, so the last one to run sets the latest wish. */
+    private val swapLock = Any()
+
+    /**
+     * Pay peers from the chequebook, or not (bee's swap-enable): for
+     * downloads and uploads alike, live on a running node and at every
+     * later start (ant resets it at init). Returns at once; the native
+     * call runs off the caller's thread.
+     */
+    fun setSwapEnabled(enabled: Boolean) {
+        synchronized(swapLock) { swapWanted = enabled }
+        scope.launch { applySwap() }
+    }
+
+    /** The switch's value for the next apply. Under [swapLock]. */
+    private fun swapValue(): Boolean = swapWanted ?: runCatching { config.swapEnabled() }.getOrElse {
+        Log.w(TAG, "reading the pay-peers setting failed (${it.javaClass.simpleName}); on, ant's default")
+        true
+    }
+
+    /**
+     * Sets the switch on [h], a handle not published yet; or, with no
+     * argument, on the running node's, under [handleUse] like a storage
+     * call. A failure is logged: the node then runs ant's default, which
+     * [swapStatus] reports.
+     */
+    private fun applySwap(h: Long? = null) {
+        if (h != null) {
+            synchronized(swapLock) {
+                val on = swapValue()
+                runCatching { ops.setSwapEnabled(h, on) }
+                    .onSuccess { Log.i(TAG, "pay peers from the chequebook: $on") }
+                    .onFailure { Log.w(TAG, "setting pay-peers failed", it) }
+            }
+            return
+        }
+        handleUse.read {
+            synchronized(swapLock) {
+                val running = synchronized(lock) { handle }
+                if (running == 0L || _state.value.status != NodeStatus.Running) return@read
+                val on = swapValue()
+                runCatching { ops.setSwapEnabled(running, on) }
+                    .onSuccess { Log.i(TAG, "pay peers from the chequebook: $on") }
+                    .onFailure { Log.w(TAG, "setting pay-peers failed", it) }
+            }
+        }
+    }
+
+    /**
+     * The node's SWAP state, ant's `ant_swap_status` JSON: whether it can
+     * pay peers, whether the switch is on, and whether it pays now. In
+     * either mode (an ultra-light node reports it doesn't pay). Throws
+     * [IllegalStateException] while the node isn't running.
+     */
+    fun swapStatus(): String = handleUse.read {
+        val h = synchronized(lock) { handle }
+        check(h != 0L && _state.value.status == NodeStatus.Running) { SwarmStrings.get(R.string.swarmnode_not_running) }
+        ops.swapStatus(h)
+    }
+
+    /**
+     * Accepts the outstanding cheques of [chequebook] after the node's
+     * cheque ledger was lost, as the user confirmed: the node then pays
+     * peers from it again. Only for the chequebook the gateway runs.
+     * Returns true when a loss was confirmed, false when there was none.
+     */
+    fun confirmChequeLiability(chequebook: String): Boolean {
+        val want = normalizeAddress(chequebook) ?: throw IllegalArgumentException("not a chequebook address")
+        return withLightNode { h, _ ->
+            when (gatewayChequebook()) {
+                null -> throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_chequebook_unknown))
+                "" -> throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_chequebook_none))
+                want -> Unit
+                else -> throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_chequebook_other))
+            }
+            ops.confirmChequeLiability(h, "0x$want") == 0
         }
     }
 

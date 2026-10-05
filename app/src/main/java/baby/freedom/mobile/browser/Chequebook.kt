@@ -18,6 +18,13 @@ import org.json.JSONObject
  * other nodes for pushing what the node publishes; the first postage
  * stamp sets it up (#116). Unlike a stamp there's no swap: the xBZZ must
  * already be in the node's account. The UI lives in ChequebookScreen.kt.
+ *
+ * Paid downloads (browsing credit), after desktop's #490/#492: the same
+ * chequebook also pays peers for faster downloads and uploads than the
+ * free tier carries (bee's swap-enable, ant's `ant_set_swap_enabled`).
+ * What it can still pay is bee's `availableBalance` — the on-chain
+ * balance less the cheques peers haven't cashed yet — and whether it
+ * pays now is ant's `ant_swap_status`.
  */
 
 /**
@@ -50,7 +57,125 @@ internal data class ChequebookState(
     val balancePlur: BigInteger? = null,
     /** The node account's own xBZZ, from `GET /wallet`: what a deposit moves. */
     val walletPlur: BigInteger? = null,
+    /** What the chequebook can still pay: bee's `availableBalance`. */
+    val availablePlur: BigInteger? = null,
+    /** [availablePlur] is only an upper bound: ant couldn't count its cheques (`availableBalanceError`). */
+    val availableUpperBound: Boolean = false,
+    /** The node's cheque ledger was lost and nobody confirmed it since (`chequeLedgerLost`): it pays no cheques. */
+    val ledgerLost: Boolean = false,
 )
+
+/** What a `/chequebook/balance` body says, beyond [chequebookBalanceFrom]'s total. */
+internal data class ChequebookFunds(
+    val totalPlur: BigInteger,
+    val availablePlur: BigInteger,
+    val availableUpperBound: Boolean,
+    val ledgerLost: Boolean,
+)
+
+/**
+ * The balances from a `/chequebook/balance` body: `totalBalance`, and
+ * `availableBalance` (the total, an upper bound, when ant couldn't work it
+ * out and says why in `availableBalanceError`, or when it's missing).
+ */
+internal fun chequebookFundsFrom(body: String): ChequebookFunds? {
+    val o = runCatching { JSONObject(body) }.getOrNull() ?: return null
+    val total = chequebookBalanceFrom(body) ?: return null
+    val available = runCatching { BigInteger(o.getString("availableBalance")) }.getOrNull()?.takeIf { it.signum() >= 0 }
+    val lost = o.optString("chequeLedgerLost").isNotBlank()
+    return ChequebookFunds(
+        totalPlur = total,
+        availablePlur = available ?: total,
+        availableUpperBound = available == null || o.optString("availableBalanceError").isNotBlank() || lost,
+        ledgerLost = lost,
+    )
+}
+
+/** ant's `ant_swap_status`, the parts the page shows. */
+internal data class SwapStatus(
+    /** This build can pay peers with cheques at all. */
+    val supported: Boolean,
+    /** The switch as the node runs it now. */
+    val swapEnabled: Boolean,
+    /** Cheques are being paid right now. */
+    val paying: Boolean,
+)
+
+internal fun swapStatusFrom(o: JSONObject): SwapStatus? {
+    if (!o.has("swap_enabled") || !o.has("paying")) return null
+    return SwapStatus(
+        supported = o.optBoolean("supported", false),
+        swapEnabled = o.optBoolean("swap_enabled", false),
+        paying = o.optBoolean("paying", false),
+    )
+}
+
+/**
+ * Bee's smallest cheque, as desktop counts it: 90 000 accounting units at
+ * 100 000 PLUR. Below it the credit can't pay a peer: it's used up.
+ */
+internal val MIN_CHEQUE_PLUR: BigInteger = BigInteger.valueOf(90_000L * 100_000L)
+
+/** Below this the credit is low: half the node's default 0.001 xBZZ deposit, as on desktop. */
+internal val LOW_CREDIT_PLUR: BigInteger = BigInteger("5000000000000")
+
+/** Why downloads are on the free tier. */
+internal enum class FreeTierReason { NotSupported, SwitchedOff, NoChequebook, LedgerLost, NoCredit, NotSetUp }
+
+/** Whether downloads (and uploads) pay peers from the chequebook now. */
+internal sealed interface CreditStatus {
+    data object Checking : CreditStatus
+    data class Paying(val low: Boolean) : CreditStatus
+    data class FreeTier(val reason: FreeTierReason) : CreditStatus
+}
+
+/**
+ * Paying peers or free tier, and why, from ant's own `paying` and the
+ * chequebook's figures. Used-up credit reads as free tier whatever the
+ * node's last funds read says (desktop does the same): it can't pay
+ * another cheque.
+ */
+internal fun creditStatus(swap: SwapStatus?, state: ChequebookState): CreditStatus {
+    val available = state.availablePlur
+    return when {
+        swap == null -> CreditStatus.Checking
+        !swap.supported -> CreditStatus.FreeTier(FreeTierReason.NotSupported)
+        !swap.swapEnabled -> CreditStatus.FreeTier(FreeTierReason.SwitchedOff)
+        state.address == "" -> CreditStatus.FreeTier(FreeTierReason.NoChequebook)
+        state.ledgerLost -> CreditStatus.FreeTier(FreeTierReason.LedgerLost)
+        available != null && available < MIN_CHEQUE_PLUR -> CreditStatus.FreeTier(FreeTierReason.NoCredit)
+        swap.paying -> CreditStatus.Paying(low = available != null && available < LOW_CREDIT_PLUR)
+        else -> CreditStatus.FreeTier(FreeTierReason.NotSetUp)
+    }
+}
+
+/** The status line: "Paying peers", or "Free tier: <why>". */
+internal fun creditStatusText(status: CreditStatus): String = when (status) {
+    CreditStatus.Checking -> Strings.get(R.string.stamps_checking)
+    is CreditStatus.Paying -> Strings.get(R.string.stamps_credit_paying)
+    is CreditStatus.FreeTier -> Strings.get(
+        R.string.stamps_credit_free_tier,
+        Strings.get(
+            when (status.reason) {
+                FreeTierReason.NotSupported -> R.string.stamps_credit_free_not_supported
+                FreeTierReason.SwitchedOff -> R.string.stamps_credit_free_switched_off
+                FreeTierReason.NoChequebook -> R.string.stamps_credit_free_no_chequebook
+                FreeTierReason.LedgerLost -> R.string.stamps_credit_free_ledger_lost
+                FreeTierReason.NoCredit -> R.string.stamps_credit_free_no_credit
+                FreeTierReason.NotSetUp -> R.string.stamps_credit_free_not_set_up
+            },
+        ),
+    )
+}
+
+/**
+ * Does the deposit need xBZZ the node's account doesn't hold? Then the page
+ * says how to fund the node first, with its address.
+ */
+internal fun depositNeedsFunding(state: ChequebookState, amountPlur: BigInteger?): Boolean {
+    val wallet = state.walletPlur ?: return false
+    return wallet.signum() == 0 || (amountPlur != null && amountPlur > wallet)
+}
 
 /** The chequebook's balance from a `/chequebook/balance` body (bee's `totalBalance`, PLUR). */
 internal fun chequebookBalanceFrom(body: String): BigInteger? =

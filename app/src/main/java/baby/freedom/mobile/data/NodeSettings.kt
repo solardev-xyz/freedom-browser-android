@@ -147,6 +147,24 @@ class NodeSettings private constructor(
     }
 
     /**
+     * Whether the Swarm node pays peers from its chequebook ("Pay peers
+     * from the chequebook" on the Chequebook page): bee's swap-enable,
+     * for faster downloads and uploads than the free tier. On by default,
+     * as in bee, ant and desktop (`antSwapEnable`). ant doesn't persist
+     * it, so this is the record: `MainActivity` relays it to the `:node`
+     * process on every bind and every change
+     * ([baby.freedom.mobile.node.INodeService.setSwapEnabled]), and the
+     * node applies it after every init.
+     */
+    val swarmSwapEnabled: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.SWARM_SWAP_ENABLED] ?: true
+    }
+
+    suspend fun setSwarmSwapEnabled(enabled: Boolean) {
+        store.edit { it[Keys.SWARM_SWAP_ENABLED] = enabled }
+    }
+
+    /**
      * Whether the embedded Radicle node should run (#73). Off by default,
      * as on iOS: it's a publish-capable node that creates an identity key
      * and dials Radicle seeds, so it starts only once the user asks. The UI
@@ -723,6 +741,7 @@ class NodeSettings private constructor(
         val ASK_WHERE_TO_SAVE = booleanPreferencesKey("ask_where_to_save")
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SWARM_NODE_MODE = stringPreferencesKey("swarm_node_mode")
+        val SWARM_SWAP_ENABLED = booleanPreferencesKey("swarm_swap_enabled")
         /** Both chains' start at launch before #274; see [myotisStartOnLaunch]. */
         val LEGACY_MYOTIS_ENABLED = booleanPreferencesKey("myotis_enabled")
         private val MYOTIS_START_ON_LAUNCH = MyotisNetwork.entries.associateWith {
