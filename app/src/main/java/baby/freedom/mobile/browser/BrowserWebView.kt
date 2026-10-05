@@ -2620,6 +2620,10 @@ private fun buildRefreshableWebView(
         // (see [BlobDownloads]).
         val blobDownloads = BlobDownloads.install(this)
 
+        // The page's own word that it gave up on a dweb request — which
+        // WebView never passes on — so its fetch stops (see [DwebAborts]).
+        val dwebAborts = DwebAborts.install(this)
+
         // `window.radicle` (#124): the provider's page object and channel.
         RadicleProviders.install(this, state)
 
@@ -3753,6 +3757,9 @@ private fun buildRefreshableWebView(
                 view: WebView?,
                 request: WebResourceRequest?,
             ): WebResourceResponse? {
+                // When this call began, for [DwebAborts]: read first, as
+                // the work below can block (R3-M2).
+                val calledAt = dwebAborts?.clock()
                 val mainFrame = request?.isForMainFrame == true
                 // A page's tapped navigation across the desktop/mobile
                 // line (#180): its first request is answered here with a
@@ -3843,6 +3850,17 @@ private fun buildRefreshableWebView(
                 // A certificate-refused load issued again: its page, in
                 // its own entry, never reaching the network (#259).
                 val certPage = if (mainFrame) request!!.url?.toString()?.let(certRefusal::take) else null
+                // A dweb subresource the page already gave up on, before
+                // WebView got round to asking for it: answered at once,
+                // nothing fetched. Any other is told if the page gives up
+                // while it's fetched (see [DwebAborts]).
+                val ticket = request?.url?.toString()
+                    ?.takeIf { DwebAborts.tracks(it, mainFrame) }
+                    ?.let { url -> dwebAborts?.let { a -> a.begin(url, calledAt ?: a.clock()) } }
+                if (ticket?.abandoned == true) {
+                    dwebAborts?.finished(ticket)
+                    return abandonedResponse()
+                }
                 val work = state.gatewayWork.start(generation)
                 val response = if (heldBack) heldBackResponse() else if (certPage != null) {
                     certPageResponse(certPage)
@@ -3855,12 +3873,20 @@ private fun buildRefreshableWebView(
                         freshFetch = { target -> state.takeFreshFetch(generation, target) },
                         freshDocument = { target -> state.fetchedFresh(generation, target) },
                         private = state.private,
+                        abandon = ticket,
                     ) { served ->
                         noteMainFrameContentLoad(view, state, generation, served)
                     }
                 } catch (t: Throwable) {
                     state.gatewayWork.finish(work)
                     throw t
+                } finally {
+                    ticket?.let { dwebAborts?.finished(it) }
+                }
+                // A later cache hit on it must read as one to a
+                // cross-origin page too (see [DwebAborts.timingAllowed]).
+                if (ticket != null && response != null) {
+                    response.responseHeaders = DwebAborts.timingAllowed(response.responseHeaders)
                 }
                 // Before Chromium has the answer, so none of the new
                 // document's own requests can be filed under the load
@@ -5815,6 +5841,8 @@ internal fun interceptVirtualRequest(
     freshDocument: (target: String) -> Boolean = { false },
     /** Asked for by a private tab (#86) — or its profile's service workers. */
     private: Boolean = false,
+    /** Whether the page has given up on this request ([DwebAborts]); null: never asked. */
+    abandon: AbandonSignal? = null,
     onMainFrameRoot: (ContentRoot?) -> Unit = {},
 ): WebResourceResponse? {
     val req = request ?: return null
@@ -5840,7 +5868,7 @@ internal fun interceptVirtualRequest(
         RadApi.intercept(req, url)
             ?: interceptOnchainAppRequest(req, url, onchain)
             ?: siteDataCleanupFor(req, url, tab, private)
-            ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, freshDocument, onMainFrameRoot, private)
+            ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, freshDocument, onMainFrameRoot, private, abandon)
     } catch (t: Throwable) {
         Log.e(LOG_TAG, "interceptor failed for $url", t)
         syntheticResponse(502, "Bad Gateway", "The browser couldn't serve this request.")
@@ -5961,6 +5989,7 @@ private fun interceptVirtualRequestFor(
     freshDocument: (target: String) -> Boolean,
     onMainFrameRoot: (ContentRoot?) -> Unit,
     private: Boolean,
+    abandon: AbandonSignal?,
 ): WebResourceResponse? {
     val uri = req.url ?: return null
     val url = uri.toString()
@@ -6093,9 +6122,9 @@ private fun interceptVirtualRequestFor(
             // A Hard-reloaded document's media requests all go past the
             // gateway's caches, not just its first: each is streamed from
             // the gateway, with nothing kept from the fetch before.
-            fetchMediaWithRangeSupport(req, target, url, fresh || freshDocument(target))
+            fetchMediaWithRangeSupport(req, target, url, fresh || freshDocument(target), abandon)
         } else {
-            fetchWithRetry(req, target, url, fresh, gatewayFetchPolicy(req.isForMainFrame, media = false))
+            fetchWithRetry(req, target, url, fresh, gatewayFetchPolicy(req.isForMainFrame, media = false), abandon = abandon)
         }
         // Fetched from a gateway a sweep switched away from meanwhile:
         // the origin was already wiped, so this must not land there.
@@ -6193,10 +6222,11 @@ private fun fetchMediaWithRangeSupport(
     targetUrl: String,
     originalUrl: String,
     noCache: Boolean,
+    abandon: AbandonSignal?,
 ): WebResourceResponse? =
     fetchWithRetry(
         req, targetUrl, originalUrl, noCache,
-        gatewayFetchPolicy(req.isForMainFrame, media = true), media = true,
+        gatewayFetchPolicy(req.isForMainFrame, media = true), media = true, abandon = abandon,
     )
 
 private sealed class FetchAttempt {
@@ -6211,6 +6241,9 @@ private sealed class FetchAttempt {
     /** The gateway socket refused outright — retrying is pointless;
      *  the caller should synthesize a clean error immediately. */
     object Unreachable : FetchAttempt()
+
+    /** The page gave up on the request ([AbandonSignal]): nothing more to fetch. */
+    object Abandoned : FetchAttempt()
 }
 
 /**
@@ -6219,6 +6252,11 @@ private sealed class FetchAttempt {
  * [policy]'s retry statuses or the attempt fails on the way (a timeout, a
  * dropped connection). The last answer is handed back once the attempts
  * are spent; null when the gateway can't be reached at all.
+ *
+ * Once [abandon] says the page gave up on the request, the attempt under
+ * way is cut, no other is made, and [abandonedResponse] — which no page
+ * reads — is handed back at once, so neither the gateway nor WebView's
+ * worker thread goes on working for it.
  */
 internal fun fetchWithRetry(
     req: WebResourceRequest,
@@ -6227,23 +6265,39 @@ internal fun fetchWithRetry(
     fresh: Boolean,
     policy: GatewayFetchPolicy,
     media: Boolean = false,
+    abandon: AbandonSignal? = null,
 ): WebResourceResponse? {
     var lastResponse: WebResourceResponse? = null
+    fun abandoned(): WebResourceResponse {
+        lastResponse?.data?.let { runCatching { it.close() } }
+        Log.i(LOG_TAG, "abandoned by the page: $originalUrl")
+        return abandonedResponse()
+    }
     for ((index, delayMs) in ESCAPE_RETRY_DELAYS_MS.withIndex()) {
+        if (abandon?.abandoned == true) return abandoned()
         if (delayMs > 0) {
-            try {
-                Thread.sleep(delayMs)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-                return lastResponse
+            if (abandon != null) {
+                if (abandon.sleep(delayMs)) return abandoned()
+            } else {
+                try {
+                    Thread.sleep(delayMs)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return lastResponse
+                }
             }
         }
 
-        when (val attempt = fetchOnce(req, targetUrl, fresh, policy, media)) {
+        when (val attempt = fetchOnce(req, targetUrl, fresh, policy, media, abandon)) {
             is FetchAttempt.Response -> {
                 // The earlier transient answer is superseded: close its
                 // body (and with it the connection) before dropping it.
                 lastResponse?.data?.let { runCatching { it.close() } }
+                lastResponse = null
+                if (abandon?.abandoned == true) {
+                    runCatching { attempt.response.data?.close() }
+                    return abandoned()
+                }
                 if (!attempt.transient) return attempt.response
                 lastResponse = attempt.response
                 Log.i(
@@ -6254,10 +6308,20 @@ internal fun fetchWithRetry(
             }
             FetchAttempt.Unreachable -> return lastResponse
             FetchAttempt.Retry -> {}
+            FetchAttempt.Abandoned -> return abandoned()
         }
     }
     return lastResponse
 }
+
+/**
+ * The answer to a request the page gave up on ([fetchWithRetry]): WebView
+ * has nobody to hand it to. Should the page's report ever have been
+ * matched to a request it still waits on ([DwebAborts]), it reads as the
+ * transient failure it is.
+ */
+internal fun abandonedResponse(): WebResourceResponse =
+    syntheticResponse(503, "Service Unavailable", "The page no longer wanted this response.")
 
 /**
  * Single network attempt against [targetUrl]; [fresh]: past any cache in
@@ -6272,6 +6336,7 @@ private fun fetchOnce(
     fresh: Boolean,
     policy: GatewayFetchPolicy,
     media: Boolean = false,
+    abandon: AbandonSignal? = null,
 ): FetchAttempt {
     // A header wait shorter than the body's is enforced from outside: the
     // connection's own read timeout is one value for both. Past the base
@@ -6281,6 +6346,9 @@ private fun fetchOnce(
     } else {
         null
     }
+    // The page giving up cuts the attempt where it is: connecting, or
+    // waiting on its headers (once they're in, the body's close does it).
+    val unwatch = abandon?.onAbandon { deadline?.abandon() }
     return try {
         val target = URL(targetUrl)
         // Redirects are followed hop by hop through TorRouting.
@@ -6370,7 +6438,9 @@ private fun fetchOnce(
         }
         FetchAttempt.Response(response, transient = status in policy.retryStatuses)
     } catch (t: Throwable) {
-        if (deadline?.expired == true) {
+        if (abandon?.abandoned == true) {
+            FetchAttempt.Abandoned
+        } else if (deadline?.expired == true) {
             // The header deadline disconnected it: a timeout, worth another attempt.
             Log.w(LOG_TAG, "gateway sent no headers in time (${policy.baseHeaderTimeoutMs}/${policy.headerTimeoutMs} ms): $targetUrl")
             FetchAttempt.Retry
@@ -6378,6 +6448,7 @@ private fun fetchOnce(
             failedAttempt(t, targetUrl, media)
         }
     } finally {
+        unwatch?.invoke()
         deadline?.headersReceived()
     }
 }
