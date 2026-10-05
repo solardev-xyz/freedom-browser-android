@@ -38,6 +38,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +53,8 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.l10n.Strings
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.flatMapLatest
 
 /**
  * How far back Delete browsing data reaches (#400), as Chrome offers it.
@@ -188,6 +191,7 @@ private val DeleteChoiceSaver = Saver<DeleteChoice, List<Any>>(
  * on its way out, to delete the rest (the host closes the page and says
  * what went).
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 @Composable
 internal fun DeleteBrowsingDataPage(
     repo: BrowsingRepository,
@@ -199,8 +203,13 @@ internal fun DeleteBrowsingDataPage(
     var confirming by rememberSaveable { mutableStateOf(false) }
     // Fixed while the page is open, so the count doesn't creep as the clock does.
     val now = remember { System.currentTimeMillis() }
-    val since = choice.range.since(now)
-    val historyCount by remember(since) { repo.historyCount(since) }.collectAsState(initial = null)
+    // One flow for the page's life, switching query as the range does:
+    // the last range's count stays on the sub-line until Room answers for
+    // the new one, rather than the line blanking and the card jumping
+    // (R3-M4). Only the very first answer starts from nothing.
+    val historyCount by remember(repo, now) {
+        snapshotFlow { choice.range.since(now) }.flatMapLatest { repo.historyCount(it) }
+    }.collectAsState(initial = null)
 
     FullScreenScaffold(title = stringResource(R.string.delete_data_title), onDismiss = onBack) {
         LazyColumn(

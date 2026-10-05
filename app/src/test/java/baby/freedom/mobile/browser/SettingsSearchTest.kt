@@ -4,13 +4,15 @@ import baby.freedom.mobile.ui.Appearance
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SettingsSearchTest {
     private val rows = listOf(
-        settingsRow("history", "Clear history", "3 visits"),
-        settingsRow("bookmarks", "Clear bookmarks", "Nothing to clear"),
-        settingsRow("site-data", "Clear cookies & site data", "Cookies, DOM storage, cache, and form data"),
+        // Made-up rows for the matcher, not the real Browsing data card.
+        settingsRow("history", "Delete history", "3 visits"),
+        settingsRow("bookmarks", "Delete bookmarks", "Nothing to delete"),
+        settingsRow("site-data", "Delete cookies & site data", "Cookies, DOM storage, cache, and form data"),
     )
 
     private fun visible(query: String, title: String = "Browsing data") =
@@ -35,7 +37,7 @@ class SettingsSearchTest {
 
     @Test
     fun `substring shared by several rows keeps all of them`() {
-        assertEquals(setOf("history", "bookmarks", "site-data"), visible("clear"))
+        assertEquals(setOf("history", "bookmarks", "site-data"), visible("delete"))
     }
 
     @Test
@@ -66,7 +68,7 @@ class SettingsSearchTest {
 
     @Test
     fun `keeps row order`() {
-        assertEquals(listOf("history", "bookmarks", "site-data"), visible("c").toList())
+        assertEquals(listOf("history", "bookmarks", "site-data"), visible("de").toList())
     }
 
     @Test
@@ -81,15 +83,30 @@ class SettingsSearchTest {
 
     @Test
     fun `delete browsing data row is found by what it deletes`() {
-        // #400: the one row replacing Clear history / bookmarks / cookies & site data.
+        // #400: the one row replacing the old history, bookmarks and cookies rows.
         for (q in listOf(
             "clear", "Delete", "history", "cookies", "cache", "cached", "site data",
             "desktop site", "zoom", "form data", "DOM storage", "browsing data",
         )) {
+            assertTrue(q, "delete-data" in visibleSettingsRows(q, "Browsing data", browsingDataRows()))
+        }
+        for (q in listOf("history", "cookies", "cache", "site data", "zoom", "form data")) {
             assertEquals(q, setOf("delete-data"), visibleSettingsRows(q, "Browsing data", browsingDataRows()))
         }
-        // Bookmarks moved to the Bookmarks page: Settings no longer offers to wipe them.
-        assertEquals(emptySet<Any>(), visibleSettingsRows("bookmarks", "Browsing data", browsingDataRows()))
+    }
+
+    @Test
+    fun `a search for bookmarks finds only the pointer to the Bookmarks page`() {
+        // R3-M3: Delete all bookmarks moved to the Bookmarks page's ⋮; Settings
+        // doesn't wipe them any more, but a search for them still says where.
+        for (q in listOf("bookmarks", "Bookmark", "favorites", "saved pages")) {
+            assertEquals(q, setOf(BOOKMARKS_MOVED), visibleSettingsRows(q, "Browsing data", browsingDataRows()))
+        }
+        // "delete" finds both: the row, and the bookmarks one's new home.
+        assertEquals(
+            setOf("delete-data", BOOKMARKS_MOVED),
+            visibleSettingsRows("delete", "Browsing data", browsingDataRows()),
+        )
     }
 
     @Test

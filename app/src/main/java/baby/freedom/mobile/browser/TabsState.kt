@@ -436,7 +436,7 @@ class TabsState(
      *
      * Only a window a page opened can be closed this way. Chromium also
      * honours `window.close()` in a tab whose session history has a
-     * single entry (e.g. right after "Clear cookies & site data" clears
+     * single entry (e.g. right after *Delete browsing data* clears
      * every tab's history), which would let any page's script silently
      * close a tab the user opened — so a tab with no opener ignores it.
      */

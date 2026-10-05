@@ -479,7 +479,7 @@ fun BrowserScreen(
     onPanelShown: (Boolean) -> Unit = {},
     /** A node's recent log lines (#276), or null while its process isn't running. Blocking. */
     readNodeLogs: (NodeLogSource) -> String? = { null },
-    /** Every running node forgets its kept log lines (part of Clear cookies & site data). */
+    /** Every running node forgets its kept log lines (part of Delete browsing data → Cookies and site data). */
     clearNodeLogs: () -> Unit = {},
     /** Hardware-keyboard shortcuts (#270): this screen is their target while composed. */
     shortcuts: KeyboardShortcutRouter? = null,
@@ -573,7 +573,7 @@ fun BrowserScreen(
     // but one tap away, and held on disk until answered. Run in the
     // effect's own scope and cleared only by an answer: an Activity
     // relaunch while it's up cancels it, and the next screen shows it
-    // again; Reopen closed tab or Clear history ends the offer, and the
+    // again; Reopen closed tab or Delete browsing data ends the offer, and the
     // notice with it. It waits on a host of its own: on the shared one
     // its Indefinite notice would hold every later notice (a Close all's
     // Undo, downloads, permission recovery) in the queue until answered.
@@ -2617,6 +2617,13 @@ fun BrowserScreen(
             },
             onDismiss = { showSettings = false },
             onOpenIpfsLogs = { showLogs = NodeLogSource.Ipfs },
+            // Settings search's "Delete all bookmarks is on the Bookmarks
+            // page" hint (#400): Settings closes and Bookmarks opens.
+            onOpenBookmarks = {
+                showSettings = false
+                bookmarksPrivate = state.private
+                showBookmarks = true
+            },
         )
     }
 

@@ -48,6 +48,7 @@ import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.HourglassTop
@@ -167,6 +168,11 @@ fun SettingsScreen(
     onOpenIpfsLogs: () -> Unit = {},
     /** A newer release's page (#272), in a new tab in front of Settings. */
     onOpenUrl: (String) -> Unit = {},
+    /**
+     * The Bookmarks page, from the search-only hint that Delete all
+     * bookmarks moved there (#400).
+     */
+    onOpenBookmarks: () -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     // Settings search (#93). Registered after the dismiss handler so it
@@ -410,7 +416,13 @@ fun SettingsScreen(
             config = ensRpcConfig,
             settings = settings,
         )
-        SettingsSection.Browsing -> BrowsingDataSection(onOpen = { deleteDataOpen = true })
+        SettingsSection.Browsing -> BrowsingDataSection(
+            visible = visible,
+            // Only among search results, not on the Privacy page itself.
+            searching = searching && page == null,
+            onOpen = { deleteDataOpen = true },
+            onOpenBookmarks = onOpenBookmarks,
+        )
         SettingsSection.Downloads -> DownloadSettingsSection(
             askWhereToSave = askWhereToSave,
             onAskWhereToSave = { on -> scope.launch { settings.setAskWhereToSave(on) } },
@@ -1893,11 +1905,16 @@ private fun AllowlistSiteDialog(onAdd: (String) -> Unit, onDismiss: () -> Unit) 
 
 private val ROW_DELETE_DATA: String get() = Strings.get(R.string.settings_delete_browsing_data)
 private val ROW_DELETE_DATA_SUBTITLE: String get() = Strings.get(R.string.settings_delete_browsing_data_subtitle)
+private val ROW_BOOKMARKS_MOVED: String get() = Strings.get(R.string.settings_bookmarks_moved)
+private val ROW_BOOKMARKS_MOVED_SUBTITLE: String get() = Strings.get(R.string.settings_bookmarks_moved_subtitle)
 
 /**
  * Privacy & security → Browsing data (#400): the one row that opens
  * [DeleteBrowsingDataPage], found by what it deletes ("history",
  * "cookies", "cache", "desktop site" …) and by "clear" and "delete".
+ * Plus a hint shown only in search results: Delete all bookmarks used to
+ * sit here and moved to the Bookmarks page, so a search for "bookmarks"
+ * points there (and opens it) instead of finding nothing.
  */
 internal fun browsingDataRows() = listOf(
     settingsRow(
@@ -1906,25 +1923,57 @@ internal fun browsingDataRows() = listOf(
         ROW_DELETE_DATA_SUBTITLE,
         *searchKeywords(R.string.settings_delete_browsing_data_keywords),
     ),
+    settingsRow(
+        BOOKMARKS_MOVED,
+        ROW_BOOKMARKS_MOVED,
+        ROW_BOOKMARKS_MOVED_SUBTITLE,
+        *searchKeywords(R.string.settings_bookmarks_moved_keywords),
+    ),
 )
 
+/** Key of the search-only "Delete all bookmarks is on the Bookmarks page" hint. */
+internal const val BOOKMARKS_MOVED = "bookmarks-moved"
+
 @Composable
-private fun BrowsingDataSection(onOpen: () -> Unit) {
+private fun BrowsingDataSection(
+    visible: Set<Any>,
+    searching: Boolean,
+    onOpen: () -> Unit,
+    onOpenBookmarks: () -> Unit,
+) {
     SectionCard(title = stringResource(R.string.settings_section_browsing)) {
-        PageRow(
-            title = ROW_DELETE_DATA,
-            subtitle = ROW_DELETE_DATA_SUBTITLE,
-            style = PageRowStyle.Inset,
-            leadingIcon = Icons.Filled.DeleteForever,
-            onClick = onOpen,
-            trailing = {
-                Icon(
-                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            },
-        )
+        if ("delete-data" in visible) {
+            PageRow(
+                title = ROW_DELETE_DATA,
+                subtitle = ROW_DELETE_DATA_SUBTITLE,
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.DeleteForever,
+                onClick = onOpen,
+                trailing = {
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+            )
+        }
+        if (searching && BOOKMARKS_MOVED in visible) {
+            PageRow(
+                title = ROW_BOOKMARKS_MOVED,
+                subtitle = ROW_BOOKMARKS_MOVED_SUBTITLE,
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.Bookmark,
+                onClick = onOpenBookmarks,
+                trailing = {
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+            )
+        }
     }
 }
 

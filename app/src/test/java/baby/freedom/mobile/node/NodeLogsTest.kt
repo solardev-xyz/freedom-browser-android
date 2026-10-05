@@ -380,7 +380,7 @@ class NodeLogsTest {
         }
     }
 
-    // ---- Clear cookies & site data forgets the kept lines ----
+    // ---- Delete browsing data's Cookies and site data forgets the kept lines ----
 
     @Test
     fun `a cleared ring is empty and takes lines again`() {

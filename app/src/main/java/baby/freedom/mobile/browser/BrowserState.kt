@@ -536,7 +536,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         /**
          * The same, with the saved back/forward list dropped: the tab
          * comes back on its address alone, as a WebView whose history was
-         * cleared (Clear cookies & site data) would.
+         * cleared (*Delete browsing data*'s *Cookies and site data*) would.
          */
         fun withoutHistory(): PendingRestore = PendingRestore(
             webViewState = null,

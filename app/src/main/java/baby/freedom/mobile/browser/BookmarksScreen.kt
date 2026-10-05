@@ -80,7 +80,7 @@ import kotlinx.coroutines.launch
  * TalkBack gets the whole menu as actions on the row. The order is saved
  * ([BrowsingRepository.moveBookmark]) and is the Home page tiles' order
  * too. The page's own ⋮ has *Delete all bookmarks*, behind a
- * confirmation (#400: it used to sit in Settings next to Clear history).
+ * confirmation (#400: it used to sit in Settings next to the old Clear history row).
  *
  * [private] is whether it was opened from a private tab: the edit
  * dialog's fields then don't let the keyboard learn what's typed, and

@@ -166,6 +166,11 @@
     <string name="settings_delete_browsing_data_subtitle">History, cookies and site data, cached images and files</string>
     <!-- Comma-separated, not shown: more words Settings search finds the Delete browsing data row by. -->
     <string name="settings_delete_browsing_data_keywords">clear, delete, wipe, erase, history, cookies, cache, cached, site data, DOM storage, local storage, form data, autofill, zoom levels, desktop sites, sign out</string>
+    <!-- Shown only in Settings search results: Delete all bookmarks moved out of Settings (#400). Tapping it opens the Bookmarks page. -->
+    <string name="settings_bookmarks_moved">Delete all bookmarks</string>
+    <string name="settings_bookmarks_moved_subtitle">Now on the Bookmarks page: open it and tap ⋮ at the top</string>
+    <!-- Comma-separated, not shown: more words Settings search finds the hint above by. -->
+    <string name="settings_bookmarks_moved_keywords">bookmarks, bookmark, saved pages, favorites, favourites</string>
 
     <!-- DeleteBrowsingData.kt: the Delete browsing data page -->
     <string name="delete_data_title">Delete browsing data</string>
@@ -182,7 +187,7 @@
     </plurals>
     <string name="delete_data_history_none">No visits in this range, plus closed tabs and tabs waiting to be restored</string>
     <string name="delete_data_cookies">Cookies and site data</string>
-    <string name="delete_data_cookies_subtitle">Signs you out of most sites</string>
+    <string name="delete_data_cookies_subtitle">Signs you out of every site</string>
     <string name="delete_data_cookies_detail">Also site storage, form autofill, remembered zoom levels, desktop-site choices, open tabs\' back and forward pages and the nodes\' recent logs. Unfinished downloads are cancelled.</string>
     <string name="delete_data_cache">Cached images and files</string>
     <string name="delete_data_cache_subtitle">Pages may load more slowly on your next visit</string>

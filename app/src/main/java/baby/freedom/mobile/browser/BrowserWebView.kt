@@ -926,7 +926,7 @@ fun BrowserWebViewHost(
      * [onPrivateSessionEnded]: the node processes' logs go too (#276,
      * R3-M3) — scrubbed, but the timing and volume of what the private
      * tabs fetched is in them, and a line can't be told apart by tab, so
-     * every node's lines go, as with *Clear cookies & site data*. So do
+     * every node's lines go, as with *Delete browsing data*'s *Cookies and site data*. So do
      * those logged in the next [baby.freedom.mobile.node.NodeLogs.SETTLE_MS]:
      * the nodes go on with a closed tab's requests for a while (R1-M1).
      */

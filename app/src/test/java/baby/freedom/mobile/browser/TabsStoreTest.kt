@@ -416,7 +416,7 @@ class TabsStoreTest {
     }
 
     @Test
-    fun `dismissing the offer, Reopen closed tab or Clear history each end it and drop the held copy`() {
+    fun `dismissing the offer, Reopen closed tab or deleting browsing history each end it and drop the held copy`() {
         // The ×: still on this run's reopen stack, no longer pinned or on disk.
         crashedRestoreSession().apply {
             val group = heldTabs!!.group
@@ -438,7 +438,7 @@ class TabsStoreTest {
             assertEquals(3, TabsStore.decode(savedFile().readText())!!.tabs.size)
             File(dir, TabsStore.RESTORE_MARK).delete() // for the next case's own restore
         }
-        // Clear history forgets the reopen stack, and the held tabs with it.
+        // Deleting browsing history forgets the reopen stack, and the held tabs with it.
         crashedRestoreSession().apply {
             tabs.forgetClosedTabs()
             androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
@@ -543,7 +543,7 @@ class TabsStoreTest {
         TabsSession(HOME_URL, SavedStateHandle(mapOf("tabs" to android.os.Bundle())), store).also { sessions += it }
 
     @Test
-    fun `a relaunch from saved instance state offers the held tabs again, and Clear history drops them`() = runBlocking {
+    fun `a relaunch from saved instance state offers the held tabs again, and deleting browsing history drops them`() = runBlocking {
         crashedRestoreSession().also { assertTrue(File(dir, TabsStore.HELD).exists()) }
         // The process is killed in the background; the next one comes
         // back from its saved instance state, not from the disk list.
@@ -552,7 +552,7 @@ class TabsStoreTest {
         withTimeout(5_000) { while (session.heldTabs == null) kotlinx.coroutines.delay(10) }
         assertEquals(listOf("a", "b", "c"), session.heldTabs!!.group.tabs.map { it.title })
         assertTrue(session.heldTabs!!.afterCrash)
-        // Clear history, as Settings runs it: the held tabs go too.
+        // Delete browsing data, as Settings runs it: the held tabs go too.
         session.tabs.forgetClosedTabs()
         session.forgetHeld()
         assertNull(session.heldTabs)
@@ -564,7 +564,7 @@ class TabsStoreTest {
     }
 
     @Test
-    fun `Clear history drops the held tabs even before a relaunch has read them`() = runBlocking {
+    fun `deleting browsing history drops the held tabs even before a relaunch has read them`() = runBlocking {
         crashedRestoreSession()
         val session = relaunchedSession()
         session.forgetHeld()
