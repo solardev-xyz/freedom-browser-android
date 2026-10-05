@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import baby.freedom.mobile.browser.AdblockCategory
+import baby.freedom.mobile.browser.AdblockLocaleDefaults
 import androidx.datastore.preferences.preferencesDataStore
 import baby.freedom.mobile.browser.ExternalEndpoints
 import baby.freedom.mobile.browser.SearchEngines
@@ -651,8 +652,11 @@ class NodeSettings private constructor(
         return true
     }
 
-    /** The ad-blocking categories switched on (#126). */
-    val adblockCategories: Flow<Set<AdblockCategory>> = store.data.map { prefs ->
+    /**
+     * The ad-blocking categories switched on (#126). Re-emits when a
+     * locale-dependent default changes ([AdblockLocaleDefaults], #405).
+     */
+    val adblockCategories: Flow<Set<AdblockCategory>> = combine(store.data, AdblockLocaleDefaults.german) { prefs, _ ->
         AdblockCategory.entries.filterTo(LinkedHashSet()) { category ->
             prefs[Keys.adblock(category)] ?: category.enabledByDefault
         }

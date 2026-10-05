@@ -94,8 +94,9 @@ class AdblockRedirectTest {
         assertTrue(e.blocks("https://adserver.example/x.js"))
         assertNull(e.redirect("https://adserver.example/x.js"))
         assertTrue(e.blocks("https://cdn.example/x.gif", RequestType.IMAGE))
-        // The named exception lifts only its own stand-in.
-        assertNull(e.redirect("https://cdn.example/x.gif", RequestType.IMAGE))
+        // The named exception lifts only its own stand-in: the other
+        // directive that matches serves instead, as in uBlock (R1-M2).
+        assertEquals("noop.js", e.redirect("https://cdn.example/x.gif", RequestType.IMAGE))
         assertEquals("noop.js", e.redirect("https://cdn.example/x.js"))
     }
 
@@ -128,6 +129,36 @@ class AdblockRedirectTest {
         assertNotNull(e.redirect(url))
     }
 
+    /**
+     * #405 R1-M2, as uBlock: an exception takes out only the stand-ins it
+     * names, the next directive left serves, and none lifts `$important`.
+     */
+    @Test
+    fun `an exception for one stand-in falls through to the next, never past important`() {
+        val url = "https://ads.example/a.js"
+        val e = engine(
+            "||ads.example/a.js\$script,redirect=noopjs:5",
+            "*\$script,redirect-rule=googletagservices_gpt.js,domain=spiegel.de",
+            "@@||ads.example/a.js\$script,redirect-rule=noopjs",
+        )
+        assertTrue(e.blocks(url))
+        assertEquals("googletagservices_gpt.js", e.redirect(url))
+
+        val bare = engine(
+            "||ads.example/a.js\$script,redirect=noopjs:5",
+            "*\$script,redirect-rule=googletagservices_gpt.js,domain=spiegel.de",
+            "@@||ads.example/a.js\$script,redirect-rule",
+        )
+        assertNull(bare.redirect(url))
+
+        val important = engine(
+            "||ads.example/a.js\$script,redirect=noopjs,important",
+            "@@||ads.example/a.js\$script,redirect-rule=noopjs",
+            "@@||ads.example/b.js\$script,redirect-rule",
+        )
+        assertEquals("noop.js", important.redirect(url))
+    }
+
     @Test
     fun `EasyList Germany is on by default for German speakers and German-speaking regions`() {
         assertTrue(germanListByDefault(listOf(Locale.GERMANY)))
@@ -137,5 +168,18 @@ class AdblockRedirectTest {
         assertFalse(germanListByDefault(listOf(Locale.US)))
         assertFalse(germanListByDefault(listOf(Locale.FRANCE, Locale.UK)))
         assertFalse(germanListByDefault(emptyList()))
+    }
+
+    /** #405 R1-M3: a language change re-reads the default, and the categories flow follows it. */
+    @Test
+    fun `a language change re-reads the German default`() {
+        try {
+            AdblockLocaleDefaults.refresh(listOf(Locale.GERMANY))
+            assertTrue(AdblockCategory.GERMAN.enabledByDefault)
+            AdblockLocaleDefaults.refresh(listOf(Locale.US))
+            assertFalse(AdblockCategory.GERMAN.enabledByDefault)
+        } finally {
+            AdblockLocaleDefaults.refresh()
+        }
     }
 }

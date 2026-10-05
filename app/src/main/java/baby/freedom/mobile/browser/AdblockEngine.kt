@@ -155,7 +155,8 @@ internal class AdblockEngine private constructor(
      * `$redirect-rule=` one only names it for a request something else
      * blocks; the highest `:priority` wins (the first listed on a tie);
      * an `@@…$redirect-rule` / `@@…$redirect=name` exception lifts all
-     * of them, or that one, where it matches.
+     * of them, or that one, where it matches — the next one left then
+     * serves — and none lifts an `$important` one.
      */
     fun redirectFor(url: String, host: String, types: Int, pageHost: String?): String? {
         if (redirects.isEmpty()) return null
@@ -718,6 +719,7 @@ internal fun parseCosmeticSelector(raw: String): CosmeticSelector? {
     selector = selector.trim()
     if (selector.isEmpty()) return null
     if (PROCEDURAL.any { selector.contains(it) }) return null
+    if (!isBalanced(selector)) return null
     return CosmeticSelector(selector, style, raw)
 }
 
@@ -727,8 +729,37 @@ private fun isSafeDeclarations(declarations: String): Boolean {
     if (declarations.any { it == '{' || it == '}' || it == '\\' || it == '<' || it == '>' || it == '@' || it.code < 0x20 }) {
         return false
     }
+    if (!isBalanced(declarations)) return false
     val lower = declarations.lowercase()
     return "url(" !in lower && "image-set(" !in lower && "image(" !in lower && "/*" !in lower && "expression(" !in lower
+}
+
+/**
+ * Are [css]'s brackets and quotes all closed, in order (#405 R1-M1)?
+ * [cssFor] puts every rule into one sheet, and CSS reads an open `(`,
+ * `[` or string on past the rule's `}` — taking every later rule with
+ * it — so one rule like `:style(width: calc(1px)` would silently undo
+ * the rest of the batch. A `\` escapes the next character.
+ */
+internal fun isBalanced(css: String): Boolean {
+    val open = StringBuilder()
+    var quote = 0.toChar()
+    var i = 0
+    while (i < css.length) {
+        val c = css[i]
+        when {
+            c == '\\' -> if (++i == css.length) return false // escapes the next character; there must be one
+            quote != 0.toChar() -> if (c == quote) quote = 0.toChar() else if (c == '\n') return false
+            c == '"' || c == '\'' -> quote = c
+            c == '(' || c == '[' -> open.append(c)
+            c == ')' || c == ']' -> {
+                if (open.isEmpty() || open.last() != (if (c == ')') '(' else '[')) return false
+                open.setLength(open.length - 1)
+            }
+        }
+        i++
+    }
+    return quote == 0.toChar() && open.isEmpty()
 }
 
 /**
@@ -1123,16 +1154,17 @@ internal class RedirectIndex {
         exceptions += Directive(filter, resource, -1)
     }
 
+    /**
+     * As uBlock does it: every matching directive is a candidate; a
+     * matching exception takes out the candidates naming its stand-in
+     * (all of them, for a bare `@@…$redirect-rule`) — never an
+     * `$important` one — and the best of what's left wins, so an
+     * exception for one stand-in falls through to the next (#405 R1-M2).
+     */
     fun resolve(request: AdblockEngine.Request): String? {
-        var best: Directive? = null
+        val matched = ArrayList<Directive>(2)
         fun consider(d: Directive) {
-            if (!d.filter.matches(request)) return
-            val b = best
-            if (b == null || d.filter.redirectPriority > b.filter.redirectPriority ||
-                (d.filter.redirectPriority == b.filter.redirectPriority && d.order < b.order)
-            ) {
-                best = d
-            }
+            if (d.filter.matches(request)) matched += d
         }
         val url = request.lowerUrl
         var i = 0
@@ -1146,10 +1178,24 @@ internal class RedirectIndex {
         }
         request.pageHost?.let { page -> forEachHostSuffix(page) { byPageDomain[it]?.forEach(::consider) } }
         untokened.forEach(::consider)
-        val chosen = best ?: return null
+        if (matched.isEmpty()) return null
+        var exceptAll = false
+        var excepted: HashSet<String>? = null
         for (e in exceptions) {
-            if ((e.resource.isEmpty() || e.resource == chosen.resource) && e.filter.matches(request)) return null
+            if (exceptAll) break
+            if (!e.filter.matches(request)) continue
+            if (e.resource.isEmpty()) exceptAll = true else (excepted ?: HashSet<String>().also { excepted = it }) += e.resource
         }
-        return chosen.resource
+        var best: Directive? = null
+        for (d in matched) {
+            if (!d.filter.important && (exceptAll || excepted?.contains(d.resource) == true)) continue
+            val b = best
+            if (b == null || d.filter.redirectPriority > b.filter.redirectPriority ||
+                (d.filter.redirectPriority == b.filter.redirectPriority && d.order < b.order)
+            ) {
+                best = d
+            }
+        }
+        return best?.resource
     }
 }

@@ -58,7 +58,7 @@ enum class AdblockCategory(
     ADS("ads", "easylist.txt", R.string.settings_adblock_block_ads, "EasyList", { true }),
     GERMAN(
         "german", "easylistgermany.txt", R.string.settings_adblock_block_german, "EasyList Germany",
-        { germanListByDefault(systemLocales()) },
+        { AdblockLocaleDefaults.german.value },
     ),
     PRIVACY("privacy", "easyprivacy.txt", R.string.settings_adblock_block_trackers, "EasyPrivacy", { true }),
     COOKIES(
@@ -71,7 +71,11 @@ enum class AdblockCategory(
     ),
     ;
 
-    /** On until the user switches it (the stored choice wins); for [GERMAN], read from the phone's locales each time. */
+    /**
+     * On until the user switches it (the stored choice wins); for
+     * [GERMAN], from the phone's locales as [AdblockLocaleDefaults] last
+     * read them — the same value the engine's categories were built from.
+     */
     val enabledByDefault: Boolean get() = defaultOn()
 
     /** The category's switch in Settings ("Block ads"). */
@@ -114,6 +118,24 @@ private fun systemLocales(): List<Locale> {
     val list: LocaleList? = runCatching { LocaleList.getDefault() }.getOrNull()
     if (list == null || list.isEmpty) return listOf(Locale.getDefault())
     return (0 until list.size()).map { list[it] }
+}
+
+/**
+ * The locale-dependent category defaults (#405 R1-M3): [german] is
+ * [germanListByDefault] for the phone's languages, read once and again
+ * on every configuration change ([refresh], from [baby.freedom.mobile.FreedomApplication]),
+ * so a language switch while the app runs re-emits it and
+ * [baby.freedom.mobile.data.NodeSettings.adblockCategories] — which the
+ * engine and Settings both collect — follows at once, instead of the
+ * engine keeping the old list while a later read in Settings shows the new default.
+ */
+object AdblockLocaleDefaults {
+    private val _german = MutableStateFlow(germanListByDefault(systemLocales()))
+    val german: StateFlow<Boolean> = _german.asStateFlow()
+
+    fun refresh(locales: List<Locale> = systemLocales()) {
+        _german.value = germanListByDefault(locales)
+    }
 }
 
 /** Countries whose sites are largely in German, for [germanListByDefault]. */
