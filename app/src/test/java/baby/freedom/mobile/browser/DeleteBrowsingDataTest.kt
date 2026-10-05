@@ -1,0 +1,105 @@
+package baby.freedom.mobile.browser
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class DeleteBrowsingDataTest {
+    private val now = 1_800_000_000_000L
+    private val hour = 60L * 60L * 1000L
+
+    @Test
+    fun `ranges are Chrome's, in Chrome's order`() {
+        assertEquals(
+            listOf("Last hour", "Last 24 hours", "Last 7 days", "Last 4 weeks", "All time"),
+            DeleteRange.entries.map { it.label },
+        )
+    }
+
+    @Test
+    fun `each range starts that far back, and all time takes every visit`() {
+        assertEquals(now - hour, DeleteRange.LastHour.since(now))
+        assertEquals(now - 24 * hour, DeleteRange.Last24Hours.since(now))
+        assertEquals(now - 7 * 24 * hour, DeleteRange.Last7Days.since(now))
+        assertEquals(now - 28 * 24 * hour, DeleteRange.Last4Weeks.since(now))
+        assertEquals(0L, DeleteRange.AllTime.since(now))
+    }
+
+    @Test
+    fun `a range on a clock near zero never turns into all time`() {
+        // since() of 0 means "every visit"; a bounded range must never ask for that.
+        for (range in DeleteRange.entries - DeleteRange.AllTime) {
+            assertTrue(range.name, range.since(10L) > 0L)
+        }
+    }
+
+    @Test
+    fun `defaults are the last hour with every box checked`() {
+        val choice = DeleteChoice()
+        assertEquals(DeleteRange.LastHour, choice.range)
+        assertTrue(choice.history && choice.siteData && choice.cache)
+        assertTrue(choice.canDelete)
+    }
+
+    @Test
+    fun `delete is off only with no box checked`() {
+        assertFalse(DeleteChoice(history = false, siteData = false, cache = false).canDelete)
+        assertTrue(DeleteChoice(history = true, siteData = false, cache = false).canDelete)
+        assertTrue(DeleteChoice(history = false, siteData = true, cache = false).canDelete)
+        assertTrue(DeleteChoice(history = false, siteData = false, cache = true).canDelete)
+    }
+
+    @Test
+    fun `closed tabs go with history or with site data, not with the cache alone`() {
+        assertTrue(DeleteChoice(history = true, siteData = false, cache = false).forgetsClosedTabs)
+        assertTrue(DeleteChoice(history = false, siteData = true, cache = false).forgetsClosedTabs)
+        assertFalse(DeleteChoice(history = false, siteData = false, cache = true).forgetsClosedTabs)
+    }
+
+    @Test
+    fun `all-time note shows for a bounded range with cookies or cache checked`() {
+        for (range in DeleteRange.entries) {
+            for (siteData in listOf(false, true)) for (cache in listOf(false, true)) for (history in listOf(false, true)) {
+                val note = allTimeOnlyNote(DeleteChoice(range, history, siteData, cache))
+                val expected = range != DeleteRange.AllTime && (siteData || cache)
+                assertEquals("$range h=$history s=$siteData c=$cache", expected, note != null)
+            }
+        }
+    }
+
+    @Test
+    fun `all-time note names only what is checked`() {
+        val both = allTimeOnlyNote(DeleteChoice(DeleteRange.LastHour, siteData = true, cache = true))
+        val cookies = allTimeOnlyNote(DeleteChoice(DeleteRange.LastHour, siteData = true, cache = false))
+        val cache = allTimeOnlyNote(DeleteChoice(DeleteRange.LastHour, siteData = false, cache = true))
+        assertNotNull(both)
+        assertTrue(both!!.startsWith("Cookies, site data and cached files"))
+        assertTrue(cookies!!.startsWith("Cookies and site data"))
+        assertFalse(cookies.contains("Cached", ignoreCase = true))
+        assertTrue(cache!!.startsWith("Cached images and files"))
+        assertNull(allTimeOnlyNote(DeleteChoice(DeleteRange.LastHour, siteData = false, cache = false)))
+    }
+
+    @Test
+    fun `history line counts visits in the range`() {
+        assertEquals("1 visit, plus recently closed tabs", historyCountLine(1))
+        assertEquals("42 visits, plus recently closed tabs", historyCountLine(42))
+        assertEquals("No visits in this range, plus recently closed tabs", historyCountLine(0))
+    }
+
+    @Test
+    fun `done message says history alone, otherwise browsing data`() {
+        assertEquals("Browsing data deleted", deleteDoneMessage(DeleteChoice()))
+        assertEquals(
+            "Browsing history deleted",
+            deleteDoneMessage(DeleteChoice(DeleteRange.AllTime, history = true, siteData = false, cache = false)),
+        )
+        assertEquals(
+            "Browsing data deleted",
+            deleteDoneMessage(DeleteChoice(DeleteRange.Last7Days, history = false, siteData = false, cache = true)),
+        )
+    }
+}

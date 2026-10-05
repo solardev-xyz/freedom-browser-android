@@ -1383,52 +1383,59 @@ fun BrowserWebViewHost(
         tabs.dropMemoryCache = { tab ->
             webViews[tab.id]?.let { wv -> runCatching { wv.clearCache(false) } }
         }
-        tabs.clearWebViewData = {
-            // Globally-scoped stores: cookies and DOM storage / IndexedDB /
-            // WebSQL are shared across every WebView in the process, so
-            // wiping them once is enough. This covers the per-root
-            // virtual origins too — removeAllCookies / deleteAllData
-            // are origin-agnostic, so "clear browsing data" clears
-            // every `*.bzz.freedom.baby`-style origin's storage along
-            // with everything else.
-            runCatching { CookieManager.getInstance().removeAllCookies(null) }
-            runCatching { CookieManager.getInstance().flush() }
-            runCatching { WebStorage.getInstance().deleteAllData() }
-            // …and a private session's own (#86), which lives in its
-            // profile's stores.
-            PrivateProfile.clearData()
-            // Per-instance state: HTTP cache, autofill form data, and the
-            // back/forward stack live on each WebView, so clear them on
-            // every live tab.
-            for (wv in webViews.values) {
-                runCatching { wv.clearCache(true) }
-                runCatching { wv.clearFormData() }
-                runCatching { wv.clearHistory() }
+        tabs.clearWebViewData = { siteData, cache ->
+            if (siteData) {
+                // Globally-scoped stores: cookies and DOM storage / IndexedDB /
+                // WebSQL are shared across every WebView in the process, so
+                // wiping them once is enough. This covers the per-root
+                // virtual origins too — removeAllCookies / deleteAllData
+                // are origin-agnostic, so "clear browsing data" clears
+                // every `*.bzz.freedom.baby`-style origin's storage along
+                // with everything else. Neither API takes a time range,
+                // so this is always all time (#400).
+                runCatching { CookieManager.getInstance().removeAllCookies(null) }
+                runCatching { CookieManager.getInstance().flush() }
+                runCatching { WebStorage.getInstance().deleteAllData() }
+                // …and a private session's own (#86), which lives in its
+                // profile's stores.
+                PrivateProfile.clearData()
+                // Per-instance state: autofill form data and the
+                // back/forward stack live on each WebView, so clear them on
+                // every live tab.
+                for (wv in webViews.values) {
+                    runCatching { wv.clearFormData() }
+                    runCatching { wv.clearHistory() }
+                }
+                // A tab whose renderer went away (#260) keeps its back/forward
+                // list in the state it's to be rebuilt from: it comes back on
+                // its page alone, as `clearHistory()` leaves every other tab.
+                for (tab in tabs.tabs) {
+                    if (tab.rendererGone != null) tab.pendingRestore = tab.pendingRestore?.withoutHistory()
+                }
+                // Remembered zoom levels are keyed by the sites visited (#88).
+                pageZoom.clearAll()
+                // …and so are the sites asked for as desktop sites (#180).
+                desktopSites.clearAll()
+                // Unfinished downloads keep partial files in app storage
+                // (#265): they stop, and those files go.
+                DownloadManager.get(context).discardUnfinished()
             }
-            // A tab whose renderer went away (#260) keeps its back/forward
-            // list in the state it's to be rebuilt from: it comes back on
-            // its page alone, as `clearHistory()` leaves every other tab.
-            for (tab in tabs.tabs) {
-                if (tab.rendererGone != null) tab.pendingRestore = tab.pendingRestore?.withoutHistory()
+            if (cache) {
+                // The HTTP cache lives on each WebView's profile; clear it
+                // through every live tab's (`clearCache` has no time range).
+                for (wv in webViews.values) runCatching { wv.clearCache(true) }
+                // The HTTP cache is per profile, and a WebView is the only
+                // handle on it: a profile none of whose tabs has a live
+                // WebView (every one went with the shared renderer, #260, or
+                // none was built yet) has its cache cleared through a
+                // stand-in — or it survives the clear and serves the next
+                // load from what the user was told was gone.
+                if (webViews.keys.none { it !in privateIds }) clearDefaultCache(context)
+                if (privateIds.isNotEmpty() && privateIds.none { it in webViews }) clearPrivateCache(context, null)
+                // Camera captures handed to pages live in our own cache/uploads
+                // (served by our FileProvider), outside Chromium's cache dir.
+                runCatching { fileChooser.clearCaptures() }
             }
-            // The HTTP cache is per profile, and a WebView is the only
-            // handle on it: a profile none of whose tabs has a live
-            // WebView (every one went with the shared renderer, #260, or
-            // none was built yet) has its cache cleared through a
-            // stand-in — or it survives the clear and serves the next
-            // load from what the user was told was gone.
-            if (webViews.keys.none { it !in privateIds }) clearDefaultCache(context)
-            if (privateIds.isNotEmpty() && privateIds.none { it in webViews }) clearPrivateCache(context, null)
-            // Camera captures handed to pages live in our own cache/uploads
-            // (served by our FileProvider), outside Chromium's cache dir.
-            runCatching { fileChooser.clearCaptures() }
-            // Remembered zoom levels are keyed by the sites visited (#88).
-            pageZoom.clearAll()
-            // …and so are the sites asked for as desktop sites (#180).
-            desktopSites.clearAll()
-            // Unfinished downloads keep partial files in app storage
-            // (#265): they stop, and those files go.
-            DownloadManager.get(context).discardUnfinished()
         }
         onDispose {
             tabs.captureActiveThumbnail = null

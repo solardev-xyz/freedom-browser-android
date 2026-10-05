@@ -268,6 +268,27 @@ class BrowsingRepository internal constructor(
         scope.launch { db.history().clear() }
     }
 
+    /**
+     * Delete browsing data (#400): how many visits were recorded at or
+     * after [since] (epoch ms; 0 counts them all). Re-emits as history
+     * changes.
+     */
+    fun historyCount(since: Long): Flow<Int> = db.history().countSince(since)
+
+    /**
+     * Delete the visits recorded at or after [since] (epoch ms); 0 (or
+     * less) deletes every one, as [clearHistory] does.
+     */
+    fun deleteHistorySince(since: Long) {
+        scope.launch {
+            try {
+                if (since <= 0L) db.history().clear() else db.history().deleteSince(since)
+            } catch (e: SQLiteException) {
+                Log.w(TAG, "deleteHistorySince: ${e.message}")
+            }
+        }
+    }
+
     fun clearBookmarks() {
         scope.launch { db.bookmarks().clear() }
     }

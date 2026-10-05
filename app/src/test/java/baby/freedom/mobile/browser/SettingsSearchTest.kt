@@ -80,11 +80,16 @@ class SettingsSearchTest {
     }
 
     @Test
-    fun `desktop site choices are found under clear site data`() {
-        // #180: "Clear cookies & site data" also forgets desktop-site choices.
-        for (q in listOf("desktop site", "Desktop")) {
-            assertEquals(q, setOf("site-data"), visibleSettingsRows(q, "Browsing data", browsingDataRows(3, 2)))
+    fun `delete browsing data row is found by what it deletes`() {
+        // #400: the one row replacing Clear history / bookmarks / cookies & site data.
+        for (q in listOf(
+            "clear", "Delete", "history", "cookies", "cache", "cached", "site data",
+            "desktop site", "zoom", "form data", "DOM storage", "browsing data",
+        )) {
+            assertEquals(q, setOf("delete-data"), visibleSettingsRows(q, "Browsing data", browsingDataRows()))
         }
+        // Bookmarks moved to the Bookmarks page: Settings no longer offers to wipe them.
+        assertEquals(emptySet<Any>(), visibleSettingsRows("bookmarks", "Browsing data", browsingDataRows()))
     }
 
     @Test

@@ -2552,15 +2552,14 @@ fun BrowserScreen(
                 showSettings = false
                 tabs.requestOpenInNewTab?.invoke(url, false, false)
             },
-            // The reopen stack keeps closed tabs' pages, titles and
-            // back/forward lists — history by any other name.
-            onClearHistory = { tabs.forgetClosedTabs() },
-            onClearWebViewData = {
-                // Closed tabs carry their saved back/forward history.
-                tabs.forgetClosedTabs()
-                tabs.clearWebViewData?.invoke()
+            onDeleteBrowsingData = { choice ->
+                // The reopen stack keeps closed tabs' pages, titles and
+                // back/forward lists — history by any other name. It has
+                // no dates, so a ranged delete takes all of it.
+                if (choice.forgetsClosedTabs) tabs.forgetClosedTabs()
+                if (choice.siteData || choice.cache) tabs.clearWebViewData?.invoke(choice.siteData, choice.cache)
                 // The nodes' logs can name what was browsed (#276).
-                clearNodeLogs()
+                if (choice.siteData) clearNodeLogs()
             },
             onDismiss = { showSettings = false },
             onOpenIpfsLogs = { showLogs = NodeLogSource.Ipfs },

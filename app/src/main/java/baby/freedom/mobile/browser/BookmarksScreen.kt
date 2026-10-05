@@ -16,6 +16,8 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
+import baby.freedom.mobile.l10n.pluralText
+import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.DragIndicator
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.outlined.BookmarkBorder
@@ -77,7 +79,8 @@ import kotlinx.coroutines.launch
  * once), or long-press anywhere on it and drag, as in the tab switcher;
  * TalkBack gets the whole menu as actions on the row. The order is saved
  * ([BrowsingRepository.moveBookmark]) and is the Home page tiles' order
- * too.
+ * too. The page's own ⋮ has *Delete all bookmarks*, behind a
+ * confirmation (#400: it used to sit in Settings next to Clear history).
  *
  * [private] is whether it was opened from a private tab: the edit
  * dialog's fields then don't let the keyboard learn what's typed, and
@@ -97,6 +100,9 @@ fun BookmarksScreen(
     var editingId by rememberSaveable { mutableStateOf<Long?>(null) }
     // The row whose menu is open, from its ⋮ or a long-press.
     var menuFor by remember { mutableStateOf<Long?>(null) }
+    // The page's own ⋮ (#400), and its Delete all bookmarks confirmation.
+    var pageMenuOpen by remember { mutableStateOf(false) }
+    var confirmDeleteAll by rememberSaveable { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -124,6 +130,25 @@ fun BookmarksScreen(
     FullScreenScaffold(
         title = stringResource(R.string.library_bookmarks_title),
         onDismiss = onDismiss,
+        trailing = {
+            // Only with something to delete: an empty page has no ⋮.
+            if (entries.isNotEmpty()) Box {
+                // Material's own size: a full 48 dp target (#279).
+                IconButton(onClick = { pageMenuOpen = true }, shapes = IconButtonDefaults.shapes()) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.library_bookmarks_more))
+                }
+                DropdownMenu(expanded = pageMenuOpen, onDismissRequest = { pageMenuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.library_bookmarks_delete_all)) },
+                        leadingIcon = { Icon(Icons.Filled.DeleteForever, contentDescription = null) },
+                        onClick = {
+                            pageMenuOpen = false
+                            confirmDeleteAll = true
+                        },
+                    )
+                }
+            }
+        },
     ) {
         if (shown.isEmpty()) {
             EmptyState(
@@ -180,6 +205,21 @@ fun BookmarksScreen(
                 }
             }
         }
+    }
+
+    if (confirmDeleteAll) {
+        ConfirmDialog(
+            title = stringResource(R.string.library_bookmarks_delete_all_title),
+            message = pluralText(
+                R.plurals.library_bookmarks_delete_all_message, entries.size, entries.size,
+            ),
+            confirmLabel = stringResource(R.string.library_bookmarks_delete_all_confirm),
+            onConfirm = {
+                repo.clearBookmarks()
+                confirmDeleteAll = false
+            },
+            onDismiss = { confirmDeleteAll = false },
+        )
     }
 
     editingId?.let { id ->
