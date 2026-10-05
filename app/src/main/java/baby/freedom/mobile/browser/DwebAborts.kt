@@ -62,8 +62,11 @@ internal interface AbandonSignal {
  * - it may have begun just before the entry's request, inside the range:
  *   it could be another request's, still wanted — nothing is done;
  * - there is none: WebView hasn't got round to the entry's call — the
- *   next call for the URL, within [ABANDONED_TTL_MS], is answered at once
- *   without a fetch. That call is then kept as answered, so should the
+ *   next call for the URL that didn't begin before the entry's start,
+ *   within [ABANDONED_TTL_MS], is answered at once without a fetch — if
+ *   it began after the entry's start for certain; one that did begin
+ *   before is another request's, merely slow to reach [begin], and one
+ *   inside the range spends the entry but is fetched anyway. That call is then kept as answered, so should the
  *   entry have been another request's after all, this request's own
  *   entry is matched to it rather than stopping yet another call.
  *
@@ -127,9 +130,17 @@ internal class DwebAborts(
     private class Calls {
         val working = ArrayList<Ticket>()
         val answered = ArrayList<Long>() // when each answered call began, its entry still to come
-        val abandonedAt = ArrayDeque<Long>() // entries ahead of their call
-        fun idle() = working.isEmpty() && answered.isEmpty() && abandonedAt.isEmpty()
+        val abandoned = ArrayDeque<Ahead>() // entries ahead of their call, in arrival order
+        fun idle() = working.isEmpty() && answered.isEmpty() && abandoned.isEmpty()
     }
+
+    /**
+     * An entry that came before any call it could be matched to: it came
+     * at [at] ([now]), for a request started between [lo] and [hi] (with
+     * the slack [pageDone] allows). A call begun before [lo] is never its
+     * own; one begun by [hi] may be another request's.
+     */
+    private class Ahead(val at: Long, val lo: Double, val hi: Double)
 
     private val lock = Any()
 
@@ -154,7 +165,14 @@ internal class DwebAborts(
     /**
      * An interceptor call for [url] begins; it was entered at [calledAt]
      * ([clock]). Already [Ticket.abandoned] when the page gave up on it
-     * before WebView got round to the call.
+     * before WebView got round to the call: an entry is waiting whose
+     * request certainly started before the call began. An entry whose
+     * request started after it — an aborted duplicate processed while
+     * this call was still in its blocking pre-[begin] work — is never
+     * this call's, so it's left for the duplicate's own call (R4-M1);
+     * one whose request may have started either side of it is spent on
+     * it, but the call is fetched anyway, as [pageDone] does with a call
+     * already begun.
      *
      * [calledAt] is read as the interceptor is entered, before any of its
      * other per-request work, some of which can block: a stamp taken
@@ -168,8 +186,9 @@ internal class DwebAborts(
         val gone = synchronized(lock) {
             val calls = byUrl.getOrPut(key) { Calls() }
             prune(calls)
-            if (calls.abandonedAt.isNotEmpty()) {
-                calls.abandonedAt.removeFirst()
+            val ahead = calls.abandoned.firstOrNull { ticket.beganAt >= it.lo }
+            if (ahead != null) calls.abandoned.remove(ahead)
+            if (ahead != null && ticket.beganAt > ahead.hi) {
                 // Kept as answered: if the entry spent here was another
                 // request's after all (one no call of ours made), this
                 // call's own request gets the throwaway answer and its
@@ -223,7 +242,7 @@ internal class DwebAborts(
             val first = listOfNotNull(working?.beganAt, answered).minOrNull()
             when {
                 first == null -> {
-                    if (calls.abandonedAt.size < MAX_COUNT) calls.abandonedAt.addLast(now())
+                    if (calls.abandoned.size < MAX_COUNT) calls.abandoned.addLast(Ahead(now(), lo, hi))
                     null
                 }
                 first <= hi -> null // maybe another request's, still wanted
@@ -255,9 +274,7 @@ internal class DwebAborts(
     // Under [lock]: entries whose call never came are forgotten.
     private fun prune(calls: Calls) {
         val t = now()
-        while (calls.abandonedAt.isNotEmpty() && t - calls.abandonedAt.first() !in 0 until ttlMs) {
-            calls.abandonedAt.removeFirst()
-        }
+        calls.abandoned.removeAll { t - it.at !in 0 until ttlMs }
     }
 
     companion object {

@@ -229,6 +229,39 @@ class DwebAbortsTest {
         assertTrue(stale.abandoned)
     }
 
+    /** R4-M1: an entry queued ahead of its call never goes to a call entered before its request. */
+    @Test
+    fun `a queued entry skips a live call entered before its request started`() {
+        // The live call is entered at 1_000 and blocks in its pre-begin
+        // work; meanwhile a duplicate is started (1_002–1_004) and aborted,
+        // and its entry comes while no call for the URL has begun yet.
+        val c = Clocked()
+        c.now = 1_020
+        c.done(lo = 1_010, hi = 1_012)
+        c.now = 1_050
+        val live = c.aborts.begin(SEG, calledAt = 1_000)
+        assertFalse(live.abandoned)
+        // The entry waits for the duplicate's own call, which takes it.
+        assertTrue(c.begin(at = 1_060).abandoned)
+        assertFalse(live.abandoned)
+        assertEquals(1, c.aborts.working(SEG))
+    }
+
+    @Test
+    fun `a queued entry spent on a call that may be another request's leaves it fetching`() {
+        // Entered at 1_000, the call may have begun just before or after
+        // the entry's request (1_002–1_004): spent, but fetched anyway.
+        val c = Clocked()
+        c.now = 1_020
+        c.done(lo = 1_002, hi = 1_004)
+        c.now = 1_050
+        val call = c.aborts.begin(SEG, calledAt = 1_000)
+        assertFalse(call.abandoned)
+        assertEquals(1, c.aborts.working(SEG))
+        // Nothing left for the next call.
+        assertFalse(c.begin(at = 1_060).abandoned)
+    }
+
     @Test
     fun `a stamp is never later than begin itself`() {
         val c = Clocked()
