@@ -5,6 +5,7 @@ import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -611,6 +612,19 @@ class TorRoutingTest {
             assertEquals("lookup localhost", events.first())
             assertTrue(events.toList().toString(), events[1].startsWith("connecting") && events[1].endsWith(" fallback"))
             assertEquals(listOf("connected", "answered"), events.drop(2))
+            // PR #409 R3-F1: only for a while — once ROUTE_POSTPONE_MS has
+            // passed the proxy is dialed first again, as main's fresh
+            // RouteDatabase per connection did, so a proxy that recovered
+            // gets its traffic back.
+            val realClock = TorRouting.routeClock
+            val later = realClock() + TorRouting.ROUTE_POSTPONE_MS
+            TorRouting.routeClock = { later }
+            try {
+                fetch("http://localhost:$port/c2b")
+                assertEquals(listOf("connecting fallback", "lookup localhost", "connecting", "connected", "answered"), events.toList())
+            } finally {
+                TorRouting.routeClock = realClock
+            }
             // Another host's routes are its own: the proxy is dialed first there.
             fetch("http://127.0.0.1:$port/c3")
             assertEquals(listOf("connecting fallback", "connecting", "connected", "answered"), events.toList())
@@ -692,6 +706,27 @@ class TorRoutingTest {
             accepted.forEach { runCatching { it.close() } }
             acceptor.join(1_000)
         }
+    }
+
+    /**
+     * PR #409 R3-M1: a failed route's key doesn't depend on whether the
+     * proxy's name was resolved on that request — `Proxy.toString` does.
+     */
+    @Test
+    fun `a proxy route's key is the same resolved or not`() {
+        val hop = URL("https://Gateway.Example/x")
+        val unresolved = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress.createUnresolved("Proxy.Example", 8080))
+        val resolved = java.net.Proxy(
+            java.net.Proxy.Type.HTTP,
+            java.net.InetSocketAddress(java.net.InetAddress.getByAddress("proxy.example", byteArrayOf(10, 0, 0, 5)), 8080),
+        )
+        assertNotEquals(unresolved.toString(), resolved.toString())
+        assertEquals(TorRouting.routeKey(hop, unresolved), TorRouting.routeKey(hop, resolved))
+        assertNotEquals(TorRouting.routeKey(hop, resolved), TorRouting.routeKey(hop, java.net.Proxy.NO_PROXY))
+        assertNotEquals(
+            TorRouting.routeKey(hop, resolved),
+            TorRouting.routeKey(hop, java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress.createUnresolved("proxy.example", 8081))),
+        )
     }
 
     /**

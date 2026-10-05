@@ -850,10 +850,11 @@ object TorRouting {
      * fallback with it. `main` gave that reply 10 s and then went direct.
      * Dialed one by one, a stalled proxy route is cut at its own share of
      * the clock and the next route still gets dialed. A route that failed
-     * before ([failedRoutes]) is dialed last, so the stall is paid once,
-     * not by every later request (PR #409 R2-F1), and only a failure
-     * okhttp would recover from falls through to the next route
-     * ([routeFailureRecoverable], R2-M1).
+     * lately ([failedRoutes]) is dialed last for a while, so the stall is
+     * paid once per [ROUTE_POSTPONE_MS], not by every later request, and
+     * the proxy is dialed first again after it (PR #409 R2-F1, R3-F1);
+     * only a failure okhttp would recover from falls through to the next
+     * route ([routeFailureRecoverable], R2-M1).
      */
     private fun proxyRoutes(hop: URL): List<Proxy>? {
         if (fetchMayReachOnion(hop)) return null
@@ -861,40 +862,77 @@ object TorRouting {
         val selected = runCatching { proxiesFor(uri) }.getOrNull() ?: return null
         val proxies = selected.filter { it.type() != Proxy.Type.DIRECT }
         if (proxies.isEmpty()) return null
-        // Routes that failed before go last, as okhttp's RouteDatabase
-        // postpones them (PR #409 R2-F1).
-        val (fresh, failed) = (proxies + Proxy.NO_PROXY).partition { routeKey(hop, it) !in failedRoutes }
+        // Routes that failed lately go last, for a while (PR #409 R2-F1,
+        // R3-F1).
+        val (fresh, failed) = (proxies + Proxy.NO_PROXY).partition { !routePostponed(hop, it) }
         return fresh + failed
     }
 
     /**
      * Proxy routes ([proxyRoutes]) that failed to connect, by hop and
-     * route, process-wide — okhttp's `RouteDatabase`, which Android's
-     * HttpURLConnection keeps for its one shared client (PR #409 R2-F1).
-     * A route here is dialed after the others, until it connects again.
-     * On `main` a stalled system proxy cost the first request its
-     * route's timeout; every later one was answered on the pooled direct
-     * connection (the selector's `Address` is shared) or, with nothing
-     * pooled, dialed direct first. Without this every subresource dialed
-     * the stalled proxy again — ≥ 16 s each, on a Chromium pool thread.
-     * Dialed direct first, a later request reuses the pooled direct
-     * connection: its explicit `NO_PROXY` route is one `Address` across
-     * requests. Bounded: cleared when it reaches [MAX_FAILED_ROUTES].
+     * route, process-wide, with when each last failed ([routeClock]). A
+     * route here is dialed after the others — but only for
+     * [ROUTE_POSTPONE_MS] after its failure, then first again, as
+     * the selector ordered it (PR #409 R3-F1). Android builds a fresh
+     * okhttp client (and `RouteDatabase`) for every `openConnection`, so
+     * on `main` every new connection dialed the system proxy first again;
+     * only a request answered on a pooled direct connection skipped it.
+     * Postponing a failed route for good would send every later fetch to
+     * that host around the user's proxy for the rest of the process after
+     * one blip. Postponing it for a while keeps what R2-F1 was after — a
+     * stalled proxy is paid once per window, not by every subresource
+     * (≥ 16 s each on a Chromium pool thread), and the requests in between
+     * reuse the pooled direct connection (its explicit `NO_PROXY` route is
+     * one `Address` across requests) — and a proxy that recovered gets
+     * its traffic back within [ROUTE_POSTPONE_MS]. A route that connects
+     * is forgotten at once. Bounded: cleared when it reaches
+     * [MAX_FAILED_ROUTES].
      */
-    private val failedRoutes: MutableSet<String> = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
+    private val failedRoutes = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     private const val MAX_FAILED_ROUTES = 256
 
-    private fun routeKey(hop: URL, route: Proxy?): String =
-        "${hop.protocol}://${hop.host.lowercase()}:${if (hop.port == -1) hop.defaultPort else hop.port} via $route"
+    /** How long a failed proxy route ([failedRoutes]) is dialed last. */
+    internal const val ROUTE_POSTPONE_MS = 30_000L
+
+    /** Monotonic milliseconds for [failedRoutes]; tests swap it. */
+    internal var routeClock: () -> Long = { System.nanoTime() / 1_000_000 }
+
+    /**
+     * A route's key: the hop's scheme, host and port, and the proxy's type
+     * and address as configured — its host string and port, never
+     * [Proxy.toString], whose address part reads differently once the
+     * proxy's name was resolved (or failed to be), so a failed entry would
+     * be missed (PR #409 R3-M1).
+     */
+    internal fun routeKey(hop: URL, route: Proxy?): String {
+        val via = when {
+            route == null -> "selector"
+            route.type() == Proxy.Type.DIRECT -> "direct"
+            else -> when (val a = route.address()) {
+                is InetSocketAddress -> "${route.type()} ${a.hostString.lowercase(java.util.Locale.US)}:${a.port}"
+                else -> "${route.type()} $a"
+            }
+        }
+        return "${hop.protocol}://${hop.host.lowercase(java.util.Locale.US)}:${if (hop.port == -1) hop.defaultPort else hop.port} via $via"
+    }
+
+    /** Whether [route] to [hop] failed within the last [ROUTE_POSTPONE_MS]. */
+    private fun routePostponed(hop: URL, route: Proxy?): Boolean {
+        val key = routeKey(hop, route)
+        val at = failedRoutes[key] ?: return false
+        if (routeClock() - at in 0 until ROUTE_POSTPONE_MS) return true
+        failedRoutes.remove(key, at)
+        return false
+    }
 
     private fun proxyRouteFailed(hop: URL, route: Proxy?) {
         if (failedRoutes.size >= MAX_FAILED_ROUTES) failedRoutes.clear()
-        failedRoutes += routeKey(hop, route)
+        failedRoutes[routeKey(hop, route)] = routeClock()
     }
 
     private fun proxyRouteConnected(hop: URL, route: Proxy?) {
-        failedRoutes -= routeKey(hop, route)
+        failedRoutes.remove(routeKey(hop, route))
     }
 
     /** Forget every failed proxy route ([failedRoutes]); tests. */
