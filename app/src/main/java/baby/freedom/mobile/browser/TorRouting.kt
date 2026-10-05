@@ -686,7 +686,11 @@ object TorRouting {
             val pinned = if (local) pinLocalhost(current) else if (direct) pin(current) else null
             // A watched hop on the system proxy has each of the selector's
             // routes dialed as a connect of its own (PR #409 R1-M1).
-            val proxied = if (pinned == null && route == null && hops != null) proxyRoutes(current) else null
+            // A failed proxy route whose postponement just ended, which
+            // this request dials first again (it holds the re-probe), is
+            // let go when the hop is done (PR #409 R4-M1).
+            val reprobes = mutableListOf<Pair<String, Long>>()
+            val proxied = if (pinned == null && route == null && hops != null) proxyRoutes(current, reprobes) else null
             val candidates: List<Pair<URL, Proxy?>> = pinned?.urls?.map { it to route }
                 ?: proxied?.map { current to it }
                 ?: listOf(current to route)
@@ -694,6 +698,7 @@ object TorRouting {
             // The route [conn] goes by: the one a proxied hop dialed last.
             var connRoute: Proxy? = route
             var dialed = false // connected as a fallback-able route already
+            var tunnels = false // [conn] goes through a system proxy's proxy
             var keep = false
             try {
                 for ((i, pair) in candidates.withIndex()) {
@@ -710,12 +715,22 @@ object TorRouting {
                     if (local && pinned == null && c is HttpsURLConnection) {
                         c.sslSocketFactory = DevicePeerRefusingFactory(c.sslSocketFactory, current, requireDevice = true)
                     }
+                    // A route through one of the system proxy's proxies:
+                    // its reply and its TLS handshake are timed apart
+                    // (PR #409 R4-M2).
+                    val tunnel = proxied != null && candidateRoute != null && candidateRoute.type() != Proxy.Type.DIRECT
+                    tunnels = tunnel
                     hops?.handshakeTimeoutMs?.let { ms ->
                         // Each route's TLS handshake gets its own limit, so
                         // one that stalls fails there and the connection
                         // tries the next, as under main's read timeout
                         // (PR #409 R6-M1).
-                        if (c is HttpsURLConnection) c.sslSocketFactory = HandshakeTimeoutFactory(c.sslSocketFactory, ms)
+                        if (c is HttpsURLConnection) {
+                            c.sslSocketFactory = HandshakeTimeoutFactory(
+                                c.sslSocketFactory, ms,
+                                onLayer = if (tunnel) ({ hops.tunnelled(c) }) else null,
+                            )
+                        }
                     }
                     method?.let { c.requestMethod = it }
                     c.instanceFollowRedirects = false
@@ -727,7 +742,7 @@ object TorRouting {
                     // own lookup (or route selection) would have (R4-F2).
                     // A watchdog cut here ends this route only, not the
                     // attempt (PR #409 R1-M1).
-                    hops?.connecting(c, if (proxied == null || candidateRoute == null) 1 else lookUpAhead(current, candidateRoute), fallback = true)
+                    hops?.connecting(c, if (proxied == null || candidateRoute == null) 1 else lookUpAhead(current, candidateRoute), fallback = true, tunnel = tunnel)
                     try {
                         c.connect()
                         if (proxied != null) proxyRouteConnected(current, candidateRoute)
@@ -757,7 +772,7 @@ object TorRouting {
                     // main (PR #409 R5-M1, R6-M1); a pinned hop dials one.
                     if (!dialed) {
                         val routes = if (pinned == null) lookUpAhead(current, connRoute) else 1
-                        hops.connecting(c, routes)
+                        hops.connecting(c, routes, tunnel = tunnels)
                         c.connect()
                         if (proxied != null) proxyRouteConnected(current, connRoute)
                     }
@@ -789,6 +804,7 @@ object TorRouting {
                 }
             } finally {
                 if (!keep) runCatching { conn?.disconnect() }
+                for ((key, token) in reprobes) letGoOfReprobe(key, token)
             }
         }
         throw IOException(Strings.get(R.string.node_fetch_too_many_redirects))
@@ -852,11 +868,12 @@ object TorRouting {
      * the clock and the next route still gets dialed. A route that failed
      * lately ([failedRoutes]) is dialed last for a while, so the stall is
      * paid once per [ROUTE_POSTPONE_MS], not by every later request, and
-     * the proxy is dialed first again after it (PR #409 R2-F1, R3-F1);
+     * the proxy is dialed first again after it (PR #409 R2-F1, R3-F1) — by
+     * one request at a time ([reprobes], R4-M1);
      * only a failure okhttp would recover from falls through to the next
      * route ([routeFailureRecoverable], R2-M1).
      */
-    private fun proxyRoutes(hop: URL): List<Proxy>? {
+    private fun proxyRoutes(hop: URL, reprobes: MutableList<Pair<String, Long>>): List<Proxy>? {
         if (fetchMayReachOnion(hop)) return null
         val uri = selectorUri(hop) ?: return null
         val selected = runCatching { proxiesFor(uri) }.getOrNull() ?: return null
@@ -864,7 +881,7 @@ object TorRouting {
         if (proxies.isEmpty()) return null
         // Routes that failed lately go last, for a while (PR #409 R2-F1,
         // R3-F1).
-        val (fresh, failed) = (proxies + Proxy.NO_PROXY).partition { !routePostponed(hop, it) }
+        val (fresh, failed) = (proxies + Proxy.NO_PROXY).partition { !routePostponed(hop, it, reprobes) }
         return fresh + failed
     }
 
@@ -887,8 +904,25 @@ object TorRouting {
      * its traffic back within [ROUTE_POSTPONE_MS]. A route that connects
      * is forgotten at once. Bounded: cleared when it reaches
      * [MAX_FAILED_ROUTES].
+     *
+     * When the window ends, one request at a time dials the route first
+     * again ([reprobes]); every other request keeps it last until that
+     * re-probe is decided — connected (forgotten), failed (a fresh window)
+     * or let go without being dialed (the next request re-probes). So a
+     * proxy still stalled costs one request per window its route's share,
+     * however many requests a page starts while the re-probe runs, not
+     * each of them (PR #409 R4-M1).
      */
     private val failedRoutes = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * The route keys ([routeKey]) of [failedRoutes] whose window is over
+     * and that one request is dialing first again, each with that
+     * request's token, so only it lets go ([letGoOfReprobe]).
+     */
+    private val reprobes = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private val reprobeTokens = java.util.concurrent.atomic.AtomicLong()
 
     private const val MAX_FAILED_ROUTES = 256
 
@@ -917,26 +951,47 @@ object TorRouting {
         return "${hop.protocol}://${hop.host.lowercase(java.util.Locale.US)}:${if (hop.port == -1) hop.defaultPort else hop.port} via $via"
     }
 
-    /** Whether [route] to [hop] failed within the last [ROUTE_POSTPONE_MS]. */
-    private fun routePostponed(hop: URL, route: Proxy?): Boolean {
+    /**
+     * Whether [route] to [hop] is to be dialed last: it failed within the
+     * last [ROUTE_POSTPONE_MS], or its window is over and another request
+     * is re-probing it. Otherwise, if its window is over, this request
+     * takes the re-probe, added to [taken] (PR #409 R4-M1).
+     */
+    private fun routePostponed(hop: URL, route: Proxy?, taken: MutableList<Pair<String, Long>>): Boolean {
         val key = routeKey(hop, route)
         val at = failedRoutes[key] ?: return false
         if (routeClock() - at in 0 until ROUTE_POSTPONE_MS) return true
-        failedRoutes.remove(key, at)
+        val token = reprobeTokens.incrementAndGet()
+        if (reprobes.putIfAbsent(key, token) != null) return true
+        taken += key to token
         return false
     }
 
+    private fun letGoOfReprobe(key: String, token: Long) {
+        reprobes.remove(key, token)
+    }
+
     private fun proxyRouteFailed(hop: URL, route: Proxy?) {
-        if (failedRoutes.size >= MAX_FAILED_ROUTES) failedRoutes.clear()
-        failedRoutes[routeKey(hop, route)] = routeClock()
+        if (failedRoutes.size >= MAX_FAILED_ROUTES) {
+            failedRoutes.clear()
+            reprobes.clear()
+        }
+        val key = routeKey(hop, route)
+        failedRoutes[key] = routeClock()
+        reprobes.remove(key)
     }
 
     private fun proxyRouteConnected(hop: URL, route: Proxy?) {
-        failedRoutes.remove(routeKey(hop, route))
+        val key = routeKey(hop, route)
+        failedRoutes.remove(key)
+        reprobes.remove(key)
     }
 
-    /** Forget every failed proxy route ([failedRoutes]); tests. */
-    internal fun forgetFailedRoutes() = failedRoutes.clear()
+    /** Forget every failed proxy route ([failedRoutes], [reprobes]); tests. */
+    internal fun forgetFailedRoutes() {
+        failedRoutes.clear()
+        reprobes.clear()
+    }
 
     /**
      * Whether a failed connect is one okhttp's route selection moves on to
@@ -1009,8 +1064,18 @@ object TorRouting {
          * connect fails, [openFollowingRedirects] goes on to another (the
          * next pinned address, the next of the system proxy's routes), so
          * running out of time ends this connect only, not the fetch.
+         * [tunnel]: a route through a proxy of the system proxy's, whose
+         * tunnel coming up is reported ([tunnelled]) before an https hop's
+         * TLS handshake, so the proxy's reply and the handshake can be
+         * timed apart (PR #409 R4-M2).
          */
-        fun connecting(conn: HttpURLConnection, routes: Int = 1, fallback: Boolean = false)
+        fun connecting(conn: HttpURLConnection, routes: Int = 1, fallback: Boolean = false, tunnel: Boolean = false)
+
+        /**
+         * A [connecting] `tunnel` route's proxy has answered and its TLS
+         * handshake is about to start (on the connecting thread).
+         */
+        fun tunnelled(conn: HttpURLConnection) {}
         fun connected(conn: HttpURLConnection)
         fun answered(conn: HttpURLConnection)
     }
@@ -1388,12 +1453,15 @@ object TorRouting {
     private class HandshakeTimeoutFactory(
         private val delegate: SSLSocketFactory,
         private val timeoutMs: Int,
+        /** Told when TLS is layered over a route's socket: its tunnel is up (not part of equality). */
+        private val onLayer: (() -> Unit)? = null,
     ) : SSLSocketFactory() {
         private fun timed(socket: Socket): Socket = socket.apply { soTimeout = timeoutMs }
 
         override fun getDefaultCipherSuites(): Array<String> = delegate.defaultCipherSuites
         override fun getSupportedCipherSuites(): Array<String> = delegate.supportedCipherSuites
         override fun createSocket(s: Socket, host: String?, port: Int, autoClose: Boolean): Socket {
+            onLayer?.invoke()
             timed(s)
             return timed(delegate.createSocket(s, host, port, autoClose))
         }

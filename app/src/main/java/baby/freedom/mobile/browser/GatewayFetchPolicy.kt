@@ -194,6 +194,24 @@ internal fun connectStretchMs(connectMs: Int, handshakeMs: Int, routes: Int, gra
     (connectMs.toLong() + handshakeMs) * routes.coerceAtLeast(1) + graceMs
 
 /**
+ * How long [HeaderDeadline] lets one proxy route of a hop on the system
+ * proxy run before its tunnel is up — the TCP connect to the proxy and its
+ * reply (an HTTP proxy's answer to CONNECT, a SOCKS proxy's) —
+ * `max(connectMs, replyMs) + graceMs`: 11 s, 61 s for media. On `main` the
+ * reply was read under the 10 s read timeout (60 s for media), so a proxy
+ * that accepts TCP and never answers held a pool thread that long, then
+ * the connection went direct; [connectStretchMs]'s `connect + handshake`
+ * share kept it 16 s (PR #409 R4-M2). The TLS handshake through the tunnel
+ * is timed apart, from when the tunnel is up ([HeaderDeadline.tunnelled]),
+ * as on `main`, where it had a read timeout of its own. The connect and
+ * the reply share one wait, so a proxy slow at both — each inside its own
+ * `main` limit, together past this — is left for the direct route, a
+ * second earlier than the cut on `main`'s worst case.
+ */
+internal fun tunnelStretchMs(connectMs: Int, replyMs: Int, graceMs: Int = CONNECT_GRACE_MS): Long =
+    maxOf(connectMs, replyMs).toLong() + graceMs
+
+/**
  * Enforces [GatewayFetchPolicy]'s header limits from outside the thread
  * waiting on the headers: [HttpURLConnection.setReadTimeout] can only be
  * one value for the whole exchange, and is set to the (longer) body stall
@@ -223,7 +241,12 @@ internal fun connectStretchMs(connectMs: Int, handshakeMs: Int, routes: Int, gra
  * each of its routes (each proxy, then the direct fallback) dialed as a
  * connect of its own, so a cut there ends that route only and the next is
  * still tried, as on `main` (`fallback`, PR #409 R1-M1); only a cut of the
- * hop's last route expires the attempt. The name is looked up before this
+ * hop's last route expires the attempt. Such a proxy route is timed in two
+ * stretches (`tunnel`, PR #409 R4-M2): the TCP connect and the proxy's
+ * reply get [tunnelStretchMs] (11 s, close to `main`'s 10 s read timeout
+ * for that reply, rather than [connectStretchMs]'s 16 s), and once the
+ * tunnel is up ([tunnelled]) its TLS handshake gets [baseMs] + the grace
+ * of its own. The name is looked up before this
  * stretch starts ([TorRouting.openFollowingRedirects] does it ahead
  * of [connecting], so the connect finds it cached): lookup time comes on
  * top, as on `main`, where no limit covered it. (A cut that does land
@@ -258,6 +281,7 @@ internal class HeaderDeadline(
     private var hop = 0 // which hop that is
     private var patient = false
     private var cutting = false // a connect-stretch disconnect is still running
+    private var connectingFallback: Boolean? = null // set while [current] is connecting: its `fallback`
     private var task: ScheduledFuture<*>? = null
 
     /** Did a hop's deadline pass before its headers arrived? */
@@ -270,14 +294,27 @@ internal class HeaderDeadline(
     var extended = false
         private set
 
-    override fun connecting(conn: HttpURLConnection, routes: Int, fallback: Boolean) {
+    override fun connecting(conn: HttpURLConnection, routes: Int, fallback: Boolean, tunnel: Boolean) {
         synchronized(lock) {
             if (expired) throw SocketTimeoutException("no headers in time")
             stop()
             current = conn
             val mine = ++hop
-            val limit = connectStretchMs(connectMs, baseMs, routes, graceMs)
+            connectingFallback = fallback
+            val limit = if (tunnel) tunnelStretchMs(connectMs, baseMs, graceMs) else connectStretchMs(connectMs, baseMs, routes, graceMs)
             task = watchdog.schedule({ cutConnect(mine, fallback) }, limit, TimeUnit.MILLISECONDS)
+        }
+    }
+
+    // A proxy route's tunnel is up: its TLS handshake gets a clock of its
+    // own, [baseMs] (its socket's own limit) plus the grace (PR #409 R4-M2).
+    override fun tunnelled(conn: HttpURLConnection) {
+        synchronized(lock) {
+            val fallback = connectingFallback ?: return
+            if (current !== conn || cutting) return
+            task?.cancel(false)
+            val mine = ++hop
+            task = watchdog.schedule({ cutConnect(mine, fallback) }, baseMs.toLong() + graceMs, TimeUnit.MILLISECONDS)
         }
     }
 
@@ -346,6 +383,7 @@ internal class HeaderDeadline(
         task?.cancel(false)
         task = null
         current = null
+        connectingFallback = null
         hop++
         release()
     }

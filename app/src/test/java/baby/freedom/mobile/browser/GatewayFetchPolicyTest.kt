@@ -277,6 +277,65 @@ class GatewayFetchPolicyTest {
         assertEquals(5_000, GATEWAY_CONNECT_TIMEOUT_MS)
     }
 
+    /**
+     * PR #409 R4-M2: a system proxy's route has its TCP connect and the
+     * proxy's reply (CONNECT, SOCKS) bounded together near main's 10 s
+     * read timeout for that reply — 11 s, not a connect and a handshake
+     * timeout's 16 s — and its handshake through the tunnel apart.
+     */
+    @Test
+    fun `a proxy route's reply is cut near main's read timeout`() {
+        assertEquals(11_000L, tunnelStretchMs(5_000, 10_000))
+        assertEquals(61_000L, tunnelStretchMs(5_000, 60_000))
+        assertTrue(tunnelStretchMs(5_000, 10_000) < connectStretchMs(5_000, 10_000, 1))
+        // A connect timeout longer than the reply's still gets its own wait.
+        assertEquals(1_200L, tunnelStretchMs(1_000, 500, graceMs = 200))
+    }
+
+    /**
+     * PR #409 R4-M2: a tunnel route is cut at [tunnelStretchMs] while its
+     * proxy hasn't answered; once the tunnel is up its TLS handshake gets
+     * the base wait plus the grace of its own, and a cut there with a
+     * fallback after it still doesn't end the attempt.
+     */
+    @Test
+    fun `a proxy route's reply and handshake are timed apart`() {
+        // Silent proxy: cut at max(100, 300) + 0, before a connect and handshake's 400.
+        val silent = AtomicInteger(0)
+        val stalled = HeaderDeadline(300, patience = PatientWaits(0), connectMs = 100, graceMs = 0)
+        stalled.connecting(FakeConnection { silent.incrementAndGet() }, fallback = true, tunnel = true)
+        Thread.sleep(220)
+        assertEquals("cut before the reply's wait", 0, silent.get())
+        Thread.sleep(180) // 400 ms in
+        assertTrue("the silent proxy wasn't cut at the reply's wait", silent.get() >= 1)
+        assertFalse(stalled.expired)
+        stalled.headersReceived()
+
+        // The proxy answers at 250 ms: the handshake then has 300 ms of its own.
+        val cuts = AtomicInteger(0)
+        val deadline = HeaderDeadline(300, patience = PatientWaits(0), connectMs = 100, graceMs = 0)
+        val conn = FakeConnection { cuts.incrementAndGet() }
+        deadline.connecting(conn, fallback = true, tunnel = true)
+        Thread.sleep(250)
+        deadline.tunnelled(conn)
+        Thread.sleep(200) // 450 ms in: past the reply's wait, inside the handshake's
+        assertEquals("the handshake had no clock of its own", 0, cuts.get())
+        Thread.sleep(250) // 700 ms in, 450 ms into the handshake
+        assertTrue("the stalled handshake wasn't cut", cuts.get() >= 1)
+        assertFalse("a fallback route's cut expired the attempt", deadline.expired)
+        deadline.headersReceived()
+
+        // Another connection's tunnel, or none connecting, changes nothing.
+        val other = HeaderDeadline(100, patience = PatientWaits(0), connectMs = 100, graceMs = 0)
+        other.tunnelled(FakeConnection {})
+        val mine = AtomicInteger(0)
+        other.connecting(FakeConnection { mine.incrementAndGet() }, fallback = true, tunnel = true)
+        other.tunnelled(FakeConnection {})
+        Thread.sleep(250)
+        assertTrue(mine.get() >= 1)
+        other.headersReceived()
+    }
+
     /** The per-route handshake limit is the policy's base header wait: main's read timeout. */
     @Test
     fun `each route's handshake gets main's read timeout`() {

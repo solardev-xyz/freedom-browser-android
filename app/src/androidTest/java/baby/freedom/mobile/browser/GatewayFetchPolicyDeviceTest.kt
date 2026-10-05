@@ -561,7 +561,8 @@ class GatewayFetchPolicyDeviceTest {
             override fun select(uri: java.net.URI?) = listOf(proxy)
             override fun connectFailed(uri: java.net.URI?, sa: java.net.SocketAddress?, ioe: java.io.IOException?) {}
         })
-        val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(0), connectMs = 500, graceMs = 200) // 1.7 s per route
+        // The proxy's reply: max(0.5, 1) + 0.2 = 1.2 s (PR #409 R4-M2).
+        val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(0), connectMs = 500, graceMs = 200)
         try {
             val started = System.nanoTime()
             val conn = TorRouting.openFollowingRedirects(URL("https://${TlsFixture.NAME}:${serving.localPort}/via-proxy"), hops = deadline) {
@@ -576,7 +577,7 @@ class GatewayFetchPolicyDeviceTest {
             assertEquals("the proxy never saw the CONNECT", 1, connections.get())
             assertEquals("not answered by the direct route", 1, tls.served.get())
             assertTrue("the proxy route's cut expired the attempt", !deadline.expired)
-            assertTrue("took $ms ms", ms in 1_500..3_000)
+            assertTrue("took $ms ms", ms in 1_100..3_000)
         } finally {
             TorRouting.proxiesFor = realProxies
             TorRouting.forgetFailedRoutes()
@@ -625,11 +626,74 @@ class GatewayFetchPolicyDeviceTest {
             }
             assertEquals("the stalled proxy was dialed again", 1, connections.get())
             assertEquals("the direct connection wasn't reused", 1, tls.served.get())
-            assertTrue("took $times ms", times[0] in 1_500..3_000)
+            assertTrue("took $times ms", times[0] in 1_100..3_000)
             assertTrue("later fetches re-paid the proxy: $times ms", times.drop(1).all { it < 1_000 })
         } finally {
             TorRouting.proxiesFor = realProxies
             TorRouting.forgetFailedRoutes()
+            tls.close()
+        }
+    }
+
+    /**
+     * PR #409 R4-M2: a system proxy's route is timed in two stretches on
+     * Android's own HttpURLConnection — the proxy's CONNECT reply within
+     * max(connect, base) + grace, then, once the tunnel is up, the TLS
+     * handshake through it on a clock of its own. The proxy answers
+     * CONNECT at 0.9 s and the TLS end behind it holds its handshake
+     * 0.7 s more: 1.6 s in all, past the reply's 1.2 s, and delivered.
+     * Without the tunnel report the route is cut at 1.2 s mid-handshake.
+     */
+    @Test
+    fun aProxyRoutesHandshakeHasAClockOfItsOwn() {
+        val tls = TlsFixture()
+        val proxyServer = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+        val tunnels = AtomicInteger(0)
+        Thread {
+            while (!proxyServer.isClosed) {
+                val s = runCatching { proxyServer.accept() }.getOrNull() ?: break
+                synchronized(sockets) { sockets += s }
+                Thread {
+                    runCatching {
+                        readRequestHead(s.getInputStream())
+                        Thread.sleep(900)
+                        s.getOutputStream().apply { write("HTTP/1.1 200 Connection established\r\n\r\n".toByteArray()); flush() }
+                        tunnels.incrementAndGet()
+                        val tunneled = tls.serverFactory.createSocket(s, "127.0.0.1", s.port, true) as javax.net.ssl.SSLSocket
+                        tunneled.useClientMode = false
+                        Thread.sleep(700)
+                        tunneled.startHandshake()
+                        readRequestHead(tunneled.inputStream)
+                        tunneled.outputStream.apply { write(head(200, "OK", 2)); write("ok".toByteArray()); flush() }
+                        Thread.sleep(1_000)
+                    }
+                    runCatching { s.close() }
+                }.apply { isDaemon = true; start() }
+            }
+        }.apply { isDaemon = true; start() }
+        // Nothing listens on the direct route: only the proxy can answer.
+        val closed = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
+        val proxy = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress("127.0.0.1", proxyServer.localPort))
+        val realProxies = TorRouting.proxiesFor
+        TorRouting.proxiesFor = { listOf(proxy) }
+        try {
+            val deadline = HeaderDeadline(1_000, 4_000, PatientWaits(0), connectMs = 500, graceMs = 200)
+            val started = System.nanoTime()
+            val conn = TorRouting.openFollowingRedirects(URL("https://${TlsFixture.NAME}:$closed/tunnel"), hops = deadline) {
+                (this as javax.net.ssl.HttpsURLConnection).sslSocketFactory = tls.clientFactory
+                connectTimeout = GATEWAY_CONNECT_TIMEOUT_MS
+                readTimeout = 8_000
+            }
+            deadline.headersReceived()
+            val ms = elapsedMs(started)
+            assertEquals(200, conn.responseCode)
+            assertEquals("ok", conn.inputStream.use { it.readBytes().decodeToString() })
+            assertEquals("the proxy wasn't dialed once", 1, tunnels.get())
+            assertTrue("took $ms ms", ms in 1_500..3_000)
+        } finally {
+            TorRouting.proxiesFor = realProxies
+            TorRouting.forgetFailedRoutes()
+            runCatching { proxyServer.close() }
             tls.close()
         }
     }
@@ -744,6 +808,8 @@ class GatewayFetchPolicyDeviceTest {
         private val serverCerts = okhttp3.tls.HandshakeCertificates.Builder().heldCertificate(cert).build()
         val clientFactory: javax.net.ssl.SSLSocketFactory =
             okhttp3.tls.HandshakeCertificates.Builder().addTrustedCertificate(cert.certificate).build().sslSocketFactory()
+        /** Server-side TLS over an accepted socket, as a proxy's tunnel end would. */
+        val serverFactory: javax.net.ssl.SSLSocketFactory = serverCerts.sslContext().socketFactory
         val served = AtomicInteger(0)
         private val accepts = java.util.concurrent.ConcurrentHashMap<ServerSocket, AtomicInteger>()
         private val open = java.util.Collections.synchronizedList(mutableListOf<java.io.Closeable>())
