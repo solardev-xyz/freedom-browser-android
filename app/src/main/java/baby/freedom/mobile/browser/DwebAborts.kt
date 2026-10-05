@@ -63,7 +63,14 @@ internal interface AbandonSignal {
  *   it could be another request's, still wanted — nothing is done;
  * - there is none: WebView hasn't got round to the entry's call — the
  *   next call for the URL, within [ABANDONED_TTL_MS], is answered at once
- *   without a fetch.
+ *   without a fetch. That call is then kept as answered, so should the
+ *   entry have been another request's after all, this request's own
+ *   entry is matched to it rather than stopping yet another call.
+ *
+ * An entry with no call of its own is what could misfire, so the page
+ * leaves out every entry it can tell no call made — a cache hit included,
+ * cross-origin too, as every tracked answer allows its timing to be read
+ * ([timingAllowed]).
  *
  * So a call that began before an aborted duplicate of its URL was even
  * started is never the one cut, and anything uncertain errs towards
@@ -156,7 +163,13 @@ internal class DwebAborts(
             prune(calls)
             if (calls.abandonedAt.isNotEmpty()) {
                 calls.abandonedAt.removeFirst()
-                if (calls.idle()) byUrl.remove(key)
+                // Kept as answered: if the entry spent here was another
+                // request's after all (one no call of ours made), this
+                // call's own request gets the throwaway answer and its
+                // entry comes too — matched to this record, it does
+                // nothing, instead of queuing an abandon for the next
+                // call and passing the mistake on (R2-F2).
+                answer(calls, ticket.beganAt)
                 true
             } else {
                 calls.working.add(ticket)
@@ -172,14 +185,7 @@ internal class DwebAborts(
         synchronized(lock) {
             val calls = byUrl[ticket.url] ?: return
             if (!calls.working.remove(ticket)) return // abandoned: its entry is spent
-            if (!ticket.abandoned) {
-                if (calls.answered.size >= MAX_COUNT) {
-                    val oldest = calls.answered.minOrNull()!!
-                    calls.answered.remove(oldest)
-                    forget(oldest)
-                }
-                calls.answered.add(ticket.beganAt)
-            }
+            if (!ticket.abandoned) answer(calls, ticket.beganAt)
             if (calls.idle()) byUrl.remove(ticket.url)
         }
     }
@@ -224,6 +230,16 @@ internal class DwebAborts(
     /** Calls in flight, for tests. */
     internal fun working(url: String): Int = synchronized(lock) { byUrl[keyOf(url)]?.working?.size ?: 0 }
 
+    // Under [lock]: a call begun at [beganAt] has its answer; its entry is still to come.
+    private fun answer(calls: Calls, beganAt: Long) {
+        if (calls.answered.size >= MAX_COUNT) {
+            val oldest = calls.answered.minOrNull()!!
+            calls.answered.remove(oldest)
+            forget(oldest)
+        }
+        calls.answered.add(beganAt)
+    }
+
     // Under [lock].
     private fun forget(beganAt: Long) {
         if (beganAt > forgotUpTo) forgotUpTo = beganAt
@@ -260,6 +276,25 @@ internal class DwebAborts(
          */
         fun tracks(url: String, mainFrame: Boolean): Boolean =
             !mainFrame && url.startsWith("https://") && VirtualOrigin.parseHostOfUrl(url) != null
+
+        /**
+         * [headers] with `Timing-Allow-Origin: *`, for a tracked
+         * request's answer. Without it a cross-origin document's entry
+         * for it is opaque: `deliveryType` reads empty, so a later
+         * memory-cache hit on it — no interceptor call — reads like a
+         * request the page gave up on, and its stray "done" would stop
+         * the next real request for the URL (R2-F1). With it the hit
+         * says `cache` and is left out ([dwebAbortsJs]); a request
+         * aborted before its headers has no response, so it stays
+         * opaque and is still reported. It shows a page no more than
+         * the `Access-Control-Allow-Origin: *` dweb content carries
+         * already does.
+         */
+        fun timingAllowed(headers: Map<String, String>?): Map<String, String> =
+            (headers.orEmpty().filterKeys { !it.equals(TIMING_ALLOW_ORIGIN, ignoreCase = true) }) +
+                (TIMING_ALLOW_ORIGIN to "*")
+
+        private const val TIMING_ALLOW_ORIGIN = "Timing-Allow-Origin"
 
         fun isSupported(): Boolean = runCatching {
             WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) &&

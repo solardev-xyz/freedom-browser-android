@@ -163,6 +163,40 @@ class DwebAbortsTest {
         assertFalse(c.begin(at = 2_020).abandoned)
     }
 
+    /** R2-F2: a stray entry costs at most the one call it's spent on; it isn't passed on. */
+    @Test
+    fun `a request answered at once by a stray entry doesn't pass it on`() {
+        val c = Clocked()
+        // An entry no call of ours made (a cache hit the page couldn't tell apart).
+        c.done(lo = 900, hi = 902)
+        // The next real request for the URL takes it: answered at once.
+        c.now = 1_000
+        val live = c.begin(at = 1_000)
+        assertTrue(live.abandoned)
+        c.aborts.finished(live)
+        // That request's own entry: it started before its call began.
+        c.now = 1_010
+        c.done(lo = 995, hi = 997)
+        // Retries within the TTL are fetched again, not answered at once in turn.
+        for (at in listOf(1_100L, 1_300L, 1_600L)) {
+            val retry = c.begin(at = at)
+            assertFalse(retry.abandoned)
+            c.aborts.finished(retry)
+            c.now = at + 10
+            c.done(lo = at - 5, hi = at - 3)
+        }
+    }
+
+    /** R2-F1: every tracked answer lets a cross-origin page see a later cache hit on it as one. */
+    @Test
+    fun `timing is allowed on every tracked answer, once`() {
+        assertEquals(mapOf("Timing-Allow-Origin" to "*"), DwebAborts.timingAllowed(null))
+        assertEquals(
+            mapOf("Content-Type" to "video/mp2t", "Timing-Allow-Origin" to "*"),
+            DwebAborts.timingAllowed(mapOf("Content-Type" to "video/mp2t", "timing-allow-origin" to "https://a.example")),
+        )
+    }
+
     @Test
     fun `an entry whose call never comes is forgotten`() {
         val c = Clocked()

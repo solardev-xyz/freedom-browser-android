@@ -3880,6 +3880,11 @@ private fun buildRefreshableWebView(
                 } finally {
                     ticket?.let { dwebAborts?.finished(it) }
                 }
+                // A later cache hit on it must read as one to a
+                // cross-origin page too (see [DwebAborts.timingAllowed]).
+                if (ticket != null && response != null) {
+                    response.responseHeaders = DwebAborts.timingAllowed(response.responseHeaders)
+                }
                 // Before Chromium has the answer, so none of the new
                 // document's own requests can be filed under the load
                 // before it (R3-F1).
