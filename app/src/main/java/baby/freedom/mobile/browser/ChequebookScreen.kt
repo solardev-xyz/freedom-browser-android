@@ -41,6 +41,7 @@ import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import java.math.BigInteger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -120,9 +121,12 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
     LaunchedEffect(spend) {
         if (spend is StampClient.Spend.Done || spend is StampClient.Spend.Failed) refresh++
     }
-    val state = rememberChequebookState(light = blocked == null, refresh = refresh, withWallet = true)
     val context = LocalContext.current
     val settings = remember(context) { NodeSettings.get(context) }
+    // Confirmed lost ledgers: their credit stays an upper bound.
+    val confirmedLedgers by remember(settings) { settings.swarmConfirmedLedgers }.collectAsState(initial = emptySet())
+    val state = rememberChequebookState(light = blocked == null, refresh = refresh, withWallet = true)
+        .withConfirmedLedgers(confirmedLedgers)
     // The switch's setting; null until read, so it doesn't flicker.
     // MainActivity relays it to the node, live and after every init.
     val swapWanted by remember(settings) { settings.swarmSwapEnabled }.collectAsState(initial = null)
@@ -222,8 +226,15 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
             onConfirm = {
                 confirmingLiability = null
                 scope.launch {
-                    val answer = withContext(Dispatchers.IO) {
-                        StampClient.call("confirmLiability", JSONObject().put("chequebook", chequebook))
+                    // Once ant confirmed, the record must follow even if
+                    // the page is left meanwhile: without it the credit
+                    // would read as exact.
+                    val answer = withContext(NonCancellable + Dispatchers.IO) {
+                        StampClient.call("confirmLiability", JSONObject().put("chequebook", chequebook)).also {
+                            if (it is StampClient.Answer.Ok && it.json.optBoolean("confirmed")) {
+                                runCatching { settings.addSwarmConfirmedLedger(chequebook) }
+                            }
+                        }
                     }
                     liabilityOutcome = liabilityOutcomeText(answer)
                     swapRefresh++
@@ -280,7 +291,11 @@ internal fun ChequebookCreditCards(
                 )
                 SubLine(
                     stringResource(
-                        if (state.availableUpperBound) R.string.stamps_credit_spendable_upper_note else R.string.stamps_credit_spendable_note,
+                        when {
+                            state.ledgerConfirmed -> R.string.stamps_credit_spendable_confirmed_note
+                            state.availableUpperBound -> R.string.stamps_credit_spendable_upper_note
+                            else -> R.string.stamps_credit_spendable_note
+                        },
                     ),
                 )
                 DetailRow(
@@ -301,6 +316,8 @@ internal fun ChequebookCreditCards(
             DetailRow(stringResource(R.string.stamps_credit_downloads), creditStatusText(credit), singleLine = false)
             if (credit is CreditStatus.Paying && credit.low) {
                 SubLine(stringResource(R.string.stamps_credit_low))
+            } else if (credit is CreditStatus.Paying && credit.uncertain) {
+                SubLine(stringResource(R.string.stamps_credit_maybe_low))
             }
             Spacer(Modifier.height(6.dp))
             PayPeersSwitch(wanted = swapWanted, running = swap?.swapEnabled, onChange = onSwapChange)

@@ -238,6 +238,7 @@
     <string name="stamps_credit_at_most">At most %1$s</string>
     <string name="stamps_credit_spendable_note">What the node can still pay: the balance below, less the cheques it has written that peers haven\'t cashed yet.</string>
     <string name="stamps_credit_spendable_upper_note">The node couldn\'t count the cheques it has written, so this is the balance below: what is left is less.</string>
+    <string name="stamps_credit_spendable_confirmed_note">The payment record was lost and you confirmed it, so the cheques the node wrote before that aren\'t counted here: what is really left is less.</string>
     <string name="stamps_credit_on_chain">On-chain balance</string>
     <string name="stamps_credit_on_chain_note">What the chequebook contract holds. It only drops once peers cash their cheques, so it can read as more than is left to spend.</string>
     <string name="stamps_credit_downloads_title">Paid downloads</string>
@@ -250,8 +251,9 @@
     <string name="stamps_credit_free_no_chequebook">no chequebook yet. The first postage stamp sets one up.</string>
     <string name="stamps_credit_free_ledger_lost">the payment record was lost. See below.</string>
     <string name="stamps_credit_free_no_credit">the credit is used up. Downloads may be slow; deposit to pay peers again.</string>
-    <string name="stamps_credit_free_not_set_up">settlement isn\'t set up yet. The node starts paying once it has read the chequebook\'s funds from the chain, within a minute.</string>
+    <string name="stamps_credit_free_not_set_up">the node isn\'t paying from this chequebook yet. It usually starts within a minute, once it has read the chequebook\'s funds from the chain; if it doesn\'t, the node couldn\'t verify the chequebook on chain, and downloads stay on the free tier.</string>
     <string name="stamps_credit_low">The credit is low. Deposit more to keep paying peers.</string>
+    <string name="stamps_credit_maybe_low">The credit above is only an upper bound, so it may run out sooner than it shows. Deposit more if downloads slow down.</string>
     <string name="stamps_credit_switch">Pay peers from the chequebook</string>
     <string name="stamps_credit_switch_note">Faster downloads and uploads, paid from the credit above. Off keeps both on the free tier, even with credit left.</string>
     <string name="stamps_credit_switch_applying">The node hasn\'t switched yet…</string>
@@ -264,7 +266,7 @@
     <string name="stamps_credit_lost_dialog_body">This accepts every cheque the node wrote from %1$s before the record was lost, including ones it can no longer count. Peers holding those cheques may refuse new ones, and disconnect the node, until its new cheques pass what they hold. Afterwards the spendable credit leaves those lost cheques out, so it reads higher than what is really left. Nothing is sent on chain.</string>
     <string name="stamps_credit_lost_dialog_confirm">Confirm</string>
     <string name="stamps_credit_lost_confirmed">Confirmed. The node pays peers again within a minute.</string>
-    <string name="stamps_credit_lost_nothing">Nothing to confirm: the node already pays from this chequebook.</string>
+    <string name="stamps_credit_lost_nothing">Nothing to confirm: no lost payment record is on file for this chequebook.</string>
     <!-- %1$s: why. -->
     <string name="stamps_credit_lost_failed">Couldn\'t confirm: %1$s</string>
     <string name="stamps_credit_fund_node_note">A deposit moves xBZZ the node\'s account already holds. Send xBZZ on Gnosis Chain to this address first, from any wallet, then deposit.</string>

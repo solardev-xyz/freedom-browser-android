@@ -2,6 +2,7 @@ package baby.freedom.mobile.data
 
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import baby.freedom.mobile.data.NodeSettingsEnsRpcTest.MemoryStore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -34,5 +35,16 @@ class NodeSettingsSwapTest {
         assertEquals(false, settings(file).swarmSwapEnabled.first())
         settings(file).setSwarmSwapEnabled(true)
         assertEquals(true, settings(file).swarmSwapEnabled.first())
+    }
+
+    @Test
+    fun `a confirmed lost ledger is recorded per chequebook, lowercase, and kept`() = runBlocking {
+        val file = MemoryStore(emptyPreferences())
+        assertEquals(emptySet<String>(), settings(file).swarmConfirmedLedgers.first())
+        settings(file).addSwarmConfirmedLedger("0xAbCd")
+        settings(file).addSwarmConfirmedLedger("0xabcd")
+        settings(file).addSwarmConfirmedLedger("0x1234")
+        assertEquals(setOf("0xabcd", "0x1234"), settings(file).swarmConfirmedLedgers.first())
+        assertEquals(setOf("0xabcd", "0x1234"), file.state.value[stringSetPreferencesKey("swarm_confirmed_ledgers")])
     }
 }

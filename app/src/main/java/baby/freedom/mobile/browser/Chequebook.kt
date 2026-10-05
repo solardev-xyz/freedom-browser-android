@@ -63,7 +63,25 @@ internal data class ChequebookState(
     val availableUpperBound: Boolean = false,
     /** The node's cheque ledger was lost and nobody confirmed it since (`chequeLedgerLost`): it pays no cheques. */
     val ledgerLost: Boolean = false,
+    /**
+     * The ledger was lost and the user confirmed it ([withConfirmedLedgers]):
+     * [availablePlur] leaves out the cheques written before the loss, so it
+     * is an upper bound for good, though ant no longer says so.
+     */
+    val ledgerConfirmed: Boolean = false,
 )
+
+/**
+ * [this] with the record of confirmed lost ledgers ([confirmed], lowercase
+ * addresses) applied: after a confirmation ant drops `chequeLedgerLost`
+ * and `availableBalanceError` and counts only the cheques written since,
+ * so for that chequebook the spendable credit stays an upper bound.
+ */
+internal fun ChequebookState.withConfirmedLedgers(confirmed: Set<String>): ChequebookState {
+    val chequebook = address?.lowercase()
+    if (chequebook.isNullOrEmpty() || ledgerLost || chequebook !in confirmed) return this
+    return copy(availableUpperBound = true, ledgerConfirmed = true)
+}
 
 /** What a `/chequebook/balance` body says, beyond [chequebookBalanceFrom]'s total. */
 internal data class ChequebookFunds(
@@ -125,7 +143,11 @@ internal enum class FreeTierReason { NotSupported, SwitchedOff, NoChequebook, Le
 /** Whether downloads (and uploads) pay peers from the chequebook now. */
 internal sealed interface CreditStatus {
     data object Checking : CreditStatus
-    data class Paying(val low: Boolean) : CreditStatus
+    /**
+     * [low]: the credit is surely below [LOW_CREDIT_PLUR]. [uncertain]: the
+     * figure is only an upper bound, so what is left may be less still.
+     */
+    data class Paying(val low: Boolean, val uncertain: Boolean = false) : CreditStatus
     data class FreeTier(val reason: FreeTierReason) : CreditStatus
 }
 
@@ -133,7 +155,8 @@ internal sealed interface CreditStatus {
  * Paying peers or free tier, and why, from ant's own `paying` and the
  * chequebook's figures. Used-up credit reads as free tier whatever the
  * node's last funds read says (desktop does the same): it can't pay
- * another cheque.
+ * another cheque. An upper-bound figure under a threshold is surely under
+ * it; one above it only may be, which [CreditStatus.Paying.uncertain] says.
  */
 internal fun creditStatus(swap: SwapStatus?, state: ChequebookState): CreditStatus {
     val available = state.availablePlur
@@ -144,7 +167,10 @@ internal fun creditStatus(swap: SwapStatus?, state: ChequebookState): CreditStat
         state.address == "" -> CreditStatus.FreeTier(FreeTierReason.NoChequebook)
         state.ledgerLost -> CreditStatus.FreeTier(FreeTierReason.LedgerLost)
         available != null && available < MIN_CHEQUE_PLUR -> CreditStatus.FreeTier(FreeTierReason.NoCredit)
-        swap.paying -> CreditStatus.Paying(low = available != null && available < LOW_CREDIT_PLUR)
+        swap.paying -> CreditStatus.Paying(
+            low = available != null && available < LOW_CREDIT_PLUR,
+            uncertain = state.availableUpperBound,
+        )
         else -> CreditStatus.FreeTier(FreeTierReason.NotSetUp)
     }
 }

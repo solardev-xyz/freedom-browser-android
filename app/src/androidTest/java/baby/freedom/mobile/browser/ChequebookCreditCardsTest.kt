@@ -10,9 +10,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -74,12 +80,28 @@ class ChequebookCreditCardsTest {
             "lost", funded.copy(availablePlur = xbzz("0.011"), availableUpperBound = true, ledgerLost = true),
             swap(enabled = true, paying = false), true, "Free tier: the payment record was lost. See below.",
         ),
+        // Confirmed since: ant reports an exact-looking figure that leaves
+        // out the pre-loss cheques, so the page keeps it an upper bound.
+        Case(
+            "confirmed", funded.copy(availablePlur = xbzz("0.011")).withConfirmedLedgers(setOf(chequebook)),
+            swap(enabled = true, paying = true), true, "Paying peers",
+        ),
     )
 
     private val shots = InstrumentationRegistry.getArguments().getString("chequebookShots") == "true"
 
-    private fun render(case: Case, dark: Boolean, onSwap: (Boolean) -> Unit = {}, onLost: (String) -> Unit = {}) {
+    private fun render(
+        case: Case,
+        dark: Boolean,
+        onSwap: (Boolean) -> Unit = {},
+        onLost: (String) -> Unit = {},
+        fontScale: Float? = null,
+    ) {
         rule.setContent {
+            val density = LocalDensity.current
+            CompositionLocalProvider(
+                LocalDensity provides Density(density.density, fontScale ?: density.fontScale),
+            ) {
             FreedomTheme(darkTheme = dark) {
                 // As the page's scaffold does: the theme's content colour.
                 Surface(color = MaterialTheme.colorScheme.background) {
@@ -103,6 +125,7 @@ class ChequebookCreditCardsTest {
                     }
                 }
                 }
+            }
             }
         }
     }
@@ -138,6 +161,36 @@ class ChequebookCreditCardsTest {
     @Test fun offDark() = showsState(cases[2], dark = true)
     @Test fun lostLight() = showsState(cases[3], dark = false)
     @Test fun lostDark() = showsState(cases[3], dark = true)
+
+    @Test fun confirmedLight() = showsState(cases[4], dark = false)
+
+    @Test
+    fun aConfirmedLostLedgerStillReadsAsAnUpperBound() {
+        render(cases[4], dark = false)
+        rule.onNodeWithText("At most 0.011 xBZZ").assertExists()
+        rule.onNodeWithText("you confirmed it", substring = true).assertExists()
+        rule.onNodeWithText("may run out sooner", substring = true).assertExists()
+        rule.onNodeWithText("Payment record lost").assertDoesNotExist()
+    }
+
+    /** At 200% font the credit figures move under their labels whole, never broken mid-number. */
+    private fun keepsNumbersWholeAtDoubleFont(case: Case, value: String) {
+        render(case, dark = false, fontScale = 2f)
+        val result = mutableListOf<TextLayoutResult>()
+        rule.onNodeWithText(value).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(result) }
+        val layout = result.single()
+        // No word (the figure, its unit) is split across lines.
+        for (w in Regex("\\S+").findAll(value)) {
+            assertEquals(
+                "'${w.value}' of '$value' stays on one line",
+                layout.getLineForOffset(w.range.first), layout.getLineForOffset(w.range.last),
+            )
+        }
+        save("${case.name}-font2")
+    }
+
+    @Test fun emptyAtDoubleFont() = keepsNumbersWholeAtDoubleFont(cases[1], "< 0.000001 xBZZ")
+    @Test fun confirmedAtDoubleFont() = keepsNumbersWholeAtDoubleFont(cases[4], "At most 0.011 xBZZ")
 
     @Test
     fun theSwitchAsksForTheOtherValue() {

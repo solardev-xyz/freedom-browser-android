@@ -232,6 +232,40 @@ class ChequebookTest {
     }
 
     @Test
+    fun `a confirmed lost ledger keeps the credit an upper bound, though ant stops saying so`() {
+        // After a confirmation ant drops chequeLedgerLost and availableBalanceError.
+        val after = chequebookFundsFrom("""{"totalBalance":"110000000000000","availableBalance":"100000000000000"}""")!!
+        assertFalse(after.availableUpperBound)
+        val read = funded.copy(availablePlur = after.availablePlur, availableUpperBound = false)
+        // Not confirmed here (or another chequebook): the figure stays exact.
+        assertEquals(read, read.withConfirmedLedgers(emptySet()))
+        assertEquals(read, read.withConfirmedLedgers(setOf("0x" + "11".repeat(20))))
+        // Confirmed (matched case-insensitively): an upper bound for good.
+        val confirmed = read.withConfirmedLedgers(setOf(chequebook.lowercase()))
+        assertTrue(confirmed.availableUpperBound)
+        assertTrue(confirmed.ledgerConfirmed)
+        assertEquals(read.availablePlur, confirmed.availablePlur)
+        val upper = read.copy(address = chequebook.uppercase().replace("0X", "0x")).withConfirmedLedgers(setOf(chequebook))
+        assertTrue(upper.ledgerConfirmed)
+        // Still lost (a second loss): the lost card is what shows, not this.
+        assertFalse(read.copy(ledgerLost = true).withConfirmedLedgers(setOf(chequebook)).ledgerConfirmed)
+        // No chequebook / not read yet: nothing to apply.
+        assertEquals(ChequebookState(address = ""), ChequebookState(address = "").withConfirmedLedgers(setOf(chequebook)))
+        assertEquals(ChequebookState(), ChequebookState().withConfirmedLedgers(setOf(chequebook)))
+        // Paying with an upper-bound figure says it may be less; under the
+        // thresholds it is surely under them.
+        assertEquals(CreditStatus.Paying(low = false, uncertain = true), creditStatus(swap(paying = true), confirmed))
+        assertEquals(
+            CreditStatus.Paying(low = true, uncertain = true),
+            creditStatus(swap(paying = true), confirmed.copy(availablePlur = BigInteger("4000000000000"))),
+        )
+        assertEquals(
+            FreeTierReason.NoCredit,
+            (creditStatus(swap(paying = true), confirmed.copy(availablePlur = BigInteger.ZERO)) as CreditStatus.FreeTier).reason,
+        )
+    }
+
+    @Test
     fun `free tier says why`() {
         fun why(s: SwapStatus?, st: ChequebookState = funded) = (creditStatus(s, st) as CreditStatus.FreeTier).reason
         assertEquals(FreeTierReason.NotSupported, why(swap(supported = false, paying = true)))
@@ -248,6 +282,11 @@ class ChequebookTest {
             creditStatusText(CreditStatus.FreeTier(FreeTierReason.SwitchedOff)),
         )
         assertTrue(creditStatusText(CreditStatus.FreeTier(FreeTierReason.NoCredit)).contains("used up"))
+        // Not set up covers a chequebook ant's chain check turned down too:
+        // no promise it pays within a minute.
+        val notSetUp = creditStatusText(CreditStatus.FreeTier(FreeTierReason.NotSetUp))
+        assertTrue(notSetUp.contains("usually"))
+        assertTrue(notSetUp.contains("couldn't verify the chequebook"))
     }
 
     @Test
@@ -264,6 +303,8 @@ class ChequebookTest {
     fun `a lost ledger's confirmation says how it went`() {
         assertTrue(liabilityOutcomeText(StampClient.Answer.Ok(JSONObject().put("confirmed", true))).startsWith("Confirmed"))
         assertTrue(liabilityOutcomeText(StampClient.Answer.Ok(JSONObject().put("confirmed", false))).startsWith("Nothing to confirm"))
+        // ant's 1 is "no loss on record": it says nothing about paying (the switch may be off).
+        assertFalse(liabilityOutcomeText(StampClient.Answer.Ok(JSONObject().put("confirmed", false))).contains("pays"))
         assertEquals("Couldn't confirm: boom", liabilityOutcomeText(StampClient.Answer.Failed("boom")))
     }
 
