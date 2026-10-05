@@ -114,6 +114,9 @@ sealed class DownloadEvent {
     data class Failed(override val id: Long, override val fileName: String, val reason: String) : DownloadEvent()
 }
 
+/** A `data:` download up to this long has its size told on the UI thread ([DownloadManager.start]); about a millisecond's scan. */
+private const val DATA_URI_INLINE_SCAN_CHARS = 1_000_000
+
 /**
  * The browser's download manager (#79).
  *
@@ -133,7 +136,11 @@ sealed class DownloadEvent {
  *   logged-in / session-gated downloads work. The only Referer is the
  *   page's bare origin, and only to that same origin
  *   ([downloadReferer]).
- * - **`data:`**: decoded in-process.
+ * - **`data:`**: decoded in-process, as it's written ([openDataUri]).
+ * - **`blob:`**: read inside the frame that made it, a chunk at a time,
+ *   through the tab's [BlobDownloads] channel. Such a row keeps no source
+ *   URL — nothing can read the blob once its page is gone — so it can't
+ *   be paused or retried.
  *
  * Bytes stream into a partial file in the app's own storage
  * (`no_backup/downloads/<id>.part`, #265), and only a complete file is
@@ -329,7 +336,7 @@ class DownloadManager private constructor(context: Context) {
      * until the user accepts it — unless the tab is blocked (see
      * [DownloadOffers]), when it's dropped unasked.
      */
-    fun start(
+    internal fun start(
         tabId: Long,
         private: Boolean = false,
         url: String,
@@ -338,8 +345,19 @@ class DownloadManager private constructor(context: Context) {
         mimeType: String?,
         contentLength: Long,
         pageUrl: String?,
+        /**
+         * A `blob:` download's file, as the page that holds it described
+         * it ([BlobDownloads.prepare]) — its name, type and size stand in
+         * for what `DownloadListener` said (which for a blob is nothing
+         * but its type). Released if the offer is declined or dropped.
+         */
+        blob: BlobSource? = null,
     ) {
         val target = classifyDownloadUrl(url, Gateways::isLocalGateway, Gateways::toDisplay)
+        @Suppress("NAME_SHADOWING")
+        val contentDisposition = blob?.let { blobContentDisposition(it.name) } ?: contentDisposition
+        @Suppress("NAME_SHADOWING")
+        val mimeType = if (blob != null) blobMimeType(blob.mimeType, blob.name, ::mimeForExtension) else mimeType
         val name = downloadFileName(contentDisposition, url, normalizeMime(mimeType), ::extensionForMime)
         val refererOrigin = downloadRefererOrigin(pageUrl)
         // Who asked, as the prompt names them. A page with no usable
@@ -349,13 +367,32 @@ class DownloadManager private constructor(context: Context) {
         // A private offer belongs to the session live when it was made:
         // accepted after that session ended, it's dropped ([enqueue]).
         val session = if (private) privateSession() else null
-        val queued = offerQueue.offer(
-            tabId, requestedBy, name, target.displayUrl, contentLength.coerceAtLeast(-1), private,
-            mimeType = saveAsMimeType(normalizeMime(mimeType)),
-        ) { saveTo ->
-            enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, session, saveTo)
+        fun offer(contentLength: Long) {
+            val queued = offerQueue.offer(
+                tabId, requestedBy, name, target.displayUrl, contentLength.coerceAtLeast(-1), private,
+                mimeType = saveAsMimeType(normalizeMime(mimeType)),
+                discard = { blob?.release() },
+            ) { saveTo ->
+                enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, session, saveTo, blob)
+            }
+            if (!queued) blob?.release()
+            if (!queued) Log.i(LOG_TAG, "download offer from tab $tabId dropped (tab blocked or closed, or $MAX_PENDING_OFFERS waiting)")
         }
-        if (!queued) Log.i(LOG_TAG, "download offer from tab $tabId dropped (tab blocked or $MAX_PENDING_OFFERS waiting)")
+        when {
+            blob != null -> offer(if (blob.failure == null) blob.size else contentLength)
+            // WebView says 0 for every data: URI; its payload tells. A
+            // short one is told at once; a long one can be tens of
+            // millions of characters to scan, so not on the UI thread.
+            target is DownloadTarget.Data && contentLength <= 0 && url.length <= DATA_URI_INLINE_SCAN_CHARS ->
+                offer(openDataUri(url)?.length ?: -1)
+            target is DownloadTarget.Data && contentLength <= 0 ->
+                scope.launch(Dispatchers.Default) {
+                    // Unwatched: a failure to tell only costs the size.
+                    val length = try { openDataUri(url)?.length } catch (_: Throwable) { null }
+                    offer(length ?: -1)
+                }
+            else -> offer(contentLength)
+        }
     }
 
     /**
@@ -427,8 +464,14 @@ class DownloadManager private constructor(context: Context) {
         session: PrivateSession?,
         /** The document picked to save it as (#322); never for a private download. */
         saveTo: PickedDocument? = null,
+        /** A `blob:` download's file, held by its page ([start]). */
+        blob: BlobSource? = null,
     ) {
-        val target = classifyDownloadUrl(url, Gateways::isLocalGateway, Gateways::toDisplay)
+        val target = if (blob != null) {
+            DownloadTarget.Blob(url, blob)
+        } else {
+            classifyDownloadUrl(url, Gateways::isLocalGateway, Gateways::toDisplay)
+        }
         val guessedMime = normalizeMime(mimeType)
         scope.launch {
             staleSweep.join()
@@ -447,8 +490,10 @@ class DownloadManager private constructor(context: Context) {
                     displayUrl = target.displayUrl,
                     // A data: URI *is* the file — possibly megabytes — and
                     // doesn't belong in a history row (Room's cursor window
-                    // is 2 MB). Blank means "can't be retried".
-                    sourceUrl = if (target is DownloadTarget.Data) "" else url,
+                    // is 2 MB). A blob: URL means nothing once its page is
+                    // gone (and nothing can read it but that page). Blank
+                    // means "can't be retried" (and can't be paused).
+                    sourceUrl = if (target is DownloadTarget.Data || target is DownloadTarget.Blob) "" else url,
                     mimeType = guessedMime ?: "application/octet-stream",
                     contentUri = null,
                     status = DownloadStatus.RUNNING,
@@ -471,14 +516,17 @@ class DownloadManager private constructor(context: Context) {
                 val id = if (session != null) {
                     privateRows.withLock {
                         // Its session ended meanwhile: nothing to list it in.
-                        val id = privateSessions.allocate(session.generation) ?: return@launch
+                        val id = privateSessions.allocate(session.generation) ?: run {
+                            blob?.release()
+                            return@launch
+                        }
                         memoryDao.insert(row.copy(id = id))
                     }
                 } else {
                     dao.insert(row)
                 }
                 _events.tryEmit(DownloadEvent.Started(id, initialName))
-                launchJob(id, resuming = false) {
+                launchJob(id, resuming = false, abandoned = { blob?.release() }) {
                     run(id, target, userAgent, contentDisposition, refererOrigin, cookies, resuming = false)
                 }
             }
@@ -489,9 +537,17 @@ class DownloadManager private constructor(context: Context) {
      * Start [id]'s (RUNNING) row's job [block]. Called under
      * [transitions]. A stop that got there first — possible only before
      * a new row's insert is seen, as the Cancel button appears with it —
-     * leaves the row the way run() would have.
+     * leaves the row the way run() would have — and, as run()'s own
+     * `finally` would, lets go of what it was to read ([abandoned]: a
+     * `blob:` download's file, which its page would otherwise go on
+     * holding until its own timer runs out).
      */
-    private suspend fun launchJob(id: Long, resuming: Boolean, block: suspend () -> Unit) {
+    private suspend fun launchJob(
+        id: Long,
+        resuming: Boolean,
+        abandoned: () -> Unit = {},
+        block: suspend () -> Unit,
+    ) {
         val job = scope.launch(start = CoroutineStart.LAZY) { block() }
         if (cancellation.register(id, job)) {
             job.start()
@@ -499,6 +555,7 @@ class DownloadManager private constructor(context: Context) {
         }
         val stop = cancellation.stopOf(id)
         job.cancel()
+        abandoned()
         val row = daoFor(id).get(id) ?: return
         if (stop != DownloadStop.PAUSE) endSaveTo(row, discard = true)
         daoFor(id).update(
@@ -978,6 +1035,8 @@ class DownloadManager private constructor(context: Context) {
             if (reason != null) _events.tryEmit(DownloadEvent.Failed(id, entry.fileName, reason))
             if (t is CancellationException) throw t
         } finally {
+            // Read or not, the page can let go of a blob: download's file.
+            (target as? DownloadTarget.Blob)?.source?.release()
             if (!settled) {
                 cancellation.release(id, job)
                 _progress.update { it - id }
@@ -1188,6 +1247,22 @@ class DownloadManager private constructor(context: Context) {
         }
     }
 
+    /**
+     * [src], with an [IOException] it throws while being read turned into
+     * the one [map] makes of it — a malformed `data:` body or a page that
+     * stopped handing over its `blob:` file fails with its own reason, not
+     * as a lost connection.
+     */
+    private class FailureMappingStream(
+        src: InputStream,
+        private val map: (IOException) -> IOException,
+    ) : java.io.FilterInputStream(src) {
+        override fun read(): Int = try { super.read() } catch (e: IOException) { throw remap(e) }
+        override fun read(b: ByteArray, off: Int, len: Int): Int =
+            try { super.read(b, off, len) } catch (e: IOException) { throw remap(e) }
+        private fun remap(e: IOException) = if (e is DownloadFailure) e else map(e)
+    }
+
     /** A response body plus what it says about itself. */
     private class Body(
         val stream: InputStream,
@@ -1244,13 +1319,34 @@ class DownloadManager private constructor(context: Context) {
         rangeHeaders: Map<String, String>,
     ): Body = when (target) {
         is DownloadTarget.Data -> {
-            val payload = parseDataUri(target.uri) ?: throw DownloadFailure(DownloadNote.of(R.string.library_download_malformed_data_uri))
+            // Decoded as it's written: a page's data: URI can be tens of MB.
+            val body = openDataUri(target.uri) ?: throw DownloadFailure(DownloadNote.of(R.string.library_download_malformed_data_uri))
             Body(
-                stream = payload.bytes.inputStream(),
-                length = payload.bytes.size.toLong(),
-                mimeType = normalizeMime(payload.mimeType),
+                stream = FailureMappingStream(body.stream) { DownloadFailure(DownloadNote.of(R.string.library_download_malformed_data_uri)) },
+                length = body.length,
+                mimeType = normalizeMime(body.mimeType),
                 contentDisposition = contentDisposition,
                 nameUrl = target.uri,
+            )
+        }
+        is DownloadTarget.Blob -> {
+            // Read inside the page that made it ([BlobDownloads]); with no
+            // page's answer (the row of a dead process) there's nothing to read.
+            val source = target.source ?: throw DownloadFailure(DownloadNote.of(R.string.library_download_blob_page_closed))
+            source.failure?.let { throw DownloadFailure(it) }
+            val stream = try {
+                source.open()
+            } catch (e: BlobReadException) {
+                throw DownloadFailure(e.note)
+            }
+            Body(
+                stream = FailureMappingStream(stream) { e ->
+                    if (e is BlobReadException) DownloadFailure(e.note) else e
+                },
+                length = source.size,
+                mimeType = blobMimeType(source.mimeType, source.name, ::mimeForExtension),
+                contentDisposition = blobContentDisposition(source.name) ?: contentDisposition,
+                nameUrl = target.url,
             )
         }
         is DownloadTarget.Dweb -> {
@@ -1588,6 +1684,9 @@ private fun normalizeMime(raw: String?): String? =
 
 private fun extensionForMime(mime: String): String? =
     MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
+
+private fun mimeForExtension(ext: String): String? =
+    MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
 
 /** What [DownloadManager.open] found behind a completed row's URI. */
 internal enum class DownloadFileState {

@@ -2622,6 +2622,10 @@ private fun buildRefreshableWebView(
         // denies every real request and pointer-lock-gated games never start.
         PointerLock.install(this)
 
+        // `blob:` downloads: read inside the frame that made the file
+        // (see [BlobDownloads]).
+        val blobDownloads = BlobDownloads.install(this)
+
         // `window.radicle` (#124): the provider's page object and channel.
         RadicleProviders.install(this, state)
 
@@ -2840,22 +2844,34 @@ private fun buildRefreshableWebView(
                 // hooks; it is the address itself.
                 downloadIsNavigationResponse = wasPending || url == state.addressBarText,
             )
-            DownloadManager.get(context).start(
-                tabId = state.id,
-                private = state.private,
-                url = url,
-                userAgent = userAgent,
-                contentDisposition = contentDisposition,
-                mimeType = mimeType,
-                contentLength = contentLength,
-                // An address the user submitted has no referrer — the
-                // page on screen had nothing to do with it. Anything else
-                // a page asked for, even with no URL to show ("" — the
-                // prompt then says "a page"): null would pass it off as
-                // the user's own request, which a declined tab still
-                // lets through.
-                pageUrl = if (endsTypedNavigation) null else (this.url ?: ""),
-            )
+            // An address the user submitted has no referrer — the page on
+            // screen had nothing to do with it. Anything else a page asked
+            // for, even with no URL to show ("" — the prompt then says "a
+            // page"): null would pass it off as the user's own request,
+            // which a declined tab still lets through.
+            val pageUrl = if (endsTypedNavigation) null else (this.url ?: "")
+            val offer = { blob: BlobSource? ->
+                DownloadManager.get(context).start(
+                    tabId = state.id,
+                    private = state.private,
+                    url = url,
+                    userAgent = userAgent,
+                    contentDisposition = contentDisposition,
+                    mimeType = mimeType,
+                    contentLength = contentLength,
+                    pageUrl = pageUrl,
+                    blob = blob,
+                )
+            }
+            if (url.startsWith("blob:", ignoreCase = true)) {
+                // Only the page that made it can read it: have the frame
+                // holding it keep the file (and say what it is) first,
+                // then offer it as usual.
+                blobDownloads?.prepare(url) { offer(it) }
+                    ?: offer(FailedBlob(DownloadNote.of(R.string.library_download_blob_unreachable)))
+            } else {
+                offer(null)
+            }
             if (endsTypedNavigation) {
                 state.stopProgress()
                 state.addressBarText = state.url
@@ -2936,6 +2952,10 @@ private fun buildRefreshableWebView(
                 failedLoad = null
                 pendingCertErrors.clear()
                 certRefusal.committed(url)
+                // The page that held a blob: download's file is gone, and
+                // its file with it: such a download fails now, not after
+                // a chunk times out.
+                blobDownloads?.documentChanged()
                 // Whether this document is one of our error pages (the
                 // menu's Add to Home screen and Desktop site read it):
                 // `state.url` will hold the address that failed, so the

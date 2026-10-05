@@ -57,8 +57,60 @@ class DownloadRequestTest {
             },
         )
         assertTrue(classifyDownloadUrl("data:text/plain,hi") is DownloadTarget.Data)
-        val blob = classifyDownloadUrl("blob:https://example.com/uuid")
-        assertEquals("blob", (blob as DownloadTarget.Unsupported).scheme)
+        val blob = classifyDownloadUrl("blob:https://example.com/uuid") as DownloadTarget.Blob
+        assertEquals("blob:https://example.com/uuid", blob.displayUrl)
+        assertNull(blob.source)
+        assertTrue(classifyDownloadUrl("BLOB:https://example.com/uuid") is DownloadTarget.Blob)
+        assertTrue(classifyDownloadUrl("file:///sdcard/a.txt") is DownloadTarget.Unsupported)
+    }
+
+    @Test
+    fun `a blob's origin is the url inside it, default port dropped`() {
+        assertEquals("https://example.com", blobUrlOrigin("blob:https://example.com/9f0c"))
+        assertEquals("http://localhost:8700", blobUrlOrigin("blob:http://localhost:8700/9f0c"))
+        assertEquals("https://example.com", blobUrlOrigin("blob:https://EXAMPLE.com:443/9f0c"))
+        assertEquals(
+            "https://3zlpn20abc.bzz.freedom.baby",
+            blobUrlOrigin("blob:https://3zlpn20abc.bzz.freedom.baby/1b2c-uuid"),
+        )
+        // Opaque (a sandboxed frame's, a data: document's): no frame can be told apart.
+        assertNull(blobUrlOrigin("blob:null/9f0c"))
+        assertNull(blobUrlOrigin("https://example.com/9f0c"))
+        assertNull(blobUrlOrigin("blob:file:///x"))
+    }
+
+    @Test
+    fun `a blob is named by its download attribute, else download plus its type's extension`() {
+        val url = "blob:https://example.com/3f2a1b6c-0d1e-4f00-9a7b-1c2d3e4f5a6b"
+        assertEquals("download.txt", downloadFileName(null, url, "text/plain", ext::get))
+        assertEquals("export.json", downloadFileName(blobContentDisposition("export.json"), url, "application/json", ext::get))
+        // Any character the page used survives the header round trip — and is then sanitized.
+        assertEquals("a+b c;ü.txt", downloadFileName(blobContentDisposition("a+b c;ü.txt"), url, null))
+        assertEquals("passwd", downloadFileName(blobContentDisposition("../../etc/passwd"), url, null))
+        assertNull(blobContentDisposition(""))
+        assertNull(blobContentDisposition(null))
+    }
+
+    @Test
+    fun `an untyped blob is saved by its name's type, never DownloadListener's text plain`() {
+        val types = mapOf("zip" to "application/zip", "json" to "application/json")
+        // The blob's own type wins.
+        assertEquals("image/png", blobMimeType("image/png", "export.zip", types::get))
+        assertEquals("text/csv", blobMimeType("Text/CSV; charset=utf-8", null, types::get))
+        // An untyped blob (new Blob([bytes])): its download name's extension.
+        assertEquals("application/zip", blobMimeType(null, "export.zip", types::get))
+        assertEquals("application/zip", blobMimeType("", "EXPORT.ZIP", types::get))
+        // Nothing to go by: octet-stream, which MediaStore adds no extension to.
+        assertEquals("application/octet-stream", blobMimeType(null, "big100.bin", types::get))
+        assertEquals("application/octet-stream", blobMimeType(null, null, types::get))
+        assertEquals("application/octet-stream", blobMimeType(null, "README", types::get))
+        assertEquals("application/octet-stream", blobMimeType("garbage", "x.", types::get))
+        // The name an untyped blob's prompt shows is the one saved.
+        val url = "blob:https://example.com/0f2b8c2e-1111-2222-3333-444455556666"
+        assertEquals(
+            "export.zip",
+            downloadFileName(blobContentDisposition("export.zip"), url, blobMimeType(null, "export.zip", types::get)) { null },
+        )
     }
 
     @Test
@@ -94,6 +146,47 @@ class DownloadRequestTest {
 
         // Percent-encoded base64 ('=' as %3D) still decodes.
         assertEquals("hi", String(parseDataUri("data:;base64,aGk%3D")!!.bytes))
+    }
+
+    @Test
+    fun `a data uri streams to the same bytes it decodes to whole`() {
+        val bytes = ByteArray(300_000) { (it * 31 + (it shr 10)).toByte() }
+        val b64 = java.util.Base64.getEncoder().encodeToString(bytes)
+        for (uri in listOf(
+            "data:application/octet-stream;base64,$b64",
+            "data:application/octet-stream;base64," + b64.trimEnd('='),
+            "data:application/octet-stream;base64," + b64.chunked(76).joinToString("\r\n"),
+            "data:application/octet-stream;base64," + b64.replace('+', '-').replace('/', '_'),
+            "data:application/octet-stream;base64," + b64.replace("+", "%2B").replace("/", "%2F").replace("=", "%3D"),
+        )) {
+            val body = openDataUri(uri)!!
+            assertArrayEquals(bytes, body.stream.use { it.readBytes() })
+        }
+    }
+
+    @Test
+    fun `a data uri's decoded length is told up front when its payload is plain`() {
+        val b64 = java.util.Base64.getEncoder()
+        for (n in 0..7) {
+            val enc = b64.encodeToString(ByteArray(n))
+            assertEquals(n.toLong(), openDataUri("data:;base64,$enc")!!.length)
+            assertEquals(n.toLong(), openDataUri("data:;base64," + enc.trimEnd('='))!!.length)
+        }
+        assertEquals(-1L, openDataUri("data:;base64,aGk%3D")!!.length)
+        assertEquals(-1L, openDataUri("data:;base64,aG k=")!!.length)
+        assertEquals(5L, openDataUri("data:text/plain,héllo".replace("é", "e"))!!.length)
+        assertEquals(6L, openDataUri("data:text/plain,héllo")!!.length)
+        assertEquals(-1L, openDataUri("data:text/plain,a%2Cb")!!.length)
+    }
+
+    @Test
+    fun `a malformed data body fails as it is read`() {
+        val body = openDataUri("data:;base64,aGk@@@@")!!
+        try {
+            body.stream.readBytes()
+            org.junit.Assert.fail("bad base64 read without an error")
+        } catch (_: java.io.IOException) {
+        }
     }
 
     @Test
