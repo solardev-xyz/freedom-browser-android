@@ -632,8 +632,9 @@ class TabsStoreTest {
         withTimeout(5_000) { session.ready.await() }
         val mark = File(dir, TabsStore.RESTORE_MARK)
         withTimeout(5_000) { while (!mark.exists()) kotlinx.coroutines.delay(10) }
-        // The app was cold-started from a link: it opens in a new tab,
-        // and the restored one behind it never loads (R4-M3).
+        // The app was cold-started from a link: it opens in a new tab
+        // (R4-M3). The restored one behind it is left pending here,
+        // which is the instant before the WebView host starts its load.
         session.tabs.newTab().apply {
             url = "https://link.example/"
             addressBarText = url
