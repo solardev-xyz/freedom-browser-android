@@ -582,7 +582,12 @@ class TorRoutingTest {
         }
         val realResolve = TorRouting.resolve
         val realProxies = TorRouting.proxiesFor
-        TorRouting.resolve = { host -> events += "lookup $host"; realResolve(host) }
+        // localhost pinned to 127.0.0.1: a dual-stack host (the CI runner)
+        // also resolves it to ::1, which would make every route count 2.
+        TorRouting.resolve = { host ->
+            events += "lookup $host"
+            if (host == "localhost") arrayOf(java.net.InetAddress.getByName("127.0.0.1")) else realResolve(host)
+        }
         fun fetch(url: String) {
             events.clear()
             TorRouting.openFollowingRedirects(URL(url), hops = watcher) { connectTimeout = 2_000; readTimeout = 2_000 }
