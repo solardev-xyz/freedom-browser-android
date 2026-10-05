@@ -99,7 +99,7 @@
     <string name="settings_adblock_allowlist_empty">Sites you allow ads on — from the page menu, or with Add site — appear here. Blocking is off for them and their subdomains.</string>
     <string name="settings_adblock_add_site">Add site</string>
     <string name="settings_adblock_add_site_subtitle">Turn ad blocking off for a site</string>
-    <string name="settings_adblock_credits">Filter lists: EasyList, EasyPrivacy and Fanboy\'s lists (easylist.to), © their authors, used under CC BY-SA 3.0; uBlock Origin\'s filters and scriptlets (github.com/uBlockOrigin), © Raymond Hill and contributors, used under GPL-3.0. Changes apply to pages as they next load.</string>
+    <string name="settings_adblock_credits">Filter lists: EasyList, EasyList Germany, EasyPrivacy and Fanboy\'s lists (easylist.to), © their authors, used under CC BY-SA 3.0; uBlock Origin\'s filters and scriptlets (github.com/uBlockOrigin), © Raymond Hill and contributors, used under GPL-3.0. Changes apply to pages as they next load.</string>
     <!-- Under an enabled ad-blocking category: its lists' rules the engine runs (%1$s), of those scriptlets (%2$s), and the rules it can't run (%3$s). Numbers are formatted. -->
     <string name="settings_adblock_category_counts">%1$s rules in use, %2$s of them scriptlets · %3$s can\'t run here</string>
     <!-- The same, for lists with no scriptlet rules. -->
@@ -284,6 +284,7 @@
 
     <!-- Adblock.kt: filter-list categories -->
     <string name="settings_adblock_block_ads">Block ads</string>
+    <string name="settings_adblock_block_german">Block ads on German-language sites</string>
     <string name="settings_adblock_block_trackers">Block trackers</string>
     <string name="settings_adblock_block_cookie_notices">Block cookie notices</string>
     <string name="settings_adblock_block_annoyances">Block other annoyances</string>

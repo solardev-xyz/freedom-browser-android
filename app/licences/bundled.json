@@ -211,13 +211,13 @@
       "texts": ["bundled/ts-pattern.txt"]
     },
     {
-      "name": "EasyList, EasyPrivacy, Fanboy's Cookiemonster and Fanboy's Annoyance List",
+      "name": "EasyList, EasyList Germany, EasyPrivacy, Fanboy's Cookiemonster and Fanboy's Annoyance List",
       "version": "",
       "section": "data",
       "licence": "GPL-3.0-or-later OR CC-BY-SA-3.0 (redistributed under CC-BY-SA-3.0)",
       "url": "https://easylist.to/",
       "notice": "The filter lists are © The EasyList authors (https://easylist.to/), dual-licensed under the GNU General Public License v3 or later and the Creative Commons Attribution-ShareAlike 3.0 Unported licence (or later). Freedom redistributes them, unmodified, under CC BY-SA 3.0. The copies built into the app are assets/adblock/*.txt.",
-      "files": ["adblock/easylist.txt", "adblock/easyprivacy.txt", "adblock/fanboy-annoyance.txt", "adblock/fanboy-cookiemonster.txt"],
+      "files": ["adblock/easylist.txt", "adblock/easylistgermany.txt", "adblock/easyprivacy.txt", "adblock/fanboy-annoyance.txt", "adblock/fanboy-cookiemonster.txt"],
       "texts": ["texts/CC-BY-SA-3.0.txt"]
     },
     {

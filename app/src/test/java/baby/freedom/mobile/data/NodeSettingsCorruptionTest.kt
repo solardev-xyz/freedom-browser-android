@@ -3,6 +3,12 @@ package baby.freedom.mobile.data
 import androidx.datastore.core.CorruptionException
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import baby.freedom.mobile.browser.AdblockCategory
+import baby.freedom.mobile.browser.AdblockLocaleDefaults
+import java.util.Locale
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
+import org.junit.Assert.assertFalse
 import baby.freedom.mobile.data.NodeSettingsEnsRpcTest.MemoryStore
 import java.io.File
 import java.nio.file.Files
@@ -69,6 +75,27 @@ class NodeSettingsCorruptionTest {
         assertEquals(emptyList<String>(), settings.adblockAllowlist.first())
         assertEquals(true, settings.adblockAutoUpdate.first())
         assertEquals(true, settings.checkForUpdates.first())
+    }
+
+    /** #405 R1-M3: a language change while the app runs re-emits the categories the engine and Settings collect. */
+    @Test
+    fun `a language change re-emits the ad-blocking categories`() = runBlocking {
+        val settings = NodeSettings.forTesting(
+            MemoryStore(),
+            ChainStore(MemoryStore()),
+            RpcKeyStore(MemoryStore(), AesGcmCipher { aes }),
+        )
+        try {
+            AdblockLocaleDefaults.refresh(listOf(Locale.GERMANY))
+            val seen = Channel<Set<AdblockCategory>>(Channel.UNLIMITED)
+            val job = scope.launch { settings.adblockCategories.collect { seen.send(it) } }
+            assertTrue(AdblockCategory.GERMAN in withTimeout(5_000) { seen.receive() })
+            AdblockLocaleDefaults.refresh(listOf(Locale.US))
+            assertFalse(AdblockCategory.GERMAN in withTimeout(5_000) { seen.receive() })
+            job.cancel()
+        } finally {
+            AdblockLocaleDefaults.refresh()
+        }
     }
 
     @Test

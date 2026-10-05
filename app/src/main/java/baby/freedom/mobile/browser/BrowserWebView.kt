@@ -3804,15 +3804,13 @@ private fun buildRefreshableWebView(
                     // its next load (#318). Only a request the document
                     // itself made names it (see [refererNamesDocument]).
                     scriptlets?.noteReferer(request.requestHeaders)
-                    if (url != null &&
-                        Adblock.shouldBlock(
+                    if (url != null) {
+                        Adblock.blockedResponseFor(
                             url,
                             request.requestHeaders,
                             adblockPage.current(refererOf(request.requestHeaders)),
                             state.private,
-                        )
-                    ) {
-                        return Adblock.blockedResponse()
+                        )?.let { return it }
                     }
                     // A frame's document: its scriptlets in place before
                     // its answer can arrive (#318).
