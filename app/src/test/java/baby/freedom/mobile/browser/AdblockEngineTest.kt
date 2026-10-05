@@ -256,6 +256,33 @@ class AdblockEngineTest {
         assertEquals(".ok{color: red}\n", css(e, "news.example"))
     }
 
+    /**
+     * #405 R1-M1: every rule goes into one sheet, where an unclosed `(`,
+     * `[` or string reads on past its `}` and swallows the rules after it —
+     * so a rule that leaves one open is dropped, and the rest still apply.
+     */
+    @Test
+    fun `a rule with an unclosed bracket or string is dropped, not the rest`() {
+        val e = engine(
+            "news.example##.a:style(width: calc(1px)",
+            "news.example##.b:style(content: \"a)",
+            "news.example##.c:style(width: calc(1px)))",
+            "news.example##.d[href=\"x\"",
+            "news.example##.e:has(> .f",
+            "news.example##.g:style(content: \"a)\")",
+            "news.example##.h[title=\"(\"]",
+            "news.example##.i\\(x",
+            "news.example##.ok",
+        )
+        assertEquals(
+            ".g{content: \"a)\"}\n.h[title=\"(\"]{display:none!important}\n.i\\(x{display:none!important}\n.ok{display:none!important}\n",
+            css(e, "news.example"),
+        )
+        assertTrue(isBalanced("a[b='c]']"))
+        assertFalse(isBalanced("a\\"))
+        assertFalse(isBalanced("a(]"))
+    }
+
     /** #405: cosmetic rules scoped to uBlock entities (`example.*`) apply under any public suffix, `~` entities excepted. */
     @Test
     fun `cosmetic rules scoped to entities apply under any suffix`() {
