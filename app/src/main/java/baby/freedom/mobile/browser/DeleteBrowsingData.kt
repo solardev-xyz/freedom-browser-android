@@ -93,7 +93,27 @@ data class DeleteChoice(
 
     /** The reopen stack keeps closed tabs' pages and back/forward lists — history by another name. */
     val forgetsClosedTabs: Boolean get() = history || siteData
+
+    /**
+     * Delete data asks first. Cookies and site data can't be taken back
+     * and go for all time whatever the range says, so a tap meant for
+     * the last hour's history must not sign the user out of every site
+     * on its own. History in a range and the cache don't ask, as in Chrome.
+     */
+    val needsConfirm: Boolean get() = siteData
 }
+
+/**
+ * The confirmation's message when [DeleteChoice.needsConfirm]: everyone
+ * signed out, every site's storage gone, and — for a bounded range — that
+ * the range doesn't hold them back.
+ */
+internal fun deleteConfirmMessage(choice: DeleteChoice): String =
+    if (choice.range == DeleteRange.AllTime) {
+        Strings.get(R.string.delete_data_confirm_all_time)
+    } else {
+        Strings.get(R.string.delete_data_confirm_ranged, choice.range.label.replaceFirstChar { it.lowercase() })
+    }
 
 /**
  * The line saying a picked range doesn't reach cookies, site data or the
@@ -176,6 +196,7 @@ internal fun DeleteBrowsingDataPage(
 ) {
     BackHandler(onBack = onBack)
     var choice by rememberSaveable(stateSaver = DeleteChoiceSaver) { mutableStateOf(DeleteChoice()) }
+    var confirming by rememberSaveable { mutableStateOf(false) }
     // Fixed while the page is open, so the count doesn't creep as the clock does.
     val now = remember { System.currentTimeMillis() }
     val since = choice.range.since(now)
@@ -242,7 +263,8 @@ internal fun DeleteBrowsingDataPage(
                         onClick = {
                             // The page's own clock reading: the range deletes at least
                             // every visit the count above showed.
-                            deleteBrowsingData(choice, repo, now, onDelete)
+                            if (choice.needsConfirm) confirming = true
+                            else deleteBrowsingData(choice, repo, now, onDelete)
                         },
                         enabled = choice.canDelete,
                         modifier = Modifier.heightIn(min = 48.dp),
@@ -252,6 +274,18 @@ internal fun DeleteBrowsingDataPage(
                 }
             }
         }
+    }
+    if (confirming && choice.canDelete) {
+        ConfirmDialog(
+            title = stringResource(R.string.delete_data_confirm_title),
+            message = deleteConfirmMessage(choice),
+            confirmLabel = stringResource(R.string.delete_data_confirm_button),
+            onConfirm = {
+                confirming = false
+                deleteBrowsingData(choice, repo, now, onDelete)
+            },
+            onDismiss = { confirming = false },
+        )
     }
 }
 

@@ -177,10 +177,10 @@
     <string name="delete_data_range_all">All time</string>
     <string name="delete_data_history">Browsing history</string>
     <plurals name="delete_data_history_count">
-        <item quantity="one">%d visit, plus recently closed tabs</item>
-        <item quantity="other">%d visits, plus recently closed tabs</item>
+        <item quantity="one">%d visit, plus closed tabs and tabs waiting to be restored</item>
+        <item quantity="other">%d visits, plus closed tabs and tabs waiting to be restored</item>
     </plurals>
-    <string name="delete_data_history_none">No visits in this range, plus recently closed tabs</string>
+    <string name="delete_data_history_none">No visits in this range, plus closed tabs and tabs waiting to be restored</string>
     <string name="delete_data_cookies">Cookies and site data</string>
     <string name="delete_data_cookies_subtitle">Signs you out of most sites</string>
     <string name="delete_data_cookies_detail">Also site storage, form autofill, remembered zoom levels, desktop-site choices, open tabs\' back and forward pages and the nodes\' recent logs. Unfinished downloads are cancelled.</string>
@@ -194,6 +194,10 @@
     <string name="delete_data_all_time_history_range">Browsing history keeps to the range.</string>
     <string name="delete_data_all_time_both">Cookies, site data and cached files are deleted for all time: Android\'s WebView can\'t delete them by date.</string>
     <string name="delete_data_button">Delete data</string>
+    <string name="delete_data_confirm_title">Delete cookies and site data?</string>
+    <string name="delete_data_confirm_ranged">This signs you out of every site and deletes every site\'s stored data for all time, not only for the %1$s. It can\'t be undone.</string>
+    <string name="delete_data_confirm_all_time">This signs you out of every site and deletes every site\'s stored data. It can\'t be undone.</string>
+    <string name="delete_data_confirm_button">Delete</string>
     <string name="delete_data_nothing_selected">Pick at least one kind of data to delete.</string>
     <!-- Toast after Delete data: short, as Android cuts a toast at two lines -->
     <string name="delete_data_done">Browsing data deleted</string>

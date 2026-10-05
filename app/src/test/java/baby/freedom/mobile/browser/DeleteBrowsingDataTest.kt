@@ -53,6 +53,30 @@ class DeleteBrowsingDataTest {
     }
 
     @Test
+    fun `cookies and site data always ask first, history and cache alone never do`() {
+        for (range in DeleteRange.entries) for (h in listOf(true, false)) for (c in listOf(true, false)) {
+            assertTrue("$range $h $c", DeleteChoice(range, history = h, siteData = true, cache = c).needsConfirm)
+            assertFalse("$range $h $c", DeleteChoice(range, history = h, siteData = false, cache = c).needsConfirm)
+        }
+        // The defaults (last hour, every box) ask: one tap never signs the user out everywhere.
+        assertTrue(DeleteChoice().needsConfirm)
+    }
+
+    @Test
+    fun `the confirmation says a bounded range doesn't hold site data back`() {
+        assertEquals(
+            "This signs you out of every site and deletes every site's stored data for all time, " +
+                "not only for the last hour. It can't be undone.",
+            deleteConfirmMessage(DeleteChoice(range = DeleteRange.LastHour)),
+        )
+        assertTrue(deleteConfirmMessage(DeleteChoice(range = DeleteRange.Last7Days)).contains("not only for the last 7 days"))
+        assertEquals(
+            "This signs you out of every site and deletes every site's stored data. It can't be undone.",
+            deleteConfirmMessage(DeleteChoice(range = DeleteRange.AllTime)),
+        )
+    }
+
+    @Test
     fun `closed tabs go with history or with site data, not with the cache alone`() {
         assertTrue(DeleteChoice(history = true, siteData = false, cache = false).forgetsClosedTabs)
         assertTrue(DeleteChoice(history = false, siteData = true, cache = false).forgetsClosedTabs)
@@ -96,9 +120,9 @@ class DeleteBrowsingDataTest {
 
     @Test
     fun `history line counts visits in the range`() {
-        assertEquals("1 visit, plus recently closed tabs", historyCountLine(1))
-        assertEquals("42 visits, plus recently closed tabs", historyCountLine(42))
-        assertEquals("No visits in this range, plus recently closed tabs", historyCountLine(0))
+        assertEquals("1 visit, plus closed tabs and tabs waiting to be restored", historyCountLine(1))
+        assertEquals("42 visits, plus closed tabs and tabs waiting to be restored", historyCountLine(42))
+        assertEquals("No visits in this range, plus closed tabs and tabs waiting to be restored", historyCountLine(0))
     }
 
     @Test
