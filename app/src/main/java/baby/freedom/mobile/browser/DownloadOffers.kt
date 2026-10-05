@@ -47,6 +47,12 @@ class DownloadOffer internal constructor(
     val mimeType: String = "application/octet-stream",
     /** Starts the download; with the document the user picked to save it as, if any (#322). */
     internal val start: (saveTo: PickedDocument?) -> Unit,
+    /**
+     * The offer went without starting (declined, its tab blocked or
+     * closed): let go of what it held — a `blob:` file its page keeps
+     * for it ([BlobDownloads]).
+     */
+    internal val discard: () -> Unit = {},
 )
 
 /**
@@ -97,10 +103,11 @@ internal class DownloadOffers {
         totalBytes: Long,
         private: Boolean = false,
         mimeType: String = "application/octet-stream",
+        discard: () -> Unit = {},
         start: (saveTo: PickedDocument?) -> Unit,
     ): Boolean {
         val offer = DownloadOffer(
-            nextKey.getAndIncrement(), tabId, requestedBy, fileName, source, totalBytes, private, mimeType, start,
+            nextKey.getAndIncrement(), tabId, requestedBy, fileName, source, totalBytes, private, mimeType, start, discard,
         )
         synchronized(this) {
             if (requestedBy != null && tabId in blockedTabs) return false
@@ -138,6 +145,7 @@ internal class DownloadOffers {
      */
     fun decline(key: Long) = synchronized(this) {
         val offer = take(key) ?: return@synchronized
+        offer.discard()
         if (offer.requestedBy != null) block(offer.tabId)
         pruneDropped()
     }
@@ -146,6 +154,7 @@ internal class DownloadOffers {
     fun declineAll(tabId: Long) = synchronized(this) {
         val mine = _pending.value.filter { it.tabId == tabId }
         _pending.value = _pending.value - mine.toSet()
+        mine.forEach { it.discard() }
         if (mine.any { it.requestedBy != null }) block(tabId)
         pruneDropped()
     }
@@ -162,12 +171,14 @@ internal class DownloadOffers {
      */
     fun retainTabs(tabIds: Set<Long>) = synchronized(this) {
         blockedTabs.retainAll(tabIds)
+        _pending.value.filter { it.tabId !in tabIds }.forEach { it.discard() }
         _pending.value = _pending.value.filter { it.tabId in tabIds }
         pruneDropped()
     }
 
     private fun block(tabId: Long) {
         blockedTabs += tabId
+        _pending.value.filter { it.tabId == tabId && it.requestedBy != null }.forEach { it.discard() }
         _pending.value = _pending.value.filterNot { it.tabId == tabId && it.requestedBy != null }
     }
 
