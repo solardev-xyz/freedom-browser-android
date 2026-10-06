@@ -244,6 +244,79 @@ class CapsuleLoadBarTest {
     }
 
     @Test
+    fun `a new load that took over unseen starts over instead of inheriting the old floor`() {
+        // R2-M1: loading at 80 %, the tab goes off screen; that load ends
+        // and a new one starts with no frame in between.
+        val m = CapsuleLoadMeter()
+        m.attach()
+        var t = 0L
+        m.frame(t, 0, loading = true, indeterminate = false, generation = 1)
+        repeat(60) { t += 16; m.frame(t, 80, loading = true, indeterminate = false, generation = 1) }
+        assertTrue(m.fraction > 0.75f)
+        m.detach()
+        m.attach()
+        t += 5_000
+        m.frame(t, 10, loading = true, indeterminate = false, generation = 2)
+        assertEquals(CAPSULE_LOAD_MIN_FRACTION, m.fraction, 0f)
+        repeat(60) { t += 16; m.frame(t, 10, loading = true, indeterminate = false, generation = 2) }
+        assertEquals(0.1f, m.fraction, 0.01f)
+
+        // Same with the bar on screen the whole time and no idle frame.
+        t += 16
+        m.frame(t, 60, loading = true, indeterminate = false, generation = 2)
+        repeat(60) { t += 16; m.frame(t, 60, loading = true, indeterminate = false, generation = 2) }
+        t += 16
+        m.frame(t, 10, loading = true, indeterminate = false, generation = 3)
+        assertEquals(CAPSULE_LOAD_MIN_FRACTION, m.fraction, 0f)
+    }
+
+    @Test
+    fun `a new load the generation misses still starts over when shown again`() {
+        // A POST navigation: no new generation, but progress went back.
+        val m = CapsuleLoadMeter()
+        m.attach()
+        var t = 0L
+        m.frame(t, 0, loading = true, indeterminate = false)
+        repeat(60) { t += 16; m.frame(t, 80, loading = true, indeterminate = false) }
+        m.unwatched()
+        t += 5_000
+        m.frame(t, 10, loading = true, indeterminate = false)
+        assertEquals(CAPSULE_LOAD_MIN_FRACTION, m.fraction, 0f)
+    }
+
+    @Test
+    fun `a load that ended while the app was away isn't filled and faded on return`() {
+        // R2-M2: the bar stays attached; the app is stopped mid-animation.
+        val m = CapsuleLoadMeter()
+        m.attach()
+        var t = 0L
+        m.frame(t, 0, loading = true, indeterminate = false)
+        t += 16
+        assertEquals(0L, m.frame(t, 40, loading = true, indeterminate = false))
+        m.unwatched()
+        t += 30_000
+        m.frame(t, -1, loading = false, indeterminate = false)
+        assertFalse(m.visible)
+    }
+
+    @Test
+    fun `a load still running when the app returns carries on without a jump`() {
+        val m = CapsuleLoadMeter()
+        m.attach()
+        var t = 0L
+        m.frame(t, 0, loading = true, indeterminate = false)
+        t += 16
+        m.frame(t, 40, loading = true, indeterminate = false)
+        val before = m.fraction
+        m.unwatched()
+        t += 30_000
+        m.frame(t, 40, loading = true, indeterminate = false)
+        // Not advanced by the whole time away in one frame, nor restarted.
+        assertEquals(before, m.fraction, 0f)
+        assertEquals(1f, m.alpha, 0f)
+    }
+
+    @Test
     fun `a failed or stopped load fades where it stands instead of filling`() {
         val m = CapsuleLoadMeter()
         var t = 0L

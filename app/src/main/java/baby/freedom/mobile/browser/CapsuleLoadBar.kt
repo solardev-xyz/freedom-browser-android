@@ -29,6 +29,9 @@ import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.ceil
@@ -124,8 +127,10 @@ private const val CAPSULE_LOAD_FRAME_MS = 16L
 
 /**
  * A bar composed again after this long off the frame clock (the tab was
- * in the background, the bar was off screen) is not resumed where it
- * left off: a load that ended unseen is not filled and faded now.
+ * in the background, the bar was off screen) — or shown again after the
+ * app itself was out of sight ([CapsuleLoadMeter.unwatched]) — is not
+ * resumed where it left off: a load that ended unseen is not filled and
+ * faded now, and one that gave way to another unseen starts over.
  */
 private const val CAPSULE_LOAD_REATTACH_GAP_MS = 100L
 
@@ -184,6 +189,8 @@ internal class CapsuleLoadMeter {
     private var lastWait = 0L
     private var drivers = 0
     private var reattached = false
+    private var unseen = false
+    private var lastGeneration = 0
 
     /**
      * A bar showing this meter came on screen ([detach] when it goes).
@@ -199,6 +206,18 @@ internal class CapsuleLoadMeter {
     }
 
     /**
+     * The app is back after being out of sight (stopped) with the bar
+     * still attached: the frame clock stopped, but the load didn't. The
+     * next frame resumes the meter the way a bar coming back on
+     * screen does, so a load that ended meanwhile isn't filled and faded
+     * as if the user had watched it, and the whole time away isn't
+     * advanced as one frame (R2-M2).
+     */
+    fun unwatched() {
+        unseen = true
+    }
+
+    /**
      * Advance to [nowMs] (a frame time) and say how long, in ms, the bar
      * can rest before the next frame matters: `0` for the very next
      * frame, [Long.MAX_VALUE] for "not until an input changes". A caller
@@ -210,7 +229,10 @@ internal class CapsuleLoadMeter {
      * it is (the sweep is drawn instead) and the creep clock doesn't run.
      * [failed] is read as the load ends: a load that failed or was
      * stopped fades out where it stands instead of filling, so it is
-     * never shown as a completed load (R1-M2).
+     * never shown as a completed load (R1-M2). [generation] is the tab's
+     * [BrowserState.loadGeneration]: a change while loading is a new
+     * load, started over at the minimum even if no frame ever saw the
+     * last one end (R2-M1).
      */
     fun frame(
         nowMs: Long,
@@ -218,21 +240,28 @@ internal class CapsuleLoadMeter {
         loading: Boolean,
         indeterminate: Boolean,
         failed: Boolean = false,
+        generation: Int = 0,
     ): Long {
-        if (running && nowMs == lastFrameMs && !reattached) return lastWait
+        if (running && nowMs == lastFrameMs && !reattached && !unseen) return lastWait
         var dt = if (running) (nowMs - lastFrameMs).coerceAtLeast(0L).toFloat() else 0f
         // Resting, nothing moved; resuming must not count the rest as one
         // long frame and jump.
         if (lastWait > 0L) dt = min(dt, CAPSULE_LOAD_FRAME_MS.toFloat())
-        if (reattached) {
+        if (reattached || unseen) {
+            val away = unseen || nowMs - lastFrameMs > CAPSULE_LOAD_REATTACH_GAP_MS
             reattached = false
-            if (running && nowMs - lastFrameMs > CAPSULE_LOAD_REATTACH_GAP_MS) {
+            unseen = false
+            if (running && away) {
                 dt = 0f
-                if (!loading) hide()
+                // Ended unseen: gone. Still loading, but reporting less
+                // than before: a new load took over unseen — one the
+                // generation doesn't mark (a form POST, which the WebView
+                // follows without asking): start it over (R2-M1).
+                if (!loading || (progress in 0 until lastProgress)) hide()
             }
         }
         lastFrameMs = nowMs
-        lastWait = step(nowMs, progress, loading, indeterminate, failed, dt)
+        lastWait = step(nowMs, progress, loading, indeterminate, failed, dt, generation)
         return lastWait
     }
 
@@ -243,11 +272,14 @@ internal class CapsuleLoadMeter {
         indeterminate: Boolean,
         failed: Boolean,
         dt: Float,
+        generation: Int,
     ): Long {
         if (loading) {
-            if (!running || finishing) {
+            if (!running || finishing || generation != lastGeneration) {
                 // A new load — including one that starts while the last
-                // one is still fading: back to the start, at once.
+                // one is still fading, or that took over from it with no
+                // idle frame in between: back to the start, at once.
+                lastGeneration = generation
                 running = true
                 finishing = false
                 failedEnd = false
@@ -323,8 +355,14 @@ internal class CapsuleLoadMeter {
 internal fun capsuleLoadFailed(state: BrowserState): Boolean = state.showsErrorPage || state.loadAborted
 
 /** What the bar's frame loop reads from the tab; a change wakes a resting bar. */
-private data class CapsuleLoadInputs(val progress: Int, val loading: Boolean, val resolving: Boolean) {
-    constructor(state: BrowserState) : this(state.progress, isCapsuleLoading(state), state.resolving)
+private data class CapsuleLoadInputs(
+    val progress: Int,
+    val loading: Boolean,
+    val resolving: Boolean,
+    val generation: Int,
+) {
+    constructor(state: BrowserState) :
+        this(state.progress, isCapsuleLoading(state), state.resolving, state.loadGeneration)
 }
 
 /**
@@ -378,9 +416,29 @@ private fun rememberCapsuleSweep(): State<Float> {
 internal fun CapsuleLoadBar(state: BrowserState, shape: Shape, modifier: Modifier = Modifier) {
     val loading by remember(state) { derivedStateOf { isCapsuleLoading(state) } }
     val meter = state.loadMeter
-    DisposableEffect(meter) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(meter, lifecycle) {
         meter.attach()
-        onDispose { meter.detach() }
+        // The app going out of sight stops the frame clock but not the
+        // load: see [CapsuleLoadMeter.unwatched].
+        // Told on the way back (ON_START after an ON_STOP), so the very
+        // next frame is the one that resumes, whatever ran while stopped.
+        var stopped = false
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> stopped = true
+                Lifecycle.Event.ON_START -> if (stopped) {
+                    stopped = false
+                    meter.unwatched()
+                }
+                else -> Unit
+            }
+        }
+        lifecycle.addObserver(observer)
+        onDispose {
+            lifecycle.removeObserver(observer)
+            meter.detach()
+        }
     }
     // Runs only while there is something to show: from a load's start to
     // the end of its fade. An idle bar is off the frame clock entirely,
@@ -392,7 +450,9 @@ internal fun CapsuleLoadBar(state: BrowserState, shape: Shape, modifier: Modifie
         while (true) {
             val now = withFrameMillis { it }
             val seen = CapsuleLoadInputs(state)
-            val wait = meter.frame(now, seen.progress, seen.loading, seen.resolving, capsuleLoadFailed(state))
+            val wait = meter.frame(
+                now, seen.progress, seen.loading, seen.resolving, capsuleLoadFailed(state), seen.generation,
+            )
             if (!seen.loading && !meter.visible) break
             if (wait > 0L) {
                 withTimeoutOrNull(wait) { snapshotFlow { CapsuleLoadInputs(state) }.first { it != seen } }
