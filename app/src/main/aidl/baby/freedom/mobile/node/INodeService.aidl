@@ -104,6 +104,34 @@ interface INodeService {
      */
     void setSwapEnabled(boolean enabled);
 
+    /**
+     * The Swarm node's disk chunk cache cap in bytes (ant clamps it to
+     * 64 MiB–16 GiB): the setting lives in the UI process's DataStore,
+     * so the UI relays it on every bind and whenever it changes. The
+     * service applies it to the running node at once — a smaller cap
+     * evicts down to it straight away — and hands it to every later init
+     * (ant doesn't persist it).
+     */
+    void setSwarmCacheCapacity(long bytes);
+
+    /**
+     * The Swarm node's chunk cache figures, ant's `ant_cache_status` JSON
+     * (`used_bytes`, `capacity_bytes`, `pinned_bytes`, `file_bytes`,
+     * `disk_enabled`, …), or null while the node isn't running. Reads
+     * counters only: the Nodes page polls it while it's on screen.
+     */
+    @nullable String getSwarmCacheStatus();
+
+    /**
+     * Drops every unpinned chunk from the Swarm node's cache, on disk and
+     * in memory; pinned (and so published) content stays. Blocks until
+     * done — well under a second at the default size, longer for several
+     * GB — so call it off the main thread. Returns ant's `ant_cache_clear`
+     * JSON (`freed_bytes`, `file_bytes_before`, `file_bytes_after`,
+     * `status`), or `{"error": …}`.
+     */
+    String clearSwarmCache();
+
     RadicleInfo getRadicleState();
 
     /**

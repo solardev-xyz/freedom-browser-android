@@ -10,14 +10,17 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -28,6 +31,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,12 +45,16 @@ import androidx.compose.ui.res.stringResource
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.data.SwarmCacheSize
 import baby.freedom.mobile.node.NodeLogSource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.swarm.MyotisChainStatus
@@ -163,6 +171,19 @@ fun NodeScreen(
     }
     BackHandler(onBack = onDismiss)
 
+    // The Swarm node's chunk cache: read every few seconds while this
+    // page is on screen, and at once after a clear. Held here, not in the
+    // list item, so scrolling the card away doesn't lose it.
+    val swarmRunning = nodeInfo.status == NodeStatus.Running
+    val cacheClear by SwarmCache.clear.collectAsState()
+    val cacheSize by remember(settings) { settings.swarmCacheSize }.collectAsState(initial = null)
+    // Re-read at once when a clear ends or the size changes, not at the next poll.
+    val cacheStatus = rememberSwarmCacheStatus(swarmRunning, refresh = cacheClear to cacheSize)
+    var confirmCacheClear by rememberSaveable { mutableStateOf(false) }
+    var pickCacheSize by rememberSaveable { mutableStateOf(false) }
+    // A clear's "Freed …" is for this visit: gone once the page closes.
+    DisposableEffect(Unit) { onDispose { SwarmCache.forgetOutcome() } }
+
     FullScreenScaffold(
         title = stringResource(R.string.node_screen_title),
         onDismiss = onDismiss,
@@ -179,6 +200,14 @@ fun NodeScreen(
                     external = externalSwarm.isNotEmpty(),
                     onToggleRunNode = onToggleRunNode,
                     onOpenLogs = { onOpenLogs(NodeLogSource.Swarm) },
+                    cache = SwarmCacheView(
+                        running = swarmRunning,
+                        status = cacheStatus,
+                        size = cacheSize,
+                        clear = cacheClear,
+                    ),
+                    onClearCache = { confirmCacheClear = true },
+                    onPickCacheSize = { pickCacheSize = true },
                 )
             }
             item("details") {
@@ -214,6 +243,29 @@ fun NodeScreen(
             }
         }
     }
+    if (confirmCacheClear) {
+        ConfirmDialog(
+            title = stringResource(R.string.node_cache_clear_title),
+            message = stringResource(R.string.node_cache_clear_message),
+            confirmLabel = stringResource(R.string.node_cache_clear_confirm),
+            onConfirm = {
+                confirmCacheClear = false
+                SwarmCache.startClear()
+            },
+            onDismiss = { confirmCacheClear = false },
+        )
+    }
+    val pickingFrom = cacheSize
+    if (pickCacheSize && pickingFrom != null) {
+        SwarmCacheSizeDialog(
+            current = pickingFrom,
+            onPick = { size ->
+                pickCacheSize = false
+                pickSwarmCacheSize(context, scope, settings, pickingFrom, size)
+            },
+            onDismiss = { pickCacheSize = false },
+        )
+    }
 }
 
 @Composable
@@ -223,6 +275,9 @@ private fun StatusSection(
     external: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
     onOpenLogs: () -> Unit,
+    cache: SwarmCacheView,
+    onClearCache: () -> Unit,
+    onPickCacheSize: () -> Unit,
 ) {
     SectionCard(title = stringResource(R.string.node_swarm_node)) {
         Row(
@@ -257,7 +312,85 @@ private fun StatusSection(
                 onCheckedChange = null,
             )
         }
+        CacheRows(cache, onClearCache, onPickCacheSize)
         LogsButton(onOpenLogs)
+    }
+}
+
+/** What the Swarm node card shows of the chunk cache. [size] null until the setting is read. */
+internal data class SwarmCacheView(
+    val running: Boolean,
+    val status: SwarmCacheStatus?,
+    val size: SwarmCacheSize?,
+    val clear: SwarmCache.Clear,
+)
+
+/** The Cache row's value: the figures, or why there are none. */
+internal fun swarmCacheLine(cache: SwarmCacheView): String = when {
+    !cache.running -> Strings.get(R.string.node_cache_not_running)
+    cache.status == null -> Strings.get(R.string.node_cache_checking)
+    !cache.status.diskEnabled -> Strings.get(R.string.node_cache_disk_off)
+    else -> swarmCacheSummary(cache.status)
+}
+
+/** Clear cache is offered: the node runs, its disk cache opened, and no clear is running. */
+internal fun swarmCacheClearEnabled(cache: SwarmCacheView): Boolean =
+    cache.running && cache.status?.diskEnabled == true && cache.clear != SwarmCache.Clear.Running
+
+/**
+ * The cache in the Swarm node card: what it holds, its size (a row
+ * opening the picker), Clear cache, and how the last clear went. While
+ * the button is off, the Cache row above it says why.
+ */
+@Composable
+private fun CacheRows(cache: SwarmCacheView, onClear: () -> Unit, onPickSize: () -> Unit) {
+    Spacer(Modifier.height(8.dp))
+    DetailRow(stringResource(R.string.node_cache), swarmCacheLine(cache), singleLine = false)
+    Text(
+        stringResource(R.string.node_cache_about),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(vertical = 4.dp),
+    )
+    PageRow(
+        title = stringResource(R.string.node_cache_size),
+        subtitle = cache.size?.let(::swarmCacheSizeLabel).orEmpty(),
+        style = PageRowStyle.Inset,
+        leadingIcon = Icons.Filled.Storage,
+        enabled = cache.size != null,
+        onClick = onPickSize,
+        trailing = { Icon(Icons.Filled.ArrowDropDown, contentDescription = null) },
+    )
+    OutlinedButton(
+        onClick = onClear,
+        enabled = swarmCacheClearEnabled(cache),
+        modifier = Modifier.heightIn(min = 48.dp),
+    ) {
+        Text(
+            stringResource(
+                if (cache.clear == SwarmCache.Clear.Running) R.string.node_cache_clearing else R.string.node_cache_clear,
+            ),
+        )
+    }
+    val outcome = when (val c = cache.clear) {
+        is SwarmCache.Clear.Done -> swarmCacheFreedLine(c.cleared)
+        is SwarmCache.Clear.Failed -> Strings.get(R.string.node_cache_clear_failed, c.message)
+        else -> null
+    }
+    if (outcome != null) {
+        Text(
+            outcome,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (cache.clear is SwarmCache.Clear.Failed) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
+            // Read out when it appears: the button's tap gives no other sign the clear ended.
+            modifier = Modifier
+                .padding(vertical = 4.dp)
+                .semantics { liveRegion = LiveRegionMode.Polite },
+        )
     }
 }
 

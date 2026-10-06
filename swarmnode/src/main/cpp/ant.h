@@ -123,6 +123,33 @@ AntHandle *ant_init_with_identity(const char *data_dir,
                                   char **out_err);
 
 /*
+ * The extensible init: every option of ant_init_with_options and
+ * ant_init_with_identity, plus the ones added since, in one JSON
+ * document, so a later option doesn't need yet another entry point.
+ * `config_json` may be NULL or "" (all defaults: exactly ant_init).
+ *
+ *   {"source_root":          "/…/imports" | null,
+ *    "identity_json":        "{\"signing_key\":…}" | null,
+ *    "cache_capacity_bytes": 1073741824 | null}
+ *
+ * source_root: as in ant_init_with_options. identity_json: the
+ * identity document *as a string*, exactly what ant_init_with_identity
+ * takes (host-owned key, same account re-scoping); null means the data
+ * dir's identity.json, created on first run. cache_capacity_bytes: the
+ * disk chunk cache cap, clamped like ant_cache_set_capacity (64 MiB to
+ * 16 GiB); null means the 512 MiB default. Pass the user's saved cache
+ * size here so it applies from start-up.
+ *
+ * Unknown keys are an error, so a typo can't silently fall back to a
+ * default. On success returns a non-NULL handle. On failure returns
+ * NULL and writes an allocated error string to *out_err (free with
+ * ant_free_string).
+ */
+AntHandle *ant_init_with_config(const char *data_dir,
+                                const char *config_json,
+                                char **out_err);
+
+/*
  * Mint a fresh node identity without starting a node, so a host that
  * keeps the key itself can create one on first run and hand it back to
  * ant_init_with_identity.
@@ -276,6 +303,98 @@ int ant_set_unverified_logs_rpc(const AntHandle *handle,
  * ant_init. Never blocks on the network. Free with ant_free_string.
  */
 char *ant_swap_status(const AntHandle *handle, char **out_err);
+
+/*
+ * Chunk cache
+ * -----------
+ * The node caches chunks in two tiers: <data_dir>/chunks.sqlite on disk
+ * (byte-capped, 512 MiB unless the host sets it) and an in-memory LRU
+ * (8192 chunks). Pinned chunks (uploads made with Swarm-Pin: true, and
+ * the gateway's /pins) live in the same database but outside the cap and
+ * are never evicted or cleared here, so don't delete chunks.sqlite
+ * yourself: use these calls. Bee has no cache clear; the gateway's
+ * bee-compatible GET /debugstore reports the same cache in bee's shape
+ * (chunk counts).
+ */
+
+/*
+ * Chunk cache figures, as JSON:
+ *
+ *   {"disk_enabled":true,
+ *    "used_bytes":0, "capacity_bytes":0, "chunks":0,
+ *    "pinned_bytes":0, "pinned_chunks":0,
+ *    "file_bytes":0,
+ *    "memory_chunks":0, "memory_capacity_chunks":8192}
+ *
+ * used_bytes / chunks: unpinned cached chunks, the ones counted against
+ * capacity_bytes (evicted oldest-first past it). pinned_bytes /
+ * pinned_chunks: pinned chunks, outside the cap. file_bytes: the size on
+ * disk of chunks.sqlite plus its -wal and -shm files. memory_chunks /
+ * memory_capacity_chunks: the in-memory cache. disk_enabled: false when
+ * chunks.sqlite couldn't be opened at init (every disk figure is 0).
+ *
+ * Reads counters, never the database: cheap enough to poll every few
+ * seconds from a UI. Right after ant_init on a large cache the disk
+ * counters read 0 for a few seconds, until a background count finishes.
+ * Returns an allocated string (free with ant_free_string), or NULL with
+ * *out_err set on a NULL handle.
+ */
+char *ant_cache_status(const AntHandle *handle, char **out_err);
+
+/*
+ * Remove every unpinned chunk from the disk cache, empty the in-memory
+ * cache, and give the space back to the OS (incremental vacuum; a
+ * database created by an older build is rebuilt once with VACUUM on a
+ * clear, only when the pinned chunks left are at most 64 MiB (the
+ * rebuild's temp copy is held in memory) and the disk has about twice
+ * that free; otherwise the file keeps its size
+ * and later cache writes reuse the freed space). Pinned
+ * chunks and the pin list are never touched. Blocks until done (well
+ * under a second for the default cap, longer for several GB): call it
+ * off the main thread.
+ *
+ * Safe while downloads and uploads run: a read racing the clear gets
+ * the chunk or a cache miss, and a miss is fetched from the network;
+ * cache writes queue behind the clear and land after it. Unpinned
+ * chunks of your own uploads are cache entries like any other, so an
+ * upload's later self-heal re-reads its source file for them.
+ *
+ * Returns JSON:
+ *
+ *   {"freed_bytes":0, "removed_chunks":0,
+ *    "file_bytes_before":0, "file_bytes_after":0,
+ *    "memory_chunks_removed":0,
+ *    "status":{…ant_cache_status after the clear…}}
+ *
+ * freed_bytes: chunk bytes removed (what used_bytes dropped by);
+ * file_bytes_before - file_bytes_after: what the files on disk shrank
+ * by (giving space back is best-effort, so this can be 0 while
+ * freed_bytes isn't; the clear still succeeded). Free with ant_free_string. On failure returns NULL and writes an
+ * allocated error string into *out_err.
+ */
+char *ant_cache_clear(const AntHandle *handle, char **out_err);
+
+/*
+ * Set the disk chunk cache cap to `bytes`, clamped to 64 MiB ..= 16 GiB
+ * (ant_cache_status's capacity_bytes shows the value applied). Lowering
+ * it below used_bytes evicts oldest-first down to ~95% of the new cap
+ * before returning and gives the space back to the OS; pinned chunks
+ * are never evicted and don't count against it. Blocks until done: call
+ * it off the main thread.
+ *
+ * Not persisted: pass the saved value as ant_init_with_config's
+ * cache_capacity_bytes at the next start.
+ *
+ * Returns 0 on success, -1 if `handle` is NULL, -2 if the disk cache is
+ * unavailable (failed to open at init) or the eviction failed; an
+ * allocated error string is written into *out_err (free with
+ * ant_free_string). On an eviction failure the new cap is still applied
+ * (capacity_bytes shows it), part of the eviction may have happened,
+ * and the next cache write evicts down to it again, so don't revert a
+ * saved setting on -2. Giving file space back is best-effort and never
+ * makes this fail.
+ */
+int ant_cache_set_capacity(const AntHandle *handle, uint64_t bytes, char **out_err);
 
 /*
  * Confirm the outstanding liability of `chequebook` ("0x…" hex) after

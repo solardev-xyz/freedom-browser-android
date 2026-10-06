@@ -45,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -53,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.swarm.NodeStatus
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.flatMapLatest
 
@@ -82,17 +84,20 @@ private const val HOUR = 60L * 60L * 1000L
 
 /**
  * What Delete browsing data is about to delete: a [range] for history,
- * and the three checkboxes. The defaults are Chrome's: the last hour,
- * every box checked.
+ * and the checkboxes. The defaults are Chrome's for Chrome's three: the
+ * last hour, every box checked; [swarmCache], the Swarm node's chunk
+ * cache, is off unless picked — it isn't something a browser's clear
+ * usually reaches, and refilling it costs network.
  */
 data class DeleteChoice(
     val range: DeleteRange = DeleteRange.LastHour,
     val history: Boolean = true,
     val siteData: Boolean = true,
     val cache: Boolean = true,
+    val swarmCache: Boolean = false,
 ) {
     /** Delete data is enabled: at least one box is checked. */
-    val canDelete: Boolean get() = history || siteData || cache
+    val canDelete: Boolean get() = history || siteData || cache || swarmCache
 
     /** The reopen stack keeps closed tabs' pages and back/forward lists — history by another name. */
     val forgetsClosedTabs: Boolean get() = history || siteData
@@ -150,36 +155,50 @@ internal fun historyCountLine(count: Int): String =
  * at two lines, and at a large font scale a list of what went wouldn't fit.
  */
 internal fun deleteDoneMessage(choice: DeleteChoice): String =
-    if (choice.history && !choice.siteData && !choice.cache) {
+    if (choice.history && !choice.siteData && !choice.cache && !choice.swarmCache) {
         Strings.get(R.string.delete_data_done_history)
     } else {
         Strings.get(R.string.delete_data_done)
     }
 
 /**
- * Delete what [choice] names: history in its range from [repo] here;
- * the rest — closed tabs, WebView state, node logs — through [onDelete],
- * the host's, which owns the tabs and WebViews.
+ * Delete what [choice] names: history in its range from [repo] here, and
+ * the Swarm node's cache, all of it whatever the range
+ * ([SwarmCache.clearInBackground]: pinned content stays); the rest —
+ * closed tabs, WebView state, node logs — through [onDelete], the
+ * host's, which owns the tabs and WebViews.
  */
 internal fun deleteBrowsingData(
     choice: DeleteChoice,
     repo: BrowsingRepository,
     now: Long,
     onDelete: (DeleteChoice) -> Unit,
+) = deleteBrowsingData(choice, repo::deleteHistorySince, SwarmCache::clearInBackground, now, onDelete)
+
+/** [deleteBrowsingData] over its two stores, for tests. */
+internal fun deleteBrowsingData(
+    choice: DeleteChoice,
+    deleteHistorySince: (Long) -> Unit,
+    clearSwarmCache: () -> Unit,
+    now: Long,
+    onDelete: (DeleteChoice) -> Unit,
 ) {
     if (!choice.canDelete) return
-    if (choice.history) repo.deleteHistorySince(choice.range.since(now))
+    if (choice.history) deleteHistorySince(choice.range.since(now))
+    // Not a date in it: ant can only drop every unpinned chunk.
+    if (choice.swarmCache) clearSwarmCache()
     onDelete(choice)
 }
 
 private val DeleteChoiceSaver = Saver<DeleteChoice, List<Any>>(
-    save = { listOf(it.range.name, it.history, it.siteData, it.cache) },
+    save = { listOf(it.range.name, it.history, it.siteData, it.cache, it.swarmCache) },
     restore = {
         DeleteChoice(
             range = DeleteRange.entries.firstOrNull { r -> r.name == it[0] } ?: DeleteRange.LastHour,
             history = it[1] as Boolean,
             siteData = it[2] as Boolean,
             cache = it[3] as Boolean,
+            swarmCache = it.getOrNull(4) as? Boolean ?: false,
         )
     },
 )
@@ -200,6 +219,9 @@ internal fun DeleteBrowsingDataPage(
 ) {
     BackHandler(onBack = onBack)
     var choice by rememberSaveable(stateSaver = DeleteChoiceSaver) { mutableStateOf(DeleteChoice()) }
+    val swarmRunning = StampClient.node.collectAsState().value.status == NodeStatus.Running
+    // What Delete data acts on: the Swarm box counts only while it can be acted on.
+    val acted = if (swarmRunning) choice else choice.copy(swarmCache = false)
     var confirming by rememberSaveable { mutableStateOf(false) }
     // Fixed while the page is open, so the count doesn't creep as the clock does.
     val now = remember { System.currentTimeMillis() }
@@ -243,10 +265,25 @@ internal fun DeleteBrowsingDataPage(
                         checked = choice.cache,
                         onCheckedChange = { choice = choice.copy(cache = it) },
                     )
+                    // ant clears only while the node runs; off (and unchecked) otherwise.
+                    CheckRow(
+                        icon = ImageVector.vectorResource(R.drawable.ic_swarm),
+                        title = stringResource(R.string.delete_data_swarm_cache),
+                        subtitle = stringResource(
+                            if (swarmRunning) {
+                                R.string.delete_data_swarm_cache_subtitle
+                            } else {
+                                R.string.delete_data_swarm_cache_off
+                            },
+                        ),
+                        checked = choice.swarmCache && swarmRunning,
+                        enabled = swarmRunning,
+                        onCheckedChange = { choice = choice.copy(swarmCache = it) },
+                    )
                 }
             }
-            val note = allTimeOnlyNote(choice)
-                ?: if (!choice.canDelete) Strings.get(R.string.delete_data_nothing_selected) else null
+            val note = allTimeOnlyNote(acted)
+                ?: if (!acted.canDelete) Strings.get(R.string.delete_data_nothing_selected) else null
             if (note != null) item("note") {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
@@ -272,10 +309,10 @@ internal fun DeleteBrowsingDataPage(
                         onClick = {
                             // The page's own clock reading: the range deletes at least
                             // every visit the count above showed.
-                            if (choice.needsConfirm) confirming = true
-                            else deleteBrowsingData(choice, repo, now, onDelete)
+                            if (acted.needsConfirm) confirming = true
+                            else deleteBrowsingData(acted, repo, now, onDelete)
                         },
-                        enabled = choice.canDelete,
+                        enabled = acted.canDelete,
                         modifier = Modifier.heightIn(min = 48.dp),
                     ) {
                         Text(stringResource(R.string.delete_data_button))
@@ -284,14 +321,14 @@ internal fun DeleteBrowsingDataPage(
             }
         }
     }
-    if (confirming && choice.canDelete) {
+    if (confirming && acted.canDelete) {
         ConfirmDialog(
             title = stringResource(R.string.delete_data_confirm_title),
-            message = deleteConfirmMessage(choice),
+            message = deleteConfirmMessage(acted),
             confirmLabel = stringResource(R.string.delete_data_confirm_button),
             onConfirm = {
                 confirming = false
-                deleteBrowsingData(choice, repo, now, onDelete)
+                deleteBrowsingData(acted, repo, now, onDelete)
             },
             onDismiss = { confirming = false },
         )
@@ -345,27 +382,35 @@ private fun CheckRow(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     detail: String? = null,
+    enabled: Boolean = true,
 ) {
+    val alpha = if (enabled) 1f else 0.45f
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
             .clip(MaterialTheme.shapes.small)
-            .toggleable(value = checked, role = Role.Checkbox, onValueChange = onCheckedChange)
+            .toggleable(value = checked, enabled = enabled, role = Role.Checkbox, onValueChange = onCheckedChange)
             .padding(start = 12.dp, top = 10.dp, bottom = 10.dp, end = 0.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
+        // 24 dp whatever the vector's own size (the Swarm mark's is smaller), so the titles line up.
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
+            modifier = Modifier.size(24.dp),
+        )
         Spacer(Modifier.width(12.dp))
         Column(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            Text(title, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+            Text(title, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha))
             if (subtitle.isNotEmpty()) Text(
                 subtitle,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
             )
             if (detail != null) Text(
                 detail,
@@ -373,6 +418,11 @@ private fun CheckRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
             )
         }
-        Checkbox(checked = checked, onCheckedChange = null, modifier = Modifier.padding(horizontal = 12.dp))
+        Checkbox(
+            checked = checked,
+            onCheckedChange = null,
+            enabled = enabled,
+            modifier = Modifier.padding(horizontal = 12.dp),
+        )
     }
 }

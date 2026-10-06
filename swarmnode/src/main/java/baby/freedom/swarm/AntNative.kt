@@ -16,17 +16,20 @@ internal object AntNative {
         System.loadLibrary("freedom_jni")
     }
 
-    /** Boot the node against Swarm mainnet; returns a non-zero handle. */
-    external fun init(dataDir: String): Long
-
     /**
-     * Like [init], but as the account in [identity] (#77): the UTF-8
-     * identity document `ant_init_with_identity` takes
-     * (`{"signing_key","overlay_nonce"}`). ant neither reads nor writes
-     * `identity.json` then; the shim zeroes its native copy, and the
-     * caller zeroes [identity].
+     * Boot the node against Swarm mainnet through `ant_init_with_config`;
+     * returns a non-zero handle. With [identity] null, ant runs as the
+     * data dir's own `identity.json` (created on first run), as
+     * `ant_init` did; otherwise as the account in [identity] (#77): the
+     * UTF-8 identity document `ant_init_with_identity` took
+     * (`{"signing_key","overlay_nonce"}`), handed to ant unchanged as the
+     * config's `identity_json` — ant neither reads nor writes
+     * `identity.json` then. The shim zeroes its native copies, and the
+     * caller zeroes [identity]. [cacheCapacityBytes] caps the disk chunk
+     * cache from start-up (ant clamps it to 64 MiB–16 GiB); 0 or less
+     * keeps ant's 512 MiB default.
      */
-    external fun initWithIdentity(dataDir: String, identity: ByteArray): Long
+    external fun initWithConfig(dataDir: String, identity: ByteArray?, cacheCapacityBytes: Long): Long
 
     /** `ant_account_info`: `{"eth_address","overlay","peer_id","agent"}`, null on a stale handle. */
     external fun accountInfo(handle: Long): String?
@@ -128,6 +131,27 @@ internal object AntNative {
      * a refused broadcast ([SpendGuard]).
      */
     external fun storageDiscover(handle: Long, gnosisRpc: String): String
+
+    /**
+     * `ant_cache_status`: the chunk cache's figures (`used_bytes`,
+     * `capacity_bytes`, `pinned_bytes`, `file_bytes`, `disk_enabled`, …).
+     * Reads counters only: cheap enough to poll.
+     */
+    external fun cacheStatus(handle: Long): String
+
+    /**
+     * `ant_cache_clear`: drops every unpinned chunk on disk and in memory;
+     * pinned chunks and the pin list stay. Returns `freed_bytes`,
+     * `file_bytes_before`/`file_bytes_after` and the `status` after.
+     */
+    external fun cacheClear(handle: Long): String
+
+    /**
+     * `ant_cache_set_capacity`: the disk cache's cap, clamped by ant to
+     * 64 MiB–16 GiB, evicting down to it at once. Not persisted by ant.
+     * Throws on a failed eviction too, though the cap is applied then.
+     */
+    external fun cacheSetCapacity(handle: Long, bytes: Long)
 
     /** Tear the node down and free the handle — it must not be reused. */
     external fun shutdown(handle: Long)

@@ -71,8 +71,10 @@ class SwarmNode internal constructor(
     /** The native calls [SwarmNode] makes; swapped for a fake in tests. */
     internal interface NodeOps {
         fun seed(antDir: File)
-        fun init(dataDir: String): Long
-        fun initWithIdentity(dataDir: String, identity: ByteArray): Long
+        /** Boots as the data dir's own identity, the disk cache capped at [cacheCapacityBytes] (≤ 0: ant's default). */
+        fun init(dataDir: String, cacheCapacityBytes: Long): Long
+        /** Boots as the account in [identity] (#77), likewise capped. */
+        fun initWithIdentity(dataDir: String, identity: ByteArray, cacheCapacityBytes: Long): Long
         fun accountInfo(handle: Long): String?
         /** Starts the gateway allowing CORS reads from [corsOrigins] only. */
         fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String, corsOrigins: List<String>)
@@ -94,6 +96,9 @@ class SwarmNode internal constructor(
         fun setSwapEnabled(handle: Long, enabled: Boolean)
         fun swapStatus(handle: Long): String
         fun confirmChequeLiability(handle: Long, chequebook: String): Int
+        fun cacheStatus(handle: Long): String
+        fun cacheClear(handle: Long): String
+        fun cacheSetCapacity(handle: Long, bytes: Long)
 
         /**
          * One request to the node's own gateway ([GATEWAY_URL] + [path]),
@@ -104,9 +109,10 @@ class SwarmNode internal constructor(
 
         object Native : NodeOps {
             override fun seed(antDir: File) = BootnodeSeeder.seedIfEmpty(antDir)
-            override fun init(dataDir: String) = AntNative.init(dataDir)
-            override fun initWithIdentity(dataDir: String, identity: ByteArray) =
-                AntNative.initWithIdentity(dataDir, identity)
+            override fun init(dataDir: String, cacheCapacityBytes: Long) =
+                AntNative.initWithConfig(dataDir, null, cacheCapacityBytes)
+            override fun initWithIdentity(dataDir: String, identity: ByteArray, cacheCapacityBytes: Long) =
+                AntNative.initWithConfig(dataDir, identity, cacheCapacityBytes)
             override fun accountInfo(handle: Long) = AntNative.accountInfo(handle)
             override fun startGateway(
                 handle: Long,
@@ -139,6 +145,9 @@ class SwarmNode internal constructor(
             override fun swapStatus(handle: Long) = AntNative.swapStatus(handle)
             override fun confirmChequeLiability(handle: Long, chequebook: String) =
                 AntNative.confirmChequeLiability(handle, chequebook)
+            override fun cacheStatus(handle: Long) = AntNative.cacheStatus(handle)
+            override fun cacheClear(handle: Long) = AntNative.cacheClear(handle)
+            override fun cacheSetCapacity(handle: Long, bytes: Long) = AntNative.cacheSetCapacity(handle, bytes)
             override fun gateway(method: String, path: String, timeoutMs: Int): GatewayAnswer? = try {
                 val conn = java.net.URL(GATEWAY_URL + path).openConnection() as java.net.HttpURLConnection
                 try {
@@ -190,6 +199,13 @@ class SwarmNode internal constructor(
          * in bee and ant.
          */
         val swapEnabled: () -> Boolean = { true },
+        /**
+         * The disk chunk cache's cap in bytes, read at every start until
+         * [setCacheCapacity] has said otherwise, and handed to ant's init
+         * so it applies from start-up (ant doesn't persist it). 0 or less:
+         * ant's default, 512 MiB.
+         */
+        val cacheCapacityBytes: () -> Long = { 0L },
     )
 
     /**
@@ -217,7 +233,7 @@ class SwarmNode internal constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
-     * `*mut AntHandle` from [AntNative.init]; `0` when not running.
+     * `*mut AntHandle` from [AntNative.initWithConfig]; `0` when not running.
      * `@Volatile` so the peer poller observes the reset in [stop]
      * without locking.
      */
@@ -301,8 +317,9 @@ class SwarmNode internal constructor(
                 identity?.fill(0)
                 throw t
             }
+            val cache = cacheValue()
             val h = try {
-                if (identity != null) ops.initWithIdentity(antDir, identity) else ops.init(antDir)
+                if (identity != null) ops.initWithIdentity(antDir, identity, cache) else ops.init(antDir, cache)
             } finally {
                 identity?.fill(0)
             }
@@ -353,6 +370,8 @@ class SwarmNode internal constructor(
                 // Again on the published handle: a [setSwapEnabled] that
                 // landed since the first apply found no handle to set.
                 applySwap()
+                // Likewise a [setCacheCapacity] since the init read its cap.
+                applyCache(bootedWith = h to cache)
             } else {
                 Log.i(TAG, "stopped while starting; shutting the new node down")
                 runCatching {
@@ -530,6 +549,95 @@ class SwarmNode internal constructor(
         val h = synchronized(lock) { handle }
         check(h != 0L && _state.value.status == NodeStatus.Running) { SwarmStrings.get(R.string.swarmnode_not_running) }
         ops.swapStatus(h)
+    }
+
+    /**
+     * What [setCacheCapacity] last asked for; null until it has, when the
+     * node boots with [Config.cacheCapacityBytes]. Guarded by [cacheLock].
+     */
+    private var cacheWanted: Long? = null
+
+    /** Guards [cacheWanted]; never held across a native call. */
+    private val cacheLock = Any()
+
+    /**
+     * Orders every live apply of the cache cap, so the last one to run
+     * sets the latest wish. Held across the native call (a shrink evicts
+     * before it returns), so it isn't [cacheLock], which a binder thread
+     * takes to record a new wish.
+     */
+    private val cacheApplyLock = Any()
+
+    /** The cache cap for the next init or apply. */
+    private fun cacheValue(): Long = synchronized(cacheLock) { cacheWanted } ?: runCatching { config.cacheCapacityBytes() }
+        .getOrElse {
+            Log.w(TAG, "reading the cache size setting failed (${it.javaClass.simpleName}); ant's default")
+            0L
+        }
+
+    /**
+     * The disk chunk cache's cap: live on a running node (ant evicts down
+     * to it at once when it shrinks) and at every later start. Returns at
+     * once; the native call runs off the caller's thread. A failed
+     * eviction is logged and not undone: ant keeps the new cap applied and
+     * evicts down to it on its next write.
+     */
+    fun setCacheCapacity(bytes: Long) {
+        synchronized(cacheLock) { cacheWanted = bytes }
+        scope.launch { applyCache() }
+    }
+
+    /**
+     * The handle and cap last set on it (by its init, or a live apply).
+     * Guarded by [cacheApplyLock].
+     */
+    private var cacheApplied: Pair<Long, Long>? = null
+
+    /**
+     * Sets the latest [setCacheCapacity] on the running node, under
+     * [handleUse] like a storage call; nothing when none was asked for, or
+     * the running node already has it. [bootedWith]: the handle just
+     * published and the cap its init was given.
+     */
+    private fun applyCache(bootedWith: Pair<Long, Long>? = null) {
+        handleUse.read {
+            synchronized(cacheApplyLock) {
+                if (bootedWith != null) cacheApplied = bootedWith
+                val running = synchronized(lock) { handle }
+                if (running == 0L || _state.value.status != NodeStatus.Running) return@read
+                val want = synchronized(cacheLock) { cacheWanted } ?: return@read
+                if (want <= 0L || cacheApplied == (running to want)) return@read
+                // Recorded either way: on a failed eviction ant keeps the cap
+                // applied, and evicts down to it on its next write.
+                cacheApplied = running to want
+                runCatching { ops.cacheSetCapacity(running, want) }
+                    .onSuccess { Log.i(TAG, "chunk cache capped at $want bytes") }
+                    .onFailure { Log.w(TAG, "setting the chunk cache's cap to $want failed", it) }
+            }
+        }
+    }
+
+    /**
+     * The chunk cache's figures, ant's `ant_cache_status` JSON. Cheap.
+     * Throws [IllegalStateException] while the node isn't running.
+     */
+    fun cacheStatus(): String = withRunningNode { h -> ops.cacheStatus(h) }
+
+    /**
+     * Drops every unpinned chunk from the cache (pinned ones stay), ant's
+     * `ant_cache_clear` JSON. Blocks for as long as the clear takes: off
+     * the main thread. Throws [IllegalStateException] while the node
+     * isn't running, and [RuntimeException] with ant's message on failure.
+     */
+    fun clearCache(): String = withRunningNode { h ->
+        ops.cacheClear(h).also { Log.i(TAG, "chunk cache cleared") }
+    }
+
+    /** [block] on the running node's handle, under [handleUse] like a storage call. */
+    private fun <T> withRunningNode(block: (Long) -> T): T = handleUse.read {
+        val h = synchronized(lock) { handle }
+        check(h != 0L && _state.value.status == NodeStatus.Running) { SwarmStrings.get(R.string.swarmnode_not_running) }
+        block(h)
     }
 
     /**

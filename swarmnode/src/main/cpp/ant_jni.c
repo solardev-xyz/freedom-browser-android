@@ -8,7 +8,7 @@
  * download-smoke app's class and don't cover the gateway, so Freedom
  * carries this thin wrapper instead: init, start/stop the bee-shaped
  * HTTP gateway (and its CORS allow-list, #284), peer count, postage
- * stamps (#116), shutdown. Errors surface as
+ * stamps (#116), the chunk cache, shutdown. Errors surface as
  * RuntimeException with the message ant allocated (freed here).
  */
 
@@ -36,57 +36,110 @@ static void throw_runtime(JNIEnv *env, char *owned_err, const char *fallback) {
     ant_free_string(owned_err);
 }
 
-JNIEXPORT jlong JNICALL
-Java_baby_freedom_swarm_AntNative_init(JNIEnv *env, jobject thiz, jstring data_dir) {
-    (void)thiz;
-    const char *dir = (*env)->GetStringUTFChars(env, data_dir, NULL);
-    if (dir == NULL) return 0; /* OOM — exception already pending */
-    /* Before ant_init claims the process's tracing subscriber for its
-     * logs alone: this one also carries freedom-ipfs's progress recorder
-     * (see freedom_mobile.h; #156). */
-    freedom_mobile_init_logging();
-    char *err = NULL;
-    AntHandle *handle = ant_init(dir, &err);
-    (*env)->ReleaseStringUTFChars(env, data_dir, dir);
-    if (handle == NULL) {
-        throw_runtime(env, err, "ant_init failed");
-        return 0;
+/*
+ * Boots the node through ant_init_with_config (ant v0.5.60), the one
+ * init that also takes the chunk cache's cap, so the user's saved cache
+ * size applies from start-up rather than after a 512 MiB first moment.
+ *
+ * The config is `{"source_root":null,"identity_json":…,"cache_capacity_bytes":…}`:
+ *  - source_root null, as the ant_init / ant_init_with_identity(dir, NULL, …)
+ *    calls this replaces passed it.
+ *  - identity_json: `identity` (#77), the UTF-8 identity document that
+ *    ant_init_with_identity took, as a JSON string, escaped here so ant
+ *    decodes exactly the bytes it was handed; null (a NULL `identity`)
+ *    means the data dir's identity.json, as ant_init did. Handed over as
+ *    a byte[] so neither side ever holds the key in an immutable String:
+ *    copied straight into a native buffer (GetByteArrayRegion — no
+ *    pinned or JVM-side copy), and both native buffers are zeroed before
+ *    they are freed.
+ *  - cache_capacity_bytes: `cache_bytes`, or null (ant's 512 MiB default)
+ *    when it is 0 or less.
+ */
+static const char *const CONFIG_HEAD = "{\"source_root\":null,\"identity_json\":";
+
+/* `src` (n bytes) as the body of a JSON string into `out`, which has room
+ * for 6 bytes per input byte; returns the bytes written. */
+static size_t json_escape(const unsigned char *src, size_t n, char *out) {
+    static const char hex[] = "0123456789abcdef";
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = src[i];
+        if (c == '"' || c == '\\') {
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c < 0x20) {
+            out[o++] = '\\';
+            out[o++] = 'u';
+            out[o++] = '0';
+            out[o++] = '0';
+            out[o++] = hex[c >> 4];
+            out[o++] = hex[c & 0xf];
+        } else {
+            out[o++] = (char)c;
+        }
     }
-    return (jlong)(uintptr_t)handle;
+    return o;
 }
 
-/*
- * Like init, but ant runs as the account in `identity` (#77): the UTF-8
- * identity document for ant_init_with_identity, handed over as a byte[]
- * so neither side ever holds the key in an immutable String. It is
- * copied straight into a native buffer (GetByteArrayRegion — no pinned
- * or JVM-side copy), NUL-terminated, and zeroed before it is freed.
- */
 JNIEXPORT jlong JNICALL
-Java_baby_freedom_swarm_AntNative_initWithIdentity(JNIEnv *env, jobject thiz, jstring data_dir,
-                                                   jbyteArray identity) {
+Java_baby_freedom_swarm_AntNative_initWithConfig(JNIEnv *env, jobject thiz, jstring data_dir,
+                                                 jbyteArray identity, jlong cache_bytes) {
     (void)thiz;
-    jsize len = (*env)->GetArrayLength(env, identity);
-    char *doc = malloc((size_t)len + 1);
-    if (doc == NULL) {
+    jsize len = identity != NULL ? (*env)->GetArrayLength(env, identity) : 0;
+    unsigned char *doc = NULL;
+    if (identity != NULL) {
+        doc = malloc((size_t)len + 1);
+        if (doc == NULL) {
+            throw_runtime(env, NULL, "out of memory");
+            return 0;
+        }
+        (*env)->GetByteArrayRegion(env, identity, 0, len, (jbyte *)doc);
+    }
+    /* head + "\"" + escaped + "\"" (or null) + the cap's key and digits + "}". */
+    size_t cap = strlen(CONFIG_HEAD) + 2 + (size_t)len * 6 + 64;
+    char *config = malloc(cap);
+    if (config == NULL) {
+        if (doc != NULL) {
+            wipe(doc, (size_t)len + 1);
+            free(doc);
+        }
         throw_runtime(env, NULL, "out of memory");
         return 0;
     }
-    (*env)->GetByteArrayRegion(env, identity, 0, len, (jbyte *)doc);
-    doc[len] = '\0';
+    size_t o = strlen(CONFIG_HEAD);
+    memcpy(config, CONFIG_HEAD, o);
+    if (doc != NULL) {
+        config[o++] = '"';
+        o += json_escape(doc, (size_t)len, config + o);
+        config[o++] = '"';
+        wipe(doc, (size_t)len + 1);
+        free(doc);
+    } else {
+        memcpy(config + o, "null", 4);
+        o += 4;
+    }
+    if (cache_bytes > 0) {
+        o += (size_t)snprintf(config + o, cap - o, ",\"cache_capacity_bytes\":%llu}",
+                              (unsigned long long)cache_bytes);
+    } else {
+        o += (size_t)snprintf(config + o, cap - o, ",\"cache_capacity_bytes\":null}");
+    }
     const char *dir = (*env)->GetStringUTFChars(env, data_dir, NULL);
     AntHandle *handle = NULL;
     char *err = NULL;
     if (dir != NULL) {
+        /* Before ant claims the process's tracing subscriber for its logs
+         * alone: this one also carries freedom-ipfs's progress recorder
+         * (see freedom_mobile.h; #156). */
         freedom_mobile_init_logging();
-        handle = ant_init_with_identity(dir, NULL, doc, &err);
+        handle = ant_init_with_config(dir, config, &err);
     }
-    wipe(doc, (size_t)len + 1);
-    free(doc);
+    wipe(config, cap);
+    free(config);
     if (dir == NULL) return 0; /* OOM — exception already pending */
     (*env)->ReleaseStringUTFChars(env, data_dir, dir);
     if (handle == NULL) {
-        throw_runtime(env, err, "ant_init_with_identity failed");
+        throw_runtime(env, err, "ant_init_with_config failed");
         return 0;
     }
     return (jlong)(uintptr_t)handle;
@@ -643,6 +696,43 @@ Java_baby_freedom_swarm_AntNative_storageDiscover(JNIEnv *env, jobject thiz, jlo
     char *json = ant_storage_discover((const AntHandle *)(uintptr_t)handle, rpc, &err);
     (*env)->ReleaseStringUTFChars(env, gnosis_rpc, rpc);
     return json_or_throw(env, json, err, "ant_storage_discover failed");
+}
+
+/*
+ * The chunk cache (ant v0.5.60): its figures, a clear that keeps pinned
+ * chunks, and its cap. Each blocks (the clear and a shrinking cap for as
+ * long as the eviction takes), so SwarmNode calls them off the main
+ * thread, under its handle lock like the storage calls.
+ */
+JNIEXPORT jstring JNICALL
+Java_baby_freedom_swarm_AntNative_cacheStatus(JNIEnv *env, jobject thiz, jlong handle) {
+    (void)thiz;
+    char *err = NULL;
+    char *json = ant_cache_status((const AntHandle *)(uintptr_t)handle, &err);
+    return json_or_throw(env, json, err, "ant_cache_status failed");
+}
+
+JNIEXPORT jstring JNICALL
+Java_baby_freedom_swarm_AntNative_cacheClear(JNIEnv *env, jobject thiz, jlong handle) {
+    (void)thiz;
+    char *err = NULL;
+    char *json = ant_cache_clear((const AntHandle *)(uintptr_t)handle, &err);
+    return json_or_throw(env, json, err, "ant_cache_clear failed");
+}
+
+/* ant_cache_set_capacity: throws on -1/-2 (on -2 the cap is still applied). */
+JNIEXPORT void JNICALL
+Java_baby_freedom_swarm_AntNative_cacheSetCapacity(JNIEnv *env, jobject thiz, jlong handle,
+                                                   jlong bytes) {
+    (void)thiz;
+    char *err = NULL;
+    int rc = ant_cache_set_capacity((const AntHandle *)(uintptr_t)handle,
+                                    bytes > 0 ? (uint64_t)bytes : 0, &err);
+    if (rc != 0) {
+        throw_runtime(env, err, "ant_cache_set_capacity failed");
+        return;
+    }
+    ant_free_string(err);
 }
 
 /*
