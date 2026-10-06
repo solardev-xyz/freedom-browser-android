@@ -1,6 +1,8 @@
 package baby.freedom.mobile.browser
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.layout.Column
@@ -27,6 +29,7 @@ import baby.freedom.mobile.data.SwarmCacheSize
 import baby.freedom.mobile.l10n.Strings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -53,6 +56,12 @@ internal data class SwarmCacheStatus(
     val fileBytes: Long,
     val memoryChunks: Long,
     val memoryCapacityChunks: Long,
+    /**
+     * `:node`'s mark (SwarmNode.markCacheCounting): every disk counter
+     * reads 0 over a large file right after init — ant's background count
+     * hasn't finished, so the 0s aren't the cache's size.
+     */
+    val counting: Boolean = false,
 ) {
     companion object {
         /**
@@ -77,6 +86,7 @@ internal data class SwarmCacheStatus(
                 fileBytes = n("file_bytes"),
                 memoryChunks = n("memory_chunks"),
                 memoryCapacityChunks = n("memory_capacity_chunks"),
+                counting = o.optBoolean("counting", false),
             )
         }
     }
@@ -112,8 +122,14 @@ internal data class SwarmCacheCleared(
     }
 }
 
-/** "312 MB of 512 MB · 1.2 GB pinned": pinned only when there is some. */
+/**
+ * "312 MB of 512 MB · 1.2 GB pinned": pinned only when there is some.
+ * While ant is still counting after init ([SwarmCacheStatus.counting]),
+ * "Counting… (512 MB max)" rather than a "0 B of 512 MB" that would read
+ * as nothing to clear.
+ */
 internal fun swarmCacheSummary(status: SwarmCacheStatus): String {
+    if (status.counting) return Strings.get(R.string.node_cache_counting, formatBytes(status.capacityBytes))
     val used = Strings.get(R.string.node_cache_used, formatBytes(status.usedBytes), formatBytes(status.capacityBytes))
     return if (status.pinnedBytes > 0) {
         "$used · ${Strings.get(R.string.node_cache_pinned, formatBytes(status.pinnedBytes))}"
@@ -121,6 +137,10 @@ internal fun swarmCacheSummary(status: SwarmCacheStatus): String {
         used
     }
 }
+
+/** Delete browsing data's toast when the Swarm cache box's clear failed. */
+internal fun swarmCacheClearFailedLine(message: String): String =
+    Strings.get(R.string.delete_data_swarm_cache_failed, message.ifEmpty { Strings.get(R.string.node_call_failed) })
 
 /** "Freed 300 MB". */
 internal fun swarmCacheFreedLine(cleared: SwarmCacheCleared): String =
@@ -195,13 +215,37 @@ internal object SwarmCache {
         synchronized(this) { if (_clear.value != Clear.Running) _clear.value = Clear.Idle }
     }
 
-    /** Delete browsing data's Swarm node cache box: clears off the caller's thread, the outcome logged. */
-    fun clearInBackground() {
-        scope.launch {
-            clearNow()
-                .onSuccess { Log.i(TAG, "cleared from Delete browsing data: ${it.freedBytes} bytes freed") }
-                .onFailure { Log.w(TAG, "clear from Delete browsing data failed: ${it.message}") }
+    /**
+     * Delete browsing data's Swarm node cache box: clears off the caller's
+     * thread. "Browsing data deleted" is already up by the time the clear
+     * ends, so a failure says so in a toast of its own rather than only in
+     * the log: the user would otherwise believe the cache gone.
+     */
+    fun clearInBackground(context: Context) {
+        val app = context.applicationContext
+        clearInBackground(::clearNow) { message ->
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(app, swarmCacheClearFailedLine(message), Toast.LENGTH_LONG).show()
+            }
         }
+    }
+
+    /** [clearInBackground] over its clear, [onFailed] getting the failure's message; for tests. */
+    internal fun clearInBackground(
+        clear: () -> Result<SwarmCacheCleared>,
+        onFailed: (String) -> Unit,
+    ): Job = scope.launch {
+        val result = try {
+            clear()
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+        result
+            .onSuccess { Log.i(TAG, "cleared from Delete browsing data: ${it.freedBytes} bytes freed") }
+            .onFailure {
+                Log.w(TAG, "clear from Delete browsing data failed: ${it.message}")
+                onFailed(it.message.orEmpty())
+            }
     }
 
     private const val TAG = "SwarmCache"

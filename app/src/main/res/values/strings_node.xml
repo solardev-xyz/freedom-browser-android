@@ -228,6 +228,7 @@
     <!-- %1$s is how much is cached ("312 MB"), %2$s the cache size ("512 MB"). -->
     <string name="node_cache_used">%1$s of %2$s</string>
     <!-- %1$s is how much pinned content is kept outside the cache size ("1.2 GB"). -->
+    <string name="node_cache_counting">Counting… (%1$s max)</string>
     <string name="node_cache_pinned">%1$s pinned</string>
     <string name="node_cache_about">Swarm pages and files you\'ve opened, kept on this device so they load faster next time. Pinned and published content doesn\'t count towards the size.</string>
     <string name="node_cache_checking">Checking…</string>

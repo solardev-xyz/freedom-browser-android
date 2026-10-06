@@ -243,6 +243,10 @@ class SwarmNode internal constructor(
     /** The mode [handle] booted in; its RPC is the one the storage calls use. Guarded by [lock]. */
     private var handleMode: Mode = Mode.ULTRA_LIGHT
 
+    /** [clock] when [handle] was published: how long ant has had to count its chunk cache. */
+    @Volatile
+    private var handleBootedAt: Long = 0L
+
     /**
      * Held (read) by every storage call for as long as it uses [handle],
      * and (write) by the shutdown of a handle [stop] took down — so ant
@@ -352,6 +356,7 @@ class SwarmNode internal constructor(
                 if (generation != gen) return@synchronized false
                 handle = h
                 handleMode = mode
+                handleBootedAt = clock()
                 _state.update {
                     it.copy(
                         status = NodeStatus.Running,
@@ -618,10 +623,14 @@ class SwarmNode internal constructor(
     }
 
     /**
-     * The chunk cache's figures, ant's `ant_cache_status` JSON. Cheap.
+     * The chunk cache's figures, ant's `ant_cache_status` JSON, with
+     * `"counting":true` added while ant is probably still counting a
+     * large cache after init (see [markCacheCounting]). Cheap.
      * Throws [IllegalStateException] while the node isn't running.
      */
-    fun cacheStatus(): String = withRunningNode { h -> ops.cacheStatus(h) }
+    fun cacheStatus(): String = withRunningNode { h ->
+        markCacheCounting(ops.cacheStatus(h), clock() - handleBootedAt)
+    }
 
     /**
      * Drops every unpinned chunk from the cache (pinned ones stay), ant's
@@ -978,6 +987,39 @@ class SwarmNode internal constructor(
         val GATEWAY_CORS_ORIGINS: List<String> = emptyList()
 
         private const val TAG = "SwarmNode"
+
+        /**
+         * How long after init an all-zero cache reading over a large file
+         * is taken for ant's background count rather than an empty cache.
+         * ant documents "a few seconds"; this leaves a slow phone room.
+         */
+        internal const val CACHE_COUNT_WINDOW_MS = 60_000L
+
+        /**
+         * A `chunks.sqlite` (+ -wal/-shm) at least this big isn't an empty
+         * cache: a fresh database is a few KB, and a clear gives the
+         * space back (incremental vacuum).
+         */
+        internal const val CACHE_COUNT_MIN_FILE_BYTES = 1L shl 20
+
+        /**
+         * [json] (ant's `ant_cache_status`) with `"counting":true` when it
+         * is most likely ant's post-init count still running: right after
+         * init on a large cache, ant reads 0 for every disk counter until a
+         * background count finishes, which would read as "0 B of 2 GB".
+         * So: within [CACHE_COUNT_WINDOW_MS] of init ([sinceBootMs]), disk
+         * cache open, nothing counted (used, chunks, pinned all 0), yet
+         * the file holds at least [CACHE_COUNT_MIN_FILE_BYTES]. Otherwise
+         * (and for anything unreadable) [json] unchanged.
+         */
+        internal fun markCacheCounting(json: String, sinceBootMs: Long): String {
+            if (sinceBootMs !in 0 until CACHE_COUNT_WINDOW_MS) return json
+            val o = runCatching { JSONObject(json) }.getOrNull() ?: return json
+            if (!o.optBoolean("disk_enabled", false)) return json
+            if (listOf("used_bytes", "chunks", "pinned_bytes", "pinned_chunks").any { o.optLong(it, 0L) != 0L }) return json
+            if (o.optLong("file_bytes", 0L) < CACHE_COUNT_MIN_FILE_BYTES) return json
+            return o.put("counting", true).toString()
+        }
 
         private const val GATEWAY_CONNECT_TIMEOUT_MS = 5_000
         private const val GATEWAY_READ_TIMEOUT_MS = 15_000

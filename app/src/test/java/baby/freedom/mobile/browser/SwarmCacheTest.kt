@@ -133,4 +133,30 @@ class SwarmCacheTest {
         }
         assertTrue(visibleSettingsRows("cookies", "Nodes", rows).isEmpty())
     }
+
+    @Test
+    fun `while ant is still counting after init the row says so, not 0 B`() {
+        val json = """{"disk_enabled":true,"used_bytes":0,"capacity_bytes":${2048 * mb},"chunks":0,""" +
+            """"pinned_bytes":0,"pinned_chunks":0,"file_bytes":${2000 * mb},"counting":true}"""
+        val s = SwarmCacheStatus.parse(json)!!
+        assertTrue(s.counting)
+        assertEquals("Counting… (2.0 GB max)", swarmCacheSummary(s))
+        val view = SwarmCacheView(running = true, status = s, size = SwarmCacheSize.DEFAULT, clear = SwarmCache.Clear.Idle)
+        assertEquals("Counting… (2.0 GB max)", swarmCacheLine(view))
+        // No mark: the figures as they are, a real empty cache included.
+        assertFalse(SwarmCacheStatus.parse(statusJson)!!.counting)
+        assertEquals("0 B of 1.0 GB", swarmCacheSummary(status(used = 0, capacity = 1024 * mb)))
+    }
+
+    @Test
+    fun `Delete browsing data's clear reports a failure, and only a failure`() {
+        val failures = mutableListOf<String>()
+        kotlinx.coroutines.runBlocking {
+            SwarmCache.clearInBackground({ Result.failure(IllegalStateException("node gone")) }) { failures += it }.join()
+            SwarmCache.clearInBackground({ throw RuntimeException("binder died") }) { failures += it }.join()
+            SwarmCache.clearInBackground({ Result.success(SwarmCacheCleared(1, 2, 1, null)) }) { failures += it }.join()
+        }
+        assertEquals(listOf("node gone", "binder died"), failures)
+        assertEquals("Couldn't clear the Swarm node cache: node gone", swarmCacheClearFailedLine("node gone"))
+    }
 }

@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
@@ -43,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.vectorResource
@@ -164,16 +166,18 @@ internal fun deleteDoneMessage(choice: DeleteChoice): String =
 /**
  * Delete what [choice] names: history in its range from [repo] here, and
  * the Swarm node's cache, all of it whatever the range
- * ([SwarmCache.clearInBackground]: pinned content stays); the rest —
+ * ([SwarmCache.clearInBackground]: pinned content stays; a failure gets
+ * its own toast after the "deleted" one); the rest —
  * closed tabs, WebView state, node logs — through [onDelete], the
  * host's, which owns the tabs and WebViews.
  */
 internal fun deleteBrowsingData(
+    context: Context,
     choice: DeleteChoice,
     repo: BrowsingRepository,
     now: Long,
     onDelete: (DeleteChoice) -> Unit,
-) = deleteBrowsingData(choice, repo::deleteHistorySince, SwarmCache::clearInBackground, now, onDelete)
+) = deleteBrowsingData(choice, repo::deleteHistorySince, { SwarmCache.clearInBackground(context) }, now, onDelete)
 
 /** [deleteBrowsingData] over its two stores, for tests. */
 internal fun deleteBrowsingData(
@@ -218,6 +222,7 @@ internal fun DeleteBrowsingDataPage(
     onBack: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
+    val context = LocalContext.current
     var choice by rememberSaveable(stateSaver = DeleteChoiceSaver) { mutableStateOf(DeleteChoice()) }
     val swarmRunning = StampClient.node.collectAsState().value.status == NodeStatus.Running
     // What Delete data acts on: the Swarm box counts only while it can be acted on.
@@ -310,7 +315,7 @@ internal fun DeleteBrowsingDataPage(
                             // The page's own clock reading: the range deletes at least
                             // every visit the count above showed.
                             if (acted.needsConfirm) confirming = true
-                            else deleteBrowsingData(acted, repo, now, onDelete)
+                            else deleteBrowsingData(context, acted, repo, now, onDelete)
                         },
                         enabled = acted.canDelete,
                         modifier = Modifier.heightIn(min = 48.dp),
@@ -328,7 +333,7 @@ internal fun DeleteBrowsingDataPage(
             confirmLabel = stringResource(R.string.delete_data_confirm_button),
             onConfirm = {
                 confirming = false
-                deleteBrowsingData(acted, repo, now, onDelete)
+                deleteBrowsingData(context, acted, repo, now, onDelete)
             },
             onDismiss = { confirming = false },
         )

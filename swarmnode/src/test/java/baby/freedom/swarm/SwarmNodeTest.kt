@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.json.JSONObject
 import org.junit.Test
 import java.io.File
 import java.util.Collections
@@ -1266,6 +1267,29 @@ class SwarmNodeTest {
         assertEquals("""{"freed_bytes":1}""", node.clearCache())
         assertTrue(ops.calls.containsAll(listOf("cacheStatus:1", "cacheClear:1")))
         node.dispose()
+    }
+
+    @Test
+    fun cacheStatusMarksAntsPostInitCountOnALargeCache() {
+        val mb = 1L shl 20
+        fun zeros(file: Long, disk: Boolean = true) =
+            """{"disk_enabled":$disk,"used_bytes":0,"capacity_bytes":${2048 * mb},"chunks":0,""" +
+                """"pinned_bytes":0,"pinned_chunks":0,"file_bytes":$file}"""
+        fun counting(json: String, since: Long) =
+            JSONObject(SwarmNode.markCacheCounting(json, since)).optBoolean("counting", false)
+        // Right after init, all 0 over a 2 GB file: ant hasn't counted yet.
+        assertTrue(counting(zeros(2000 * mb), 2_000))
+        // Past the window, the 0s are taken as they are.
+        assertFalse(counting(zeros(2000 * mb), SwarmNode.CACHE_COUNT_WINDOW_MS))
+        // A clock reading before init (shouldn't happen) proves nothing.
+        assertFalse(counting(zeros(2000 * mb), -1))
+        // A small file is an empty cache, not an uncounted one.
+        assertFalse(counting(zeros(64 * 1024), 2_000))
+        // No disk cache, or something counted: unchanged, byte for byte.
+        assertEquals(zeros(2000 * mb, disk = false), SwarmNode.markCacheCounting(zeros(2000 * mb, disk = false), 2_000))
+        val counted = """{"disk_enabled":true,"used_bytes":0,"pinned_bytes":${5 * mb},"file_bytes":${2000 * mb}}"""
+        assertEquals(counted, SwarmNode.markCacheCounting(counted, 2_000))
+        assertEquals("not json", SwarmNode.markCacheCounting("not json", 2_000))
     }
 
     @Test
