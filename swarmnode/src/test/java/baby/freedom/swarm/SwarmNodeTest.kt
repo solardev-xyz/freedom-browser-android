@@ -161,9 +161,10 @@ class SwarmNodeTest {
         override fun swapStatus(handle: Long) = swapStatusJson
         /** Each [cacheSetCapacity], as `handle:bytes`; [cacheStatus] / [cacheClear] go to [calls]. */
         val capacityCalls: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        @Volatile var cacheStatusJson = """{"disk_enabled":true,"used_bytes":1}"""
         override fun cacheStatus(handle: Long): String {
             calls += "cacheStatus:$handle"
-            return """{"disk_enabled":true,"used_bytes":1}"""
+            return cacheStatusJson
         }
         override fun cacheClear(handle: Long): String {
             calls += "cacheClear:$handle"
@@ -1290,6 +1291,36 @@ class SwarmNodeTest {
         val counted = """{"disk_enabled":true,"used_bytes":0,"pinned_bytes":${5 * mb},"file_bytes":${2000 * mb}}"""
         assertEquals(counted, SwarmNode.markCacheCounting(counted, 2_000))
         assertEquals("not json", SwarmNode.markCacheCounting("not json", 2_000))
+        // After a clear, all 0 over a big file is the clear's own answer (an
+        // older build's database kept its size): never "counting".
+        assertFalse(JSONObject(SwarmNode.markCacheCounting(zeros(512 * mb), 2_000, clearedSinceBoot = true)).optBoolean("counting", false))
+    }
+
+    @Test
+    fun cacheStatusStopsMarkingCountingOnceThisBootCleared() {
+        val mb = 1L shl 20
+        val ops = FakeOps().apply {
+            releaseSeed.countDown(); releaseInit.countDown()
+            cacheStatusJson = """{"disk_enabled":true,"used_bytes":0,"chunks":0,"pinned_bytes":0,""" +
+                """"pinned_chunks":0,"file_bytes":${512 * mb}}"""
+        }
+        val now = 1_000_000L
+        val node = SwarmNode(config, ops, { now })
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        fun counting() = JSONObject(node.cacheStatus()).optBoolean("counting", false)
+        // Seconds after init, all 0 over a 512 MB file: ant still counting.
+        assertTrue(counting())
+        node.clearCache()
+        // Same reading after a clear on this boot: the clear's answer.
+        assertFalse(counting())
+        node.stop()
+        awaitStatus(node, NodeStatus.Stopped)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        // A new boot counts afresh: the earlier boot's clear doesn't carry over.
+        assertTrue(counting())
+        node.dispose()
     }
 
     @Test

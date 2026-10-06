@@ -248,6 +248,17 @@ class SwarmNode internal constructor(
     private var handleBootedAt: Long = 0L
 
     /**
+     * A fresh token each time a [handle] is published, and the one a
+     * [clearCache] last succeeded on: after a clear on this boot, an
+     * all-zero cache reading is the clear's own answer, not ant's post-init
+     * count (an older build's database can keep its size through a clear).
+     */
+    @Volatile
+    private var handleBoot: Any = Any()
+    @Volatile
+    private var cacheClearedBoot: Any? = null
+
+    /**
      * Held (read) by every storage call for as long as it uses [handle],
      * and (write) by the shutdown of a handle [stop] took down — so ant
      * is never shut down under a call still inside it. A buy blocks until
@@ -357,6 +368,7 @@ class SwarmNode internal constructor(
                 handle = h
                 handleMode = mode
                 handleBootedAt = clock()
+                handleBoot = Any()
                 _state.update {
                     it.copy(
                         status = NodeStatus.Running,
@@ -629,7 +641,8 @@ class SwarmNode internal constructor(
      * Throws [IllegalStateException] while the node isn't running.
      */
     fun cacheStatus(): String = withRunningNode { h ->
-        markCacheCounting(ops.cacheStatus(h), clock() - handleBootedAt)
+        val boot = handleBoot
+        markCacheCounting(ops.cacheStatus(h), clock() - handleBootedAt, clearedSinceBoot = cacheClearedBoot === boot)
     }
 
     /**
@@ -639,7 +652,11 @@ class SwarmNode internal constructor(
      * isn't running, and [RuntimeException] with ant's message on failure.
      */
     fun clearCache(): String = withRunningNode { h ->
-        ops.cacheClear(h).also { Log.i(TAG, "chunk cache cleared") }
+        val boot = handleBoot
+        ops.cacheClear(h).also {
+            cacheClearedBoot = boot
+            Log.i(TAG, "chunk cache cleared")
+        }
     }
 
     /** [block] on the running node's handle, under [handleUse] like a storage call. */
@@ -1010,9 +1027,14 @@ class SwarmNode internal constructor(
          * So: within [CACHE_COUNT_WINDOW_MS] of init ([sinceBootMs]), disk
          * cache open, nothing counted (used, chunks, pinned all 0), yet
          * the file holds at least [CACHE_COUNT_MIN_FILE_BYTES]. Otherwise
-         * (and for anything unreadable) [json] unchanged.
+         * (and for anything unreadable) [json] unchanged. Never after a
+         * clear on this boot ([clearedSinceBoot]): ant rebuilds a database
+         * from an older build on a clear only when its pinned chunks fit
+         * in 64 MiB and the disk has room, so a cleared cache can keep a
+         * large file with nothing in it, and that is the true reading.
          */
-        internal fun markCacheCounting(json: String, sinceBootMs: Long): String {
+        internal fun markCacheCounting(json: String, sinceBootMs: Long, clearedSinceBoot: Boolean = false): String {
+            if (clearedSinceBoot) return json
             if (sinceBootMs !in 0 until CACHE_COUNT_WINDOW_MS) return json
             val o = runCatching { JSONObject(json) }.getOrNull() ?: return json
             if (!o.optBoolean("disk_enabled", false)) return json
