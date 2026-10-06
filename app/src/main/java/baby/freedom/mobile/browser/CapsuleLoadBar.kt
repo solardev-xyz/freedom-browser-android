@@ -9,12 +9,14 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
@@ -27,7 +29,11 @@ import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.ceil
 import kotlin.math.exp
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -104,10 +110,52 @@ internal fun capsuleLoadTarget(progress: Int, floor: Float, stalledMs: Long): Fl
 }
 
 /**
+ * How far apart, as a fraction of the field, two drawn positions of the
+ * bar may be before it is worth drawing again — about a dp on an
+ * ordinary address field. While the bar is within this of where it is
+ * heading it snaps there and rests; the slow stall creep advances in
+ * steps of this size. So a stalled load redraws a few times a second
+ * at most, not at the display's refresh rate (R1-F1).
+ */
+internal const val CAPSULE_LOAD_STEP = 0.0025f
+
+/** A frame: the shortest wait [CapsuleLoadMeter.frame] asks for. */
+private const val CAPSULE_LOAD_FRAME_MS = 16L
+
+/**
+ * A bar composed again after this long off the frame clock (the tab was
+ * in the background, the bar was off screen) is not resumed where it
+ * left off: a load that ended unseen is not filled and faded now.
+ */
+private const val CAPSULE_LOAD_REATTACH_GAP_MS = 100L
+
+/**
+ * The frame-clock time, counted from the stall's start ([stalledMs] of
+ * [capsuleLoadTarget]), at which a load stalled on [progress] with
+ * [floor] creeps up to [value]; `null` if it never does (at or past the
+ * ceiling, or already 100). The bar sleeps until then rather than
+ * redraw a sub-pixel creep every frame.
+ */
+internal fun capsuleCreepReachMs(progress: Int, floor: Float, value: Float): Long? {
+    if (progress >= 100 || value >= CAPSULE_LOAD_CREEP_CEILING) return null
+    val reported = progress.coerceIn(0, 100) / 100f
+    val start = max(max(reported, floor), CAPSULE_LOAD_MIN_FRACTION)
+    if (start >= CAPSULE_LOAD_CREEP_CEILING) return null
+    if (value <= start) return CAPSULE_LOAD_CREEP_DELAY_MS
+    val reach = (value - start) / (CAPSULE_LOAD_CREEP_CEILING - start)
+    return CAPSULE_LOAD_CREEP_DELAY_MS + ceil(-CAPSULE_LOAD_CREEP_TIME_CONSTANT_MS * ln(1f - reach)).toLong()
+}
+
+/**
  * The bar's state over one load and its fade-out, advanced one frame at a
  * time by [frame]. A plain class with no clock of its own so the whole
  * curve — the instant minimum, the smooth follow, the creep, the fill and
  * the fade — is testable without Compose.
+ *
+ * One per tab ([BrowserState.loadMeter]), shared by every bar that shows
+ * that tab's load, so the bar moving from the address field to the find
+ * bar and back (or the tab being shown again mid-load) carries on from
+ * where it was instead of starting over at the minimum (R1-M1).
  *
  * [fraction] and [alpha] are snapshot state, read only in the bar's draw
  * phase: a frame invalidates the bar's drawing and nothing else.
@@ -127,59 +175,138 @@ internal class CapsuleLoadMeter {
 
     private var running = false
     private var finishing = false
+    private var failedEnd = false
     private var lastFrameMs = 0L
     private var lastProgress = Int.MIN_VALUE
+    private var lastIndeterminate = false
     private var lastChangeMs = 0L
     private var floor = 0f
+    private var lastWait = 0L
+    private var drivers = 0
+    private var reattached = false
 
     /**
-     * Advance to [nowMs] (a frame time). [loading] is
-     * [isCapsuleLoading]; [indeterminate] is a name resolve or gateway
-     * warm-up, which has no percentage — the bar holds where it is (the
-     * sweep is drawn instead) and the creep clock doesn't run.
+     * A bar showing this meter came on screen ([detach] when it goes).
+     * The first one after none resumes the meter: see
+     * [CAPSULE_LOAD_REATTACH_GAP_MS].
      */
-    fun frame(nowMs: Long, progress: Int, loading: Boolean, indeterminate: Boolean) {
-        val dt = if (running) (nowMs - lastFrameMs).coerceAtLeast(0L).toFloat() else 0f
+    fun attach() {
+        if (drivers++ == 0) reattached = true
+    }
+
+    fun detach() {
+        drivers = (drivers - 1).coerceAtLeast(0)
+    }
+
+    /**
+     * Advance to [nowMs] (a frame time) and say how long, in ms, the bar
+     * can rest before the next frame matters: `0` for the very next
+     * frame, [Long.MAX_VALUE] for "not until an input changes". A caller
+     * may call more often than asked; two calls for the same frame (two
+     * bars on screen for a moment) count once.
+     *
+     * [loading] is [isCapsuleLoading]; [indeterminate] is a name resolve
+     * or gateway warm-up, which has no percentage — the bar holds where
+     * it is (the sweep is drawn instead) and the creep clock doesn't run.
+     * [failed] is read as the load ends: a load that failed or was
+     * stopped fades out where it stands instead of filling, so it is
+     * never shown as a completed load (R1-M2).
+     */
+    fun frame(
+        nowMs: Long,
+        progress: Int,
+        loading: Boolean,
+        indeterminate: Boolean,
+        failed: Boolean = false,
+    ): Long {
+        if (running && nowMs == lastFrameMs && !reattached) return lastWait
+        var dt = if (running) (nowMs - lastFrameMs).coerceAtLeast(0L).toFloat() else 0f
+        // Resting, nothing moved; resuming must not count the rest as one
+        // long frame and jump.
+        if (lastWait > 0L) dt = min(dt, CAPSULE_LOAD_FRAME_MS.toFloat())
+        if (reattached) {
+            reattached = false
+            if (running && nowMs - lastFrameMs > CAPSULE_LOAD_REATTACH_GAP_MS) {
+                dt = 0f
+                if (!loading) hide()
+            }
+        }
         lastFrameMs = nowMs
+        lastWait = step(nowMs, progress, loading, indeterminate, failed, dt)
+        return lastWait
+    }
+
+    private fun step(
+        nowMs: Long,
+        progress: Int,
+        loading: Boolean,
+        indeterminate: Boolean,
+        failed: Boolean,
+        dt: Float,
+    ): Long {
         if (loading) {
             if (!running || finishing) {
                 // A new load — including one that starts while the last
                 // one is still fading: back to the start, at once.
                 running = true
                 finishing = false
+                failedEnd = false
                 fractionState.floatValue = CAPSULE_LOAD_MIN_FRACTION
                 alphaState.floatValue = 1f
                 floor = CAPSULE_LOAD_MIN_FRACTION
                 lastProgress = progress
+                lastIndeterminate = indeterminate
                 lastChangeMs = nowMs
-                return
+                return 0L
             }
-            if (progress != lastProgress || indeterminate) {
+            // The creep clock restarts on a new report, and while (and
+            // just after) there is no percentage to creep from.
+            if (progress != lastProgress || indeterminate || lastIndeterminate) {
                 floor = max(floor, fraction)
                 lastProgress = progress
                 lastChangeMs = nowMs
             }
+            lastIndeterminate = indeterminate
             val target = capsuleLoadTarget(progress, floor, nowMs - lastChangeMs)
-            fractionState.floatValue = approach(fraction, target, dt, CAPSULE_LOAD_FOLLOW_MS)
-            return
+            if (target - fraction > 2 * CAPSULE_LOAD_STEP) {
+                fractionState.floatValue = approach(fraction, target, dt, CAPSULE_LOAD_FOLLOW_MS)
+                return 0L
+            }
+            // Close enough: settle on the target and rest until the creep
+            // has moved it another step, or an input changes.
+            if (target > fraction) fractionState.floatValue = target
+            if (indeterminate) return Long.MAX_VALUE
+            val next = capsuleCreepReachMs(progress, floor, fraction + CAPSULE_LOAD_STEP)
+                ?: return Long.MAX_VALUE
+            return (lastChangeMs + next - nowMs).coerceAtLeast(CAPSULE_LOAD_FRAME_MS)
         }
-        if (!running) return
-        // The load is over: fill to the end, then fade.
-        finishing = true
-        if (fraction < 1f) {
+        if (!running) return Long.MAX_VALUE
+        if (!finishing) {
+            finishing = true
+            failedEnd = failed
+        }
+        // The load is over: fill to the end — unless it failed or was
+        // stopped — then fade.
+        if (!failedEnd && fraction < 1f) {
             val next = approach(fraction, 1f, dt, CAPSULE_LOAD_FILL_MS)
             fractionState.floatValue = if (next > 0.995f) 1f else next
-            return
+            return 0L
         }
         val nextAlpha = alpha - dt / CAPSULE_LOAD_FADE_MS
         if (nextAlpha <= 0f) {
-            running = false
-            finishing = false
-            alphaState.floatValue = 0f
-            fractionState.floatValue = 0f
-        } else {
-            alphaState.floatValue = nextAlpha
+            hide()
+            return Long.MAX_VALUE
         }
+        alphaState.floatValue = nextAlpha
+        return 0L
+    }
+
+    private fun hide() {
+        running = false
+        finishing = false
+        failedEnd = false
+        alphaState.floatValue = 0f
+        fractionState.floatValue = 0f
     }
 
     /** Exponential follow from [from] towards [to]; never moves backwards. */
@@ -187,6 +314,17 @@ internal class CapsuleLoadMeter {
         if (to <= from) return from
         return from + (to - from) * (1f - exp(-dt / tauMs))
     }
+}
+
+/**
+ * Whether the load that just ended didn't complete: it failed (the tab
+ * now shows an error page) or the user stopped it.
+ */
+internal fun capsuleLoadFailed(state: BrowserState): Boolean = state.showsErrorPage || state.loadAborted
+
+/** What the bar's frame loop reads from the tab; a change wakes a resting bar. */
+private data class CapsuleLoadInputs(val progress: Int, val loading: Boolean, val resolving: Boolean) {
+    constructor(state: BrowserState) : this(state.progress, isCapsuleLoading(state), state.resolving)
 }
 
 /**
@@ -220,7 +358,8 @@ private fun rememberCapsuleSweep(): State<Float> {
  *   its own.
  * - While a name resolves or a gateway warms up ([BrowserState.resolving])
  *   there is no percentage, so a short segment sweeps along the same line.
- * - When the load ends it fills to 100 % and fades out.
+ * - When the load ends it fills to 100 % and fades out; a load that
+ *   failed or was stopped ([capsuleLoadFailed]) fades where it stands.
  *
  * Shared by the address field and the find bar, which stands in for the
  * capsule while it is open, so a load started with the bar up still shows
@@ -238,15 +377,26 @@ private fun rememberCapsuleSweep(): State<Float> {
 @Composable
 internal fun CapsuleLoadBar(state: BrowserState, shape: Shape, modifier: Modifier = Modifier) {
     val loading by remember(state) { derivedStateOf { isCapsuleLoading(state) } }
-    val meter = remember(state) { CapsuleLoadMeter() }
+    val meter = state.loadMeter
+    DisposableEffect(meter) {
+        meter.attach()
+        onDispose { meter.detach() }
+    }
     // Runs only while there is something to show: from a load's start to
-    // the end of its fade. An idle bar is off the frame clock entirely.
+    // the end of its fade. An idle bar is off the frame clock entirely,
+    // and a bar at rest (settled on its target, or between two steps of
+    // the stall creep) sleeps until the meter's next step is due or an
+    // input changes, instead of drawing every frame (R1-F1).
     LaunchedEffect(meter, loading) {
         if (!loading && !meter.visible) return@LaunchedEffect
         while (true) {
             val now = withFrameMillis { it }
-            meter.frame(now, state.progress, isCapsuleLoading(state), state.resolving)
-            if (!isCapsuleLoading(state) && !meter.visible) break
+            val seen = CapsuleLoadInputs(state)
+            val wait = meter.frame(now, seen.progress, seen.loading, seen.resolving, capsuleLoadFailed(state))
+            if (!seen.loading && !meter.visible) break
+            if (wait > 0L) {
+                withTimeoutOrNull(wait) { snapshotFlow { CapsuleLoadInputs(state) }.first { it != seen } }
+            }
         }
     }
     val sweep: State<Float>? = if (loading && state.resolving) rememberCapsuleSweep() else null

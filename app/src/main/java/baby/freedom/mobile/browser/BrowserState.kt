@@ -118,6 +118,13 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     var progress by mutableIntStateOf(-1)
 
     /**
+     * What the capsule's load bar shows for this tab ([CapsuleLoadBar]),
+     * kept with the tab so every bar that shows it — the address field,
+     * the find bar — continues the same curve.
+     */
+    internal val loadMeter = CapsuleLoadMeter()
+
+    /**
      * Indicates this tab is in the indeterminate pre-navigation phase:
      * ENS name being resolved, or peer-warmup [GatewayProbe] still
      * running. Drives the top LinearProgressIndicator independently

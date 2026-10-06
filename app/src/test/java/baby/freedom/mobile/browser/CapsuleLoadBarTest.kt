@@ -152,6 +152,121 @@ class CapsuleLoadBarTest {
         assertEquals(1f, m.alpha, 0f)
     }
 
+    /**
+     * Drives [m] the way [CapsuleLoadBar]'s loop does — the next frame
+     * after the wait the meter asks for — and counts the frames drawn.
+     */
+    private fun drive(m: CapsuleLoadMeter, from: Long, until: Long, progress: Int): Pair<Long, Int> {
+        var t = from
+        var frames = 0
+        while (t < until) {
+            val wait = m.frame(t, progress, loading = true, indeterminate = false)
+            frames++
+            t += if (wait == Long.MAX_VALUE) until - t else maxOf(16L, wait)
+        }
+        return t to frames
+    }
+
+    @Test
+    fun `a stalled load rests between creep steps instead of drawing every frame`() {
+        val m = CapsuleLoadMeter()
+        m.frame(0, 30, loading = true, indeterminate = false)
+        val (_, frames) = drive(m, 16, 40_000, 30)
+        // 40 s at 60 Hz would be 2 500 frames.
+        assertTrue("drew $frames frames", frames < 400)
+        // …and it still creeps, never past the ceiling.
+        assertTrue(m.fraction > 0.6f)
+        assertTrue(m.fraction < CAPSULE_LOAD_CREEP_CEILING)
+        // A settled bar with no creep left asks for nothing at all.
+        val held = CapsuleLoadMeter()
+        held.frame(0, 95, loading = true, indeterminate = false)
+        val (_, heldFrames) = drive(held, 16, 60_000, 95)
+        assertTrue("drew $heldFrames frames", heldFrames < 60)
+    }
+
+    @Test
+    fun `the creep wake-up time is where the creep reaches that value`() {
+        val at = capsuleCreepReachMs(30, 0f, 0.5f)!!
+        assertEquals(0.5f, capsuleLoadTarget(30, 0f, at), 1e-3f)
+        assertTrue(capsuleLoadTarget(30, 0f, at - 50) < 0.5f)
+        assertEquals(CAPSULE_LOAD_CREEP_DELAY_MS, capsuleCreepReachMs(30, 0f, 0.2f))
+        assertEquals(null, capsuleCreepReachMs(30, 0f, CAPSULE_LOAD_CREEP_CEILING))
+        assertEquals(null, capsuleCreepReachMs(100, 0f, 0.5f))
+    }
+
+    @Test
+    fun `a progress report wakes a resting bar and it eases rather than jumps`() {
+        val m = CapsuleLoadMeter()
+        m.frame(0, 30, loading = true, indeterminate = false)
+        drive(m, 16, 1_000, 30)
+        val before = m.fraction
+        // Woken long after its last frame by a new report.
+        m.frame(1_400, 80, loading = true, indeterminate = false)
+        assertTrue(m.fraction < 0.5f)
+        assertTrue(m.fraction >= before)
+    }
+
+    @Test
+    fun `the tab's bar carries on where it was when shown again mid-load`() {
+        val tab = BrowserState(id = 1L)
+        val m = tab.loadMeter
+        m.attach()
+        var t = 0L
+        m.frame(t, 0, loading = true, indeterminate = false)
+        repeat(60) { t += 16; m.frame(t, 70, loading = true, indeterminate = false) }
+        val shown = m.fraction
+        assertEquals(0.7f, shown, 0.01f)
+        // The find bar opens and closes: one bar goes, another comes.
+        m.detach()
+        m.attach()
+        t += 16
+        m.frame(t, 70, loading = true, indeterminate = false)
+        assertTrue(m.fraction >= shown)
+        // Much later, still loading (the tab was in the background).
+        m.detach()
+        m.attach()
+        t += 5_000
+        m.frame(t, 75, loading = true, indeterminate = false)
+        assertTrue(m.fraction >= shown)
+        assertEquals(1f, m.alpha, 0f)
+        assertTrue(tab.loadMeter === m)
+    }
+
+    @Test
+    fun `a load that ended while no bar was on screen isn't filled later`() {
+        val m = CapsuleLoadMeter()
+        m.attach()
+        m.frame(0, 40, loading = true, indeterminate = false)
+        m.detach()
+        m.attach()
+        m.frame(10_000, -1, loading = false, indeterminate = false)
+        assertFalse(m.visible)
+    }
+
+    @Test
+    fun `a failed or stopped load fades where it stands instead of filling`() {
+        val m = CapsuleLoadMeter()
+        var t = 0L
+        m.frame(t, 0, loading = true, indeterminate = false)
+        repeat(60) { t += 16; m.frame(t, 30, loading = true, indeterminate = false) }
+        val at = m.fraction
+        while (m.visible && t < 2_000) {
+            t += 16
+            m.frame(t, -1, loading = false, indeterminate = false, failed = true)
+            assertEquals(at, if (m.visible) m.fraction else at, 0f)
+        }
+        assertFalse(m.visible)
+        assertTrue("faded within ~250 ms, took ${t - 960}", t - 960 <= 300)
+
+        val tab = BrowserState(id = 2L)
+        assertFalse(capsuleLoadFailed(tab))
+        tab.showsErrorPage = true
+        assertTrue(capsuleLoadFailed(tab))
+        tab.showsErrorPage = false
+        tab.stopProgress()
+        assertTrue(capsuleLoadFailed(tab))
+    }
+
     @Test
     fun `the lead-in is where a bar clipped to a pill reaches full thickness`() {
         // 44 px tall pill, 3 px bar: the strip is full height ~11 px in.
