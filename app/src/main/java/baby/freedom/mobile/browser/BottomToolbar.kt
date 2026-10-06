@@ -1165,23 +1165,6 @@ internal fun capsulePillSlotScale(collapse: Float): Float =
     (1f - collapse * CONTROL_COLLAPSE_RATE).coerceIn(0f, 1f)
 
 /**
- * Stroke of the load-progress trace that runs along the capsule's own
- * outline. Thin enough to read as a highlight on the edge rather than a
- * second border; drawn *over* the capsule, so it costs no layout height
- * and nothing shifts when a load starts or ends.
- */
-private val CapsuleProgressStroke = 2.5.dp
-
-/**
- * Fraction of each half-perimeter covered by the travelling segment
- * while the load is indeterminate (ENS resolve / gateway warm-up).
- */
-private const val CAPSULE_SWEEP_WINDOW = 0.4f
-
-/** One full lap of the indeterminate sweep, in milliseconds. */
-private const val CAPSULE_SWEEP_PERIOD_MS = 1400
-
-/**
  * Which control the address pill's trailing slot is showing. The slot
  * is a fixed-size square that is *always* reserved, so the pill's text
  * area never changes width — that is what keeps a load starting or
@@ -1414,13 +1397,15 @@ internal fun CapsuleSurface(
  * each shrinks whole into the edge it retreats to, width and scale
  * together, never a cross-fade and never a clipped fragment.
  *
- * **Loading** is drawn *on* the field: a thin trace runs along its
- * outline from the bottom centre out to both sides (see
- * [CapsuleEdgeTrace]). It is measured from whatever outline the field
- * currently has, so it traces the compact and editing shapes just as
- * readily as the resting one. The field's trailing slot turns into a
- * Stop control. Both are overlays on geometry that is already settled,
- * so a load starting or ending moves nothing.
+ * **Loading** is drawn *on* the field, the way Chrome for Android draws
+ * it: a thin bar along the field's bottom edge, clipped to its shape,
+ * that grows from the leading edge, sweeps while a name resolves, and
+ * fills and fades when the load ends (see [CapsuleLoadBar]). It is
+ * sized from whatever outline the field currently has, so it sits on
+ * the compact and editing shapes just as readily as the resting one.
+ * The field's trailing slot turns into a Stop control. Both are overlays
+ * on geometry that is already settled, so a load starting or ending
+ * moves nothing.
  *
  * The caller owns the layout slot (insets, IME padding, max width); this
  * composable only fills whatever width it is given.
@@ -1757,7 +1742,6 @@ internal fun BottomToolbar(
                     state = state,
                     nodeInfo = nodeInfo,
                     isBookmarked = isBookmarked,
-                    onForward = onForward,
                     onHome = onHome,
                     onToggleBookmark = onToggleBookmark,
                     onOpenSettings = onOpenSettings,
@@ -1919,36 +1903,32 @@ internal fun BottomToolbar(
             )
         }
 
-        // Load progress, stroked along the field's *current* outline.
+        // Load progress: Chrome's thin bar along the field's bottom edge.
         //
         // Its own sibling, sized and positioned from the same two numbers
         // the field's surface is ([addressFieldDrawnWidth] /
-        // [addressFieldDrawnCenter]), and last in the Box so it lands
-        // over the finished bar — the trace belongs on the edge, not
-        // half-swallowed by a shape clip. It carries no pointer input, so
-        // it is not a hit target and the controls underneath it still
-        // take every tap.
+        // [addressFieldDrawnCenter]) and carrying the field's own bottom
+        // anchor, so the bar sits on whatever shape the field currently
+        // is — 32 dp compact, 44 dp at rest, 64 dp editing, and every
+        // frame in between. Last in the Box so it lands over the
+        // surface's hairline; it clips itself to the field's pill shape,
+        // and it carries no pointer input, so the controls underneath it
+        // still take every tap.
         //
-        // Because it is measured from `size`, the trace re-traces
-        // whatever shape the field currently is: 32 dp compact, 44 dp
-        // at rest, 64 dp editing, and every frame in between — and it
-        // carries the field's own bottom anchor, so it stays on the
-        // outline rather than beside it.
-        //
-        // `state.progress` is read inside the draw lambda (and only as a
-        // boundary, through `loading` above), so a ticking load
-        // invalidates drawing only — never layout or composition.
-        if (loading) {
-            CapsuleLoadTrace(
-                state = state,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .width(fieldWidth)
-                    .height(drawnHeight)
-                    .offset { IntOffset((fieldCenter.toPx() * direction).roundToInt(), 0) }
-                    .offset(y = bottomAnchor),
-            )
-        }
+        // Composed unconditionally: it draws nothing while idle and has
+        // to outlive the load to fade out. `state.progress` is read on
+        // the frame clock and the result in the draw phase, so a ticking
+        // load invalidates drawing only — never layout or composition.
+        CapsuleLoadBar(
+            state = state,
+            shape = CircleShape,
+            modifier = Modifier
+                .align(Alignment.Center)
+                .width(fieldWidth)
+                .height(drawnHeight)
+                .offset { IntOffset((fieldCenter.toPx() * direction).roundToInt(), 0) }
+                .offset(y = bottomAnchor),
+        )
     }
 }
 
@@ -2150,149 +2130,6 @@ private fun Modifier.collapsingControl(
  */
 private fun Modifier.capsuleFieldSlot(slotScale: Float, towardsStart: Boolean): Modifier =
     collapsingControl(slotScale, towardsStart).size(CapsuleTrailingSlotSize)
-
-/**
- * Phase of the indeterminate edge sweep, 0..1 per lap. Kept in its own
- * composable so the infinite transition is only created while a tab is
- * actually resolving.
- */
-@Composable
-private fun rememberCapsuleSweep(): State<Float> {
-    val transition = rememberInfiniteTransition(label = "capsuleSweep")
-    return transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(CAPSULE_SWEEP_PERIOD_MS, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "capsuleSweepPhase",
-    )
-}
-
-/**
- * The load-progress trace stroked along the outline of whatever capsule
- * [modifier] sizes it to: `0 → progress` for a determinate load, a
- * travelling segment while [BrowserState.resolving] (ENS resolve /
- * gateway warm-up). Shared by the address field and the find bar, which
- * stands in for the capsule while it is open, so a load started with the
- * bar up still shows (#83). Callers compose it only while
- * [isCapsuleLoading]; `state.progress` is read in the draw phase only.
- */
-@Composable
-internal fun CapsuleLoadTrace(state: BrowserState, modifier: Modifier = Modifier) {
-    // The travelling segment only exists while we have no percentage to
-    // show; composing the infinite transition conditionally keeps an
-    // idle capsule off the animation clock entirely.
-    val sweep: State<Float>? = if (state.resolving) rememberCapsuleSweep() else null
-    val progressColor = MaterialTheme.colorScheme.primary
-    val progressStrokePx = with(LocalDensity.current) { CapsuleProgressStroke.toPx() }
-    // No semantics of its own: TalkBack hears the load on the address
-    // bar ([capsuleLoadStateDescription]). A node here, drawn over the
-    // field, would hide the field and its controls from accessibility.
-    Box(
-        modifier = modifier.drawWithCache {
-            // The outline only changes when the capsule's size does, so
-            // it is traced and measured here in the cache block — a frame
-            // of the sweep then costs one `getSegment` per half, not two
-            // fresh paths and a fresh PathMeasure.
-            val trace = CapsuleEdgeTrace(size, progressStrokePx)
-            onDrawBehind {
-                val start: Float
-                val end: Float
-                if (sweep != null) {
-                    val head = sweep.value * (1f + CAPSULE_SWEEP_WINDOW)
-                    start = (head - CAPSULE_SWEEP_WINDOW).coerceIn(0f, 1f)
-                    end = head.coerceIn(0f, 1f)
-                } else {
-                    start = 0f
-                    end = state.progress.coerceIn(0, 100) / 100f
-                }
-                trace.draw(this, start, end, progressColor)
-            }
-        },
-    )
-}
-
-/**
- * The capsule's own outline, pre-split and pre-measured, ready to be
- * traced with the load progress.
- *
- * The perimeter is split into two halves that both start at the bottom
- * centre and end at the top centre, so progress opens outwards from
- * under the domain and closes at the top — symmetric, and unambiguous
- * about where 0 % and 100 % are.
- *
- * The geometry depends on nothing but the capsule's [size] and the
- * stroke width, so one of these is built per size in
- * [Modifier.drawWithCache]'s cache block and reused for every frame of
- * the load. The paths are inset by half the stroke, so the trace's outer
- * edge lands exactly on the capsule's edge, and they are drawn over the
- * finished capsule, so nothing about them participates in layout.
- */
-private class CapsuleEdgeTrace(size: Size, strokeWidth: Float) {
-    private val stroke = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-
-    // Held for the lifetime of the trace: a [PathMeasure] measures the
-    // path it was given rather than a copy of it.
-    private val halves: List<Path> = capsuleHalves(size, strokeWidth)
-    private val measures: List<PathMeasure> =
-        halves.map { half -> PathMeasure().apply { setPath(half, false) } }
-    private val lengths: List<Float> = measures.map { it.length }
-
-    // Rewritten in place each frame; `getSegment` appends, so it is
-    // reset first.
-    private val segment = Path()
-
-    /**
-     * Stroke the [start]..[end] fraction of each half onto [scope]: a
-     * determinate load draws `0 → progress`, an indeterminate one a
-     * short window travelling from bottom to top.
-     */
-    fun draw(scope: DrawScope, start: Float, end: Float, color: Color) {
-        if (end <= start) return
-        for (i in measures.indices) {
-            val length = lengths[i]
-            segment.reset()
-            measures[i].getSegment(start * length, end * length, segment, true)
-            scope.drawPath(segment, color, style = stroke)
-        }
-    }
-}
-
-/**
- * The capsule outline as two half-paths, each running bottom centre →
- * along an edge → around the end cap → back to the top centre. Empty
- * when [size] is not the shape we trace: a capsule needs at least one
- * full cap per side.
- */
-private fun capsuleHalves(size: Size, strokeWidth: Float): List<Path> {
-    val inset = strokeWidth / 2f
-    val width = size.width - strokeWidth
-    val height = size.height - strokeWidth
-    if (height <= 0f || width < height) return emptyList()
-
-    val left = inset
-    val top = inset
-    val right = inset + width
-    val bottom = inset + height
-    val radius = height / 2f
-    val centerX = inset + width / 2f
-
-    val leftHalf = Path().apply {
-        moveTo(centerX, bottom)
-        lineTo(left + radius, bottom)
-        arcTo(Rect(left, top, left + height, bottom), 90f, 180f, false)
-        lineTo(centerX, top)
-    }
-    val rightHalf = Path().apply {
-        moveTo(centerX, bottom)
-        lineTo(right - radius, bottom)
-        arcTo(Rect(right - height, top, right, bottom), 90f, -180f, false)
-        lineTo(centerX, top)
-    }
-    return listOf(leftHalf, rightHalf)
-}
 
 /**
  * The address field — the middle surface of the split bar, and the only
@@ -3031,7 +2868,6 @@ private fun OverflowMenuButton(
     state: BrowserState,
     nodeInfo: NodeInfo,
     isBookmarked: Boolean,
-    onForward: () -> Unit,
     onHome: () -> Unit,
     onToggleBookmark: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -3121,9 +2957,6 @@ private fun OverflowMenuButton(
                 ),
             )
             val icons = mainMenuIconsFor(
-                canGoBack = state.canGoBack,
-                canGoForward = state.canGoForward,
-                isHome = state.isHome,
                 url = state.url,
                 addressBarText = state.addressBarText,
                 isBookmarked = isBookmarked,
@@ -3168,7 +3001,6 @@ private fun OverflowMenuButton(
                     ) {
                         MainMenuIconRow(
                             icons = icons,
-                            onForward = { close(onForward) },
                             onToggleBookmark = { close(onToggleBookmark) },
                             onShare = {
                                 close { icons.shareUrl?.let { shareUrl(context, it, state.title) } }
@@ -3218,8 +3050,10 @@ private fun OverflowMenuButton(
 }
 
 /**
- * The menu's top row (#400): Forward · Bookmark · Share · Reload, the
- * page actions people reach for most, as Chrome puts them. Each is a full
+ * The menu's top row (#400): Bookmark · Share · Reload, the page actions
+ * people reach for most, as Chrome puts them — without Chrome's Forward,
+ * which the capsule's Back + Forward pill already shows whenever it can
+ * act (#415). Each is a full
  * 48 dp target with its name as its content description, and the same
  * name in a tooltip on a long press, since an icon alone doesn't say it.
  */
@@ -3227,7 +3061,6 @@ private fun OverflowMenuButton(
 @Composable
 private fun MainMenuIconRow(
     icons: MainMenuIcons,
-    onForward: () -> Unit,
     onToggleBookmark: () -> Unit,
     onShare: () -> Unit,
     onReload: () -> Unit,
@@ -3240,12 +3073,6 @@ private fun MainMenuIconRow(
             .fillMaxWidth()
             .padding(horizontal = 8.dp),
     ) {
-        MainMenuIconButton(
-            icon = Icons.AutoMirrored.Filled.ArrowForward,
-            label = stringResource(R.string.browser_forward),
-            enabled = icons.forwardEnabled,
-            onClick = onForward,
-        )
         MainMenuIconButton(
             icon = if (icons.bookmarked) Icons.Filled.Star else Icons.Filled.StarBorder,
             label = stringResource(

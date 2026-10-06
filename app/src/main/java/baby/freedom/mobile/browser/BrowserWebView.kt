@@ -3664,8 +3664,10 @@ private fun buildRefreshableWebView(
                 if (navigationOpensStopLatch(request.isForMainFrame, detoured)) {
                     state.loadAborted = false
                     // A link the WebView follows itself is a new load
-                    // (a detoured one gets this from the submit, #94).
-                    state.beginLoad(inWebView = true)
+                    // (a detoured one gets this from the submit, #94);
+                    // a redirect hop is a new generation of the same one
+                    // as far as the load bar is concerned (R3-F1).
+                    state.beginLoad(inWebView = true, redirect = request.isRedirect)
                 }
                 if (detoured) {
                     // The WebView's own navigation stops here; the submit
