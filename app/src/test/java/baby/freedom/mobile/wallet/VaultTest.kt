@@ -411,6 +411,16 @@ class VaultTest {
     }
 
     @Test
+    fun `revealing the phrase alone leaves the backup reminder up`() = runBlocking {
+        // #421: only the backup flow's passed check calls markBackedUp, never a reveal.
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        assertEquals(phrase, v.revealMnemonic(auth))
+        assertFalse((v.state.value as Vault.State.Unlocked).info.backedUp)
+        assertFalse((vault().state.value as Vault.State.Locked).info.backedUp)
+    }
+
+    @Test
     fun `an auto-lock landing while markBackedUp writes stays locked`() = runBlocking {
         val v = vault()
         v.create(phrase, auth, imported = false)

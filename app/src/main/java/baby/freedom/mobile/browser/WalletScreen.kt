@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -34,6 +35,7 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -41,7 +43,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -78,6 +84,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
@@ -692,7 +699,12 @@ fun WalletScreen(
     val cameFrom = remember { currentSite }
     // No other app's overlay over the wallet (#240): Android 12+ hides them while it's open.
     HideOverlayWindows()
-    var showingPhrase by remember { mutableStateOf(false) }
+    // The recovery phrase / backup flow (#421), while open: its state holds the words in memory only.
+    var phraseFlow by remember { mutableStateOf<BackupFlowState?>(null) }
+    // The flow opened right after Create: the phrase's length is known (Mnemonic.CREATE_WORD_COUNT).
+    var phraseFlowAfterCreate by remember { mutableStateOf(false) }
+    // "I already have one" with a Google backup there: restore it, or type the phrase.
+    var choosingRestore by remember { mutableStateOf(false) }
     // Show private key (#323): the account it was opened for, fixed then, by address.
     var showingKeyOf by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
@@ -1013,18 +1025,22 @@ fun WalletScreen(
         LaunchedEffect(openSite) { openSite = null }
     }
     val stored = storedInfo
-    if (showingPhrase && stored != null) {
-        RecoveryPhrasePage(
+    val flow = phraseFlow
+    if (flow != null && stored != null) {
+        BackupFlow(
+            state = flow,
             protection = stored.protection,
+            wordCount = if (phraseFlowAfterCreate) Mnemonic.CREATE_WORD_COUNT else null,
+            reminder = backupReminderText(stored.protection, googleBackup = googleBackupHeld == BackupHeld.CLOUD),
             reveal = { vault.revealMnemonic(auth) },
-            onSeen = { vault.markBackedUp() },
+            markBackedUp = { vault.markBackedUp() },
             errorMessage = { e -> walletErrorMessage(e, Strings.get(R.string.wallet_action_show_phrase), phraseBackedUp) },
-            onBack = { showingPhrase = false },
+            onClose = { phraseFlow = null },
         )
         return
     }
     // The wallet went away (removed, or unreadable) with the page up: nothing to show.
-    LaunchedEffect(stored == null) { if (stored == null) showingPhrase = false }
+    LaunchedEffect(stored == null) { if (stored == null) phraseFlow = null }
 
     // Looked up by the address it was opened for, never the active account: a switch
     // meanwhile must not change whose key the page shows. Gone from the list (or no key
@@ -1093,6 +1109,15 @@ fun WalletScreen(
                     }
                 }
             }
+            // Until the phrase is checked (#421). Google backup doesn't end it: its upload hangs
+            // on Android's own Google backup, which may be off (#244 R5-F1).
+            if (stored != null && !stored.backedUp) item("backup-banner") {
+                BackupBanner(enabled = !busy) {
+                    error = null
+                    phraseFlowAfterCreate = false
+                    phraseFlow = BackupFlowState(startWithIntro = true, needsCheck = true)
+                }
+            }
             if (state == Vault.State.Empty && backupEntry == true) item("restore") {
                 RestoreFromBackupSection(
                     busy = busy,
@@ -1118,11 +1143,14 @@ fun WalletScreen(
                         onCreate = {
                             run(Strings.get(R.string.wallet_action_create)) {
                                 vault.create(Mnemonic.generate(), auth, imported = false)
+                                // Straight into the backup, which "Later" skips (#421).
+                                phraseFlowAfterCreate = true
+                                phraseFlow = BackupFlowState(startWithIntro = true, needsCheck = true)
                             }
                         },
-                        onImport = {
+                        onHaveOne = {
                             error = null
-                            importing = true
+                            if (backupEntry == true) choosingRestore = true else importing = true
                         },
                     )
                     is Vault.State.Locked -> StatusSection(
@@ -1289,17 +1317,8 @@ fun WalletScreen(
             }
             val openPhrase = {
                 error = null
-                showingPhrase = true
-            }
-            // Google backup doesn't end it: its upload hangs on Android's own Google backup,
-            // which may be off (#244 R5-F1).
-            if (info != null && !info.backedUp) item("backup") {
-                BackupReminder(
-                    info.protection,
-                    googleBackup = googleBackupHeld == BackupHeld.CLOUD,
-                    busy = busy,
-                    onShow = openPhrase,
-                )
+                phraseFlowAfterCreate = false
+                phraseFlow = BackupFlowState(startWithIntro = false, needsCheck = info?.backedUp == false)
             }
             if (info != null) item("phrase") {
                 SectionCard(title = stringResource(R.string.wallet_phrase_section)) {
@@ -1328,6 +1347,7 @@ fun WalletScreen(
                     onToggle = { on -> if (on) turnOnBackup() else confirmBackupOff = true },
                     onDeleteKept = { confirmBackupDelete = true },
                     screenLockButton = { ScreenLockSettingsButton() },
+                    deviceSecure = deviceSecure,
                 )
             }
             if (info?.protection == VaultProtection.DEVICE_ONLY) item("no-lock") {
@@ -1419,6 +1439,27 @@ fun WalletScreen(
                 }
             }
         }
+    }
+
+    if (choosingRestore && state == Vault.State.Empty && backupEntry == true) {
+        RestoreChoiceDialog(
+            deviceSecure = deviceSecure,
+            onRestore = {
+                choosingRestore = false
+                run(Strings.get(R.string.wallet_action_restore)) {
+                    vault.restore(auth, phraseBackup)
+                    backupCheck++
+                }
+            },
+            onPhrase = {
+                choosingRestore = false
+                importing = true
+            },
+            onDismiss = { choosingRestore = false },
+        )
+    } else if (choosingRestore) {
+        // The backup (or the empty state) went away under it.
+        LaunchedEffect(Unit) { choosingRestore = false }
     }
 
     if (confirmBackupOff || confirmBackupDelete) {
@@ -1526,37 +1567,92 @@ internal fun backupKeptMessage(kept: PhraseBackup.DeleteIfOf?): String? = when (
     else -> null
 }
 
+/**
+ * No wallet yet (#421, W9): an icon, one line, Create and "I already have
+ * one" — which imports a phrase, or offers the Google backup first when
+ * there is one ([RestoreChoiceDialog]). Without a screen lock it says what
+ * that means before Create.
+ */
 @Composable
 private fun SetupSection(
     busy: Boolean,
     deviceSecure: Boolean,
     onCreate: () -> Unit,
-    onImport: () -> Unit,
+    onHaveOne: () -> Unit,
 ) {
-    SectionCard(title = stringResource(R.string.wallet_setup_title)) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 16.dp),
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(88.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+        ) {
+            Icon(
+                Icons.Filled.AccountBalanceWallet,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(44.dp),
+            )
+        }
+        Spacer(Modifier.height(20.dp))
         Text(
-            stringResource(R.string.wallet_setup_intro),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            stringResource(R.string.wallet_setup_write_down, stringResource(R.string.wallet_show_phrase)),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            stringResource(R.string.wallet_empty_line),
+            style = MaterialTheme.typography.bodyLarge,
+            textAlign = TextAlign.Center,
         )
         if (!deviceSecure) {
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(16.dp))
             NoScreenLockWarning(text = stringResource(R.string.wallet_setup_no_screen_lock))
             ScreenLockSettingsButton()
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(24.dp))
         Button(onClick = onCreate, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
             Text(stringResource(if (busy) R.string.wallet_creating else R.string.wallet_create))
         }
-        OutlinedButton(onClick = onImport, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-            Text(stringResource(R.string.wallet_import_phrase_button))
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = onHaveOne, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+            Text(stringResource(R.string.wallet_have_one))
         }
     }
+}
+
+/** "I already have one" with a Google backup there: restore that, or enter a recovery phrase. */
+@Composable
+private fun RestoreChoiceDialog(
+    deviceSecure: Boolean,
+    onRestore: () -> Unit,
+    onPhrase: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Filled.AccountBalanceWallet, contentDescription = null) },
+        title = { Text(stringResource(R.string.wallet_have_one_title)) },
+        text = {
+            Column {
+                Button(onClick = onRestore, enabled = deviceSecure, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.wallet_have_one_google))
+                }
+                if (!deviceSecure) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        stringResource(R.string.wallet_have_one_google_no_lock),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = onPhrase, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.wallet_have_one_phrase))
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
+    )
 }
 
 @Composable
@@ -1640,23 +1736,6 @@ private fun StatusLine(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-        }
-    }
-}
-
-/**
- * The persistent backup-reminder card (maintainer decision 3), until the
- * phrase has been shown once on [RecoveryPhrasePage] (#78). With a Google
- * backup written for the cloud ([googleBackup]) it says why that isn't
- * enough (#244 R5-F1).
- */
-@Composable
-private fun BackupReminder(protection: VaultProtection, googleBackup: Boolean, busy: Boolean, onShow: () -> Unit) {
-    SectionCard(title = stringResource(R.string.wallet_reminder_line)) {
-        NoScreenLockWarning(text = backupReminderText(protection, googleBackup))
-        Spacer(Modifier.height(12.dp))
-        Button(onClick = onShow, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-            Text(stringResource(R.string.wallet_back_up_now))
         }
     }
 }
@@ -1971,51 +2050,47 @@ internal val COPY_NOTE: String get() = (PhraseClipboard.TTL_MS / 1000 / 60).toIn
  * wallet made on a phone with no screen lock is the one exception, and
  * says so.
  *
- * The page is `FLAG_SECURE` ([SecureWindow]): no screenshot, screen
- * recording, casting or Recents thumbnail. The words live in plain
- * `remember` state only — never `rememberSaveable` — and are dropped on
- * Hide, on Back, and as soon as the app goes to the background, so
- * coming back to it asks again. Showing them once clears the backup
- * reminder ([Vault.markBackedUp]).
+ * The words step of [BackupFlow] (#421), which holds them ([words]) in
+ * plain memory only — never `rememberSaveable` — and drops them on Hide
+ * ([onHide]), on Back, and as soon as the app goes to the background, so
+ * coming back to it asks again. The page is `FLAG_SECURE` ([SecureWindow]):
+ * no screenshot, screen recording, casting or Recents thumbnail.
+ *
+ * Seeing the words records nothing: with [onWrittenDown] (not backed up
+ * yet) the page offers "I've written them down", on to the three-word
+ * check, and only that check clears the reminder. Copy is in the ⋮ menu,
+ * behind its warning, rather than next to Hide.
  */
 @Composable
-private fun RecoveryPhrasePage(
+internal fun RecoveryPhrasePage(
+    title: String,
     protection: VaultProtection,
+    words: List<String>?,
+    onRevealed: (List<String>) -> Unit,
+    onHide: () -> Unit,
     reveal: suspend () -> Mnemonic,
-    onSeen: suspend () -> Unit,
     errorMessage: (Throwable) -> String?,
+    onWrittenDown: (() -> Unit)?,
     onBack: () -> Unit,
+    /** Reveal on opening, as the intro's "Show the words" asked ([onRevealStarted] once begun). */
+    revealNow: Boolean = false,
+    onRevealStarted: () -> Unit = {},
 ) {
     SecureWindow()
     ReleaseCoveredFocus()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var words by remember { mutableStateOf<List<String>?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    // Follows the clipboard itself, so the button says "Copy" again as
-    // soon as the minute is up and the words have been taken off — and
-    // only for these words, not a removed wallet's (#334 R3-M2).
+    var menuOpen by remember { mutableStateOf(false) }
+    var confirmCopy by remember { mutableStateOf(false) }
+    // Follows the clipboard itself, so the line goes as soon as the minute is
+    // up and the words have been taken off — and only for these words, not a
+    // removed wallet's (#334 R3-M2).
     val copiedLabel by PhraseClipboard.copiedLabel.collectAsState()
     val copiedHash by PhraseClipboard.copiedHash.collectAsState()
-    val hide = {
-        words = null
-    }
 
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) hide()
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    val back = {
-        hide()
-        onBack()
-    }
-    BackHandler(onBack = back)
+    BackHandler(onBack = onBack)
 
     fun show() {
         if (busy) return
@@ -2023,14 +2098,7 @@ private fun RecoveryPhrasePage(
         error = null
         scope.launch {
             try {
-                words = reveal().words
-                try {
-                    onSeen()
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    // The reminder stays up; the words are on screen all the same.
-                }
+                onRevealed(reveal().words)
             } catch (e: Throwable) {
                 error = errorMessage(e)
                 if (e is CancellationException) throw e
@@ -2039,8 +2107,36 @@ private fun RecoveryPhrasePage(
             }
         }
     }
+    LaunchedEffect(revealNow) {
+        if (revealNow) {
+            onRevealStarted()
+            if (words == null) show()
+        }
+    }
 
-    FullScreenScaffold(title = stringResource(R.string.wallet_phrase_section), onDismiss = back) {
+    FullScreenScaffold(
+        title = title,
+        onDismiss = onBack,
+        trailing = {
+            // Copy only once the words are on screen, and only through its warning.
+            if (words != null) Box {
+                // Material's own size: a full 48 dp target (#279).
+                IconButton(onClick = { menuOpen = true }, shapes = IconButtonDefaults.shapes()) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.wallet_phrase_more))
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.wallet_phrase_copy_item)) },
+                        leadingIcon = { Icon(Icons.Filled.ContentCopy, contentDescription = null) },
+                        onClick = {
+                            menuOpen = false
+                            confirmCopy = true
+                        },
+                    )
+                }
+            }
+        },
+    ) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -2077,34 +2173,55 @@ private fun RecoveryPhrasePage(
                         }
                     } else {
                         PhraseGrid(shown)
+                        if (PhraseClipboard.holdsPhrase(copiedLabel, copiedHash, shown)) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                stringResource(R.string.wallet_phrase_copied_line),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                         Spacer(Modifier.height(12.dp))
-                        SheetButtonRow {
-                            OutlinedButton(
-                                onClick = {
-                                    PhraseClipboard.copy(context, shown)
-                                },
-                            ) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(8.dp))
-                                CopyLabel(PhraseClipboard.holdsPhrase(copiedLabel, copiedHash, shown))
+                        if (onWrittenDown != null) {
+                            Button(onClick = onWrittenDown, modifier = Modifier.fillMaxWidth()) {
+                                Text(stringResource(R.string.wallet_backup_written_down))
                             }
-                            OutlinedButton(onClick = hide) {
+                            TextButton(onClick = onHide, modifier = Modifier.fillMaxWidth()) {
+                                Icon(Icons.Filled.VisibilityOff, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(stringResource(R.string.wallet_hide))
+                            }
+                        } else {
+                            OutlinedButton(onClick = onHide, modifier = Modifier.fillMaxWidth()) {
                                 Icon(Icons.Filled.VisibilityOff, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
                                 Text(stringResource(R.string.wallet_hide))
                             }
                         }
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            COPY_NOTE,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
                     }
                 }
             }
             error?.let { message -> item("error") { ErrorText(message) } }
         }
+    }
+    val copyWords = words
+    if (confirmCopy && copyWords != null) {
+        AlertDialog(
+            onDismissRequest = { confirmCopy = false },
+            icon = { Icon(Icons.Filled.ContentCopy, contentDescription = null) },
+            title = { Text(stringResource(R.string.wallet_phrase_copy_title)) },
+            text = { Text(COPY_NOTE + "\n\n" + stringResource(R.string.wallet_phrase_copy_risk)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmCopy = false
+                    PhraseClipboard.copy(context, copyWords)
+                }) { Text(stringResource(R.string.wallet_copy)) }
+            },
+            dismissButton = { TextButton(onClick = { confirmCopy = false }) { Text(stringResource(R.string.common_cancel)) } },
+        )
+    } else if (confirmCopy) {
+        // Hidden (or backgrounded) under the dialog: nothing left to copy.
+        LaunchedEffect(Unit) { confirmCopy = false }
     }
 }
 

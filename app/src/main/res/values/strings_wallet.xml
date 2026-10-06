@@ -174,14 +174,8 @@
     <string name="wallet_removed_backup_not_deleted">The wallet is removed, but its Google backup couldn’t be deleted (%s). Delete it below once Google Play services answers.</string>
     <string name="wallet_removed_kept_other_wallets">The wallet is removed. The Google backup on this phone is another wallet’s, so it was kept: restore or delete it below.</string>
     <string name="wallet_removed_kept_unknown">The wallet is removed. Freedom couldn’t tell whether the Google backup on this phone is this wallet’s, so it was kept: restore or delete it below.</string>
-    <string name="wallet_setup_title">Set up your wallet</string>
-    <string name="wallet_setup_intro">Your wallet is your identity for dApps, publishing and payments: a 24-word recovery phrase, encrypted on this phone. You don’t need one to browse.</string>
-    <!-- %s: the name of the button that shows the phrase (wallet_show_phrase). -->
-    <string name="wallet_setup_write_down">It stays on this phone only unless you turn on Google backup. Once it’s made, write down its recovery phrase (%s): without it, the wallet can’t be restored if the phone is lost, broken or reset.</string>
     <string name="wallet_setup_no_screen_lock">This phone has no screen lock. You can still make a wallet, but nothing will ask who you are before it opens: anyone holding the phone can use it. Set a PIN, pattern or password first to protect it with your fingerprint, face or screen lock.</string>
     <string name="wallet_creating">Creating…</string>
-    <string name="wallet_create">Create wallet</string>
-    <string name="wallet_import_phrase_button">Import recovery phrase</string>
     <string name="wallet_locked_detail">Unlock with your fingerprint, face or screen lock</string>
     <string name="wallet_locked_detail_no_screen_lock">Unlocks without asking — this phone has no screen lock</string>
     <string name="wallet_unlocked_detail">Locks after 15 minutes without wallet activity, 1 minute after you leave the app, and whenever the app restarts</string>
@@ -195,7 +189,6 @@
     <string name="wallet_unlocking">Unlocking…</string>
     <string name="wallet_unlock">Unlock</string>
     <string name="wallet_lock_now">Lock now</string>
-    <string name="wallet_back_up_now">Back up now</string>
     <string name="wallet_screen_lock_settings">Screen lock settings</string>
     <string name="wallet_import_title">Import wallet</string>
     <string name="wallet_import_intro">Type or paste the words, separated by spaces. They’re encrypted on this phone only and never sent anywhere. A phrase pasted in, or copied out of this field, is taken off the clipboard when you tap Import wallet or leave this page.</string>
@@ -283,15 +276,17 @@
 
     <!-- WalletBackupUi.kt -->
     <string name="wallet_backup_google_title">Google backup</string>
-    <string name="wallet_backup_e2ee_note">Google encrypts the backup on this phone with a key protected by your screen lock, so Google can’t read it. Restoring it on a new phone asks for this phone’s PIN, pattern or password while you set that phone up. Without a screen lock (or a Google account) there’s no encryption, so no backup. It goes to your Google account with this phone’s own Google backup, so that must be on in Android settings; Freedom can’t check it, so write your recovery phrase down too.</string>
-    <string name="wallet_backup_status_on_cloud">On · end-to-end encrypted, for your Google account backup (if this phone’s Google backup is on)</string>
-    <string name="wallet_backup_status_on_paused">On, paused · this phone can’t end-to-end encrypt it now (no screen lock or no Google account), so it’s kept on this phone only until it can</string>
-    <string name="wallet_backup_status_on_missing">On, but the backup is missing from Google Play services · turn it off and on again to back up</string>
-    <string name="wallet_backup_status_on_no_answer">On · Google Play services isn’t answering right now</string>
-    <string name="wallet_backup_status_off_ready">Off · back up the recovery phrase to your Google account, end-to-end encrypted</string>
-    <string name="wallet_backup_status_unavailable_not_encrypted">Unavailable · needs a screen lock and a Google account on this phone</string>
-    <string name="wallet_backup_status_unavailable_unsupported">Unavailable · needs Google Play services, which this phone doesn’t have</string>
-    <string name="wallet_backup_status_unavailable_no_answer">Unavailable · Google Play services isn’t answering right now</string>
+    <string name="wallet_backup_e2ee_note">Google encrypts the backup on this phone with a key protected by your screen lock, so Google can’t read it. Restoring it on a new phone asks for this phone’s PIN, pattern or password while you set that phone up. Without a screen lock (or a Google account) there’s no encryption, so the backup pauses and stays on this phone only until it can be encrypted again. It goes to your Google account with this phone’s own Google backup, so that must be on in Android settings; Freedom can’t check it, so write your recovery phrase down too.</string>
+    <string name="wallet_backup_status_on_cloud">On, if Android’s backup is on</string>
+    <string name="wallet_backup_status_on_paused">Paused – set a screen lock</string>
+    <string name="wallet_backup_status_on_missing">Missing – turn it off and on</string>
+    <string name="wallet_backup_status_on_no_answer">On · Play services not answering</string>
+    <string name="wallet_backup_status_off_ready">Off</string>
+    <string name="wallet_backup_status_unavailable_not_encrypted">Unavailable – set a screen lock</string>
+    <string name="wallet_backup_status_unavailable_unsupported">Unavailable – no Google Play services</string>
+    <string name="wallet_backup_status_unavailable_no_answer">Unavailable – Play services not answering</string>
+    <string name="wallet_backup_status_on_paused_account">Paused – add a Google account</string>
+    <string name="wallet_backup_status_unavailable_account">Unavailable – add a Google account</string>
     <string name="wallet_backup_status_checking">Checking…</string>
     <string name="wallet_backup_kept_this_wallet">Google Play services still holds a backup of this wallet from before. Turn backup on to keep it up to date here, or delete it.</string>
     <string name="wallet_backup_kept_other_wallet">Google Play services already holds a backup of a different wallet from before. Turning backup on replaces it.</string>
@@ -299,7 +294,7 @@
     <string name="wallet_backup_switch_label">Back up recovery phrase</string>
     <string name="wallet_backup_delete_kept">Delete that backup</string>
     <string name="wallet_backup_offer_title">Back up with Google?</string>
-    <string name="wallet_backup_offer_text">Keep an end-to-end encrypted copy of this wallet’s recovery phrase in your Google account backup, so a new phone can restore the wallet. It stays off unless you turn it on, and you can turn it off at any time here. It’s no substitute for writing the phrase down.</string>
+    <string name="wallet_backup_offer_text">Keep an encrypted copy of the recovery phrase in your Google account, so a new phone can restore this wallet. Write the words down too.</string>
     <string name="wallet_backup_offer_turn_on">Turn on Google backup</string>
     <string name="wallet_backup_restore_title">Restore from Google backup</string>
     <string name="wallet_backup_restore_text">Google Play services holds a wallet backed up from Freedom — on this phone before, or on the phone this one was set up from. Restore it to use that wallet here.</string>
