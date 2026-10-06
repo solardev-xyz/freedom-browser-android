@@ -184,6 +184,15 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         private set
 
     /**
+     * Like [loadGeneration], but not bumped by a server redirect hop
+     * ([beginLoad]'s `redirect`): one per load the user would call a new
+     * one. The capsule's load bar ([CapsuleLoadMeter]) starts over when it
+     * changes, and a redirect hop mustn't throw the bar back (R3-F1).
+     */
+    var loadStarts by mutableIntStateOf(0)
+        private set
+
+    /**
      * The [loadGeneration] of the navigation the WebView itself was last
      * handed. It trails [loadGeneration] while a submit is still in its
      * probe phase — the WebView is still on (or still fetching) the
@@ -227,9 +236,12 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * Mark the start of a new navigation (see [loadGeneration]).
      * [inWebView]: the WebView is already navigating (a link it follows,
      * a reload) rather than waiting for a probe to hand it the URL.
+     * [redirect]: a server redirect hop of a navigation already under way
+     * — a new generation, but not a new [loadStarts].
      */
-    internal fun beginLoad(inWebView: Boolean = false) {
+    internal fun beginLoad(inWebView: Boolean = false, redirect: Boolean = false) {
         loadGeneration++
+        if (!redirect) loadStarts++
         if (inWebView) webViewGeneration = loadGeneration
     }
 

@@ -271,6 +271,35 @@ class CapsuleLoadBarTest {
     }
 
     @Test
+    fun `a redirect hop never throws the bar back`() {
+        // R3-F1: a 302 chain bumps the tab's load generation at every hop,
+        // but not the load count the bar keys on.
+        val tab = BrowserState(id = 1)
+        tab.beginLoad(inWebView = true) // the tapped link
+        val m = tab.loadMeter
+        m.attach()
+        var t = 0L
+        m.frame(t, 10, loading = true, indeterminate = false, generation = tab.loadStarts)
+        repeat(60) { t += 16; m.frame(t, 40, loading = true, indeterminate = false, generation = tab.loadStarts) }
+        t += 20_000 // stalled long enough to creep
+        m.frame(t, 40, loading = true, indeterminate = false, generation = tab.loadStarts)
+        val before = m.fraction
+        assertTrue(before > 0.4f)
+        repeat(2) {
+            val generation = tab.loadGeneration
+            tab.beginLoad(inWebView = true, redirect = true) // the server's 302
+            assertEquals(generation + 1, tab.loadGeneration)
+            repeat(30) { t += 16; m.frame(t, 10, loading = true, indeterminate = false, generation = tab.loadStarts) }
+            assertTrue(m.fraction >= before)
+        }
+        // A real new load still starts over.
+        tab.beginLoad(inWebView = true)
+        t += 16
+        m.frame(t, 10, loading = true, indeterminate = false, generation = tab.loadStarts)
+        assertEquals(CAPSULE_LOAD_MIN_FRACTION, m.fraction, 0f)
+    }
+
+    @Test
     fun `a new load the generation misses still starts over when shown again`() {
         // A POST navigation: no new generation, but progress went back.
         val m = CapsuleLoadMeter()

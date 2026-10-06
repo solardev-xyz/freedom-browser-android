@@ -230,9 +230,10 @@ internal class CapsuleLoadMeter {
      * [failed] is read as the load ends: a load that failed or was
      * stopped fades out where it stands instead of filling, so it is
      * never shown as a completed load (R1-M2). [generation] is the tab's
-     * [BrowserState.loadGeneration]: a change while loading is a new
-     * load, started over at the minimum even if no frame ever saw the
-     * last one end (R2-M1).
+     * [BrowserState.loadStarts]: a change while loading is a new load,
+     * started over at the minimum even if no frame ever saw the last one
+     * end (R2-M1). A server redirect hop doesn't change it, so a redirect
+     * chain never throws the bar back (R3-F1).
      */
     fun frame(
         nowMs: Long,
@@ -362,7 +363,7 @@ private data class CapsuleLoadInputs(
     val generation: Int,
 ) {
     constructor(state: BrowserState) :
-        this(state.progress, isCapsuleLoading(state), state.resolving, state.loadGeneration)
+        this(state.progress, isCapsuleLoading(state), state.resolving, state.loadStarts)
 }
 
 /**
