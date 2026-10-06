@@ -107,46 +107,39 @@ class MainMenuTest {
     }
 
     private fun icons(
-        canGoBack: Boolean = true,
-        canGoForward: Boolean = false,
-        isHome: Boolean = false,
         url: String = "https://example.org/",
         addressBarText: String = "https://example.org/",
         isBookmarked: Boolean = false,
         loading: Boolean = false,
-    ) = mainMenuIconsFor(canGoBack, canGoForward, isHome, url, addressBarText, isBookmarked, loading)
+    ) = mainMenuIconsFor(url, addressBarText, isBookmarked, loading)
 
     @Test
-    fun `Forward is enabled exactly when the capsule shows its Forward half`() {
-        for (back in listOf(true, false)) for (fwd in listOf(true, false)) for (home in listOf(true, false)) {
-            assertEquals(
-                navControlsFor(back, fwd, home).showsForward,
-                icons(canGoBack = back, canGoForward = fwd, isHome = home).forwardEnabled,
-            )
-        }
-        assertTrue(icons(canGoForward = true).forwardEnabled)
-        assertFalse(icons(canGoForward = false).forwardEnabled)
+    fun `the icon row has no Forward - the capsule's pill carries it`() {
+        // Bookmark · Share · Reload only (#415): Forward lives on the
+        // Back + Forward pill, which shows it exactly when it can act.
+        val fields = MainMenuIcons::class.java.declaredFields.map { it.name }
+        assertTrue(fields.none { it.contains("forward", ignoreCase = true) })
     }
 
     @Test
     fun `Bookmark shows the page's bookmarked state and needs a page`() {
         assertTrue(icons(isBookmarked = true).bookmarked)
         assertFalse(icons(isBookmarked = false).bookmarked)
-        assertFalse(icons(url = "", addressBarText = "", isHome = true).bookmarkEnabled)
+        assertFalse(icons(url = "", addressBarText = "").bookmarkEnabled)
     }
 
     @Test
     fun `Share shares what the address field's long-press Share does`() {
         assertEquals("https://example.org/", icons().shareUrl)
         assertEquals(urlActionTarget("ens://vitalik.eth", "ens://vitalik.eth"), icons(url = "ens://vitalik.eth", addressBarText = "ens://vitalik.eth").shareUrl)
-        assertNull(icons(url = "", addressBarText = "", isHome = true).shareUrl)
+        assertNull(icons(url = "", addressBarText = "").shareUrl)
     }
 
     @Test
     fun `Reload turns into Stop while a load runs, and is off on home`() {
         assertEquals(MainMenuReload.Reload, icons().reload)
         assertEquals(MainMenuReload.Stop, icons(loading = true).reload)
-        assertEquals(MainMenuReload.None, icons(url = "", addressBarText = "", isHome = true).reload)
+        assertEquals(MainMenuReload.None, icons(url = "", addressBarText = "").reload)
         // A typed address still loading before anything committed: Stop.
         assertEquals(MainMenuReload.Stop, icons(url = "", addressBarText = "ens://x.eth", loading = true).reload)
     }

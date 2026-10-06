@@ -271,7 +271,7 @@ sealed interface FindAction {
  * and Escape closes the bar.
  *
  * While the bar stands in for the capsule it also carries the capsule's
- * load-progress trace ([CapsuleLoadTrace]), so a load or gateway probe
+ * load-progress bar ([CapsuleLoadBar]), so a load or gateway probe
  * started from the page with the bar up is still visible.
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -307,9 +307,6 @@ internal fun FindBar(
             FindSubmit.None -> Unit
         }
     }
-    // Derived so a ticking load only recomposes at the idle/busy
-    // boundary; the percentage itself is read in the trace's draw phase.
-    val loading by remember(tab) { derivedStateOf { isCapsuleLoading(tab) } }
     // Room for "0000/0000" in tabular figures, so stepping 9/10 → 10/10
     // or 999/1200 → 1000/1200 (or a count converging past a digit)
     // doesn't nudge the field. Past that the label just grows.
@@ -416,14 +413,13 @@ internal fun FindBar(
             FindBarButton(Icons.Filled.KeyboardArrowDown, stringResource(R.string.browser_find_next_match), canStep) { onStep(true) }
             FindBarButton(Icons.Filled.Close, stringResource(R.string.browser_find_close), true, onClose)
         }
-        if (loading) {
-            CapsuleLoadTrace(
-                state = tab,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(CapsuleRestingHeight),
-            )
-        }
+        CapsuleLoadBar(
+            state = tab,
+            shape = CircleShape,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(CapsuleRestingHeight),
+        )
     }
 }
 

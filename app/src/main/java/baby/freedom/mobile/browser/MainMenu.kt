@@ -115,12 +115,15 @@ internal enum class MainMenuReload {
 }
 
 /**
- * The icon row at the top of the menu: Forward · Bookmark · Share ·
- * Reload. Always all four, in the same places, disabled where they can't
- * act, so a finger that learned where Reload is finds it on every page.
+ * The icon row at the top of the menu: Bookmark · Share · Reload. Always
+ * all three, in the same places, disabled where they can't act, so a
+ * finger that learned where Reload is finds it on every page.
+ *
+ * No Forward (#415): the capsule's Back button grows a Forward half
+ * exactly when there is somewhere to go forward ([navControlsFor]), so a
+ * Forward here would only be a second copy of a button already on screen.
  */
 internal data class MainMenuIcons(
-    val forwardEnabled: Boolean,
     val bookmarkEnabled: Boolean,
     val bookmarked: Boolean,
     /** What Share hands to the share sheet, or null (disabled). */
@@ -129,17 +132,12 @@ internal data class MainMenuIcons(
 )
 
 /**
- * The icon row for a tab. Forward follows the capsule's own rule
- * ([navControlsFor]: the pill grows a Forward half exactly then), Share
- * shares what the address field's long-press Share does
+ * The icon row for a tab. Share shares what the address field's long-press Share does
  * ([urlActionTarget]), and Reload/Stop is the capsule's trailing control
  * ([capsuleTrailingControl]) as it reads at rest — the menu only opens
  * while the field isn't being edited.
  */
 internal fun mainMenuIconsFor(
-    canGoBack: Boolean,
-    canGoForward: Boolean,
-    isHome: Boolean,
     url: String,
     addressBarText: String,
     isBookmarked: Boolean,
@@ -159,7 +157,6 @@ internal fun mainMenuIconsFor(
         else -> MainMenuReload.None
     }
     return MainMenuIcons(
-        forwardEnabled = navControlsFor(canGoBack, canGoForward, isHome).showsForward,
         bookmarkEnabled = url.isNotBlank(),
         bookmarked = isBookmarked,
         shareUrl = urlActionTarget(addressBarText, url),
