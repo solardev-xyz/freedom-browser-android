@@ -1,38 +1,57 @@
 package baby.freedom.mobile.browser
 
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -43,28 +62,35 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
-import baby.freedom.mobile.l10n.pluralText
-import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.ens.EnsAddressResult
 import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.EthTransaction
 import baby.freedom.mobile.wallet.GasOracle
 import baby.freedom.mobile.wallet.Recipients
+import baby.freedom.mobile.wallet.ScannedCode
 import baby.freedom.mobile.wallet.SendAmounts
 import baby.freedom.mobile.wallet.SendException
 import baby.freedom.mobile.wallet.SendQuote
@@ -74,9 +100,12 @@ import baby.freedom.mobile.wallet.Token
 import baby.freedom.mobile.wallet.TokenAmounts
 import baby.freedom.mobile.wallet.TokenBalance
 import baby.freedom.mobile.wallet.TokenRegistry
+import baby.freedom.mobile.wallet.TxHistory
+import baby.freedom.mobile.wallet.TxRecord
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultAuthenticator
 import baby.freedom.mobile.wallet.WalletAccount
+import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.WalletSender
 import java.math.BigDecimal
 import java.math.BigInteger
@@ -242,6 +271,149 @@ internal fun prefillChainName(prefill: SendPrefill): String {
 internal fun explorerTxUrl(chain: Chain, hash: String): String? =
     chain.explorerUrl?.trimEnd('/')?.let { "$it/tx/$hash" }
 
+/** Whether [balance] shows anything held: a current read, or the last one when the latest failed. */
+private fun holds(balance: TokenBalance?): Boolean = when (balance) {
+    is TokenBalance.Known -> balance.raw.signum() > 0
+    is TokenBalance.Failed -> (balance.previous?.raw?.signum() ?: 0) > 0
+    null -> false
+}
+
+/**
+ * [assets] as the asset sheet lists them (#422): those the account holds
+ * first, then the rest, each group in the wallet's own order (chain by
+ * chain, native currency first).
+ */
+internal fun assetOrder(assets: List<Pair<Chain, Token>>, balances: Map<String, TokenBalance>): List<Pair<Chain, Token>> {
+    val (held, empty) = assets.partition { holds(balances[it.second.key]) }
+    return held + empty
+}
+
+/** How the Send form's amount stands as it's typed (#422). */
+internal sealed interface AmountCheck {
+    /** Nothing typed yet: nothing to say. */
+    data object Empty : AmountCheck
+
+    /** [raw] base units, which the balance read covers (or nothing was read to say otherwise). */
+    data class Ok(val raw: BigInteger) : AmountCheck
+
+    /**
+     * Not usable, and [note] says why. [balance]: it's the account's
+     * balance that's short — said again under the disabled Review.
+     */
+    data class Problem(val note: String, val balance: Boolean = false) : AmountCheck
+}
+
+/**
+ * [input], an amount of [token] on [chain], judged as it's typed (#422):
+ * how it reads ([SendAmounts.parse]), then against [held] — the token's
+ * balance as last read — and, for a token, whether there's any of the
+ * chain's own currency ([nativeHeld]) to pay the fee with. A balance
+ * that wasn't read (null) blocks nothing: the review reads it again.
+ * The fee itself is only known once priced, so a native send of the
+ * whole balance is the review's to refuse (Max takes the fee off).
+ */
+internal fun amountCheck(input: String, token: Token, chain: Chain, held: BigInteger?, nativeHeld: BigInteger?): AmountCheck {
+    if (input.isEmpty()) return AmountCheck.Empty
+    ambiguousAmountNote(input)?.let { return AmountCheck.Problem(it) }
+    val raw = SendAmounts.parse(input, token.decimals)
+        ?: return AmountCheck.Problem(Strings.plural(R.plurals.send_amount_invalid, token.decimals, token.decimals))
+    if (held != null && raw > held) {
+        return AmountCheck.Problem(
+            Strings.get(R.string.send_not_enough, token.symbol, TokenAmounts.format(held, token.decimals)),
+            balance = true,
+        )
+    }
+    if (!token.isNative && nativeHeld != null && nativeHeld.signum() == 0) {
+        return AmountCheck.Problem(Strings.get(R.string.send_no_fee_currency, chain.symbol, chain.name), balance = true)
+    }
+    return AmountCheck.Ok(raw)
+}
+
+/**
+ * Someone to suggest for an empty To field (#422): one of the user's own
+ * accounts ([mine]), or an address they sent to before. [label] is the
+ * account's or the typed name's, when there is one.
+ */
+internal data class RecipientSuggestion(val label: String?, val address: String, val mine: Boolean)
+
+/**
+ * The To field's suggestions for a send from [from] (#422): the user's
+ * other [accounts], then up to [recent] addresses [records] show [from]
+ * sent to, newest first, each once and none of them an own account.
+ */
+internal fun recipientSuggestions(
+    accounts: List<WalletAccount>,
+    from: String,
+    records: List<TxRecord>,
+    recent: Int = 3,
+): List<RecipientSuggestion> {
+    val mine = accounts.filter { !it.address.equals(from, ignoreCase = true) }
+        .map { RecipientSuggestion(it.name, it.address, mine = true) }
+    val own = accounts.map { it.address.lowercase() }.toSet() + from.lowercase()
+    val sentTo = records.filter { it.from.equals(from, ignoreCase = true) }
+        .sortedByDescending { it.sentAt }
+        .distinctBy { it.to.lowercase() }
+        .filter { it.to.lowercase() !in own }
+        .take(recent)
+        .map { RecipientSuggestion(it.toName, it.to, mine = false) }
+    return mine + sentTo
+}
+
+/**
+ * A [SendPrefill.tokenKey] naming no asset (a scanned plain address,
+ * #422): it matches none, so the page starts on its own default.
+ */
+internal const val ANY_ASSET = ""
+
+/** What a scanned code (or pasted text) puts in the Send form (#422). */
+internal sealed interface ScannedRecipient {
+    /**
+     * Pay [recipient]. [prefill]: a payment request's, as its link would
+     * open Send — asset, maybe an amount, and which network was assumed;
+     * null for a plain address.
+     */
+    data class Fill(val recipient: String, val prefill: SendPrefill? = null) : ScannedRecipient {
+        /** What the Send page opens with for this: the request's own, or the address on the page's default asset. */
+        fun sendPrefill(): SendPrefill = prefill ?: SendPrefill(origin = null, tokenKey = ANY_ASSET, recipient = recipient, amount = null)
+    }
+
+    /** Nothing to send to, and why. */
+    data class Refused(val reason: String) : ScannedRecipient
+}
+
+/**
+ * [text], read by the To field's camera (#422): an address, or an EIP-681
+ * request read as a payment link is ([ethereumLinkRoute], so a network or
+ * token Send can't pay is refused the same way); anything else isn't
+ * someone to pay.
+ */
+internal fun scannedRecipient(text: String): ScannedRecipient = when (val code = ScannedCode.parse(text)) {
+    is ScannedCode.Address -> ScannedRecipient.Fill(code.address)
+    is ScannedCode.Payment -> when (val route = ethereumLinkRoute(text.trim(), private = false, walletReady = true, origin = null)) {
+        is EthereumLinkRoute.OpenSend -> ScannedRecipient.Fill(route.prefill.recipient, route.prefill)
+        is EthereumLinkRoute.Refuse -> ScannedRecipient.Refused(route.reason)
+        EthereumLinkRoute.Drop -> ScannedRecipient.Refused(Strings.get(R.string.send_scan_not_address))
+    }
+    is ScannedCode.Unrecognized -> ScannedRecipient.Refused(code.reason)
+    is ScannedCode.Pairing, is ScannedCode.SafeRequest -> ScannedRecipient.Refused(Strings.get(R.string.send_scan_not_address))
+}
+
+/**
+ * The clipboard's text for the To field's Paste (#422): an address or a
+ * payment request's payee as [scannedRecipient] reads it, else the text
+ * itself, trimmed. Read as the item's plain text, never coerced (a
+ * `content:` item isn't opened). Null when there's no text.
+ */
+internal fun pastedRecipient(context: Context): String? {
+    val clip = context.getSystemService(ClipboardManager::class.java)?.primaryClip ?: return null
+    val text = clip.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()?.trim()?.take(MAX_PASTED_RECIPIENT)
+    if (text.isNullOrEmpty()) return null
+    return (scannedRecipient(text) as? ScannedRecipient.Fill)?.recipient ?: text
+}
+
+/** More than any address or name: a longer paste is cut rather than kept whole in the field. */
+private const val MAX_PASTED_RECIPIENT = 512
+
 /**
  * Send (#105): the active account sends a native currency or a known
  * ERC-20 on one of the wallet's chains. Pick the asset, type the
@@ -264,6 +436,7 @@ internal class SendDraft {
     var all by mutableStateOf(false)
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun SendPage(
     account: WalletAccount,
@@ -283,6 +456,8 @@ internal fun SendPage(
     // (a link's Send page hidden while a feature's request needs the
     // wallet home, R2-M1); the page's own otherwise.
     draft: SendDraft? = null,
+    // [prefill] came from a code scanned on the wallet's Scan page (#422), not a link.
+    scanned: Boolean = false,
 ) {
     val context = LocalContext.current
     val sender = remember(context) { WalletSender.get(context) }
@@ -299,7 +474,8 @@ internal fun SendPage(
     val form = draft ?: remember { SendDraft() }
     if (!form.filled) {
         form.filled = true
-        form.assetKey = prefilledAsset?.key ?: assets.firstOrNull()?.second?.key
+        // With nothing named, the first asset the account holds (#422).
+        form.assetKey = prefilledAsset?.key ?: assetOrder(assets, balances).firstOrNull()?.second?.key
         form.recipient = prefill?.recipient.orEmpty()
         // In the link's asset's own decimals, every digit kept: a request's amount isn't rounded.
         form.amount = prefilledAsset?.let { token -> prefill.amount?.let { SendAmounts.exact(it, token.decimals) } }.orEmpty()
@@ -331,6 +507,17 @@ internal fun SendPage(
     // the field (#277): the lookup that refill restarts shows it rather
     // than asking again, past the cache, behind the review's error.
     var seededLookup by remember { mutableStateOf<NameLookup?>(null) }
+    // The asset sheet and the To field's camera (#422). The camera's permission
+    // state is held here, above the list, so scrolling never asks again.
+    var assetSheet by remember { mutableStateOf(false) }
+    var scanSheet by remember { mutableStateOf(false) }
+    val cameraPermission = rememberCameraPermissionState()
+    // Suggestions for an empty To field: the user's other accounts, then recent recipients.
+    val accountList by remember(context) { WalletAccounts.get(context) }.accounts.collectAsState()
+    val records by remember(context) { TxHistory.get(context) }.records.collectAsState()
+    val suggestions = remember(accountList, records, account.address) {
+        recipientSuggestions(accountList?.accounts.orEmpty(), account.address, records)
+    }
 
     // A name in the field is looked up for the selected asset's chain
     // (#277). Here, at the page's top, not inside the list's item: an
@@ -376,6 +563,19 @@ internal fun SendPage(
         is Recipients.Parsed.Name -> (nameRecipient as? Recipients.Parsed.Ok)?.address
             ?.takeIf { nameAnswer!!.trust.verified || unverifiedAccepted }
         else -> null
+    }
+
+    // The amount judged as it's typed (#422): Review waits for a usable one.
+    val amountCheckNow = if (fieldToken != null && fieldChain != null) {
+        amountCheck(
+            amount,
+            fieldToken,
+            fieldChain,
+            held = (balances[fieldToken.key] as? TokenBalance.Known)?.raw,
+            nativeHeld = (balances["${fieldChain.id}:native"] as? TokenBalance.Known)?.raw,
+        )
+    } else {
+        AmountCheck.Empty
     }
 
     fun price(then: (SendQuote) -> Unit, priced: suspend () -> SendQuote) {
@@ -466,6 +666,7 @@ internal fun SendPage(
                         busy = busy,
                         notice = notice,
                         error = error,
+                        onOpenUrl = onOpenUrl,
                         onEdit = ::leaveReview,
                         onConfirm = {
                             // Priced too long ago to trust its fee: price it again and let the user look.
@@ -554,25 +755,23 @@ internal fun SendPage(
                     )
                 }
                 else -> {
-                    if (prefill != null) {
-                        item("link") { SendLinkNote(prefill) }
-                    }
-                    item("from") {
-                        SectionCard(title = stringResource(R.string.send_label_from)) {
-                            Text(account.name, fontWeight = FontWeight.Medium)
-                            AddressText(
-                                account.address,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    when {
+                        prefill != null && scanned -> item("link") {
+                            Text(
+                                stringResource(R.string.send_scan_filled),
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(horizontal = 4.dp).testTag("send-link-note"),
                             )
                         }
+                        prefill != null -> item("link") { SendLinkNote(prefill) }
                     }
-                    item("asset") {
-                        AssetPicker(assets, asset?.second, balances, enabled = !busy) {
-                            assetKey = it.key
-                            all = false
-                            error = null
-                        }
+                    item("from") {
+                        Text(
+                            stringResource(R.string.send_from_line, account.name, shortAddress(account.address)),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        )
                     }
                     val token = fieldToken
                     val chain = fieldChain
@@ -594,10 +793,29 @@ internal fun SendPage(
                                     autoCorrectEnabled = false,
                                     keyboardType = KeyboardType.Ascii,
                                 ),
+                                trailingIcon = {
+                                    Row {
+                                        IconButton(
+                                            enabled = !busy,
+                                            onClick = {
+                                                pastedRecipient(context)?.let {
+                                                    recipient = it
+                                                    error = null
+                                                }
+                                            },
+                                        ) { Icon(Icons.Filled.ContentPaste, contentDescription = stringResource(R.string.send_paste)) }
+                                        IconButton(enabled = !busy, onClick = { scanSheet = true }) {
+                                            Icon(Icons.Filled.QrCodeScanner, contentDescription = stringResource(R.string.send_scan))
+                                        }
+                                    }
+                                },
                                 modifier = Modifier.fillMaxWidth(),
                             )
                             when {
-                                recipient.isEmpty() -> Unit
+                                recipient.isEmpty() -> RecipientSuggestions(suggestions, enabled = !busy) {
+                                    recipient = it
+                                    error = null
+                                }
                                 parsed is Recipients.Parsed.Invalid -> FieldNote(parsed.reason, error = true)
                                 parsed is Recipients.Parsed.Name && chain != null -> NameRecipientNote(
                                     name = parsed.name,
@@ -613,32 +831,51 @@ internal fun SendPage(
                                         lookupAttempt++
                                     },
                                 )
-                                parsed is Recipients.Parsed.Ok && parsed.address.equals(account.address, ignoreCase = true) ->
-                                    FieldNote(stringResource(R.string.send_own_address_note), error = false)
+                                // The field scrolls a long address out of view: here it is whole.
+                                parsed is Recipients.Parsed.Ok -> {
+                                    Spacer(Modifier.height(6.dp))
+                                    AddressText(
+                                        parsed.address,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    if (parsed.address.equals(account.address, ignoreCase = true)) {
+                                        FieldNote(stringResource(R.string.send_own_address_note), error = false)
+                                    }
+                                }
                             }
                         }
                     }
                     item("amount") {
                         val held = token?.let { (balances[it.key] as? TokenBalance.Known)?.raw }
-                        val parsedAmount = token?.let { SendAmounts.parse(amount, it.decimals) }
                         SectionCard(title = stringResource(R.string.send_label_amount)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                OutlinedTextField(
-                                    value = amount,
-                                    onValueChange = {
-                                        amount = it.trim()
-                                        all = false
-                                        error = null
-                                    },
-                                    enabled = !busy,
-                                    singleLine = true,
-                                    placeholder = { Text(stringResource(R.string.send_amount_placeholder)) },
-                                    suffix = { Text(token?.symbol.orEmpty()) },
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                                    modifier = Modifier.weight(1f),
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                TextButton(
+                            OutlinedTextField(
+                                value = amount,
+                                onValueChange = {
+                                    amount = it.trim()
+                                    all = false
+                                    error = null
+                                },
+                                enabled = !busy,
+                                singleLine = true,
+                                placeholder = {
+                                    Text(stringResource(R.string.send_amount_placeholder), style = MaterialTheme.typography.headlineMedium)
+                                },
+                                textStyle = MaterialTheme.typography.headlineMedium,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                if (token != null && chain != null) {
+                                    AssistChip(
+                                        enabled = !busy,
+                                        onClick = { assetSheet = true },
+                                        label = { Text(stringResource(R.string.send_asset_chip, token.symbol, chain.name)) },
+                                        trailingIcon = { Icon(Icons.Filled.ArrowDropDown, contentDescription = null) },
+                                    )
+                                }
+                                FilterChip(
+                                    selected = all,
                                     enabled = !busy && held != null && held.signum() > 0,
                                     onClick = {
                                         if (token != null && held != null) {
@@ -647,30 +884,26 @@ internal fun SendPage(
                                             error = null
                                         }
                                     },
-                                ) { Text(stringResource(R.string.send_max)) }
+                                    label = { Text(stringResource(R.string.send_max)) },
+                                )
                             }
                             if (token != null) {
-                                when {
-                                    SendAmounts.ambiguous(amount) -> FieldNote(ambiguousAmountNote(amount)!!, error = true)
-                                    amount.isNotEmpty() && parsedAmount == null -> FieldNote(
-                                        pluralText(R.plurals.send_amount_invalid, token.decimals, token.decimals),
-                                        error = true,
-                                    )
-                                    all && token.isNative -> FieldNote(
-                                        stringResource(R.string.send_all_note),
-                                        error = false,
-                                    )
-                                    held != null -> FieldNote(
-                                        stringResource(R.string.send_balance_note, TokenAmounts.format(held, token.decimals), token.symbol),
-                                        error = false,
-                                    )
+                                when (val check = amountCheckNow) {
+                                    is AmountCheck.Problem -> FieldNote(check.note, error = true)
+                                    else -> when {
+                                        all && token.isNative -> FieldNote(stringResource(R.string.send_all_note), error = false)
+                                        held != null -> FieldNote(
+                                            stringResource(R.string.send_balance_note, TokenAmounts.format(held, token.decimals), token.symbol),
+                                            error = false,
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                     item("review") {
                         val to = recipientAddress
-                        val raw = token?.let { SendAmounts.parse(amount, it.decimals) }
+                        val raw = (amountCheckNow as? AmountCheck.Ok)?.raw
                         Column {
                             error?.let {
                                 FieldNote(it, error = true)
@@ -690,7 +923,7 @@ internal fun SendPage(
                                         )
                                     }
                                 },
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                             ) {
                                 if (busy) {
                                     CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
@@ -706,43 +939,103 @@ internal fun SendPage(
             }
         }
     }
+    if (assetSheet) {
+        AssetSheet(
+            assets = assetOrder(assets, balances),
+            selected = asset?.second,
+            balances = balances,
+            onPick = {
+                assetKey = it.key
+                all = false
+                error = null
+                assetSheet = false
+            },
+            onDismiss = { assetSheet = false },
+        )
+    }
+    if (scanSheet) {
+        RecipientScanSheet(
+            permission = cameraPermission,
+            onRead = { text ->
+                when (val read = scannedRecipient(text)) {
+                    is ScannedRecipient.Fill -> {
+                        read.prefill?.tokenKey?.let { key -> assets.firstOrNull { it.second.key == key }?.let { assetKey = key } }
+                        recipient = read.recipient
+                        read.prefill?.amount?.let { raw ->
+                            assets.firstOrNull { it.second.key == assetKey }?.second?.let { amount = SendAmounts.exact(raw, it.decimals) }
+                        }
+                        all = false
+                        error = null
+                        scanSheet = false
+                        null
+                    }
+                    is ScannedRecipient.Refused -> read.reason
+                }
+            },
+            onDismiss = { scanSheet = false },
+        )
+    }
 }
 
-/** Every asset the wallet knows, grouped by chain, each with its balance: pick one. */
+/**
+ * The asset sheet (#422): every asset the wallet can send, those with a
+ * balance first ([assetOrder]), each with its network under it and what
+ * the account holds. One tap picks it and closes the sheet.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AssetPicker(
+private fun AssetSheet(
     assets: List<Pair<Chain, Token>>,
     selected: Token?,
     balances: Map<String, TokenBalance>,
-    enabled: Boolean,
     onPick: (Token) -> Unit,
+    onDismiss: () -> Unit,
 ) {
-    SectionCard(title = stringResource(R.string.send_label_asset)) {
-        var lastChain: Long? = null
-        assets.forEach { (chain, token) ->
-            if (chain.id != lastChain) {
-                if (lastChain != null) Spacer(Modifier.height(6.dp))
-                Text(chain.name, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-                lastChain = chain.id
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        modifier = Modifier.testTag("send-asset-sheet"),
+    ) {
+        LazyColumn(
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            item("title") {
+                Text(
+                    stringResource(R.string.send_asset_sheet_title),
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp).semantics { heading() },
+                )
             }
-            val text = balanceText(balances[token.key], token.decimals, refreshing = false)
-            val isSelected = token.key == selected?.key
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .selectable(selected = isSelected, enabled = enabled, role = Role.RadioButton, onClick = { onPick(token) })
-                    .padding(vertical = 2.dp),
-            ) {
-                RadioButton(selected = isSelected, onClick = null, enabled = enabled)
-                Spacer(Modifier.width(8.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(token.symbol, fontWeight = if (isSelected) FontWeight.Medium else FontWeight.Normal)
-                    Text(
-                        text.amount?.let { "$it ${token.symbol}" } ?: text.detail,
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+            items(assets, key = { it.second.key }) { (chain, token) ->
+                val text = balanceText(balances[token.key], token.decimals, refreshing = false)
+                val isSelected = token.key == selected?.key
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp)
+                        .clip(MaterialTheme.shapes.small)
+                        .selectable(selected = isSelected, role = Role.RadioButton, onClick = { onPick(token) })
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(token.symbol, fontWeight = FontWeight.Medium)
+                        Text(chain.name, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            text.amount?.let { stringResource(R.string.send_balance_note, it, token.symbol) } ?: text.detail,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (isSelected) {
+                        Spacer(Modifier.width(8.dp))
+                        Icon(
+                            Icons.Filled.Check,
+                            contentDescription = stringResource(R.string.send_asset_selected),
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                 }
             }
         }
@@ -750,8 +1043,88 @@ private fun AssetPicker(
 }
 
 /**
- * What will be signed, before anything is: network, from, to, amount,
- * the most the fee can be and the nonce. Confirm ignores taps for the
+ * The To field's Scan (#422): the camera in a sheet. The first code that
+ * names someone to pay fills the form in ([onRead] returns null) and
+ * closes it; anything else keeps scanning, with [onRead]'s reason shown.
+ * [permission] is the page's ([rememberCameraPermissionState]), so the
+ * automatic ask happens once per Send page, not once per sheet.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RecipientScanSheet(permission: CameraPermissionState, onRead: (String) -> String?, onDismiss: () -> Unit) {
+    var problem by remember { mutableStateOf<String?>(null) }
+    var done by remember { mutableStateOf(false) }
+    var last by remember { mutableStateOf<String?>(null) }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        modifier = Modifier.testTag("send-scan-sheet"),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 24.dp)) {
+            Text(
+                stringResource(R.string.send_scan_title),
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.semantics { heading() },
+            )
+            Spacer(Modifier.height(12.dp))
+            QrScanner(
+                permission = permission,
+                onCode = { text ->
+                    // The same code read frame after frame is judged once.
+                    if (!done && text != last) {
+                        last = text
+                        val reason = onRead(text)
+                        if (reason == null) done = true else problem = reason
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)),
+            )
+            problem?.let {
+                Spacer(Modifier.height(8.dp))
+                FieldNote(it, error = true)
+            }
+        }
+    }
+}
+
+/** Suggestions under an empty To field (#422): the user's other accounts, then who they sent to lately. */
+@Composable
+private fun RecipientSuggestions(suggestions: List<RecipientSuggestion>, enabled: Boolean, onPick: (String) -> Unit) {
+    if (suggestions.isEmpty()) return
+    var lastMine: Boolean? = null
+    Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        suggestions.forEach { s ->
+            if (s.mine != lastMine) {
+                Text(
+                    stringResource(if (s.mine) R.string.send_suggestions_mine else R.string.send_suggestions_recent),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 2.dp).semantics { heading() },
+                )
+                lastMine = s.mine
+            }
+            Column(
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 56.dp)
+                    .clip(MaterialTheme.shapes.small)
+                    .clickable(enabled = enabled, role = Role.Button) { onPick(s.address) }
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+            ) {
+                s.label?.let { Text(it, fontWeight = FontWeight.Medium) }
+                AddressText(s.address, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+/**
+ * What will be signed, before anything is (#422): one sentence saying
+ * what goes where ([sendHeadline]), the most the fee can be and the
+ * total, the recipient and sender in full with Copy and the explorer;
+ * network, token contract, nonce, gas and the fee footnote under
+ * Details. Confirm, labelled with what moves, ignores taps for the
  * first [PromptTapGuard.SPEND_PROTECTION_MS] the review is on screen, so
  * the tap that opened it can't also confirm it, and drops a press begun
  * before then or one another app's window covered; other apps' overlays
@@ -765,6 +1138,7 @@ private fun SendReviewSection(
     busy: Boolean,
     notice: String?,
     error: String?,
+    onOpenUrl: (String) -> Unit,
     onEdit: () -> Unit,
     onConfirm: () -> Unit,
 ) {
@@ -774,42 +1148,63 @@ private fun SendReviewSection(
     val tap = rememberArmedTapGuard(quote, PromptTapGuard.SPEND_PROTECTION_MS)
     val guard = tap.guard
     val armed = tap.armed
+    val amount = SendAmounts.exact(request.amount, token.decimals)
+    val fee = feeText(quote.maxFee, chain)
     SectionCard(title = stringResource(R.string.send_review_title)) {
-        ReviewRow(stringResource(R.string.send_label_network), chain.name)
-        ReviewRow(stringResource(R.string.send_label_asset), token.symbol, address = token.address)
-        ReviewRow(stringResource(R.string.send_label_from), request.from.name, address = request.from.address)
-        val recheckNote = stringResource(R.string.send_name_recheck_note)
-        ReviewRow(
-            stringResource(R.string.send_label_to),
-            request.toName,
+        TxReviewSummary(
+            headline = sendHeadline(amount, token.symbol, request.to, request.toName, chain.name),
+            fee = stringResource(R.string.send_up_to, fee),
+            total = quote.nativeTotal?.let { stringResource(R.string.send_up_to, feeText(it, chain)) }
+                ?: stringResource(R.string.send_total_token, amount, token.symbol, fee),
+        ) {
+            if (request.to.equals(request.from.address, ignoreCase = true)) {
+                FieldNote(stringResource(R.string.send_self_send_note), error = false)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        HorizontalDivider()
+        CopyableAddressRow(
+            label = stringResource(R.string.send_label_to),
             address = request.to,
-            detail = recipientTrust?.let { stringResource(R.string.send_name_trust_detail, it.tier.title, it.recipientSummary) }
-                ?: request.toName?.let { recheckNote },
+            name = request.toName,
+            explorerUrl = explorerAddressUrl(chain, request.to),
+            onOpenUrl = onOpenUrl,
+            below = { recipientTrust?.let { NameTrustLine(it) } },
         )
-        if (request.to.equals(request.from.address, ignoreCase = true)) {
-            FieldNote(stringResource(R.string.send_self_send_note), error = false)
+        CopyableAddressRow(
+            label = stringResource(R.string.send_label_from),
+            address = request.from.address,
+            name = request.from.name,
+            explorerUrl = explorerAddressUrl(chain, request.from.address),
+            onOpenUrl = onOpenUrl,
+        )
+        DetailsExpander {
+            ReviewRow(stringResource(R.string.send_label_network), chain.name)
+            token.address?.let {
+                CopyableAddressRow(
+                    label = stringResource(R.string.send_label_token_contract, token.symbol),
+                    address = it,
+                    explorerUrl = explorerAddressUrl(chain, it),
+                    onOpenUrl = onOpenUrl,
+                )
+            }
+            ReviewRow(stringResource(R.string.send_label_nonce), quote.tx.nonce.toString(), mono = true, detail = nonceDetail(quote))
+            ReviewRow(stringResource(R.string.send_label_gas), feeDetail(quote))
+            request.toName?.let {
+                Text(
+                    stringResource(R.string.send_name_recheck_note),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+            Text(
+                feeFootnote(quote.tx),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
+            )
         }
-        ReviewRow(stringResource(R.string.send_label_amount), "${SendAmounts.exact(request.amount, token.decimals)} ${token.symbol}", mono = true)
-        ReviewRow(
-            stringResource(R.string.send_label_network_fee),
-            stringResource(R.string.send_up_to, feeText(quote.maxFee, chain)),
-            mono = true,
-            detail = feeDetail(quote),
-        )
-        quote.nativeTotal?.let {
-            ReviewRow(stringResource(R.string.send_label_total), stringResource(R.string.send_up_to, feeText(it, chain)), mono = true)
-        }
-        ReviewRow(
-            stringResource(R.string.send_label_nonce),
-            quote.tx.nonce.toString(),
-            detail = nonceDetail(quote),
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            feeFootnote(quote.tx),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
     Spacer(Modifier.height(12.dp))
     notice?.let {
@@ -821,19 +1216,75 @@ private fun SendReviewSection(
         Spacer(Modifier.height(8.dp))
     }
     ObscuredTapNotice(tap)
+    val sending = stringResource(R.string.send_sending)
     SheetButtonRow {
-        OutlinedButton(onClick = onEdit, enabled = !busy) { Text(stringResource(R.string.common_edit)) }
+        OutlinedButton(onClick = onEdit, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) {
+            Text(stringResource(R.string.common_edit))
+        }
         Button(
             onClick = { if (guard.accepts()) onConfirm() },
             enabled = armed && !busy,
-            modifier = Modifier.protectedPress(tap),
+            modifier = Modifier.heightIn(min = 48.dp).protectedPress(tap),
         ) {
             if (busy) {
-                CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                // Named, so TalkBack says what's happening rather than "Button, disabled" (W50).
+                CircularProgressIndicator(
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(18.dp).semantics { contentDescription = sending },
+                )
             } else {
-                Text(stringResource(if (request.from.isLedger) R.string.send_confirm_on_ledger else R.string.send_confirm_and_send))
+                Text(
+                    stringResource(
+                        if (request.from.isLedger) R.string.send_confirm_amount_ledger else R.string.send_confirm_amount,
+                        amount,
+                        token.symbol,
+                    ),
+                    textAlign = TextAlign.Center,
+                )
             }
         }
+    }
+}
+
+/**
+ * How a recipient name was checked (#277, #422): a name the servers
+ * agreed on or a proof vouched for reads "✓ Verified name", with an info
+ * button that opens what was checked and how; a name only one server
+ * answered keeps its warning in full, since it's the user's call.
+ */
+@Composable
+private fun NameTrustLine(trust: NameTrust) {
+    if (trust.tier == TrustTier.Unverified) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+            Icon(trust.tier.icon, contentDescription = null, tint = trust.tier.color, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(trust.tier.title, style = MaterialTheme.typography.labelLarge, color = trust.tier.color)
+        }
+        Text(trust.recipientSummary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        return
+    }
+    var about by remember { mutableStateOf(false) }
+    // The tier's own green is too light to read on a light surface.
+    val green = if (MaterialTheme.colorScheme.isLight) Color(0xFF15803D) else trust.tier.color
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            stringResource(R.string.send_name_verified),
+            style = MaterialTheme.typography.labelLarge,
+            color = green,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        IconButton(onClick = { about = true }) {
+            Icon(Icons.Outlined.Info, contentDescription = stringResource(R.string.send_name_about))
+        }
+    }
+    if (about) {
+        AlertDialog(
+            onDismissRequest = { about = false },
+            icon = { Icon(trust.tier.icon, contentDescription = null, tint = trust.tier.color) },
+            title = { Text(trust.tier.title) },
+            text = { Text(trust.recipientSummary) },
+            confirmButton = { TextButton(onClick = { about = false }) { Text(stringResource(R.string.common_ok)) } },
+        )
     }
 }
 
@@ -1043,25 +1494,12 @@ private fun NameRecipientNote(
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(trust.tier.icon, contentDescription = null, tint = trust.tier.color, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        trust.tier.title,
-                        style = MaterialTheme.typography.labelLarge,
-                        color = trust.tier.color,
-                    )
-                }
-                Text(
-                    trust.recipientSummary,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                NameTrustLine(trust)
                 when {
                     recipient is Recipients.Parsed.Invalid -> FieldNote(recipient.reason, error = true)
                     !result.trust.verified -> Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth().selectable(
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(
                             selected = unverifiedAccepted,
                             enabled = enabled,
                             role = Role.Checkbox,
@@ -1082,7 +1520,9 @@ private fun NameRecipientNote(
             else -> {
                 FieldNote(Recipients.lookupProblem(result, chainName).orEmpty(), error = true)
                 if (Recipients.retryable(result)) {
-                    TextButton(onClick = onRetry, enabled = enabled) { Text(stringResource(R.string.common_try_again)) }
+                    TextButton(onClick = onRetry, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text(stringResource(R.string.common_try_again))
+                    }
                 }
             }
         }
@@ -1095,7 +1535,8 @@ private fun FieldNote(text: String, error: Boolean) {
         text,
         style = MaterialTheme.typography.bodySmall,
         color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = 4.dp),
+        // A problem is announced as it appears, not only found by exploring (W50).
+        modifier = Modifier.padding(top = 4.dp).then(if (error) Modifier.semantics { liveRegion = LiveRegionMode.Polite } else Modifier),
     )
 }
 

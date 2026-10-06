@@ -334,7 +334,7 @@
     <string name="wallet_history_subtitle">%1$s · %2$s · %3$s</string>
     <string name="wallet_history_row_to_named">To %1$s · %2$s</string>
     <string name="wallet_history_row_to">To %1$s</string>
-    <string name="wallet_history_empty">Nothing sent from this account yet.</string>
+    <string name="wallet_history_empty">Nothing sent from this account yet. Sends made here show up here; money you receive shows on the block explorer.</string>
     <string name="wallet_history_all">All transactions</string>
     <plurals name="wallet_history_all_count">
         <item quantity="one">%d sent from this account</item>
@@ -357,7 +357,7 @@
     <string name="wallet_qr_scan_title">Scan QR code</string>
     <string name="wallet_qr_receive_title">Receive</string>
     <string name="wallet_qr_receive_code_description">QR code of %1$s’s address</string>
-    <string name="wallet_qr_receive_note">Send ETH, xDAI or tokens to this address on Ethereum, Gnosis or any other EVM chain: it’s the same address on all of them. Ask the sender which network they’re sending on, so you know where to look for it.</string>
+    <string name="wallet_qr_receive_note">Same address on Ethereum, Gnosis and every other EVM network</string>
     <string name="wallet_qr_own_account">This is your %1$s</string>
     <string name="wallet_qr_line_address">Address</string>
     <string name="wallet_qr_line_network">Network</string>
@@ -379,14 +379,12 @@
     <string name="wallet_qr_camera_title">Camera</string>
     <string name="wallet_qr_camera_note">Point the camera at an address, a payment request, a pairing code or a Safe request. Codes are read on this phone; nothing the camera sees is saved or sent.</string>
     <string name="wallet_qr_paste_title">Or paste it</string>
-    <string name="wallet_qr_paste_placeholder">0x…, ethereum:… or openlv://…</string>
+    <string name="wallet_qr_paste_placeholder">Paste an address or request</string>
     <string name="wallet_qr_read">Read</string>
     <string name="wallet_qr_kind_payment">Payment request</string>
     <string name="wallet_qr_kind_pairing">Pairing code</string>
     <string name="wallet_qr_kind_safe_request">Safe request</string>
     <string name="wallet_qr_kind_unrecognized">Can’t use this code</string>
-    <string name="wallet_qr_payment_note">Sending from this wallet isn’t available yet. To pay from another wallet, copy the address and check the network and amount there.</string>
-    <string name="wallet_qr_copy_address_to_pay">Copy address to pay</string>
     <string name="wallet_qr_camera_blocked">Freedom isn’t allowed to use the camera. Turn it on in Android settings to scan, or paste the code below.</string>
     <string name="wallet_qr_camera_needed">Scanning needs the camera. You can also paste the code below.</string>
     <string name="wallet_qr_allow_camera">Allow camera</string>
@@ -396,4 +394,11 @@
     <string name="wallet_qr_address_copied">Address copied</string>
 
     <!-- PhraseClipboard.kt: nothing moved (CLIP_LABEL identifies our own clip, so it stays fixed) -->
+    <!-- Receive, Scan and History actions (#422). -->
+    <string name="wallet_qr_share_address">Share</string>
+    <string name="wallet_qr_send_to_address">Send to this address</string>
+    <string name="wallet_qr_pay">Pay</string>
+    <!-- %1$s: the block explorer's host name, like etherscan.io. -->
+    <string name="wallet_history_explorer_activity">See full activity on %1$s</string>
+    <string name="wallet_history_receive">Receive</string>
 </resources>

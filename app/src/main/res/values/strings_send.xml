@@ -77,7 +77,6 @@
     <string name="send_self_send_note">This is the sending account itself.</string>
     <!-- %1$s: a fee with its currency symbol, fixed format. -->
     <string name="send_up_to">up to %1$s</string>
-    <string name="send_confirm_on_ledger">Confirm on Ledger</string>
     <string name="send_confirm_and_send">Confirm and send</string>
     <!-- %1$s: the amount, fixed format; %2$s: the token's symbol; %3$s: the network. -->
     <string name="send_amount_on_chain">%1$s %2$s on %3$s</string>
@@ -356,4 +355,46 @@
     <string name="send_link_filled">Filled in from a payment link. Check every field before you review.</string>
     <string name="send_link_chain_assumed">The link doesn’t name a network, so Ethereum is filled in. Pick another asset if the payment is meant for another network.</string>
     <string name="send_link_chain_from_token">The link doesn’t name a network. %1$s is filled in: it’s the only network Send knows this token on. Check the payment is meant for it.</string>
+    <!-- The shared transaction review (#422): TxReview.kt. -->
+    <!-- %1$s: the amount, fixed format; %2$s: its symbol; %3$s: who gets it (a short address, or tx_review_recipient_named); %4$s: the network. -->
+    <string name="tx_review_send_headline">Send %1$s %2$s to %3$s on %4$s</string>
+    <!-- %1$s: a name like vitalik.eth; %2$s: its short address, like 0xd8dA…6045. -->
+    <string name="tx_review_recipient_named">%1$s (%2$s)</string>
+    <string name="tx_review_details">Details</string>
+    <string name="tx_review_details_expanded">Expanded</string>
+    <string name="tx_review_details_collapsed">Collapsed</string>
+    <!-- Content description of a row's copy button; %1$s: the row's label, like "To". -->
+    <string name="tx_review_copy">Copy %1$s</string>
+    <!-- Content description of a row's explorer button; %1$s: the row's label. -->
+    <string name="tx_review_open_explorer">Open %1$s on the block explorer</string>
+
+    <!-- The Send form (#422). -->
+    <!-- %1$s: the account's name; %2$s: its short address. -->
+    <string name="send_from_line">From %1$s (%2$s)</string>
+    <string name="send_paste">Paste</string>
+    <string name="send_scan">Scan a QR code</string>
+    <string name="send_suggestions_mine">Your accounts</string>
+    <string name="send_suggestions_recent">Sent to recently</string>
+    <!-- The asset chip under the amount; %1$s: the symbol; %2$s: the network. -->
+    <string name="send_asset_chip">%1$s · %2$s</string>
+    <string name="send_asset_sheet_title">Choose what to send</string>
+    <string name="send_asset_selected">Selected</string>
+    <!-- %1$s: the symbol; %2$s: the balance, formatted. -->
+    <string name="send_not_enough">Not enough %1$s: this account has %2$s %1$s.</string>
+    <!-- %1$s: the network's currency symbol, like ETH; %2$s: the network. -->
+    <string name="send_no_fee_currency">This account has no %1$s on %2$s to pay the network fee.</string>
+    <string name="send_scan_title">Scan an address</string>
+    <string name="send_scan_not_address">That code isn’t an address or a payment request. Try another one.</string>
+    <string name="send_scan_filled">Filled in from the code you scanned. Check every field before you review.</string>
+    <string name="send_name_verified">✓ Verified name</string>
+    <string name="send_name_about">How this name was checked</string>
+    <!-- The review's Total for a token: %1$s the amount, fixed format; %2$s its symbol; %3$s the most the fee can be, with its currency. -->
+    <string name="send_total_token">%1$s %2$s + up to %3$s</string>
+    <string name="send_label_gas">Gas</string>
+    <!-- %1$s: the token's symbol. -->
+    <string name="send_label_token_contract">%1$s contract</string>
+    <!-- The confirm button; %1$s: the amount, fixed format; %2$s: its symbol. -->
+    <string name="send_confirm_amount">Send %1$s %2$s</string>
+    <string name="send_confirm_amount_ledger">Send %1$s %2$s with Ledger</string>
+    <string name="send_sending">Sending…</string>
 </resources>
