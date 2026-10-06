@@ -515,14 +515,6 @@ internal fun pastedRecipient(context: Context): PastedRecipient? {
 private const val MAX_PASTED_RECIPIENT = 512
 
 /**
- * Send (#105): the active account sends a native currency or a known
- * ERC-20 on one of the wallet's chains. Pick the asset, type the
- * address and amount, review what will be signed — the fee is priced
- * and the nonce read at that moment — and confirm. The confirmed send
- * runs in [WalletSender], so leaving this page doesn't stop it; coming
- * back shows where it got to.
- */
-/**
  * The Send form's own fields — asset, recipient, amount, "all" — held
  * apart from [SendPage] so a caller can keep them while the page is off
  * screen: a link's page hidden behind a feature's request comes back with
@@ -546,19 +538,6 @@ internal class SendDraft {
     var note by mutableStateOf<FillNote?>(null)
 
     /**
-     * The To field's Scan or Paste filling the form in from [read] (#422),
-     * the one way both do it. A payment request sets the payee and, the
-     * way its link would open Send, its asset and amount: one naming no
-     * amount leaves the amount empty (R3-M1) — whatever was there, typed
-     * or an earlier request's, isn't this request's, and the note above
-     * says the form was filled in from it. A plain address only replaces
-     * the payee: an earlier request's asset and amount stay, and so does
-     * its note, now saying the payee isn't the request's (R2-M1) — unless
-     * it's the payee already there (R3-M2), which replaces nothing. With
-     * no note, a scanned address is said, a paste isn't. [assets]: the
-     * assets Send offers.
-     */
-    /**
      * The default asset, the first one the account holds (#422), picked
      * again from [balances] as they're read (R4-M2): a page opened before
      * any balance was read would otherwise stay on the wallet's first
@@ -572,6 +551,19 @@ internal class SendDraft {
         if (best != assetKey) assetKey = best
     }
 
+    /**
+     * The To field's Scan or Paste filling the form in from [read] (#422),
+     * the one way both do it. A payment request sets the payee and, the
+     * way its link would open Send, its asset and amount: one naming no
+     * amount leaves the amount empty (R3-M1) — whatever was there, typed
+     * or an earlier request's, isn't this request's, and the note above
+     * says the form was filled in from it. A plain address only replaces
+     * the payee: an earlier request's asset and amount stay, and so does
+     * its note, now saying the payee isn't the request's (R2-M1) — unless
+     * it's the payee already there (R3-M2), which replaces nothing. With
+     * no note, a scanned address is said, a paste isn't. [assets]: the
+     * assets Send offers.
+     */
     fun fill(read: ScannedRecipient.Fill, source: FillSource, assets: List<Pair<Chain, Token>>) {
         val request = read.prefill
         if (request != null) {
@@ -591,6 +583,14 @@ internal class SendDraft {
     }
 }
 
+/**
+ * Send (#105): the active account sends a native currency or a known
+ * ERC-20 on one of the wallet's chains. Pick the asset, type the
+ * address and amount, review what will be signed — the fee is priced
+ * and the nonce read at that moment — and confirm. The confirmed send
+ * runs in [WalletSender], so leaving this page doesn't stop it; coming
+ * back shows where it got to.
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun SendPage(
