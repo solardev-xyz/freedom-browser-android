@@ -1120,11 +1120,6 @@ private val NODES_PAGE: String get() = Strings.get(R.string.settings_nodes_page)
 private val NODES_PAGE_SUBTITLE: String get() = Strings.get(R.string.settings_nodes_page_subtitle)
 private const val NODES_PAGE_KEY = "nodes-page"
 
-/**
- * The row to the Nodes page, then where `bzz://` and `ipfs://` content
- * comes from (#125) — both always listed, IPFS no longer behind an
- * advanced-options switch (#400 item 8).
- */
 private const val SWARM_CACHE_SIZE_KEY = "swarm-cache-size"
 
 /**
@@ -1138,6 +1133,11 @@ internal fun swarmCacheSizeRow(size: SwarmCacheSize?) = settingsRow(
     *searchKeywords(R.string.node_cache_size_keywords),
 )
 
+/**
+ * The row to the Nodes page, then where `bzz://` and `ipfs://` content
+ * comes from (#125) — both always listed, IPFS no longer behind an
+ * advanced-options switch (#400 item 8).
+ */
 internal fun nodeRows(externalSwarm: String, externalIpfs: String) =
     listOf(
         settingsRow(NODES_PAGE_KEY, NODES_PAGE, NODES_PAGE_SUBTITLE, Strings.get(R.string.node_screen_title)),
