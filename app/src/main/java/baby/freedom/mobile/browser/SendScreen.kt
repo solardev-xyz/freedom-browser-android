@@ -232,11 +232,6 @@ private data class NameLookup(val name: String, val chainId: Long, val result: E
 /** How long the recipient field must stay still before a name in it is looked up. */
 private const val NAME_LOOKUP_DEBOUNCE_MS = 400L
 
-/**
- * Where the form's values came from, when a payment link filled it in
- * (#317): the site whose link it was, in full (never shortened — its tail
- * is what a spoof hides), and a network the link didn't name.
- */
 /** Where a [SendPrefill] the Send form shows came from (#317, #422): what its note above the form says. */
 internal enum class FillSource {
     /** A payment link opened in the browser (#317). */
@@ -536,6 +531,13 @@ private const val MAX_PASTED_RECIPIENT = 512
 internal class SendDraft {
     var filled = false
     var assetKey by mutableStateOf<String?>(null)
+
+    /**
+     * [assetKey] was named — picked on the asset sheet, or by a link or
+     * request — rather than defaulted; a defaulted one follows the
+     * balances ([followDefault]).
+     */
+    var assetChosen = false
     var recipient by mutableStateOf("")
     var amount by mutableStateOf("")
     var all by mutableStateOf(false)
@@ -556,11 +558,28 @@ internal class SendDraft {
      * no note, a scanned address is said, a paste isn't. [assets]: the
      * assets Send offers.
      */
+    /**
+     * The default asset, the first one the account holds (#422), picked
+     * again from [balances] as they're read (R4-M2): a page opened before
+     * any balance was read would otherwise stay on the wallet's first
+     * asset. Only while nothing named the asset and nothing has been
+     * typed against it — an amount is in the asset's own units, so once
+     * there is one (or Max) the asset stays put.
+     */
+    fun followDefault(assets: List<Pair<Chain, Token>>, balances: Map<String, TokenBalance>) {
+        if (assetChosen || amount.isNotEmpty() || all) return
+        val best = assetOrder(assets, balances).firstOrNull()?.second?.key ?: return
+        if (best != assetKey) assetKey = best
+    }
+
     fun fill(read: ScannedRecipient.Fill, source: FillSource, assets: List<Pair<Chain, Token>>) {
         val request = read.prefill
         if (request != null) {
             val requested = assets.firstOrNull { it.second.key == request.tokenKey }?.second
-            if (requested != null) assetKey = requested.key
+            if (requested != null) {
+                assetKey = requested.key
+                assetChosen = true
+            }
             amount = requested?.let { token -> request.amount?.let { SendAmounts.exact(it, token.decimals) } }.orEmpty()
             note = FillNote(request, source)
         } else {
@@ -611,12 +630,15 @@ internal fun SendPage(
     if (!form.filled) {
         form.filled = true
         // With nothing named, the first asset the account holds (#422).
+        // Picked again as balances are read, until something names one (R4-M2).
         form.assetKey = prefilledAsset?.key ?: assetOrder(assets, balances).firstOrNull()?.second?.key
+        form.assetChosen = prefilledAsset != null
         form.recipient = prefill?.recipient.orEmpty()
         // In the link's asset's own decimals, every digit kept: a request's amount isn't rounded.
         form.amount = prefilledAsset?.let { token -> prefill.amount?.let { SendAmounts.exact(it, token.decimals) } }.orEmpty()
         form.note = prefill?.let { FillNote(it, if (scanned) FillSource.SCANNED else FillSource.LINK) }
     }
+    LaunchedEffect(assets, balances) { form.followDefault(assets, balances) }
     var assetKey by form::assetKey
     val asset = assets.firstOrNull { it.second.key == assetKey } ?: assets.firstOrNull()
     var recipient by form::recipient
@@ -869,7 +891,10 @@ internal fun SendPage(
                                                 // with the name in it, even on a reopened page.
                                                 val shown = NameLookup(name, chainId, after)
                                                 if (typedName != name || fieldChain?.id != chainId) {
-                                                    assets.firstOrNull { it.second.key == q.request.token.key }?.let { assetKey = it.second.key }
+                                                    assets.firstOrNull { it.second.key == q.request.token.key }?.let {
+                                                        assetKey = it.second.key
+                                                        form.assetChosen = true
+                                                    }
                                                     recipient = name
                                                     if (amount.isBlank()) amount = SendAmounts.exact(q.request.amount, q.request.token.decimals)
                                                     all = false
@@ -1090,6 +1115,7 @@ internal fun SendPage(
             balances = balances,
             onPick = {
                 assetKey = it.key
+                form.assetChosen = true
                 all = false
                 error = null
                 assetSheet = false

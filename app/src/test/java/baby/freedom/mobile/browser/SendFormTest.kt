@@ -282,6 +282,38 @@ class SendFormTest {
         assertEquals("0.001", form.amount)
     }
 
+    @Test
+    fun `the default asset follows balances as they're read, until one is named or an amount typed`() {
+        val form = SendDraft()
+        form.assetKey = assetOrder(assets, emptyMap()).first().second.key
+        assertEquals(ethNative.key, form.assetKey)
+        // Nothing read yet: the wallet's first asset; then xDAI's balance arrives.
+        form.followDefault(assets, mapOf("${gnosis.id}:native" to known(7)))
+        assertEquals("${gnosis.id}:native", form.assetKey)
+
+        // An amount typed against it keeps the asset put.
+        form.amount = "1"
+        form.followDefault(assets, mapOf(xbzz.key to known(5)))
+        assertEquals("${gnosis.id}:native", form.assetKey)
+        form.amount = ""
+        form.all = true
+        form.followDefault(assets, mapOf(xbzz.key to known(5)))
+        assertEquals("${gnosis.id}:native", form.assetKey)
+        form.all = false
+
+        // A request naming its asset is never overridden by a balance.
+        form.fill(scannedRecipient("ethereum:$other") as ScannedRecipient.Fill, FillSource.SCANNED, assets)
+        assertEquals(ethNative.key, form.assetKey)
+        assertEquals("", form.amount)
+        form.followDefault(assets, mapOf(xbzz.key to known(5)))
+        assertEquals(ethNative.key, form.assetKey)
+
+        // Nor is one picked on the sheet.
+        val picked = SendDraft().apply { assetKey = usdc.key; assetChosen = true }
+        picked.followDefault(assets, mapOf(xbzz.key to known(5)))
+        assertEquals(usdc.key, picked.assetKey)
+    }
+
     // ---- receive ----
 
     @Test
