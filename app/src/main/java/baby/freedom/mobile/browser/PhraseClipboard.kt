@@ -85,6 +85,14 @@ internal object PhraseClipboard {
 
     private val LABELS = setOf(CLIP_LABEL, KEY_CLIP_LABEL)
 
+    /**
+     * Whether a clip labelled [label] is one of ours — a recovery phrase or
+     * a private key — told from its description alone: a field that pastes
+     * (Send's To, #422) leaves it out rather than show the secret on a page
+     * screenshots and Recents can see.
+     */
+    internal fun isSecretLabel(label: CharSequence?): Boolean = label?.toString() in LABELS
+
     /** `ClipDescription.EXTRA_IS_SENSITIVE`, a plain string key, so it's set on every API level. */
     internal const val EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE"
     private const val PREFS = "phrase_clipboard"

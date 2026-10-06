@@ -39,13 +39,21 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -70,9 +78,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -179,10 +192,48 @@ internal fun QrCodeImage(content: String, description: String, modifier: Modifie
 }
 
 /**
+ * [address] in groups of four for reading aloud or comparing (#422):
+ * `0x5aAe b605 3F3E … eAed` — the `0x` stays on the first group. Joined
+ * with spaces it's what Receive shows; Copy and Share hand over the
+ * address itself, without them.
+ */
+internal fun addressGroups(address: String): List<String> {
+    val hex = address.removePrefix("0x").removePrefix("0X")
+    if (hex.length == address.length) return hex.chunked(4)
+    val groups = hex.chunked(4)
+    return listOf(address.take(2) + groups.firstOrNull().orEmpty()) + groups.drop(1)
+}
+
+/** [address] as Receive shows it: grouped, the first and last group emphasised (they're what people check). */
+@Composable
+private fun groupedAddress(address: String): AnnotatedString {
+    val groups = addressGroups(address)
+    val strong = SpanStyle(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+    val muted = SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant)
+    return buildAnnotatedString {
+        groups.forEachIndexed { i, group ->
+            if (i > 0) append(' ')
+            withStyle(if (i == 0 || i == groups.lastIndex) strong else muted) { append(group) }
+        }
+    }
+}
+
+/** Hands [address] to another app through the system share sheet (#422). */
+internal fun shareAddress(context: Context, address: String) {
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, address)
+    }
+    // A device with no share target at all would throw.
+    runCatching { context.startActivity(Intent.createChooser(send, null)) }
+}
+
+/**
  * The receive page (#106): [account]'s address as a QR code and as
- * text, with Copy. The code holds the plain address, as on iOS — the
- * same address takes funds on every EVM chain, and plenty of scanners
- * don't read EIP-681 `ethereum:` links.
+ * text in groups of four, with Copy and Share and a one-line note that
+ * it's the same on every network (#422). The code holds the plain
+ * address, as on iOS — the same address takes funds on every EVM chain,
+ * and plenty of scanners don't read EIP-681 `ethereum:` links.
  */
 @Composable
 internal fun ReceivePage(account: WalletAccount, onBack: () -> Unit) {
@@ -205,26 +256,35 @@ internal fun ReceivePage(account: WalletAccount, onBack: () -> Unit) {
                     }
                     Spacer(Modifier.height(12.dp))
                     SelectionContainer {
-                        AddressText(
-                            account.address,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
+                        Text(
+                            groupedAddress(account.address),
+                            style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth(),
                         )
                     }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        TextButton(onClick = { copyToClipboard(context, account.address) }) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        stringResource(R.string.wallet_qr_receive_note),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    SheetButtonRow {
+                        Button(onClick = { copyToClipboard(context, account.address) }, modifier = Modifier.heightIn(min = 48.dp)) {
+                            Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
                             Text(stringResource(R.string.common_copy_address))
+                        }
+                        OutlinedButton(onClick = { shareAddress(context, account.address) }, modifier = Modifier.heightIn(min = 48.dp)) {
+                            Icon(Icons.Filled.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(stringResource(R.string.wallet_qr_share_address))
                         }
                     }
                 }
-            }
-            item("note") {
-                Text(
-                    stringResource(R.string.wallet_qr_receive_note),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 4.dp),
-                )
             }
         }
     }
@@ -323,23 +383,33 @@ internal fun exactAmount(raw: BigInteger, decimals: Int): String =
 
 /**
  * The scan page (#106): the camera ([QrScanner]) or a pasted link, and
- * what the wallet makes of it ([ScannedCode]). Addresses and payment
- * requests can be copied; sending and pairing with desktop Freedom come
- * with their own features, so this page says what the code is and
- * doesn't act on it.
+ * what the wallet makes of it ([ScannedCode]). An address or a payment
+ * request Send can pay offers Send / Pay (#422), which opens the Send
+ * page filled in ([onSend]) — nothing is signed before its own review —
+ * with Copy as the second choice; a request Send can't pay says why.
  *
  * The decoded text lives only in plain `remember` state: a pairing code
  * is a live session secret, and nothing scanned belongs in the
  * saved-instance-state bundle.
  */
 @Composable
-internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onSafeRequest: (String) -> Unit, onBack: () -> Unit) {
+internal fun ScanPage(
+    chains: List<Chain>,
+    accounts: List<WalletAccount>,
+    onSafeRequest: (String) -> Unit,
+    onSend: (SendPrefill) -> Unit,
+    onBack: () -> Unit,
+) {
     val context = LocalContext.current
     val session = remember(context) { OpenLvSession.get(context) }
     var result by remember { mutableStateOf<ScannedCode?>(null) }
+    // The text [result] was read from: what Send / Pay reads the request from.
+    var resultText by remember { mutableStateOf("") }
     var pasted by remember { mutableStateOf("") }
     // A pairing code connects as it's read (#113): the sheets ask before anything is signed or shared.
-    fun show(code: ScannedCode) {
+    fun show(text: String) {
+        val code = ScannedCode.parse(text)
+        resultText = text
         result = code
         if (code is ScannedCode.Pairing) session.start(code.uri)
         // Another Safe owner's request (#141) opens its own review: nothing is signed before the user asks.
@@ -353,7 +423,7 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onSafe
     // on the next frame.
     fun readPasted() {
         dedup.holdRecent()
-        show(ScannedCode.parse(pasted))
+        show(pasted)
     }
     // Held here, not in the scanner: the scanner sits in a LazyColumn item,
     // whose plain remember is lost when it scrolls off screen.
@@ -369,7 +439,7 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onSafe
                 SectionCard(title = stringResource(R.string.wallet_qr_camera_title)) {
                     QrScanner(
                         permission = cameraPermission,
-                        onCode = { text -> if (dedup.isNew(text)) show(ScannedCode.parse(text)) },
+                        onCode = { text -> if (dedup.isNew(text)) show(text) },
                         modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)),
                     )
                     Spacer(Modifier.height(8.dp))
@@ -385,7 +455,13 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onSafe
                     if (code is ScannedCode.Pairing) {
                         PairingSection(code.uri)
                     } else {
-                        ScannedCodeSection(code, scannedLines(code, chains, accounts), onCopy = { copyToClipboard(context, it) })
+                        ScannedCodeSection(
+                            code,
+                            scannedLines(code, chains, accounts),
+                            send = scannedRecipient(resultText),
+                            onCopy = { copyToClipboard(context, it) },
+                            onSend = onSend,
+                        )
                     }
                 }
             }
@@ -423,7 +499,13 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onSafe
 }
 
 @Composable
-private fun ScannedCodeSection(code: ScannedCode, lines: List<ScannedLine>, onCopy: (String) -> Unit) {
+private fun ScannedCodeSection(
+    code: ScannedCode,
+    lines: List<ScannedLine>,
+    send: ScannedRecipient,
+    onCopy: (String) -> Unit,
+    onSend: (SendPrefill) -> Unit,
+) {
     val title = when (code) {
         is ScannedCode.Address -> stringResource(R.string.wallet_qr_line_address)
         is ScannedCode.Payment -> stringResource(R.string.wallet_qr_kind_payment)
@@ -465,20 +547,29 @@ private fun ScannedCodeSection(code: ScannedCode, lines: List<ScannedLine>, onCo
         when (code) {
             is ScannedCode.Address, is ScannedCode.Payment -> {
                 val address = if (code is ScannedCode.Address) code.address else (code as ScannedCode.Payment).recipient
-                if (code is ScannedCode.Payment) {
-                    Text(
-                        stringResource(R.string.wallet_qr_payment_note),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = { onCopy(address) }) {
-                        Text(
-                            stringResource(
-                                if (code is ScannedCode.Payment) R.string.wallet_qr_copy_address_to_pay else R.string.common_copy_address,
-                            ),
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    when (send) {
+                        is ScannedRecipient.Fill -> Button(
+                            onClick = { onSend(send.sendPrefill()) },
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                stringResource(
+                                    if (code is ScannedCode.Payment) R.string.wallet_qr_pay else R.string.wallet_qr_send_to_address,
+                                ),
+                            )
+                        }
+                        // A request Send can't pay (another network, an unknown token): why, in a sentence.
+                        is ScannedRecipient.Refused -> Text(
+                            send.reason,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
                         )
+                    }
+                    OutlinedButton(onClick = { onCopy(address) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                        Text(stringResource(R.string.common_copy_address))
                     }
                 }
             }

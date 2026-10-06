@@ -682,6 +682,9 @@ fun WalletScreen(
     // The receive and scan pages (#106).
     var receiving by remember { mutableStateOf(false) }
     var scanning by remember { mutableStateOf(false) }
+    // What a scanned code filled Send in with (#422), for as long as that Send page is open.
+    var scanPrefill by remember { mutableStateOf<SendPrefill?>(null) }
+    LaunchedEffect(sending) { if (!sending) scanPrefill = null }
     // Connect a Ledger (#142).
     var connectingLedger by remember { mutableStateOf(false) }
     val publishers = remember(context) { PublisherIdentityStore.get(context) }
@@ -913,9 +916,10 @@ fun WalletScreen(
             onOpenUrl = onOpenUrl,
             // A link's Send page goes back to the page the link was on.
             onBack = { if (sendLink != null) onDismiss() else sending = false },
-            prefill = sendLink,
+            prefill = sendLink ?: scanPrefill,
             onStarted = if (sendLink != null) onSendStarted else ({}),
             draft = if (sendLink != null) linkDraft else null,
+            scanned = sendLink == null && scanPrefill != null,
         )
         return
     }
@@ -991,6 +995,12 @@ fun WalletScreen(
             onSafeRequest = {
                 scanning = false
                 coSigning = it
+            },
+            // An address or payment request scanned (#422): Send, filled in from it.
+            onSend = {
+                scanning = false
+                scanPrefill = it
+                sending = true
             },
             onBack = { scanning = false },
         )
@@ -1238,6 +1248,12 @@ fun WalletScreen(
                     item("history") {
                         TxHistorySection(
                             records = accountTx,
+                            onReceive = {
+                                error = null
+                                receiving = true
+                            },
+                            explorers = historyAccount?.let { accountExplorerLinks(walletChains.orEmpty(), it.address) }.orEmpty(),
+                            onOpenUrl = onOpenUrl,
                             onOpen = {
                                 error = null
                                 openTx = it.hash
