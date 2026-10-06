@@ -138,3 +138,58 @@ class DeleteBrowsingDataTest {
         )
     }
 }
+
+class DeleteSwarmCacheTest {
+    private val now = 1_800_000_000_000L
+
+    private class Recorder {
+        val history = mutableListOf<Long>()
+        var swarmClears = 0
+        val handed = mutableListOf<DeleteChoice>()
+    }
+
+    private fun run(choice: DeleteChoice): Recorder = Recorder().also { r ->
+        deleteBrowsingData(choice, { r.history += it }, { r.swarmClears++ }, now) { r.handed += it }
+    }
+
+    @Test
+    fun `the Swarm node cache box is off by default`() {
+        assertFalse(DeleteChoice().swarmCache)
+    }
+
+    @Test
+    fun `the Swarm box alone enables Delete data, without asking first`() {
+        val only = DeleteChoice(history = false, siteData = false, cache = false, swarmCache = true)
+        assertTrue(only.canDelete)
+        assertFalse(only.needsConfirm)
+        assertEquals("Browsing data deleted", deleteDoneMessage(only))
+        assertEquals(
+            "Browsing data deleted",
+            deleteDoneMessage(DeleteChoice(history = true, siteData = false, cache = false, swarmCache = true)),
+        )
+    }
+
+    @Test
+    fun `a checked box clears the Swarm cache once, whatever the range`() {
+        for (range in DeleteRange.entries) {
+            val r = run(DeleteChoice(range = range, history = false, siteData = false, cache = false, swarmCache = true))
+            assertEquals("$range", 1, r.swarmClears)
+            assertTrue("$range", r.history.isEmpty())
+            assertEquals(1, r.handed.size)
+        }
+    }
+
+    @Test
+    fun `an unchecked box never touches the Swarm cache`() {
+        val r = run(DeleteChoice())
+        assertEquals(0, r.swarmClears)
+        assertEquals(listOf(now - 60L * 60L * 1000L), r.history)
+    }
+
+    @Test
+    fun `nothing checked deletes nothing`() {
+        val r = run(DeleteChoice(history = false, siteData = false, cache = false, swarmCache = false))
+        assertEquals(0, r.swarmClears)
+        assertTrue(r.history.isEmpty() && r.handed.isEmpty())
+    }
+}

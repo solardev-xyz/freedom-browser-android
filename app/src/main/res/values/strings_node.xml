@@ -223,4 +223,34 @@
     <!-- %1$s is the node's own error message. -->
     <string name="node_notification_error">Error: %1$s</string>
     <string name="node_error_unknown">unknown</string>
+    <!-- The Swarm node's chunk cache, on the Nodes page and in Settings → Nodes & networks. -->
+    <string name="node_cache">Cache</string>
+    <!-- %1$s is how much is cached ("312 MB"), %2$s the cache size ("512 MB"). -->
+    <string name="node_cache_used">%1$s of %2$s</string>
+    <!-- Shown for a few seconds after the node starts while it counts a large cache. %1$s is the cache size ("512 MB"). -->
+    <string name="node_cache_counting">Counting… (%1$s max)</string>
+    <!-- %1$s is how much pinned content is kept outside the cache size ("1.2 GB"). -->
+    <string name="node_cache_pinned">%1$s pinned</string>
+    <string name="node_cache_about">Swarm pages and files you\'ve opened, kept on this device so they load faster next time. Pinned and published content doesn\'t count towards the size.</string>
+    <string name="node_cache_checking">Checking…</string>
+    <string name="node_cache_not_running">Shown while the Swarm node is running.</string>
+    <string name="node_cache_disk_off">The cache on this device couldn\'t be opened, so there\'s nothing on disk to clear. Restarting the node tries again.</string>
+    <string name="node_cache_unbound">The Swarm node isn\'t running.</string>
+    <string name="node_cache_clear">Clear cache</string>
+    <string name="node_cache_clearing">Clearing…</string>
+    <string name="node_cache_clear_title">Clear the Swarm cache?</string>
+    <string name="node_cache_clear_message">Swarm pages you\'ve opened will load from the network again. Pinned and published content is kept.</string>
+    <string name="node_cache_clear_confirm">Clear</string>
+    <!-- %1$s is how much the clear removed ("300 MB"). -->
+    <string name="node_cache_freed">Freed %1$s</string>
+    <!-- %1$s is why the clear failed, in the node's words. -->
+    <string name="node_cache_clear_failed">Couldn\'t clear the cache: %1$s</string>
+    <string name="node_cache_size">Cache size</string>
+    <string name="node_cache_size_title">Swarm cache size</string>
+    <!-- %1$s is a size ("512 MB"): the default one's label in the picker. -->
+    <string name="node_cache_size_default">%1$s (default)</string>
+    <string name="node_cache_size_note">A smaller size frees space right away: the oldest cached content goes first. Pinned and published content doesn\'t count and is kept.</string>
+    <!-- Toast after picking a smaller cache size. %1$s is the new size ("256 MB"). -->
+    <string name="node_cache_size_shrunk">Swarm cache set to %1$s: freeing space now</string>
+    <string name="node_cache_size_keywords">Swarm cache, storage, disk space, chunks, clear cache</string>
 </resources>

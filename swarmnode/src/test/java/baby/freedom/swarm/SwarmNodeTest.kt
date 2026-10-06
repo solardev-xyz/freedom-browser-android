@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.json.JSONObject
 import org.junit.Test
 import java.io.File
 import java.util.Collections
@@ -29,7 +30,10 @@ class SwarmNodeTest {
             seedEntered.countDown()
             releaseSeed.await(5, TimeUnit.SECONDS)
         }
-        override fun init(dataDir: String): Long {
+        /** Each init's cache cap, in order. */
+        val initCaches: MutableList<Long> = Collections.synchronizedList(mutableListOf())
+        override fun init(dataDir: String, cacheCapacityBytes: Long): Long {
+            initCaches += cacheCapacityBytes
             val h = nextHandle++
             calls += "init:$h"
             initEntered.countDown()
@@ -39,7 +43,8 @@ class SwarmNodeTest {
         /** What [initWithIdentity] was handed, copied before the node zeroes it; and the array itself. */
         val identities: MutableList<String> = Collections.synchronizedList(mutableListOf())
         val identityArrays: MutableList<ByteArray> = Collections.synchronizedList(mutableListOf())
-        override fun initWithIdentity(dataDir: String, identity: ByteArray): Long {
+        override fun initWithIdentity(dataDir: String, identity: ByteArray, cacheCapacityBytes: Long): Long {
+            initCaches += cacheCapacityBytes
             identities += String(identity)
             identityArrays += identity
             val h = nextHandle++
@@ -154,6 +159,20 @@ class SwarmNodeTest {
             if (swapFails) throw RuntimeException("node loop gone")
         }
         override fun swapStatus(handle: Long) = swapStatusJson
+        /** Each [cacheSetCapacity], as `handle:bytes`; [cacheStatus] / [cacheClear] go to [calls]. */
+        val capacityCalls: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        @Volatile var cacheStatusJson = """{"disk_enabled":true,"used_bytes":1}"""
+        override fun cacheStatus(handle: Long): String {
+            calls += "cacheStatus:$handle"
+            return cacheStatusJson
+        }
+        override fun cacheClear(handle: Long): String {
+            calls += "cacheClear:$handle"
+            return """{"freed_bytes":1}"""
+        }
+        override fun cacheSetCapacity(handle: Long, bytes: Long) {
+            capacityCalls += "$handle:$bytes"
+        }
         override fun confirmChequeLiability(handle: Long, chequebook: String): Int {
             confirms += "$handle:$chequebook"
             return confirmResult
@@ -1144,6 +1163,163 @@ class SwarmNodeTest {
         val node = SwarmNode(config.copy(swapEnabled = { false }), ops)
         node.start()
         awaitStatus(node, NodeStatus.Running)
+        node.dispose()
+    }
+
+    private fun awaitCapacityCalls(ops: FakeOps, n: Int) {
+        val until = System.currentTimeMillis() + 5_000
+        while (ops.capacityCalls.size < n && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertEquals(ops.capacityCalls.toString(), n, ops.capacityCalls.size)
+    }
+
+    @Test
+    fun theSavedCacheSizeIsHandedToEveryInit() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config.copy(cacheCapacityBytes = { 1L shl 30 }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf(1L shl 30), ops.initCaches.toList())
+        // Applied at init, so not again live.
+        Thread.sleep(100)
+        assertTrue(ops.capacityCalls.toString(), ops.capacityCalls.isEmpty())
+        node.dispose()
+    }
+
+    @Test
+    fun aNewCacheSizeAppliesLiveAndAtTheNextInit() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config.copy(cacheCapacityBytes = { 512L shl 20 }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        node.setCacheCapacity(256L shl 20)
+        awaitCapacityCalls(ops, 1)
+        assertEquals("1:${256L shl 20}", ops.capacityCalls[0])
+        // The setting store isn't re-read over the user's latest choice.
+        ops.nextHandle = 2
+        node.restart()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf(512L shl 20, 256L shl 20), ops.initCaches.toList())
+        node.dispose()
+    }
+
+    @Test
+    fun aCacheSizeSetWhileStoppedReachesTheNextInitOnly() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        node.setCacheCapacity(2L shl 30)
+        Thread.sleep(100)
+        assertTrue(ops.capacityCalls.isEmpty())
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf(2L shl 30), ops.initCaches.toList())
+        node.dispose()
+    }
+
+    @Test
+    fun aCacheSizeSetDuringStartupIsAppliedOnceTheNodeIsUp() {
+        val ops = FakeOps()
+        val node = SwarmNode(config.copy(cacheCapacityBytes = { 512L shl 20 }), ops)
+        node.start()
+        ops.releaseSeed.countDown()
+        assertTrue(ops.initEntered.await(5, TimeUnit.SECONDS))
+        node.setCacheCapacity(4L shl 30)
+        ops.releaseInit.countDown()
+        awaitStatus(node, NodeStatus.Running)
+        awaitCapacityCalls(ops, 1)
+        assertEquals("1:${4L shl 30}", ops.capacityCalls.last())
+        node.dispose()
+    }
+
+    @Test
+    fun aRelayOfTheCapTheNodeAlreadyHasIsNotAppliedAgain() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config.copy(cacheCapacityBytes = { 512L shl 20 }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        // The UI relays the saved size on every bind: the same cap the init got.
+        node.setCacheCapacity(512L shl 20)
+        node.setCacheCapacity(1L shl 30)
+        awaitCapacityCalls(ops, 1)
+        node.setCacheCapacity(1L shl 30)
+        Thread.sleep(100)
+        assertEquals(listOf("1:${1L shl 30}"), ops.capacityCalls.toList())
+        node.dispose()
+    }
+
+    @Test
+    fun noSavedCacheSizeKeepsAntsDefault() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf(0L), ops.initCaches.toList())
+        node.dispose()
+    }
+
+    @Test
+    fun cacheStatusAndClearNeedARunningNode() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        assertThrows(IllegalStateException::class.java) { node.cacheStatus() }
+        assertThrows(IllegalStateException::class.java) { node.clearCache() }
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals("""{"disk_enabled":true,"used_bytes":1}""", node.cacheStatus())
+        assertEquals("""{"freed_bytes":1}""", node.clearCache())
+        assertTrue(ops.calls.containsAll(listOf("cacheStatus:1", "cacheClear:1")))
+        node.dispose()
+    }
+
+    @Test
+    fun cacheStatusMarksAntsPostInitCountOnALargeCache() {
+        val mb = 1L shl 20
+        fun zeros(file: Long, disk: Boolean = true) =
+            """{"disk_enabled":$disk,"used_bytes":0,"capacity_bytes":${2048 * mb},"chunks":0,""" +
+                """"pinned_bytes":0,"pinned_chunks":0,"file_bytes":$file}"""
+        fun counting(json: String, since: Long) =
+            JSONObject(SwarmNode.markCacheCounting(json, since)).optBoolean("counting", false)
+        // Right after init, all 0 over a 2 GB file: ant hasn't counted yet.
+        assertTrue(counting(zeros(2000 * mb), 2_000))
+        // Past the window, the 0s are taken as they are.
+        assertFalse(counting(zeros(2000 * mb), SwarmNode.CACHE_COUNT_WINDOW_MS))
+        // A clock reading before init (shouldn't happen) proves nothing.
+        assertFalse(counting(zeros(2000 * mb), -1))
+        // A small file is an empty cache, not an uncounted one.
+        assertFalse(counting(zeros(64 * 1024), 2_000))
+        // No disk cache, or something counted: unchanged, byte for byte.
+        assertEquals(zeros(2000 * mb, disk = false), SwarmNode.markCacheCounting(zeros(2000 * mb, disk = false), 2_000))
+        val counted = """{"disk_enabled":true,"used_bytes":0,"pinned_bytes":${5 * mb},"file_bytes":${2000 * mb}}"""
+        assertEquals(counted, SwarmNode.markCacheCounting(counted, 2_000))
+        assertEquals("not json", SwarmNode.markCacheCounting("not json", 2_000))
+        // After a clear, all 0 over a big file is the clear's own answer (an
+        // older build's database kept its size): never "counting".
+        assertFalse(JSONObject(SwarmNode.markCacheCounting(zeros(512 * mb), 2_000, clearedSinceBoot = true)).optBoolean("counting", false))
+    }
+
+    @Test
+    fun cacheStatusStopsMarkingCountingOnceThisBootCleared() {
+        val mb = 1L shl 20
+        val ops = FakeOps().apply {
+            releaseSeed.countDown(); releaseInit.countDown()
+            cacheStatusJson = """{"disk_enabled":true,"used_bytes":0,"chunks":0,"pinned_bytes":0,""" +
+                """"pinned_chunks":0,"file_bytes":${512 * mb}}"""
+        }
+        val now = 1_000_000L
+        val node = SwarmNode(config, ops, { now })
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        fun counting() = JSONObject(node.cacheStatus()).optBoolean("counting", false)
+        // Seconds after init, all 0 over a 512 MB file: ant still counting.
+        assertTrue(counting())
+        node.clearCache()
+        // Same reading after a clear on this boot: the clear's answer.
+        assertFalse(counting())
+        node.stop()
+        awaitStatus(node, NodeStatus.Stopped)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        // A new boot counts afresh: the earlier boot's clear doesn't carry over.
+        assertTrue(counting())
         node.dispose()
     }
 

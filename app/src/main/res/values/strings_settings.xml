@@ -192,6 +192,10 @@
     <string name="delete_data_cache">Cached images and files</string>
     <string name="delete_data_cache_subtitle">Pages may load more slowly on your next visit</string>
     <string name="delete_data_cache_detail">Also photos taken with the camera for a site\'s upload.</string>
+    <string name="delete_data_swarm_cache">Swarm node cache</string>
+    <string name="delete_data_swarm_cache_subtitle">Deleted for all time, whatever the range: the node can\'t delete it by date. Pinned and published content is kept.</string>
+    <string name="delete_data_swarm_cache_failed">Couldn\'t clear the Swarm node cache: %1$s</string>
+    <string name="delete_data_swarm_cache_off">Only while the Swarm node is running.</string>
     <!-- Shown when a time range other than All time is picked with cookies and/or cache checked -->
     <string name="delete_data_all_time_cookies">Cookies and site data are deleted for all time: Android\'s WebView can\'t delete them by date.</string>
     <string name="delete_data_all_time_cache">Cached images and files are deleted for all time: Android\'s WebView can\'t delete them by date.</string>

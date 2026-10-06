@@ -236,6 +236,17 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         runCatching { b?.setSwapEnabled(enabled) }
     }
 
+    /**
+     * The Swarm chunk cache's cap in bytes, relayed to `:node` on every
+     * bind and every change; null until first read. Main thread only.
+     */
+    private var swarmCacheBytes: Long? = null
+
+    private fun relaySwarmCacheBytes(b: INodeService?, bytes: Long?) {
+        bytes ?: return
+        runCatching { b?.setSwarmCacheCapacity(bytes) }
+    }
+
     private fun relaySwarmMode(b: INodeService?, relay: SwarmRelay?) {
         relay ?: return
         val gnosis = relay.gnosis
@@ -379,6 +390,8 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
             // ant forgets the pay-peers switch at every init: `:node`
             // applies the latest relayed value after each one.
             relaySwapEnabled(b, swapEnabled)
+            // Nor does it keep the cache's cap: the same, for every init.
+            relaySwarmCacheBytes(b, swarmCacheBytes)
             // A wallet change made while unbound (#77).
             runCatching { b.reloadIdentity() }
             // The Radicle on/off setting lives here, in the UI process's
@@ -532,6 +545,16 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
             settings.swarmSwapEnabled.distinctUntilChanged().collect { enabled ->
                 swapEnabled = enabled
                 relaySwapEnabled(binder, enabled)
+            }
+        }
+
+        // The Swarm cache size, likewise: `:node` caps the running node's
+        // cache at once (a smaller size evicts straight away) and hands
+        // the size to every later init.
+        lifecycleScope.launch {
+            settings.swarmCacheCapacityBytes.distinctUntilChanged().collect { bytes ->
+                swarmCacheBytes = bytes
+                relaySwarmCacheBytes(binder, bytes)
             }
         }
 

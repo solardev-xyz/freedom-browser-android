@@ -56,6 +56,8 @@ import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -94,6 +96,7 @@ import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.DappGrantStore
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.data.SwarmCacheSize
 import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.Appearance
@@ -199,6 +202,9 @@ fun SettingsScreen(
     val ensRpcConfig by settings.ensRpcConfig.collectAsState(initial = EnsRpcConfig())
     val externalSwarm by settings.externalSwarmEndpoint.collectAsState(initial = "")
     val externalIpfs by settings.externalIpfsGateway.collectAsState(initial = "")
+    // The Swarm node's cache size; null until read, so the row doesn't flash the default.
+    val swarmCacheSize by settings.swarmCacheSize.collectAsState(initial = null)
+    var pickSwarmCacheSize by remember { mutableStateOf(false) }
     var editEndpoint by remember { mutableStateOf<NodeEndpoint?>(null) }
     val adblockCategories by settings.adblockCategories
         .collectAsState(initial = AdblockCategory.entries.filterTo(LinkedHashSet()) { it.enabledByDefault })
@@ -268,7 +274,8 @@ fun SettingsScreen(
         SettingsSection.Chains to chainSettingsRows(chains),
         SettingsSection.Ens to ensSectionRows(ensRpcConfig),
         SettingsSection.Rpc to rpcSectionRows(ensRpcConfig),
-        SettingsSection.Nodes to nodeRows(externalSwarm, externalIpfs) + radicleSettingsRow(radicle),
+        SettingsSection.Nodes to
+            nodeRows(externalSwarm, externalIpfs) + swarmCacheSizeRow(swarmCacheSize) + radicleSettingsRow(radicle),
         SettingsSection.Ipfs to ipfsRows(ipfsInfo),
         SettingsSection.About to aboutRows(appVersion, context.packageName, appUpdate, checkForUpdates),
     )
@@ -448,6 +455,8 @@ fun SettingsScreen(
             externalSwarm = externalSwarm,
             externalIpfs = externalIpfs,
             onEdit = { editEndpoint = it },
+            cacheSize = swarmCacheSize,
+            onPickCacheSize = { pickSwarmCacheSize = true },
             radicle = radicle,
             onOpenRadicle = onOpenRadicle,
             onOpenNodes = onOpenNodes,
@@ -636,6 +645,17 @@ fun SettingsScreen(
                 editTorClient = false
             },
             onDismiss = { editTorClient = false },
+        )
+    }
+    val cacheSizeFrom = swarmCacheSize
+    if (pickSwarmCacheSize && cacheSizeFrom != null) {
+        SwarmCacheSizeDialog(
+            current = cacheSizeFrom,
+            onPick = { size ->
+                pickSwarmCacheSize = false
+                pickSwarmCacheSize(context, scope, settings, cacheSizeFrom, size)
+            },
+            onDismiss = { pickSwarmCacheSize = false },
         )
     }
     editEndpoint?.let { endpoint ->
@@ -1036,7 +1056,7 @@ private fun templateHint(rejection: SearchEngines.Rejection): String = when (rej
 }
 
 @Composable
-private fun EngineRadioRow(
+internal fun EngineRadioRow(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
@@ -1099,6 +1119,19 @@ private fun endpointSubtitle(endpoint: NodeEndpoint, external: String) =
 private val NODES_PAGE: String get() = Strings.get(R.string.settings_nodes_page)
 private val NODES_PAGE_SUBTITLE: String get() = Strings.get(R.string.settings_nodes_page_subtitle)
 private const val NODES_PAGE_KEY = "nodes-page"
+
+private const val SWARM_CACHE_SIZE_KEY = "swarm-cache-size"
+
+/**
+ * The Swarm node's cache size, found by "cache", "storage", "disk space"
+ * and the like as well as by its title and the size in use.
+ */
+internal fun swarmCacheSizeRow(size: SwarmCacheSize?) = settingsRow(
+    SWARM_CACHE_SIZE_KEY,
+    Strings.get(R.string.node_cache_size_title),
+    size?.let(::swarmCacheSizeLabel),
+    *searchKeywords(R.string.node_cache_size_keywords),
+)
 
 /**
  * The row to the Nodes page, then where `bzz://` and `ipfs://` content
@@ -1246,6 +1279,8 @@ private fun NodesSection(
     externalSwarm: String,
     externalIpfs: String,
     onEdit: (NodeEndpoint) -> Unit,
+    cacheSize: SwarmCacheSize?,
+    onPickCacheSize: () -> Unit,
     radicle: RadicleControls,
     onOpenRadicle: () -> Unit,
     onOpenNodes: () -> Unit,
@@ -1266,6 +1301,17 @@ private fun NodesSection(
                 external = externalSwarm,
                 icon = ImageVector.vectorResource(R.drawable.ic_swarm),
                 onClick = { onEdit(NodeEndpoint.Swarm) },
+            )
+        }
+        if (SWARM_CACHE_SIZE_KEY in visible) {
+            PageRow(
+                title = stringResource(R.string.node_cache_size_title),
+                subtitle = cacheSize?.let(::swarmCacheSizeLabel).orEmpty(),
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.Storage,
+                enabled = cacheSize != null,
+                onClick = onPickCacheSize,
+                trailing = { Icon(Icons.Filled.ArrowDropDown, contentDescription = null) },
             )
         }
         if (NodeEndpoint.Ipfs.key in visible) {

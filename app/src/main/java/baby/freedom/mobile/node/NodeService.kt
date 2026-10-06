@@ -102,6 +102,14 @@ class NodeService : Service() {
     @Volatile
     private var relayedSwap: Boolean? = null
 
+    /**
+     * The Swarm chunk cache's cap as the UI last relayed it through
+     * [INodeService.setSwarmCacheCapacity]; null until it has, when a boot
+     * reads the persisted setting itself ([swarmCacheCapacity]).
+     */
+    @Volatile
+    private var relayedCacheCapacity: Long? = null
+
     /** The mode the launch now booting read, handed to [SwarmNode.Config.mode] right after its identity. */
     @Volatile
     private var launchMode: SwarmNode.Mode = SwarmNode.Mode.ULTRA_LIGHT
@@ -293,6 +301,19 @@ class NodeService : Service() {
         override fun setSwapEnabled(enabled: Boolean) {
             relayedSwap = enabled
             swarmNode.setSwapEnabled(enabled)
+        }
+
+        override fun setSwarmCacheCapacity(bytes: Long) {
+            relayedCacheCapacity = bytes
+            swarmNode.setCacheCapacity(bytes)
+        }
+
+        override fun getSwarmCacheStatus(): String? =
+            runCatching { swarmNode.cacheStatus() }.getOrNull()
+
+        override fun clearSwarmCache(): String = runCatching { swarmNode.clearCache() }.getOrElse { e ->
+            Log.w(TAG, "clearing the Swarm cache failed: ${e.javaClass.simpleName}: ${e.message}")
+            JSONObject().put("error", e.message ?: Strings.get(R.string.node_call_failed)).toString()
         }
 
         override fun getRadicleState(): RadicleInfo = radicleNode.state.value
@@ -600,6 +621,20 @@ class NodeService : Service() {
     }
 
     /**
+     * The Swarm chunk cache's cap: the UI's latest
+     * [INodeService.setSwarmCacheCapacity], or — before this process has
+     * heard one — the persisted setting, read here as [swapEnabled] reads
+     * its own. ant's default when it can't be read. Blocking: called from
+     * a launch's IO thread.
+     */
+    private fun swarmCacheCapacity(): Long = relayedCacheCapacity ?: try {
+        runBlocking { NodeSettings.get(this@NodeService).swarmCacheCapacityBytes.first() }
+    } catch (e: Exception) {
+        Log.w(TAG, "reading the Swarm cache size failed (${e.javaClass.simpleName}); ant's default")
+        0L
+    }
+
+    /**
      * The Gnosis chain for the Swarm node's reads (#273): the UI's latest
      * relay, or — before this process has heard one — the chains store,
      * read here as [swarmMode] does. While that can't be read, the shipped
@@ -750,6 +785,7 @@ class NodeService : Service() {
                 },
                 mode = { launchMode },
                 swapEnabled = ::swapEnabled,
+                cacheCapacityBytes = ::swarmCacheCapacity,
             ),
         )
 

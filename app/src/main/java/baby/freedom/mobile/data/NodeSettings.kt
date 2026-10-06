@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import baby.freedom.mobile.browser.AdblockCategory
@@ -162,6 +163,26 @@ class NodeSettings private constructor(
 
     suspend fun setSwarmSwapEnabled(enabled: Boolean) {
         store.edit { it[Keys.SWARM_SWAP_ENABLED] = enabled }
+    }
+
+    /**
+     * The Swarm node's disk chunk cache size ([SwarmCacheSize]), 512 MB —
+     * ant's own default — until the user picks another. ant doesn't
+     * persist its cap, so this is the record: `MainActivity` relays it to
+     * the `:node` process on every bind and every change
+     * ([baby.freedom.mobile.node.INodeService.setSwarmCacheCapacity]),
+     * which applies it live and hands it to every init; the `:node`
+     * process reads it here itself before it has heard from the UI.
+     */
+    val swarmCacheSize: Flow<SwarmCacheSize> = store.data.map { prefs ->
+        SwarmCacheSize.fromBytes(prefs[Keys.SWARM_CACHE_CAPACITY_BYTES])
+    }
+
+    /** [swarmCacheSize]'s cap in bytes. */
+    val swarmCacheCapacityBytes: Flow<Long> = swarmCacheSize.map { it.bytes }
+
+    suspend fun setSwarmCacheSize(size: SwarmCacheSize) {
+        store.edit { it[Keys.SWARM_CACHE_CAPACITY_BYTES] = size.bytes }
     }
 
     /**
@@ -762,6 +783,7 @@ class NodeSettings private constructor(
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SWARM_NODE_MODE = stringPreferencesKey("swarm_node_mode")
         val SWARM_SWAP_ENABLED = booleanPreferencesKey("swarm_swap_enabled")
+        val SWARM_CACHE_CAPACITY_BYTES = longPreferencesKey("swarm_cache_capacity_bytes")
         val SWARM_CONFIRMED_LEDGERS = stringSetPreferencesKey("swarm_confirmed_ledgers")
         /** Both chains' start at launch before #274; see [myotisStartOnLaunch]. */
         val LEGACY_MYOTIS_ENABLED = booleanPreferencesKey("myotis_enabled")
