@@ -237,27 +237,61 @@ private const val NAME_LOOKUP_DEBOUNCE_MS = 400L
  * (#317): the site whose link it was, in full (never shortened — its tail
  * is what a spoof hides), and a network the link didn't name.
  */
+/** Where a [SendPrefill] the Send form shows came from (#317, #422): what its note above the form says. */
+internal enum class FillSource {
+    /** A payment link opened in the browser (#317). */
+    LINK,
+
+    /** A code scanned on the wallet's Scan page, or with the To field's camera (#422). */
+    SCANNED,
+
+    /** A payment request pasted into the To field (#422). */
+    PASTED,
+}
+
+/** What the note above the Send form says: [prefill] filled it in, from [source]. */
+internal data class FillNote(val prefill: SendPrefill, val source: FillSource)
+
+/**
+ * The note above a form [note] filled in. [assetKey]: the asset picked
+ * now. The line saying which network was assumed (#317) shows only
+ * while that asset is still the one it was assumed for: whoever filled
+ * the form in with a request naming no network — a link, a scanned
+ * code, a paste — is told so, never left to find out on the review.
+ */
 @Composable
-private fun SendLinkNote(prefill: SendPrefill) {
+private fun SendLinkNote(note: FillNote, assetKey: String?) {
+    val prefill = note.prefill
     Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.testTag("send-link-note")) {
         Text(
-            prefill.origin?.let { stringResource(R.string.send_link_filled_from_site, permissionOriginDisplay(it)) }
-                ?: stringResource(R.string.send_link_filled),
+            when (note.source) {
+                FillSource.LINK -> prefill.origin?.let { stringResource(R.string.send_link_filled_from_site, permissionOriginDisplay(it)) }
+                    ?: stringResource(R.string.send_link_filled)
+                FillSource.SCANNED -> stringResource(R.string.send_scan_filled)
+                FillSource.PASTED -> stringResource(R.string.send_paste_filled)
+            },
             style = MaterialTheme.typography.bodyMedium,
         )
-        prefill.chainGuess?.let { guess ->
+        prefill.chainGuess?.takeIf { assetKey == prefill.tokenKey }?.let { guess ->
             Text(
-                when (guess) {
-                    ChainGuess.ETHEREUM_DEFAULT -> stringResource(R.string.send_link_chain_assumed)
-                    ChainGuess.ONLY_CHAIN_WITH_TOKEN -> stringResource(
-                        R.string.send_link_chain_from_token,
-                        prefillChainName(prefill),
-                    )
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                chainGuessNote(guess, note.source, prefillChainName(prefill)),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.testTag("send-chain-guess"),
             )
         }
+    }
+}
+
+/** Why [guess]'s network was filled in, worded for where the request came from ([source]); [chainName] is that network. */
+internal fun chainGuessNote(guess: ChainGuess, source: FillSource, chainName: String): String = when (source) {
+    FillSource.LINK -> when (guess) {
+        ChainGuess.ETHEREUM_DEFAULT -> Strings.get(R.string.send_link_chain_assumed)
+        ChainGuess.ONLY_CHAIN_WITH_TOKEN -> Strings.get(R.string.send_link_chain_from_token, chainName)
+    }
+    FillSource.SCANNED, FillSource.PASTED -> when (guess) {
+        ChainGuess.ETHEREUM_DEFAULT -> Strings.get(R.string.send_request_chain_assumed)
+        ChainGuess.ONLY_CHAIN_WITH_TOKEN -> Strings.get(R.string.send_request_chain_from_token, chainName)
     }
 }
 
@@ -339,7 +373,8 @@ internal data class RecipientSuggestion(val label: String?, val address: String,
 /**
  * The To field's suggestions for a send from [from] (#422): the user's
  * other [accounts], then up to [recent] addresses [records] show [from]
- * sent to, newest first, each once and none of them an own account.
+ * paid from Send ([TxRecord.payee]), newest first, each once and none of
+ * them an own account.
  */
 internal fun recipientSuggestions(
     accounts: List<WalletAccount>,
@@ -350,7 +385,9 @@ internal fun recipientSuggestions(
     val mine = accounts.filter { !it.address.equals(from, ignoreCase = true) }
         .map { RecipientSuggestion(it.name, it.address, mine = true) }
     val own = accounts.map { it.address.lowercase() }.toSet() + from.lowercase()
-    val sentTo = records.filter { it.from.equals(from, ignoreCase = true) }
+    // Only payees the user chose on Send: a dApp's, a Safe's or a stamp
+    // purchase's transaction goes to the contract it calls, never someone to pay.
+    val sentTo = records.filter { it.payee && it.from.equals(from, ignoreCase = true) }
         .sortedByDescending { it.sentAt }
         .distinctBy { it.to.lowercase() }
         .filter { it.to.lowercase() !in own }
@@ -398,17 +435,61 @@ internal fun scannedRecipient(text: String): ScannedRecipient = when (val code =
     is ScannedCode.Pairing, is ScannedCode.SafeRequest -> ScannedRecipient.Refused(Strings.get(R.string.send_scan_not_address))
 }
 
+/** What the To field's Paste puts in the form (#422). */
+internal sealed interface PastedRecipient {
+    /** An address, or a payment request: filled in as a scanned one is ([ScannedRecipient.Fill]). */
+    data class Fill(val fill: ScannedRecipient.Fill) : PastedRecipient
+
+    /** A payment request Send can't pay, and why: nothing is filled in. */
+    data class Refused(val reason: String) : PastedRecipient
+
+    /** Anything else — a name, say — goes into the field as typed. */
+    data class Text(val text: String) : PastedRecipient
+
+    /**
+     * A clip marked secret — this wallet's own recovery phrase or private
+     * key ([PhraseClipboard.CLIP_LABEL], [PhraseClipboard.KEY_CLIP_LABEL]),
+     * or anything another app flagged sensitive: never put in a field on
+     * a page screenshots and Recents can see.
+     */
+    data object Secret : PastedRecipient
+}
+
 /**
- * The clipboard's text for the To field's Paste (#422): an address or a
- * payment request's payee as [scannedRecipient] reads it, else the text
- * itself, trimmed. Read as the item's plain text, never coerced (a
- * `content:` item isn't opened). Null when there's no text.
+ * The clip for the To field's Paste (#422), told apart by its
+ * description first — [label] and whether it's flagged [sensitive] —
+ * so a secret ([PastedRecipient.Secret]) is never shown; then [text]
+ * as [scannedRecipient] reads it: an address or a payment request
+ * fills the form in as a scanned one would, a request Send can't pay
+ * is refused, and anything else is the text itself, trimmed. Null when
+ * there's no text.
  */
-internal fun pastedRecipient(context: Context): String? {
+internal fun pastedRecipient(label: CharSequence?, sensitive: Boolean, text: String?): PastedRecipient? {
+    if (sensitive || PhraseClipboard.isSecretLabel(label)) return PastedRecipient.Secret
+    val trimmed = text?.trim()?.take(MAX_PASTED_RECIPIENT)
+    if (trimmed.isNullOrEmpty()) return null
+    return when (val read = scannedRecipient(trimmed)) {
+        is ScannedRecipient.Fill -> PastedRecipient.Fill(read)
+        // Only a payment request is refused: a name, say, isn't one, and goes in as typed.
+        is ScannedRecipient.Refused -> if (ScannedCode.parse(trimmed) is ScannedCode.Payment) {
+            PastedRecipient.Refused(read.reason)
+        } else {
+            PastedRecipient.Text(trimmed)
+        }
+    }
+}
+
+/**
+ * [pastedRecipient] for what's on the clipboard now. The description is
+ * looked at before any item; the item is read as its plain text, never
+ * coerced (a `content:` item isn't opened).
+ */
+internal fun pastedRecipient(context: Context): PastedRecipient? {
     val clip = context.getSystemService(ClipboardManager::class.java)?.primaryClip ?: return null
-    val text = clip.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()?.trim()?.take(MAX_PASTED_RECIPIENT)
-    if (text.isNullOrEmpty()) return null
-    return (scannedRecipient(text) as? ScannedRecipient.Fill)?.recipient ?: text
+    val description = clip.description
+    val sensitive = description?.extras?.getBoolean(PhraseClipboard.EXTRA_IS_SENSITIVE, false) == true
+    if (sensitive || PhraseClipboard.isSecretLabel(description?.label)) return PastedRecipient.Secret
+    return pastedRecipient(description?.label, sensitive = false, text = clip.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString())
 }
 
 /** More than any address or name: a longer paste is cut rather than kept whole in the field. */
@@ -434,6 +515,9 @@ internal class SendDraft {
     var recipient by mutableStateOf("")
     var amount by mutableStateOf("")
     var all by mutableStateOf(false)
+
+    /** The note above the form: what filled it in, if anything did (#317, #422). */
+    var note by mutableStateOf<FillNote?>(null)
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -479,6 +563,7 @@ internal fun SendPage(
         form.recipient = prefill?.recipient.orEmpty()
         // In the link's asset's own decimals, every digit kept: a request's amount isn't rounded.
         form.amount = prefilledAsset?.let { token -> prefill.amount?.let { SendAmounts.exact(it, token.decimals) } }.orEmpty()
+        form.note = prefill?.let { FillNote(it, if (scanned) FillSource.SCANNED else FillSource.LINK) }
     }
     var assetKey by form::assetKey
     val asset = assets.firstOrNull { it.second.key == assetKey } ?: assets.firstOrNull()
@@ -511,6 +596,8 @@ internal fun SendPage(
     // state is held here, above the list, so scrolling never asks again.
     var assetSheet by remember { mutableStateOf(false) }
     var scanSheet by remember { mutableStateOf(false) }
+    // Why a Paste filled nothing in (a secret, a request Send can't pay); any edit clears it.
+    var toNote by remember { mutableStateOf<String?>(null) }
     val cameraPermission = rememberCameraPermissionState()
     // Suggestions for an empty To field: the user's other accounts, then recent recipients.
     val accountList by remember(context) { WalletAccounts.get(context) }.accounts.collectAsState()
@@ -594,6 +681,35 @@ internal fun SendPage(
             } finally {
                 busy = false
             }
+        }
+    }
+
+    /**
+     * The To field's Scan or Paste filling the form in from [read] (#422),
+     * the one way both do it: the payee; for a payment request, also its
+     * asset and amount, the way its link would open Send. A request that
+     * names another asset but no amount leaves the amount empty — one
+     * typed for the asset before isn't an amount of this one — and the
+     * note above the form says where the request came from and, when it
+     * named no network, which one was assumed.
+     */
+    fun fill(read: ScannedRecipient.Fill, source: FillSource) {
+        val request = read.prefill
+        val requested = request?.let { p -> assets.firstOrNull { it.second.key == p.tokenKey }?.second }
+        if (requested != null && requested.key != assetKey) {
+            assetKey = requested.key
+            amount = ""
+        }
+        recipient = read.recipient
+        if (requested != null) request.amount?.let { amount = SendAmounts.exact(it, requested.decimals) }
+        all = false
+        error = null
+        toNote = null
+        // A pasted plain address is just a paste; anything scanned, or a request, is said.
+        form.note = when {
+            request != null -> FillNote(request, source)
+            source == FillSource.SCANNED -> FillNote(read.sendPrefill(), source)
+            else -> null
         }
     }
 
@@ -755,16 +871,7 @@ internal fun SendPage(
                     )
                 }
                 else -> {
-                    when {
-                        prefill != null && scanned -> item("link") {
-                            Text(
-                                stringResource(R.string.send_scan_filled),
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.padding(horizontal = 4.dp).testTag("send-link-note"),
-                            )
-                        }
-                        prefill != null -> item("link") { SendLinkNote(prefill) }
-                    }
+                    form.note?.let { note -> item("link") { SendLinkNote(note, assetKey) } }
                     item("from") {
                         Text(
                             stringResource(R.string.send_from_line, account.name, shortAddress(account.address)),
@@ -783,6 +890,7 @@ internal fun SendPage(
                                 onValueChange = {
                                     recipient = it.trim()
                                     error = null
+                                    toNote = null
                                 },
                                 enabled = !busy,
                                 singleLine = true,
@@ -798,9 +906,16 @@ internal fun SendPage(
                                         IconButton(
                                             enabled = !busy,
                                             onClick = {
-                                                pastedRecipient(context)?.let {
-                                                    recipient = it
-                                                    error = null
+                                                when (val pasted = pastedRecipient(context)) {
+                                                    is PastedRecipient.Fill -> fill(pasted.fill, FillSource.PASTED)
+                                                    is PastedRecipient.Text -> {
+                                                        recipient = pasted.text
+                                                        error = null
+                                                        toNote = null
+                                                    }
+                                                    is PastedRecipient.Refused -> toNote = pasted.reason
+                                                    PastedRecipient.Secret -> toNote = Strings.get(R.string.send_paste_secret)
+                                                    null -> Unit
                                                 }
                                             },
                                         ) { Icon(Icons.Filled.ContentPaste, contentDescription = stringResource(R.string.send_paste)) }
@@ -811,10 +926,12 @@ internal fun SendPage(
                                 },
                                 modifier = Modifier.fillMaxWidth(),
                             )
+                            toNote?.let { FieldNote(it, error = true) }
                             when {
                                 recipient.isEmpty() -> RecipientSuggestions(suggestions, enabled = !busy) {
                                     recipient = it
                                     error = null
+                                    toNote = null
                                 }
                                 parsed is Recipients.Parsed.Invalid -> FieldNote(parsed.reason, error = true)
                                 parsed is Recipients.Parsed.Name && chain != null -> NameRecipientNote(
@@ -959,13 +1076,7 @@ internal fun SendPage(
             onRead = { text ->
                 when (val read = scannedRecipient(text)) {
                     is ScannedRecipient.Fill -> {
-                        read.prefill?.tokenKey?.let { key -> assets.firstOrNull { it.second.key == key }?.let { assetKey = key } }
-                        recipient = read.recipient
-                        read.prefill?.amount?.let { raw ->
-                            assets.firstOrNull { it.second.key == assetKey }?.second?.let { amount = SendAmounts.exact(raw, it.decimals) }
-                        }
-                        all = false
-                        error = null
+                        fill(read, FillSource.SCANNED)
                         scanSheet = false
                         null
                     }
@@ -1248,7 +1359,9 @@ private fun SendReviewSection(
 
 /**
  * How a recipient name was checked (#277, #422): a name the servers
- * agreed on or a proof vouched for reads "✓ Verified name", with an info
+ * agreed on or a proof vouched for reads "✓ Verified name" — an
+ * off-chain record a proof showed the resolver accepted says that
+ * instead (#205) — with an info
  * button that opens what was checked and how; a name only one server
  * answered keeps its warning in full, since it's the user's call.
  */
@@ -1268,7 +1381,9 @@ private fun NameTrustLine(trust: NameTrust) {
     val green = if (MaterialTheme.colorScheme.isLight) Color(0xFF15803D) else trust.tier.color
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
-            stringResource(R.string.send_name_verified),
+            // A proof of an off-chain (CCIP-Read) answer shows only that the
+            // resolver accepted it, not that the chain holds it (#205): said so here too.
+            stringResource(if (trust.trust.offchain) R.string.send_name_proven_offchain else R.string.send_name_verified),
             style = MaterialTheme.typography.labelLarge,
             color = green,
             modifier = Modifier.weight(1f, fill = false),

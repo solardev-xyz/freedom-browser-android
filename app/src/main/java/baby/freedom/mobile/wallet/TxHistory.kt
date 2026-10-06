@@ -51,6 +51,13 @@ data class TxRecord(
     val feePaid: BigInteger? = null,
     /** When [status] stopped being [Status.PENDING]. */
     val settledAt: Long? = null,
+    /**
+     * [to] is someone the user paid from Send (#422): not the contract a
+     * composed transaction — a dApp's, a Safe's, a stamp purchase's —
+     * calls. Only these are suggested as recipients again. False for a
+     * record kept before this was noted: which kind it was isn't known.
+     */
+    val payee: Boolean = false,
 ) {
     enum class Status(internal val rank: Int) {
         /** Sent (or may have been), no receipt yet. */
@@ -166,6 +173,7 @@ internal object TxHistoryCodec {
         .put("block", r.block ?: JSONObject.NULL)
         .put("feePaid", r.feePaid?.toString() ?: JSONObject.NULL)
         .put("settledAt", r.settledAt ?: JSONObject.NULL)
+        .put("payee", r.payee)
 
     private fun record(o: JSONObject): TxRecord {
         val hash = o.getString("hash")
@@ -190,6 +198,7 @@ internal object TxHistoryCodec {
             block = if (o.isNull("block")) null else o.getLong("block"),
             feePaid = o.stringOrNull("feePaid")?.let(::BigInteger),
             settledAt = if (o.isNull("settledAt")) null else o.getLong("settledAt"),
+            payee = o.optBoolean("payee", false),
         )
     }
 
@@ -449,6 +458,7 @@ class TxHistory internal constructor(
             nonce = q.tx.nonce,
             sentAt = clock(),
             status = TxRecord.Status.PENDING,
+            payee = r.dapp == null,
         )
     }
 

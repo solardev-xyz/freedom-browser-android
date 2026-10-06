@@ -100,11 +100,11 @@ class SendFormTest {
 
     // ---- suggestions ----
 
-    private fun record(to: String, at: Long, from: String = me, name: String? = null) = TxRecord(
+    private fun record(to: String, at: Long, from: String = me, name: String? = null, payee: Boolean = true) = TxRecord(
         hash = "0x" + at.toString().padStart(64, '0'), chainId = gnosis.id, chainName = gnosis.name, chainSymbol = gnosis.symbol,
         chainDecimals = 18, explorerUrl = gnosis.explorerUrl, from = from, to = to, toName = name, tokenAddress = null,
         tokenSymbol = "xDAI", tokenDecimals = 18, amount = BigInteger.ONE, nonce = BigInteger.valueOf(at), sentAt = at,
-        status = TxRecord.Status.CONFIRMED,
+        status = TxRecord.Status.CONFIRMED, payee = payee,
     )
 
     @Test
@@ -127,6 +127,15 @@ class SendFormTest {
             recipientSuggestions(accounts, me, records),
         )
         assertEquals(1, recipientSuggestions(emptyList(), me, records, recent = 1).size)
+    }
+
+    @Test
+    fun `a composed call's contract, or a record not known to be a payment, is never suggested`() {
+        val records = listOf(
+            record("0x0000000000000000000000000000000000000003", at = 70, payee = false), // a DEX router, a Safe, the postage contract
+            record(third, at = 10),
+        )
+        assertEquals(listOf(RecipientSuggestion(null, third, mine = false)), recipientSuggestions(emptyList(), me, records))
     }
 
     // ---- review headline ----
@@ -178,6 +187,38 @@ class SendFormTest {
         val base = scannedRecipient("ethereum:$other@8453?value=1e15")
         assertTrue(base.toString(), base is ScannedRecipient.Refused && base.reason.contains("Base"))
         assertTrue(scannedRecipient("hello") is ScannedRecipient.Refused)
+    }
+
+    // ---- paste ----
+
+    @Test
+    fun `paste leaves out this wallet's phrase and key, and anything flagged sensitive, unread`() {
+        assertEquals(PastedRecipient.Secret, pastedRecipient(PhraseClipboard.CLIP_LABEL, sensitive = false, text = "abandon ability able"))
+        assertEquals(PastedRecipient.Secret, pastedRecipient(PhraseClipboard.KEY_CLIP_LABEL, sensitive = false, text = "0x" + "11".repeat(32)))
+        assertEquals(PastedRecipient.Secret, pastedRecipient("Password", sensitive = true, text = other))
+        assertEquals(PastedRecipient.Secret, pastedRecipient(PhraseClipboard.CLIP_LABEL, sensitive = false, text = null))
+    }
+
+    @Test
+    fun `paste fills in a request as Scan does, refuses one Send can't pay, and takes anything else as typed`() {
+        val pay = pastedRecipient("URL", false, " ethereum:${xbzz.address}@100/transfer?address=$other&uint256=1.5e16 ")
+        assertEquals(PastedRecipient.Fill(scannedRecipient("ethereum:${xbzz.address}@100/transfer?address=$other&uint256=1.5e16") as ScannedRecipient.Fill), pay)
+        assertEquals(xbzz.key, (pay as PastedRecipient.Fill).fill.prefill!!.tokenKey)
+        assertEquals(PastedRecipient.Fill(ScannedRecipient.Fill(other)), pastedRecipient(null, false, other))
+        val base = pastedRecipient(null, false, "ethereum:$other@8453?value=1e15")
+        assertTrue(base.toString(), base is PastedRecipient.Refused && base.reason.contains("Base"))
+        assertEquals(PastedRecipient.Text("vitalik.eth"), pastedRecipient(null, false, "  vitalik.eth\n"))
+        assertNull(pastedRecipient(null, false, "  "))
+    }
+
+    @Test
+    fun `a request naming no network says which was assumed, worded for a link or for a request`() {
+        val guessed = (scannedRecipient("ethereum:$other?value=1e15") as ScannedRecipient.Fill).prefill!!
+        assertEquals(ChainGuess.ETHEREUM_DEFAULT, guessed.chainGuess)
+        assertTrue(chainGuessNote(ChainGuess.ETHEREUM_DEFAULT, FillSource.SCANNED, "Ethereum").startsWith("The request doesn’t name a network"))
+        assertTrue(chainGuessNote(ChainGuess.ETHEREUM_DEFAULT, FillSource.PASTED, "Ethereum").startsWith("The request doesn’t name a network"))
+        assertTrue(chainGuessNote(ChainGuess.ETHEREUM_DEFAULT, FillSource.LINK, "Ethereum").startsWith("The link doesn’t name a network"))
+        assertTrue(chainGuessNote(ChainGuess.ONLY_CHAIN_WITH_TOKEN, FillSource.SCANNED, "Gnosis Chain").contains("Gnosis Chain is filled in"))
     }
 
     // ---- receive ----
