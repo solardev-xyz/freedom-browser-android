@@ -92,8 +92,8 @@ internal fun PublisherIdentitiesPage(currentSite: String?, onBack: () -> Unit) {
     val state by vault.state.collectAsState()
     val unlocked = state is Vault.State.Unlocked
     val phraseBackedUp = when (val s = state) {
-        is Vault.State.Locked -> s.info.backedUp
-        is Vault.State.Unlocked -> s.info.backedUp
+        is Vault.State.Locked -> s.info.phraseKnown
+        is Vault.State.Unlocked -> s.info.phraseKnown
         else -> true
     }
     val scope = rememberCoroutineScope()

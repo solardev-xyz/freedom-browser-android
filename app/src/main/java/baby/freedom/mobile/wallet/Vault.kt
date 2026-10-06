@@ -2,6 +2,7 @@ package baby.freedom.mobile.wallet
 
 import android.content.Context
 import android.os.SystemClock
+import java.io.IOException
 import java.security.GeneralSecurityException
 import javax.crypto.Cipher
 import kotlinx.coroutines.CompletableDeferred
@@ -111,13 +112,23 @@ class Vault internal constructor(
     data class Info(
         val protection: VaultProtection,
         val strongBox: Boolean,
-        /** False until the user has seen the phrase (#78): the backup reminder shows till then. */
+        /** False until the backup check has passed (#78, #421): the backup reminder shows till then. */
         val backedUp: Boolean,
         /** Google backup (#231) is on: the phrase is this wallet's entry in Block Store. */
         val cloudBackup: Boolean = false,
         /** The one-time Google backup offer after create or import has been answered. */
         val cloudBackupOffered: Boolean = false,
-    )
+        /** The phrase has been shown (or was imported), check passed or not ([VaultRecord.phraseShown]). */
+        val phraseShown: Boolean = backedUp,
+    ) {
+        /**
+         * Whether the user can have the recovery phrase at all: false only
+         * for a created wallet whose phrase was never on screen. What the
+         * lost-wallet advice goes by — not [backedUp], which a reveal
+         * without the check leaves false (#421 R1-F1).
+         */
+        val phraseKnown: Boolean get() = backedUp || phraseShown
+    }
 
     sealed interface State {
         data object Empty : State
@@ -236,7 +247,19 @@ class Vault internal constructor(
      * Show it only on a `FLAG_SECURE` screen ([baby.freedom.mobile.browser.SecureWindow]).
      */
     suspend fun revealMnemonic(auth: VaultAuthenticator): Mnemonic = ops.withLock {
-        openMnemonic(storedRecord(), auth, VaultAuthPurpose.REVEAL)
+        val record = storedRecord()
+        val mnemonic = openMnemonic(record, auth, VaultAuthPurpose.REVEAL)
+        // The words are about to be on screen: from now on the user may have them on paper,
+        // so the lost-wallet advice must offer import (#421 R1-F1). Not the backup reminder:
+        // only a passed check ends that. A failed write mustn't cost the reveal.
+        if (!record.phraseShown) {
+            try {
+                rewrite(record.copy(phraseShown = true))
+            } catch (_: IOException) {
+                // Left unrecorded: the next reveal tries again.
+            }
+        }
+        mnemonic
     }
 
     /**
@@ -270,7 +293,7 @@ class Vault internal constructor(
         }
     }
 
-    /** The user has seen the phrase (#78): the backup reminder goes. */
+    /** The backup check has passed (#78, #421): the backup reminder goes. */
     suspend fun markBackedUp() = ops.withLock {
         val record = storedRecord()
         if (record.backedUp) return@withLock
@@ -600,4 +623,4 @@ class Vault internal constructor(
     }
 }
 
-private fun VaultRecord.info() = Vault.Info(protection, strongBox, backedUp, cloudBackup, cloudBackupOffered)
+private fun VaultRecord.info() = Vault.Info(protection, strongBox, backedUp, cloudBackup, cloudBackupOffered, phraseShown)

@@ -280,7 +280,7 @@
     <string name="wallet_backup_status_on_cloud">On, if Android’s backup is on</string>
     <string name="wallet_backup_status_on_paused">Paused – set a screen lock</string>
     <string name="wallet_backup_status_on_missing">Missing – turn it off and on</string>
-    <string name="wallet_backup_status_on_no_answer">On · Play services not answering</string>
+    <string name="wallet_backup_status_on_no_answer">On – Play services not answering</string>
     <string name="wallet_backup_status_off_ready">Off</string>
     <string name="wallet_backup_status_unavailable_not_encrypted">Unavailable – set a screen lock</string>
     <string name="wallet_backup_status_unavailable_unsupported">Unavailable – no Google Play services</string>

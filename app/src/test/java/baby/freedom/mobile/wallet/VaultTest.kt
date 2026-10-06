@@ -421,6 +421,57 @@ class VaultTest {
     }
 
     @Test
+    fun `a revealed phrase counts as known for the lost-wallet advice, check or not`() = runBlocking {
+        // #421 R1-F1: a reveal without the check leaves the reminder up but means the
+        // user may have the words, so a dead wallet must not be called unrestorable.
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        val fresh = (v.state.value as Vault.State.Unlocked).info
+        assertFalse(fresh.phraseShown)
+        assertFalse(fresh.phraseKnown)
+        v.revealMnemonic(auth)
+        val shown = (v.state.value as Vault.State.Unlocked).info
+        assertTrue(shown.phraseShown)
+        assertTrue(shown.phraseKnown)
+        assertFalse(shown.backedUp)
+        // Persisted, and kept through the check's own write.
+        assertTrue((vault().state.value as Vault.State.Locked).info.phraseKnown)
+        v.markBackedUp()
+        assertTrue(store.record!!.phraseShown)
+    }
+
+    @Test
+    fun `a reveal whose record write fails still shows the phrase`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        store.onWrite = { throw java.io.IOException("disk full") }
+        assertEquals(phrase, v.revealMnemonic(auth))
+        assertFalse((v.state.value as Vault.State.Unlocked).info.phraseKnown)
+    }
+
+    @Test
+    fun `imported counts as known, restored and created-unseen don't`() = runBlocking {
+        vault().create(phrase, auth, imported = true)
+        assertTrue((vault().state.value as Vault.State.Locked).info.phraseKnown)
+        store.wipe()
+        vault().create(phrase, auth, imported = true, restored = true)
+        assertFalse((vault().state.value as Vault.State.Locked).info.phraseKnown)
+    }
+
+    @Test
+    fun `a vault file from before phraseShown takes it from backedUp`() {
+        val record = VaultRecord(VaultProtection.DEVICE_ONLY, false, byteArrayOf(1), byteArrayOf(2), backedUp = true)
+        val old = org.json.JSONObject(record.encode()).apply { remove("phraseShown") }.toString()
+        assertTrue(VaultRecord.decode(old)!!.phraseShown)
+        val unseen = org.json.JSONObject(record.withBackedUp(false).copy(phraseShown = false).encode())
+            .apply { remove("phraseShown") }.toString()
+        assertFalse(VaultRecord.decode(unseen)!!.phraseShown)
+        val shownNotChecked = record.withBackedUp(false).copy(phraseShown = true)
+        assertTrue(VaultRecord.decode(shownNotChecked.encode())!!.phraseShown)
+        assertFalse(VaultRecord.decode(shownNotChecked.encode())!!.backedUp)
+    }
+
+    @Test
     fun `an auto-lock landing while markBackedUp writes stays locked`() = runBlocking {
         val v = vault()
         v.create(phrase, auth, imported = false)

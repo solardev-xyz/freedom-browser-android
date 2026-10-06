@@ -47,7 +47,26 @@ class BackupFlowTest {
             asked.forEach { word -> assertTrue(word in check.chips) }
             val decoys = check.chips.toMutableList().apply { asked.forEach { remove(it) } }
             assertTrue(decoys.none { it in asked })
+            // One chip per asked position: a word asked twice has two.
+            asked.distinct().forEach { word ->
+                assertEquals(asked.count { it == word }, check.chips.count { it == word })
+            }
         }
+    }
+
+    @Test
+    fun `a word asked at two positions can be picked for both`() {
+        val repeats = List(12) { if (it % 2 == 0) "abandon" else "ability$it" }
+        val seed = (0 until 1000).first { seed ->
+            val c = BackupCheck(repeats, Random(seed))
+            c.positions.count { repeats[it] == "abandon" } >= 2
+        }
+        val flow = BackupFlowState(startWithIntro = false, needsCheck = true, random = Random(seed))
+        flow.revealed(repeats)
+        assertTrue(flow.writtenDown())
+        assertFalse(flow.tap(flow.expected(0)))
+        assertFalse(flow.tap(flow.expected(1)))
+        assertTrue(flow.tap(flow.expected(2)))
     }
 
     @Test

@@ -86,7 +86,12 @@ internal class BackupCheck(private val words: List<String>, random: Random) {
     /** The asked-for positions, 0-based and ascending. */
     val positions: List<Int>
 
-    /** What to pick from: each asked-for word once, plus up to [DECOYS] other words of the phrase. */
+    /**
+     * What to pick from: one chip per asked position, plus up to [DECOYS]
+     * other words of the phrase. Not always distinct: a word the phrase
+     * repeats at two asked positions gets a chip for each (a picked chip
+     * is used up), so two chips then read the same.
+     */
     val chips: List<String>
 
     init {

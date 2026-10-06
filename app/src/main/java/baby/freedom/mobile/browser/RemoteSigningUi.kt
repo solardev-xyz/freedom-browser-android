@@ -220,8 +220,8 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
     val guard = tap.guard
     val armed = tap.armed
     val backedUp = when (val s = vaultState) {
-        is Vault.State.Locked -> s.info.backedUp
-        is Vault.State.Unlocked -> s.info.backedUp
+        is Vault.State.Locked -> s.info.phraseKnown
+        is Vault.State.Unlocked -> s.info.phraseKnown
         else -> true
     }
     val unlockAction = stringResource(R.string.signing_remote_action_unlock_wallet)

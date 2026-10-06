@@ -238,8 +238,8 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
     val payer: WalletAccount? = accountList?.active
     val vaultState by vault.state.collectAsState()
     val phraseBackedUp = when (val s = vaultState) {
-        is Vault.State.Locked -> s.info.backedUp
-        is Vault.State.Unlocked -> s.info.backedUp
+        is Vault.State.Locked -> s.info.phraseKnown
+        is Vault.State.Unlocked -> s.info.phraseKnown
         else -> true
     }
     val sendStatus by sender.status.collectAsState()

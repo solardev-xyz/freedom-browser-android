@@ -812,8 +812,8 @@ fun WalletScreen(
     // whose phrase was never shown (#78), which the copy must not send
     // them to re-import.
     val phraseBackedUp = when (val s = state) {
-        is Vault.State.Locked -> s.info.backedUp
-        is Vault.State.Unlocked -> s.info.backedUp
+        is Vault.State.Locked -> s.info.phraseKnown
+        is Vault.State.Unlocked -> s.info.phraseKnown
         else -> true
     }
     // Whether Block Store's entry is this wallet, and where it holds the phrase (#244 R2-F1):
