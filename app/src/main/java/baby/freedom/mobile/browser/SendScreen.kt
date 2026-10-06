@@ -542,6 +542,34 @@ internal class SendDraft {
 
     /** The note above the form: what filled it in, if anything did (#317, #422). */
     var note by mutableStateOf<FillNote?>(null)
+
+    /**
+     * The To field's Scan or Paste filling the form in from [read] (#422),
+     * the one way both do it. A payment request sets the payee and, the
+     * way its link would open Send, its asset and amount: one naming no
+     * amount leaves the amount empty (R3-M1) — whatever was there, typed
+     * or an earlier request's, isn't this request's, and the note above
+     * says the form was filled in from it. A plain address only replaces
+     * the payee: an earlier request's asset and amount stay, and so does
+     * its note, now saying the payee isn't the request's (R2-M1) — unless
+     * it's the payee already there (R3-M2), which replaces nothing. With
+     * no note, a scanned address is said, a paste isn't. [assets]: the
+     * assets Send offers.
+     */
+    fun fill(read: ScannedRecipient.Fill, source: FillSource, assets: List<Pair<Chain, Token>>) {
+        val request = read.prefill
+        if (request != null) {
+            val requested = assets.firstOrNull { it.second.key == request.tokenKey }?.second
+            if (requested != null) assetKey = requested.key
+            amount = requested?.let { token -> request.amount?.let { SendAmounts.exact(it, token.decimals) } }.orEmpty()
+            note = FillNote(request, source)
+        } else {
+            val kept = if (read.recipient.equals(recipient, ignoreCase = true)) note else note?.afterPayeeReplaced()
+            note = kept ?: FillNote(read.sendPrefill(), source).takeIf { source == FillSource.SCANNED }
+        }
+        recipient = read.recipient
+        all = false
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -708,35 +736,11 @@ internal fun SendPage(
         }
     }
 
-    /**
-     * The To field's Scan or Paste filling the form in from [read] (#422),
-     * the one way both do it: the payee; for a payment request, also its
-     * asset and amount, the way its link would open Send. A request that
-     * names another asset but no amount leaves the amount empty — one
-     * typed for the asset before isn't an amount of this one — and the
-     * note above the form says where the request came from and, when it
-     * named no network, which one was assumed.
-     */
+    // The To field's Scan or Paste filling the form in: see [SendDraft.fill].
     fun fill(read: ScannedRecipient.Fill, source: FillSource) {
-        val request = read.prefill
-        val requested = request?.let { p -> assets.firstOrNull { it.second.key == p.tokenKey }?.second }
-        if (requested != null && requested.key != assetKey) {
-            assetKey = requested.key
-            amount = ""
-        }
-        recipient = read.recipient
-        if (requested != null) request.amount?.let { amount = SendAmounts.exact(it, requested.decimals) }
-        all = false
+        form.fill(read, source, assets)
         error = null
         toNote = null
-        // A request says where it came from. A plain address only replaces
-        // the payee: an earlier request's asset and amount stay, and so does
-        // its note (R2-M1); with none, a scanned address is said, a paste isn't.
-        form.note = when {
-            request != null -> FillNote(request, source)
-            else -> form.note?.afterPayeeReplaced()
-                ?: FillNote(read.sendPrefill(), source).takeIf { source == FillSource.SCANNED }
-        }
     }
 
     // The payee typed, or picked from the suggestions (R2-M2): whatever filled

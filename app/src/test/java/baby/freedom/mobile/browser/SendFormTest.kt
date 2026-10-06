@@ -238,6 +238,50 @@ class SendFormTest {
         assertNull(plain.afterPayeeReplaced())
     }
 
+    @Test
+    fun `a request naming no amount empties the amount, even for the asset already picked`() {
+        val form = SendDraft()
+        form.fill(scannedRecipient("ethereum:$other?value=1e15") as ScannedRecipient.Fill, FillSource.SCANNED, assets)
+        assertEquals(ethNative.key, form.assetKey)
+        assertEquals("0.001", form.amount)
+        assertEquals(other, form.recipient)
+
+        val noAmount = scannedRecipient("ethereum:$third") as ScannedRecipient.Fill
+        assertNull(noAmount.prefill!!.amount)
+        assertEquals(ethNative.key, noAmount.prefill!!.tokenKey)
+        form.fill(noAmount, FillSource.SCANNED, assets)
+        assertEquals(ethNative.key, form.assetKey)
+        assertEquals("", form.amount)
+        assertEquals(third, form.recipient)
+        assertEquals(FillNote(noAmount.prefill!!, FillSource.SCANNED), form.note)
+
+        // A typed amount isn't the request's either.
+        form.amount = "2"
+        form.fill(noAmount, FillSource.PASTED, assets)
+        assertEquals("", form.amount)
+    }
+
+    @Test
+    fun `a plain address replaces a request's payee only when it's another one`() {
+        val form = SendDraft()
+        form.fill(scannedRecipient("ethereum:$other?value=1e15") as ScannedRecipient.Fill, FillSource.SCANNED, assets)
+        val filled = form.note!!
+        assertFalse(filled.payeeReplaced)
+
+        // The request's own address again, pasted or scanned to double-check: nothing replaced.
+        form.fill(ScannedRecipient.Fill(other), FillSource.PASTED, assets)
+        assertEquals(filled, form.note)
+        form.fill(ScannedRecipient.Fill(other.lowercase()), FillSource.SCANNED, assets)
+        assertEquals(filled, form.note)
+        assertEquals("0.001", form.amount)
+
+        // Another address: the note says the payee isn't the request's.
+        form.fill(ScannedRecipient.Fill(third), FillSource.PASTED, assets)
+        assertTrue(form.note!!.payeeReplaced)
+        assertEquals(third, form.recipient)
+        assertEquals("0.001", form.amount)
+    }
+
     // ---- receive ----
 
     @Test
