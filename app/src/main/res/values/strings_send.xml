@@ -353,6 +353,9 @@
     <!-- %1$s: the site whose link it was. -->
     <string name="send_link_filled_from_site">Filled in from a payment link on %1$s. Check every field before you review.</string>
     <string name="send_link_filled">Filled in from a payment link. Check every field before you review.</string>
+    <!-- %1$s: the site whose link it was. Shown once the payee the link filled in has been changed. -->
+    <string name="send_link_rest_from_site">The payee is no longer the one in the payment link on %1$s; the rest was filled in from it. Check every field before you review.</string>
+    <string name="send_link_rest">The payee is no longer the one in the payment link; the rest was filled in from it. Check every field before you review.</string>
     <string name="send_link_chain_assumed">The link doesn’t name a network, so Ethereum is filled in. Pick another asset if the payment is meant for another network.</string>
     <string name="send_link_chain_from_token">The link doesn’t name a network. %1$s is filled in: it’s the only network Send knows this token on. Check the payment is meant for it.</string>
     <!-- The shared transaction review (#422): TxReview.kt. -->
@@ -387,6 +390,8 @@
     <string name="send_scan_not_address">That code isn’t an address or a payment request. Try another one.</string>
     <string name="send_scan_filled">Filled in from the code you scanned. Check every field before you review.</string>
     <string name="send_paste_filled">Filled in from the payment request you pasted. Check every field before you review.</string>
+    <string name="send_scan_rest">The payee is no longer the one in the code you scanned; the rest was filled in from it. Check every field before you review.</string>
+    <string name="send_paste_rest">The payee is no longer the one in the payment request you pasted; the rest was filled in from it. Check every field before you review.</string>
     <string name="send_request_chain_assumed">The request doesn’t name a network, so Ethereum is filled in. Pick another asset if the payment is meant for another network.</string>
     <!-- %1$s: the network filled in. -->
     <string name="send_request_chain_from_token">The request doesn’t name a network. %1$s is filled in: it’s the only network Send knows this token on. Check the payment is meant for it.</string>

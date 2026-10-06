@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import androidx.compose.material3.Surface
 import androidx.compose.ui.test.hasScrollToNodeAction
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -13,6 +14,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import baby.freedom.mobile.chains.BuiltInChains
@@ -90,6 +92,36 @@ class SendFillTest {
         rule.onNode(hasScrollToNodeAction()).performScrollToNode(hasText("USDC · Ethereum"))
         rule.onNodeWithText("USDC · Ethereum").assertExists()
         rule.onNodeWithText("100").assertDoesNotExist()
+    }
+
+    @Test
+    fun aPlainAddressPastedOverARequestKeepsItsAssumedNetworkLine() {
+        // R2-M1: the request's ETH and 0.001 stay, so the warning about them does too.
+        val read = scannedRecipient("ethereum:0x209693Bc6afc0C5328bA36FaF03C514EF312287C?value=1e15") as ScannedRecipient.Fill
+        show(read.sendPrefill(), scanned = true)
+        clip(ClipData.newPlainText("address", payee))
+        rule.onNodeWithContentDescription("Paste").performClick()
+        rule.waitForIdle()
+        rule.onAllNodesWithText(payee).onFirst().assertExists()
+        rule.onNodeWithText("The payee is no longer the one in the code you scanned", substring = true).assertExists()
+        rule.onNodeWithText("Filled in from the code you scanned", substring = true).assertDoesNotExist()
+        rule.onNodeWithTag("send-chain-guess").assertExists()
+        rule.onNode(hasScrollToNodeAction()).performScrollToNode(hasText("0.001"))
+        rule.onNodeWithText("0.001").assertExists()
+    }
+
+    @Test
+    fun typingAnotherPayeeOverAPastedRequestSaysSo() {
+        // R2-M2: the note no longer says the whole form came from the request.
+        show(null, scanned = false)
+        clip(ClipData.newPlainText("URL", "ethereum:0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48@1/transfer?address=$payee&uint256=2e6"))
+        rule.onNodeWithContentDescription("Paste").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Filled in from the payment request you pasted", substring = true).assertExists()
+        rule.onNode(hasSetTextAction() and hasText(payee)).performTextReplacement("0x209693Bc6afc0C5328bA36FaF03C514EF312287C")
+        rule.waitForIdle()
+        rule.onNodeWithText("Filled in from the payment request you pasted", substring = true).assertDoesNotExist()
+        rule.onNodeWithText("The payee is no longer the one in the payment request you pasted", substring = true).assertExists()
     }
 
     @Test

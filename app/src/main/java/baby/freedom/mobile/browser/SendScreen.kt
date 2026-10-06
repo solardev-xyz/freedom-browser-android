@@ -249,8 +249,23 @@ internal enum class FillSource {
     PASTED,
 }
 
-/** What the note above the Send form says: [prefill] filled it in, from [source]. */
-internal data class FillNote(val prefill: SendPrefill, val source: FillSource)
+/**
+ * What the note above the Send form says: [prefill] filled it in, from
+ * [source]. [payeeReplaced]: the payee has since been changed — typed,
+ * picked from the suggestions, or a plain address pasted or scanned over
+ * it — so only the rest (asset, amount) is still the request's.
+ */
+internal data class FillNote(val prefill: SendPrefill, val source: FillSource, val payeeReplaced: Boolean = false)
+
+/**
+ * The note once the To field's payee is replaced by anything that isn't
+ * a request of its own (#422 R2-M1, R2-M2): the request's asset and
+ * amount stay in the form, so the note — and the assumed-network line
+ * with it — stays too, now saying the payee isn't the request's. A note
+ * for a plain scanned address filled nothing else in, so it goes.
+ */
+internal fun FillNote.afterPayeeReplaced(): FillNote? =
+    if (prefill.tokenKey == ANY_ASSET) null else copy(payeeReplaced = true)
 
 /**
  * The note above a form [note] filled in. [assetKey]: the asset picked
@@ -264,11 +279,20 @@ private fun SendLinkNote(note: FillNote, assetKey: String?) {
     val prefill = note.prefill
     Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.testTag("send-link-note")) {
         Text(
-            when (note.source) {
-                FillSource.LINK -> prefill.origin?.let { stringResource(R.string.send_link_filled_from_site, permissionOriginDisplay(it)) }
-                    ?: stringResource(R.string.send_link_filled)
-                FillSource.SCANNED -> stringResource(R.string.send_scan_filled)
-                FillSource.PASTED -> stringResource(R.string.send_paste_filled)
+            if (note.payeeReplaced) {
+                when (note.source) {
+                    FillSource.LINK -> prefill.origin?.let { stringResource(R.string.send_link_rest_from_site, permissionOriginDisplay(it)) }
+                        ?: stringResource(R.string.send_link_rest)
+                    FillSource.SCANNED -> stringResource(R.string.send_scan_rest)
+                    FillSource.PASTED -> stringResource(R.string.send_paste_rest)
+                }
+            } else {
+                when (note.source) {
+                    FillSource.LINK -> prefill.origin?.let { stringResource(R.string.send_link_filled_from_site, permissionOriginDisplay(it)) }
+                        ?: stringResource(R.string.send_link_filled)
+                    FillSource.SCANNED -> stringResource(R.string.send_scan_filled)
+                    FillSource.PASTED -> stringResource(R.string.send_paste_filled)
+                }
             },
             style = MaterialTheme.typography.bodyMedium,
         )
@@ -705,12 +729,23 @@ internal fun SendPage(
         all = false
         error = null
         toNote = null
-        // A pasted plain address is just a paste; anything scanned, or a request, is said.
+        // A request says where it came from. A plain address only replaces
+        // the payee: an earlier request's asset and amount stay, and so does
+        // its note (R2-M1); with none, a scanned address is said, a paste isn't.
         form.note = when {
             request != null -> FillNote(request, source)
-            source == FillSource.SCANNED -> FillNote(read.sendPrefill(), source)
-            else -> null
+            else -> form.note?.afterPayeeReplaced()
+                ?: FillNote(read.sendPrefill(), source).takeIf { source == FillSource.SCANNED }
         }
+    }
+
+    // The payee typed, or picked from the suggestions (R2-M2): whatever filled
+    // the form in no longer named it.
+    fun enterRecipient(value: String) {
+        if (value != recipient) form.note = form.note?.afterPayeeReplaced()
+        recipient = value
+        error = null
+        toNote = null
     }
 
     fun prepare(request: SendRequest, sendAll: Boolean, then: (SendQuote) -> Unit = { quote = it }) =
@@ -887,11 +922,7 @@ internal fun SendPage(
                         SectionCard(title = stringResource(R.string.send_label_to)) {
                             OutlinedTextField(
                                 value = recipient,
-                                onValueChange = {
-                                    recipient = it.trim()
-                                    error = null
-                                    toNote = null
-                                },
+                                onValueChange = { enterRecipient(it.trim()) },
                                 enabled = !busy,
                                 singleLine = true,
                                 placeholder = { Text(stringResource(R.string.send_recipient_placeholder)) },
@@ -908,11 +939,7 @@ internal fun SendPage(
                                             onClick = {
                                                 when (val pasted = pastedRecipient(context)) {
                                                     is PastedRecipient.Fill -> fill(pasted.fill, FillSource.PASTED)
-                                                    is PastedRecipient.Text -> {
-                                                        recipient = pasted.text
-                                                        error = null
-                                                        toNote = null
-                                                    }
+                                                    is PastedRecipient.Text -> enterRecipient(pasted.text)
                                                     is PastedRecipient.Refused -> toNote = pasted.reason
                                                     PastedRecipient.Secret -> toNote = Strings.get(R.string.send_paste_secret)
                                                     null -> Unit
@@ -928,11 +955,7 @@ internal fun SendPage(
                             )
                             toNote?.let { FieldNote(it, error = true) }
                             when {
-                                recipient.isEmpty() -> RecipientSuggestions(suggestions, enabled = !busy) {
-                                    recipient = it
-                                    error = null
-                                    toNote = null
-                                }
+                                recipient.isEmpty() -> RecipientSuggestions(suggestions, enabled = !busy) { enterRecipient(it) }
                                 parsed is Recipients.Parsed.Invalid -> FieldNote(parsed.reason, error = true)
                                 parsed is Recipients.Parsed.Name && chain != null -> NameRecipientNote(
                                     name = parsed.name,

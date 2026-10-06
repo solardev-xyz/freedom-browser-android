@@ -9,6 +9,7 @@ import baby.freedom.mobile.wallet.TxRecord
 import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -219,6 +220,22 @@ class SendFormTest {
         assertTrue(chainGuessNote(ChainGuess.ETHEREUM_DEFAULT, FillSource.PASTED, "Ethereum").startsWith("The request doesn’t name a network"))
         assertTrue(chainGuessNote(ChainGuess.ETHEREUM_DEFAULT, FillSource.LINK, "Ethereum").startsWith("The link doesn’t name a network"))
         assertTrue(chainGuessNote(ChainGuess.ONLY_CHAIN_WITH_TOKEN, FillSource.SCANNED, "Gnosis Chain").contains("Gnosis Chain is filled in"))
+    }
+
+    @Test
+    fun `replacing the payee keeps a request's note, assumed network and all, and drops a plain address's`() {
+        val guessed = (scannedRecipient("ethereum:$other?value=1e15") as ScannedRecipient.Fill).prefill!!
+        val note = FillNote(guessed, FillSource.PASTED)
+        val replaced = note.afterPayeeReplaced()!!
+        assertTrue(replaced.payeeReplaced)
+        assertEquals(guessed, replaced.prefill)
+        assertEquals(ChainGuess.ETHEREUM_DEFAULT, replaced.prefill.chainGuess)
+        assertEquals(FillSource.PASTED, replaced.source)
+        assertEquals(replaced, replaced.afterPayeeReplaced())
+        assertFalse(note.payeeReplaced)
+
+        val plain = FillNote((scannedRecipient(other) as ScannedRecipient.Fill).sendPrefill(), FillSource.SCANNED)
+        assertNull(plain.afterPayeeReplaced())
     }
 
     // ---- receive ----
