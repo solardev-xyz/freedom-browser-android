@@ -528,6 +528,58 @@ class IncomingTransfersTest {
     }
 
     @Test
+    fun `an RPC flooding fake logs never grows the candidate list past its cap, and a real transfer still shows soon`() = runBlocking {
+        val head = 1_000_000L
+        // Three fake logs in each of 1,000 blocks right under the head, none of them in any receipt.
+        val fakes = (1..1_000).flatMap { b -> (0 until 3).map { i -> log(block = head - 30 - b, tx = hash(10_000 + b * 3 + i), logIndex = i.toLong()) } }
+        val real = log(block = head - 5_000, tx = hash(1))
+        val reads = fake(head, *(fakes + real).toTypedArray())
+        fakes.forEach { reads.receipts[it.getString("transactionHash")] = null }
+        val sizes = mutableListOf<Int>()
+        val store = object : IncomingStore {
+            override fun save(scans: List<ScanState>): Boolean {
+                synchronized(sizes) { scans.forEach { sizes += it.candidates.size } }
+                return true
+            }
+            override fun load() = emptyList<ScanState>()
+        }
+        var now = 0L
+        val inc = incoming(reads, store, uptime = { now })
+        var scansNeeded = 0
+        while (inc.transfers.value.isEmpty() && scansNeeded < 400) {
+            inc.scan(account, listOf(gnosis))
+            inc.persistNow()
+            now += IncomingTransfers.MIN_SCAN_INTERVAL_MS
+            scansNeeded++
+        }
+        assertEquals(listOf(hash(1)), inc.transfers.value.map { t -> t.hash })
+        assertTrue("candidates peaked at ${sizes.max()}", sizes.max() <= IncomingTransfers.MAX_CANDIDATES)
+        // 3,000 fakes drained 20 receipts a scan: no stall beyond what draining them takes.
+        assertTrue("took $scansNeeded scans", scansNeeded <= 3_000 / IncomingTransfers.MAX_VERIFY_PER_RUN + 5)
+    }
+
+    @Test
+    fun `a chunk with more than fits counts read only the blocks that fit, unbroken on the read side`() {
+        fun c(block: Long, i: Long = 0) = LogCandidate(requireNotNull(xbzz.address), sender, BigInteger.ONE, hash(block.toInt()), i, block, emptyList(), "0x")
+        val found = listOf(c(110), c(120), c(120, 1), c(130))
+        // A first chunk, or one going back: the newest blocks are kept.
+        val first = ScanState(account, gnosis.id, floor = 0, span = IncomingScan.MIN_SPAN)
+        assertEquals((111L..150L) to listOf(c(130), c(120), c(120, 1)), IncomingScan.fitting(first, 100L..150L, found, 3, 50))
+        val back = first.copy(from = 151, to = 400)
+        assertEquals((121L..150L) to listOf(c(130)), IncomingScan.fitting(back, 100L..150L, found, 2, 50))
+        // A chunk past what was read: the oldest are kept.
+        val ahead = first.copy(from = 0, to = 99)
+        assertEquals((100L..119L) to listOf(c(110)), IncomingScan.fitting(ahead, 100L..150L, found, 2, 50))
+        // Not even the first block fits: wait, unless the list is empty.
+        assertEquals(null, IncomingScan.fitting(back, 100L..150L, found.reversed(), 0, 50))
+        val crowded = (0L until 5).map { c(140, it) } + c(100)
+        assertEquals((101L..150L) to (0L until 3).map { c(140, it) }, IncomingScan.fitting(back, 100L..150L, crowded, 3, 3))
+        assertEquals(null, IncomingScan.fitting(back, 100L..150L, crowded, 2, 3))
+        // Everything fits: the whole chunk.
+        assertEquals((100L..150L) to found, IncomingScan.fitting(back, 100L..150L, found, 4, 50))
+    }
+
+    @Test
     fun `a first scan that read nothing starts over a window under a much later head`() = runBlocking {
         val head = 3_000_000L
         val reads = fake(head)

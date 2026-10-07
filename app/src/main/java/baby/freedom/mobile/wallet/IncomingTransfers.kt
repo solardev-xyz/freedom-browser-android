@@ -248,6 +248,39 @@ internal object IncomingScan {
         )
     }
 
+    /**
+     * The part of [range] (from [nextRange]) whose [found] candidates fit
+     * in [room], cut at a block boundary on the side that keeps what's read
+     * one unbroken range: the oldest blocks of a chunk past [ScanState.to],
+     * the newest of any other. Null when not even the first block fits.
+     * When it doesn't but [room] is all of [cap] (the list is empty), that
+     * one block is read with only its first [cap] logs kept: a block holding
+     * more transfers to one account than that is not worth stalling over.
+     */
+    fun fitting(s: ScanState, range: LongRange, found: List<LogCandidate>, room: Int, cap: Int): Pair<LongRange, List<LogCandidate>>? {
+        if (found.size <= room) return range to found
+        val forward = s.to != null && range.first > s.to
+        val blocks = found.groupBy { it.block }.toSortedMap(if (forward) naturalOrder() else reverseOrder())
+        val kept = mutableListOf<LogCandidate>()
+        var cut: Long? = null
+        for ((block, logs) in blocks) {
+            if (kept.size + logs.size > room) {
+                cut = block
+                break
+            }
+            kept += logs
+        }
+        val stop = requireNotNull(cut)
+        if (kept.isEmpty()) {
+            if (room < cap) return null
+            val first = blocks.getValue(stop).sortedBy { it.logIndex }.take(cap)
+            val next = blocks.keys.firstOrNull { it != stop }
+            val part = if (forward) range.first..((next ?: range.last + 1) - 1) else ((next ?: range.first - 1) + 1)..range.last
+            return part to first
+        }
+        return (if (forward) range.first..(stop - 1) else (stop + 1)..range.last) to kept
+    }
+
     /** [s] after a chunk no RPC would read: smaller chunks from now on. */
     fun failed(s: ScanState): ScanState = s.copy(span = maxOf(MIN_SPAN, s.span / 2), streak = 0)
 }
@@ -534,8 +567,9 @@ class IncomingTransfers internal constructor(
         var failures = 0
         var chunks = 0
         while (chunks < MAX_CHUNKS_PER_RUN) {
-            // A candidate is never dropped once its block counts as read, or it would be gone
-            // for good: with the list full, reading waits until receipts have drained it.
+            // A candidate is never dropped once its block counts as read (bar one block holding more
+            // than the whole list), or it would be gone for good: with the list full, reading waits
+            // until receipts have drained it.
             val room = MAX_CANDIDATES - s.candidates.size
             if (room <= 0) break
             val range = IncomingScan.nextRange(s, safeHead) ?: break
@@ -562,8 +596,11 @@ class IncomingTransfers internal constructor(
                 chunks++
                 continue
             }
-            // At the smallest chunk everything found is kept, a little over the cap, never cut.
-            s = IncomingScan.read(s, range).copy(candidates = s.candidates + fresh)
+            // At the smallest chunk only the blocks whose candidates fit count as read; the rest
+            // are asked again once receipts have made room. The list never passes the cap, so a
+            // lying RPC's flood of fake logs can't pause reading for more than a few scans.
+            val (part, kept) = IncomingScan.fitting(s, range, fresh, room, MAX_CANDIDATES) ?: break
+            s = IncomingScan.read(s, part).copy(candidates = s.candidates + kept)
             if (!commit(key, s, mine)) return
             chunks++
             if (IncomingScan.nextRange(s, safeHead) != null) delay(pauseMs)
@@ -715,9 +752,12 @@ class IncomingTransfers internal constructor(
         const val MAX_VERIFY_PER_RUN = 20
 
         /**
-         * Unproven candidates kept per account and chain. A full list pauses
-         * reading (nothing found is ever dropped for space); one chunk at
-         * [IncomingScan.MIN_SPAN] may still take it a little over.
+         * Unproven candidates kept per account and chain, never more. A full
+         * list pauses reading until receipts drain it (at most a few scans,
+         * [MAX_VERIFY_PER_RUN] each); a chunk at [IncomingScan.MIN_SPAN] that
+         * finds more than fits counts only its blocks that fit as read. A
+         * found transfer is dropped for space only when one block alone holds
+         * more than this many for the account.
          */
         const val MAX_CANDIDATES = 50
 
