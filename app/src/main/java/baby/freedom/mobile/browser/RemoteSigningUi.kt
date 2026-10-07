@@ -513,8 +513,11 @@ private fun CantSendBody(request: OpenLvSession.Request.CantSend) {
  * A transaction desktop asks this phone to send (W40): what it does in a
  * sentence ([sendTxHeadline], as a site's sheet says it), any native value
  * a contract call also sends ([alsoSendsLine]), the most the fee can be
- * and the total, the accounts with Copy; network, value, call
- * data, nonce and gas under Details.
+ * and the total, the network it's on (#434 R3-F1: a peer can switch the
+ * session's chain without a prompt, and a decoded call's headline doesn't
+ * name it), the accounts with Copy, and the notes the site's sheet shows
+ * for the same call ([sendTxWarnings]); value, call data, nonce and gas
+ * under Details.
  */
 @Composable
 internal fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) {
@@ -539,11 +542,11 @@ internal fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction)
     }
     Spacer(Modifier.height(8.dp))
     HorizontalDivider()
+    ReviewRow(stringResource(R.string.signing_review_network), chain.name)
     CopyableAddressRow(stringResource(R.string.signing_review_from), r.from.address, name = r.from.name)
     CopyableAddressRow(stringResource(R.string.signing_review_to), r.to)
-    replacesWarning(quote)?.let { Warning(it) }
+    sendTxWarnings(quote).forEach { Warning(it) }
     DetailsExpander {
-        ReviewRow(stringResource(R.string.signing_review_network), chain.name)
         ReviewRow(stringResource(R.string.signing_review_value), "${SendAmounts.exact(r.amount, chain.decimals)} ${chain.symbol}", mono = true)
         val data = "0x" + (r.dapp?.data?.toHex() ?: "")
         HexRow(

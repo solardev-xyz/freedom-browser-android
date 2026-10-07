@@ -145,19 +145,7 @@ internal fun sheetWarnings(ask: EthAsk, nowSeconds: Long, siteRpcs: Boolean = fa
             ?: SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_typed_note), "typed-unknown"),
         ask.ledgerHashes?.let { SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_ledger_hashes_only), "ledger-hashes") },
     )
-    is EthAsk.SendTransaction -> {
-        val quote = ask.quote
-        val chain = quote.request.chain
-        listOfNotNull(
-            if (ask.repriced) SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_repriced), "repriced") else null,
-            // A site's transaction can take the nonce of a send the user stopped tracking that's
-            // still waiting in a pool — say so here as the Send page does, or confirming silently
-            // drops that earlier send (#215 R6-F1).
-            replacesWarning(quote),
-            if (!GasOracle.quiet(quote.tx.fees, chain.id)) SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_high_fee), "high-fee") else null,
-            sentCall(ask)?.let(::callWarning),
-        )
-    }
+    is EthAsk.SendTransaction -> sendTxWarnings(ask.quote, ask.repriced)
     is EthAsk.CantSend -> listOf(SheetWarning(WarningLevel.Info, Strings.get(R.string.send_eth_cant_send_note)))
     is EthAsk.SwitchChain -> listOf(SheetWarning(WarningLevel.Info, Strings.get(R.string.send_eth_switch_note)))
     is EthAsk.AddChain -> listOf(
@@ -171,6 +159,27 @@ internal fun sheetWarnings(ask: EthAsk, nowSeconds: Long, siteRpcs: Boolean = fa
 }
 
 /**
+ * The notes a transaction sheet shows for [quote], at their level: a
+ * repriced fee ([repriced]), a send it replaces, a high fee, and what a
+ * decoded call grants (an unlimited approval is Danger). The site's sheet
+ * and desktop's over OpenLV (#434 R3-M1) show the same list, so a call
+ * reads the same whoever asked for it.
+ */
+internal fun sendTxWarnings(quote: SendQuote, repriced: Boolean = false): List<SheetWarning> {
+    val request = quote.request
+    val chain = request.chain
+    return listOfNotNull(
+        if (repriced) SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_repriced), "repriced") else null,
+        // A transaction can take the nonce of a send the user stopped tracking that's still
+        // waiting in a pool — say so here as the Send page does, or confirming silently drops
+        // that earlier send (#215 R6-F1).
+        replacesWarning(quote),
+        if (!GasOracle.quiet(quote.tx.fees, chain.id)) SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_high_fee), "high-fee") else null,
+        TxDecode.call(request.to, quote.tx.data, chain.id)?.let(::callWarning),
+    )
+}
+
+/**
  * The surface Caution for a [quote] that takes the nonce of a send the user
  * stopped tracking ([SendQuote.replaces]). Every sheet that can confirm such
  * a quote — the site's, a remote signer's (OpenLV), a Safe activation or
@@ -179,12 +188,6 @@ internal fun sheetWarnings(ask: EthAsk, nowSeconds: Long, siteRpcs: Boolean = fa
  */
 internal fun replacesWarning(quote: SendQuote): SheetWarning? =
     quote.replaces?.let { SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_replaces, it), "replaces") }
-
-/** The call [ask]'s transaction makes, when it's one [TxDecode.call] reads. */
-internal fun sentCall(ask: EthAsk.SendTransaction): DecodedCall? {
-    val request = ask.quote.request
-    return TxDecode.call(request.to, ask.quote.tx.data, request.chain.id)
-}
 
 /**
  * The hero line of a site's transaction (W22): what a decoded call does

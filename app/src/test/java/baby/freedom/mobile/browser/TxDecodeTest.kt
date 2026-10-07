@@ -369,6 +369,24 @@ class TxDecodeTest {
     }
 
     @Test
+    fun `desktop's sheet over OpenLV gives a call the same notes as the site's sheet`() {
+        // #434 R3-M1: an unlimited approve is Danger on the remote sheet too, a replaced send a Caution.
+        val approve = bytes("095ea7b3" + word(spender) + word(TxDecode.MAX_UINT256))
+        val hash = "0x" + "ab".repeat(32)
+        for (ask in listOf(sendAsk(usdc, approve), sendAsk(usdc, approve, replaces = hash))) {
+            assertEquals(sheetWarnings(ask, now), sendTxWarnings(ask.quote))
+        }
+        assertEquals(
+            listOf("replaces" to WarningLevel.Caution, "approve-unlimited" to WarningLevel.Danger),
+            sendTxWarnings(sendAsk(usdc, approve, replaces = hash).quote).map { it.tag to it.level },
+        )
+        // A repriced fee is only said when the caller says so (the remote sheet shows its own notice).
+        val repriced = sendAsk(usdc, approve, repriced = true)
+        assertEquals(sheetWarnings(repriced, now), sendTxWarnings(repriced.quote, repriced = true))
+        assertTrue(sendTxWarnings(repriced.quote).none { it.tag == "repriced" })
+    }
+
+    @Test
     fun `a send's sheet - a repriced fee and a replaced send are cautions, an unlimited approve a danger, a plain transfer nothing`() {
         val transfer = bytes("a9059cbb" + word(recipient) + word(BigInteger.valueOf(20_000_000)))
         assertTrue(sheetWarnings(sendAsk(usdc, transfer), now).isEmpty())
