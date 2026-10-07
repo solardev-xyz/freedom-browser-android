@@ -99,8 +99,10 @@ object UnverifiedOrigins {
 
     /**
      * Origins only a private tab was served, wherever they are now
-     * ([origins], [toClear], a hold that [release] puts back into
-     * [toClear]): kept in memory, never persisted (see the class doc).
+     * ([origins], [toClear], a default-profile hold that [release] puts
+     * back into [toClear] — a private hold goes back into
+     * [privateToClear] instead): kept in memory, never persisted (see
+     * the class doc).
      * Left only when a normal tab is served one ([record]); never
      * entered by an origin a normal tab's earlier gateway left a
      * default-profile cleanup pending on.
