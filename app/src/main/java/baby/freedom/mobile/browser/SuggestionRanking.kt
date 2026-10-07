@@ -73,12 +73,21 @@ internal fun suggestionHost(url: String): String =
 
 /**
  * The page [url] is for, so one page reached as a tab, a bookmark and a
- * history entry is suggested once: [typedForm] with an empty trailing
- * `#` and a lone trailing `/` dropped (`https://example.com/` and
- * `http://www.example.com` are one page).
+ * history entry is suggested once: no scheme, no `www.`, an empty
+ * trailing `#` and a lone trailing `/` dropped (`https://example.com/`
+ * and `http://www.example.com` are one page). Only the scheme and host
+ * are case-insensitive; the path, query and fragment keep their case,
+ * since a server may treat `/Docs` and `/docs` as two pages.
  */
-internal fun pageKey(url: String): String =
-    typedForm(url).removeSuffix("#").removeSuffix("/")
+internal fun pageKey(url: String): String {
+    var s = url.trim()
+    val scheme = s.indexOf("://")
+    if (scheme in 1..16) s = s.substring(scheme + 3)
+    val hostEnd = s.indexOfAny(charArrayOf('/', '?', '#')).let { if (it < 0) s.length else it }
+    var host = s.substring(0, hostEnd).lowercase()
+    if (host.startsWith("www.")) host = host.substring(4)
+    return (host + s.substring(hostEnd)).removeSuffix("#").removeSuffix("/")
+}
 
 /** How well [query] matches a page with [url] and [title] ([MatchStrength]). */
 internal fun matchStrength(query: String, url: String, title: String): Int {
@@ -126,8 +135,12 @@ private class Ranked(
  * One page is one row ([pageKey]): an open tab beats a bookmark, which
  * beats history, and the row keeps the best match and the visits any
  * of them had. Rows are ordered by [matchStrength], then that source
- * order, then how often and how recently the page was visited. A tab
- * has to match the text itself; a database row the text matched only
+ * order, then how often and how recently the page was visited. A page
+ * open in a tab is offered as that tab whichever source matched it — a
+ * tab whose current title no longer matches still claims a page an
+ * older visit's title matched, so tapping it switches rather than
+ * reloading the page in this tab. A tab matching nothing else has to
+ * match the text itself; a database row the text matched only
  * in a way [matchStrength] doesn't see (SQL's `LIKE` is looser about
  * case outside ASCII) still counts as [MatchStrength.CONTAINS].
  */
@@ -143,8 +156,10 @@ internal fun rankSuggestions(
     if (query.isBlank() || limit <= 0) return emptyList()
     val byPage = LinkedHashMap<String, Ranked>()
 
+    // A tab is offered even when it doesn't match ([MatchStrength.NONE]),
+    // so a bookmark or history row for its page merges into it; a page
+    // nothing else matched stays at NONE and is left out below.
     fun offer(s: UrlSuggestion, strength: Int, visits: Int, lastVisit: Long) {
-        if (strength == MatchStrength.NONE) return
         val key = pageKey(s.url)
         val held = byPage[key]
         if (held == null) {
@@ -188,6 +203,7 @@ internal fun rankSuggestions(
         )
     }
     return byPage.values
+        .filter { it.strength != MatchStrength.NONE }
         .sortedWith(
             compareByDescending<Ranked> { it.strength }
                 .thenBy { sourceRank(it.suggestion.source) }

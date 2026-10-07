@@ -338,19 +338,46 @@ class NodeSettings private constructor(
      * is typed into a regular tab's address bar is sent to the selected
      * engine for suggestions (`SearchSuggestions`). Off by default; never
      * used in private tabs.
+     *
+     * The consent names one engine ("Sends what you type … to
+     * DuckDuckGo"), so it is stored as that engine's id and holds only
+     * while that engine is the one in use ([searchSuggestionsFor]):
+     * picking another engine turns it off, and it stays off on a return
+     * to the first one until the user turns it on again.
      */
     val searchSuggestions: Flow<Boolean> = store.data.map { prefs ->
-        prefs[Keys.SEARCH_SUGGESTIONS] ?: false
+        searchSuggestionsFor(
+            prefs[Keys.SEARCH_SUGGESTIONS_ENGINE],
+            prefs[Keys.SEARCH_ENGINE],
+            prefs[Keys.SEARCH_CUSTOM_TEMPLATE],
+        )
     }
 
+    /**
+     * Turn *Search suggestions* on for the engine in use now, or off. A
+     * custom engine has no known suggestion service and can't be turned on.
+     */
     suspend fun setSearchSuggestions(enabled: Boolean) {
-        store.edit { it[Keys.SEARCH_SUGGESTIONS] = enabled }
+        store.edit { prefs ->
+            val engine = SearchEngines.effectiveId(prefs[Keys.SEARCH_ENGINE], prefs[Keys.SEARCH_CUSTOM_TEMPLATE])
+            if (enabled && engine != SearchEngines.CUSTOM_ID) {
+                prefs[Keys.SEARCH_SUGGESTIONS_ENGINE] = engine
+            } else {
+                prefs.remove(Keys.SEARCH_SUGGESTIONS_ENGINE)
+            }
+        }
     }
 
-    /** Select a built-in engine; the saved custom template is kept. */
+    /**
+     * Select a built-in engine; the saved custom template is kept. A
+     * *Search suggestions* consent given for another engine is dropped.
+     */
     suspend fun setSearchEngine(id: String) {
         require(SearchEngines.BUILT_IN.any { it.id == id }) { "unknown engine $id" }
-        store.edit { it[Keys.SEARCH_ENGINE] = id }
+        store.edit {
+            it[Keys.SEARCH_ENGINE] = id
+            if (it[Keys.SEARCH_SUGGESTIONS_ENGINE] != id) it.remove(Keys.SEARCH_SUGGESTIONS_ENGINE)
+        }
     }
 
     /**
@@ -362,6 +389,7 @@ class NodeSettings private constructor(
         store.edit {
             it[Keys.SEARCH_CUSTOM_TEMPLATE] = normalized
             it[Keys.SEARCH_ENGINE] = SearchEngines.CUSTOM_ID
+            it.remove(Keys.SEARCH_SUGGESTIONS_ENGINE)
         }
         return true
     }
@@ -804,7 +832,8 @@ class NodeSettings private constructor(
 
     private object Keys {
         val ASK_WHERE_TO_SAVE = booleanPreferencesKey("ask_where_to_save")
-        val SEARCH_SUGGESTIONS = booleanPreferencesKey("search_suggestions")
+        /** The engine id *Search suggestions* was turned on for (see [searchSuggestions]). */
+        val SEARCH_SUGGESTIONS_ENGINE = stringPreferencesKey("search_suggestions_engine")
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SWARM_NODE_MODE = stringPreferencesKey("swarm_node_mode")
         val SWARM_SWAP_ENABLED = booleanPreferencesKey("swarm_swap_enabled")
@@ -914,4 +943,16 @@ class NodeSettings private constructor(
                 ).also { instance = it }
             }
     }
+}
+
+/**
+ * Whether *Search suggestions* is on: it was turned on for
+ * [consentedEngine] and that is still the engine in use
+ * ([SearchEngines.effectiveId] of [engineId]/[customTemplate]) — never
+ * for a custom engine. A consent for DuckDuckGo doesn't carry over to
+ * Google, nor to a stale `custom` that falls back to the default.
+ */
+internal fun searchSuggestionsFor(consentedEngine: String?, engineId: String?, customTemplate: String?): Boolean {
+    if (consentedEngine == null || consentedEngine == SearchEngines.CUSTOM_ID) return false
+    return consentedEngine == SearchEngines.effectiveId(engineId, customTemplate)
 }

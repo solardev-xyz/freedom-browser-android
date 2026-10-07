@@ -174,9 +174,43 @@ class SuggestionRankingTest {
         assertEquals(pageKey("https://www.Example.com/"), pageKey("http://example.com"))
         assertEquals(pageKey("https://example.com/a#"), pageKey("https://example.com/a"))
         assertTrue(pageKey("https://example.com/a") != pageKey("https://example.com/b"))
+        // Host case folds; path, query and fragment case don't.
+        assertEquals("example.com/Docs?Q=1#Top", pageKey("HTTPS://WWW.EXAMPLE.COM/Docs?Q=1#Top"))
+        assertTrue(pageKey("https://example.com/Docs") != pageKey("https://example.com/docs"))
         assertEquals("example.com/a", suggestionAddress("https://example.com/a"))
         assertEquals("example.com", suggestionAddress("http://example.com"))
         assertEquals("bzz://name.eth/", suggestionAddress("bzz://name.eth/"))
         assertEquals("en.wikipedia.org", suggestionHost("https://user@en.wikipedia.org:443/wiki"))
+    }
+
+    @Test
+    fun `pages differing only in path case stay two rows`() {
+        val out = rank(
+            "example",
+            history = listOf(visit("https://example.com/Docs", "Docs"), visit("https://example.com/docs", "docs")),
+        )
+        assertEquals(listOf("https://example.com/Docs", "https://example.com/docs"), out.map { it.url }.sorted())
+    }
+
+    @Test
+    fun `an open tab claims its page even when only an older title matched`() {
+        // The tab's current title doesn't match; an old visit's title does.
+        val out = rank(
+            "release",
+            tabs = listOf(tab(7, "https://news.example/today", "Today's headlines")),
+            history = listOf(visit("https://news.example/today", "Release notes", visits = 3)),
+        )
+        assertEquals(1, out.size)
+        assertEquals(Source.TAB, out.single().source)
+        assertEquals(7L, out.single().tabId)
+        // Likewise for a bookmark.
+        val viaBookmark = rank(
+            "release",
+            tabs = listOf(tab(7, "https://news.example/today", "Today's headlines")),
+            bookmarks = listOf(bookmark("https://news.example/today", "Release notes")),
+        )
+        assertEquals(listOf(7L), viaBookmark.map { it.tabId })
+        // A tab nothing matches is still left out.
+        assertTrue(rank("release", tabs = listOf(tab(7, "https://news.example/today", "Today"))).isEmpty())
     }
 }
