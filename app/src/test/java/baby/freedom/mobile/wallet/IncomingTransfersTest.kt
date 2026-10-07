@@ -449,6 +449,51 @@ class IncomingTransfersTest {
     }
 
     @Test
+    fun `a wipe during one chain's scan stops the scan's later chains from saving the removed account`() = runBlocking {
+        val head = 1_000_000L
+        val reads = fake(head, log(block = head - 100))
+        val gate = CompletableDeferred<Unit>()
+        reads.gate = gate
+        val store = FileIncomingStore(tmp.root.resolve("incoming.json"))
+        val inc = incoming(reads, store)
+        inc.awaitLoaded()
+        val job = scope.launch { inc.scan(account, listOf(BuiltInChains.ETHEREUM, gnosis)) }
+        withTimeout(5_000) { reads.entered.await() }
+        inc.wipeNow()
+        reads.gate = null
+        gate.complete(Unit)
+        job.join()
+        // Only Ethereum's one gated chunk was read; Gnosis wasn't started at all.
+        assertEquals(1, reads.asked.size)
+        assertTrue(inc.transfers.value.isEmpty())
+        inc.persistNow()
+        assertTrue(store.load().isEmpty())
+    }
+
+    @Test
+    fun `candidates that stay unproven don't keep later ones from being checked`() = runBlocking {
+        val head = 1_000_000L
+        val stuck = IncomingTransfers.MAX_VERIFY_PER_RUN
+        // The stuck ones are older, so they sit at the head of the candidate list.
+        val logs = (1..stuck).map { log(block = head - 10_000 + it, tx = hash(it)) } + log(block = head - 100, tx = hash(500))
+        val reads = fake(head, *logs.toTypedArray())
+        val disputed = object : IncomingReads by reads {
+            override suspend fun receipt(chainId: Long, tx: String): WalletRpc.Reading<JSONObject?> {
+                val r = reads.receipt(chainId, tx)
+                return if (tx == hash(500)) r else WalletRpc.Reading(r.value, lone)
+            }
+        }
+        var now = 0L
+        val inc = incoming(disputed, uptime = { now })
+        inc.scan(account, listOf(gnosis))
+        assertTrue(inc.transfers.value.isEmpty())
+        // The next scan asks about the one not asked yet before the stuck ones again.
+        now += IncomingTransfers.MIN_SCAN_INTERVAL_MS
+        inc.scan(account, listOf(gnosis))
+        assertEquals(listOf(hash(500)), inc.transfers.value.map { t -> t.hash })
+    }
+
+    @Test
     fun `a first scan that read nothing starts over a window under a much later head`() = runBlocking {
         val head = 3_000_000L
         val reads = fake(head)

@@ -464,6 +464,10 @@ class IncomingTransfers internal constructor(
     /** A write asked for before the file was read: done once it has been (a wipe's included). */
     private var writeAfterLoad = false
 
+    /** Per (account, chain), when each candidate's receipt was last asked for, by [askSeq]. Under this object's lock. */
+    private val lastAsked = HashMap<Pair<String, Long>, HashMap<String, Long>>()
+    private var askSeq = 0L
+
     /** When each (account, chain) last read up to the head, by [uptime]. Under this object's lock. */
     private val lastScan = HashMap<Pair<String, Long>, Long>()
     private val fileRead = CompletableDeferred<Unit>()
@@ -493,12 +497,16 @@ class IncomingTransfers internal constructor(
         fileRead.await()
         scanning.withLock {
             val who = account.lowercase()
+            // One generation for the whole scan: a wipe during one chain stops the rest too,
+            // or the next chain would save the removed account's reads again.
+            val mine = synchronized(this) { generation }
             try {
                 for (chain in chains) {
+                    if (synchronized(this) { generation != mine }) return
                     val tokens = TokenRegistry.builtins.filter { it.chainId == chain.id }
                     if (tokens.isEmpty()) continue
                     try {
-                        scanChain(account, chain, tokens)
+                        scanChain(account, chain, tokens, mine)
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -511,9 +519,8 @@ class IncomingTransfers internal constructor(
         }
     }
 
-    private suspend fun scanChain(account: String, chain: Chain, tokens: List<Token>) {
+    private suspend fun scanChain(account: String, chain: Chain, tokens: List<Token>, mine: Int) {
         val key = keyOf(account, chain.id)
-        val mine = synchronized(this) { generation }
         val known = scans.value[key]
         val since = synchronized(this) { lastScan[key] }?.let { uptime() - it }
         if (known != null && known.caughtUp && known.candidates.isEmpty() && since != null && since in 0 until MIN_SCAN_INTERVAL_MS) return
@@ -522,6 +529,7 @@ class IncomingTransfers internal constructor(
         val safeHead = head - IncomingScan.margin(chain.id)
         if (safeHead <= 0) return
         var s = IncomingScan.rebase(known ?: IncomingScan.start(account, chain.id, safeHead), safeHead)
+        synchronized(this) { if (generation != mine) return }
         if (!s.caughtUp) _catchingUp.value = _catchingUp.value + account.lowercase()
         var failures = 0
         var chunks = 0
@@ -554,10 +562,22 @@ class IncomingTransfers internal constructor(
         verify(chain, s, key, mine)
     }
 
-    /** Checks [s]'s candidates against their receipts; null when a wipe came meanwhile. */
+    /**
+     * Checks [s]'s candidates against their receipts, the longest-unasked
+     * first, so ones that stay unproven can't hold the rest back for good;
+     * null when a wipe came meanwhile.
+     */
     private suspend fun verify(chain: Chain, start: ScanState, key: Pair<String, Long>, mine: Int): ScanState? {
         var s = start
-        for (c in start.candidates.take(MAX_VERIFY_PER_RUN)) {
+        val batch = synchronized(this) {
+            if (generation != mine) return null
+            val asked = lastAsked.getOrPut(key) { HashMap() }
+            val live = start.candidates.map { it.key }.toSet()
+            asked.keys.retainAll(live)
+            // Never asked first, then by when last asked; a stable sort keeps list order among equals.
+            start.candidates.sortedBy { asked[it.key] ?: -1L }.take(MAX_VERIFY_PER_RUN).onEach { asked[it.key] = ++askSeq }
+        }
+        for (c in batch) {
             val keep: Boolean
             var found: IncomingTransfer? = null
             try {
@@ -642,6 +662,7 @@ class IncomingTransfers internal constructor(
         generation++
         if (!loaded) wipedBeforeLoad = true
         lastScan.clear()
+        lastAsked.clear()
         publish(emptyMap())
         _catchingUp.value = emptySet()
     }
@@ -679,7 +700,7 @@ class IncomingTransfers internal constructor(
          */
         const val MAX_FAILURES_PER_RUN = 4
 
-        /** Receipts read per chain per scan. */
+        /** Receipts read per chain per scan, the longest-unasked candidates first. */
         const val MAX_VERIFY_PER_RUN = 20
 
         const val MAX_CANDIDATES = 50
