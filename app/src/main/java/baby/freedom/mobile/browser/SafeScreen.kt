@@ -1210,11 +1210,9 @@ private fun SafeProposePage(
                                     IconButton(
                                         enabled = !busy,
                                         onClick = {
-                                            when (val pasted = pastedRecipient(context)) {
-                                                is PastedRecipient.Fill -> takeRecipient(pasted.fill.recipient)
-                                                is PastedRecipient.Text -> takeRecipient(pasted.text)
-                                                is PastedRecipient.Refused -> recipientNote = pasted.reason
-                                                PastedRecipient.Secret -> recipientNote = Strings.get(R.string.send_paste_secret)
+                                            when (val pasted = safePastedRecipient(pastedRecipient(context))) {
+                                                is SafePaste.Take -> takeRecipient(pasted.text)
+                                                is SafePaste.Note -> recipientNote = pasted.reason
                                                 null -> Unit
                                             }
                                         },
@@ -1235,9 +1233,14 @@ private fun SafeProposePage(
                             QrScanner(
                                 permission = cameraPermission,
                                 onCode = { text ->
-                                    if (ScannedCode.parse(text) is ScannedCode.Address) {
-                                        scanning = false
-                                        takeRecipient(text)
+                                    when (ScannedCode.parse(text)) {
+                                        is ScannedCode.Address -> {
+                                            scanning = false
+                                            takeRecipient(text)
+                                        }
+                                        // Told why, the same as a pasted one: not filled in with its network, token and amount dropped.
+                                        is ScannedCode.Payment -> recipientNote = Strings.get(R.string.safe_paste_payment_request)
+                                        else -> Unit
                                     }
                                 },
                                 modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)),
@@ -2003,6 +2006,23 @@ internal fun SafeCoSignPage(
                         is SafeProtocol.Request.Message -> ReviewRow(stringResource(R.string.safe_label_text), request.shownText)
                     }
                     CopyableAddressRow(stringResource(R.string.safe_label_safe), request.safe, explorerUrl = explorer(request.safe), onOpenUrl = onOpenUrl)
+                    // On the surface, not under Details: a request queued behind transactions this
+                    // signer hasn't seen ("earlier transactions must execute first") is said up front.
+                    if (request is SafeProtocol.Request.Tx) {
+                        val tx = request.tx
+                        val shownNonce = safeNonceShown(selfCall, snapshot, nonce)
+                        ReviewRow(
+                            stringResource(R.string.safe_label_safe_nonce),
+                            tx.nonce.toString(),
+                            mono = true,
+                            detail = when {
+                                shownNonce == null -> null
+                                shownNonce > tx.nonce -> stringResource(R.string.safe_nonce_past)
+                                shownNonce < tx.nonce -> stringResource(R.string.safe_nonce_ahead, shownNonce.toString())
+                                else -> stringResource(R.string.safe_nonce_next)
+                            },
+                        )
+                    }
                     DetailsExpander {
                         if (request is SafeProtocol.Request.Tx) {
                             val tx = request.tx
@@ -2028,18 +2048,6 @@ internal fun SafeCoSignPage(
                                     },
                                 )
                             }
-                            val shownNonce = safeNonceShown(selfCall, snapshot, nonce)
-                            ReviewRow(
-                                stringResource(R.string.safe_label_safe_nonce),
-                                tx.nonce.toString(),
-                                mono = true,
-                                detail = when {
-                                    shownNonce == null -> null
-                                    shownNonce > tx.nonce -> stringResource(R.string.safe_nonce_past)
-                                    shownNonce < tx.nonce -> stringResource(R.string.safe_nonce_ahead, shownNonce.toString())
-                                    else -> stringResource(R.string.safe_nonce_next)
-                                },
-                            )
                         }
                         CopyableAddressRow(
                             stringResource(if (request is SafeProtocol.Request.Tx) R.string.safe_label_safetx_hash else R.string.safe_label_safemessage_hash),
@@ -2645,4 +2653,31 @@ private fun FieldText(text: String, error: Boolean, announce: Boolean = error) {
         // part of the page from its first frame ([announce] false) is read in turn, not as news.
         modifier = Modifier.padding(top = 4.dp).then(if (announce) Modifier.semantics { liveRegion = LiveRegionMode.Polite } else Modifier),
     )
+}
+
+/** What Safe Propose's Paste does with the clip ([safePastedRecipient]). */
+internal sealed interface SafePaste {
+    /** Into the To field as typed. */
+    data class Take(val text: String) : SafePaste
+
+    /** Nothing filled in; [reason] shown under the field. */
+    data class Note(val reason: String) : SafePaste
+}
+
+/**
+ * [pasted], as Safe Propose's To field takes it. A plain address or a
+ * name goes in; a payment request (EIP-681) doesn't, even when Send
+ * could pay it: it names its own network, token and amount, and taking
+ * only its address would let the Safe send something else, on its own
+ * network, to an address that may only take the request's (an exchange's
+ * Ethereum-only deposit address, say). The camera on the same page reads
+ * a request the same way. A secret is never shown.
+ */
+internal fun safePastedRecipient(pasted: PastedRecipient?): SafePaste? = when (pasted) {
+    is PastedRecipient.Fill ->
+        if (pasted.fill.prefill == null) SafePaste.Take(pasted.fill.recipient) else SafePaste.Note(Strings.get(R.string.safe_paste_payment_request))
+    is PastedRecipient.Refused -> SafePaste.Note(Strings.get(R.string.safe_paste_payment_request))
+    is PastedRecipient.Text -> SafePaste.Take(pasted.text)
+    PastedRecipient.Secret -> SafePaste.Note(Strings.get(R.string.send_paste_secret))
+    null -> null
 }

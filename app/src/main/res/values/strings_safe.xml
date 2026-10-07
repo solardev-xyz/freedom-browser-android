@@ -183,6 +183,7 @@
     <!-- %1$s the exact amount held, %2$s the token symbol. -->
     <string name="safe_amount_too_much">More than the Safe holds (%1$s %2$s).</string>
     <string name="safe_scan_not_address">That isn’t an address.</string>
+    <string name="safe_paste_payment_request">That’s a payment request: it names its own network, token and amount, which a Safe proposal here doesn’t take from it. Paste or scan just the address, and check it can take this Safe’s network and token.</string>
 
     <!-- browser/SafeScreen.kt: a pending transaction or message -->
     <string name="safe_moved_on_unconfirmed">The Safe has moved on; this transaction’s execution isn’t confirmed yet. Try again in a moment.</string>

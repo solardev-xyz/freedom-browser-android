@@ -289,6 +289,13 @@ internal fun ledgerFooter(loadError: String?, found: Int): LedgerFooter = when {
     else -> LedgerFooter.NONE
 }
 
+/**
+ * The number an account found at [path] goes by, as Ledger Live numbers it: its index in
+ * [scheme] plus one — from the path itself, not the row's place in the list ([row] is the
+ * fallback only for a path the layout doesn't make).
+ */
+internal fun ledgerAccountNumber(scheme: LedgerScheme, path: String, row: Int): Int = (scheme.index(path) ?: row) + 1
+
 /** Whether another page of accounts is still to be read: [found] so far, [wanted] asked for. */
 internal fun ledgerNeedsRead(found: Int, wanted: Int): Boolean = found < wanted
 
@@ -405,7 +412,7 @@ private fun LedgerAccountsStep(
                             RadioButton(selected = picked?.first == path, onClick = null, enabled = !added && !adding)
                             Spacer(Modifier.width(8.dp))
                             Column(Modifier.weight(1f)) {
-                                Text(stringResource(R.string.signing_ledger_account_n, i + 1), fontWeight = FontWeight.Medium)
+                                Text(stringResource(R.string.signing_ledger_account_n, ledgerAccountNumber(scheme, path, i)), fontWeight = FontWeight.Medium)
                                 AddressText(address, MaterialTheme.typography.bodyMedium, MaterialTheme.colorScheme.onSurface)
                                 val balance = balances[address.lowercase()]
                                 when {

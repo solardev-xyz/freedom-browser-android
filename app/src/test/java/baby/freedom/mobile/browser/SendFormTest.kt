@@ -213,6 +213,23 @@ class SendFormTest {
     }
 
     @Test
+    fun `Safe Propose's Paste takes an address or a name, never just a payment request's address`() {
+        // Send would pay this one (Gnosis xBZZ); a Safe proposal takes none of its network, token or amount.
+        val request = "ethereum:${xbzz.address}@100/transfer?address=$other&uint256=1.5e16"
+        val payment = safePastedRecipient(pastedRecipient(null, false, request))
+        assertTrue(payment.toString(), payment is SafePaste.Note && payment.reason.contains("payment request"))
+        // No chain named, so Ethereum: the case an exchange's deposit request is.
+        assertTrue(safePastedRecipient(pastedRecipient(null, false, "ethereum:$other?value=5e17")) is SafePaste.Note)
+        // One Send can't pay is refused here the same way, not with Send's reason.
+        val base = safePastedRecipient(pastedRecipient(null, false, "ethereum:$other@8453?value=1e15"))
+        assertTrue(base.toString(), base is SafePaste.Note && base.reason.contains("payment request"))
+        assertEquals(SafePaste.Take(other), safePastedRecipient(pastedRecipient(null, false, other)))
+        assertEquals(SafePaste.Take("vitalik.eth"), safePastedRecipient(pastedRecipient(null, false, " vitalik.eth ")))
+        assertTrue(safePastedRecipient(PastedRecipient.Secret) is SafePaste.Note)
+        assertNull(safePastedRecipient(null))
+    }
+
+    @Test
     fun `a request naming no network says which was assumed, worded for a link or for a request`() {
         val guessed = (scannedRecipient("ethereum:$other?value=1e15") as ScannedRecipient.Fill).prefill!!
         assertEquals(ChainGuess.ETHEREUM_DEFAULT, guessed.chainGuess)
