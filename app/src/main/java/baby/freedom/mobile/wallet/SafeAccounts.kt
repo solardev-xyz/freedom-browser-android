@@ -97,10 +97,18 @@ data class SafeAccount(
 /**
  * What [SafeAccounts.applyOnChain] changed: the threshold before and now,
  * whether the owner list changed, and how many collected signatures were
- * taken off pending items because their signer is no longer an owner.
+ * taken off because their signer is no longer an owner. As
+ * `applyOnChain`'s answer it covers the whole Safe (every pending item's
+ * drops added up); as a [SafePending.policyChange] it is that one item's.
  */
 data class SafePolicyChange(val thresholdBefore: Int, val thresholdNow: Int, val ownersChanged: Boolean, val droppedSignatures: Int) {
     val thresholdChanged: Boolean get() = thresholdBefore != thresholdNow
+
+    /** Whether there's anything to tell. */
+    val any: Boolean get() = thresholdChanged || ownersChanged || droppedSignatures > 0
+
+    /** This change followed by [later] (to the same item): the first threshold, the last, and everything in between added up. */
+    fun then(later: SafePolicyChange) = SafePolicyChange(thresholdBefore, later.thresholdNow, ownersChanged || later.ownersChanged, droppedSignatures + later.droppedSignatures)
 }
 
 /**
@@ -138,6 +146,14 @@ data class SafePending(
      * earlier one can be the one mined ([MAX_ABANDONED] at most).
      */
     val abandonedExecs: List<AbandonedExec> = emptyList(),
+    /**
+     * What on-chain readings changed about this item that its page hasn't
+     * told yet ([SafeAccounts.takePolicyChange]): its threshold before and
+     * now, whether the owners changed, and how many of its own signatures
+     * were dropped. Kept on disk, so whichever page (or the propose page)
+     * applied the reading, this item's page still says what it lost.
+     */
+    val policyChange: SafePolicyChange? = null,
 ) {
     enum class Kind { TX, MESSAGE }
 
@@ -256,6 +272,9 @@ class SafeStore internal constructor(private val file: File) {
                 }
                     // A record from before the list: its one abandoned execution, sender unknown.
                     ?: listOfNotNull(p.optString("abandonedExec").takeIf { p.has("abandonedExec") && !p.isNull("abandonedExec") }?.let { SafePending.AbandonedExec(it) }),
+                policyChange = p.optJSONObject("policyChange")?.let { c ->
+                    SafePolicyChange(c.getInt("thresholdBefore"), c.getInt("thresholdNow"), c.getBoolean("ownersChanged"), c.getInt("droppedSignatures"))
+                },
             )
         }
         SafeState(safes, pending)
@@ -312,6 +331,13 @@ class SafeStore internal constructor(private val file: File) {
                                             )
                                         }
                                     },
+                                )
+                                .put(
+                                    "policyChange",
+                                    p.policyChange?.let { c ->
+                                        JSONObject().put("thresholdBefore", c.thresholdBefore).put("thresholdNow", c.thresholdNow)
+                                            .put("ownersChanged", c.ownersChanged).put("droppedSignatures", c.droppedSignatures)
+                                    } ?: JSONObject.NULL,
                                 ),
                         )
                     }
@@ -512,8 +538,10 @@ class SafeAccounts internal constructor(
      * [noteSend] recognises it) is those signatures; and a transaction whose
      * nonce the Safe is already past ([policy]'s nonce), which can't execute
      * any more and is settled by the nonce guard, not recounted against
-     * owners it never ran under. Returns what changed, or null if nothing
-     * did. Throws [SafeException] if [policy] isn't confirmed, isn't a
+     * owners it never ran under. Each item touched keeps what it lost in
+     * [SafePending.policyChange] (added to what its page hasn't told yet),
+     * so its own page can say it whichever page applied the reading.
+     * Returns what changed for the whole Safe, or null if nothing did. Throws [SafeException] if [policy] isn't confirmed, isn't a
      * Safe's policy, or was read at an earlier block than the last reading
      * applied ([SafeAccount.checkedBlock]) and names other owners or another
      * threshold than the record — the record never goes back to owners or a
@@ -542,13 +570,21 @@ class SafeAccounts internal constructor(
                 if (!p.safe.equals(current.address, ignoreCase = true)) return@map p
                 if (p.kind == SafePending.Kind.TX && runCatching { p.safeTx().nonce < policy.nonce }.getOrDefault(false)) return@map p
                 val kept = if (p.execHash != null) p.signatures else p.signatures.filter { sig -> checked.any { it.equals(sig.signer, ignoreCase = true) } }
-                dropped += p.signatures.size - kept.size
-                p.copy(threshold = threshold, signatures = kept)
+                val lost = p.signatures.size - kept.size
+                dropped += lost
+                val mine = SafePolicyChange(p.threshold, threshold, ownersChanged, lost)
+                val told = (p.policyChange?.then(mine) ?: mine).takeIf { it.any }
+                p.copy(threshold = threshold, signatures = kept, policyChange = told)
             }
             val next = s.copy(safes = s.safes.map { if (it.address.equals(current.address, ignoreCase = true)) safe else it }, pending = pending)
-            next to SafePolicyChange(thresholdBefore, threshold, ownersChanged, dropped)
-                .takeIf { it.thresholdChanged || ownersChanged || dropped > 0 }
+            next to SafePolicyChange(thresholdBefore, threshold, ownersChanged, dropped).takeIf { it.any }
         }
+    }
+
+    /** What on-chain readings changed about pending [id] that its page hasn't told yet; taken off the entry, so it's told once. */
+    suspend fun takePolicyChange(id: String): SafePolicyChange? = update { s ->
+        val change = s.pending.firstOrNull { it.id == id }?.policyChange ?: return@update s to null
+        s.copy(pending = s.pending.map { if (it.id == id) it.copy(policyChange = null) else it }) to change
     }
 
     /** Takes [address] off this phone, with what was pending for it. The Safe and its funds stay on chain. */

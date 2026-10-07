@@ -1505,7 +1505,10 @@ private fun SafeRequestPage(
                 throw SafeException(Strings.get(if (tx) R.string.safe_policy_read_failed_tx else R.string.safe_policy_read_failed_message))
             }
             if (!policy.confirmed) throw SafeException(Strings.get(if (tx) R.string.safe_policy_unconfirmed_tx else R.string.safe_policy_unconfirmed_message))
-            val change = safes.applyOnChain(safe.address, policy)
+            safes.applyOnChain(safe.address, policy)
+            // What this item lost — from this reading or one another page (the propose page, another
+            // request's) applied first — not the Safe's total across its other items.
+            val change = safes.takePolicyChange(p.id)
             // A transaction the Safe is already past isn't recounted (the nonce guard settles it): nothing to tell about it.
             val passed = tx && runCatching { p.safeTx().nonce < policy.nonce }.getOrDefault(false)
             if (change != null && !passed) policyNotice = safePolicyChangeNotice(change)

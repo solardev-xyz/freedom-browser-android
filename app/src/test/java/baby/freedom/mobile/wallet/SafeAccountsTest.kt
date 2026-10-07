@@ -672,6 +672,49 @@ class SafeAccountsTest {
     }
 
     @Test
+    fun `each pending item's page tells what it lost, whichever page applied the reading`() = runBlocking<Unit> {
+        // #447 R3-M1: A, B, C at 2; a transaction signed by A and B, a message by A; swapOwner(A → stranger)
+        // on another device. The message's page applied the reading first and said "2 signatures" (the
+        // Safe's total), and the transaction's page — the item that went from ready to 1 of 2 — said nothing.
+        val s = opened()
+        val safe = s.create("", listOf(account1.address, account2.address, other), 2, local)
+        s.markDeployed(safe.address)
+        val p = s.proposeTx(safe, SafeProtocol.SafeTx(other, BigInteger.ONE, ByteArray(0), BigInteger.ZERO), SafePending.Payment(other, BigInteger.ONE, "xDAI", 18, null))
+        val m = s.proposeMessage(safe, "hello safe")
+        vault.unlock(auth)
+        s.signWith(p.id, account1)
+        assertTrue(s.signWith(p.id, account2).ready)
+        s.signWith(m.id, account1)
+
+        val total = s.applyOnChain(safe.address, reading(listOf(stranger, account2.address, other), 2, block = 120))!!
+        assertEquals(2, total.droppedSignatures)
+        // Each item keeps its own, on disk too.
+        assertEquals(s.state.value, safes().also { it.reconcile(vault.state.value) }.state.value)
+        // The message's page: its one signature.
+        assertEquals(
+            "This Safe’s owners have changed. The list here now matches the Safe. " +
+                "1 signature was from an account that’s no longer an owner, so it no longer counts.",
+            safePolicyChangeNotice(s.takePolicyChange(m.id)!!),
+        )
+        assertNull(s.takePolicyChange(m.id))
+        // A later reading with nothing new adds nothing, and the transaction's page still says what it lost.
+        assertNull(s.applyOnChain(safe.address, reading(listOf(stranger, account2.address, other), 2, block = 121)))
+        val tx = s.takePolicyChange(p.id)!!
+        assertEquals(SafePolicyChange(2, 2, ownersChanged = true, droppedSignatures = 1), tx)
+        assertFalse(s.state.value!!.pending.first { it.id == p.id }.ready)
+        assertNull(s.takePolicyChange(p.id))
+
+        // Changes the page hasn't told yet add up: the first threshold, the last, every drop.
+        s.applyOnChain(safe.address, reading(listOf(stranger, account2.address, other), 3, block = 122))
+        s.applyOnChain(safe.address, reading(listOf(stranger, other), 1, block = 123))
+        assertEquals(SafePolicyChange(2, 1, ownersChanged = true, droppedSignatures = 1), s.takePolicyChange(p.id))
+        // Raised and lowered back with nothing dropped: nothing to tell.
+        s.applyOnChain(safe.address, reading(listOf(stranger, other), 2, block = 124))
+        s.applyOnChain(safe.address, reading(listOf(stranger, other), 1, block = 125))
+        assertNull(s.takePolicyChange(p.id))
+    }
+
+    @Test
     fun `an execution going out keeps its signatures when the owners change, so it's still recognised once mined`() = runBlocking<Unit> {
         val s = opened()
         val safe = s.create("", listOf(account1.address, account2.address, other), 2, local)
