@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.CallReceived
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CheckCircle
@@ -49,6 +50,7 @@ import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
+import baby.freedom.mobile.wallet.IncomingTransfer
 import baby.freedom.mobile.wallet.SendAmounts
 import baby.freedom.mobile.wallet.TxRecord
 import java.text.DateFormat
@@ -116,6 +118,52 @@ internal fun accountExplorerLinks(chains: List<Chain>, address: String): List<Pa
 /** The block explorer's page for a record, or null when its chain had no explorer. */
 internal fun explorerTxUrl(r: TxRecord): String? = r.explorerUrl?.trimEnd('/')?.let { "$it/tx/${r.hash}" }
 
+/** The block explorer's page for a received transfer's transaction, or null when its chain had no explorer. */
+internal fun explorerTxUrl(t: IncomingTransfer): String? = t.explorerUrl?.trimEnd('/')?.let { "$it/tx/${t.hash}" }
+
+/**
+ * One line of the history (#441): a send made here, or a built-in token
+ * received ([IncomingTransfers][baby.freedom.mobile.wallet.IncomingTransfers]).
+ */
+internal sealed interface HistoryItem {
+    /** When: a send's time sent, a transfer's block time. */
+    val at: Long
+
+    /** Unique across both kinds, for opening one and as a list key. */
+    val key: String
+
+    data class Sent(val record: TxRecord) : HistoryItem {
+        override val at get() = record.sentAt
+        override val key get() = "sent:${record.hash.lowercase()}"
+    }
+
+    data class Received(val transfer: IncomingTransfer) : HistoryItem {
+        override val at get() = transfer.at
+        override val key get() = "received:${transfer.key}"
+    }
+}
+
+/**
+ * [sent] and [received] in one list, newest first. At the same moment (a
+ * send to the account itself, mined in the second it was sent) the send
+ * comes first; otherwise each keeps its own list's order.
+ */
+internal fun historyItems(sent: List<TxRecord>, received: List<IncomingTransfer>): List<HistoryItem> =
+    (sent.map { HistoryItem.Sent(it) } + received.map { HistoryItem.Received(it) })
+        .sortedWith(compareByDescending<HistoryItem> { it.at }.thenBy { if (it is HistoryItem.Sent) 0 else 1 })
+
+/** [transfers] that arrived at [address]. */
+internal fun transfersTo(transfers: List<IncomingTransfer>, address: String?): List<IncomingTransfer> =
+    if (address == null) emptyList() else transfers.filter { it.account.equals(address, ignoreCase = true) }
+
+/** "Received 12.5 xBZZ". */
+internal fun receivedTitle(t: IncomingTransfer): String =
+    Strings.get(R.string.wallet_history_title_received, SendAmounts.exact(t.amount, t.tokenDecimals), t.tokenSymbol)
+
+/** A received transfer's second line: "Received", chain and when. */
+internal fun receivedSubtitle(t: IncomingTransfer, format: DateFormat = txDateFormat()): String =
+    Strings.get(R.string.wallet_history_subtitle, Strings.get(R.string.wallet_history_status_received), t.chainName, format.format(Date(t.at)))
+
 @Composable
 private fun statusIcon(r: TxRecord): Pair<ImageVector, Color> {
     val light = MaterialTheme.colorScheme.isLight
@@ -157,16 +205,94 @@ private fun TxRow(r: TxRecord, onOpen: (TxRecord) -> Unit) {
     }
 }
 
+/** One received transfer in a list: amount, "Received", chain, date and sender, each wrapped rather than cut. */
+@Composable
+private fun ReceivedRow(t: IncomingTransfer, onOpen: (IncomingTransfer) -> Unit) {
+    val tint = receivedTint()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
+            .clickable(onClick = { onOpen(t) })
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(receivedTitle(t), fontWeight = FontWeight.Medium)
+            Text(receivedSubtitle(t), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // The whole sender, not its ends: a look-alike address sending dust
+            // (address poisoning) matches a known one's first and last characters.
+            val dim = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            Text(stringResource(R.string.wallet_history_field_from), style = MaterialTheme.typography.labelSmall, color = dim)
+            AddressText(t.from, style = MaterialTheme.typography.labelSmall, color = dim)
+        }
+        Spacer(Modifier.width(8.dp))
+        Icon(
+            Icons.AutoMirrored.Filled.CallReceived,
+            contentDescription = stringResource(R.string.wallet_history_status_received),
+            tint = tint,
+            modifier = Modifier.size(20.dp),
+        )
+    }
+}
+
+@Composable
+private fun receivedTint(): Color = if (MaterialTheme.colorScheme.isLight) Color(0xFF15803D) else Color(0xFF22C55E)
+
+@Composable
+private fun HistoryRow(item: HistoryItem, onOpen: (HistoryItem) -> Unit) = when (item) {
+    is HistoryItem.Sent -> TxRow(item.record) { onOpen(item) }
+    is HistoryItem.Received -> ReceivedRow(item.transfer) { onOpen(item) }
+}
+
 /**
- * The wallet page's latest sends from the active account, with a way to
- * all of them. With none yet (#422): what the list shows and doesn't
- * (money received isn't in it), Receive ([onReceive]), and the
- * account's page on each explorer ([explorers], [accountExplorerLinks]).
+ * Under a list (#441): received ETH or xDAI isn't in it, and where to see
+ * it — each explorer's page for the account. While the account's first
+ * scan is still reading back ([catchingUp]), says older tokens may still
+ * come in.
+ */
+@Composable
+private fun HistoryFootnote(catchingUp: Boolean, explorers: List<Pair<String, String>>, onOpenUrl: (String) -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (catchingUp) {
+            Text(
+                stringResource(R.string.wallet_history_catching_up),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Text(
+            stringResource(R.string.wallet_history_native_note),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        ExplorerLinks(explorers, onOpenUrl)
+    }
+}
+
+@Composable
+private fun ExplorerLinks(explorers: List<Pair<String, String>>, onOpenUrl: (String) -> Unit) {
+    explorers.forEach { (host, url) ->
+        TextButton(onClick = { onOpenUrl(url) }, modifier = Modifier.heightIn(min = 48.dp)) {
+            Text(stringResource(R.string.wallet_history_explorer_activity, host))
+            Spacer(Modifier.width(4.dp))
+            Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+        }
+    }
+}
+
+/**
+ * The wallet page's latest activity of the active account — sends made
+ * here and built-in tokens received (#441) — with a way to all of it.
+ * With none yet (#422): what the list shows and doesn't (ETH or xDAI
+ * received isn't in it), Receive ([onReceive]), and the account's page on
+ * each explorer ([explorers], [accountExplorerLinks]); under a list, the
+ * same note and links ([HistoryFootnote]).
  */
 @Composable
 internal fun TxHistorySection(
-    records: List<TxRecord>,
-    onOpen: (TxRecord) -> Unit,
+    records: List<HistoryItem>,
+    onOpen: (HistoryItem) -> Unit,
     onShowAll: () -> Unit,
     onReceive: (() -> Unit)? = null,
     explorers: List<Pair<String, String>> = emptyList(),
@@ -175,13 +301,14 @@ internal fun TxHistorySection(
     preview: Int = TX_HISTORY_PREVIEW,
     // A row above the list (the wallet home's send in progress, W1).
     top: (@Composable () -> Unit)? = null,
+    catchingUp: Boolean = false,
 ) {
     SectionCard(title = title) {
         top?.invoke()
         if (records.isEmpty()) {
-            TxHistoryEmpty(onReceive, explorers, onOpenUrl)
+            TxHistoryEmpty(onReceive, explorers, onOpenUrl, catchingUp)
         } else {
-            records.take(preview).forEach { TxRow(it, onOpen) }
+            records.take(preview).forEach { HistoryRow(it, onOpen) }
             if (records.size > preview) {
                 PageRow(
                     title = stringResource(R.string.wallet_history_all),
@@ -191,16 +318,22 @@ internal fun TxHistorySection(
                     onClick = onShowAll,
                 )
             }
+            HistoryFootnote(catchingUp, explorers, onOpenUrl)
         }
     }
 }
 
-/** No sends yet (#422): say so, and offer Receive and the explorers' full activity. */
+/** Nothing yet (#422): say so, and offer Receive and the explorers' full activity. */
 @Composable
-private fun TxHistoryEmpty(onReceive: (() -> Unit)?, explorers: List<Pair<String, String>>, onOpenUrl: (String) -> Unit) {
+private fun TxHistoryEmpty(
+    onReceive: (() -> Unit)?,
+    explorers: List<Pair<String, String>>,
+    onOpenUrl: (String) -> Unit,
+    catchingUp: Boolean = false,
+) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
-            stringResource(R.string.wallet_history_empty),
+            stringResource(if (catchingUp) R.string.wallet_history_empty_catching_up else R.string.wallet_history_empty),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -211,19 +344,21 @@ private fun TxHistoryEmpty(onReceive: (() -> Unit)?, explorers: List<Pair<String
                 Text(stringResource(R.string.wallet_history_receive))
             }
         }
-        explorers.forEach { (host, url) ->
-            TextButton(onClick = { onOpenUrl(url) }, modifier = Modifier.heightIn(min = 48.dp)) {
-                Text(stringResource(R.string.wallet_history_explorer_activity, host))
-                Spacer(Modifier.width(4.dp))
-                Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
-            }
-        }
+        ExplorerLinks(explorers, onOpenUrl)
     }
 }
 
-/** Every send from the active account, newest first. */
+/** All of the active account's activity — sends made here and tokens received — newest first. */
 @Composable
-internal fun TxHistoryPage(accountName: String, records: List<TxRecord>, onOpen: (TxRecord) -> Unit, onBack: () -> Unit) {
+internal fun TxHistoryPage(
+    accountName: String,
+    records: List<HistoryItem>,
+    onOpen: (HistoryItem) -> Unit,
+    onBack: () -> Unit,
+    explorers: List<Pair<String, String>> = emptyList(),
+    onOpenUrl: (String) -> Unit = {},
+    catchingUp: Boolean = false,
+) {
     BackHandler(onBack = onBack)
     FullScreenScaffold(title = stringResource(R.string.wallet_history_title), onDismiss = onBack) {
         LazyColumn(
@@ -232,11 +367,13 @@ internal fun TxHistoryPage(accountName: String, records: List<TxRecord>, onOpen:
             modifier = Modifier.fillMaxSize(),
         ) {
             item("list") {
-                SectionCard(title = stringResource(R.string.wallet_history_sent_from, accountName)) {
+                SectionCard(title = accountName) {
                     if (records.isEmpty()) {
-                        Text(stringResource(R.string.wallet_history_empty), style = MaterialTheme.typography.bodyMedium)
+                        TxHistoryEmpty(onReceive = null, explorers = explorers, onOpenUrl = onOpenUrl, catchingUp = catchingUp)
+                    } else {
+                        records.forEach { HistoryRow(it, onOpen) }
+                        HistoryFootnote(catchingUp, explorers, onOpenUrl)
                     }
-                    records.forEach { TxRow(it, onOpen) }
                 }
             }
         }
@@ -314,6 +451,95 @@ internal fun TxDetailPage(r: TxRecord, onOpenUrl: (String) -> Unit, onBack: () -
                 }
             }
             explorerTxUrl(r)?.let { url ->
+                item("explorer") {
+                    OutlinedButton(onClick = { onOpenUrl(url) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                        Text(
+                            android.net.Uri.parse(url).host?.let { stringResource(R.string.wallet_history_view_on, it) }
+                                ?: stringResource(R.string.wallet_history_view_on_explorer),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One received transfer in full (#441): the amount and that it arrived
+ * first, then from whom, on which network and when; the receiving
+ * account, the token contract and the transaction under Details.
+ */
+@Composable
+internal fun ReceivedDetailPage(t: IncomingTransfer, onOpenUrl: (String) -> Unit, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    val tint = receivedTint()
+    val format = txDateFormat()
+    // The block number as explorers write it, whatever the phone's language.
+    val block = "%,d".format(Locale.ROOT, t.block)
+    FullScreenScaffold(title = stringResource(R.string.wallet_history_detail_title), onDismiss = onBack) {
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            item("status") {
+                SectionCard(title = stringResource(R.string.wallet_history_field_amount)) {
+                    Text(
+                        receivedTitle(t),
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.semantics { heading() },
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.Top) {
+                        Icon(Icons.AutoMirrored.Filled.CallReceived, contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                stringResource(R.string.wallet_history_status_received),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = tint,
+                            )
+                            SelectionContainer {
+                                Text(stringResource(R.string.wallet_history_received_text, block), style = MaterialTheme.typography.bodyMedium)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    HorizontalDivider()
+                    CopyableAddressRow(
+                        label = stringResource(R.string.wallet_history_field_from),
+                        address = t.from,
+                        explorerUrl = explorerAddressUrl(t.explorerUrl, t.from),
+                        onOpenUrl = onOpenUrl,
+                        detail = stringResource(R.string.wallet_history_received_from_caution),
+                    )
+                    TxField(stringResource(R.string.wallet_history_field_network), t.chainName)
+                    TxField(stringResource(R.string.wallet_history_field_received), format.format(Date(t.at)))
+                    DetailsExpander {
+                        CopyableAddressRow(
+                            label = stringResource(R.string.wallet_history_field_to),
+                            address = t.account,
+                            explorerUrl = explorerAddressUrl(t.explorerUrl, t.account),
+                            onOpenUrl = onOpenUrl,
+                        )
+                        CopyableAddressRow(
+                            label = stringResource(R.string.wallet_history_field_contract, t.tokenSymbol),
+                            address = t.tokenAddress,
+                            explorerUrl = explorerAddressUrl(t.explorerUrl, t.tokenAddress),
+                            onOpenUrl = onOpenUrl,
+                        )
+                        CopyableAddressRow(
+                            label = stringResource(R.string.wallet_history_field_transaction),
+                            address = t.hash,
+                            explorerUrl = explorerTxUrl(t),
+                            onOpenUrl = onOpenUrl,
+                        )
+                    }
+                }
+            }
+            explorerTxUrl(t)?.let { url ->
                 item("explorer") {
                     OutlinedButton(onClick = { onOpenUrl(url) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                         Text(

@@ -393,13 +393,23 @@
     <string name="wallet_history_subtitle">%1$s · %2$s · %3$s</string>
     <string name="wallet_history_row_to_named">To %1$s · %2$s</string>
     <string name="wallet_history_row_to">To %1$s</string>
-    <string name="wallet_history_empty">Nothing sent from this account yet. Sends made here show up here; money you receive shows on the block explorer.</string>
+    <string name="wallet_history_empty">Nothing here yet. Sends made from this account and tokens it receives show up here. ETH or xDAI it receives only shows on the block explorer.</string>
+    <!-- While the account's first look for received tokens (#441) is still going. -->
+    <string name="wallet_history_empty_catching_up">Nothing here yet. Looking for tokens this account received in the last 30 days…</string>
+    <string name="wallet_history_catching_up">Still looking for tokens received in the last 30 days…</string>
+    <!-- Under the list (#441): plain coin transfers leave no record the app can look up. -->
+    <string name="wallet_history_native_note">Tokens you receive show up here. ETH or xDAI you receive doesn’t: the network keeps no record of it the wallet can look up. The block explorer shows everything.</string>
+    <string name="wallet_history_title_received">Received %1$s %2$s</string>
+    <string name="wallet_history_status_received">Received</string>
+    <!-- %1$s: block number. -->
+    <string name="wallet_history_received_text">Arrived in block %1$s.</string>
+    <string name="wallet_history_received_from_caution">Anyone can send tokens to your address, including from an address made to look like one you know. Check every character before sending anything back to it.</string>
+    <string name="wallet_history_field_received">Received</string>
     <string name="wallet_history_all">All transactions</string>
     <plurals name="wallet_history_all_count">
-        <item quantity="one">%d sent from this account</item>
-        <item quantity="other">%d sent from this account</item>
+        <item quantity="one">%d transaction</item>
+        <item quantity="other">%d transactions</item>
     </plurals>
-    <string name="wallet_history_sent_from">Sent from %1$s</string>
     <string name="wallet_history_detail_title">Transaction</string>
     <string name="wallet_history_field_amount">Amount</string>
     <string name="wallet_history_field_to">To</string>

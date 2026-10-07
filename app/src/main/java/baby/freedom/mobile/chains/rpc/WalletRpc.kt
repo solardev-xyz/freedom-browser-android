@@ -166,6 +166,16 @@ class WalletRpc(
             }
         }
 
+    /**
+     * `eth_getLogs` for [filter] (`fromBlock`, `toBlock`, `address`,
+     * `topics`): the logs as the answering tier gave them. Tiers in [skip]
+     * aren't asked ([ChainDataRouter.request]).
+     */
+    suspend fun logs(chainId: Long, filter: JSONObject, skip: Set<ChainSource> = emptySet()): Reading<JSONArray> =
+        read(chainId, "eth_getLogs", JSONArray().put(filter), agreeOn = null, skip = skip) {
+            it as? JSONArray ?: throw invalid("eth_getLogs", it)
+        }
+
     /** Send a signed transaction; its hash. */
     suspend fun sendRawTransaction(chainId: Long, rawTransaction: String): Reading<String> {
         val r = router.broadcast(chainId, rawTransaction)
