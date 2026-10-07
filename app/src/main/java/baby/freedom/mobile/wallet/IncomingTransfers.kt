@@ -211,6 +211,8 @@ internal object IncomingScan {
      * its transaction has no receipt is taken as proof it doesn't exist:
      * nearer the head, a quorum of RPCs a few blocks behind would say the
      * same of a real transfer, whose block then counts as read for good.
+     * Blocks nearer the head than this aren't counted as read either (one
+     * RPC a little behind may answer them with no logs): they're only peeked at.
      */
     fun absenceDepth(chainId: Long): Long = ABSENCE_MS / (SLOT_MS[chainId] ?: 12_000L)
 
@@ -571,8 +573,12 @@ class IncomingTransfers internal constructor(
         // The head bounds what's marked read: one RPC's word for it could skip blocks never read.
         val head = reads.blockNumber(chain.id).takeIf { it.trust.undisputed }?.value ?: return
         val safeHead = head - IncomingScan.margin(chain.id)
-        if (safeHead <= 0) return
-        var s = IncomingScan.rebase(known ?: IncomingScan.start(account, chain.id, safeHead), safeHead)
+        // Blocks count as read only this far under the head: one RPC a little behind may answer
+        // an empty list for blocks past its own head, and a range marked read is never asked again.
+        // The newer blocks are only peeked at (below), and read for good by a later scan.
+        val settled = head - maxOf(IncomingScan.margin(chain.id), IncomingScan.absenceDepth(chain.id))
+        if (settled <= 0) return
+        var s = IncomingScan.rebase(known ?: IncomingScan.start(account, chain.id, settled), settled)
         synchronized(this) { if (generation != mine) return }
         if (!s.caughtUp) _catchingUp.value = _catchingUp.value + account.lowercase()
         var failures = 0
@@ -583,7 +589,7 @@ class IncomingTransfers internal constructor(
             // until receipts have drained it.
             val room = MAX_CANDIDATES - s.candidates.size
             if (room <= 0) break
-            val range = IncomingScan.nextRange(s, safeHead) ?: break
+            val range = IncomingScan.nextRange(s, settled) ?: break
             val logs = try {
                 reads.logs(chain.id, IncomingLogs.filter(account, tokens, range)).value
             } catch (e: CancellationException) {
@@ -618,11 +624,40 @@ class IncomingTransfers internal constructor(
             // A part read means the rest's next block didn't fit, and the room has only shrunk
             // since: asking again before receipts drain the list would find the same and stop.
             if (part != range) break
-            if (IncomingScan.nextRange(s, safeHead) != null) delay(pauseMs)
+            if (IncomingScan.nextRange(s, settled) != null) delay(pauseMs)
         }
-        val readToHead = (s.to ?: -1) >= safeHead
+        val readToHead = (s.to ?: -1) >= settled
+        if (readToHead && safeHead > settled) s = peek(chain, tokens, s, key, mine, (settled + 1)..safeHead) ?: return
         synchronized(this) { if (readToHead && generation == mine) lastScan[key] = uptime() }
         verify(chain, s, key, mine, head)
+    }
+
+    /**
+     * [s] with the transfers to its account in [range] — the blocks between
+     * what counts as read and the head — added as candidates, without
+     * marking them read: a later scan reads them for good once they're far
+     * enough under the head that an empty answer means none. So a transfer
+     * shows within a scan or two of arriving, and an RPC behind the head
+     * can't hide one. Nothing is added when they don't all fit; null when a
+     * wipe came meanwhile.
+     */
+    private suspend fun peek(chain: Chain, tokens: List<Token>, s: ScanState, key: Pair<String, Long>, mine: Int, range: LongRange): ScanState? {
+        val room = MAX_CANDIDATES - s.candidates.size
+        if (room <= 0) return s
+        delay(pauseMs)
+        val logs = try {
+            reads.logs(chain.id, IncomingLogs.filter(s.account, tokens, range)).value
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return s
+        }
+        val found = (0 until logs.length()).mapNotNull { IncomingLogs.decode(logs.opt(it), s.account, tokens, range) }
+        val have = s.transfers.map { "${it.hash.lowercase()}:${it.logIndex}" }.toSet() + s.candidates.map { it.key }
+        val fresh = found.filter { it.key !in have }.distinctBy { it.key }
+        if (fresh.isEmpty() || fresh.size > room) return s
+        val next = s.copy(candidates = s.candidates + fresh)
+        return if (commit(key, next, mine)) next else null
     }
 
     /**

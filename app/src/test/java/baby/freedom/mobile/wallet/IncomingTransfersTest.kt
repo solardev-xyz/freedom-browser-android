@@ -283,6 +283,9 @@ class IncomingTransfersTest {
         /** Ranges wider than this are refused, like an RPC's cap. */
         var maxRange = Long.MAX_VALUE
         var down = false
+
+        /** How far behind the head this RPC is: it answers no logs past its own head, as some do. */
+        var lag = 0L
         var gate: CompletableDeferred<Unit>? = null
         val entered = CompletableDeferred<Unit>()
         lateinit var ok: ChainTrust
@@ -298,7 +301,7 @@ class IncomingTransfersTest {
             if (down) throw ChainRpcException.AllSourcesFailed(listOf("direct: down"), null)
             if (to - from + 1 > maxRange) throw ChainRpcException.AllSourcesFailed(listOf("direct: range too large"), null)
             val out = JSONArray()
-            logs.filter { it.getString("blockNumber").substring(2).toLong(16) in from..to }.forEach { out.put(it) }
+            logs.filter { it.getString("blockNumber").substring(2).toLong(16).let { b -> b in from..to && b <= head - lag } }.forEach { out.put(it) }
             return WalletRpc.Reading(out, ok)
         }
 
@@ -335,10 +338,12 @@ class IncomingTransfersTest {
         assertEquals(head - 50_000, t.block)
         assertEquals((1_700_000_000L + (head - 50_000) * 5) * 1000, t.at)
         assertEquals(gnosis.name, t.chainName)
-        // The whole window, newest chunk first, ending 20 blocks under the head (reorg margin).
-        val safe = head - IncomingScan.margin(gnosis.id)
-        assertEquals((safe - IncomingScan.INITIAL_SPAN + 1)..safe, reads.asked.first())
-        assertEquals(IncomingScan.windowBlocks(gnosis.id), reads.asked.sumOf { r -> r.count().toLong() })
+        // The whole window, newest chunk first, read for good up to ~10 minutes under the head;
+        // then the blocks from there to 20 under the head (reorg margin) are only peeked at.
+        val settled = head - IncomingScan.absenceDepth(gnosis.id)
+        assertEquals((settled - IncomingScan.INITIAL_SPAN + 1)..settled, reads.asked.first())
+        assertEquals((settled + 1)..(head - IncomingScan.margin(gnosis.id)), reads.asked.last())
+        assertEquals(IncomingScan.windowBlocks(gnosis.id), reads.asked.dropLast(1).sumOf { r -> r.count().toLong() })
         assertTrue(inc.catchingUp.value.isEmpty())
     }
 
@@ -356,7 +361,8 @@ class IncomingTransfersTest {
         reads.head += 100
         reads.logs += log(block = reads.head - 30, tx = hash(9))
         inc.scan(account, listOf(gnosis))
-        assertEquals(listOf((2_000_000L - 20 + 1)..(reads.head - 20)), reads.asked.drop(first))
+        // The blocks peeked at last time are read for good now, then the newest peeked at.
+        assertEquals(listOf((2_000_000L - 120 + 1)..(reads.head - 120), (reads.head - 119)..(reads.head - 20)), reads.asked.drop(first))
         assertEquals(hash(9), inc.transfers.value.single().hash)
     }
 
@@ -415,6 +421,22 @@ class IncomingTransfersTest {
     }
 
     @Test
+    fun `an RPC behind the head answering no logs for the newest blocks doesn't hide a transfer there for good`() = runBlocking {
+        val head = 1_000_000L
+        val reads = fake(head, log(block = head - 50, tx = hash(7)))
+        reads.lag = 100
+        var now = 0L
+        val inc = incoming(reads, uptime = { now })
+        inc.scan(account, listOf(gnosis))
+        assertTrue(inc.transfers.value.isEmpty())
+        // Later, the same RPC still as far behind: the block is read again, and this time it has it.
+        reads.head += 200
+        now += IncomingTransfers.MIN_SCAN_INTERVAL_MS
+        inc.scan(account, listOf(gnosis))
+        assertEquals(hash(7), inc.transfers.value.single().hash)
+    }
+
+    @Test
     fun `no RPC answering stops the scan after a few tries and it resumes where it was`() = runBlocking {
         val head = 3_000_000L
         val reads = fake(head)
@@ -426,7 +448,7 @@ class IncomingTransfersTest {
         reads.asked.clear()
         inc.scan(account, listOf(gnosis))
         assertTrue(reads.asked.isNotEmpty())
-        assertEquals(head - 20, reads.asked.first().last)
+        assertEquals(head - 120, reads.asked.first().last)
     }
 
     @Test
@@ -555,7 +577,9 @@ class IncomingTransfersTest {
             scansNeeded++
         }
         assertEquals(listOf(hash(1)), inc.transfers.value.map { t -> t.hash })
-        assertTrue("candidates peaked at ${sizes.max()}", sizes.max() <= IncomingTransfers.MAX_CANDIDATES)
+        // A save from the last scan's background write may still be landing.
+        val peak = synchronized(sizes) { sizes.max() }
+        assertTrue("candidates peaked at $peak", peak <= IncomingTransfers.MAX_CANDIDATES)
         // 3,000 fakes drained 20 receipts a scan, plus the wait for those nearest the head to sink
         // past the absence depth: no stall beyond that.
         val sinking = (IncomingScan.ABSENCE_MS / IncomingTransfers.MIN_SCAN_INTERVAL_MS).toInt()
@@ -604,7 +628,7 @@ class IncomingTransfersTest {
     @Test
     fun `a chunk read only in part stops reading until receipts make room`() = runBlocking {
         val head = 1_000_000L
-        val safe = head - IncomingScan.margin(gnosis.id)
+        val safe = head - IncomingScan.absenceDepth(gnosis.id)
         val to = safe - IncomingScan.MIN_SPAN
         // 45 waiting candidates, read up to `to` in the smallest chunks.
         val waiting = (0 until 45).map { i ->
@@ -666,7 +690,7 @@ class IncomingTransfersTest {
         reads.head = head + 5_000_000L
         // The failures shrank the chunks, so reading back takes a few runs; each stops at the window's floor.
         repeat(20) { inc.scan(account, listOf(gnosis)) }
-        val safe = reads.head - IncomingScan.margin(gnosis.id)
+        val safe = reads.head - IncomingScan.absenceDepth(gnosis.id)
         val windowFloor = safe - IncomingScan.windowBlocks(gnosis.id) + 1
         assertEquals(windowFloor, reads.asked.minOf { r -> r.first })
         assertTrue(inc.catchingUp.value.isEmpty())
@@ -716,8 +740,8 @@ class IncomingTransfersTest {
         reads.asked.clear()
         reads.head += 10
         again.scan(account, listOf(gnosis))
-        // Only the ten new blocks: the window was read before the restart.
-        assertEquals(listOf((head - 19)..(head - 10)), reads.asked)
+        // Only the ten new blocks, then a peek at the newest: the window was read before the restart.
+        assertEquals(listOf((head - 119)..(head - 110), (head - 109)..(head - 10)), reads.asked)
     }
 
     @Test

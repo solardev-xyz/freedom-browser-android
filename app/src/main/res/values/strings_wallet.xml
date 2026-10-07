@@ -407,8 +407,8 @@
     <string name="wallet_history_field_received">Received</string>
     <string name="wallet_history_all">All transactions</string>
     <plurals name="wallet_history_all_count">
-        <item quantity="one">%d sent from this account</item>
-        <item quantity="other">%d sent from this account</item>
+        <item quantity="one">%d transaction</item>
+        <item quantity="other">%d transactions</item>
     </plurals>
     <string name="wallet_history_detail_title">Transaction</string>
     <string name="wallet_history_field_amount">Amount</string>
