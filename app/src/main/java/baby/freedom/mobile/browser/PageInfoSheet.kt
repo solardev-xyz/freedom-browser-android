@@ -73,6 +73,7 @@ import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -331,35 +332,105 @@ internal object SiteData {
         return SiteDataCount(cookies, bytes)
     }
 
-    /** Tab id → the origin whose data that tab's next document load clears first. */
-    private val cleanups = ConcurrentHashMap<Long, String>()
+    /** One Delete's mark on a tab: the origin its next document load clears first. */
+    class CleanupMark internal constructor(val origin: String)
+
+    /** Tab id → the mark its next document load takes. */
+    private val cleanups = ConcurrentHashMap<Long, CleanupMark>()
 
     /**
      * Mark tab [tabId]'s next document load — the reload [delete] is
      * followed by — to be answered with the site-data cleanup page
-     * ([takeCleanup]) if it is on [origin]. That page, run in the tab
-     * itself, is what reaches the tab's own sessionStorage, and whatever
-     * the old document wrote on its way out. The mark lasts that one
-     * navigation: the tab's next main-frame request takes it, and its
+     * ([takeCleanup]) if it is a GET on [origin]. That page, run in the
+     * tab itself, is what reaches the tab's own sessionStorage, and
+     * whatever the old document wrote on its way out. The mark lasts that
+     * one navigation: the tab's next main-frame request takes it, its
      * next commit ([committed]) drops it if no request did — a load a
-     * service worker answered never reaches the interceptor.
+     * service worker answered never reaches the interceptor — and the
+     * Delete that set it drops it when it's done waiting for that reload
+     * ([dropCleanup]), so a reload that never came (a page that stopped
+     * it, a fragment-only navigation) can't leave it armed for a later
+     * load the user didn't ask to clean (R2-F1). Returns the mark, for
+     * [cleanupPending] and [dropCleanup]; it replaces any earlier one.
      */
-    fun markCleanup(tabId: Long, origin: String) {
-        cleanups[tabId] = origin
-    }
+    fun markCleanup(tabId: Long, origin: String): CleanupMark =
+        CleanupMark(origin).also { cleanups[tabId] = it }
 
     /**
      * Should tab [tabId]'s main-frame request for [url] be answered with
      * the site-data cleanup page ([SITE_DATA_CLEANUP_HTML])? Once: the
      * tab's next main-frame request takes the mark whatever it is for,
-     * and only one on the marked origin is answered with the page — a
+     * and only a GET on the marked origin is answered with the page — a
      * tab that went elsewhere instead never has it turn up on a later
-     * visit. Any thread (the interceptor's).
+     * visit, and a form POST (a login) is never swallowed by it. Any
+     * thread (the interceptor's).
      */
-    fun takeCleanup(tabId: Long, url: String): Boolean {
-        val origin = cleanups.remove(tabId) ?: return false
-        return permissionOriginKey(url) == origin
+    fun takeCleanup(tabId: Long, url: String, method: String?): Boolean {
+        val mark = cleanups.remove(tabId) ?: return false
+        return method.equals("GET", ignoreCase = true) && permissionOriginKey(url) == mark.origin
     }
+
+    /** Is [mark] still on tab [tabId], waiting for a load to take it? */
+    fun cleanupPending(tabId: Long, mark: CleanupMark): Boolean = cleanups[tabId] === mark
+
+    /** Drop [mark] from tab [tabId] if no load took it; a later Delete's mark is left alone. */
+    fun dropCleanup(tabId: Long, mark: CleanupMark) {
+        cleanups.remove(tabId, mark)
+    }
+
+    /**
+     * The tab's half of Delete data, after [delete]: get tab [tabId] onto
+     * a new document whose first load is the cleanup page ([markCleanup]),
+     * its service workers unregistered first. [clean] asks the tab's own
+     * document to clear and unregister, then reload itself
+     * ([siteDataInPageJs]) under a done-key; [cleaned] asks whether it has
+     * finished clearing. Only once it has — or after [IN_PAGE_WIPE_MAX_MS]
+     * at the most — does the wait for its reload start, so a slow clearing
+     * (big caches, many databases) isn't overtaken by a reload from here
+     * that the still-registered worker would answer (R2-F3). If no load
+     * takes the mark within [IN_PAGE_RELOAD_WAIT_MS] of that (a page that
+     * stops it), or the page couldn't be asked, [reload] reloads the tab
+     * from here. Whatever happens, the mark is dropped at the end, so it
+     * can't stay armed for a later load (R2-F1).
+     */
+    suspend fun cleanAndReload(
+        tabId: Long,
+        origin: String,
+        clean: (doneKey: String) -> Boolean,
+        cleaned: suspend (doneKey: String) -> Boolean,
+        reload: () -> Unit,
+        doneKey: String = "_" + UUID.randomUUID().toString().replace("-", ""),
+    ) {
+        val mark = markCleanup(tabId, origin)
+        try {
+            if (clean(doneKey)) {
+                withTimeoutOrNull(IN_PAGE_WIPE_MAX_MS) {
+                    while (cleanupPending(tabId, mark) && !cleaned(doneKey)) delay(CLEANUP_POLL_MS)
+                }
+                withTimeoutOrNull(IN_PAGE_RELOAD_WAIT_MS) {
+                    while (cleanupPending(tabId, mark)) delay(CLEANUP_POLL_MS)
+                }
+            }
+            if (!cleanupPending(tabId, mark)) return
+            reload()
+            withTimeoutOrNull(FALLBACK_RELOAD_WAIT_MS) {
+                while (cleanupPending(tabId, mark)) delay(CLEANUP_POLL_MS)
+            }
+        } finally {
+            dropCleanup(tabId, mark)
+        }
+    }
+
+    /** The longest [cleanAndReload] waits for the page's own clearing to end. */
+    const val IN_PAGE_WIPE_MAX_MS = 15_000L
+
+    /** How long, once the page's clearing ended, [cleanAndReload] waits for its reload to start. */
+    const val IN_PAGE_RELOAD_WAIT_MS = 3_000L
+
+    /** How long the mark waits for the reload [cleanAndReload] itself started. */
+    const val FALLBACK_RELOAD_WAIT_MS = 5_000L
+
+    private const val CLEANUP_POLL_MS = 100L
 
     /** Tab id → the origin ([permissionOriginKey]) of the document it last committed. */
     private val committedOrigins = ConcurrentHashMap<Long, String>()
@@ -374,9 +445,6 @@ internal object SiteData {
         val origin = url?.let(::permissionOriginKey)
         if (origin == null) committedOrigins.remove(tabId) else committedOrigins[tabId] = origin
     }
-
-    /** Is a [markCleanup] for tab [tabId] still waiting for a load to take it? */
-    fun cleanupPending(tabId: Long): Boolean = cleanups.containsKey(tabId)
 
     /** The origin of tab [tabId]'s committed document, as [committed] last heard. */
     fun committedOrigin(tabId: Long): String? = committedOrigins[tabId]

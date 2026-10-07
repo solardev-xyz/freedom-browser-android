@@ -253,13 +253,31 @@ class TabsState(
      * Hook installed by the [BrowserWebViewHost]: have the given tab's
      * document, if it is on the given origin, clear that origin's data
      * and unregister its service workers itself, then reload
-     * ([siteDataInPageJs]) — Page info's Delete data (#442). Whether it
-     * was asked to; `false` when the tab has no WebView or its committed
-     * document is on another origin. `null` before the host has
-     * composed, or after it disposes.
+     * ([siteDataInPageJs], marking that it's done with the given key) —
+     * Page info's Delete data (#442). Whether it was asked to; `false`
+     * when the tab has no WebView or its committed document is on another
+     * origin. `null` before the host has composed, or after it disposes.
      */
     @Volatile
-    internal var cleanSiteInPage: ((BrowserState, String) -> Boolean)? = null
+    internal var cleanSiteInPage: ((BrowserState, String, String) -> Boolean)? = null
+
+    /**
+     * Hook installed by the [BrowserWebViewHost]: answer whether the given
+     * tab's document has finished the clearing [cleanSiteInPage] asked of
+     * it under the given key ([siteDataInPageDoneJs]); `false` when the
+     * tab has no WebView. Main thread; the answer comes on it too.
+     */
+    @Volatile
+    internal var siteCleanedInPage: ((BrowserState, String, (Boolean) -> Unit) -> Unit)? = null
+
+    /**
+     * Hook installed by the [BrowserWebViewHost]: reload the given tab's
+     * document in its WebView (`WebView.reload()`) — a new document even
+     * where the address has a fragment, which a `loadUrl` of the same
+     * address isn't. Whether there was a WebView to reload.
+     */
+    @Volatile
+    internal var reloadDocument: ((BrowserState) -> Boolean)? = null
 
     /**
      * Hook installed by the [BrowserWebViewHost]: mute or unmute the

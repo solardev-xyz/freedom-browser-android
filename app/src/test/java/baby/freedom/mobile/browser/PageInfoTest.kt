@@ -6,6 +6,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.currentTime
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
 /** Page info (#442): the badge, the connection, and the site-data helpers. */
@@ -142,42 +148,125 @@ class PageInfoTest {
     @Test
     fun `the cleanup page is served once, to the marked tab, on the marked origin only`() {
         SiteData.markCleanup(7L, "https://example.org")
-        assertEquals(false, SiteData.takeCleanup(8L, "https://example.org/"))
-        assertEquals(true, SiteData.takeCleanup(7L, "https://example.org/a?b"))
+        assertEquals(false, SiteData.takeCleanup(8L, "https://example.org/", "GET"))
+        assertEquals(true, SiteData.takeCleanup(7L, "https://example.org/a?b", "GET"))
         // Taken: the next load is served normally.
-        assertEquals(false, SiteData.takeCleanup(7L, "https://example.org/"))
+        assertEquals(false, SiteData.takeCleanup(7L, "https://example.org/", "GET"))
         // A tab that went elsewhere loses the mark rather than keep it for a later visit.
         SiteData.markCleanup(7L, "https://example.org")
-        assertEquals(false, SiteData.takeCleanup(7L, "https://other.example/"))
-        assertEquals(false, SiteData.takeCleanup(7L, "https://example.org/"))
+        assertEquals(false, SiteData.takeCleanup(7L, "https://other.example/", "GET"))
+        assertEquals(false, SiteData.takeCleanup(7L, "https://example.org/", "GET"))
+        // A form POST on the origin (a login) is never answered with the cleanup page.
+        SiteData.markCleanup(7L, "https://example.org")
+        assertEquals(false, SiteData.takeCleanup(7L, "https://example.org/login", "POST"))
+        assertEquals(false, SiteData.takeCleanup(7L, "https://example.org/", "GET"))
     }
 
     @Test
     fun `a load a service worker answered drops the cleanup mark at its commit`() {
         // The reload never reached the interceptor; its commit ends the mark,
         // so a later same-origin load isn't served the cleanup page.
-        SiteData.markCleanup(9L, "https://example.org")
-        assertTrue(SiteData.cleanupPending(9L))
+        val mark = SiteData.markCleanup(9L, "https://example.org")
+        assertTrue(SiteData.cleanupPending(9L, mark))
         SiteData.committed(9L, "https://example.org/")
-        assertFalse(SiteData.cleanupPending(9L))
+        assertFalse(SiteData.cleanupPending(9L, mark))
         assertEquals("https://example.org", SiteData.committedOrigin(9L))
-        assertEquals(false, SiteData.takeCleanup(9L, "https://example.org/"))
+        assertEquals(false, SiteData.takeCleanup(9L, "https://example.org/", "GET"))
         // Another tab's commit leaves this one's mark alone.
         SiteData.markCleanup(9L, "https://example.org")
         SiteData.committed(10L, "https://other.example/")
-        assertEquals(true, SiteData.takeCleanup(9L, "https://example.org/"))
+        assertEquals(true, SiteData.takeCleanup(9L, "https://example.org/", "GET"))
         SiteData.tabClosed(9L)
         assertNull(SiteData.committedOrigin(9L))
     }
 
     @Test
-    fun `the in-page cleanup acts only on its own origin, then reloads`() {
-        val js = siteDataInPageJs("http://localhost:8720")
+    fun `dropping a mark leaves a later Delete's mark alone`() {
+        val first = SiteData.markCleanup(11L, "https://example.org")
+        val second = SiteData.markCleanup(11L, "https://example.org")
+        assertFalse(SiteData.cleanupPending(11L, first))
+        SiteData.dropCleanup(11L, first)
+        assertTrue(SiteData.cleanupPending(11L, second))
+        SiteData.dropCleanup(11L, second)
+        assertEquals(false, SiteData.takeCleanup(11L, "https://example.org/", "GET"))
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a reload that never comes leaves no mark behind`() = runTest {
+        // The fragment case (R2-F1): neither the page's reload nor the
+        // app's starts a load. The mark must not outlive the Delete, or a
+        // later same-origin visit is wiped.
+        var reloads = 0
+        SiteData.cleanAndReload(
+            tabId = 12L, origin = "http://localhost:8721",
+            clean = { true }, cleaned = { true }, reload = { reloads++ },
+        )
+        assertEquals(1, reloads)
+        assertEquals(false, SiteData.takeCleanup(12L, "http://localhost:8721/index.html?later", "GET"))
+        // A page that couldn't be asked is reloaded from here at once, and again the mark goes.
+        SiteData.cleanAndReload(
+            tabId = 12L, origin = "http://localhost:8721",
+            clean = { false }, cleaned = { error("not asked") }, reload = { reloads++ },
+        )
+        assertEquals(2, reloads)
+        assertEquals(false, SiteData.takeCleanup(12L, "http://localhost:8721/", "GET"))
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `the fallback reload waits for the page's clearing to end`() = runTest {
+        // A slow clearing (R2-F3): the app doesn't reload over it while
+        // the worker is still registered; it waits for the page's done
+        // mark, then for the page's own reload.
+        var done = false
+        var reloadedAt = -1L
+        val job = launch {
+            SiteData.cleanAndReload(
+                tabId = 13L, origin = "https://example.org",
+                clean = { true }, cleaned = { done }, reload = { reloadedAt = currentTime },
+            )
+        }
+        advanceTimeBy(10_000)
+        runCurrent()
+        assertEquals(-1L, reloadedAt)
+        done = true
+        // The page's own reload takes the mark: nothing reloads from here.
+        advanceTimeBy(1_000)
+        assertEquals(true, SiteData.takeCleanup(13L, "https://example.org/", "GET"))
+        job.join()
+        assertEquals(-1L, reloadedAt)
+        // A page that never ends its clearing is reloaded once the cap has passed.
+        val capped = launch {
+            SiteData.cleanAndReload(
+                tabId = 14L, origin = "https://example.org",
+                clean = { true }, cleaned = { false }, reload = { reloadedAt = currentTime },
+            )
+        }
+        val start = currentTime
+        capped.join()
+        assertTrue(reloadedAt - start >= SiteData.IN_PAGE_WIPE_MAX_MS)
+    }
+
+    @Test
+    fun `the in-page cleanup acts only on its own origin, marks it done, then reloads`() {
+        val js = siteDataInPageJs("http://localhost:8720", "_k1")
         assertTrue("if (location.origin !== \"http://localhost:8720\") return;" in js)
         assertTrue("r.unregister()" in js)
-        assertTrue(js.indexOf("r.unregister()") < js.indexOf("location.replace(location.href)"))
+        assertTrue(js.indexOf("r.unregister()") < js.indexOf("window[\"_k1\"] = true"))
+        assertTrue(js.indexOf("window[\"_k1\"] = true") < js.indexOf("location.replace(location.href)"))
+        assertEquals("window[\"_k1\"] === true", siteDataInPageDoneJs("_k1"))
         // An origin can't break out of the string it's compared with.
-        assertTrue("\"a\\\"b\"" in siteDataInPageJs("a\"b"))
+        assertTrue("\"a\\\"b\"" in siteDataInPageJs("a\"b", "_k"))
+    }
+
+    @Test
+    fun `an address with a fragment is reloaded, not navigated to in place`() {
+        // `location.replace(href)` with a #fragment is a same-document
+        // navigation that loads nothing (R2-F1).
+        for (js in listOf(siteDataInPageJs("https://example.org", "_k"), SITE_DATA_CLEANUP_HTML)) {
+            assertTrue(js, "if (location.href.includes('#')) location.reload(); else location.replace(location.href);" in js)
+        }
     }
 
     @Test

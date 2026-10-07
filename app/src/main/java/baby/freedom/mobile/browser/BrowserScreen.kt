@@ -110,8 +110,10 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 
 /**
  * Sentinel URL for the home tab. We load `about:blank` into the
@@ -3339,26 +3341,41 @@ fun BrowserScreen(
                         // What the page holds in memory goes with a reload,
                         // whose document is the cleanup page first: it
                         // reaches the tab's own sessionStorage, and what
-                        // the old page wrote on its way out.
-                        if (tabs.active !== tab) return@launch
+                        // the old page wrote on its way out. The tab's, by
+                        // id, whether or not it is still the one on screen
+                        // (R2-F2) — only a tab that has since closed is
+                        // left alone.
+                        if (tab !in tabs.tabs) return@launch
                         if (tab.rendererGone != null) {
-                            reloadPage()
+                            tab.recoverRenderer()
                             return@launch
                         }
-                        SiteData.markCleanup(tab.id, dataOrigin)
                         // The site's service workers are only reachable
                         // from a document of its own: the page's, which
                         // unregisters them and then reloads itself — so a
-                        // worker doesn't answer the reload. If it hasn't
-                        // started a load within a few seconds (a page that
-                        // stops it), the tab is reloaded from here.
-                        if (tabs.cleanSiteInPage?.invoke(tab, dataOrigin) == true) {
-                            val started = withTimeoutOrNull(IN_PAGE_CLEANUP_WAIT_MS) {
-                                while (SiteData.cleanupPending(tab.id)) delay(100)
-                            }
-                            if (started != null) return@launch
-                        }
-                        if (tabs.active === tab) reloadPage()
+                        // worker doesn't answer the reload. If it doesn't
+                        // (a page that stops it), the tab is reloaded from
+                        // here, once its clearing is done (R2-F3).
+                        SiteData.cleanAndReload(
+                            tabId = tab.id,
+                            origin = dataOrigin,
+                            clean = { key -> tabs.cleanSiteInPage?.invoke(tab, dataOrigin, key) == true },
+                            cleaned = { key ->
+                                val ask = tabs.siteCleanedInPage
+                                ask != null && withTimeoutOrNull(1_000) {
+                                    suspendCancellableCoroutine { cont ->
+                                        ask(tab, key) { done -> if (cont.isActive) cont.resume(done) }
+                                    }
+                                } == true
+                            },
+                            reload = {
+                                if (tab in tabs.tabs && tabs.reloadDocument?.invoke(tab) != true &&
+                                    tabs.active === tab
+                                ) {
+                                    reloadPage()
+                                }
+                            },
+                        )
                     }
                 }
             },
@@ -3459,7 +3476,4 @@ private fun IpfsStatusLine(text: String, modifier: Modifier = Modifier) {
 }
 
 /** The tab and document a page's Site permissions sheet (#266) was opened over. */
-/** How long Page info's Delete waits for the page to reload itself ([TabsState.cleanSiteInPage]). */
-private const val IN_PAGE_CLEANUP_WAIT_MS = 3_000L
-
 private data class PageSheetTarget(val tabId: Long, val origin: String?, val doc: Int?)

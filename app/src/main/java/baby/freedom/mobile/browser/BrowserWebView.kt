@@ -1414,10 +1414,23 @@ fun BrowserWebViewHost(
                 )
             }
         }
-        tabs.cleanSiteInPage = cleanSiteInPage@{ tab, origin ->
+        tabs.cleanSiteInPage = cleanSiteInPage@{ tab, origin, doneKey ->
             val wv = webViews[tab.id] ?: return@cleanSiteInPage false
             if (SiteData.committedOrigin(tab.id) != origin) return@cleanSiteInPage false
-            runCatching { wv.evaluateJavascript(siteDataInPageJs(origin), null) }.isSuccess
+            runCatching { wv.evaluateJavascript(siteDataInPageJs(origin, doneKey), null) }.isSuccess
+        }
+        tabs.siteCleanedInPage = { tab, doneKey, answer ->
+            val wv = webViews[tab.id]
+            if (wv == null) {
+                answer(false)
+            } else {
+                runCatching { wv.evaluateJavascript(siteDataInPageDoneJs(doneKey)) { answer(it == "true") } }
+                    .onFailure { answer(false) }
+            }
+        }
+        tabs.reloadDocument = reloadDocument@{ tab ->
+            val wv = webViews[tab.id] ?: return@reloadDocument false
+            runCatching { wv.reload() }.isSuccess
         }
         tabs.clearWebViewData = { siteData, cache ->
             if (siteData) {
@@ -1485,6 +1498,8 @@ fun BrowserWebViewHost(
             tabs.dropMemoryCache = null
             tabs.pageCertificate = null
             tabs.cleanSiteInPage = null
+            tabs.siteCleanedInPage = null
+            tabs.reloadDocument = null
             UnverifiedOrigins.onSweep = null
             tabs.setAudioMuted = null
         }
@@ -3935,7 +3950,7 @@ private fun buildRefreshableWebView(
                 // site's own origin — the only way to reach its
                 // localStorage, Cache Storage and service workers.
                 val cleanup = mainFrame && certPage == null &&
-                    request!!.url?.toString()?.let { SiteData.takeCleanup(state.id, it) } == true
+                    request!!.url?.toString()?.let { SiteData.takeCleanup(state.id, it, request.method) } == true
                 // A dweb subresource the page already gave up on, before
                 // WebView got round to asking for it: answered at once,
                 // nothing fetched. Any other is told if the page gives up
@@ -6095,9 +6110,18 @@ private const val SITE_DATA_WIPE_JS = """
   });
 """
 
+/**
+ * Load the document's address again, as a new document. `location.replace`
+ * of the same address — a GET even on a page a form POST answered — except
+ * where the address has a fragment: navigating to it is then a same-
+ * document fragment navigation, which loads nothing (R2-F1), so it's
+ * `location.reload()`.
+ */
+private const val SITE_DATA_RELOAD_JS = """
+  if (location.href.includes('#')) location.reload(); else location.replace(location.href);"""
+
 internal const val SITE_DATA_CLEANUP_HTML = """<!doctype html><meta charset="utf-8"><script>
-(async () => {$SITE_DATA_WIPE_JS
-  location.replace(location.href);
+(async () => {$SITE_DATA_WIPE_JS$SITE_DATA_RELOAD_JS
 })();
 </script>"""
 
@@ -6107,14 +6131,22 @@ internal const val SITE_DATA_CLEANUP_HTML = """<!doctype html><meta charset="utf
  * unregistered from (a `loadDataWithBaseURL` document is refused them):
  * the same clearing as [SITE_DATA_CLEANUP_HTML], then the page reloads
  * itself, once the workers are gone, so the reload isn't one of theirs.
- * Does nothing at all in a document on any other origin — one that
- * committed after the caller last looked.
+ * Just before it reloads it sets `window[doneKey]`, which
+ * [siteDataInPageDoneJs] reads: the app's own fallback reload waits for
+ * the clearing to end rather than racing it (R2-F3). [doneKey] is a
+ * fresh random name each time, nothing that names the app. Does nothing
+ * at all in a document on any other origin — one that committed after
+ * the caller last looked.
  */
-internal fun siteDataInPageJs(origin: String): String =
+internal fun siteDataInPageJs(origin: String, doneKey: String): String =
     """(async () => {
   if (location.origin !== ${org.json.JSONObject.quote(origin)}) return;$SITE_DATA_WIPE_JS
-  location.replace(location.href);
+  try { window[${org.json.JSONObject.quote(doneKey)}] = true; } catch (e) {}$SITE_DATA_RELOAD_JS
 })();"""
+
+/** Has [siteDataInPageJs] with [doneKey] finished clearing in this document? Evaluates to `true` if so. */
+internal fun siteDataInPageDoneJs(doneKey: String): String =
+    "window[${org.json.JSONObject.quote(doneKey)}] === true"
 
 /**
  * The same clearing as [SITE_DATA_CLEANUP_HTML], ending by setting the
