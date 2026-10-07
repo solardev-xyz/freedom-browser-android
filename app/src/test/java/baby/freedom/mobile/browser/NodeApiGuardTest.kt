@@ -48,13 +48,15 @@ class NodeApiGuardTest {
                 assertEquals(url, spendRefusal, NodeApiGuard.refusalText("POST", url))
             }
         }
-        // A read of those paths, or a write to any other v0 route, isn't a spend:
-        // refused on the device with the read text, let through to another node.
+        // A read of those paths isn't a spend: refused on the device with the
+        // read text, let through to another node. A write to any other v0
+        // route isn't a spend either, but no page writes through a node (#358).
+        val writeRefusal = NodeApiGuard.refusalText("POST", "http://127.0.0.1:1633/bzz")
         assertEquals(NodeApiGuard.READ_REFUSAL, NodeApiGuard.refusalText("GET", "http://127.0.0.1:1633/v0/storage/buy"))
-        assertEquals(NodeApiGuard.READ_REFUSAL, NodeApiGuard.refusalText("POST", "http://127.0.0.1:1633/v0/manifest/ab"))
+        assertEquals(writeRefusal, NodeApiGuard.refusalText("POST", "http://127.0.0.1:1633/v0/manifest/ab"))
         assertFalse(refused("GET", "http://192.168.1.20:1633/v0/storage/buy"))
-        assertFalse(refused("POST", "http://192.168.1.20:1633/v0/manifest/ab"))
-        assertFalse(refused("POST", "http://192.168.1.20:1633/storage/buy"))
+        assertTrue(refused("POST", "http://192.168.1.20:1633/v0/manifest/ab"))
+        assertEquals(writeRefusal, NodeApiGuard.refusalText("POST", "http://192.168.1.20:1633/storage/buy"))
     }
 
     @Test
@@ -87,6 +89,7 @@ class NodeApiGuardTest {
     fun `every refusal a page can read stays English in another app language`() {
         val cases = listOf(
             "POST" to "http://127.0.0.1:1633/stamps/1/17",
+            "POST" to "http://127.0.0.1:1633/bzz",
             "GET" to "http://127.0.0.1:1633/addresses",
             "GET" to "http://nas.lan:1633/addresses",
         )
@@ -139,21 +142,14 @@ class NodeApiGuardTest {
     }
 
     @Test
-    fun `the dapp surface stays open`() {
+    fun `the dapp surface stays open to reads`() {
         for ((method, path) in listOf(
             "GET" to "/bzz/ab/index.html",
             "HEAD" to "/bzz/ab",
-            "POST" to "/bzz?name=a.txt",
-            "OPTIONS" to "/bzz",
             "GET" to "/bytes/ab",
-            "POST" to "/bytes",
             "GET" to "/chunks/ab",
-            "POST" to "/chunks",
             "GET" to "/soc/ab/cd",
-            "POST" to "/soc/ab/cd",
             "GET" to "/feeds/ab/cd",
-            "POST" to "/feeds/ab/cd",
-            "POST" to "/pss/send/ab/cd",
             "GET" to "/gsoc/subscribe/ab",
             "GET" to "/health",
             "GET" to "/readiness",
@@ -161,6 +157,135 @@ class NodeApiGuardTest {
             "GET" to "//bytes/ab",
         )) {
             assertFalse("$method $path", refused(method, "http://127.0.0.1:1633$path"))
+        }
+    }
+
+    @Test
+    fun `no page writes through a node, on any host, the dapp surface included`() {
+        val writes = listOf(
+            "POST" to "/bzz?name=a.txt", "POST" to "/bzz", "PUT" to "/bzz/ab", "OPTIONS" to "/bzz",
+            "POST" to "/bytes", "POST" to "/chunks", "POST" to "/soc/ab/cd", "POST" to "/feeds/ab/cd",
+            "POST" to "/pss/send/ab/cd", "POST" to "/gsoc/send/ab", "POST" to "/pins/ab", "DELETE" to "/pins/ab",
+            "POST" to "/connect/ip4/1.2.3.4/tcp/1634", "POST" to "/tags", "PATCH" to "/tags/1", "DELETE" to "/tags/1",
+            "POST" to "/grantee", "PATCH" to "/grantee/ab", "POST" to "/envelope/ab", "POST" to "/stewardship/ab",
+            "PUT" to "/stewardship/ab", "DELETE" to "/peers/ab", "POST" to "/health", "post" to "/BZZ",
+            "POST" to "/some-future-endpoint",
+        )
+        val hosts = listOf("127.0.0.1", "localhost", "[::1]", "192.168.1.20", "10.0.2.2", "[fe80::1]", "8.8.8.8", "nas", "bee.example")
+        val writeRefusal = NodeApiGuard.refusalText("POST", "http://127.0.0.1:1633/bzz")!!
+        assertTrue(writeRefusal, "window.swarm" in writeRefusal)
+        for ((method, path) in writes) {
+            for (host in hosts) {
+                val url = "http://$host:1633$path"
+                assertTrue("$method $url", refused(method, url))
+                assertTrue("$method $url", refused(method, url, externalSwarm = "http://$host:1633"))
+                assertEquals("$method $url", writeRefusal, NodeApiGuard.refusalText(method, url))
+            }
+            assertTrue("$method https", refused(method, "https://127.0.0.1:1633$path"))
+        }
+    }
+
+    @Test
+    fun `the external Swarm node takes no page writes on its own port, and only it`() {
+        val external = "https://bee.example:8443"
+        for (url in listOf(
+            "https://bee.example:8443/bzz", "https://BEE.example.:8443/bzz", "https://bee.example:8443/pins/ab",
+            "https://bee.example:08443/tags",
+        )) {
+            assertTrue(url, refused("POST", url, externalSwarm = external))
+        }
+        // Its reads aren't the device's API and pass as before.
+        assertFalse(refused("GET", "https://bee.example:8443/bzz/ab/", externalSwarm = external))
+        assertFalse(refused("GET", "https://bee.example:8443/wallet", externalSwarm = external))
+        // Another port or host is another server; the scheme alone isn't (R3-M3).
+        assertFalse(refused("POST", "https://bee.example/bzz", externalSwarm = external))
+        assertFalse(refused("POST", "http://bee.example/bzz", externalSwarm = external))
+        assertTrue(refused("POST", "http://bee.example:8443/bzz", externalSwarm = external))
+        assertFalse(refused("POST", "https://other.example:8443/bzz", externalSwarm = external))
+        assertFalse(refused("POST", "https://bee.example.evil.example:8443/bzz", externalSwarm = external))
+        // A default port matches the external node's implicit one.
+        assertTrue(refused("POST", "https://gw.example:443/bzz", externalSwarm = "https://gw.example"))
+        assertTrue(refused("POST", "https://gw.example/feeds/a/b", externalSwarm = "https://gw.example/"))
+        // One proxy server block on 80 and 443: an http page's write reaches the same node (R3-M3).
+        for (url in listOf(
+            "http://me.example/bee/bzz", "http://me.example:80/bee/pins/ab", "https://me.example/bee/bzz",
+            "http://gw.example/bzz",
+        )) {
+            assertTrue(url, refused("POST", url, externalSwarm = if ("gw." in url) "https://gw.example" else "https://me.example/bee"))
+        }
+        assertFalse(refused("POST", "http://me.example/login", externalSwarm = "https://me.example/bee"))
+        assertFalse(refused("POST", "http://me.example:8080/bee/bzz", externalSwarm = "https://me.example/bee"))
+        assertTrue(refused("POST", "https://bee.example/bzz", externalSwarm = "http://bee.example"))
+        // No external node: nothing off the gateway port.
+        assertFalse(refused("POST", "https://bee.example:8443/bzz"))
+    }
+
+    @Test
+    fun `an external Swarm node behind a path is only that path, not its whole origin`() {
+        val external = ExternalEndpoints.normalize("https://me.example/bee/")!!
+        assertEquals("https://me.example/bee", external)
+        for (url in listOf(
+            "https://me.example/bee", "https://me.example/bee/", "https://me.example/bee/bzz",
+            "https://me.example/bee/pins/ab", "https://me.example/BEE/bytes", "https://me.example/%62ee/feeds/a/b",
+            "https://me.example//bee/tags",
+            // A proxy that decodes `%2F` and resolves the `..` hands these to /bee (R2-F1).
+            "https://me.example/x%2F..%2Fbee/bzz", "https://me.example/x%2f..%2fbee/pins/ab",
+            "https://me.example/a/b%2F..%2F..%2Fbee/feeds/a/b", "https://me.example/x%5C..%5Cbee/bzz",
+            "https://me.example/%2E%2E%2Fbee/bzz", "https://me.example/x/%2e%2e/bee/tags",
+        )) {
+            assertTrue(url, refused("POST", url, externalSwarm = external))
+        }
+        // The rest of the origin is another site: its logins and forms aren't the node's.
+        for (url in listOf(
+            "https://me.example/login", "https://me.example/", "https://me.example/beehive/upload",
+            "https://me.example/nextcloud/bee/x", "https://me.example/be",
+            "https://me.example/x%2F..%2Flogin",
+        )) {
+            assertFalse(url, refused("POST", url, externalSwarm = external))
+        }
+        // Deeper mounts too.
+        val deep = ExternalEndpoints.normalize("https://me.example/a/b")!!
+        assertTrue(refused("PUT", "https://me.example/a/b/feeds/x", externalSwarm = deep))
+        assertFalse(refused("PUT", "https://me.example/a/feeds/x", externalSwarm = deep))
+        // Reads anywhere on it still pass.
+        assertFalse(refused("GET", "https://me.example/bee/bzz/ab/", externalSwarm = external))
+    }
+
+    @Test
+    fun `a CORS preflight is judged as the request it asks for`() {
+        fun preflight(asks: String?) =
+            NodeApiGuard.pageMethod("OPTIONS", asks?.let { mapOf("Access-Control-Request-Method" to it) } ?: emptyMap())
+        assertEquals("GET", preflight("GET"))
+        assertEquals("POST", preflight("POST"))
+        assertEquals("PUT", NodeApiGuard.pageMethod("OPTIONS", mapOf("access-control-request-method" to " PUT ")))
+        // A page's own OPTIONS, and one with no or a blank header, stays a write.
+        assertEquals("OPTIONS", preflight(null))
+        assertEquals("OPTIONS", preflight(""))
+        assertEquals("OPTIONS", NodeApiGuard.pageMethod("OPTIONS", null))
+        // Only OPTIONS is read through the header.
+        assertEquals("POST", NodeApiGuard.pageMethod("POST", mapOf("Access-Control-Request-Method" to "GET")))
+
+        assertFalse(refused(preflight("GET"), "http://127.0.0.1:1633/bzz/ab/"))
+        assertFalse(refused(preflight("HEAD"), "http://127.0.0.1:1633/bytes/ab"))
+        assertTrue(refused(preflight("POST"), "http://127.0.0.1:1633/bzz"))
+        assertTrue(refused(preflight("PUT"), "http://127.0.0.1:1633/feeds/ab/cd"))
+        assertTrue(refused(preflight("GET"), "http://127.0.0.1:1633/wallet"))
+        assertTrue(refused(preflight(null), "http://127.0.0.1:1633/bzz"))
+    }
+
+    @Test
+    fun `a page's batch and access-control headers aren't forwarded to the gateway`() {
+        for (name in listOf(
+            "Swarm-Postage-Batch-Id", "swarm-postage-batch-id", "SWARM-POSTAGE-BATCH-ID",
+            "Swarm-Act", "Swarm-Act-Publisher", "Swarm-Act-History-Address", "Swarm-Act-Timestamp", "swarm-act-anything",
+        )) {
+            assertTrue(name, isNodeAuthorityHeader(name))
+        }
+        for (name in listOf(
+            "Range", "Accept", "Swarm-Chunk-Retrieval-Timeout", "Swarm-Redundancy-Strategy", "Swarm-Feed-Index",
+            "Swarm-Postage-Stamp", "Swarm-Tag", "X-Swarm-Act",
+        )) {
+            assertFalse(name, isNodeAuthorityHeader(name))
         }
     }
 
@@ -185,7 +310,12 @@ class NodeApiGuardTest {
         for (host in listOf("192.168.1.20", "10.0.2.2", "[fe80::1]", "[2001:db8::1]", "[::1:0:0:0]", "8.8.8.8", "0xc0.0xa8.1.20")) {
             assertFalse(host, refused("GET", "http://$host:1633/wallet"))
             assertFalse(host, refused("GET", "http://$host:1633/stamps"))
-            assertFalse(host, refused("POST", "http://$host:1633/pins/ab"))
+            assertFalse(host, refused("GET", "http://$host:1633/pins"))
+            // But no page writes to it (#358): a no-cors POST needs no
+            // preflight, so pinning, tagging or dialing peers would be CSRF.
+            assertTrue(host, refused("POST", "http://$host:1633/pins/ab"))
+            assertTrue(host, refused("POST", "http://$host:1633/connect/ip4/1.2.3.4/tcp/1634"))
+            assertTrue(host, refused("POST", "http://$host:1633/tags"))
             // Spending stays refused on every host, as before #283.
             assertTrue(host, refused("POST", "http://$host:1633/stamps/1/17"))
         }

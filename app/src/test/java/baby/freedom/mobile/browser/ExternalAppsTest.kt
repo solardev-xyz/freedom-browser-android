@@ -59,7 +59,7 @@ class ExternalAppsTest {
     @Test
     fun `allowing one scheme for a site allows nothing else`() {
         val s = PermissionSession()
-        val o = "https://example.com"
+        val o = PermissionScope("https://example.com")
         s.record(o, ExternalScheme("magnet"), PermissionDecision.ALLOW, remembered = false)
         assertEquals(PermissionPlan.Grant, planFor(o, listOf(ExternalScheme("magnet")), emptyMap(), s))
         assertEquals(
@@ -68,7 +68,7 @@ class ExternalAppsTest {
         )
         assertEquals(
             PermissionPlan.Ask(listOf(ExternalScheme("magnet"))),
-            planFor("https://other.example", listOf(ExternalScheme("magnet")), emptyMap(), s),
+            planFor(PermissionScope("https://other.example"), listOf(ExternalScheme("magnet")), emptyMap(), s),
         )
     }
 

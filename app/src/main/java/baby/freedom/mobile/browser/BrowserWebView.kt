@@ -460,6 +460,24 @@ private fun HttpURLConnection.applySwarmRequestHeaders() {
 }
 
 /**
+ * Is [name] a request header that spends or unlocks with the user's own
+ * node — `Swarm-Postage-Batch-Id` (a batch the user paid for) or any
+ * `Swarm-Act*` (access control: the node's key decrypts, a publisher's
+ * grantee list) — which a page's request mustn't carry through to the
+ * gateway (#358)? Pages publish through `window.swarm`, which asks the
+ * user.
+ *
+ * This applies to reads too, the virtual-origin GET proxy included: a
+ * page can't download ACT content shared with this node by sending
+ * `Swarm-Act`, `Swarm-Act-Publisher` and `Swarm-Act-History-Address` on a
+ * GET, because decrypting it would use the node's own key without the
+ * user being asked. Such a request reaches the node without those headers
+ * and gets the encrypted reference's plain (undecryptable) answer.
+ */
+internal fun isNodeAuthorityHeader(name: String): Boolean =
+    name.lowercase().let { it == "swarm-postage-batch-id" || it.startsWith("swarm-act") }
+
+/**
  * Copy request headers from [req] onto [this] connection, stripping
  * hop-by-hop / origin-tied headers (`Range` goes through), forcing
  * `Accept-Encoding: identity`, and stamping the Swarm-* retrieval
@@ -475,7 +493,7 @@ private fun HttpURLConnection.forwardProxiedHeaders(
 ) {
     req.requestHeaders?.forEach { (k, v) ->
         val lk = k.lowercase()
-        if (lk in REQUEST_HEADERS_TO_STRIP) return@forEach
+        if (lk in REQUEST_HEADERS_TO_STRIP || isNodeAuthorityHeader(lk)) return@forEach
         // A redirect hop to another origin doesn't get the credentials
         // (HttpURLConnection's own following dropped them too).
         if (crossOrigin && lk == "authorization") return@forEach
@@ -1350,10 +1368,14 @@ fun BrowserWebViewHost(
             // tab: every tab whose document predates the fetch counts as
             // having them.
             val anyTab = UnverifiedOrigins.takeWorkerDocuments(swept)
-            for (wv in webViews.values) {
+            for ((id, wv) in webViews) {
                 val stale = sweptDocuments(wv, swept, anyTab)
                 if (stale.isEmpty()) continue
-                UnverifiedOrigins.hold(wv, stale)
+                // On the tab's own profile's storage (#351) — read off
+                // the WebView's own record, not the tab list: a private
+                // tab closed this frame is gone from [tabs.tabs] while
+                // its WebView still waits for teardown.
+                UnverifiedOrigins.hold(wv, stale, private = id in privateIds)
                 if (wv is PageWebView) wv.sweptReload.swept(wv.url) else wv.reload()
             }
         }
@@ -3086,7 +3108,7 @@ private fun buildRefreshableWebView(
                 val zoomSite = zoomSiteKey(url)
                 state.zoomSite = zoomSite
                 state.providerOrigin = providerOriginKey(url)
-                state.permissionOrigin = permissionOriginKey(url)
+                state.permissionOrigin = documentPermissionOrigin(url)
                 // …with the user agent it was fetched with (#180). One
                 // that crossed the desktop/mobile line was corrected
                 // before its request went out, where it could be (see
@@ -3154,6 +3176,7 @@ private fun buildRefreshableWebView(
                 // A real document: a popup's blank start is over, and
                 // `about:blank` in this tab is the home sentinel again.
                 state.blankIsPage = false
+                state.blankOpenerOrigin = null
                 // Whatever is parked belongs to the document this one is
                 // replacing, and it never painted (a paint is what would
                 // have flushed it). Dropping it here is what keeps the
@@ -5777,17 +5800,21 @@ internal fun navigationOpensStopLatch(isForMainFrame: Boolean, detoured: Boolean
     isForMainFrame && !detoured
 
 /**
- * Answer a CORS preflight locally. Permissive by policy: content on
- * virtual origins is public and credential-less, and the node API on
- * localhost is only reachable from this device anyway.
+ * Answer a CORS preflight locally. Permissive by policy for virtual
+ * origins: content there is public and credential-less. [methods]
+ * narrows it for the embedded gateways, where a page may only read
+ * (#358).
  */
-private fun corsPreflightResponse(req: WebResourceRequest): WebResourceResponse {
+private fun corsPreflightResponse(
+    req: WebResourceRequest,
+    methods: String = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
+): WebResourceResponse {
     val requestedHeaders = req.requestHeaders?.entries
         ?.firstOrNull { it.key.equals("Access-Control-Request-Headers", ignoreCase = true) }
         ?.value
     val headers = mutableMapOf(
         "Access-Control-Allow-Origin" to "*",
-        "Access-Control-Allow-Methods" to "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
+        "Access-Control-Allow-Methods" to methods,
         "Access-Control-Max-Age" to "600",
     )
     if (!requestedHeaders.isNullOrBlank()) {
@@ -5836,16 +5863,17 @@ private fun syntheticResponse(
  *    the submit flow.)
  *
  * Everything else — external https, and direct `http://127.0.0.1`
- * gateway calls to the dapp surface (the sanctioned write path for
- * dapps; the node's own API is refused, [NodeApiGuard]) — passes through
- * to Chromium's own network stack untouched.
+ * gateway reads of the dapp surface (pages write through no node at
+ * all, and the node's own API is refused, [NodeApiGuard]; dapps publish
+ * with `window.swarm`) — passes through to Chromium's own network stack
+ * untouched.
  *
  * Error contract: the interceptor always answers for virtual hosts. A
  * gateway that's unreachable (node not running) or an ENS name that
  * doesn't resolve synthesizes a clean 502 so the main frame fails fast
  * into [ErrorPage] instead of hanging; non-GET/HEAD methods get a 405
- * (WebView interception can't carry request bodies — writes go to the
- * node API origin directly).
+ * (WebView interception can't carry request bodies, and pages write
+ * through no node anyway — they publish with `window.swarm`).
  *
  * [ensPins] is the requesting tab's (null for service-worker fetches,
  * which belong to no tab): the ENS roots its documents were served from.
@@ -5901,7 +5929,9 @@ internal fun interceptVirtualRequest(
     TorRouting.refusalFor(req)?.let { return it }
     // A page's request to the Swarm node's own API — buying stamps,
     // funding the chequebook, reading its wallet or addresses — is refused
-    // outright; only the dapp surface stays open (#114, #283, fail closed).
+    // outright; the dapp surface stays open to reads only, and every write
+    // (any method but GET/HEAD) is refused on any host (#114, #283, #358,
+    // fail closed).
     NodeApiGuard.refusalFor(req)?.let { return it }
     val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
     // A contract-hosted app's origin (#123) is answered by its own rules.
@@ -6043,23 +6073,24 @@ private fun interceptVirtualRequestFor(
     val uri = req.url ?: return null
     val url = uri.toString()
 
-    // Sanctioned write path: pages on virtual origins POST/upload to
-    // the node API origin (`http://127.0.0.1:…`) directly. Those
-    // requests pass through to Chromium's network stack (bodies never
-    // reach the interceptor), but their CORS *preflights* are bodyless
-    // — answer them here so the write path works regardless of the
-    // node's own CORS configuration. The request itself then reaches
-    // the node, but by design (#284) the embedded Swarm gateway sends
-    // no `Access-Control-Allow-Origin` on the actual response
-    // (`SwarmNode.GATEWAY_CORS_ORIGINS` is empty), so the page can't
-    // read the reply — that is what keeps `/wallet`, `/addresses` etc.
+    // A read's CORS preflight to an embedded gateway (`http://127.0.0.1:…`)
+    // is answered here, for GET and HEAD only. No page writes through
+    // the node (#358): a Swarm write's preflight never gets this far
+    // ([NodeApiGuard] refuses it with the write itself), and any other
+    // write's preflight isn't answered by the app — it goes to the node,
+    // whose own CORS policy decides. By design (#284) the embedded Swarm
+    // gateway sends no `Access-Control-Allow-Origin` on its answers
+    // (`SwarmNode.GATEWAY_CORS_ORIGINS` is empty), so a page can't read
+    // the reply — that is what keeps `/wallet`, `/addresses` etc.
     // unreadable through a redirect (#283). Don't "fix" the missing
     // header by allowing `*` or `null`; `window.swarm` is the path that
-    // returns results (see docs/virtual-origins-hardening.md). Only the
-    // embedded nodes: an external endpoint
-    // (#125) keeps its own CORS policy, so its preflights go through.
-    if (req.method == "OPTIONS" && Gateways.isEmbeddedGateway(url)) {
-        return corsPreflightResponse(req)
+    // publishes and returns results (see docs/virtual-origins-hardening.md).
+    // Only the embedded nodes: an external endpoint (#125) keeps its
+    // own CORS policy, so its preflights go through.
+    if (req.method == "OPTIONS" && Gateways.isEmbeddedGateway(url) &&
+        NodeApiGuard.pageMethod(req.method, req.requestHeaders).uppercase().let { it == "GET" || it == "HEAD" }
+    ) {
+        return corsPreflightResponse(req, methods = "GET, HEAD, OPTIONS")
     }
 
     val scheme = uri.scheme?.lowercase()
@@ -6088,7 +6119,7 @@ private fun interceptVirtualRequestFor(
         return syntheticResponse(
             405, "Method Not Allowed",
             "Virtual dweb origins are read-only (GET/HEAD). " +
-                "Send writes to the node API at ${Gateways.swarmBase}.",
+                "Pages publish with window.swarm, which asks the user first.",
         )
     }
 

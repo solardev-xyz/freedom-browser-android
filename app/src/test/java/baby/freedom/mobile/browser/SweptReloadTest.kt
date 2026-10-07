@@ -52,7 +52,7 @@ class SweptReloadTest {
     /** The external gateway served [origin] into [tab]'s frame; now switched away. */
     private fun sweepInto(tab: Tab) {
         UnverifiedOrigins.onSweep = { origins ->
-            UnverifiedOrigins.hold(tab, origins)
+            UnverifiedOrigins.hold(tab, origins, private = false)
             tab.swept.swept(page)
         }
         UnverifiedOrigins.sweep("https://gw.example") {}

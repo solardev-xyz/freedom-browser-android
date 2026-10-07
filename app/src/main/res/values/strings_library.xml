@@ -232,6 +232,11 @@
     <!-- SitePermissionPrompt.kt -->
     <!-- Under the site's name: "example.com / wants to use your camera". %1$s: what it asks for. -->
     <string name="library_permission_prompt_wants_to">wants to %1$s</string>
+    <!-- A frame from another site asked (#363). The title is the site the user is on.
+         %1$s: "use your camera", …; %2$s: the embedded frame's site. -->
+    <string name="library_permission_prompt_wants_to_via">wants to %1$s via %2$s</string>
+    <!-- %1$s: the embedded frame's site; %2$s: the site the user is on. -->
+    <string name="library_permission_prompt_embedded_hint">%1$s is embedded in this page. Your answer counts only on %2$s, not when you visit %1$s itself.</string>
     <string name="library_permission_prompt_private">Private tab: your answer lasts until you close your private tabs.</string>
     <string name="library_permission_prompt_session_hint">“Allow this session” lasts until you close Freedom, even after you leave the site.</string>
     <string name="library_permission_prompt_allow_session">Allow this session</string>
@@ -256,4 +261,6 @@
     <string name="library_site_permissions_embedded">Embedded: %1$s</string>
     <!-- %1$s: the permission, e.g. Camera; %2$s: the site -->
     <string name="library_site_permissions_remove">Remove %1$s permission for %2$s</string>
+    <!-- %1$s: the permission, e.g. Camera; %2$s: the embedded frame's site; %3$s: the site the user is on (#363) -->
+    <string name="library_site_permissions_remove_embedded">Remove %1$s permission for %2$s embedded in %3$s</string>
 </resources>
