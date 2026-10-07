@@ -422,6 +422,45 @@ class PageInfoTest {
     }
 
     @Test
+    fun `web3 and rad pages get a badge and a connection of their own`() {
+        val addr = "0x" + "ab".repeat(20)
+        for (u in listOf("web3://$addr/", "web3://$addr:100/index.html", "https://$addr-1.${OnchainAppRef.SUFFIX}/")) {
+            assertEquals(u, PageConnection.Onchain, pageConnectionFor(u, errorPage = false, protocol = null))
+            assertEquals(u, AddressBadge.Connection(PageConnection.Onchain), addressBadgeFor(u, false, false, null))
+        }
+        val rid = "z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        for (u in listOf("rad://$rid/tree", "rad:$rid", "${RadUrl.ORIGIN}/$rid/", "${RadUrl.ORIGIN}${RadUrl.INVALID_PATH}?id=x")) {
+            assertEquals(u, PageConnection.Radicle, pageConnectionFor(u, errorPage = false, protocol = null))
+            assertEquals(u, AddressBadge.Connection(PageConnection.Radicle), addressBadgeFor(u, false, false, null))
+        }
+        assertEquals(PageConnection.ErrorPage, pageConnectionFor("web3://$addr/", errorPage = true, protocol = null))
+        assertFalse(PageConnection.Onchain.hasCertificate)
+        assertFalse(PageConnection.Radicle.hasCertificate)
+    }
+
+    @Test
+    fun `an http onion service is not Not secure`() {
+        val onion = "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"
+        for (u in listOf("http://$onion/", "http://$onion:8080/a?b", "HTTP://${onion.uppercase()}./")) {
+            assertEquals(u, PageConnection.Onion, pageConnectionFor(u, errorPage = false, protocol = null))
+        }
+        for (u in listOf("http://onion/", "http://.onion/", "http://onion.example/", "http://example.onion.example/")) {
+            assertEquals(u, PageConnection.NotSecure, pageConnectionFor(u, errorPage = false, protocol = null))
+        }
+        assertEquals(PageConnection.Secure, pageConnectionFor("https://$onion/", errorPage = false, protocol = null))
+        assertFalse(PageConnection.Onion.hasCertificate)
+    }
+
+    @Test
+    fun `a blob document is on the origin that minted it`() {
+        SiteData.committed(31L, "blob:https://example.org/0d6e-41")
+        assertEquals("https://example.org", SiteData.committedOrigin(31L))
+        SiteData.committed(31L, "blob:null/0d6e-41")
+        assertNull(SiteData.committedOrigin(31L))
+        SiteData.tabClosed(31L)
+    }
+
+    @Test
     fun `the wipe document clears what the cleanup page does and says when it is done`() {
         val html = siteDataWipeHtml("wiped-1")
         for (step in listOf("localStorage.clear()", "sessionStorage.clear()", "indexedDB.deleteDatabase",

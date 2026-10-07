@@ -102,10 +102,20 @@ internal enum class PageConnection(
      * treats as potentially trustworthy, so not "Not secure".
      */
     Local(R.string.page_info_local_title, R.string.page_info_local_body),
+    /**
+     * `http://` to a `.onion` host: an onion service, reached only
+     * through Tor, whose connection is encrypted end to end and whose
+     * address is its key — not "Not secure" (R1-M2).
+     */
+    Onion(R.string.page_info_onion_title, R.string.page_info_onion_body),
     Swarm(R.string.page_info_dweb_swarm_title, R.string.page_info_dweb_body),
     Ipfs(R.string.page_info_dweb_ipfs_title, R.string.page_info_dweb_body),
     /** A dweb page whose network isn't known from its address (a raw virtual origin). */
     Dweb(R.string.page_info_dweb_title, R.string.page_info_dweb_body),
+    /** An on-chain app (`web3://`, #123), read from a contract through the app's own chain access. */
+    Onchain(R.string.page_info_onchain_title, R.string.page_info_onchain_body),
+    /** A Radicle repository (`rad://`, #124), browsed from the embedded node. */
+    Radicle(R.string.page_info_radicle_title, R.string.page_info_radicle_body),
     /** One of the browser's own error pages, standing in for a load that failed. */
     ErrorPage(R.string.page_info_error_title, R.string.page_info_error_body),
     ;
@@ -129,12 +139,30 @@ internal fun pageConnectionFor(url: String, errorPage: Boolean, protocol: Protoc
         return if (protocol.drawableRes == R.drawable.ic_ipfs) PageConnection.Ipfs else PageConnection.Swarm
     }
     if (VirtualOrigin.isVirtualUrl(u)) return PageConnection.Dweb
+    // Served by the app itself, never fetched from a site's server: the
+    // display forms, and the virtual origins they load as (R1-F1).
+    if (OnchainAppRef.isWeb3Scheme(u) || OnchainAppRef.isUnderSuffix(u)) return PageConnection.Onchain
+    if (RadUrl.isRadScheme(u) || RadUrl.isVirtualUrl(u)) return PageConnection.Radicle
     return when {
         u.startsWith("https://", ignoreCase = true) -> PageConnection.Secure
-        u.startsWith("http://", ignoreCase = true) ->
-            if (loopbackHostOf(u)) PageConnection.Local else PageConnection.NotSecure
+        u.startsWith("http://", ignoreCase = true) -> when {
+            loopbackHostOf(u) -> PageConnection.Local
+            onionHostOf(u) -> PageConnection.Onion
+            else -> PageConnection.NotSecure
+        }
         else -> null
     }
+}
+
+/**
+ * Whether [url]'s host is a `.onion` name. [url] is the address the tab
+ * committed, which Chromium has already normalized (case-folded,
+ * percent-decoded), so its host reads as it is.
+ */
+private fun onionHostOf(url: String): Boolean {
+    val host = runCatching { java.net.URI(url).host }.getOrNull()
+        ?.lowercase()?.trimEnd('.') ?: return false
+    return host.endsWith(".onion") && host.length > ".onion".length
 }
 
 /** Whether [url]'s host is a loopback one ([isLoopbackHost]), as WHATWG parses it. */
@@ -173,8 +201,10 @@ private val AddressBadge.Connection.icon: ImageVector
         PageConnection.Secure -> Icons.Filled.Lock
         PageConnection.NotSecure -> Icons.Filled.NoEncryption
         PageConnection.Local -> Icons.Filled.PhoneAndroid
+        PageConnection.Onion -> Icons.Filled.Lock
         PageConnection.ErrorPage -> Icons.Outlined.Info
-        PageConnection.Swarm, PageConnection.Ipfs, PageConnection.Dweb -> Icons.Filled.Hub
+        PageConnection.Swarm, PageConnection.Ipfs, PageConnection.Dweb,
+        PageConnection.Onchain, PageConnection.Radicle -> Icons.Filled.Hub
     }
 
 @StringRes
@@ -182,6 +212,7 @@ private fun badgeDescriptionRes(connection: PageConnection): Int = when (connect
     PageConnection.Secure -> R.string.page_info_badge_secure
     PageConnection.NotSecure -> R.string.page_info_badge_not_secure
     PageConnection.Local -> R.string.page_info_badge_local
+    PageConnection.Onion -> R.string.page_info_badge_onion
     PageConnection.ErrorPage -> R.string.page_info_badge_error
     else -> connection.titleRes
 }
@@ -510,7 +541,7 @@ internal object SiteData {
 
     private const val CLEANUP_POLL_MS = 100L
 
-    /** Tab id → the origin ([permissionOriginKey]) of the document it last committed. */
+    /** Tab id → the origin ([documentPermissionOrigin]) of the document it last committed. */
     private val committedOrigins = ConcurrentHashMap<Long, String>()
 
     /**
@@ -520,7 +551,10 @@ internal object SiteData {
      */
     fun committed(tabId: Long, url: String?) {
         cleanups.remove(tabId)?.outcome = Outcome.COMMITTED
-        val origin = url?.let(::permissionOriginKey)
+        // A blob: document's is its creator's, as the page's own
+        // [BrowserState.permissionOrigin] is, so a Delete from one still
+        // finds the tab on the site and reloads it (R1-M3).
+        val origin = documentPermissionOrigin(url)
         if (origin == null) committedOrigins.remove(tabId) else committedOrigins[tabId] = origin
     }
 
@@ -589,8 +623,10 @@ internal object SiteData {
         try {
             // Before anything else touches it: Chromium refuses a profile
             // change once a WebView is used. A private tab's storage is
-            // never wiped through the default profile instead.
-            if (private && runCatching { PrivateProfile.attach(wv) }.isFailure) return false
+            // never wiped through the default profile instead; and one
+            // whose last tab closed while this delete ran is already gone
+            // — no new session is started for it (R1-M1).
+            if (private && !runCatching { PrivateProfile.attachToLive(wv) }.getOrDefault(false)) return false
             wv.settings.javaScriptEnabled = true
             wv.settings.domStorageEnabled = true
             wv.settings.blockNetworkLoads = true
