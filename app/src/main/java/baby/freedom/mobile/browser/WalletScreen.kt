@@ -157,10 +157,11 @@ internal fun walletSummary(state: Vault.State): String = when (state) {
 
 /**
  * The line under the Wallet row that has to stay in view: the backup
- * reminder until the phrase has been seen (#78), else the no-screen-lock
- * warning while that holds.
+ * reminder until the three-word backup check has passed (#78, #421) — only
+ * revealing the phrase doesn't clear it — else the no-screen-lock warning
+ * while that holds.
  *
- * Google backup (#231) never stands in for seeing the phrase, not even
+ * Google backup (#231) never stands in for the check, not even
  * with its entry reconciled as cloud-backed: Block Store only uploads it
  * with the phone's own Google backup, which may be off, and no app can
  * ask whether it's on (#244 R5-F1). So this phone may still hold the only

@@ -467,6 +467,39 @@ class VaultTest {
     }
 
     @Test
+    fun `a reveal cancelled mid-write still publishes phraseShown`() = runBlocking {
+        // #429 R4-M1: Back/Hide/Home cancels the reveal's scope after the record write
+        // landed; memory must agree with disk, or the lost-wallet advice says "never shown".
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        store.onWrite = {
+            entered.countDown()
+            release.await()
+        }
+        val job = launch(Dispatchers.Default) { v.revealMnemonic(auth) }
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        job.cancel()
+        release.countDown()
+        job.join()
+        store.onWrite = {}
+        assertTrue(store.record!!.phraseShown)
+        assertTrue((v.state.value as Vault.State.Unlocked).info.phraseKnown)
+    }
+
+    @Test
+    fun `a reveal republishes phraseShown already on disk`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        // Disk already says shown while the published state doesn't.
+        store.record = store.record!!.copy(phraseShown = true)
+        assertFalse((v.state.value as Vault.State.Unlocked).info.phraseKnown)
+        assertEquals(phrase, v.revealMnemonic(auth))
+        assertTrue((v.state.value as Vault.State.Unlocked).info.phraseKnown)
+    }
+
+    @Test
     fun `imported counts as known, restored and created-unseen don't`() = runBlocking {
         vault().create(phrase, auth, imported = true)
         assertTrue((vault().state.value as Vault.State.Locked).info.phraseKnown)
