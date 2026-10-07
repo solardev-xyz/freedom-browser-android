@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import androidx.compose.ui.platform.AndroidClipboard
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.Clipboard
 import androidx.compose.ui.platform.toClipEntry
@@ -16,8 +17,11 @@ import androidx.compose.ui.platform.toClipEntry
  * `ens://‮moc.lapyap.eth` must not paste elsewhere reading
  * `hte.paypal.com`. Paste reads through untouched.
  */
-internal class BidiMarkingClipboard(private val inner: Clipboard) : Clipboard {
-    override val nativeClipboard: ClipboardManager get() = inner.nativeClipboard
+internal class BidiMarkingClipboard(private val inner: Clipboard) : AndroidClipboard {
+    // An AndroidClipboard, not just a Clipboard: Compose's text fields read
+    // the platform clipboard through `nativeClipboardManager`, which throws
+    // for any other Clipboard (long-press with text on the clipboard crashed).
+    override val clipboardManager: ClipboardManager get() = inner.nativeClipboard
 
     override suspend fun getClipEntry(): ClipEntry? = inner.getClipEntry()
 

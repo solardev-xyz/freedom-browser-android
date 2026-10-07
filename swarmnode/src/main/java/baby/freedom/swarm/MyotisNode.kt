@@ -102,6 +102,13 @@ class MyotisNode internal constructor(
 
         /** `myotis_eth_call_json` (anonymous, zero value); see [MyotisNative.ethCall]. */
         fun ethCall(handle: Long, to: String, data: String, block: String): String? = null
+
+        /** The chain-data router's reads (#329); see [MyotisNative]. */
+        fun requestAccount(handle: Long, address: String, block: String): String? = null
+        fun getCode(handle: Long, address: String, block: String): String? = null
+        fun ethCallFrom(handle: Long, from: String, to: String, data: String, value: String, block: String): String? = null
+        fun transactionReceipt(handle: Long, txHash: String): String? = null
+        fun blockByNumber(handle: Long, tag: String, fullTransactions: Boolean): String? = null
     }
 
     /**
@@ -123,7 +130,8 @@ class MyotisNode internal constructor(
         class Acquired(val network: MyotisNetwork, val token: Long, val result: Result<MyotisCheckpointRecord>) : Op
         class Retry(val network: MyotisNetwork) : Op
         class Repair(val network: MyotisNetwork) : Op
-        class Barrier(val done: CompletableDeferred<Unit>) : Op
+        /** Answers, from the queue, the chain stops still draining then ([awaitIdle]). */
+        class Barrier(val done: CompletableDeferred<List<Job>>) : Op
         class Stopped(val network: MyotisNetwork) : Op
     }
 
@@ -289,7 +297,7 @@ class MyotisNode internal constructor(
                             stopping.values.toList().forEach { it.join() }
                             done.complete(Unit)
                         }
-                        is Op.Barrier -> op.done.complete(Unit)
+                        is Op.Barrier -> op.done.complete(stopping.values.toList())
                         else -> Unit
                     }
                 }
@@ -387,13 +395,42 @@ class MyotisNode internal constructor(
         return engine.ethCall(handle, to, data, "latest") ?: """{"error":"no result from the engine"}"""
     }
 
+    /**
+     * The chain-data router's read [method] with [params] (#329) at
+     * [network]'s verified head: a [MyotisReads] reply, or
+     * `{"status":"unavailable",…}` while the chain isn't ready (parked on
+     * a stale anchor, recovering, paused in the background, still
+     * syncing). Blocks for as long as the engine takes, like [ethCall].
+     */
+    fun read(network: MyotisNetwork, method: String, params: org.json.JSONArray): String {
+        val handle = readable[network] ?: return NOT_READY_JSON
+        return MyotisReads.serve(
+            object : MyotisReads.Reader {
+                override fun requestAccount(address: String, block: String) = engine.requestAccount(handle, address, block)
+                override fun getCode(address: String, block: String) = engine.getCode(handle, address, block)
+                override fun ethCall(from: String, to: String, data: String, value: String, block: String) =
+                    engine.ethCallFrom(handle, from, to, data, value, block)
+                override fun transactionReceipt(txHash: String) = engine.transactionReceipt(handle, txHash)
+                override fun blockByNumber(tag: String, fullTransactions: Boolean) =
+                    engine.blockByNumber(handle, tag, fullTransactions)
+            },
+            method,
+            params,
+        )
+    }
+
     /** Wait until every op sent so far has run, and every chain's stop with it. Tests only. */
     internal suspend fun awaitIdle(stops: Boolean = true) {
         while (true) {
-            val done = CompletableDeferred<Unit>()
+            val done = CompletableDeferred<List<Job>>()
             ops.send(Op.Barrier(done))
-            done.await()
-            val pending = stopping.values.toList()
+            // The stops still draining, read on the queue, where [Op.Stopped]
+            // removes them. Read here, off it, the map could be caught
+            // mid-[Op.Stopped]: its entry already gone but the chain not
+            // booted yet (so this returned early), or the last entry going
+            // between toList()'s size() and its iterator's next()
+            // (NoSuchElementException, #394).
+            val pending = done.await()
             if (!stops || pending.isEmpty()) return
             pending.forEach { it.join() }
         }
@@ -1100,6 +1137,16 @@ class MyotisNode internal constructor(
         override fun drainLogs(max: Int) = MyotisNative.drainLogs(max)?.toString(Charsets.UTF_8)
         override fun ethCall(handle: Long, to: String, data: String, block: String) =
             MyotisNative.ethCall(handle, to, data, block)?.toString(Charsets.UTF_8)
+        override fun requestAccount(handle: Long, address: String, block: String) =
+            MyotisNative.requestAccount(handle, address, block)?.toString(Charsets.UTF_8)
+        override fun getCode(handle: Long, address: String, block: String) =
+            MyotisNative.getCode(handle, address, block)?.toString(Charsets.UTF_8)
+        override fun ethCallFrom(handle: Long, from: String, to: String, data: String, value: String, block: String) =
+            MyotisNative.ethCallFrom(handle, from, to, data, value, block)?.toString(Charsets.UTF_8)
+        override fun transactionReceipt(handle: Long, txHash: String) =
+            MyotisNative.transactionReceipt(handle, txHash)?.toString(Charsets.UTF_8)
+        override fun blockByNumber(handle: Long, tag: String, fullTransactions: Boolean) =
+            MyotisNative.blockByNumber(handle, tag, fullTransactions)?.toString(Charsets.UTF_8)
     }
 
     companion object {

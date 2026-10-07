@@ -95,6 +95,43 @@ interface INodeService {
      */
     void setSwarmMode(boolean light, String gnosisRpc, in List<String> gnosisUserRpcs, in List<String> gnosisRpcs);
 
+    /**
+     * "Pay peers from the chequebook" (bee's swap-enable, for downloads
+     * and uploads): the setting lives in the UI process's DataStore, so
+     * the UI relays it on every bind and whenever it changes. The service
+     * sets it on the running node at once, and after every later init
+     * (ant doesn't persist it).
+     */
+    void setSwapEnabled(boolean enabled);
+
+    /**
+     * The Swarm node's disk chunk cache cap in bytes (ant clamps it to
+     * 64 MiB–16 GiB): the setting lives in the UI process's DataStore,
+     * so the UI relays it on every bind and whenever it changes. The
+     * service applies it to the running node at once — a smaller cap
+     * evicts down to it straight away — and hands it to every later init
+     * (ant doesn't persist it).
+     */
+    void setSwarmCacheCapacity(long bytes);
+
+    /**
+     * The Swarm node's chunk cache figures, ant's `ant_cache_status` JSON
+     * (`used_bytes`, `capacity_bytes`, `pinned_bytes`, `file_bytes`,
+     * `disk_enabled`, …), or null while the node isn't running. Reads
+     * counters only: the Nodes page polls it while it's on screen.
+     */
+    @nullable String getSwarmCacheStatus();
+
+    /**
+     * Drops every unpinned chunk from the Swarm node's cache, on disk and
+     * in memory; pinned (and so published) content stays. Blocks until
+     * done — well under a second at the default size, longer for several
+     * GB — so call it off the main thread. Returns ant's `ant_cache_clear`
+     * JSON (`freed_bytes`, `file_bytes_before`, `file_bytes_after`,
+     * `status`), or `{"error": …}`.
+     */
+    String clearSwarmCache();
+
     RadicleInfo getRadicleState();
 
     /**
@@ -135,8 +172,10 @@ interface INodeService {
 
     /**
      * Postage stamps (#116) and the chequebook (#117): `method` is one of
-     * `status`, `quote`, `extendQuote`, `discover`
-     * (no transaction) or `buy`, `extend`, `deposit` (SPEND, from the stamp
+     * `status`, `quote`, `extendQuote`, `discover`,
+     * `swapStatus` (no transaction), `confirmLiability` (accepts a lost
+     * cheque ledger's outstanding cheques, from the Chequebook page's
+     * confirmation only; no transaction) or `buy`, `extend`, `deposit` (SPEND, from the stamp
      * and chequebook screens' confirmation only), or `connect` (#115:
      * registers a batch the wallet bought for the node; a first one also
      * sets up the chequebook) — with
@@ -165,6 +204,15 @@ interface INodeService {
      */
     String getLogs(int source);
 
-    /** Forget every node's kept log lines (#276): Clear cookies & site data. */
+    /** Forget every node's kept log lines (#276): Delete browsing data → Cookies and site data. */
     oneway void clearLogs();
+
+    /**
+     * The *Colibri proofs* switch (Settings → Name resolution, #329),
+     * which also decides whether the chain-data router's Gnosis reads for
+     * the Swarm node go to the Colibri prover. The setting lives in the UI
+     * process's DataStore, so the UI relays it on every bind and change
+     * (ColibriReads); oneway, so they arrive in the order sent.
+     */
+    oneway void setColibriReads(boolean on);
 }

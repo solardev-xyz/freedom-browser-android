@@ -44,6 +44,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -220,11 +224,12 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
     val guard = tap.guard
     val armed = tap.armed
     val backedUp = when (val s = vaultState) {
-        is Vault.State.Locked -> s.info.backedUp
-        is Vault.State.Unlocked -> s.info.backedUp
+        is Vault.State.Locked -> s.info.phraseKnown
+        is Vault.State.Unlocked -> s.info.phraseKnown
         else -> true
     }
     val unlockAction = stringResource(R.string.signing_remote_action_unlock_wallet)
+    val working = stringResource(R.string.signing_remote_working)
     val reject = { if (!busy) approval.decide(OpenLvSession.Decision.Reject) }
     val approve = approve@{
         if (busy || !guard.accepts()) return@approve
@@ -296,12 +301,17 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
-                    error?.let {
-                        Spacer(Modifier.height(8.dp))
-                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                    }
                 }
                 Spacer(Modifier.height(16.dp))
+                // Above the buttons, outside the scrolling body: a failed approval is seen (and heard) where it was tapped (W40).
+                error?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(bottom = 8.dp).semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                }
                 ObscuredTapNotice(tap)
                 SheetButtonRow {
                     if (action == null && request is OpenLvSession.Request.Pricing) {
@@ -310,9 +320,10 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
                         Button(onClick = reject) { Text(stringResource(R.string.common_close)) }
                     } else {
                         OutlinedButton(onClick = reject, enabled = !busy) { Text(stringResource(R.string.common_reject)) }
-                        Button(onClick = approve, enabled = armed && !busy, modifier = Modifier.protectedPress(tap)) {
+                        Button(onClick = approve, enabled = armed && !busy, modifier = Modifier.heightIn(min = 48.dp).protectedPress(tap)) {
                             if (busy) {
-                                CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                                // Named, so TalkBack says what's happening rather than "Button, disabled" (W50).
+                                CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp).semantics { contentDescription = working })
                             } else {
                                 Text(action)
                             }
@@ -358,6 +369,7 @@ internal fun ConnectBody(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
                     .protectedSelectable(tap, selected = selected, enabled = enabled) { onPick(account) }
+                    .heightIn(min = 56.dp)
                     .padding(vertical = 4.dp),
             ) {
                 RadioButton(selected = selected, onClick = null, enabled = tap.armed && enabled)
@@ -373,7 +385,7 @@ internal fun ConnectBody(
 
 @Composable
 private fun AccountRow(account: WalletAccount) {
-    ReviewRow(stringResource(R.string.signing_review_account), account.name, address = account.address)
+    CopyableAddressRow(stringResource(R.string.signing_review_account), account.address, name = account.name)
 }
 
 @Composable
@@ -467,8 +479,8 @@ internal fun TypedLines(title: String, lines: List<baby.freedom.mobile.wallet.Ei
 @Composable
 private fun PricingBody(request: OpenLvSession.Request.Pricing) {
     ReviewRow(stringResource(R.string.signing_review_network), request.chain.name)
-    ReviewRow(stringResource(R.string.signing_review_from), request.account.name, address = request.account.address)
-    ReviewRow(stringResource(R.string.signing_review_to), null, address = request.to)
+    CopyableAddressRow(stringResource(R.string.signing_review_from), request.account.address, name = request.account.name)
+    CopyableAddressRow(stringResource(R.string.signing_review_to), request.to)
     ReviewRow(stringResource(R.string.signing_review_value), "${SendAmounts.exact(request.amount, request.chain.decimals)} ${request.chain.symbol}", mono = true)
     Spacer(Modifier.height(8.dp))
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -486,7 +498,7 @@ private fun PricingBody(request: OpenLvSession.Request.Pricing) {
 @Composable
 private fun CantSendBody(request: OpenLvSession.Request.CantSend) {
     ReviewRow(stringResource(R.string.signing_review_network), request.chain.name)
-    ReviewRow(stringResource(R.string.signing_review_from), request.account.name, address = request.account.address)
+    CopyableAddressRow(stringResource(R.string.signing_review_from), request.account.address, name = request.account.name)
     Spacer(Modifier.height(4.dp))
     Text(request.reason, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
     Spacer(Modifier.height(4.dp))
@@ -497,8 +509,18 @@ private fun CantSendBody(request: OpenLvSession.Request.CantSend) {
     )
 }
 
+/**
+ * A transaction desktop asks this phone to send (W40): what it does in a
+ * sentence ([sendTxHeadline], as a site's sheet says it), any native value
+ * a contract call also sends ([alsoSendsLine]), the most the fee can be
+ * and the total, the network it's on (#434 R3-F1: a peer can switch the
+ * session's chain without a prompt, and a decoded call's headline doesn't
+ * name it), the accounts with Copy, and the notes the site's sheet shows
+ * for the same call ([sendTxWarnings]); value, call data, nonce and gas
+ * under Details.
+ */
 @Composable
-private fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) {
+internal fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) {
     val quote = request.quote
     val r = quote.request
     val chain = r.chain
@@ -506,35 +528,49 @@ private fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) 
         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
         Spacer(Modifier.height(4.dp))
     }
-    ReviewRow(stringResource(R.string.signing_review_network), chain.name)
-    ReviewRow(stringResource(R.string.signing_review_from), r.from.name, address = r.from.address)
-    ReviewRow(stringResource(R.string.signing_review_to), null, address = r.to)
-    if (r.to.equals(r.from.address, ignoreCase = true)) {
-        Text(stringResource(R.string.signing_review_to_self), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    TxReviewSummary(
+        headline = sendTxHeadline(quote),
+        fee = stringResource(R.string.signing_review_up_to, feeText(quote.maxFee, chain)),
+        total = quote.nativeTotal?.takeIf { r.amount.signum() > 0 }?.let { stringResource(R.string.signing_review_up_to, feeText(it, chain)) },
+    ) {
+        alsoSendsLine(quote)?.let {
+            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (r.to.equals(r.from.address, ignoreCase = true)) {
+            Text(stringResource(R.string.signing_review_to_self), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
-    ReviewRow(stringResource(R.string.signing_review_value), "${SendAmounts.exact(r.amount, chain.decimals)} ${chain.symbol}", mono = true)
-    val data = "0x" + (r.dapp?.data?.toHex() ?: "")
-    HexRow(
-        stringResource(R.string.signing_review_data),
-        data,
-        selector = true,
-        detail = if (data.length > 2) {
-            pluralText(R.plurals.signing_review_call_bytes, (data.length - 2) / 2, (data.length - 2) / 2)
-        } else {
-            stringResource(R.string.signing_review_plain_transfer)
-        },
-    )
-    ReviewRow(stringResource(R.string.signing_review_network_fee), stringResource(R.string.signing_review_up_to, feeText(quote.maxFee, chain)), mono = true, detail = feeDetail(quote))
-    quote.nativeTotal?.let { ReviewRow(stringResource(R.string.signing_review_total), stringResource(R.string.signing_review_up_to, feeText(it, chain)), mono = true) }
-    ReviewRow(
-        stringResource(R.string.signing_review_nonce),
-        quote.tx.nonce.toString(),
-        detail = nonceDetail(quote),
-    )
-    Spacer(Modifier.height(4.dp))
-    Text(
-        stringResource(R.string.signing_remote_send_footnote, feeFootnote(quote.tx)),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+    Spacer(Modifier.height(8.dp))
+    HorizontalDivider()
+    ReviewRow(stringResource(R.string.signing_review_network), chain.name)
+    CopyableAddressRow(stringResource(R.string.signing_review_from), r.from.address, name = r.from.name)
+    CopyableAddressRow(stringResource(R.string.signing_review_to), r.to)
+    sendTxWarnings(quote).forEach { Warning(it) }
+    DetailsExpander {
+        ReviewRow(stringResource(R.string.signing_review_value), "${SendAmounts.exact(r.amount, chain.decimals)} ${chain.symbol}", mono = true)
+        val data = "0x" + (r.dapp?.data?.toHex() ?: "")
+        HexRow(
+            stringResource(R.string.signing_review_data),
+            data,
+            selector = true,
+            detail = if (data.length > 2) {
+                pluralText(R.plurals.signing_review_call_bytes, (data.length - 2) / 2, (data.length - 2) / 2)
+            } else {
+                stringResource(R.string.signing_review_plain_transfer)
+            },
+        )
+        ReviewRow(stringResource(R.string.signing_review_network_fee), stringResource(R.string.signing_review_up_to, feeText(quote.maxFee, chain)), mono = true, detail = feeDetail(quote))
+        ReviewRow(
+            stringResource(R.string.signing_review_nonce),
+            quote.tx.nonce.toString(),
+            mono = true,
+            detail = nonceDetail(quote),
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            stringResource(R.string.signing_remote_send_footnote, feeFootnote(quote.tx)),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }

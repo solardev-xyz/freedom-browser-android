@@ -52,7 +52,13 @@ import android.webkit.WebStorage
  *
  * Persisted, so a switch made while the app wasn't running (or a
  * process death between serving and switching) is still swept at the
- * next start. Recorded from the interceptor's IO threads, swept on the
+ * next start — except an origin only a private tab (#86) was served
+ * ([record] with `private`): naming the CIDs a private session opened in
+ * a file that outlives it would be a trail of it, and nothing of the
+ * private session's own storage outlives the process anyway (its
+ * profile is deleted at the next start). Such an origin is swept like
+ * any other while this process lasts, in the private profile's storage
+ * too ([wipeWebData]). Recorded from the interceptor's IO threads, swept on the
  * main thread; a request that recorded against a gateway a sweep has
  * since replaced is told so ([record], [isCurrent]) and re-resolved.
  */
@@ -67,6 +73,28 @@ object UnverifiedOrigins {
     private var gateway = ""
     private val origins = LinkedHashSet<String>()
     private val toClear = LinkedHashSet<String>()
+
+    /**
+     * Origins only a private tab was served, wherever they are now
+     * ([origins], [toClear], a hold that [release] puts back into
+     * [toClear]): kept in memory, never persisted (see the class doc).
+     * Left only when a normal tab is served one ([record]); never
+     * entered by an origin already pending a cleanup from a normal tab's
+     * earlier gateway, nor by one whose such cleanup a private tab
+     * consumed ([owedToNormal]).
+     */
+    private val privateOnly = HashSet<String>()
+
+    /**
+     * Origins whose persisted, one-shot cleanup ([toClear]) a private
+     * tab's document took ([takeClearFor] with `private`): that page
+     * cleared the private profile, so the normal profile's cleanup is
+     * still owed (#360). Such an origin is never made [privateOnly], so
+     * the cleanup a later [sweep] or [release] queues there is persisted
+     * again, as it was before #86 — the CID was on disk already. Left
+     * when a normal tab takes a cleanup there. Memory only.
+     */
+    private val owedToNormal = HashSet<String>()
 
     /** The IPFS gateway [sweep] last saw in use; `null` until the first sweep. */
     private var current: String? = null
@@ -122,11 +150,25 @@ object UnverifiedOrigins {
      * resolved its target before the switch and must resolve it again
      * rather than serve (and record) the old gateway's content.
      */
-    fun record(gateway: String, origin: String): Long? = synchronized(lock) {
+    fun record(gateway: String, origin: String, private: Boolean = false): Long? = synchronized(lock) {
         if (current != null && current != gateway) return null
-        if (this.gateway != gateway || origin !in origins) {
+        // A normal tab's request makes an origin a private tab had first
+        // an ordinary, persisted one.
+        val madePublic = !private && privateOnly.remove(origin)
+        if (this.gateway != gateway || origin !in origins || madePublic) {
             this.gateway = gateway
-            origins.add(origin)
+            // Private-only just for an origin this process knows nothing
+            // else of: one a normal tab's earlier gateway left a cleanup
+            // pending on ([toClear], or a [hold] that [release] puts back
+            // there) keeps that cleanup on disk — filtering it out of the
+            // persisted list would lose the normal profile's (R1-F1). So
+            // does one whose pending cleanup a private tab took first
+            // ([owedToNormal], R2-M1).
+            if (origins.add(origin) && private && origin !in toClear && origin !in owedToNormal &&
+                holds.values.none { origin in it }
+            ) {
+                privateOnly.add(origin)
+            }
             persist()
         }
         generation
@@ -261,9 +303,15 @@ object UnverifiedOrigins {
      * same-origin page that clears it and reloads
      * (`SITE_DATA_CLEANUP_HTML`) — the only way to reach the DOM storage
      * and service workers [wipeWebData] can't.
+     *
+     * [private]: the requester is a private tab (#86). Its cleanup page
+     * runs in the private profile, so taking a cleanup a normal tab's
+     * gateway left leaves that one owed ([owedToNormal]).
      */
-    fun takeClearFor(origin: String, requester: Any? = null): Boolean = synchronized(lock) {
+    fun takeClearFor(origin: String, requester: Any? = null, private: Boolean = false): Boolean = synchronized(lock) {
         if (toClear.remove(origin)) {
+            if (!private) owedToNormal.remove(origin)
+            else if (origin !in privateOnly) owedToNormal.add(origin)
             persist()
             return true
         }
@@ -275,11 +323,17 @@ object UnverifiedOrigins {
      * [sweep]'s wipe in the app: the origins' DOM storage, IndexedDB and
      * WebSQL, and the cookies page script set on them (the interceptor
      * strips cookies from gateway traffic, so only `document.cookie`
-     * writes exist). Main thread.
+     * writes exist). In the private session's profile (#86) as well,
+     * while one is live: a private tab's storage is its own, which the
+     * default profile's `WebStorage`/`CookieManager` never reach. Main
+     * thread.
      */
     fun wipeWebData(origins: Set<String>) {
-        val storage = runCatching { WebStorage.getInstance() }.getOrNull()
-        val cookies = runCatching { CookieManager.getInstance() }.getOrNull()
+        wipeIn(runCatching { WebStorage.getInstance() }.getOrNull(), runCatching { CookieManager.getInstance() }.getOrNull(), origins)
+        if (PrivateProfile.isLive()) wipeIn(PrivateProfile.webStorage(), PrivateProfile.cookieManager(), origins)
+    }
+
+    private fun wipeIn(storage: WebStorage?, cookies: CookieManager?, origins: Set<String>) {
         for (origin in origins) {
             runCatching { storage?.deleteOrigin(origin) }
             runCatching {
@@ -301,6 +355,8 @@ object UnverifiedOrigins {
             gateway = ""
             origins.clear()
             toClear.clear()
+            privateOnly.clear()
+            owedToNormal.clear()
             holds.clear()
             clearedWhileHeld.clear()
             workerDocuments.clear()
@@ -316,11 +372,20 @@ object UnverifiedOrigins {
     /** Origins whose next document clears their site data (tests). */
     internal fun pendingClears(): Set<String> = synchronized(lock) { toClear.toSet() }
 
+    /** What [persist] writes: [origins] and [toClear] without [privateOnly]. Under [lock]. */
+    private fun persisted(): Pair<Set<String>, Set<String>> =
+        origins.filterTo(LinkedHashSet()) { it !in privateOnly } to
+            toClear.filterTo(LinkedHashSet()) { it !in privateOnly }
+
+    /** What the persisted list holds now: recorded origins to cleanup-pending ones (tests). */
+    internal fun persistedSnapshot(): Pair<Set<String>, Set<String>> = synchronized(lock) { persisted() }
+
     private fun persist() {
+        val (keptOrigins, keptToClear) = persisted()
         prefs?.edit()
             ?.putString(KEY_GATEWAY, gateway)
-            ?.putStringSet(KEY_ORIGINS, origins.toSet())
-            ?.putStringSet(KEY_TO_CLEAR, toClear.toSet())
+            ?.putStringSet(KEY_ORIGINS, keptOrigins)
+            ?.putStringSet(KEY_TO_CLEAR, keptToClear)
             ?.apply()
     }
 }

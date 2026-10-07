@@ -87,4 +87,36 @@ class WalletRpcTest {
         } catch (_: ChainRpcException.InvalidResponse) {
         }
     }
+
+    @Test
+    fun aSitesReadsReachTheProofTiersAsTheSites() = runBlocking {
+        // An x402 offer's token contract is the site's choice: its reads go
+        // to the proof tiers as a page's, never as the wallet's (#329 R4-F1).
+        val seen = mutableListOf<RoutingContext>()
+        val proof = object : VerifiedChainSource {
+            override fun isAvailable(chainId: Long) = true
+            override suspend fun request(
+                chainId: Long,
+                method: String,
+                params: org.json.JSONArray,
+                rpcs: List<String>,
+                context: RoutingContext,
+            ): ChainDataResult {
+                seen += context
+                return ChainDataResult(
+                    "0x" + "0".repeat(63) + "6",
+                    ChainTrust(ChainTrust.Level.VERIFIED, ChainSource.MYOTIS, emptyList(), emptyList(), emptyList(), 1, 1, null),
+                )
+            }
+        }
+        val router = ChainDataRouter(
+            chains = { listOf(Chain(id = 100, name = "Gnosis", symbol = "XDAI", rpcUrls = urls)) },
+            transport = RpcTransport { _, _, _ -> error("the proof tier answers") },
+            verifiedSources = mapOf(ChainSource.MYOTIS to proof),
+        )
+        val tx = JSONObject().put("to", "0x" + "11".repeat(20)).put("data", "0x313ce567")
+        WalletRpc(router).call(100, tx)
+        WalletRpc(router, RoutingContext.forSiteChoice("https://pay.example")).call(100, tx)
+        assertEquals(listOf(RoutingContext.WALLET, RoutingContext.forSiteChoice("https://pay.example")), seen.toList())
+    }
 }

@@ -42,8 +42,20 @@ class MyotisNodeTest {
         }
         /** A stop of a handle in here blocks until its latch opens. */
         val stopGates = java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.CountDownLatch>()
+        private val stopsEntered = java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.CountDownLatch>()
+        private fun entered(handle: Long) = stopsEntered.computeIfAbsent(handle) { java.util.concurrent.CountDownLatch(1) }
+
+        /**
+         * Wait for [handle]'s stop to be called: a chain's stop runs on its
+         * own coroutine, off the queue, so the queue going idle doesn't mean
+         * it has started yet (#394).
+         */
+        fun awaitStopCalled(handle: Long) =
+            assertTrue("stop $handle not called", entered(handle).await(5, java.util.concurrent.TimeUnit.SECONDS))
+
         override fun stop(handle: Long) {
             calls += "stop $handle"
+            entered(handle).countDown()
             stopGates[handle]?.let { gate ->
                 gate.await()
                 calls += "stopped $handle"
@@ -66,6 +78,10 @@ class MyotisNodeTest {
         override fun ethCall(handle: Long, to: String, data: String, block: String): String {
             calls += "ethCall $handle $to $data $block"
             return """{"status":"ok","resultHex":"0x01","blockNumber":7,"verified":false}"""
+        }
+        override fun requestAccount(handle: Long, address: String, block: String): String {
+            calls += "account $handle $address $block"
+            return """{"exists":true,"nonce":5,"balanceWei":"1000","blockNumber":7,"verifyMethod":"headerChain","failReason":null}"""
         }
     }
 
@@ -661,6 +677,25 @@ class MyotisNodeTest {
         assertEquals(2, engine.calls.count { it.startsWith("ethCall") })
     }
 
+    @Test
+    fun `a router read reaches the engine on a ready chain and never on a parked one`() {
+        val engine = FakeEngine()
+        engine.status[1L] = readyJson
+        engine.status[2L] = """{"running":true,"beaconState":"STALE_ANCHOR","snapServingPeers":1,"elReaderAvailable":true,"currentPeriod":3692,"targetPeriod":3701,"wsBoundPeriods":3}"""
+        val node = node(engine)
+        val address = "0x" + "ab".repeat(20)
+        val params = org.json.JSONArray().put(address).put("latest")
+        node.start()
+        idle(node)
+        val mainnet = org.json.JSONObject(node.read(MyotisNetwork.Mainnet, "eth_getTransactionCount", params))
+        assertEquals("0x5", mainnet.get("result"))
+        assertEquals(7L, mainnet.getLong("blockNumber"))
+        assertTrue("account 1 $address latest" in engine.calls)
+        // Gnosis is parked on its stale anchor: no read reaches its engine.
+        assertEquals(MyotisNode.NOT_READY_JSON, node.read(MyotisNetwork.Gnosis, "eth_getTransactionCount", params))
+        assertFalse(engine.calls.any { it.startsWith("account 2") })
+    }
+
     // ---- Per-chain switches (#274).
 
     @Test
@@ -835,7 +870,7 @@ class MyotisNodeTest {
         engine.status[2L] = readyJson
         node.pollNow()
         runBlocking { withTimeout(5_000) { node.awaitIdle(stops = false) } }
-        assertTrue("stop 1" in engine.calls)
+        engine.awaitStopCalled(1L)
         assertTrue("stopped 1" !in engine.calls)
         assertEquals(true, node.state.value.chain(MyotisNetwork.Gnosis)?.ready)
         node.enterBackground()

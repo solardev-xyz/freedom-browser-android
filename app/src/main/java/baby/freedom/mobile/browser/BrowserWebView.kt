@@ -16,6 +16,7 @@ import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Bundle
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
@@ -26,6 +27,10 @@ import android.view.Menu
 import android.view.MenuItem
 import android.view.PixelCopy
 import android.view.KeyEvent
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputConnectionWrapper
+import android.view.inputmethod.TextAttribute
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -50,6 +55,7 @@ import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -115,6 +121,9 @@ internal val HEADERS_TO_STRIP = setOf(
     // [nameResolutionErrorIn] and [NodeApiGuard.isRefusal]).
     NAME_RESOLUTION_ERROR_HEADER.lowercase(),
     NodeApiGuard.REFUSAL_HEADER.lowercase(),
+    // Would let a gateway-served worker script claim a scope wider than
+    // its own path on the virtual origin (#355; desktop drops it too).
+    "service-worker-allowed",
 )
 
 /**
@@ -359,13 +368,16 @@ internal fun nameResolutionRefusalHtml(
 
 /**
  * A self-contained error page served *as* a refused document's own
- * response (no script, nothing fetched): [title], [descriptionHtml], and
- * [detailsHtml] in the details box (both already escaped), with a
- * Try again link that reloads the entry — or goes to [retryHref]
- * (escaped) instead; with [refreshSeconds], the entry is asked for again
- * after that long by a meta refresh (a GET of the same address, still no
- * script). [nameResolutionRefusal]'s and [TorRouting]'s refusals, and a
- * failed web load's page ([netErrorPageHtml]).
+ * response (no script, nothing fetched): [title] as a neutral heading,
+ * [descriptionHtml], a primary Try again link that reloads the entry —
+ * or goes to [retryHref] (escaped) instead — and [detailsHtml] collapsed
+ * under "Details" (both already escaped), in the app's own colours
+ * ([errorPageThemeCss], #419). [secondaryLink] (href and label, both
+ * escaped) is a second, outlined action — a failed typed address's
+ * "Search for … instead". With [refreshSeconds], the entry is asked for
+ * again after that long by a meta refresh (a GET of the same address,
+ * still no script). [nameResolutionRefusal]'s and [TorRouting]'s
+ * refusals, and a failed web load's page ([netErrorPageHtml]).
  */
 internal fun inPlaceErrorPageHtml(
     title: String,
@@ -373,26 +385,17 @@ internal fun inPlaceErrorPageHtml(
     detailsHtml: String,
     retryHref: String = "",
     refreshSeconds: Int? = null,
+    secondaryLink: Pair<String, String>? = null,
 ): String {
     val tryAgain = Strings.get(R.string.common_try_again)
+    val details = Strings.get(R.string.errorpage_page_details)
+    val secondary = secondaryLink?.let { (href, label) -> "<a class=\"btn\" href=\"$href\">$label</a>" }.orEmpty()
     return """<!doctype html><html lang="en"><head><meta charset="utf-8">${refreshSeconds?.let { "\n<meta http-equiv=\"refresh\" content=\"$it\">" }.orEmpty()}
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
-<title>$title</title><style>
-html,body{margin:0;min-height:100%}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-background:#141414;color:#f5f5f5;padding:32px 20px;box-sizing:border-box;text-align:center}
-.c{max-width:560px;margin:0 auto}
-h1{font-size:22px;margin:24px 0 12px;color:#ff5e5e}
-p{line-height:1.55;margin:0 0 20px;color:#ccc;font-size:15px}
-.d{background:#1a1a1a;padding:14px 16px;border-radius:8px;font-family:ui-monospace,Menlo,monospace;
-font-size:13px;color:#ff8a8a;margin:0 0 24px;word-break:break-all;white-space:pre-wrap;text-align:left}
-a{display:inline-block;padding:12px 22px;background:#2c2c2c;color:#fff;border:1px solid #444;
-border-radius:8px;font-size:15px;text-decoration:none}
-@media (prefers-color-scheme:light){body{background:#fff;color:#24292f}h1{color:#cf222e}
-p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-color:#d0d7de;color:#24292f}}
-</style></head><body><div class="c"><h1>$title</h1><p>$descriptionHtml</p>
-<div class="d">$detailsHtml</div><a href="$retryHref">$tryAgain</a></div></body></html>"""
+<title>$title</title><style>${errorPageThemeCss()}$ERROR_PAGE_CSS</style></head><body><div class="c"><h1>$title</h1><p>$descriptionHtml</p>
+<div class="b"><a class="btn p" href="$retryHref">$tryAgain</a>$secondary</div>
+<details><summary>$details</summary><div class="d">$detailsHtml</div></details></div></body></html>"""
 }
 
 /** Where [nameWebRecordNavigation] sends a request for [pathAndQuery] on the name's origin. */
@@ -441,12 +444,6 @@ private val REQUEST_HEADERS_TO_STRIP = setOf(
     "te", "trailer", "transfer-encoding", "upgrade", "cookie",
 )
 
-// HTTP status codes we treat as transient — a cold Swarm node regularly
-// answers 404 for a chunk that's still being fetched, and brief 5xx
-// from the node itself resolve on retry too. Matches the retry set
-// used by freedom-browser's `bzz-protocol.js` on desktop.
-private val TRANSIENT_STATUSES = setOf(404, 500, 502, 503, 504)
-
 /**
  * Apply the Swarm-specific request headers that give the node extra
  * server-side runway on transient chunk-retrieval failures. Measured on
@@ -463,8 +460,7 @@ private fun HttpURLConnection.applySwarmRequestHeaders() {
 
 /**
  * Copy request headers from [req] onto [this] connection, stripping
- * hop-by-hop / origin-tied headers, optionally dropping `Range`
- * (when the caller wants to fetch the full body), forcing
+ * hop-by-hop / origin-tied headers (`Range` goes through), forcing
  * `Accept-Encoding: identity`, and stamping the Swarm-* retrieval
  * hints the gateway honors. [noCache]: a Hard reload's fetch (#262) —
  * any HTTP cache in front of the content (an external gateway's, a
@@ -473,14 +469,12 @@ private fun HttpURLConnection.applySwarmRequestHeaders() {
  */
 private fun HttpURLConnection.forwardProxiedHeaders(
     req: WebResourceRequest,
-    stripRange: Boolean = false,
     crossOrigin: Boolean = false,
     noCache: Boolean = false,
 ) {
     req.requestHeaders?.forEach { (k, v) ->
         val lk = k.lowercase()
         if (lk in REQUEST_HEADERS_TO_STRIP) return@forEach
-        if (stripRange && lk == "range") return@forEach
         // A redirect hop to another origin doesn't get the credentials
         // (HttpURLConnection's own following dropped them too).
         if (crossOrigin && lk == "authorization") return@forEach
@@ -852,6 +846,8 @@ fun BrowserWebViewHost(
         // A private session a dead process left behind (#86) goes
         // before any page — private or not — can load.
         PrivateProfile.discardLeftovers()
+        // …and so do the images its tabs copied or shared.
+        if (!PrivateProfile.isLive()) discardPrivateImageShares(context)
         Unit
     }
 
@@ -918,12 +914,13 @@ fun BrowserWebViewHost(
      * [onPrivateSessionEnded]: the node processes' logs go too (#276,
      * R3-M3) — scrubbed, but the timing and volume of what the private
      * tabs fetched is in them, and a line can't be told apart by tab, so
-     * every node's lines go, as with *Clear cookies & site data*. So do
+     * every node's lines go, as with *Delete browsing data*'s *Cookies and site data*. So do
      * those logged in the next [baby.freedom.mobile.node.NodeLogs.SETTLE_MS]:
      * the nodes go on with a closed tab's requests for a while (R1-M1).
      */
     fun endPrivateSession() {
         PrivateProfile.discard()
+        discardPrivateImageShares(context)
         sitePermissions.onPrivateSessionEnded()
         Adblock.onPrivateSessionEnded()
         pageZoom.clearPrivate()
@@ -1374,52 +1371,59 @@ fun BrowserWebViewHost(
         tabs.dropMemoryCache = { tab ->
             webViews[tab.id]?.let { wv -> runCatching { wv.clearCache(false) } }
         }
-        tabs.clearWebViewData = {
-            // Globally-scoped stores: cookies and DOM storage / IndexedDB /
-            // WebSQL are shared across every WebView in the process, so
-            // wiping them once is enough. This covers the per-root
-            // virtual origins too — removeAllCookies / deleteAllData
-            // are origin-agnostic, so "clear browsing data" clears
-            // every `*.bzz.freedom.baby`-style origin's storage along
-            // with everything else.
-            runCatching { CookieManager.getInstance().removeAllCookies(null) }
-            runCatching { CookieManager.getInstance().flush() }
-            runCatching { WebStorage.getInstance().deleteAllData() }
-            // …and a private session's own (#86), which lives in its
-            // profile's stores.
-            PrivateProfile.clearData()
-            // Per-instance state: HTTP cache, autofill form data, and the
-            // back/forward stack live on each WebView, so clear them on
-            // every live tab.
-            for (wv in webViews.values) {
-                runCatching { wv.clearCache(true) }
-                runCatching { wv.clearFormData() }
-                runCatching { wv.clearHistory() }
+        tabs.clearWebViewData = { siteData, cache ->
+            if (siteData) {
+                // Globally-scoped stores: cookies and DOM storage / IndexedDB /
+                // WebSQL are shared across every WebView in the process, so
+                // wiping them once is enough. This covers the per-root
+                // virtual origins too — removeAllCookies / deleteAllData
+                // are origin-agnostic, so "clear browsing data" clears
+                // every `*.bzz.freedom.baby`-style origin's storage along
+                // with everything else. Neither API takes a time range,
+                // so this is always all time (#400).
+                runCatching { CookieManager.getInstance().removeAllCookies(null) }
+                runCatching { CookieManager.getInstance().flush() }
+                runCatching { WebStorage.getInstance().deleteAllData() }
+                // …and a private session's own (#86), which lives in its
+                // profile's stores.
+                PrivateProfile.clearData()
+                // Per-instance state: autofill form data and the
+                // back/forward stack live on each WebView, so clear them on
+                // every live tab.
+                for (wv in webViews.values) {
+                    runCatching { wv.clearFormData() }
+                    runCatching { wv.clearHistory() }
+                }
+                // A tab whose renderer went away (#260) keeps its back/forward
+                // list in the state it's to be rebuilt from: it comes back on
+                // its page alone, as `clearHistory()` leaves every other tab.
+                for (tab in tabs.tabs) {
+                    if (tab.rendererGone != null) tab.pendingRestore = tab.pendingRestore?.withoutHistory()
+                }
+                // Remembered zoom levels are keyed by the sites visited (#88).
+                pageZoom.clearAll()
+                // …and so are the sites asked for as desktop sites (#180).
+                desktopSites.clearAll()
+                // Unfinished downloads keep partial files in app storage
+                // (#265): they stop, and those files go.
+                DownloadManager.get(context).discardUnfinished()
             }
-            // A tab whose renderer went away (#260) keeps its back/forward
-            // list in the state it's to be rebuilt from: it comes back on
-            // its page alone, as `clearHistory()` leaves every other tab.
-            for (tab in tabs.tabs) {
-                if (tab.rendererGone != null) tab.pendingRestore = tab.pendingRestore?.withoutHistory()
+            if (cache) {
+                // The HTTP cache lives on each WebView's profile; clear it
+                // through every live tab's (`clearCache` has no time range).
+                for (wv in webViews.values) runCatching { wv.clearCache(true) }
+                // The HTTP cache is per profile, and a WebView is the only
+                // handle on it: a profile none of whose tabs has a live
+                // WebView (every one went with the shared renderer, #260, or
+                // none was built yet) has its cache cleared through a
+                // stand-in — or it survives the clear and serves the next
+                // load from what the user was told was gone.
+                if (webViews.keys.none { it !in privateIds }) clearDefaultCache(context)
+                if (privateIds.isNotEmpty() && privateIds.none { it in webViews }) clearPrivateCache(context, null)
+                // Camera captures handed to pages live in our own cache/uploads
+                // (served by our FileProvider), outside Chromium's cache dir.
+                runCatching { fileChooser.clearCaptures() }
             }
-            // The HTTP cache is per profile, and a WebView is the only
-            // handle on it: a profile none of whose tabs has a live
-            // WebView (every one went with the shared renderer, #260, or
-            // none was built yet) has its cache cleared through a
-            // stand-in — or it survives the clear and serves the next
-            // load from what the user was told was gone.
-            if (webViews.keys.none { it !in privateIds }) clearDefaultCache(context)
-            if (privateIds.isNotEmpty() && privateIds.none { it in webViews }) clearPrivateCache(context, null)
-            // Camera captures handed to pages live in our own cache/uploads
-            // (served by our FileProvider), outside Chromium's cache dir.
-            runCatching { fileChooser.clearCaptures() }
-            // Remembered zoom levels are keyed by the sites visited (#88).
-            pageZoom.clearAll()
-            // …and so are the sites asked for as desktop sites (#180).
-            desktopSites.clearAll()
-            // Unfinished downloads keep partial files in app storage
-            // (#265): they stop, and those files go.
-            DownloadManager.get(context).discardUnfinished()
         }
         onDispose {
             tabs.captureActiveThumbnail = null
@@ -1924,6 +1928,23 @@ private fun buildRefreshableWebView(
     val webView = PageWebView(
         if (state.private) PrivateWindowContext.of(context) else context,
     ).apply {
+        privateTab = state.private
+        // An input ended: a moment later, ask the top document's detector
+        // to echo once the renderer is past it (#348). The echo bounds
+        // when an iframe that held the thread in its own handlers got
+        // that input's activation ([UserGestureLatch.onRendererCaughtUp]).
+        // No detector, no echo: the input keeps counting, fail closed.
+        // The echo waits out a tap held back for a double tap, whose
+        // click can renew an iframe's activation ([inputSyncSettleMs]).
+        if (bottomUiSupported) {
+            val settleMs = inputSyncSettleMs(ViewConfiguration.getDoubleTapTimeout())
+            onInputEnded = { id ->
+                postDelayed({
+                    val request = inputSyncRequest(id, settleMs)
+                    for (reply in bottomUiChannels.targets) runCatching { reply.postMessage(request) }
+                }, INPUT_SYNC_DELAY_MS)
+            }
+        }
         // A private tab's WebView goes on the private session's profile
         // (#86) before anything else touches it: Chromium only takes a
         // profile change on a WebView that has never been used.
@@ -2490,6 +2511,18 @@ private fun buildRefreshableWebView(
                     if (isMainFrame) userGestures.onTopDocumentInput(input.ageMs, input.isClick)
                     return@WebMessageListener
                 }
+                // A navigation the top document itself started (#348
+                // R5-F1): only the main frame's word counts.
+                parseTopDocumentNavigate(message.data)?.let { url ->
+                    if (isMainFrame) userGestures.onTopDocumentNavigate(url)
+                    return@WebMessageListener
+                }
+                // The renderer is past an input (#348): the top
+                // document's echo of the sync sent after it ended.
+                parseInputSynced(message.data)?.let { id ->
+                    if (isMainFrame) userGestures.onRendererCaughtUp(id)
+                    return@WebMessageListener
+                }
                 // The page's say on a long-press (#84): any frame, since
                 // the press may land in an iframe. It can only ever open
                 // a menu for a press the user actually made.
@@ -2572,6 +2605,18 @@ private fun buildRefreshableWebView(
         // from, before each document arrives (see [TabScriptlets]).
         val scriptlets = TabScriptlets.install(this, state.private)
         (this as? PageWebView)?.scriptlets = scriptlets
+
+        // Pointer lock (#389): emulated in every frame, since WebView
+        // denies every real request and pointer-lock-gated games never start.
+        PointerLock.install(this)
+
+        // `blob:` downloads: read inside the frame that made the file
+        // (see [BlobDownloads]).
+        val blobDownloads = BlobDownloads.install(this)
+
+        // The page's own word that it gave up on a dweb request — which
+        // WebView never passes on — so its fetch stops (see [DwebAborts]).
+        val dwebAborts = DwebAborts.install(this)
 
         // `window.radicle` (#124): the provider's page object and channel.
         RadicleProviders.install(this, state)
@@ -2689,7 +2734,19 @@ private fun buildRefreshableWebView(
         // remembered answer) for the page that asked, then the app is
         // started. An `intent:` no app can take goes to its http(s)
         // fallback instead, as a page navigation would.
+        //
+        // [pageUrl] is the site asking: for a page's own tap, its
+        // committed origin ([externalLinkAsker], #342), as document
+        // [doc]; for a load the user named, the hop that answered.
         fun offerExternalLink(view: WebView, pageUrl: String?, tab: BrowserState, url: String, doc: Int, userNamed: Boolean = false) {
+            // The page's tap is offered only while its page is still the
+            // tab's document: the offer can run a moment after the tap
+            // (the top-document check), and a page committed meanwhile
+            // never asked, and nor did one the tab left for Home (#342).
+            if (!userNamed && !externalLinkPageCurrent(tab, pageUrl, doc)) {
+                Log.i(LOG_TAG, "external link refused: page gone: ${externalUrlForLog(url)}")
+                return
+            }
             // A payment link (#317): the wallet's Send page, not an app.
             // One the user's own address answered with (a redirect) is
             // theirs, as if typed: no ask filed against the page on
@@ -2779,22 +2836,34 @@ private fun buildRefreshableWebView(
                 // hooks; it is the address itself.
                 downloadIsNavigationResponse = wasPending || url == state.addressBarText,
             )
-            DownloadManager.get(context).start(
-                tabId = state.id,
-                private = state.private,
-                url = url,
-                userAgent = userAgent,
-                contentDisposition = contentDisposition,
-                mimeType = mimeType,
-                contentLength = contentLength,
-                // An address the user submitted has no referrer — the
-                // page on screen had nothing to do with it. Anything else
-                // a page asked for, even with no URL to show ("" — the
-                // prompt then says "a page"): null would pass it off as
-                // the user's own request, which a declined tab still
-                // lets through.
-                pageUrl = if (endsTypedNavigation) null else (this.url ?: ""),
-            )
+            // An address the user submitted has no referrer — the page on
+            // screen had nothing to do with it. Anything else a page asked
+            // for, even with no URL to show ("" — the prompt then says "a
+            // page"): null would pass it off as the user's own request,
+            // which a declined tab still lets through.
+            val pageUrl = if (endsTypedNavigation) null else (this.url ?: "")
+            val offer = { blob: BlobSource? ->
+                DownloadManager.get(context).start(
+                    tabId = state.id,
+                    private = state.private,
+                    url = url,
+                    userAgent = userAgent,
+                    contentDisposition = contentDisposition,
+                    mimeType = mimeType,
+                    contentLength = contentLength,
+                    pageUrl = pageUrl,
+                    blob = blob,
+                )
+            }
+            if (url.startsWith("blob:", ignoreCase = true)) {
+                // Only the page that made it can read it: have the frame
+                // holding it keep the file (and say what it is) first,
+                // then offer it as usual.
+                blobDownloads?.prepare(url) { offer(it) }
+                    ?: offer(FailedBlob(DownloadNote.of(R.string.library_download_blob_unreachable)))
+            } else {
+                offer(null)
+            }
             if (endsTypedNavigation) {
                 state.stopProgress()
                 state.addressBarText = state.url
@@ -2875,6 +2944,22 @@ private fun buildRefreshableWebView(
                 failedLoad = null
                 pendingCertErrors.clear()
                 certRefusal.committed(url)
+                // The page that held a blob: download's file is gone, and
+                // its file with it: such a download fails now, not after
+                // a chunk times out.
+                blobDownloads?.documentChanged()
+                // Whether this document is one of our error pages (the
+                // menu's Add to Home screen and Desktop site read it):
+                // `state.url` will hold the address that failed, so the
+                // raw URL and the in-place refusal slots are what can
+                // tell. A failed web load's page is marked when it goes
+                // up, in `onReceivedError`.
+                state.showsErrorPage = ErrorPage.isErrorPage(url) ||
+                    nameRefusal.isRefused(url) ||
+                    certRefusal.isServed(url)
+                // Another page: what was typed no longer stands behind a
+                // later load of that address (#419).
+                state.typedAddress = typedAddressAfterCommit(state.typedAddress, url)
                 mainFrameChain.committed()
                 (view as? PageWebView)?.historyStepCommitted()
                 // A Hard reload's load committed: its finish ends the
@@ -3208,6 +3293,7 @@ private fun buildRefreshableWebView(
                     state.progress = -1
                     // …and no site to zoom as (#88), for the same reason.
                     state.zoomSite = null
+                    state.showsErrorPage = false
                     state.providerOrigin = null
                     state.permissionOrigin = null
                     // …and no page colour behind the status bar (#92) —
@@ -3509,13 +3595,16 @@ private fun buildRefreshableWebView(
                     // iframe's that navigates the top frame (target=_top):
                     // the offer waits for the top document to say so
                     // ([UserGestureLatch]). The page it is asked for is
-                    // the one on screen now, whatever commits meanwhile.
-                    val pageUrl = askingView?.url
+                    // the one on screen now: the origin its tab (a popup's
+                    // opener, for the popup's first navigation) committed,
+                    // not `askingView.url`, which may already be a pending
+                    // load's address (#342) — and as its document now, so
+                    // nothing is offered once that page is gone.
                     val offerTab = opener?.first ?: state
-                    // …and its document now: a payment link's Send page is
-                    // dropped if that page is gone by the time it's shown.
-                    val offerDoc = EthereumProviders.currentDocument(offerTab.id)
-                    val offer = askingView?.let { page -> { offerExternalLink(page, pageUrl, offerTab, target, offerDoc) } }
+                    val asker = externalLinkAsker(offerTab)
+                    val offer = askingView?.let { page ->
+                        { offerExternalLink(page, asker?.origin, offerTab, target, asker?.doc ?: EthereumProviders.currentDocument(offerTab.id)) }
+                    }
                     val waiting = verdict == ExternalLinkVerdict.Ask && input != null && latch != null &&
                         offer != null && latch.whenInTopDocument(input, offer)
                     if (verdict == ExternalLinkVerdict.AskUserNamed && askingView != null) {
@@ -3572,8 +3661,10 @@ private fun buildRefreshableWebView(
                 if (navigationOpensStopLatch(request.isForMainFrame, detoured)) {
                     state.loadAborted = false
                     // A link the WebView follows itself is a new load
-                    // (a detoured one gets this from the submit, #94).
-                    state.beginLoad(inWebView = true)
+                    // (a detoured one gets this from the submit, #94);
+                    // a redirect hop is a new generation of the same one
+                    // as far as the load bar is concerned (R3-F1).
+                    state.beginLoad(inWebView = true, redirect = request.isRedirect)
                 }
                 if (detoured) {
                     // The WebView's own navigation stops here; the submit
@@ -3636,9 +3727,25 @@ private fun buildRefreshableWebView(
                         // Started by the page on screen: only that site's
                         // own allowance may pay for it (#218 R4-M3), and
                         // only on the user's tap, not the page's own
-                        // script chaining 402s (#237).
+                        // script chaining 402s (#237) — a tap the top
+                        // document says it received, not one on a
+                        // cross-origin iframe that navigates the top
+                        // frame with it (#348), and a navigation the top
+                        // document says it started itself, not one an
+                        // iframe started during the user's tap on the top
+                        // page (R5-F1). Without a PageWebView's latch,
+                        // nothing confirms it: fail closed.
+                        val gesture = if (request.hasGesture()) {
+                            (view as? PageWebView)?.userGestures?.topDocumentGesture(target) ?: TopDocumentGesture { false }
+                        } else {
+                            // Still takes the top document's word on it, or a
+                            // cross-origin frame's gestured load of the same
+                            // URL just after could claim it (#382 R1-M1).
+                            (view as? PageWebView)?.userGestures?.onTopNavigationWithoutGesture(target)
+                            null
+                        }
                         X402Payments.onNavigationStarted(
-                            state, byUser = false, pageUrl = committedPageUrl, url = target, gesture = request.hasGesture(),
+                            state, byUser = false, pageUrl = committedPageUrl, url = target, gesture = gesture,
                         )
                     }
                 }
@@ -3649,6 +3756,9 @@ private fun buildRefreshableWebView(
                 view: WebView?,
                 request: WebResourceRequest?,
             ): WebResourceResponse? {
+                // When this call began, for [DwebAborts]: read first, as
+                // the work below can block (R3-M2).
+                val calledAt = dwebAborts?.clock()
                 val mainFrame = request?.isForMainFrame == true
                 // A page's tapped navigation across the desktop/mobile
                 // line (#180): its first request is answered here with a
@@ -3721,15 +3831,13 @@ private fun buildRefreshableWebView(
                     // its next load (#318). Only a request the document
                     // itself made names it (see [refererNamesDocument]).
                     scriptlets?.noteReferer(request.requestHeaders)
-                    if (url != null &&
-                        Adblock.shouldBlock(
+                    if (url != null) {
+                        Adblock.blockedResponseFor(
                             url,
                             request.requestHeaders,
                             adblockPage.current(refererOf(request.requestHeaders)),
                             state.private,
-                        )
-                    ) {
-                        return Adblock.blockedResponse()
+                        )?.let { return it }
                     }
                     // A frame's document: its scriptlets in place before
                     // its answer can arrive (#318).
@@ -3741,6 +3849,17 @@ private fun buildRefreshableWebView(
                 // A certificate-refused load issued again: its page, in
                 // its own entry, never reaching the network (#259).
                 val certPage = if (mainFrame) request!!.url?.toString()?.let(certRefusal::take) else null
+                // A dweb subresource the page already gave up on, before
+                // WebView got round to asking for it: answered at once,
+                // nothing fetched. Any other is told if the page gives up
+                // while it's fetched (see [DwebAborts]).
+                val ticket = request?.url?.toString()
+                    ?.takeIf { DwebAborts.tracks(it, mainFrame) }
+                    ?.let { url -> dwebAborts?.let { a -> a.begin(url, calledAt ?: a.clock()) } }
+                if (ticket?.abandoned == true) {
+                    dwebAborts?.finished(ticket)
+                    return abandonedResponse()
+                }
                 val work = state.gatewayWork.start(generation)
                 val response = if (heldBack) heldBackResponse() else if (certPage != null) {
                     certPageResponse(certPage)
@@ -3751,12 +3870,22 @@ private fun buildRefreshableWebView(
                         // the interceptor's caches — this tab's, this
                         // document's only (#262).
                         freshFetch = { target -> state.takeFreshFetch(generation, target) },
+                        freshDocument = { target -> state.fetchedFresh(generation, target) },
+                        private = state.private,
+                        abandon = ticket,
                     ) { served ->
                         noteMainFrameContentLoad(view, state, generation, served)
                     }
                 } catch (t: Throwable) {
                     state.gatewayWork.finish(work)
                     throw t
+                } finally {
+                    ticket?.let { dwebAborts?.finished(it) }
+                }
+                // A later cache hit on it must read as one to a
+                // cross-origin page too (see [DwebAborts.timingAllowed]).
+                if (ticket != null && response != null) {
+                    response.responseHeaders = DwebAborts.timingAllowed(response.responseHeaders)
                 }
                 // Before Chromium has the answer, so none of the new
                 // document's own requests can be filed under the load
@@ -3833,8 +3962,10 @@ private fun buildRefreshableWebView(
                         host = req.url?.host.orEmpty().ifEmpty { failed },
                         failure = failure,
                         rawError = error?.description?.toString(),
+                        searchInstead = searchInsteadFor(state.typedAddress, failed, failure),
                     )
                     failedLoad = FailedLoad(failed, req.method.equals("POST", ignoreCase = true), netErrorPageScript(html))
+                    state.showsErrorPage = true
                     showFailedLoadPage(view, failed)
                     return
                 }
@@ -3900,8 +4031,9 @@ private fun buildRefreshableWebView(
                 if (!isDwebPageUrl(failed)) return
 
                 val status = errorResponse?.statusCode ?: 0
-                // The probe already waited out transient 404/500s — if we
-                // got one here, the gateway answered but the content
+                // The probe already waited out transient 404s and 5xx
+                // ([GatewayProbe.TRANSIENT_5XX]) — if we got one here,
+                // the gateway answered but the content
                 // genuinely isn't available (misspelled hash, etc). A
                 // synthesized 502 is the interceptor telling us the
                 // gateway socket itself is gone (node not running).
@@ -4296,11 +4428,13 @@ private const val REVEAL_HANDOVER_TIMEOUT_MS = 1_000L
 private class GestureArmingNodeProvider(
     private val inner: AccessibilityNodeProvider,
     private val latch: UserGestureLatch,
+    private val armed: () -> Unit,
 ) : AccessibilityNodeProvider() {
     override fun performAction(virtualViewId: Int, action: Int, arguments: Bundle?): Boolean {
         if (accessibilityActionArmsGestureLatch(action)) {
             latch.onInputStart(untilConfirmed = true)
             latch.onInput()
+            armed()
         }
         return inner.performAction(virtualViewId, action, arguments)
     }
@@ -4333,6 +4467,78 @@ internal class PageWebView(context: Context) : WebView(context) {
         scriptlets?.close()
         super.destroy()
     }
+
+    /** A private tab's (#86): the page's own text fields ask the keyboard not to learn. */
+    var privateTab = false
+
+    /**
+     * A page's own `<input>`/`<textarea>`/`contenteditable` in a private
+     * tab gets [EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING], like the
+     * address and find bars ([tabImeOptions]). Chromium sets it only for
+     * an off-the-record profile, and a WebView profile never is one — so
+     * without this, whatever is typed into a private page (a search box,
+     * a login name) goes into the keyboard's dictionary and comes back as
+     * a suggestion in other apps, outliving the private session.
+     */
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? =
+        super.onCreateInputConnection(outAttrs).also {
+            outAttrs.imeOptions = tabImeOptions(outAttrs.imeOptions, privateTab)
+        }?.let { KeyboardEditRecorder(it, ::keyboardEdit) }
+
+    /**
+     * One edit from the on-screen keyboard ([KeyboardEditRecorder]),
+     * [send] handing it to Chromium — recorded as an input of
+     * [userGestures] like a key press (#348 R3-F1). Chromium turns each
+     * such edit into a trusted `keydown` (key code 229, or the key an
+     * editor action sends) in whichever frame has focus, and that keydown
+     * gives the frame a fresh activation — an iframe's text field
+     * included — yet it never passes through [dispatchKeyEvent]. Unrecorded,
+     * a user typing in a cross-origin iframe for longer than
+     * [UserGestureLatch.WINDOW_MS] would leave the latch with nothing but
+     * the tap into its field, long aged out, and the iframe could then
+     * navigate the top frame on the user's next tap of the top page as
+     * if that page had.
+     *
+     * Edits arrive on Chromium's keyboard thread, which posts each to the
+     * main thread for the renderer: the input is recorded by a task
+     * posted *ahead* of that one, so it is on record before the renderer
+     * can see the keydown, and its end by one posted after, so it covers
+     * the keydown's timestamp — which the top document's detector reports
+     * like any other ([TOP_DOCUMENT_INPUT]), confirming a keystroke in
+     * the top document's own field. Not one launch's worth for an app
+     * link ([UserGestureLatch.onInput]): typing doesn't open apps.
+     */
+    private fun keyboardEdit(send: () -> Boolean): Boolean {
+        val at = SystemClock.uptimeMillis()
+        val id = IntArray(1)
+        onMainThread {
+            userGestures.onInputStart(at)
+            id[0] = userGestures.latestInputId
+        }
+        val result = send()
+        onMainThread {
+            userGestures.onInputContinues(SystemClock.uptimeMillis(), id[0])
+            inputEnded(id[0])
+        }
+        return result
+    }
+
+    private fun onMainThread(task: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) task() else mainHandler.post(task)
+    }
+
+    /**
+     * Input [id] ended: the renderer sync for it ([onInputEnded]) — unless
+     * a finger is still down. That touch's own activation comes with its
+     * lift, still ahead of the renderer; an echo now would mark it handled
+     * too early. Its `ACTION_UP` syncs the latest input, this one included.
+     */
+    private fun inputEnded(id: Int) {
+        if (!touching) onInputEnded?.invoke(id)
+    }
+
+    /** A finger is down on the page (#348 R3-F1, [inputEnded]). */
+    private var touching = false
 
     /**
      * This tab's scriptlets (#318), set by the tab: every load the app
@@ -4663,36 +4869,52 @@ internal class PageWebView(context: Context) : WebView(context) {
      */
     val userGestures = UserGestureLatch(SystemClock::uptimeMillis)
 
+    /** An input ended (or an accessibility click began): its id, for the renderer sync (#348). */
+    var onInputEnded: ((Int) -> Unit)? = null
+
     /** Only a tap counts: not the lift at the end of a scroll or fling. */
     private val taps = TapTracker(ViewConfiguration.get(context).scaledTouchSlop.toFloat())
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                touching = true
                 userGestures.onInputStart(event.eventTime)
                 taps.onDown(event.x, event.y)
             }
             MotionEvent.ACTION_MOVE -> taps.onMove(event.x, event.y)
-            MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> taps.onCancel()
+            MotionEvent.ACTION_POINTER_DOWN -> taps.onCancel()
+            MotionEvent.ACTION_CANCEL -> {
+                touching = false
+                taps.onCancel()
+                onInputEnded?.invoke(userGestures.latestInputId)
+            }
             MotionEvent.ACTION_UP -> {
+                touching = false
                 userGestures.onInputContinues(event.eventTime)
                 if (taps.onUp(event.x, event.y)) userGestures.onInput()
+                onInputEnded?.invoke(userGestures.latestInputId)
             }
         }
         return super.dispatchTouchEvent(event)
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (keyArmsGestureLatch(
+        // Every press and auto-repeat is recorded — each gives the focused
+        // frame a fresh activation (#348 R4-F1), a media key's included
+        // (R5-F2) — but only a fresh press of a page key buys an app-link
+        // launch.
+        if (keyIsPageInput(
                 action = event.action,
-                repeatCount = event.repeatCount,
-                isSystem = event.isSystem,
                 isModifier = KeyEvent.isModifierKey(event.keyCode),
             )
         ) {
-            userGestures.onInputStart(event.eventTime)
+            userGestures.onInputStart(event.eventTime, key = true)
             userGestures.onInputContinues(SystemClock.uptimeMillis())
-            userGestures.onInput()
+            if (keyArmsGestureLatch(event.action, event.repeatCount, event.isSystem, KeyEvent.isModifierKey(event.keyCode))) {
+                userGestures.onInput()
+            }
+            inputEnded(userGestures.latestInputId)
         }
         return super.dispatchKeyEvent(event)
     }
@@ -4704,6 +4926,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (accessibilityActionArmsGestureLatch(action)) {
             userGestures.onInputStart(untilConfirmed = true)
             userGestures.onInput()
+            onInputEnded?.invoke(userGestures.latestInputId)
         }
         return super.performAccessibilityAction(action, arguments)
     }
@@ -4713,7 +4936,8 @@ internal class PageWebView(context: Context) : WebView(context) {
     override fun getAccessibilityNodeProvider(): AccessibilityNodeProvider? {
         val inner = super.getAccessibilityNodeProvider() ?: return null
         a11yProvider?.let { (wrapped, wrapper) -> if (wrapped === inner) return wrapper }
-        return GestureArmingNodeProvider(inner, userGestures).also { a11yProvider = inner to it }
+        return GestureArmingNodeProvider(inner, userGestures) { onInputEnded?.invoke(userGestures.latestInputId) }
+            .also { a11yProvider = inner to it }
     }
 
     /**
@@ -5545,11 +5769,13 @@ private fun syntheticResponse(
  * 1. **Virtual hosts** (`<label>.bzz.freedom.baby` etc.): translate the
  *    host back to its content root, map path+query onto the local
  *    gateway, and proxy — main frames *included*: these hostnames never
- *    resolve in DNS, so nothing loads unless we answer here. Media gets
- *    range-aware buffering ([fetchMediaWithRangeSupport]); everything
- *    else retries transient 404/500s ([fetchWithRetry]) because a cold
+ *    resolve in DNS, so nothing loads unless we answer here. Media is
+ *    streamed with its Range header ([fetchMediaWithRangeSupport]); all
+ *    of it retries transient answers ([fetchWithRetry]) because a cold
  *    Swarm node regularly answers the manifest before every chunk is
- *    retrievable. `<name>.ens.…` hosts resolve the *name* per request
+ *    retrievable — a main frame's 404s and 5xx, a subresource's 5xx
+ *    only, with a few subresources at a time allowed to wait far longer
+ *    ([gatewayFetchPolicy], [PatientWaits]). `<name>.ens.…` hosts resolve the *name* per request
  *    (the origin is name-derived so storage survives content updates).
  *
  * 2. **Scheme-URL subresources** (`bzz://…` / `ipfs://…` / `ipns://…`
@@ -5607,6 +5833,16 @@ internal fun interceptVirtualRequest(
     assertedProtocol: (name: String) -> String? = { null },
     onchain: OnchainAppTab? = null,
     freshFetch: (target: String) -> Boolean = { false },
+    /**
+     * Whether [target] was already fetched fresh for this request's
+     * document — a Hard reload's (#262) — so a streamed media request
+     * for it goes past the gateway's cache too (R4-M2).
+     */
+    freshDocument: (target: String) -> Boolean = { false },
+    /** Asked for by a private tab (#86) — or its profile's service workers. */
+    private: Boolean = false,
+    /** Whether the page has given up on this request ([DwebAborts]); null: never asked. */
+    abandon: AbandonSignal? = null,
     onMainFrameRoot: (ContentRoot?) -> Unit = {},
 ): WebResourceResponse? {
     val req = request ?: return null
@@ -5625,10 +5861,18 @@ internal fun interceptVirtualRequest(
     // clears what that gateway's pages left there, before anything else
     // runs.
     // The Radicle repository browser and its read API (#124).
-    val response = RadApi.intercept(req, url)
-        ?: interceptOnchainAppRequest(req, url, onchain)
-        ?: siteDataCleanupFor(req, url, tab)
-        ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, onMainFrameRoot)
+    // Runs on WebView's interceptor thread, where anything thrown kills
+    // the whole process — every tab — so a bug a page can reach (#355:
+    // a page-chosen Range header) answers a 502 instead.
+    val response = try {
+        RadApi.intercept(req, url)
+            ?: interceptOnchainAppRequest(req, url, onchain)
+            ?: siteDataCleanupFor(req, url, tab, private)
+            ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, freshDocument, onMainFrameRoot, private, abandon)
+    } catch (t: Throwable) {
+        Log.e(LOG_TAG, "interceptor failed for $url", t)
+        syntheticResponse(502, "Bad Gateway", "The browser couldn't serve this request.")
+    }
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
     ) {
@@ -5693,14 +5937,14 @@ private val DOWNLOADED_TEXT_TYPES = setOf(
  * intercepted response touches those. Then it reloads the URL in
  * place, which is served normally.
  */
-private fun siteDataCleanupFor(req: WebResourceRequest, url: String, tab: Any?): WebResourceResponse? {
+private fun siteDataCleanupFor(req: WebResourceRequest, url: String, tab: Any?, private: Boolean): WebResourceResponse? {
     if (!isDocumentRequest(req.isForMainFrame, req.requestHeaders)) return null
     val origin = VirtualOrigin.parseHostOfUrl(url)?.let(VirtualOrigin::originFor) ?: return null
     // At a cold start the origins left to clear are loaded, and swept,
     // just before the endpoint settings land: a restored tab's first
     // document must not get ahead of that.
     Gateways.awaitExternalEndpointsBlocking()
-    if (!UnverifiedOrigins.takeClearFor(origin, tab)) return null
+    if (!UnverifiedOrigins.takeClearFor(origin, tab, private)) return null
     return WebResourceResponse(
         "text/html", "utf-8", 200, "OK",
         // `Vary: *`: a service worker's Cache Storage won't keep it.
@@ -5742,7 +5986,10 @@ private fun interceptVirtualRequestFor(
     incoming: EnsDocumentPins.Page?,
     assertedProtocol: (name: String) -> String?,
     freshFetch: (target: String) -> Boolean,
+    freshDocument: (target: String) -> Boolean,
     onMainFrameRoot: (ContentRoot?) -> Unit,
+    private: Boolean,
+    abandon: AbandonSignal?,
 ): WebResourceResponse? {
     val uri = req.url ?: return null
     val url = uri.toString()
@@ -5856,7 +6103,8 @@ private fun interceptVirtualRequestFor(
             val origin = VirtualOrigin.originFor(root)
             if (origin != null) {
                 // Swept away from since `target` was resolved: resolve again.
-                token = UnverifiedOrigins.record(external, origin) ?: return@repeat
+                // A private tab's origin isn't written to disk (#86).
+                token = UnverifiedOrigins.record(external, origin, private) ?: return@repeat
             }
             if (isServiceWorkerScript(req.requestHeaders)) {
                 return syntheticResponse(
@@ -5868,13 +6116,15 @@ private fun interceptVirtualRequestFor(
         }
 
         // The first request of a Hard-reloaded document for this URL
-        // (#262): not from the media buffer, and not from the gateway's
-        // own cache either.
+        // (#262): not from the gateway's own cache.
         val fresh = freshFetch(target)
         val response = if (isMediaLikeUrl(target)) {
-            fetchMediaWithRangeSupport(req, target, fresh)
+            // A Hard-reloaded document's media requests all go past the
+            // gateway's caches, not just its first: each is streamed from
+            // the gateway, with nothing kept from the fetch before.
+            fetchMediaWithRangeSupport(req, target, url, fresh || freshDocument(target), abandon)
         } else {
-            fetchWithRetry(req, target, url, fresh)
+            fetchWithRetry(req, target, url, fresh, gatewayFetchPolicy(req.isForMainFrame, media = false), abandon = abandon)
         }
         // Fetched from a gateway a sweep switched away from meanwhile:
         // the origin was already wiped, so this must not land there.
@@ -5952,199 +6202,32 @@ internal fun sweptOrigins(
     return onScreen.intersect(swept)
 }
 
-// Fully-buffered media bodies keyed by gateway URL, so successive Range
-// requests for the same file don't re-fetch it (see [MediaBodyBuffer]).
-private data class MediaBody(val bytes: ByteArray, val mime: String)
-
-private val mediaBodies = MediaBodyBuffer<MediaBody>()
-
-private fun loadMediaBody(
-    req: WebResourceRequest,
-    targetUrl: String,
-    fresh: Boolean,
-): MediaBody? =
-    // [fresh]: a Hard reload's (#262) — the buffered body may be the very
-    // stale answer being reloaded past. The buffer drops it, and until this
-    // fetch ends, other requests for the URL wait for it instead of
-    // fetching (possibly stale) bodies of their own.
-    mediaBodies.load(targetUrl, fresh) { noCache -> fetchMediaBody(req, targetUrl, noCache) }
-
-private fun fetchMediaBody(
-    req: WebResourceRequest,
-    targetUrl: String,
-    noCache: Boolean,
-): MediaBody? {
-    // Retry transient chunk-retrieval failures the same way non-media
-    // subresources do. Range is stripped on outgoing fetches because
-    // we always want the full body to feed the in-memory cache.
-    for ((index, delayMs) in ESCAPE_RETRY_DELAYS_MS.withIndex()) {
-        if (delayMs > 0) {
-            try {
-                Thread.sleep(delayMs)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-                return null
-            }
-        }
-        val attempt = tryLoadMediaBody(req, targetUrl, noCache)
-        when (attempt) {
-            is MediaLoadResult.Ok -> return attempt.body
-            MediaLoadResult.Fatal -> return null
-            MediaLoadResult.Transient -> {
-                Log.i(
-                    LOG_TAG,
-                    "media transient for $targetUrl " +
-                        "(attempt ${index + 1}/${ESCAPE_RETRY_DELAYS_MS.size})",
-                )
-            }
-        }
-    }
-    return null
-}
-
-private sealed class MediaLoadResult {
-    data class Ok(val body: MediaBody) : MediaLoadResult()
-    object Transient : MediaLoadResult()
-    object Fatal : MediaLoadResult()
-}
-
-private fun tryLoadMediaBody(
-    req: WebResourceRequest,
-    targetUrl: String,
-    noCache: Boolean,
-): MediaLoadResult {
-    val target = try {
-        URL(targetUrl)
-    } catch (t: Throwable) {
-        Log.w(LOG_TAG, "media fetch open failed: $targetUrl", t)
-        return MediaLoadResult.Fatal
-    }
-    return try {
-        // Redirects are followed hop by hop through TorRouting.
-        val conn = TorRouting.openFollowingRedirects(target) { hop ->
-            requestMethod = "GET"
-            connectTimeout = 5_000
-            readTimeout = 60_000
-            forwardProxiedHeaders(
-                req,
-                stripRange = true,
-                crossOrigin = !TorRouting.sameOrigin(hop, target),
-                noCache = noCache,
-            )
-        }
-        val status = conn.responseCode
-        if (status in TRANSIENT_STATUSES) {
-            Log.w(LOG_TAG, "media fetch transient $status for $targetUrl")
-            return MediaLoadResult.Transient
-        }
-        if (status !in 200..299) {
-            Log.w(LOG_TAG, "media fetch status $status for $targetUrl")
-            return MediaLoadResult.Fatal
-        }
-        val bytes = conn.inputStream.use { it.readBytes() }
-        val rawCt = conn.contentType
-        val mime = rawCt
-            ?.substringBefore(';')
-            ?.trim()
-            ?.ifBlank { null }
-            ?: mimeTypeFromUrl(targetUrl)
-            ?: "application/octet-stream"
-        Log.i(LOG_TAG, "media fetched: $targetUrl bytes=${bytes.size} mime=$mime")
-        MediaLoadResult.Ok(MediaBody(bytes, mime))
-    } catch (t: TorRouting.RefusedException) {
-        Log.w(LOG_TAG, "media fetch open failed: $targetUrl", t)
-        MediaLoadResult.Fatal
-    } catch (t: java.net.ConnectException) {
-        // The gateway socket refused — the node is down; retrying the
-        // whole backoff schedule would just stall the media element.
-        Log.w(LOG_TAG, "media fetch unreachable: $targetUrl", t)
-        MediaLoadResult.Fatal
-    } catch (t: IOException) {
-        Log.w(LOG_TAG, "media fetch failed: $targetUrl", t)
-        MediaLoadResult.Transient
-    } catch (t: Throwable) {
-        Log.w(LOG_TAG, "media fetch unexpected failure: $targetUrl", t)
-        MediaLoadResult.Fatal
-    }
-}
-
 /**
- * Regex matching a single byte-range in an HTTP `Range` request header —
- * `bytes=<first>-<last>`. We only support single-range requests (the
- * common case for HTML5 media); multipart/byteranges is vanishingly rare
- * and Chromium never sends it for `<video>`.
- */
-private val RANGE_REGEX = Regex("""^bytes=(\d+)?-(\d+)?$""")
-
-/**
- * Serve a media subresource with synthetic Range support. We fetch the
- * body once, cache it in-process, and answer each Range request by
- * slicing the buffer and returning a proper 206 with Content-Range /
- * Content-Length — exactly what Chromium expects. (Load-bearing under
- * bee, which answered every Range with the full body; kept under ant
- * so seeks are served from the buffer instead of re-hitting the node.)
+ * Serve a media subresource (`<audio>`/`<video>`, by extension) as a
+ * stream: the page's Range header goes to the gateway and its answer —
+ * ant's own `206` with `Content-Range` — is handed to the WebView as it
+ * arrives, with the media read timeout for slow chunks. Nothing is
+ * buffered, so playback starts with the first bytes of the range rather
+ * than after the whole file, and a page loading many large files at once
+ * (an album's dozen 50 MB WAVs) holds none of them in memory.
  *
- * Also injects a real MIME type (inferred from the URL extension) so
- * the media element can pick a decoder.
+ * Only a gateway that ignores Range (a whole-body `200`) has the slice
+ * cut here, by skipping through the stream ([mediaReplyFor]). The MIME
+ * type is the gateway's, else the extension's, so the element can pick
+ * a decoder; [noCache]: past the gateway's caches, for a Hard-reloaded
+ * document (#262).
  */
 private fun fetchMediaWithRangeSupport(
     req: WebResourceRequest,
     targetUrl: String,
-    fresh: Boolean = false,
-): WebResourceResponse? {
-    val body = loadMediaBody(req, targetUrl, fresh) ?: return null
-    val total = body.bytes.size
-    val rangeHeader = req.requestHeaders?.entries
-        ?.firstOrNull { it.key.equals("Range", ignoreCase = true) }
-        ?.value
-    val match = rangeHeader?.let { RANGE_REGEX.matchEntire(it.trim()) }
-    val baseHeaders = mutableMapOf(
-        "Accept-Ranges" to "bytes",
-        "Access-Control-Allow-Origin" to "*",
+    originalUrl: String,
+    noCache: Boolean,
+    abandon: AbandonSignal?,
+): WebResourceResponse? =
+    fetchWithRetry(
+        req, targetUrl, originalUrl, noCache,
+        gatewayFetchPolicy(req.isForMainFrame, media = true), media = true, abandon = abandon,
     )
-    return if (match != null) {
-        val firstStr = match.groupValues[1]
-        val lastStr = match.groupValues[2]
-        val (start, end) = when {
-            firstStr.isEmpty() && lastStr.isEmpty() -> 0 to (total - 1)
-            firstStr.isEmpty() -> {
-                val suffixLen = lastStr.toLong().coerceAtMost(total.toLong()).toInt()
-                (total - suffixLen) to (total - 1)
-            }
-            lastStr.isEmpty() -> firstStr.toLong().toInt() to (total - 1)
-            else -> firstStr.toLong().toInt() to lastStr.toLong().toInt().coerceAtMost(total - 1)
-        }
-        if (start < 0 || start >= total || end < start) {
-            Log.w(LOG_TAG, "media range unsatisfiable: $rangeHeader total=$total")
-            return WebResourceResponse(
-                body.mime, null, 416, "Range Not Satisfiable",
-                baseHeaders + ("Content-Range" to "bytes */$total"),
-                ByteArrayInputStream(ByteArray(0)),
-            )
-        }
-        val length = end - start + 1
-        val slice = body.bytes.copyOfRange(start, end + 1)
-        val headers = baseHeaders + mapOf(
-            "Content-Range" to "bytes $start-$end/$total",
-            "Content-Length" to length.toString(),
-        )
-        Log.v(
-            LOG_TAG,
-            "media 206: $targetUrl range=$start-$end/$total mime=${body.mime}",
-        )
-        WebResourceResponse(
-            body.mime, null, 206, "Partial Content",
-            headers, ByteArrayInputStream(slice),
-        )
-    } else {
-        val headers = baseHeaders + ("Content-Length" to total.toString())
-        Log.v(LOG_TAG, "media 200 full: $targetUrl bytes=$total mime=${body.mime}")
-        WebResourceResponse(
-            body.mime, null, 200, "OK",
-            headers, ByteArrayInputStream(body.bytes),
-        )
-    }
-}
 
 private sealed class FetchAttempt {
     data class Response(
@@ -6158,27 +6241,63 @@ private sealed class FetchAttempt {
     /** The gateway socket refused outright — retrying is pointless;
      *  the caller should synthesize a clean error immediately. */
     object Unreachable : FetchAttempt()
+
+    /** The page gave up on the request ([AbandonSignal]): nothing more to fetch. */
+    object Abandoned : FetchAttempt()
 }
 
-private fun fetchWithRetry(
+/**
+ * Fetch [targetUrl] for [req], fetching it again with the
+ * [ESCAPE_RETRY_DELAYS_MS] backoff while the gateway answers one of
+ * [policy]'s retry statuses or the attempt fails on the way (a timeout, a
+ * dropped connection). The last answer is handed back once the attempts
+ * are spent; null when the gateway can't be reached at all.
+ *
+ * Once [abandon] says the page gave up on the request, the attempt under
+ * way is cut, no other is made, and [abandonedResponse] — which no page
+ * reads — is handed back at once, so neither the gateway nor WebView's
+ * worker thread goes on working for it.
+ */
+internal fun fetchWithRetry(
     req: WebResourceRequest,
     targetUrl: String,
     originalUrl: String,
-    fresh: Boolean = false,
+    fresh: Boolean,
+    policy: GatewayFetchPolicy,
+    media: Boolean = false,
+    abandon: AbandonSignal? = null,
 ): WebResourceResponse? {
     var lastResponse: WebResourceResponse? = null
+    fun abandoned(): WebResourceResponse {
+        lastResponse?.data?.let { runCatching { it.close() } }
+        Log.i(LOG_TAG, "abandoned by the page: $originalUrl")
+        return abandonedResponse()
+    }
     for ((index, delayMs) in ESCAPE_RETRY_DELAYS_MS.withIndex()) {
+        if (abandon?.abandoned == true) return abandoned()
         if (delayMs > 0) {
-            try {
-                Thread.sleep(delayMs)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-                return lastResponse
+            if (abandon != null) {
+                if (abandon.sleep(delayMs)) return abandoned()
+            } else {
+                try {
+                    Thread.sleep(delayMs)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return lastResponse
+                }
             }
         }
 
-        when (val attempt = fetchOnce(req, targetUrl, fresh)) {
+        when (val attempt = fetchOnce(req, targetUrl, fresh, policy, media, abandon)) {
             is FetchAttempt.Response -> {
+                // The earlier transient answer is superseded: close its
+                // body (and with it the connection) before dropping it.
+                lastResponse?.data?.let { runCatching { it.close() } }
+                lastResponse = null
+                if (abandon?.abandoned == true) {
+                    runCatching { attempt.response.data?.close() }
+                    return abandoned()
+                }
                 if (!attempt.transient) return attempt.response
                 lastResponse = attempt.response
                 Log.i(
@@ -6189,27 +6308,63 @@ private fun fetchWithRetry(
             }
             FetchAttempt.Unreachable -> return lastResponse
             FetchAttempt.Retry -> {}
+            FetchAttempt.Abandoned -> return abandoned()
         }
     }
     return lastResponse
 }
 
-/** Single network attempt against [targetUrl]; [fresh]: past any cache in front of it (#262). */
+/**
+ * The answer to a request the page gave up on ([fetchWithRetry]): WebView
+ * has nobody to hand it to. Should the page's report ever have been
+ * matched to a request it still waits on ([DwebAborts]), it reads as the
+ * transient failure it is.
+ */
+internal fun abandonedResponse(): WebResourceResponse =
+    syntheticResponse(503, "Service Unavailable", "The page no longer wanted this response.")
+
+/**
+ * Single network attempt against [targetUrl]; [fresh]: past any cache in
+ * front of it (#262); [media]: answered as a media stream
+ * ([mediaReplyFor]). The headers must arrive within [policy]'s header
+ * timeout, and each body read within its stall limit; a body closed
+ * before its end drops the connection ([DisconnectOnCloseInputStream]).
+ */
 private fun fetchOnce(
     req: WebResourceRequest,
     targetUrl: String,
-    fresh: Boolean = false,
+    fresh: Boolean,
+    policy: GatewayFetchPolicy,
+    media: Boolean = false,
+    abandon: AbandonSignal? = null,
 ): FetchAttempt {
+    // A header wait shorter than the body's is enforced from outside: the
+    // connection's own read timeout is one value for both. Past the base
+    // limits only a [PatientWaits] slot holder goes on waiting.
+    val deadline = if (policy.baseHeaderTimeoutMs < policy.bodyStallTimeoutMs) {
+        HeaderDeadline(policy.baseHeaderTimeoutMs, policy.headerTimeoutMs)
+    } else {
+        null
+    }
+    // The page giving up cuts the attempt where it is: connecting, or
+    // waiting on its headers (once they're in, the body's close does it).
+    val unwatch = abandon?.onAbandon { deadline?.abandon() }
     return try {
         val target = URL(targetUrl)
         // Redirects are followed hop by hop through TorRouting.
-        val conn = TorRouting.openFollowingRedirects(target) { hop ->
+        val conn = TorRouting.openFollowingRedirects(target, hops = deadline) { hop ->
             requestMethod = if (req.method == "HEAD") "HEAD" else "GET"
-            connectTimeout = 5_000
-            readTimeout = 10_000
+            connectTimeout = GATEWAY_CONNECT_TIMEOUT_MS
+            readTimeout = policy.bodyStallTimeoutMs
             forwardProxiedHeaders(req, crossOrigin = !TorRouting.sameOrigin(hop, target), noCache = fresh)
         }
         val status = conn.responseCode
+        deadline?.headersReceived()
+        if (deadline?.expired == true) {
+            // Disconnected by the deadline just as the headers came in.
+            runCatching { conn.disconnect() }
+            throw java.net.SocketTimeoutException("no headers in time")
+        }
         val reason = conn.responseMessage?.ifBlank { null } ?: "OK"
         val rawCt = conn.contentType
         val mime = rawCt
@@ -6236,23 +6391,88 @@ private fun fetchOnce(
 
         val headers = gatewayResponseHeaders(conn.headerFields)
 
-        val body = when {
-            status in 200..399 -> conn.inputStream
-            else -> conn.errorStream ?: ByteArrayInputStream(ByteArray(0))
+        val raw = if (status in 200..399) conn.inputStream else conn.errorStream
+        val body = DisconnectOnCloseInputStream(
+            raw ?: ByteArrayInputStream(ByteArray(0)),
+            conn,
+            if (policy.baseBodyStallMs < policy.bodyStallTimeoutMs) BodyStallGuard(conn, policy.baseBodyStallMs) else null,
+            // A body WebView closes without reading on to -1 (a HEAD, a
+            // 304, exactly Content-Length bytes) keeps its connection.
+            length = conn.contentLengthLong,
+            noBody = raw == null || conn.requestMethod == "HEAD" || status in 100..199 || status == 204 || status == 304,
+        )
+        // Page-controlled: [mediaReplyFor] and [webViewSeekProof] never throw.
+        val range = req.requestHeaders?.entries
+            ?.firstOrNull { it.key.equals("Range", ignoreCase = true) }
+            ?.value
+        // WebView seeks every intercepted body to the range's first byte
+        // itself, whatever its status; no body handed back here is meant
+        // to be cut again (a 206 slice starts at the range, a whole 200 or
+        // an error page is meant whole).
+        val response = if (media) {
+            // Forwarded to the gateway with Range: its whole 200 then
+            // means the validator failed, not that Range was ignored.
+            val ifRange = req.requestHeaders?.keys?.any { it.equals("If-Range", ignoreCase = true) } == true
+            val reply = mediaReplyFor(range, status, reason, headers, conn.contentLengthLong, ifRange)
+            Log.v(LOG_TAG, "media ${reply.status}: $targetUrl range=$range gateway=$status")
+            val data = when {
+                reply.empty -> {
+                    runCatching { body.close() }
+                    ByteArrayInputStream(ByteArray(0))
+                }
+                reply.skip > 0 || reply.length != null -> SlicedInputStream(body, reply.skip, reply.length)
+                else -> body
+            }
+            WebResourceResponse(
+                mime, charset, reply.status, reply.reason, reply.headers,
+                webViewSeekProof(data, range),
+            )
+        } else {
+            // Not just a 206: a gateway that ignored Range answers a whole
+            // 200 (WebView would drop its first bytes), and a 416's body
+            // is shorter than the skip (WebView would fail the fetch).
+            WebResourceResponse(
+                mime, charset, status, reason, headers,
+                webViewSeekProof(body, range),
+            )
         }
-        val response = WebResourceResponse(mime, charset, status, reason, headers, body)
-        FetchAttempt.Response(response, transient = status in TRANSIENT_STATUSES)
-    } catch (t: java.net.ConnectException) {
-        Log.w(LOG_TAG, "gateway unreachable: $targetUrl", t)
-        FetchAttempt.Unreachable
-    } catch (t: IOException) {
-        Log.w(LOG_TAG, "gateway fetch failed: $targetUrl", t)
-        FetchAttempt.Retry
+        FetchAttempt.Response(response, transient = status in policy.retryStatuses)
     } catch (t: Throwable) {
-        Log.w(LOG_TAG, "gateway fetch unexpected failure: $targetUrl", t)
-        FetchAttempt.Unreachable
+        if (abandon?.abandoned == true) {
+            FetchAttempt.Abandoned
+        } else if (deadline?.expired == true) {
+            // The header deadline disconnected it: a timeout, worth another attempt.
+            Log.w(LOG_TAG, "gateway sent no headers in time (${policy.baseHeaderTimeoutMs}/${policy.headerTimeoutMs} ms): $targetUrl")
+            FetchAttempt.Retry
+        } else {
+            failedAttempt(t, targetUrl, media)
+        }
+    } finally {
+        unwatch?.invoke()
+        deadline?.headersReceived()
     }
 }
+
+private fun failedAttempt(t: Throwable, targetUrl: String, media: Boolean): FetchAttempt =
+    when (t) {
+        // Refused by policy, not by a failing node: no retry will change it.
+        is TorRouting.RefusedException -> {
+            Log.w(LOG_TAG, "gateway fetch refused: $targetUrl", t)
+            if (media) FetchAttempt.Unreachable else FetchAttempt.Retry
+        }
+        is java.net.ConnectException -> {
+            Log.w(LOG_TAG, "gateway unreachable: $targetUrl", t)
+            FetchAttempt.Unreachable
+        }
+        is IOException -> {
+            Log.w(LOG_TAG, "gateway fetch failed: $targetUrl", t)
+            FetchAttempt.Retry
+        }
+        else -> {
+            Log.w(LOG_TAG, "gateway fetch unexpected failure: $targetUrl", t)
+            FetchAttempt.Unreachable
+        }
+    }
 
 /**
  * Does a download that just started end the tab's pending navigation?
@@ -6567,4 +6787,62 @@ internal class CloseNotifyingInputStream(
 private fun errorPageStrings(view: WebView?, url: String?) {
     if (view == null || !ErrorPage.isErrorPage(url) || !ErrorPage.isErrorPage(view.url)) return
     view.evaluateJavascript(ErrorPage.stringsScript(), null)
+}
+
+/**
+ * The on-screen keyboard's connection to a page ([PageWebView]), passing
+ * every call on to Chromium's — through [edit] for the ones Chromium
+ * turns into a trusted `keydown` in the focused frame (#348 R3-F1):
+ * text committed, composed or deleted, a key the keyboard sends, an
+ * editor action (Enter / Go / Next). Not a selection or composing-region
+ * change, a read, or a batch edit's bounds: those make no keydown.
+ */
+private class KeyboardEditRecorder(
+    target: InputConnection,
+    private val edit: (send: () -> Boolean) -> Boolean,
+) : InputConnectionWrapper(target, false) {
+    override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean =
+        edit { super.commitText(text, newCursorPosition) }
+
+    override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean =
+        edit { super.setComposingText(text, newCursorPosition) }
+
+    // The keyboard's API 33+ forms: the wrapper hands these to Chromium
+    // directly, not through the two above.
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    override fun commitText(text: CharSequence, newCursorPosition: Int, textAttribute: TextAttribute?): Boolean =
+        edit { super.commitText(text, newCursorPosition, textAttribute) }
+
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    override fun setComposingText(text: CharSequence, newCursorPosition: Int, textAttribute: TextAttribute?): Boolean =
+        edit { super.setComposingText(text, newCursorPosition, textAttribute) }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    override fun replaceText(
+        start: Int,
+        end: Int,
+        text: CharSequence,
+        newCursorPosition: Int,
+        textAttribute: TextAttribute?,
+    ): Boolean = edit { super.replaceText(start, end, text, newCursorPosition, textAttribute) }
+
+    override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean =
+        edit { super.deleteSurroundingText(beforeLength, afterLength) }
+
+    override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean =
+        edit { super.deleteSurroundingTextInCodePoints(beforeLength, afterLength) }
+
+    override fun performEditorAction(editorAction: Int): Boolean =
+        edit { super.performEditorAction(editorAction) }
+
+    override fun sendKeyEvent(event: KeyEvent): Boolean =
+        if (keyIsPageInput(
+                action = event.action,
+                isModifier = KeyEvent.isModifierKey(event.keyCode),
+            )
+        ) {
+            edit { super.sendKeyEvent(event) }
+        } else {
+            super.sendKeyEvent(event)
+        }
 }

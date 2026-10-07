@@ -7,9 +7,9 @@
  * Same split as `ant_jni.c` / `freedom_ipfs_jni.c`: the Rust library owns
  * the C ABI, this file only marshals JNI types. Bridged: the node lifecycle
  * (init, create, create-with-checkpoint for stale-anchor recovery,
- * start/stop, pause/resume, status, logs) and one verified read, eth_call,
- * for name resolution (#101); the other verified reads come with their
- * first consumer. Errors are the engine's own sentinels (negative handle
+ * start/stop, pause/resume, status, logs) and the verified reads the app
+ * consumes: eth_call for name resolution (#101), and the account, code,
+ * call, receipt and block reads the chain-data router asks (#329). Errors are the engine's own sentinels (negative handle
  * ids, `false`, `"{}"`, `{"error": …}`), not exceptions.
  */
 
@@ -170,5 +170,125 @@ Java_baby_freedom_swarm_MyotisNative_ethCall(JNIEnv *env, jobject thiz, jlong ha
     (*env)->ReleaseStringUTFChars(env, block, block_c);
     (*env)->ReleaseStringUTFChars(env, data, data_c);
     (*env)->ReleaseStringUTFChars(env, to, to_c);
+    return take_bytes(env, out);
+}
+
+/*
+ * The chain-data router's verified reads (#329). Each pins its string
+ * arguments (hex and tags: plain ASCII), calls the engine and hands its
+ * JSON back as UTF-8 bytes. Blocking — the engine's own ~90 s budget;
+ * the caller bounds its wait. NULL only when a string couldn't be
+ * pinned (OOM, exception pending).
+ */
+#define MAX_PINNED 5
+
+typedef struct {
+    JNIEnv *env;
+    int n;
+    jstring src[MAX_PINNED];
+    const char *utf[MAX_PINNED];
+} pinned_t;
+
+/* Pin every non-NULL jstring in `in` into `out` (a NULL one stays NULL); false on failure, nothing left pinned. */
+static int pin_all(JNIEnv *env, pinned_t *p, const jstring *in, int n) {
+    p->env = env;
+    p->n = 0;
+    for (int i = 0; i < n; i++) {
+        p->src[i] = in[i];
+        p->utf[i] = NULL;
+        if (in[i] != NULL) {
+            p->utf[i] = (*env)->GetStringUTFChars(env, in[i], NULL);
+            if (p->utf[i] == NULL) {
+                for (int j = 0; j < i; j++) {
+                    if (p->utf[j] != NULL) (*env)->ReleaseStringUTFChars(env, p->src[j], p->utf[j]);
+                }
+                return 0;
+            }
+        }
+        p->n = i + 1;
+    }
+    return 1;
+}
+
+static void unpin_all(pinned_t *p) {
+    for (int i = 0; i < p->n; i++) {
+        if (p->utf[i] != NULL) (*p->env)->ReleaseStringUTFChars(p->env, p->src[i], p->utf[i]);
+    }
+}
+
+/* myotis_request_account_json: nonce and balance at `block` (NULL/"" = the verified head). */
+JNIEXPORT jbyteArray JNICALL
+Java_baby_freedom_swarm_MyotisNative_requestAccount(JNIEnv *env, jobject thiz, jlong handle,
+                                                    jstring address, jstring block) {
+    (void)thiz;
+    jstring in[2] = {address, block};
+    pinned_t p;
+    if (!pin_all(env, &p, in, 2)) return NULL;
+    char *out = myotis_request_account_json((int64_t)handle, p.utf[0] ? p.utf[0] : "", p.utf[1]);
+    unpin_all(&p);
+    return take_bytes(env, out);
+}
+
+/* myotis_get_code_json. */
+JNIEXPORT jbyteArray JNICALL
+Java_baby_freedom_swarm_MyotisNative_getCode(JNIEnv *env, jobject thiz, jlong handle,
+                                             jstring address, jstring block) {
+    (void)thiz;
+    jstring in[2] = {address, block};
+    pinned_t p;
+    if (!pin_all(env, &p, in, 2)) return NULL;
+    char *out = myotis_get_code_json((int64_t)handle, p.utf[0] ? p.utf[0] : "", p.utf[1]);
+    unpin_all(&p);
+    return take_bytes(env, out);
+}
+
+/*
+ * myotis_eth_call_json with a caller: `from` ("" = anonymous) and `value`
+ * (wei, decimal). `to` must be non-NULL: the engine refuses a NULL one,
+ * and an empty one is contract creation.
+ */
+JNIEXPORT jbyteArray JNICALL
+Java_baby_freedom_swarm_MyotisNative_ethCallFrom(JNIEnv *env, jobject thiz, jlong handle,
+                                                 jstring from, jstring to, jstring data,
+                                                 jstring value, jstring block) {
+    (void)thiz;
+    jstring in[5] = {from, to, data, value, block};
+    pinned_t p;
+    if (!pin_all(env, &p, in, 5)) return NULL;
+    if (p.utf[1] == NULL) {
+        unpin_all(&p);
+        return NULL;
+    }
+    char *out = myotis_eth_call_json((int64_t)handle, p.utf[0] ? p.utf[0] : "", p.utf[1],
+                                     p.utf[2] ? p.utf[2] : "0x", p.utf[3] ? p.utf[3] : "0",
+                                     p.utf[4]);
+    unpin_all(&p);
+    return take_bytes(env, out);
+}
+
+/* myotis_get_transaction_receipt_json: a receipt, "null" (not seen in the scanned window) or {"error"}. */
+JNIEXPORT jbyteArray JNICALL
+Java_baby_freedom_swarm_MyotisNative_transactionReceipt(JNIEnv *env, jobject thiz, jlong handle,
+                                                        jstring tx_hash) {
+    (void)thiz;
+    jstring in[1] = {tx_hash};
+    pinned_t p;
+    if (!pin_all(env, &p, in, 1)) return NULL;
+    char *out = myotis_get_transaction_receipt_json((int64_t)handle, p.utf[0] ? p.utf[0] : "");
+    unpin_all(&p);
+    return take_bytes(env, out);
+}
+
+/* myotis_get_block_by_number_json: a block, "null" or {"error"}. */
+JNIEXPORT jbyteArray JNICALL
+Java_baby_freedom_swarm_MyotisNative_blockByNumber(JNIEnv *env, jobject thiz, jlong handle,
+                                                   jstring tag, jboolean full_transactions) {
+    (void)thiz;
+    jstring in[1] = {tag};
+    pinned_t p;
+    if (!pin_all(env, &p, in, 1)) return NULL;
+    char *out = myotis_get_block_by_number_json((int64_t)handle, p.utf[0] ? p.utf[0] : "latest",
+                                                full_transactions == JNI_TRUE);
+    unpin_all(&p);
     return take_bytes(env, out);
 }

@@ -517,4 +517,122 @@ class DownloadResumeDeviceTest {
         assertEquals(DownloadStatus.CANCELLED, over.status)
         assertFalse(partialOf(id).exists())
     }
+    /**
+     * A row paused under a version that kept bidi/format characters in
+     * names (`x<U+202E>fdp.bin` reads as `xnib.pdf`) is cleaned when a
+     * new process sweeps it, and resumes — and is saved — under the
+     * cleaned name, not the disguised one.
+     */
+    @Test
+    fun aPausedRowFromBeforeNamesWereCleanedResumesUnderACleanName() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = FileServer({ body }, { etag }, ranges = true)
+            server.start()
+            val url = server.url("/f.bin").toString()
+            val dao = baby.freedom.mobile.data.AppDatabase.get(context).downloads()
+            val stem = "legacy-${System.nanoTime()}"
+            val id = dao.insert(
+                DownloadEntry(
+                    fileName = "$stem\u202Efdp.bin",
+                    displayUrl = url,
+                    sourceUrl = url,
+                    mimeType = "application/octet-stream",
+                    contentUri = null,
+                    status = DownloadStatus.PAUSED,
+                    totalBytes = body.size.toLong(),
+                    receivedBytes = 1000,
+                    error = null,
+                    startedAt = System.currentTimeMillis(),
+                    finishedAt = null,
+                    validator = etag,
+                    resumable = true,
+                ),
+            )
+            rows += id
+            partialOf(id).apply { parentFile!!.mkdirs() }.writeBytes(body.copyOf(1000))
+
+            val fresh = DownloadManager.newProcessForTest(context)
+            val swept = await("$stem.x") { it.id == id && it.fileName == "${stem}_fdp.bin" }
+            assertEquals(DownloadStatus.PAUSED, swept.status)
+            fresh.resume(id)
+            val done = await("$stem.x") { it.id == id && it.status == DownloadStatus.COMPLETED }
+            assertEquals("${stem}_fdp.bin", done.fileName)
+            assertArrayEquals(body, savedBytes(done))
+            val shown = resolver.query(
+                Uri.parse(done.contentUri!!),
+                arrayOf(android.provider.MediaStore.MediaColumns.DISPLAY_NAME), null, null, null,
+            )!!.use { it.moveToFirst(); it.getString(0) }
+            assertFalse(shown, shown.contains('\u202E'))
+            assertTrue(shown, shown.startsWith("${stem}_fdp"))
+        }
+    }
+
+    /**
+     * Rows that ended under such a version — completed, failed,
+     * cancelled — are cleaned by the same sweep, so the downloads list
+     * no longer shows `x<U+202E>fdp.apk` as `xkpa.pdf`.
+     */
+    @Test
+    fun finishedRowsFromBeforeNamesWereCleanedAreListedUnderACleanName() = runBlocking {
+        val dao = baby.freedom.mobile.data.AppDatabase.get(context).downloads()
+        val stem = "legacy-done-${System.nanoTime()}"
+        val ids = listOf(DownloadStatus.COMPLETED, DownloadStatus.FAILED, DownloadStatus.CANCELLED)
+            .mapIndexed { i, status ->
+                dao.insert(
+                    DownloadEntry(
+                        fileName = "$stem$i\u202Efdp.apk",
+                        displayUrl = "https://example.com/x",
+                        sourceUrl = "https://example.com/x",
+                        mimeType = "application/vnd.android.package-archive",
+                        contentUri = null,
+                        status = status,
+                        totalBytes = 10,
+                        receivedBytes = 10,
+                        error = null,
+                        startedAt = System.currentTimeMillis(),
+                        finishedAt = System.currentTimeMillis(),
+                    ),
+                ).also { rows += it }
+            }
+        DownloadManager.newProcessForTest(context)
+        ids.forEachIndexed { i, id ->
+            val row = await("$stem$i") { it.id == id && it.fileName == "$stem${i}_fdp.apk" }
+            assertFalse(row.fileName, row.fileName.contains('\u202E'))
+        }
+    }
+
+    /**
+     * A Save-as row's name is the picked document's own, read back from
+     * its provider; the sweep leaves it as it is, so the list keeps
+     * matching what the document is really called. The ordinary row is
+     * older, so the sweep (newest first) reaches it only after the
+     * Save-as one: once it's cleaned, the Save-as row has been passed.
+     */
+    @Test
+    fun theSweepLeavesASaveAsRowsPickedNameAlone() = runBlocking {
+        val dao = baby.freedom.mobile.data.AppDatabase.get(context).downloads()
+        val stem = "legacy-pick-${System.nanoTime()}"
+        val now = System.currentTimeMillis()
+        fun row(name: String, startedAt: Long, saveTo: String?) = DownloadEntry(
+            fileName = name,
+            displayUrl = "https://example.com/x",
+            sourceUrl = "https://example.com/x",
+            mimeType = "application/pdf",
+            contentUri = saveTo,
+            status = DownloadStatus.COMPLETED,
+            totalBytes = 10,
+            receivedBytes = 10,
+            error = null,
+            startedAt = startedAt,
+            finishedAt = startedAt,
+            saveTo = saveTo,
+        )
+        val picked = "${stem}a:b.pdf"
+        val pickedId = dao.insert(row(picked, now, "content://com.example.docs/document/$stem"))
+            .also { rows += it }
+        val plainId = dao.insert(row("${stem}c\u202Efdp.apk", now - 1, null)).also { rows += it }
+        DownloadManager.newProcessForTest(context)
+        await("${stem}c") { it.id == plainId && it.fileName == "${stem}c_fdp.apk" }
+        assertEquals(picked, dao.get(pickedId)?.fileName)
+    }
 }

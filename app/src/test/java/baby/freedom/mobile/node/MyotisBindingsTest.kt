@@ -104,4 +104,27 @@ class MyotisBindingsTest {
         b.onState(a, running)
         assertNotEquals(two, b.generation)
     }
+
+    @Test
+    fun `each chain's readiness is its own, and a stale or parked chain isn't ready`() {
+        val b = bindings()
+        val owner = Any()
+        b.connected(owner, "service")
+        assertEquals(emptySet<Long>(), b.readyChains)
+        val ready = """{"running":true,"beaconState":"SYNCED","snapServingPeers":1,"elReaderAvailable":true}"""
+        val stale = """{"running":true,"beaconState":"STALE_ANCHOR","snapServingPeers":1,"elReaderAvailable":true}"""
+        b.onState(owner, MyotisInfo(
+            status = MyotisStatus.Running,
+            chains = listOf(
+                baby.freedom.swarm.MyotisChainStatus.decode(1, stale),
+                baby.freedom.swarm.MyotisChainStatus.decode(100, ready),
+            ),
+        ))
+        assertEquals(setOf(100L), b.readyChains)
+        // A service no longer running serves nothing, whatever its rows say.
+        b.onState(owner, MyotisInfo(status = MyotisStatus.Starting, chains = listOf(baby.freedom.swarm.MyotisChainStatus.decode(100, ready))))
+        assertEquals(emptySet<Long>(), b.readyChains)
+        b.disconnected(owner)
+        assertEquals(emptySet<Long>(), b.readyChains)
+    }
 }

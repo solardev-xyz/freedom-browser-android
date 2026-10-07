@@ -52,12 +52,26 @@ import java.util.concurrent.ConcurrentHashMap
  * (`hasGesture`) — never one it starts on its own: a paid page setting
  * `location.href` to the next 402, and that one's to the next, would
  * otherwise spend the whole allowance in seconds, one silent payment a
- * hop (#237). And once a paid request of a site's is answered Refused,
- * that site's allowance pays nothing silently — in any tab — until the
+ * hop (#237). And the tap has to have been on the site's own page: a
+ * cross-origin iframe the user tapped (an ad allowed
+ * `allow-top-navigation-by-user-activation`) can set `top.location` to
+ * the site's priced URL, and WebView reports that as a main-frame
+ * navigation with a gesture, like the page's own link. Nothing native
+ * says which frame started it, so the top document says which input it
+ * received ([TopDocumentGesture], the #160 technique), and the gesture
+ * counts only when every input that could have lent the navigation its
+ * activation was the top document's own (#348).
+ *
+ * And once a paid request of a site's is answered Refused, that site's
+ * allowance pays nothing silently — in any tab — until the
  * user navigates to it themselves: their address on that site
  * ([navigationStarted] `byUser`), or their own Reload or Back/Forward on
  * its page ([usersStep]) — as the server may keep a refused payment's
- * authorization and collect it anyway (#237).
+ * authorization and collect it anyway (#237). A hold outlives the
+ * process: it's handed to [onHold] / [onLift] to be kept on disk, and the
+ * holds an earlier run left are [restore]d — until then, and for good if
+ * they couldn't be read, [holds] says every site is held but one the user
+ * has since navigated to themselves (#347).
  *
  * Main thread only, but for [epoch].
  */
@@ -66,6 +80,16 @@ internal class X402Flow<D : Any>(
     private val settle: (recordId: String, status: X402Store.Status, httpStatus: Int?) -> Unit,
     /** A URL's origin key, as [Committed.allowanceMayPay] is asked for; null for one that has none. */
     private val originOf: (String) -> String?,
+    /** [origin] was put on hold: keep it across restarts (#347). */
+    private val onHold: (origin: String) -> Unit = {},
+    /**
+     * [origin]'s hold, if it has one kept, is lifted (#347). [sure]: it's
+     * known to have one — a hold this run took, or one [restore] read back
+     * — so the lift is written until it lands; otherwise (the kept holds
+     * couldn't be read) the site may have none, and one try will do: a
+     * lift that didn't land only asks once more next run (#380 R1-M1).
+     */
+    private val onLift: (origin: String, sure: Boolean) -> Unit = { _, _ -> },
 ) {
     private class Detection<D>(val url: String, val value: D)
 
@@ -83,7 +107,7 @@ internal class X402Flow<D : Any>(
      * URL it has been at — its start's, if known, and each server
      * redirect's (#218 R5-M1).
      */
-    private class Initiator(val byUser: Boolean, val fromOrigin: String?, val post: Boolean, val gesture: Boolean) {
+    private class Initiator(val byUser: Boolean, val fromOrigin: String?, val post: Boolean, val gesture: TopDocumentGesture?) {
         val hopOrigins = mutableListOf<String?>()
     }
 
@@ -92,22 +116,36 @@ internal class X402Flow<D : Any>(
         val value: D,
         private val byUser: Boolean,
         private val fromOrigin: String?,
-        private val gesture: Boolean,
+        private val gesture: TopDocumentGesture?,
         private val hopOrigins: List<String?>,
-        private val held: Set<String>,
+        /** Whether an origin was held as the 402 committed ([holds]). */
+        private val held: (String) -> Boolean,
     ) {
         /**
          * An allowance of [origin]'s may pay this without asking: the user
          * named the load, or [origin]'s own page started it on the user's
-         * tap (#237) — not another site's link, script or popup, nor a
+         * tap (#237), one the top document confirms it received, on a
+         * navigation it says it started itself — not a cross-origin
+         * iframe's tap navigating the top frame, nor an iframe navigating
+         * it during the user's tap on the page (#348, R5-F1) — not
+         * another site's link, script or popup, nor a
          * navigation nobody was seen starting (#218 R4-M3), nor one the
          * page started on its own (#237) — and it never left [origin] on
          * the way: a redirect through another origin is that origin's say,
          * not the starter's (#218 R5-M1). Never while [origin] is held
-         * after a Refused payment (#237).
+         * after a Refused payment (#237) — as the hold stood at the
+         * commit: a 402 that commits before [restore] (the first moments
+         * after launch) counts every site the user hasn't gone to as held,
+         * and keeps that answer even if the read-back then finds no hold,
+         * so it asks once where it might not have. Fails closed on purpose:
+         * the sheet, never a silent payment (#347 R1-M2). Suspends only
+         * while the top document's word on the tap may still come — at
+         * most [UserGestureLatch.CONFIRM_MS] from the navigation's start,
+         * which has usually passed by the commit (#348).
          */
-        fun allowanceMayPay(origin: String): Boolean =
-            origin !in held && (byUser || (fromOrigin == origin && gesture)) && hopOrigins.all { it == origin }
+        suspend fun allowanceMayPay(origin: String): Boolean =
+            !held(origin) && hopOrigins.all { it == origin } &&
+                (byUser || (fromOrigin == origin && gesture?.confirmed() == true))
     }
 
     private val detections = HashMap<Long, Detection<D>>()
@@ -117,6 +155,19 @@ internal class X402Flow<D : Any>(
 
     /** Origins a paid request of which was answered Refused: no allowance of theirs pays silently (#237). */
     private val held = HashSet<String>()
+
+    /** The holds an earlier run kept have been [restore]d (#347). */
+    private var restored = false
+
+    /** The kept holds couldn't be read: every origin is held but those [lifted] (#347). */
+    private var heldUnknown = false
+
+    /**
+     * Origins the user navigated to themselves while the kept holds weren't
+     * known — before [restore], or after it found them unreadable — so a
+     * kept hold of theirs is lifted already (#347).
+     */
+    private val lifted = HashSet<String>()
 
     /** The origin of the page each tab last committed: what the user's Reload or Back/Forward navigates away from. */
     private val pages = HashMap<Long, String>()
@@ -148,7 +199,7 @@ internal class X402Flow<D : Any>(
         settle(retry.recordId, X402Store.Status.REFUSED, status)
         // The server may keep the refused authorization and collect it anyway: its site's
         // allowance pays nothing more silently until the user navigates to it (#237).
-        originOf(retry.url)?.let(held::add)
+        originOf(retry.url)?.let(::hold)
         return true
     }
 
@@ -200,12 +251,13 @@ internal class X402Flow<D : Any>(
      * of an entry already in the tab's history) began, [byUser] (their
      * address, or their own pull-to-refresh Reload) or from the page of
      * [fromOrigin] on screen (its link, script or form) — with the
-     * user's [gesture] (`hasGesture`: their tap, or script run from it)
-     * or on its own; [post]: it's a form POST (or other non-GET), whose
+     * user's [gesture] (`hasGesture`: their tap, or script run from it;
+     * whether the tap was the top document's, not an iframe's, #348)
+     * or on its own (null); [post]: it's a form POST (or other non-GET), whose
      * 307/308 redirects no callback shows. Called after [superseded].
      * The user's address on a site held after a Refused payment lets its
      * allowance pay again (#237); their Reload or Back/Forward does
-     * through [usersStep].
+     * through [usersStep]. Not if it mustn't [lifts]: a private tab's (#347).
      */
     fun navigationStarted(
         tab: Long,
@@ -213,9 +265,10 @@ internal class X402Flow<D : Any>(
         fromOrigin: String?,
         url: String?,
         post: Boolean = false,
-        gesture: Boolean = false,
+        gesture: TopDocumentGesture? = null,
+        lifts: Boolean = true,
     ) {
-        if (byUser && url != null) originOf(url)?.let(held::remove)
+        if (lifts && byUser && url != null) originOf(url)?.let(::lift)
         // Where it starts: [url]'s origin, or — a reload of the entry on
         // screen, whose own URL isn't named — the page the tab last
         // committed, or somewhere unknown (null) if it has none. A Reload
@@ -233,7 +286,61 @@ internal class X402Flow<D : Any>(
      * before it goes out, as a paid request of the site's in another tab
      * may have been Refused while this one was worked out (#237 R2-M1).
      */
-    fun holds(origin: String): Boolean = origin in held
+    fun holds(origin: String): Boolean = origin in held || (!restored || heldUnknown) && origin !in lifted
+
+    /**
+     * [holds] as it is now, not as it will be: frozen into a 402's
+     * [Committed], so one committed before [restore] stays "held" for
+     * every site the user hasn't gone to, whatever the read-back finds
+     * (#347 R1-M2).
+     */
+    private fun heldNow(): (String) -> Boolean {
+        val held = held.toSet()
+        val unknown = !restored || heldUnknown
+        val lifted = lifted.toSet()
+        return { origin -> origin in held || unknown && origin !in lifted }
+    }
+
+    /**
+     * The holds an earlier run kept ([onHold]), read back: held too, but
+     * for any the user has lifted since this run began. Null: they
+     * couldn't be read — every origin stays held until the user navigates
+     * to it themselves, as any of them may have been (#347).
+     */
+    fun restore(kept: Set<String>?) {
+        if (restored) return
+        restored = true
+        if (kept == null) {
+            heldUnknown = true
+            // Lifted before the read: any of them may have been kept.
+            lifted.forEach { onLift(it, false) }
+            return
+        }
+        // Lifted before the read, and kept: now known to be, written for sure.
+        kept.filter { it in lifted }.forEach { onLift(it, true) }
+        held += kept - lifted - held
+        lifted.clear()
+    }
+
+    private fun hold(origin: String) {
+        held += origin
+        lifted -= origin
+        onHold(origin)
+    }
+
+    private fun lift(origin: String) {
+        val wasHeld = held.remove(origin)
+        // A kept hold this run doesn't know about (yet) is lifted too.
+        val unknown = (!restored || heldUnknown) && lifted.add(origin)
+        when {
+            wasHeld -> onLift(origin, true)
+            // Not known to be kept: one try, not a write retried for every
+            // site the user visits while the store is broken (#380 R1-M1).
+            unknown && restored -> onLift(origin, false)
+            // Before the read: [restore] writes it if it was kept.
+            else -> Unit
+        }
+    }
 
     /**
      * The user's own Reload or Back/Forward on [tab] — the bar's buttons,
@@ -244,7 +351,7 @@ internal class X402Flow<D : Any>(
      * started the navigation is still [navigationStarted]'s to say.
      */
     fun usersStep(tab: Long) {
-        pages[tab]?.let(held::remove)
+        pages[tab]?.let(::lift)
     }
 
     /**
@@ -303,9 +410,9 @@ internal class X402Flow<D : Any>(
             detection.value,
             initiator?.byUser == true,
             initiator?.fromOrigin,
-            initiator?.gesture == true,
+            initiator?.gesture,
             initiator?.hopOrigins.orEmpty(),
-            held.toSet(),
+            heldNow(),
         )
     }
 
@@ -314,4 +421,17 @@ internal class X402Flow<D : Any>(
         epochs.remove(tab)
         pages.remove(tab)
     }
+}
+
+/**
+ * Whether the user's input behind a page's own navigation — one WebView
+ * reports with a gesture — was the top document's, as the top document
+ * itself says ([UserGestureLatch.topDocumentGesture]): not a tap in a
+ * cross-origin iframe that navigates the top frame (#348), nor the
+ * user's tap on the top page lent to a navigation an iframe started
+ * during it (R5-F1).
+ */
+internal fun interface TopDocumentGesture {
+    /** True once confirmed; false when it can't be, or isn't in time. */
+    suspend fun confirmed(): Boolean
 }

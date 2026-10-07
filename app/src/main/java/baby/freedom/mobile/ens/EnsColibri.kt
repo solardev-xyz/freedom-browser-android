@@ -26,7 +26,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * One `eth_call` on Ethereum mainnet, proven (#100): corpus.core's Colibri
+ * One `eth_call` on Ethereum mainnet, proven (#100) — or, for the
+ * chain-data router ([request], #329), any read the core can prove on
+ * Ethereum or Gnosis: corpus.core's Colibri
  * stateless verifier ([ColibriNative]) checks the answer against
  * Ethereum's sync committee on this device, so it has the trust of the
  * chain's own consensus rather than of RPC servers agreeing — the tier
@@ -96,16 +98,40 @@ internal class EnsColibri(
      * reads sent to [ethRpcs] (in order). Throws [Failure] when no proven
      * answer can be had, `CancellationException` when cancelled.
      */
-    suspend fun ethCall(to: String, data: ByteArray, ethRpcs: List<String>): Proven = withContext(Dispatchers.IO) {
-        if (!engine.available) throw Failure("Colibri isn't in this build")
+    suspend fun ethCall(to: String, data: ByteArray, ethRpcs: List<String>): Proven {
         val params = JSONArray()
             .put(JSONObject().put("to", to).put("data", "0x" + data.toHex()))
             .put("latest")
-            .toString()
+        val (status, provers) = run(MAINNET, "eth_call", params, ethRpcs)
+        return when (status.optString("status")) {
+            "revert" -> Proven(Outcome.Reverted(status.optString("data", "0x").ifEmpty { "0x" }), provers)
+            else -> Proven(Outcome.Returned(resultHex(status)), provers)
+        }
+    }
+
+    /**
+     * Prove [method] with [params] on chain [chainId] ([CHAINS]) — the
+     * chain-data router's reads (#329) — with the call's execution-layer
+     * reads sent to [ethRpcs]. The core's final status (`success` with its
+     * `result`, or `revert` with its `data`) and the provers it came from.
+     * Throws [Failure] when no proven answer can be had,
+     * `CancellationException` when cancelled.
+     */
+    suspend fun request(chainId: Long, method: String, params: JSONArray, ethRpcs: List<String>): Pair<JSONObject, List<String>> =
+        run(chainId, method, params, ethRpcs)
+
+    private suspend fun run(
+        chainId: Long,
+        method: String,
+        params: JSONArray,
+        ethRpcs: List<String>,
+    ): Pair<JSONObject, List<String>> = withContext(Dispatchers.IO) {
+        if (!engine.available) throw Failure("Colibri isn't in this build")
+        if (chainId !in CHAINS) throw Failure("Colibri doesn't serve chain $chainId")
         val ctx = engine.create(
-            "eth_call",
-            params,
-            MAINNET,
+            method,
+            params.toString(),
+            chainId,
             ColibriNative.PROVER_FLAG_ZK_PROOF,
             ColibriNative.VERIFY_FLAG_PAP,
             ColibriNative.PROVER_MODE_REMOTE,
@@ -122,11 +148,7 @@ internal class EnsColibri(
                 val status = engine.execute(ctx)?.let { runCatching { JSONObject(it) }.getOrNull() }
                     ?: throw Failure("the verifier returned no status")
                 when (status.optString("status")) {
-                    "success" -> return@withContext Proven(Outcome.Returned(resultHex(status)), provers.toList())
-                    "revert" -> return@withContext Proven(
-                        Outcome.Reverted(status.optString("data", "0x").ifEmpty { "0x" }),
-                        provers.toList(),
-                    )
+                    "success", "revert" -> return@withContext status to provers.toList()
                     "error" -> {
                         val error = status.optString("error", "verification failed")
                         // A head proof refused as stale says the prover is
@@ -139,7 +161,7 @@ internal class EnsColibri(
                         val answers = coroutineScope {
                             (0 until requests.length()).map { i ->
                                 val request = requests.getJSONObject(i)
-                                async { request to serve(request, ethRpcs) }
+                                async { request to serve(request, ethRpcs, chainId) }
                             }.awaitAll()
                         }
                         // Handed to the core only once all are in, and
@@ -157,7 +179,11 @@ internal class EnsColibri(
                                     if (request.optString("type") == "prover") hostOf(answer.url)?.let(provers::add)
                                 }
                                 is Served.Failed -> {
-                                    unserved = true
+                                    // A server that answered with its own
+                                    // refusal (a prover that can't prove the
+                                    // head block yet) was reached: this read
+                                    // failed, not the network.
+                                    if (!answer.answered) unserved = true
                                     engine.setError(req, answer.error, 0)
                                 }
                             }
@@ -189,7 +215,8 @@ internal class EnsColibri(
 
     private sealed class Served {
         class Ok(val body: ByteArray, val index: Int, val url: String) : Served()
-        class Failed(val error: String) : Served()
+        /** [answered]: a server was reached and refused this request itself ([refusal]). */
+        class Failed(val error: String, val answered: Boolean) : Served()
     }
 
     /**
@@ -197,9 +224,9 @@ internal class EnsColibri(
      * the ones its `exclude_mask` rules out (servers that already failed
      * it), until one answers 2xx.
      */
-    private suspend fun serve(request: JSONObject, ethRpcs: List<String>): Served {
+    private suspend fun serve(request: JSONObject, ethRpcs: List<String>, chainId: Long): Served {
         request.optLong("delay", 0).takeIf { it > 0 }?.let { delay(minOf(it, MAX_DELAY_MS)) }
-        val servers = serversFor(request, ethRpcs)
+        val servers = serversFor(request, ethRpcs, chainId)
         val exclude = parsePtr(request.optString("exclude_mask")) ?: 0L
         val path = request.optString("url", "")
         val payload = request.optJSONObject("payload")
@@ -207,6 +234,7 @@ internal class EnsColibri(
         val ssz = request.optString("encoding") == "ssz"
         val ttl = request.optLong("ttl", 0)
         var lastError = "no server for ${request.optString("type")} requests"
+        var answered = false
         for ((index, server) in servers.withIndex()) {
             if (index < 63 && exclude and (1L shl index) != 0L) continue
             val url = if (path.isNotEmpty()) server.removeSuffix("/") + "/" + path.removePrefix("/") else server
@@ -218,29 +246,51 @@ internal class EnsColibri(
             try {
                 val reply = fetch(method, url, headers, payload?.toString()?.toByteArray())
                 if (reply.code in 200..299) return Served.Ok(reply.body, index, url)
-                lastError = "HTTP ${reply.code} from ${hostOf(url)}"
+                val refused = refusal(reply)
+                if (refused != null) answered = true
+                lastError = "HTTP ${reply.code} from ${hostOf(url)}" +
+                    refused?.let { ": " + redact(it.take(200), url, server) }.orEmpty()
             } catch (e: IOException) {
                 // An exception's message can quote the URL, and a keyed
                 // endpoint's URL carries the user's API key (#169): this
                 // text goes to logcat and back into the core's own error.
-                val message = listOf(url, server).fold(e.message.orEmpty()) { text, u ->
-                    text.replace(u, EnsRpcConfig.redact(u))
-                }
-                lastError = "${hostOf(url)}: $message"
+                lastError = "${hostOf(url)}: ${redact(e.message.orEmpty(), url, server)}"
             }
         }
         Log.i(TAG, "colibri ${request.optString("type")} request failed: $lastError")
-        return Served.Failed(lastError)
+        return Served.Failed(lastError, answered)
+    }
+
+    private fun redact(text: String, vararg urls: String) =
+        urls.fold(text) { t, u -> t.replace(u, EnsRpcConfig.redact(u)) }
+
+    /**
+     * The server's own error for [reply] when it refused the request
+     * itself — a 4xx or a 500 with a JSON `{"error": …}` body, the way a
+     * prover says it can't prove a block it doesn't have yet (HTTP 500
+     * "The Block after N … can not be found in the execution layer!") —
+     * or `null` when the reply says the server couldn't be reached or
+     * couldn't serve at all: a 502/503/504 (a gateway or an unconfigured
+     * or overloaded backend, which answer JSON errors too), a 408 or 429,
+     * or a body that isn't the server's own error.
+     */
+    internal fun refusal(reply: Http.Reply): String? {
+        if (reply.code !in 400..500 || reply.code == 408 || reply.code == 429) return null
+        val body = runCatching { JSONObject(reply.body.toString(Charsets.UTF_8)) }.getOrNull() ?: return null
+        return (body.opt("error") as? String)?.takeIf { it.isNotBlank() }
     }
 
     /** The servers for [request]'s type, the way corpus.core's own Kotlin binding picks them. */
-    internal fun serversFor(request: JSONObject, ethRpcs: List<String>): List<String> = when (request.optString("type", "eth_rpc")) {
-        "prover" -> PROVERS
-        // Light-client updates: the prover serves them (the binding's
-        // `useProverFallback`), so no beacon node learns anything.
-        "beacon_api" -> PROVERS
-        "checkpointz" -> CHECKPOINTZ + BEACON_APIS
-        else -> ethRpcs
+    internal fun serversFor(request: JSONObject, ethRpcs: List<String>, chainId: Long = MAINNET): List<String> {
+        val chain = CHAINS[chainId] ?: return emptyList()
+        return when (request.optString("type", "eth_rpc")) {
+            "prover" -> chain.provers
+            // Light-client updates: the prover serves them (the binding's
+            // `useProverFallback`), so no beacon node learns anything.
+            "beacon_api" -> chain.provers
+            "checkpointz" -> chain.checkpointz + chain.beaconApis
+            else -> ethRpcs
+        }
     }
 
     /**
@@ -365,9 +415,13 @@ internal class EnsColibri(
         }
     }
 
+    /** One chain's servers, as corpus.core's own bindings default them. */
+    class ChainServers(val provers: List<String>, val checkpointz: List<String>, val beaconApis: List<String>)
+
     companion object {
         private const val TAG = "EnsColibri"
         private const val MAINNET = 1L
+        private const val GNOSIS = 100L
 
         /** Desktop's and iOS's pinned freshness window for `latest` proofs. */
         const val MAX_LATEST_AGE_SECONDS = 60L
@@ -404,6 +458,28 @@ internal class EnsColibri(
         val BEACON_APIS = listOf(
             "https://mainnet.colibri-proof.tech/consensus",
             "https://ethereum-beacon-api.publicnode.com",
+        )
+
+        /**
+         * corpus.core's Gnosis provers and checkpoint servers (the
+         * defaults its bindings ship, `chains.generated.js`, which desktop
+         * uses for Gnosis reads too).
+         */
+        val GNOSIS_PROVERS = listOf(
+            "https://gnosis.colibri-proof.tech",
+            "https://gnosis1.colibri-proof.tech",
+            "https://gnosis.colimind.com",
+        )
+        val GNOSIS_CHECKPOINTZ = listOf("https://checkpoint.gnosischain.com")
+        val GNOSIS_BEACON_APIS = listOf(
+            "https://gnosis.colibri-proof.tech/consensus",
+            "https://gnosis-beacon-api.publicnode.com",
+        )
+
+        /** The chains the verifier proves reads on (Ethereum for names and chain reads, Gnosis for chain reads). */
+        val CHAINS: Map<Long, ChainServers> = mapOf(
+            MAINNET to ChainServers(PROVERS, CHECKPOINTZ, BEACON_APIS),
+            GNOSIS to ChainServers(GNOSIS_PROVERS, GNOSIS_CHECKPOINTZ, GNOSIS_BEACON_APIS),
         )
 
         /** The binding's bound on state-machine rounds. */

@@ -194,4 +194,50 @@ class TabsPopupTest {
         assertNull(tabs.fullscreen)
         assertEquals(1, hidden)
     }
+
+    private class Hidden : WebChromeClient.CustomViewCallback {
+        var count = 0
+        override fun onCustomViewHidden() { count++ }
+    }
+
+    @Test
+    fun `a new active tab ends the old tab's fullscreen`() {
+        // A link from another app arriving while a page is fullscreen
+        // opens a new active tab (BrowserScreen's deep-link branch): the
+        // old page's fullscreen view must not stay over it.
+        val tabs = tabsWith(1)
+        val playing = tabs.active
+        val hidden = Hidden()
+        tabs.enterFullscreen(playing, View(null), hidden)
+        val fresh = tabs.newTab()
+        assertSame(fresh, tabs.active)
+        assertNull(tabs.fullscreen)
+        assertEquals(1, hidden.count)
+    }
+
+    @Test
+    fun `a tab opened behind leaves the fullscreen tab on screen in fullscreen`() {
+        val tabs = tabsWith(1)
+        val playing = tabs.active
+        val hidden = Hidden()
+        tabs.enterFullscreen(playing, View(null), hidden)
+        tabs.newTab(activate = false)
+        assertSame(playing, tabs.active)
+        assertEquals(playing.id, tabs.fullscreen?.tabId)
+        assertEquals(0, hidden.count)
+    }
+
+    @Test
+    fun `switching to another tab ends fullscreen, staying on the same tab doesn't`() {
+        val tabs = tabsWith(2)
+        tabs.switchTo(0)
+        val playing = tabs.active
+        val hidden = Hidden()
+        tabs.enterFullscreen(playing, View(null), hidden)
+        tabs.switchTo(0)
+        assertEquals(playing.id, tabs.fullscreen?.tabId)
+        tabs.switchTo(1)
+        assertNull(tabs.fullscreen)
+        assertEquals(1, hidden.count)
+    }
 }

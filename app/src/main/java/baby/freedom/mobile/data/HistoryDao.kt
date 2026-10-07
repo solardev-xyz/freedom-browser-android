@@ -56,4 +56,12 @@ interface HistoryDao {
 
     @Query("DELETE FROM history")
     suspend fun clear()
+
+    /** How many visits were recorded at or after [since] (epoch ms): Delete browsing data's count. */
+    @Query("SELECT COUNT(*) FROM history WHERE visitedAt >= :since")
+    fun countSince(since: Long): Flow<Int>
+
+    /** Delete the visits recorded at or after [since] (epoch ms): Delete browsing data's time range. */
+    @Query("DELETE FROM history WHERE visitedAt >= :since")
+    suspend fun deleteSince(since: Long)
 }

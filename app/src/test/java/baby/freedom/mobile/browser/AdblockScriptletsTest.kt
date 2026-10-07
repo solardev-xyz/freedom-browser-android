@@ -432,6 +432,43 @@ class AdblockScriptletsTest {
         assertEquals(emptyList<ScriptletCall>(), e.scriptletsFor("upload.wikimedia.org"))
     }
 
+    /**
+     * Freedom's own list (#391) compiles under Block ads with uBlock's
+     * trust, every rule in it runs, and spiegel.de's ad-reinsertion
+     * script is removed by its hard-coded probe hosts.
+     */
+    @Test
+    fun `bundled Freedom filters remove spiegel's ad-reinsertion script`() {
+        assertEquals(listOf(BundledList.UBLOCK, BundledList.FREEDOM), AdblockCategory.ADS.bundledExtras)
+        assertTrue(BundledList.FREEDOM.trustedScriptlets)
+        AdblockCategory.entries.filter { it != AdblockCategory.ADS }.forEach {
+            assertFalse(BundledList.FREEDOM in it.bundledExtras)
+        }
+        val dir = File("src/main/assets/adblock")
+        val freedom = FilterListText(File(dir, BundledList.FREEDOM.file).readText(), BundledList.FREEDOM.trustedScriptlets)
+        val own = engine(freedom)
+        val counts = own.listCounts.single()
+        assertTrue(counts.scriptlets >= 1)
+        assertEquals(0, counts.skipped)
+        assertEquals(counts.scriptlets, counts.scriptletsUsed)
+        val rule = "+js(remove-node-text, script, /brwsrfrm|dns-bait/)"
+        assertTrue(rule in own.calls("www.spiegel.de"))
+        assertTrue(rule in own.calls("spiegel.de"))
+        assertFalse(rule in own.calls("www.spiegel.com"))
+        assertFalse(rule in own.calls("notspiegel.de"))
+
+        // And with every Block ads list, as the app compiles them.
+        val ads = AdblockCategory.ADS
+        val all = AdblockEngine.build(
+            listOf(FilterListText(File(dir, ads.file).readText())) +
+                ads.bundledExtras.map { FilterListText(File(dir, it.file).readText(), it.trustedScriptlets) },
+            catalog,
+        )
+        assertTrue(rule in all.calls("www.spiegel.de"))
+        val code = assertNotNull(catalog.code(all.scriptletsFor("www.spiegel.de")))
+        assertTrue(code.contains("brwsrfrm|dns-bait"))
+    }
+
     private fun <T> assertNotNull(v: T?): T {
         org.junit.Assert.assertNotNull(v)
         return v!!

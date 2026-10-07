@@ -16,8 +16,8 @@ import baby.freedom.mobile.l10n.Strings
  * the row puts on screen (label, description, value, helper line). The
  * index is built from what the page shows at that moment — a site
  * permission is findable by its site and state, the search engine row
- * by the engine in use — and a section that isn't on the page (IPFS
- * while advanced options are off) isn't searched.
+ * by the engine in use. Results are grouped by the Settings sub-page
+ * each section lives on ([settingsResultGroups], #400).
  *
  * Every text comes from string resources (#280), section titles and the
  * extra words a row is found by ([searchKeywords]) included, so a
@@ -31,16 +31,20 @@ internal fun settingsRow(key: Any, vararg texts: String?): SettingsRow =
 /**
  * The keys of [rows] to show for [query]: every row when the query is
  * blank or names the section itself ("browsing" → the whole Browsing
- * data card), otherwise only the rows with a text
- * containing it. Empty means the section has no match and is hidden.
+ * data card) or the Settings page it's on ([pageTitle], #400: "privacy"
+ * → every card on Privacy & security), otherwise only the rows with a
+ * text containing it. Empty means the section has no match and is hidden.
  */
 internal fun visibleSettingsRows(
     query: String,
     sectionTitle: String,
     rows: List<SettingsRow>,
+    pageTitle: String? = null,
 ): Set<Any> {
     val q = query.trim()
-    val shown = if (q.isEmpty() || sectionTitle.contains(q, ignoreCase = true)) {
+    val titleMatch = sectionTitle.contains(q, ignoreCase = true) ||
+        pageTitle?.contains(q, ignoreCase = true) == true
+    val shown = if (q.isEmpty() || titleMatch) {
         rows
     } else {
         rows.filter { row -> row.texts.any { it.contains(q, ignoreCase = true) } }

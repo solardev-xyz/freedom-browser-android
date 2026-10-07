@@ -1,0 +1,422 @@
+package baby.freedom.mobile.chains.rpc
+
+import baby.freedom.mobile.ens.EnsColibri
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * The router's [ChainSource.COLIBRI] tier (#329): corpus.core's Colibri
+ * stateless verifier ([EnsColibri], the one name resolution uses) checks
+ * a remote prover's proof on this device against the chain's sync
+ * committee, on Ethereum and Gnosis. With *privacy mode basic* the state
+ * a read touches is fetched from the chain's own RPCs (the router's pool,
+ * the user's first) and checked against the proven state root; the
+ * prover learns which accounts and storage a read touches, as the RPCs
+ * do.
+ *
+ * It answers [METHODS] — what the core can prove — and nothing else:
+ * a `pending` nonce or balance (the mempool is nothing a proof covers)
+ * goes to the next tier, as does a `null` receipt, transaction or block,
+ * which says only that the prover didn't find it, never a proven "no".
+ * `eth_blockNumber` is answered from a proven `latest` block, no older
+ * than [EnsColibri.MAX_LATEST_AGE_SECONDS]. At most [maxInFlight] reads
+ * at once: past that the router moves straight on rather than queueing
+ * behind the verifier's one lock (which name resolution shares). Never
+ * broadcasts.
+ *
+ * Only while [enabled]: the *Colibri proofs* switch (Settings → Name
+ * resolution), which covers these reads too — off, nothing goes to the
+ * prover and reads start at the quorum.
+ *
+ * **Back-off**, per chain, as name resolution's ([baby.freedom.mobile.ens.EnsResolver]
+ * `ColibriBackoff`): a call that can't reach the chain's provers or
+ * servers ([EnsColibri.Failure.unreachable], or an unexpected error),
+ * or that outlasts the router's wait ([RouterWait]: not a reader that
+ * stopped waiting sooner, which says nothing about the prover), makes the tier unavailable for
+ * [BACKOFF_MS], doubling with each further one up to [BACKOFF_MAX_MS] —
+ * so a prover that's down costs one read the tier's wait, not every
+ * read. A call the router stops waiting for carries on in the
+ * background (up to [backgroundMs], holding its slot) rather than being
+ * cut off — on a first read that is the sync-committee bootstrap, which
+ * the next read then needn't repeat — and any proof that comes in ends
+ * the back-off. One call counts at most once, and a proof of this one
+ * read not checking out doesn't count: it says nothing about the others.
+ *
+ * Only the wallet's and the Swarm node's own reads count directly. A
+ * site's read ([RoutingContext.site]: `window.ethereum`, `web3://`,
+ * an x402 offer's token contract) is one the site chose — a call that takes the prover long
+ * to prove, or never proves, under a 2 s wait — so its miss or failure
+ * proves nothing about the prover, and on its own would let any site
+ * take the tier away from the wallet. It only asks for a **canary**: a
+ * proven `latest` block, which no page shapes, run in the background
+ * (up to [backgroundMs], outside [maxInFlight], one per chain at a time
+ * and at most one per [CANARY_INTERVAL_MS]). The canary failing the way
+ * a wallet read would count is what backs the chain off.
+ *
+ * Nor may pages take the tier's slots: a page's read the router stopped
+ * waiting for keeps its slot in the background (up to [backgroundMs]),
+ * so a site looping slow calls would otherwise hold all [maxInFlight]
+ * and every wallet read would find Colibri busy. Sites together get at
+ * most [maxPageInFlight] of them (as [baby.freedom.mobile.node.RouterReadSlots]
+ * does for Myotis); a page read past that share moves straight on to the
+ * next tier, and the rest stay the wallet's and the Swarm node's.
+ *
+ * **Reads the prover can't prove yet** skip the tier outright rather
+ * than cost a round trip to every prover (three on Gnosis) inside the
+ * verifier name resolution shares, each answering its own 500 ("the
+ * block after N can not be found"): a read at a numbered block past the
+ * chain's head as last proven here ([knownHead]: the block a proven
+ * `latest` read named, moved on by one [SLOT_MS] per slot since), such as
+ * [baby.freedom.mobile.wallet.Send]'s check that a block some way past
+ * the head doesn't exist yet; and, for one slot after a prover refused it, the same receipt or
+ * transaction by hash, which a receipt poll in the head block asks for
+ * again every few seconds ([HOLD_MS]). A head this tier never proved
+ * skips nothing.
+ */
+internal class ColibriChainSource(
+    private val colibri: EnsColibri,
+    /** Whether the verifier may be usable here without loading it: [isAvailable] runs on the UI thread. */
+    private val present: () -> Boolean,
+    /** The *Colibri proofs* switch ([ColibriReads]); read on every call. */
+    private val enabled: () -> Boolean = { true },
+    private val maxInFlight: Int = MAX_IN_FLIGHT,
+    /** Of [maxInFlight], how many pages' reads may hold together (see the class kdoc). */
+    private val maxPageInFlight: Int = MAX_PAGE_IN_FLIGHT,
+    private val backgroundMs: Long = BACKGROUND_MS,
+    /** Monotonic milliseconds: a wall-clock step mustn't end or stretch a back-off. */
+    private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
+    /** Where calls run, so one the router stopped waiting for can finish. */
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+) : VerifiedChainSource {
+    private val inFlight = AtomicInteger()
+    private val pagesInFlight = AtomicInteger()
+    private val backoffs = ConcurrentHashMap<Long, Backoff>()
+    private val canaries = ConcurrentHashMap<Long, Canary>()
+
+    /**
+     * Per chain: the head a proven `latest` read here named, and when
+     * ([clock]) it was learned. Only a `latest` read: a receipt, a
+     * transaction or a numbered block names a block that may be long
+     * past, and stamping it with the time it was learned would put
+     * [knownHead] behind the chain and skip blocks that exist (R4-M1).
+     */
+    private val heads = ConcurrentHashMap<Long, Pair<Long, Long>>()
+
+    /** `chain method hash` → until when ([clock]) a by-hash read the prover refused skips the tier. */
+    private val holds = ConcurrentHashMap<String, Long>()
+
+    /**
+     * The chain's head as far as this tier knows: the block the last
+     * proven `latest` read named, plus one per slot since; `null` before
+     * any such proof.
+     */
+    internal fun knownHead(chainId: Long): Long? {
+        val (block, at) = heads[chainId] ?: return null
+        val elapsed = (clock() - at).coerceAtLeast(0)
+        return block + elapsed / (SLOT_MS[chainId] ?: MIN_SLOT_MS)
+    }
+
+    /** Record [block] as chain [chainId]'s head: only ever the answer to a proven `latest` read. */
+    private fun sawHead(chainId: Long, block: Long?) {
+        if (block == null) return
+        val now = clock()
+        heads.merge(chainId, block to now) { old, new -> if (new.first > old.first) new else old }
+    }
+
+    /** The key a by-hash read is held under, `null` for any other read. */
+    private fun holdKey(chainId: Long, method: String, params: JSONArray): String? {
+        if (method !in BY_HASH) return null
+        val hash = (params.opt(0) as? String)?.lowercase() ?: return null
+        return "$chainId $method $hash"
+    }
+
+    override fun isAvailable(chainId: Long): Boolean = gap(chainId) == null
+
+    override fun gap(chainId: Long): ProofTierGap? = when {
+        chainId !in EnsColibri.CHAINS || !ChainAccessPolicy.supports(ChainSource.COLIBRI, chainId) ->
+            ProofTierGap.NOT_SERVED
+        !present() -> ProofTierGap.NOT_IN_BUILD
+        !enabled() -> ProofTierGap.OFF
+        backoffRemainingMs(chainId) != null -> ProofTierGap.UNREACHABLE
+        else -> null
+    }
+
+    /** How much longer chain [chainId]'s reads skip the prover; `null` when it may be asked. */
+    internal fun backoffRemainingMs(chainId: Long): Long? = backoffs[chainId]?.remainingMs()
+
+    override suspend fun request(
+        chainId: Long,
+        method: String,
+        params: JSONArray,
+        rpcs: List<String>,
+        context: RoutingContext,
+    ): ChainDataResult {
+        // The router's wait, which says whether it ran out: see the catch below.
+        val routerWait = currentCoroutineContext()[RouterWait]
+        if (!enabled()) throw Unanswered("Colibri proofs are off")
+        backoffRemainingMs(chainId)?.let { throw Unanswered("backing off for ${it}ms: the prover couldn't be reached") }
+        if (method !in METHODS) throw Unanswered("Colibri doesn't prove $method")
+        TAG_PARAM[method]?.let { i ->
+            val tag = params.opt(i)
+            if (tag == "pending") throw Unanswered("$method at \"pending\" can't be proven")
+            val number = (tag as? String)?.takeIf { it.startsWith("0x") && it.length in 3..17 }
+                ?.let { runCatching { it.substring(2).toLong(16) }.getOrNull() }
+            val head = knownHead(chainId)
+            if (number != null && head != null && number > head) {
+                throw Unanswered("block $number is past the proven head ($head)")
+            }
+        }
+        val held = holdKey(chainId, method, params)
+        if (held != null) {
+            val until = holds[held]
+            if (until != null) {
+                val left = until - clock()
+                if (left in 1..HOLD_MS) throw Unanswered("the prover couldn't prove this $method a moment ago")
+                holds.remove(held, until)
+            }
+        }
+        // A page's read gets only a share of the slots (see the class
+        // kdoc), taken before the shared one so a page at its share never
+        // holds a shared slot even for a moment.
+        val page = context.site
+        if (page && pagesInFlight.incrementAndGet() > maxPageInFlight) {
+            pagesInFlight.decrementAndGet()
+            throw Unanswered("Colibri is busy with sites' reads")
+        }
+        if (inFlight.incrementAndGet() > maxInFlight) {
+            inFlight.decrementAndGet()
+            if (page) pagesInFlight.decrementAndGet()
+            throw Unanswered("Colibri is busy")
+        }
+        val backoff = backoffs.getOrPut(chainId) { Backoff() }
+        // One call is one failure at most, whichever side (a missed wait
+        // here, or the background call's own end) sees it first.
+        val counted = AtomicBoolean(false)
+        fun failed() {
+            if (!counted.compareAndSet(false, true)) return
+            // A page's read only asks the canary (see the class kdoc).
+            if (context.site) canary(chainId, rpcs) else backoff.failed()
+        }
+        val blockNumber = method == "eth_blockNumber"
+        val call = scope.async {
+            try {
+                withTimeoutOrNull(backgroundMs) {
+                    if (blockNumber) {
+                        colibri.request(chainId, "eth_getBlockByNumber", JSONArray().put("latest").put(false), rpcs)
+                    } else {
+                        colibri.request(chainId, method, params, rpcs)
+                    }
+                }.also { if (it != null) backoff.succeeded() else failed() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: EnsColibri.Failure) {
+                // This read's own proof failing isn't the provers
+                // being unreachable: other reads may still prove.
+                if (e.unreachable) failed() else if (held != null) hold(held)
+                throw e
+            } catch (e: Throwable) {
+                failed()
+                throw e
+            } finally {
+                inFlight.decrementAndGet()
+                if (page) pagesInFlight.decrementAndGet()
+            }
+        }
+        val (status, provers) = try {
+            call.await() ?: throw Unanswered("no proof within ${backgroundMs}ms")
+        } catch (e: CancellationException) {
+            // With the call still running (it carries on): a missed wait
+            // only if it was the router's wait that ran out. A reader that
+            // went away first — the user left the page, or a caller's own
+            // shorter timeout — says nothing about the prover (R4-M1).
+            if (call.isActive && routerWait?.ranOut == true) failed()
+            throw e
+        }
+        if (status.optString("status") == "revert") {
+            if (method != "eth_call") throw Unanswered("the verifier reported a revert for $method")
+            throw ChainRpcException.Rpc(
+                ChainRpcException.EXECUTION_REVERTED,
+                "execution reverted",
+                status.optString("data", "0x").ifEmpty { "0x" },
+            )
+        }
+        val raw = status.opt("result")
+        if (raw == null || raw == JSONObject.NULL) throw Unanswered("no proven answer for $method")
+        val result: Any = if (blockNumber) {
+            (raw as? JSONObject)?.opt("number") as? String ?: throw Unanswered("a block without a number")
+        } else {
+            raw
+        }
+        val block = blockOf(raw)
+        // Only the head itself moves the head on (see [heads]).
+        if (blockNumber || (method == "eth_getBlockByNumber" && params.opt(0) == "latest")) sawHead(chainId, block)
+        val hosts = provers.ifEmpty {
+            listOfNotNull(EnsColibri.CHAINS[chainId]?.provers?.firstOrNull()?.let(EnsColibri::hostOf))
+        }
+        return ChainDataResult(
+            result,
+            ChainTrust(
+                level = ChainTrust.Level.VERIFIED,
+                source = ChainSource.COLIBRI,
+                agreed = hosts,
+                dissented = emptyList(),
+                queried = hosts,
+                k = 1,
+                m = 1,
+                block = block,
+            ),
+        )
+    }
+
+    /** Hold [key]'s read off the tier for [HOLD_MS] (see the class kdoc). */
+    private fun hold(key: String) {
+        val now = clock()
+        if (holds.size >= MAX_HOLDS) holds.entries.removeIf { it.value - now !in 1..HOLD_MS }
+        if (holds.size < MAX_HOLDS) holds[key] = now + HOLD_MS
+    }
+
+    /**
+     * Check chain [chainId]'s prover with a read no page shapes — a
+     * proven `latest` block — after a page's read missed or failed, and
+     * back the chain off only if that fails too (see the class kdoc).
+     */
+    private fun canary(chainId: Long, rpcs: List<String>) {
+        val c = canaries.getOrPut(chainId) { Canary() }
+        if (!c.start(clock())) return
+        val backoff = backoffs.getOrPut(chainId) { Backoff() }
+        scope.async {
+            try {
+                val proven = withTimeoutOrNull(backgroundMs) {
+                    colibri.request(chainId, "eth_getBlockByNumber", JSONArray().put("latest").put(false), rpcs)
+                }
+                if (proven != null) {
+                    backoff.succeeded()
+                    sawHead(chainId, blockOf(proven.first.opt("result")))
+                } else {
+                    backoff.failed()
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: EnsColibri.Failure) {
+                if (e.unreachable) backoff.failed()
+            } catch (_: Throwable) {
+                backoff.failed()
+            } finally {
+                c.done()
+            }
+        }
+    }
+
+    /** Whether a page's miss may start one more canary for a chain (see the class kdoc). */
+    private class Canary {
+        private var running = false
+        private var startedAt: Long? = null
+
+        @Synchronized
+        fun start(now: Long): Boolean {
+            val last = startedAt
+            if (running || (last != null && now - last in 0 until CANARY_INTERVAL_MS)) return false
+            running = true
+            startedAt = now
+            return true
+        }
+
+        @Synchronized
+        fun done() {
+            running = false
+        }
+    }
+
+    /** No proven answer; the router moves on. */
+    class Unanswered(message: String) : Exception(message)
+
+    /** One chain's back-off (see the class kdoc). */
+    private inner class Backoff {
+        private var failures = 0
+        private var until = 0L
+
+        @Synchronized
+        fun remainingMs(): Long? {
+            val left = until - clock()
+            return left.takeIf { it > 0 && it <= BACKOFF_MAX_MS }
+        }
+
+        @Synchronized
+        fun failed() {
+            failures = (failures + 1).coerceAtMost(16)
+            until = clock() + (BACKOFF_MS shl (failures - 1)).coerceAtMost(BACKOFF_MAX_MS)
+        }
+
+        @Synchronized
+        fun succeeded() {
+            failures = 0
+            until = 0
+        }
+    }
+
+    companion object {
+        const val MAX_IN_FLIGHT = 4
+
+        /** Sites' share of [MAX_IN_FLIGHT]: the wallet's and the Swarm node's reads always keep two. */
+        const val MAX_PAGE_IN_FLIGHT = 2
+
+        /** Name resolution's figures ([baby.freedom.mobile.ens.EnsResolver.COLIBRI_BACKOFF_MS]). */
+        const val BACKOFF_MS = 30_000L
+        const val BACKOFF_MAX_MS = 5 * 60_000L
+
+        /** How long a call the router stopped waiting for may go on: a first sync-committee bootstrap. */
+        const val BACKGROUND_MS = 60_000L
+
+        /** The least time between two canaries for one chain: a page looping misses mustn't loop them. */
+        const val CANARY_INTERVAL_MS = 10_000L
+
+        /** What the core proves (colibri.h, `c4_get_method_support` PROOFABLE), and the router asks. */
+        val METHODS = setOf(
+            "eth_blockNumber", "eth_getBalance", "eth_getTransactionCount", "eth_getCode", "eth_getStorageAt",
+            "eth_call", "eth_getTransactionReceipt", "eth_getTransactionByHash",
+            "eth_getBlockByNumber", "eth_getBlockByHash",
+        )
+
+        /**
+         * A slot, per chain: how often a head moves on (Ethereum 12 s,
+         * Gnosis 5 s). [knownHead] counts one block per slot since the
+         * last proven `latest` block, which can only overshoot the
+         * prover's head (a missed slot is no block), so it skips too
+         * little, never a block that exists. That holds only because
+         * nothing but a `latest` proof feeds it: an older block a
+         * receipt or a numbered read names would start it behind.
+         */
+        val SLOT_MS = mapOf(1L to 12_000L, 100L to 5_000L)
+        private const val MIN_SLOT_MS = 1_000L
+
+        /** How long a by-hash read a prover refused skips the tier: one Ethereum slot. */
+        const val HOLD_MS = 12_000L
+        private const val MAX_HOLDS = 64
+
+        private val BY_HASH = setOf("eth_getTransactionReceipt", "eth_getTransactionByHash")
+
+        /** Where each state read's block tag sits in its params. */
+        private val TAG_PARAM = mapOf(
+            "eth_getBalance" to 1, "eth_getTransactionCount" to 1, "eth_getCode" to 1,
+            "eth_getStorageAt" to 2, "eth_call" to 1, "eth_getBlockByNumber" to 0,
+        )
+
+        /** The block a proven receipt, transaction or block is in, when it says. */
+        private fun blockOf(result: Any?): Long? {
+            val o = result as? JSONObject ?: return null
+            val hex = (o.opt("blockNumber") ?: o.opt("number")) as? String ?: return null
+            return hex.takeIf { it.startsWith("0x") && it.length in 3..17 }
+                ?.let { runCatching { it.substring(2).toLong(16) }.getOrNull() }
+        }
+    }
+}

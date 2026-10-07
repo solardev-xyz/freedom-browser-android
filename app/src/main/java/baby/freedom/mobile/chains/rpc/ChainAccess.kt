@@ -3,6 +3,15 @@ package baby.freedom.mobile.chains.rpc
 import androidx.annotation.StringRes
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 
 /**
  * A tier [ChainDataRouter] can ask for chain state (#108), in the order
@@ -11,10 +20,10 @@ import baby.freedom.mobile.l10n.Strings
  * `ChainSource` raw value.
  */
 enum class ChainSource(val key: String, @StringRes private val labelRes: Int) {
-    /** Embedded P2P light client (Ethereum, Gnosis). Not wired on Android yet (#72). */
+    /** Embedded P2P light client (Ethereum, Gnosis), when the user runs it for that chain ([baby.freedom.mobile.chains.rpc.MyotisChainSource]). */
     MYOTIS("myotis", R.string.names_source_myotis),
 
-    /** Remote prover with a sync-committee proof (Ethereum, Gnosis). Not wired on Android yet. */
+    /** Remote prover with a sync-committee proof checked on the device (Ethereum, Gnosis; [baby.freedom.mobile.chains.rpc.ColibriChainSource]). */
     COLIBRI("colibri", R.string.names_source_colibri),
 
     /** [ChainAccessPolicy.quorumM] of the first [ChainAccessPolicy.quorumK] RPCs return the same bytes. */
@@ -29,6 +38,9 @@ enum class ChainSource(val key: String, @StringRes private val labelRes: Int) {
 
     /** Whether an answer from this tier carries a proof or an agreement. */
     val verifies: Boolean get() = this != DIRECT
+
+    /** The proof tiers: a light client or a prover, not RPCs agreeing. */
+    val proves: Boolean get() = this == MYOTIS || this == COLIBRI
 
     /** Tiers that can send a signed transaction. */
     val canBroadcast: Boolean get() = this == MYOTIS || this == DIRECT
@@ -107,30 +119,63 @@ data class ChainAccessPolicy(
 }
 
 /**
- * Who is asking. A page-driven read (a dapp's `eth_call`, a `web3://`
- * app) names the page's origin; the wallet's own reads name none. Only a
- * page-driven read trades verification for latency ([ChainDataRouter.INTERACTIVE_DEADLINE_MS]):
- * nobody is waiting on a frame for the wallet's.
+ * Who is asking. A site's read names the site's origin; the wallet's own
+ * reads name none. Two separate things follow from it:
+ *
+ * - [site]: the read is of something a site chose, so it mustn't cost the
+ *   wallet's own reads anything shared in the proof tiers — it gets a
+ *   site's share of their slots, and its miss or failure never backs a
+ *   tier off on its own ([VerifiedChainSource.request]).
+ * - [interactive]: a page is waiting on a frame for it, so it trades
+ *   verification for latency ([ChainDataRouter.INTERACTIVE_DEADLINE_MS]).
+ *   Only a page-driven read ([forPage]: a dapp's `eth_call`, a `web3://`
+ *   app) is; a read the wallet makes *about* a site's choice
+ *   ([forSiteChoice]: an x402 offer's token contract) keeps the chain's
+ *   full timeout for the quorum, since it needs a verified answer, not a
+ *   fast one (#329 R5-F1); only its proof tiers' waits are capped.
  */
-class RoutingContext private constructor(val origin: String?) {
-    val interactive: Boolean get() = origin != null
+class RoutingContext private constructor(
+    val origin: String?,
+    val interactive: Boolean,
+) {
+    val site: Boolean get() = origin != null
 
-    override fun equals(other: Any?) = other is RoutingContext && other.origin == origin
-    override fun hashCode() = origin.hashCode()
-    override fun toString() = "RoutingContext(${origin ?: "wallet"})"
+    override fun equals(other: Any?) =
+        other is RoutingContext && other.origin == origin && other.interactive == interactive
+    override fun hashCode() = origin.hashCode() * 31 + interactive.hashCode()
+    override fun toString() = when {
+        origin == null -> "RoutingContext(wallet)"
+        interactive -> "RoutingContext($origin)"
+        else -> "RoutingContext($origin, not interactive)"
+    }
 
     companion object {
-        val WALLET = RoutingContext(null)
+        val WALLET = RoutingContext(null, interactive = false)
 
         /**
-         * Desktop's `normalizeRoutingOrigin`: trimmed, non-empty, at most
-         * 2048 characters, no control characters — anything else counts
-         * as the wallet's own read.
+         * A page's own read. The origin is desktop's
+         * `normalizeRoutingOrigin`: trimmed, non-empty, at most 2048
+         * characters, no control characters — anything else counts as the
+         * wallet's own read.
          */
-        fun forPage(origin: String?): RoutingContext {
+        fun forPage(origin: String?): RoutingContext =
+            normalize(origin)?.let { RoutingContext(it, interactive = true) } ?: WALLET
+
+        /**
+         * The wallet's read of something site [origin] chose (an x402
+         * offer's token contract): the site's for the proof tiers' slots
+         * and back-off, but not a page's latency trade — the quorum gets
+         * the chain's full timeout, as for the wallet's own reads. Each
+         * proof tier gets [ChainDataRouter.SITE_PROOF_DEADLINE_MS], since
+         * a site's miss doesn't back it off (#329 R6-F1).
+         */
+        fun forSiteChoice(origin: String?): RoutingContext =
+            normalize(origin)?.let { RoutingContext(it, interactive = false) } ?: WALLET
+
+        private fun normalize(origin: String?): String? {
             val t = origin?.trim()
-            if (t.isNullOrEmpty() || t.length > 2048 || t.any { it.code <= 31 || it.code == 127 }) return WALLET
-            return RoutingContext(t)
+            if (t.isNullOrEmpty() || t.length > 2048 || t.any { it.code <= 31 || it.code == 127 }) return null
+            return t
         }
     }
 }
@@ -175,23 +220,48 @@ data class ChainDataResult(
 )
 
 /**
- * A light client or prover the router can ask ([ChainSource.MYOTIS],
- * [ChainSource.COLIBRI]). Neither exists on Android yet; the router skips
- * a tier with no source registered, so a policy naming one still reads.
- * Admission (how many calls a source takes at once) is the source's own
- * business — the router only bounds how long it waits.
+ * A light client or prover the router can ask ([ChainSource.MYOTIS]:
+ * [MyotisChainSource], [ChainSource.COLIBRI]: [ColibriChainSource], #329).
+ * The router skips a tier with no source registered, or one that isn't
+ * [isAvailable], so a policy naming one still reads. Admission (how many
+ * calls a source takes at once) is the source's own business — the
+ * router only bounds how long it waits.
  */
 interface VerifiedChainSource {
-    /** Whether the source can answer for [chainId] right now (synced, reachable). */
+    /** Whether the source can answer for [chainId] right now (synced, reachable). Cheap: the chain page asks it while drawing. */
     fun isAvailable(chainId: Long): Boolean
 
     /**
-     * Answer [method] with the trust the source mints. Throw
-     * [ChainRpcException.Rpc] with `deterministic` set for an answer
-     * that is itself an error (a revert); anything else thrown means
-     * "couldn't answer", and the walk moves on.
+     * Why the source can't answer for [chainId] right now, when it can't
+     * ([isAvailable] false) — for the chain page's note. Cheap, like
+     * [isAvailable]; `null` when it can answer.
      */
-    suspend fun request(chainId: Long, method: String, params: org.json.JSONArray): ChainDataResult
+    fun gap(chainId: Long): ProofTierGap? = if (isAvailable(chainId)) null else ProofTierGap.NOT_READY
+
+    /**
+     * Answer [method] with the trust the source mints. [rpcs] is the
+     * chain's RPC pool in the router's order, for a source that fetches
+     * the state it proves from them. Throw [ChainRpcException.Rpc] with
+     * `deterministic` set for an answer that is itself an error (a
+     * revert); anything else thrown means "couldn't answer", and the walk
+     * moves on. [context] says whose read it is: a site's
+     * ([RoutingContext.site]) is one the site chose, and mustn't
+     * cost the wallet's own reads anything shared (a back-off, slots).
+     */
+    suspend fun request(
+        chainId: Long,
+        method: String,
+        params: org.json.JSONArray,
+        rpcs: List<String>,
+        context: RoutingContext = RoutingContext.WALLET,
+    ): ChainDataResult
+
+    /**
+     * Whether [broadcast] is implemented. The router asks a source that
+     * can't only on reads: its broadcast tier counts as not available,
+     * never as "may have sent it".
+     */
+    val canBroadcast: Boolean get() = false
 
     /**
      * Send a signed transaction; its hash. Throw
@@ -200,4 +270,69 @@ interface VerifiedChainSource {
      */
     suspend fun broadcast(chainId: Long, rawTransaction: String): String =
         throw UnsupportedOperationException("cannot broadcast")
+}
+
+/** Why a proof tier isn't answering a chain's reads ([VerifiedChainSource.gap]). */
+enum class ProofTierGap {
+    /** The source doesn't cover this chain. */
+    NOT_SERVED,
+
+    /** Not in this build, or its native library didn't load. */
+    NOT_IN_BUILD,
+
+    /** Switched off by the user (Colibri: *Colibri proofs*). */
+    OFF,
+
+    /** Backing off after its servers couldn't be reached. */
+    UNREACHABLE,
+
+    /** Not ready for this chain (the light client: off, syncing, parked on a stale anchor). */
+    NOT_READY,
+}
+
+/**
+ * The router's wait for one proof tier's answer, carried into the
+ * source's call ([withRouterWait]) so the source can tell that wait
+ * running out — a missed wait, which says something about the prover —
+ * from its reader going away first: the user leaving the page, or a
+ * caller's own shorter timeout, which says nothing (#329 R4-M1).
+ */
+internal class RouterWait : AbstractCoroutineContextElement(Key) {
+    /** Set by the router's own timer just before it cancels the call: nothing else sets it. */
+    @Volatile
+    var ranOut = false
+        private set
+
+    internal fun expire() {
+        ranOut = true
+    }
+
+    companion object Key : CoroutineContext.Key<RouterWait>
+}
+
+/**
+ * [block] under the router's [ms] wait for a proof tier, as
+ * `withTimeoutOrNull`: null when the wait runs out. [block] runs with a
+ * [RouterWait] in its context whose [RouterWait.ranOut] is set before
+ * the cancellation reaches it — and only then, never when the caller
+ * itself is cancelled.
+ */
+internal suspend fun <T> withRouterWait(ms: Long, block: suspend () -> T): T? = coroutineScope {
+    val wait = RouterWait()
+    val work = async(wait) { block() }
+    val timer = launch {
+        delay(ms)
+        wait.expire()
+        work.cancel()
+    }
+    try {
+        work.await()
+    } catch (e: CancellationException) {
+        // Ours ran out: no answer. Anything else (the caller went away) goes on up.
+        if (!wait.ranOut) throw e
+        currentCoroutineContext().ensureActive()
+        null
+    } finally {
+        timer.cancel()
+    }
 }

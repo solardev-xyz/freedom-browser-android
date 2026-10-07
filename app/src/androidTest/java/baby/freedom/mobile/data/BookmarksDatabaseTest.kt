@@ -29,14 +29,30 @@ class BookmarksDatabaseTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
 
     /**
-     * A database file [name] exactly as Room created it at [version], from
-     * that version's exported schema (`app/schemas`, handed to this APK as
-     * assets): its tables, indices and Room's identity hash — what
-     * room-testing's `MigrationTestHelper.createDatabase` does.
+     * A database file [name] at user_version [version], built from the
+     * exported schema of [schemaVersion] (`app/schemas`, handed to this APK
+     * as assets): its tables (only those in [tables], if given), indices
+     * and setup queries, including the `room_master_table` row with that
+     * schema's identity hash — what room-testing's
+     * `MigrationTestHelper.createDatabase` does.
+     *
+     * When [schemaVersion] equals [version] this is the database exactly as
+     * Room created it at that version. When it doesn't (v1/v2, which
+     * predate the exported schemas and are built from v3's entities), the
+     * tables match that older version but the stored identity hash is
+     * [schemaVersion]'s, not the one Room wrote then. That's fine for the
+     * migration tests here — Room rewrites the stored hash once its
+     * migrations have run and only checks it after that — but such a file
+     * is not a byte-exact old database.
      */
-    private fun createDatabase(name: String, version: Int): SupportSQLiteDatabase {
+    private fun createDatabase(
+        name: String,
+        version: Int,
+        schemaVersion: Int = version,
+        tables: Set<String>? = null,
+    ): SupportSQLiteDatabase {
         val json = InstrumentationRegistry.getInstrumentation().context.assets
-            .open("${AppDatabase::class.java.name}/$version.json")
+            .open("${AppDatabase::class.java.name}/$schemaVersion.json")
             .bufferedReader().use { it.readText() }
         val schema = JSONObject(json).getJSONObject("database")
         val config = SupportSQLiteOpenHelper.Configuration.builder(context)
@@ -47,6 +63,7 @@ class BookmarksDatabaseTest {
                     for (i in 0 until entities.length()) {
                         val entity = entities.getJSONObject(i)
                         val table = entity.getString("tableName")
+                        if (tables != null && table !in tables) continue
                         db.execSQL(entity.getString("createSql").replace("\${TABLE_NAME}", table))
                         val indices = entity.optJSONArray("indices") ?: continue
                         for (j in 0 until indices.length()) {
@@ -182,6 +199,51 @@ class BookmarksDatabaseTest {
                 assertEquals("UA", d.userAgent)
                 assertNull(d.saveTo)
                 assertFalse(d.saveToCreated)
+            }
+        } finally {
+            db.close()
+            context.deleteDatabase(name)
+        }
+    }
+
+    /**
+     * v1 (history and bookmarks) and v2 (+ favicons) predate the exported
+     * schemas, so they are built from v3's — their tables were the same
+     * entities until v3 added `downloads` (v1 -> v2 -> v3 kept them
+     * unchanged). A database from v0.6.5 or earlier takes these steps on
+     * its way to v6: every row kept, bookmarks numbered newest first,
+     * and Room's check of the migrated tables against the entities passes.
+     */
+    @Test
+    fun migrationFromOneKeepsEveryRow() = migrateFromBeforeExportedSchemas(1, setOf("history", "bookmarks"))
+
+    @Test
+    fun migrationFromTwoKeepsEveryRow() = migrateFromBeforeExportedSchemas(2, setOf("history", "bookmarks", "favicons"))
+
+    private fun migrateFromBeforeExportedSchemas(version: Int, tables: Set<String>) {
+        val name = "migration-$version-6.db"
+        context.deleteDatabase(name)
+        createDatabase(name, version, schemaVersion = 3, tables = tables).apply {
+            execSQL("INSERT INTO bookmarks (id, url, title, createdAt) VALUES (1, 'https://a.example/', 'A', 100)")
+            execSQL("INSERT INTO bookmarks (id, url, title, createdAt) VALUES (2, 'vitalik.eth', 'V', 300)")
+            execSQL("INSERT INTO history (url, title, visitedAt) VALUES ('https://h.example/', 'H', 5)")
+            if ("favicons" in tables) {
+                execSQL("INSERT INTO favicons (origin, data, updatedAt) VALUES ('https://a.example', X'89504E47', 7)")
+            }
+            close()
+        }
+        val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(*AppDatabase.MIGRATIONS)
+            .build()
+        try {
+            assertEquals(6, db.openHelper.readableDatabase.version)
+            runBlocking {
+                assertEquals(listOf("vitalik.eth", "https://a.example/"), db.bookmarks().all().first().map { it.url })
+                assertEquals(listOf(0L, 1L), db.bookmarks().all().first().map { it.position })
+                assertEquals(listOf("https://h.example/"), db.history().recent().first().map { it.url })
+                val icon = db.favicons().get("https://a.example").first()
+                if ("favicons" in tables) assertEquals(4, icon?.size) else assertNull(icon)
+                assertTrue(db.downloads().all().first().isEmpty())
             }
         } finally {
             db.close()

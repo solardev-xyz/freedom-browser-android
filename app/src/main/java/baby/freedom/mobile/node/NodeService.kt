@@ -26,6 +26,7 @@ import baby.freedom.mobile.l10n.TextLocale
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.chains.rpc.ColibriReads
 import baby.freedom.mobile.chains.rpc.PinnedHttpTransport
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
@@ -47,12 +48,15 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlin.system.exitProcess
 import java.math.BigInteger
@@ -91,6 +95,22 @@ class NodeService : Service() {
     /** The newest [modeRelays] number applied to [relayedMode]. Guarded by [modeRelays]. */
     private var appliedModeRelay = 0L
 
+    /**
+     * "Pay peers from the chequebook" as the UI last relayed it through
+     * [INodeService.setSwapEnabled]; null until it has, when a boot reads
+     * the persisted setting itself ([swapEnabled]).
+     */
+    @Volatile
+    private var relayedSwap: Boolean? = null
+
+    /**
+     * The Swarm chunk cache's cap as the UI last relayed it through
+     * [INodeService.setSwarmCacheCapacity]; null until it has, when a boot
+     * reads the persisted setting itself ([swarmCacheCapacity]).
+     */
+    @Volatile
+    private var relayedCacheCapacity: Long? = null
+
     /** The mode the launch now booting read, handed to [SwarmNode.Config.mode] right after its identity. */
     @Volatile
     private var launchMode: SwarmNode.Mode = SwarmNode.Mode.ULTRA_LIGHT
@@ -115,7 +135,20 @@ class NodeService : Service() {
      * receipts) until it ends, and the process exits after either way.
      */
     private lateinit var chainBridge: AntChainBridge
+    private val myotisReads = MyotisReadBinding(this)
     private var ipfsNode: IpfsNode? = null
+
+    /**
+     * Serializes [maybeStartIpfs] and [maybeStopIpfs]. A start suspends on
+     * two DataStore reads between its `ipfsNode == null` check and setting
+     * [ipfsNode], so two overlapping starts (two IPFS navigations, or one
+     * plus the Settings toggle) would otherwise both build an [IpfsNode]:
+     * the first would be orphaned, keep its node (and the data dir's
+     * process-wide lease) after IPFS off, and leave every later start
+     * blocked in Starting. A stop queued behind a pending start then
+     * disposes the instance that start made rather than finding nothing.
+     */
+    private val ipfsLifecycle = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /** Holds a stop back while a postage spend runs inside ant (#116); see [INodeService.stopWhenIdle]. */
@@ -161,7 +194,7 @@ class NodeService : Service() {
     private val callbacks = RemoteCallbackList<INodeCallback>()
 
     private val binder = object : INodeService.Stub() {
-        override fun getState(): NodeInfo = reportedNodeInfo(swarmNode.state.value, doomed)
+        override fun getState(): NodeInfo = reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)
 
         override fun getIpfsState(): IpfsInfo = ipfsNode?.state?.value ?: IpfsInfo()
 
@@ -176,10 +209,12 @@ class NodeService : Service() {
 
         override fun clearLogs() = NodeLogs.clear()
 
+        override fun setColibriReads(on: Boolean) = ColibriReads.set(on)
+
         override fun registerCallback(cb: INodeCallback?) {
             cb ?: return
             callbacks.register(cb)
-            runCatching { cb.onStateChanged(reportedNodeInfo(swarmNode.state.value, doomed)) }
+            runCatching { cb.onStateChanged(reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)) }
             runCatching { cb.onIpfsStateChanged(ipfsNode?.state?.value ?: IpfsInfo()) }
             runCatching { cb.onRadicleStateChanged(radicleNode.state.value) }
         }
@@ -202,6 +237,14 @@ class NodeService : Service() {
             scope.launch {
                 Log.i(TAG, "app foreground → resume nodes")
                 swarmNode.resume()
+                // A launch that couldn't read the wallet's identity (#357)
+                // sits in Error, and a reload (a mode change) that couldn't
+                // read it wasn't applied; resume() touches neither, so
+                // reopening the app reads the store again and restarts the
+                // node once it reads.
+                if (bootIdentity.retryDue()) {
+                    launch(Dispatchers.IO) { restartSwarmIfStale("app foreground after an unreadable identity") }
+                }
                 ipfsNode?.enterForeground()
                 repromoteForegroundIfDemoted()
             }
@@ -257,6 +300,24 @@ class NodeService : Service() {
                 }
                 restartSwarmIfStale("swarm mode is now $mode")
             }
+        }
+
+        override fun setSwapEnabled(enabled: Boolean) {
+            relayedSwap = enabled
+            swarmNode.setSwapEnabled(enabled)
+        }
+
+        override fun setSwarmCacheCapacity(bytes: Long) {
+            relayedCacheCapacity = bytes
+            swarmNode.setCacheCapacity(bytes)
+        }
+
+        override fun getSwarmCacheStatus(): String? =
+            runCatching { swarmNode.cacheStatus() }.getOrNull()
+
+        override fun clearSwarmCache(): String = runCatching { swarmNode.clearCache() }.getOrElse { e ->
+            Log.w(TAG, "clearing the Swarm cache failed: ${e.javaClass.simpleName}: ${e.message}")
+            JSONObject().put("error", e.message ?: Strings.get(R.string.node_call_failed)).toString()
         }
 
         override fun getRadicleState(): RadicleInfo = radicleNode.state.value
@@ -412,6 +473,14 @@ class NodeService : Service() {
         }
         return when (method) {
             "status" -> swarmNode.storageStatus()
+            "swapStatus" -> swarmNode.swapStatus()
+            // Not a spend, but it lets the node pay again: the Chequebook
+            // page sends it only from its warning's confirmation.
+            "confirmLiability" -> {
+                Log.i(TAG, "confirming a lost cheque ledger's outstanding cheques, as the user confirmed")
+                val confirmed = swarmNode.confirmChequeLiability(args.getString("chequebook"))
+                JSONObject().put("confirmed", confirmed).toString()
+            }
             "quote" -> {
                 val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }
                 swarmNode.storageQuote(depth, days())
@@ -445,17 +514,18 @@ class NodeService : Service() {
             // Whether a discover still runs, and once it's over, how the
             // app's search [id] ended: the app asks once it has stopped
             // waiting for one, so it holds a publish back until the search
-            // (and any gateway reload it ends with) is over, and then says
-            // what it found or why it failed.
+            // is over (the #222 lock, from when a search could end by
+            // reloading the gateway — it no longer does, ant 0.5.52+), and
+            // then says what it found or why it failed.
             "discovering" -> {
                 val status = stopGate.discoverStatus(args.optString("id").ifEmpty { null })
                 JSONObject().put("running", status.running).apply {
                     status.outcome?.let { o -> runCatching { JSONObject(o) }.getOrNull()?.let { put("outcome", it) } }
                 }.toString()
             }
-            // Whether a buy (or connect) or a discover runs, any of which may end by
-            // reloading the gateway: a publish waits for it before sending
-            // (#222 R4-F1).
+            // Whether a buy (or connect) or a discover runs: a publish waits
+            // for it before sending (#222 R4-F1). Kept from when these could
+            // end by reloading the gateway; since ant 0.5.52 they don't.
             "gatewayWork" -> JSONObject().put("running", stopGate.gatewayWorkRunning).toString()
             "buy" -> spending(buy = true) {
                 spendable()
@@ -468,8 +538,9 @@ class NodeService : Service() {
                 Log.i(TAG, "extending a postage batch, as the user confirmed")
                 swarmNode.extendStamp(args.getString("batchId"), amount(), maxSwap())
             }
-            // Counted as a buy: a first connect sets up the chequebook and
-            // ends by reloading the gateway, which a publish waits out.
+            // Counted as a buy: a first connect sets up the chequebook, as a
+            // first buy does (the running gateway picks it up itself, ant
+            // 0.5.52+); a publish still waits it out, as for a buy.
             "connect" -> spending(buy = true) {
                 // A batch the wallet bought for the node (#115); ant checks the node owns it.
                 spendable()
@@ -489,14 +560,23 @@ class NodeService : Service() {
     /**
      * Restart the Swarm node if it booted as another identity (#77) or in
      * another mode (#114) than it would boot as now — once, however many
-     * reloads race the change (see [SwarmBootIdentity]).
+     * reloads race the change (see [SwarmBootIdentity]). A store that
+     * can't be read now (#357) says nothing about what the node should be:
+     * the node is kept, not restarted as ant's own key, and the reload is
+     * retried when the app next comes to the foreground.
      */
     private fun restartSwarmIfStale(reason: String) {
         bootIdentity.restartIfStale(
-            want = {
-                val address = identityStore.boot(vaultStore)?.let { boot ->
-                    boot.antIdentity.fill(0)
-                    boot.swarmAddress
+            want = want@{
+                val boot = try {
+                    identityStore.boot(vaultStore)
+                } catch (e: IllegalStateException) {
+                    Log.w(TAG, "$reason, but the wallet's Swarm identity can't be read; keeping the node as it is: ${e.message}")
+                    return@want null
+                }
+                val address = boot?.let {
+                    it.antIdentity.fill(0)
+                    it.swarmAddress
                 }.orEmpty()
                 swarmBootKey(address, swarmMode())
             },
@@ -528,6 +608,34 @@ class NodeService : Service() {
     } catch (e: Exception) {
         Log.w(TAG, "reading the swarm mode failed (${e.javaClass.simpleName}); ultra-light")
         SwarmNode.Mode.ULTRA_LIGHT
+    }
+
+    /**
+     * "Pay peers from the chequebook": the UI's latest
+     * [INodeService.setSwapEnabled], or — before this process has heard
+     * one, as on its first boot — the persisted setting, read here as
+     * [swarmMode] reads the mode. On (ant's default) when it can't be read.
+     * Blocking: called from a launch's IO thread.
+     */
+    private fun swapEnabled(): Boolean = relayedSwap ?: try {
+        runBlocking { NodeSettings.get(this@NodeService).swarmSwapEnabled.first() }
+    } catch (e: Exception) {
+        Log.w(TAG, "reading the pay-peers setting failed (${e.javaClass.simpleName}); on")
+        true
+    }
+
+    /**
+     * The Swarm chunk cache's cap: the UI's latest
+     * [INodeService.setSwarmCacheCapacity], or — before this process has
+     * heard one — the persisted setting, read here as [swapEnabled] reads
+     * its own. ant's default when it can't be read. Blocking: called from
+     * a launch's IO thread.
+     */
+    private fun swarmCacheCapacity(): Long = relayedCacheCapacity ?: try {
+        runBlocking { NodeSettings.get(this@NodeService).swarmCacheCapacityBytes.first() }
+    } catch (e: Exception) {
+        Log.w(TAG, "reading the Swarm cache size failed (${e.javaClass.simpleName}); ant's default")
+        0L
     }
 
     /**
@@ -621,7 +729,7 @@ class NodeService : Service() {
     private fun repromoteForegroundIfDemoted() {
         if (!foregroundDemoted) return
         runCatching {
-            startForeground(NOTIFICATION_ID, buildNotification(reportedNodeInfo(swarmNode.state.value, doomed)), foregroundTypeCompat())
+            startForeground(NOTIFICATION_ID, buildNotification(reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)), foregroundTypeCompat())
         }.onSuccess {
             foregroundDemoted = false
             Log.i(TAG, "re-promoted to foreground service")
@@ -641,8 +749,22 @@ class NodeService : Service() {
         vaultStore = KeystoreVaultStore(this)
         // Before the node starts: ant's first chain reads come at its
         // gateway's start.
+        // Its light-client tier reads through this process's own
+        // binding to `:myotis`, which never starts the light client.
+        myotisReads.bind()
+        // The Colibri proofs switch (#329): the UI relays it on bind; till
+        // then the stored value, read here (off until either lands).
+        scope.launch(Dispatchers.IO) {
+            runCatching { NodeSettings.get(this@NodeService).ensColibri.first() }
+                .onSuccess(ColibriReads::seed)
+                .onFailure { Log.w(TAG, "reading the Colibri proofs setting failed (${it.javaClass.simpleName})") }
+        }
         chainBridge = AntChainBridge(
-            ChainDataRouter(chains = { listOf(gnosisForReads()) }, transport = PinnedHttpTransport()),
+            ChainDataRouter(
+                chains = { listOf(gnosisForReads()) },
+                transport = PinnedHttpTransport(),
+                verifiedSources = ChainDataRouter.verifiedSources(this),
+            ),
         )
         AntChainTransport.install(chainBridge::serve, chainBridge::cancelInFlight)
         swarmNode = SwarmNode(
@@ -652,15 +774,36 @@ class NodeService : Service() {
                 // re-read at every (re)start; ant's own otherwise.
                 // And the mode (#114), read in the same step so the boot
                 // key records the pair this launch really boots as.
+                // When the wallet's keys are there but can't be read (#357),
+                // the launch fails with an error the Nodes page shows rather
+                // than boot as ant's own key; the next reload (a bind, an
+                // unlock, a Remove wallet, the app coming back to the
+                // foreground) tries again.
                 identity = {
                     bootIdentity.boot {
-                        val boot = identityStore.boot(vaultStore)
+                        val boot = try {
+                            identityStore.boot(vaultStore)
+                        } catch (e: IllegalStateException) {
+                            Log.w(TAG, "swarm identity unreadable: ${e.message}")
+                            // The wallet file itself unreadable can't be
+                            // unlocked: only removing it (or the file
+                            // reading again) gets past it, so say that.
+                            val walletUnreadable = runCatching { vaultStore.read() }.getOrNull() == null
+                            val message = if (walletUnreadable) {
+                                R.string.node_swarm_wallet_unreadable
+                            } else {
+                                R.string.node_swarm_identity_unreadable
+                            }
+                            throw IllegalStateException(getString(message), e)
+                        }
                         val mode = swarmMode()
                         launchMode = mode
                         swarmBootKey(boot?.swarmAddress.orEmpty(), mode) to boot?.antIdentity
                     }
                 },
                 mode = { launchMode },
+                swapEnabled = ::swapEnabled,
+                cacheCapacityBytes = ::swarmCacheCapacity,
             ),
         )
 
@@ -670,10 +813,11 @@ class NodeService : Service() {
             foregroundTypeCompat(),
         )
 
-        swarmObserver = swarmNode.state
-            .onEach { raw ->
-                // In a doomed process, why the node isn't up yet (#116).
-                val info = reportedNodeInfo(raw, doomed)
+        swarmObserver = combine(swarmNode.state, bootIdentity.owed, ::Pair)
+            .onEach { (raw, owed) ->
+                // In a doomed process, why the node isn't up yet (#116);
+                // and a restart waiting on an unreadable identity (#357).
+                val info = reportedNodeInfo(raw, doomed, owed)
                 updateNotification(info)
                 broadcastState(info)
                 Log.i(TAG, "swarm → ${info.status}  peers=${info.connectedPeers}")
@@ -733,8 +877,8 @@ class NodeService : Service() {
      * has no live-reconfig path, so changing them in Settings only
      * takes effect on the next start cycle (off → on).
      */
-    private suspend fun maybeStartIpfs() {
-        if (ipfsNode != null) return
+    private suspend fun maybeStartIpfs(): Unit = ipfsLifecycle.withLock {
+        if (ipfsNode != null) return@withLock
         val settings = NodeSettings.get(this)
         val lowPower = settings.ipfsLowPower.first()
         val routingMode = settings.ipfsRoutingMode.first()
@@ -767,8 +911,8 @@ class NodeService : Service() {
      * deliberately left alone — stopping IPFS shouldn't close
      * `bzz://` pages the user currently has open.
      */
-    private fun maybeStopIpfs() {
-        val node = ipfsNode ?: return
+    private suspend fun maybeStopIpfs(): Unit = ipfsLifecycle.withLock {
+        val node = ipfsNode ?: return@withLock
         ipfsObserver?.cancel()
         ipfsObserver = null
         node.dispose()
@@ -788,6 +932,7 @@ class NodeService : Service() {
 
     override fun onDestroy() {
         unregisterNetworkCallback()
+        myotisReads.unbind()
         callbacks.kill()
         swarmObserver?.cancel()
         ipfsObserver?.cancel()
@@ -902,7 +1047,9 @@ class NodeService : Service() {
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.node_notification_title))
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+            // The peer-network mark from the menu's Nodes row, not the
+            // system's download arrow: a running node isn't a download.
+            .setSmallIcon(R.drawable.ic_nodes)
             .setOngoing(true)
             .build()
     }

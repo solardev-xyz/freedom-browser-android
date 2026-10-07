@@ -5,6 +5,7 @@ import android.webkit.CookieManager
 import android.webkit.ServiceWorkerClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.WebStorage
 import android.webkit.WebView
 import androidx.annotation.MainThread
 import androidx.webkit.Profile
@@ -83,7 +84,7 @@ object PrivateProfile {
                     object : ServiceWorkerClient() {
                         override fun shouldInterceptRequest(
                             request: WebResourceRequest,
-                        ): WebResourceResponse? = interceptVirtualRequest(request)
+                        ): WebResourceResponse? = interceptVirtualRequest(request, private = true)
                     },
                 )
             }.onFailure { Log.w(TAG, "service-worker interception not installed", it) }
@@ -104,6 +105,14 @@ object PrivateProfile {
     fun cookieManager(): CookieManager? = cookies
 
     /**
+     * The private session's site storage, for wiping single origins
+     * ([UnverifiedOrigins.wipeWebData]). Null while no private tab is
+     * open. Main thread.
+     */
+    @MainThread
+    fun webStorage(): WebStorage? = current?.let { runCatching { it.webStorage }.getOrNull() }
+
+    /**
      * The last private tab has closed (the caller cleared the HTTP cache
      * through its WebView before destroying it): wipe the session's
      * cookies, site storage and geolocation grants, and retire the
@@ -120,9 +129,10 @@ object PrivateProfile {
     }
 
     /**
-     * "Clear cookies & site data" while private tabs are open: the
-     * private session's cookies and site storage go too. (Its cache
-     * is cleared per WebView, with every other tab's.)
+     * *Delete browsing data*'s *Cookies and site data* while private tabs
+     * are open: the private session's cookies and site storage go too.
+     * (Its cache goes with *Cached images and files*, per WebView, with
+     * every other tab's.)
      */
     @MainThread
     fun clearData() {

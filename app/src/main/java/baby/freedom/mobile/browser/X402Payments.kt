@@ -8,8 +8,10 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.rpc.ChainAccessPolicy
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainTrust
+import baby.freedom.mobile.chains.rpc.RoutingContext
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.X402Store
@@ -29,6 +31,7 @@ import java.math.BigInteger
 import java.security.SecureRandom
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.async
@@ -106,7 +109,9 @@ data class X402Grant(val cap: BigInteger, val windowMs: Long)
  * the payment it was granted with ([X402Store.Allowance]), only for a
  * navigation the user made (their load, or their tap on the site's page),
  * and not after the site answered a paid request Refused until the user
- * navigates to it themselves ([X402Flow], #237).
+ * navigates to it themselves ([X402Flow], #237) — across restarts: the
+ * hold is kept in [X402Store], and nothing pays silently until the holds
+ * an earlier run kept are read back (#347).
  *
  * Never in a private tab, and never automatically while the wallet is
  * locked: an allowance only pays when the wallet is open already; a
@@ -137,15 +142,49 @@ object X402Payments {
     private val flow = X402Flow<Detection>(
         settle = { id, status, httpStatus -> settle(id, status, httpStatus) },
         originOf = ::providerOriginKey,
+        onHold = { holdWrites.send(it, held = true) },
+        onLift = { origin, sure -> holdWrites.send(origin, held = false, retry = sure) },
     )
     private val random = SecureRandom()
+
+    /** The store [init] opened. */
+    private var store: X402Store? = null
+
+    /**
+     * Holds to keep or lift, written in order and retried until they land
+     * (#347, R1-M1) — from [init] on; any taken before wait for it.
+     */
+    private val holdWrites = X402HoldWrites(
+        write = { origin, held ->
+            val store = checkNotNull(store)
+            if (held) store.hold(origin) else store.lift(origin)
+        },
+        era = { store?.clearEra ?: 0L },
+        cleared = { era -> store?.clearedSince(era) ?: false },
+        onFailed = { held ->
+            Log.w(TAG, if (held) "keeping an x402 hold failed; trying again" else "lifting a kept x402 hold failed; trying again")
+        },
+    )
+
+    /** The holds an earlier run kept are read back into [flow] (#347). */
+    private val holdsRestored = CompletableDeferred<Unit>()
 
     fun init(context: Context) {
         if (this.context != null) return
         val app = context.applicationContext
         this.context = app
+        val store = X402Store.get(app)
+        this.store = store
+        scope.launch { holdWrites.run() }
         // Paid requests an earlier run never saw answered.
-        scope.launch { X402Store.get(app).settleStale() }
+        scope.launch { store.settleStale() }
+        // Sites an earlier run held after a Refused paid request stay held (#347).
+        scope.launch {
+            val kept = store.holds()
+            if (kept == null) Log.w(TAG, "x402 holds unreadable: every site's allowance asks until the user navigates to it")
+            flow.restore(kept)
+            holdsRestored.complete(Unit)
+        }
     }
 
     /**
@@ -188,19 +227,28 @@ object X402Payments {
      * The user's own Reload or Back/Forward on [tab]'s page: a hold on its
      * site after a Refused payment is lifted (#237 R1-M1).
      */
-    fun onUsersStep(tab: BrowserState) = flow.usersStep(tab.id)
+    fun onUsersStep(tab: BrowserState) {
+        // A private tab never writes the x402 store, nor pays from an allowance.
+        if (!tab.private) flow.usersStep(tab.id)
+    }
 
     /**
      * [tab] began a navigation to [url] (null: a reload or history step)
      * (after [onNavigationSuperseded]): [byUser] — the address they
      * named, their pull-to-refresh Reload — or the page on screen's, at
-     * [pageUrl], with the user's [gesture] or on its own. Only these may
-     * let a site's allowance pay without asking (#218 R4-M3) — the page's
-     * only with the user's gesture (#237) — and only while its redirects
-     * stay on that site (#218 R5-M1).
+     * [pageUrl], with the user's [gesture] or on its own (null). Only these
+     * may let a site's allowance pay without asking (#218 R4-M3) — the
+     * page's only with the user's gesture (#237), and only one the top
+     * document confirms was its own, not a tapped iframe's (#348) — and
+     * only while its redirects
+     * stay on that site (#218 R5-M1). A private tab's never lifts a hold:
+     * it doesn't write the x402 store (#347).
      */
-    fun onNavigationStarted(tab: BrowserState, byUser: Boolean, pageUrl: String?, url: String?, gesture: Boolean = false) =
-        flow.navigationStarted(tab.id, byUser, if (byUser) null else pageUrl?.let(::providerOriginKey), url, gesture = gesture)
+    internal fun onNavigationStarted(tab: BrowserState, byUser: Boolean, pageUrl: String?, url: String?, gesture: TopDocumentGesture? = null) =
+        flow.navigationStarted(
+            tab.id, byUser, if (byUser) null else pageUrl?.let(::providerOriginKey), url,
+            gesture = gesture, lifts = !tab.private,
+        )
 
     /**
      * [tab]'s payment epoch, read on the interceptor's thread as a
@@ -238,12 +286,14 @@ object X402Payments {
         val committed = flow.committed(tab.id, url) ?: return
         if (url == null || view == null || tab.private) return
         val detection = committed.value
-        // Another site's link, script or popup can't spend this site's allowance (#218 R4-M3).
-        val allowanceMayPay = committed.allowanceMayPay(detection.origin)
         val doc = EthereumProviders.currentDocument(tab.id)
         val webView = WeakReference(view)
         scope.launch {
             try {
+                // Another site's link, script or popup can't spend this site's allowance (#218
+                // R4-M3), nor a tapped iframe's navigation of the top frame: may wait, briefly, for
+                // the top document to confirm the tap was its own (#348).
+                val allowanceMayPay = committed.allowanceMayPay(detection.origin)
                 handle(tab, doc, webView, detection, allowanceMayPay)
             } catch (e: CancellationException) {
                 throw e
@@ -282,7 +332,12 @@ object X402Payments {
         while (true) {
             val account = activeAccount(vault, walletAccounts)
             val chains = ChainStore.get(app).chainsOrUnreadable.first().orEmpty()
-            val rpc = WalletRpc(ChainDataRouter.get(app))
+            // The offers' token contracts are the site's choice: read as the site's reads, so
+            // one it makes slow to prove can't back the proof tiers off, or take their slots,
+            // from the wallet's own reads (#329 R4-F1). But not as a page's latency trade: only
+            // a verified answer counts ([tokenReadTrusted]), so they wait for the quorum as long
+            // as the wallet's own reads do, not a page's 2 s (#329 R5-F1).
+            val rpc = WalletRpc(ChainDataRouter.get(app), RoutingContext.forSiteChoice(d.origin))
             val (options, unreadable) = options(d.required, chains, rpc, account?.address)
             val unusable = d.required.unusable + unreadable
             val allowances = store.allowances.first()
@@ -293,7 +348,9 @@ object X402Payments {
             // to be short: otherwise the sheet says why (#218 R2-M1).
             val payer = account?.address
             // The hold is read again, not only as the 402 committed: a paid request of the
-            // site's may have been Refused, in another tab, since (#237 R2-M1).
+            // site's may have been Refused, in another tab, since (#237 R2-M1) — once the
+            // holds an earlier run kept are known (#347).
+            if (allowanceMayPay) holdsRestored.await()
             val covered = silentPayOption(allowanceMayPay && !flow.holds(d.origin), switched, payer, account?.isLedger == true, options) { o ->
                 store.covering(allowances, d.origin, o.chainId, o.asset, payer!!, o.payTo, o.amount) != null
             }
@@ -507,14 +564,14 @@ object X402Payments {
         val view = webView.get()
         if (view == null || !stillOn(tab, doc, webView, d.url)) {
             // Never sent: the page it was for went while it was written.
-            store.withdraw(payment, committed.allowanceCreated)
+            store.withdraw(payment, committed)
             return Paid.NOT_SENT
         }
         // A paid request of the site's was Refused (in any tab) while this
         // one was read, signed and written: its allowance pays nothing more
         // silently — undone, and the sheet asks instead (#237 R2-M1).
         if (auto && flow.holds(d.origin)) {
-            store.withdraw(payment, committed.allowanceCreated)
+            store.withdraw(payment, committed)
             return Paid.HELD
         }
         // No suspension from the check above to here: the request goes out on the page it was for.
@@ -606,10 +663,14 @@ object X402Payments {
 
     private suspend fun readToken(rpc: WalletRpc, chain: Chain, asset: String): TokenRead = try {
         withTimeoutOrNull(READ_TIMEOUT_MS) {
-            val d = rpc.call(chain.id, JSONObject().put("to", asset).put("data", DECIMALS))
+            // Both at once: each can walk every proof tier before the quorum.
+            val (d, sym) = coroutineScope {
+                val d = async { rpc.call(chain.id, JSONObject().put("to", asset).put("data", DECIMALS)) }
+                val sym = async { rpc.call(chain.id, JSONObject().put("to", asset).put("data", SYMBOL)) }
+                d.await() to sym.await()
+            }
             val decimals = Erc20.decodeUint256(d.value)
                 ?.takeIf { it <= BigInteger.valueOf(36) }?.toInt() ?: return@withTimeoutOrNull TokenRead.Unreadable
-            val sym = rpc.call(chain.id, JSONObject().put("to", asset).put("data", SYMBOL))
             val symbol = abiSymbol(sym.value) ?: return@withTimeoutOrNull TokenRead.Unreadable
             if (!tokenReadTrusted(chain, listOf(d.trust, sym.trust))) {
                 Log.i(TAG, "unlisted token's decimals not verified (${d.trust.level.name.lowercase()}, built-in ${chain.builtIn})")
@@ -662,7 +723,13 @@ object X402Payments {
 
     private const val DECIMALS = "0x313ce567"
     private const val SYMBOL = "0x95d89b41"
-    private const val READ_TIMEOUT_MS = 8_000L
+    /**
+     * One token read's budget, sized for the router's order on a
+     * light-client chain (#329 R6-F1): each proof tier's wait for a site's
+     * choice, then the quorum's full timeout, and a second to spare.
+     */
+    internal const val READ_TIMEOUT_MS =
+        2 * ChainDataRouter.SITE_PROOF_DEADLINE_MS + ChainAccessPolicy.DEFAULT_TIMEOUT_MS + 1_000L
     private const val ACCOUNTS_WAIT_MS = 3_000L
     private const val TAG = "X402"
 }

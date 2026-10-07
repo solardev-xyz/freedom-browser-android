@@ -275,11 +275,17 @@ class HardReloadTest {
         assertTrue(tab.takeFreshFetch(generation, "http://127.0.0.1:1633/bzz/abc/app.js"))
         // A request of the document before it keeps its caches.
         assertFalse(tab.takeFreshFetch(generation - 1, "http://127.0.0.1:1633/bzz/abc/other.css"))
+        // Streamed media (nothing fresh buffered) stays fresh for the
+        // document's every later request, and only its (R4-M2).
+        assertTrue(tab.fetchedFresh(generation, target))
+        assertFalse(tab.fetchedFresh(generation, "http://127.0.0.1:1633/bzz/abc/unfetched.mp4"))
+        assertFalse(tab.fetchedFresh(generation - 1, target))
 
         // The next navigation is an ordinary one.
         tab.beginLoad()
         tab.handLoadToWebView()
         assertFalse(tab.takeFreshFetch(tab.webViewGeneration, "http://127.0.0.1:1633/bzz/abc/new.js"))
+        assertFalse(tab.fetchedFresh(tab.webViewGeneration, target))
     }
 
     @Test
@@ -294,5 +300,6 @@ class HardReloadTest {
         val target = "http://127.0.0.1:1633/bzz/abc/video.mp4"
         assertFalse(other.takeFreshFetch(other.webViewGeneration, target))
         assertTrue(reloaded.takeFreshFetch(reloaded.webViewGeneration, target))
+        assertFalse(other.fetchedFresh(other.webViewGeneration, target))
     }
 }

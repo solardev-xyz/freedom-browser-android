@@ -14,6 +14,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performClick
@@ -33,7 +34,8 @@ import java.time.ZoneId
 /**
  * The History page's day headers (#263) are headings for TalkBack, and
  * a header still reads whole at 200% font scale; an entry's long-press
- * and TalkBack actions open it in a new or a private tab (#321).
+ * and TalkBack actions open it in a new or a private tab (#321); a row
+ * names the site and keeps the full address for its long-press (#418).
  */
 @RunWith(AndroidJUnit4::class)
 class HistoryListTest {
@@ -135,6 +137,18 @@ class HistoryListTest {
         rule.onNode(hasText("Page 2") and hasClickAction()).performTouchInput { longClick(center) }
         rule.onNodeWithText("Open in private tab").performClick()
         assertEquals(listOf("https://example.com/1" to false, "https://example.com/2" to true), opened)
+    }
+
+    @Test
+    fun rowsNameTheSiteAndLongPressShowsTheFullAddress() {
+        show(fontScale = 1f)
+        // Flat rows (#418): the host, not the whole address.
+        rule.onAllNodesWithText("example.com", substring = true).assertCountEquals(3)
+        rule.onNodeWithText("https://example.com/1").assertDoesNotExist()
+        // TalkBack still reads the full address on the row.
+        rule.onNode(hasText("Page 1") and hasContentDescription("https://example.com/1")).assertExists()
+        rule.onNode(hasText("Page 1") and hasClickAction()).performTouchInput { longClick(center) }
+        rule.onNodeWithText("https://example.com/1").assertIsDisplayed()
     }
 
     @Test

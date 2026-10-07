@@ -72,7 +72,7 @@ class BalanceRowWrapTest {
             CompositionLocalProvider(LocalDensity provides Density(base.density, scale)) {
                 FreedomTheme {
                     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-                        BalancesSection(listOf(gnosis), balances, refreshing = false, onRefresh = {})
+                        AssetsSection(listOf(gnosis), balances, refreshing = false, onReceive = {})
                     }
                 }
             }
@@ -81,8 +81,8 @@ class BalanceRowWrapTest {
             scale = s
             rule.waitForIdle()
             for (amount in amounts) {
-                val nodes = rule.onAllNodesWithText(amount).fetchSemanticsNodes() +
-                    rule.onAllNodesWithText(amountBreaks(amount)).fetchSemanticsNodes()
+                val nodes = rule.onAllNodesWithText(amount, useUnmergedTree = true).fetchSemanticsNodes() +
+                    rule.onAllNodesWithText(amountBreaks(amount), useUnmergedTree = true).fetchSemanticsNodes()
                 assertEquals("$amount at $s", 1, nodes.size)
                 val layouts = mutableListOf<TextLayoutResult>()
                 nodes[0].config.getOrNull(SemanticsActions.GetTextLayoutResult)?.action?.invoke(layouts)

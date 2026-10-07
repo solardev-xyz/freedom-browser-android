@@ -36,6 +36,16 @@ internal data class FilterListCounts(
         FilterListCounts(rules + o.rules, used + o.used, scriptlets + o.scriptlets, scriptletsUsed + o.scriptletsUsed)
 }
 
+/**
+ * A redirect resource (#405): what a blocked request matching a
+ * `$redirect=` / `$redirect-rule=` filter gets instead of the empty 403 —
+ * uBlock's no-op stand-ins (an empty script, a 1×1 GIF, a silent MP3, a
+ * harmless `googletagservices_gpt.js` / `google-ima.js` shim), so a page
+ * that checks its ad script loaded carries on instead of breaking or
+ * calling its blocker wall. [canonical] is its own name.
+ */
+internal class RedirectResource(val canonical: String, val mimeType: String, val body: ByteArray)
+
 /** A scriptlet to call: its canonical [name] (`json-prune`, no `.js`) and [args]. */
 internal class ScriptletCall(val name: String, val args: List<String>) {
     /**
@@ -175,7 +185,15 @@ internal fun parseScriptletCall(body: String, catalog: ScriptletCatalog): Script
 internal class ScriptletCatalog private constructor(
     private val entries: Map<String, Entry>,
     private val aliases: Map<String, String>,
+    private val redirects: Map<String, RedirectResource> = emptyMap(),
 ) {
+    /**
+     * The neutered stand-in (#405) a `$redirect=` / `$redirect-rule=`
+     * filter serves for a blocked request, by its name or an alias
+     * (`noop.js`, `noopjs`, `1x1.gif`, …); `null` for one there isn't.
+     */
+    fun redirect(name: String): RedirectResource? = redirects[name]
+
     internal class Entry(val name: String, val fn: String, val body: String, val deps: List<String>, val requiresTrust: Boolean)
 
     /** The canonical name (no `.js`) [name] — a name or an alias, with or without `.js` — stands for; `null` if none. */
@@ -237,11 +255,40 @@ internal class ScriptletCatalog private constructor(
             "trusted-set-constant", "trusted-suppress-native-method",
         )
 
+        /**
+         * Redirect resources not served: `click2load.html` is an
+         * extension page (it asks the extension to load the real frame),
+         * which a page can't reach here.
+         */
+        private val UNSERVED_REDIRECTS = setOf("click2load.html")
+
+        /** `resources.json`'s `redirects`, by name and alias; empty if it has none or they don't parse. */
+        private fun parseRedirects(root: JSONObject): Map<String, RedirectResource> = runCatching {
+            val array = root.optJSONArray("redirects") ?: return@runCatching emptyMap()
+            val out = HashMap<String, RedirectResource>()
+            for (i in 0 until array.length()) {
+                val o = array.getJSONObject(i)
+                val name = o.getString("name")
+                if (name in UNSERVED_REDIRECTS) continue
+                // `image/gif;base64`: the body is base64 (some say it twice).
+                val type = o.getString("contentType")
+                val mime = type.substringBefore(';').trim()
+                val text = o.getString("body")
+                val bytes = if (";base64" in type) java.util.Base64.getDecoder().decode(text.trim()) else text.toByteArray()
+                val resource = RedirectResource(name, mime, bytes)
+                out[name] = resource
+                val more = o.optJSONArray("aliases")
+                for (j in 0 until (more?.length() ?: 0)) out.putIfAbsent(more!!.getString(j), resource)
+            }
+            out
+        }.getOrDefault(emptyMap())
+
         private val FN_NAME = Regex("^function\\s+([A-Za-z_$][\\w$]*)\\s*\\(")
 
         /** Parse a `resources.json`; `null` if it isn't one or has no scriptlets. */
         fun parse(json: String): ScriptletCatalog? = runCatching {
-            val array = JSONObject(json).getJSONArray("scriptlets")
+            val root = JSONObject(json)
+            val array = root.getJSONArray("scriptlets")
             val entries = HashMap<String, Entry>()
             val aliases = HashMap<String, String>()
             for (i in 0 until array.length()) {
@@ -261,7 +308,7 @@ internal class ScriptletCatalog private constructor(
                 val more = o.optJSONArray("aliases")
                 for (j in 0 until (more?.length() ?: 0)) aliases[more!!.getString(j)] = name
             }
-            if (aliases.isEmpty()) null else ScriptletCatalog(entries, aliases)
+            if (aliases.isEmpty()) null else ScriptletCatalog(entries, aliases, parseRedirects(root))
         }.onFailure { Log.w(TAG, "scriptlet resources unreadable", it) }.getOrNull()
     }
 }

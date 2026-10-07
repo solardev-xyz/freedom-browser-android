@@ -23,8 +23,8 @@ android {
         applicationId = "baby.freedom.mobile"
         minSdk = 30
         targetSdk = 37
-        versionCode = 30
-        versionName = "0.6.13"
+        versionCode = 44
+        versionName = "0.6.27"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Filter-list update trust anchor overrides (#127), for a build
@@ -303,6 +303,8 @@ dependencies {
     // a loopback server standing in for the local gateway, so the
     // tests are hermetic (no p2p, no external network).
     androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    // Certificates for an https fixture reached through a CONNECT proxy.
+    androidTestImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
 }
 
 // Settings → About → Open-source licences (#325). Everything the APK ships

@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertFalse
@@ -151,6 +152,10 @@ class ExternalAppsTest {
     }
 
     /** A clock the tests move by hand, and a latch on it. */
+    private companion object {
+        const val PRICED = "http://localhost:8710/priced"
+    }
+
     private class Clock(var now: Long = 10_000L) {
         val latch = UserGestureLatch { now }
 
@@ -171,6 +176,15 @@ class ExternalAppsTest {
          */
         fun topDocumentSaw(eventTime: Long, transitMs: Long = 3, isClick: Boolean = true) {
             latch.onTopDocumentInput(now - transitMs - eventTime, isClick)
+        }
+
+        /**
+         * A navigation of the top frame to [PRICED] starting now, which
+         * the top document says it started itself (#348 R5-F1).
+         */
+        fun topNavigation(): TopDocumentGesture {
+            latch.onTopDocumentNavigate(PRICED)
+            return latch.topDocumentGesture(PRICED)
         }
     }
 
@@ -244,6 +258,396 @@ class ExternalAppsTest {
         assertTrue(c.latch.giveUp(id))
     }
 
+    // x402 (#348): whose tap a navigation that goes on carried, without using it up.
+
+    @Test
+    fun `x402 a tap the top document confirms is its own`() {
+        val c = Clock()
+        val down = c.tap()
+        val gesture = c.topNavigation()
+        c.now += 20 // its word lands just after the navigation started
+        c.topDocumentSaw(down, isClick = false)
+        assertTrue(runBlocking { gesture.confirmed() })
+        // Not used up: an app link from the same tap is still offered.
+        assertNotNull(c.latch.consume())
+    }
+
+    @Test
+    fun `x402 a tap on an iframe that navigates the top frame is never confirmed`() {
+        val c = Clock()
+        c.tap() // the iframe got the pointerdown; the top document heard nothing
+        val gesture = c.topNavigation()
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 a top-document tap can't vouch for an iframe tap still within its activation`() {
+        // The iframe keeps its own tap's activation for WINDOW_MS, and can
+        // navigate the top frame right after the user's next tap on the page.
+        val c = Clock()
+        c.tap() // on the iframe
+        c.now += 2_000
+        val next = c.tap() // on the top page
+        c.topDocumentSaw(next)
+        val gesture = c.topNavigation()
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        c.latch.onInputStart(c.now) // anything that settles it
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 an iframe tap whose activation has run out doesn't count`() {
+        val c = Clock()
+        c.tap() // on the iframe
+        c.now += INPUT_SYNC_DELAY_MS
+        c.latch.onRendererCaughtUp(c.latch.latestInputId) // the renderer was idle
+        c.now += UserGestureLatch.WINDOW_MS + 100
+        val next = c.tap() // on the top page
+        c.topDocumentSaw(next)
+        assertTrue(runBlocking { c.topNavigation().confirmed() })
+    }
+
+    @Test
+    fun `x402 an iframe that held the renderer in its own handler keeps its tap's activation past the native window`() {
+        // The R1-F1 repro: the iframe busy-waits 6.5 s in its pointerdown
+        // handler, so its activation starts then, not at the tap.
+        val c = Clock()
+        c.tap() // on the iframe
+        val iframeTap = c.latch.latestInputId
+        c.now += 6_500
+        c.latch.onRendererCaughtUp(iframeTap) // the sync's echo, behind the busy loop
+        c.now += 1_000 // 7.5 s after the iframe tap
+        val next = c.tap() // on the top page
+        c.topDocumentSaw(next)
+        val gesture = c.topNavigation()
+        c.now += UserGestureLatch.CONFIRM_MS + 1 // its deadline passes, unconfirmed
+        assertFalse(runBlocking { gesture.confirmed() })
+        // Once WINDOW_MS has passed since the renderer was past it, it's out.
+        c.now += UserGestureLatch.WINDOW_MS
+        val later = c.tap()
+        c.topDocumentSaw(later)
+        c.latch.onRendererCaughtUp(c.latch.latestInputId)
+        assertTrue(runBlocking { c.topNavigation().confirmed() })
+    }
+
+    /**
+     * A keyboard edit as PageWebView records it (#348 R3-F1): its start,
+     * its end once Chromium has had it, then the renderer's echo.
+     */
+    private fun Clock.keyboardEdit(): Long {
+        val at = now
+        latch.onInputStart(at)
+        val id = latch.latestInputId
+        now += 2
+        latch.onInputContinues(now, id)
+        now += INPUT_SYNC_DELAY_MS
+        latch.onRendererCaughtUp(id)
+        return at
+    }
+
+    @Test
+    fun `x402 R3-F1 typing in an iframe keeps its activation fresh past the tap into its field`() {
+        val c = Clock()
+        c.tap() // into the iframe's text field
+        c.latch.onRendererCaughtUp(c.latch.latestInputId)
+        repeat(30) { // 6 s of typing there: no keydown of it is the top document's
+            c.now += 200
+            c.keyboardEdit()
+        }
+        c.now += 500
+        val next = c.tap() // a plain button on the top page
+        c.topDocumentSaw(next)
+        val gesture = c.topNavigation()
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 R3-F1 typing in the top document's own field is confirmed by its keydowns`() {
+        val c = Clock()
+        c.topDocumentSaw(c.tap()) // into the top page's text field
+        repeat(30) {
+            c.now += 200
+            c.topDocumentSaw(c.keyboardEdit(), isClick = false)
+        }
+        c.now += 500
+        val next = c.tap() // the site's own priced link
+        c.topDocumentSaw(next)
+        assertTrue(runBlocking { c.topNavigation().confirmed() })
+    }
+
+    /**
+     * A hardware key press or auto-repeat as PageWebView records it
+     * (#348 R4-F1): every one an input, only a fresh press armed.
+     */
+    private fun Clock.hardwareKey(repeatCount: Int): Long {
+        val at = now
+        latch.onInputStart(at, key = true)
+        // Dispatched a few ms after its event time: a repeat's keydown then
+        // also falls in the previous repeat's LATE_MS slack, as on the AVD.
+        latch.onInputContinues(at + 5)
+        if (repeatCount == 0) latch.onInput()
+        now += INPUT_SYNC_DELAY_MS
+        latch.onRendererCaughtUp(latch.latestInputId)
+        return at
+    }
+
+    @Test
+    fun `x402 R4-F1 a key held in an iframe keeps its activation fresh past the first press`() {
+        val c = Clock()
+        c.tap() // into the iframe's text field
+        c.latch.onRendererCaughtUp(c.latch.latestInputId)
+        c.now += 300
+        c.hardwareKey(repeatCount = 0) // Backspace goes down there…
+        repeat(150) { c.now += 50; c.hardwareKey(repeatCount = it + 1) } // …and is held 7.5 s
+        c.now += 300
+        val next = c.tap() // a plain button on the top page
+        c.topDocumentSaw(next)
+        val gesture = c.topNavigation()
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 R4-F1 a key held in the top document's own field is confirmed by its keydowns`() {
+        val c = Clock()
+        c.topDocumentSaw(c.tap()) // into the top page's text field
+        c.now += 300
+        c.topDocumentSaw(c.hardwareKey(repeatCount = 0), isClick = false)
+        repeat(150) { c.now += 50; c.topDocumentSaw(c.hardwareKey(repeatCount = it + 1), isClick = false) }
+        c.now += 300
+        val next = c.tap() // the site's own priced link
+        c.topDocumentSaw(next)
+        assertTrue(runBlocking { c.topNavigation().confirmed() })
+    }
+
+    @Test
+    fun `R4-F1 a held key's keydown is the latest repeat begun by its time`() {
+        val c = Clock()
+        val first = c.now
+        c.latch.onInputStart(first, key = true)
+        c.latch.onInputContinues(first + 5)
+        c.now = first + 50
+        val second = c.now
+        c.latch.onInputStart(second, key = true)
+        c.latch.onInputContinues(second + 5)
+        val id = c.latch.latestInputId
+        c.now = second + 4
+        c.topDocumentSaw(second, transitMs = 2, isClick = false) // fits both: the second's
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(id) { offered++ })
+        assertEquals(1, offered)
+        assertTrue(c.latch.whenInTopDocument(id - 1) { offered++ })
+        assertEquals(1, offered) // the first still waits on its own keydown
+    }
+
+    @Test
+    fun `R4-F1 the tie-break is for key inputs only - a tap among the candidates still fails closed`() {
+        val c = Clock()
+        val tap = c.tap(holdMs = 40)
+        c.latch.onInputStart(c.now, key = true)
+        c.latch.onInputContinues(c.now + 5)
+        val key = c.latch.latestInputId
+        c.now += 4
+        c.topDocumentSaw(c.now - 3, transitMs = 1, isClick = false) // fits the tap's slack and the key
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(key) { offered++ })
+        assertTrue(c.latch.whenInTopDocument(key - 1) { offered++ })
+        assertEquals(0, offered)
+        assertTrue(tap > 0)
+    }
+
+    @Test
+    fun `R4-F1 a held key's repeats buy no app-link launch of their own`() {
+        val c = Clock()
+        c.hardwareKey(repeatCount = 0)
+        assertNotNull(c.latch.consume())
+        repeat(10) { c.now += 50; c.hardwareKey(repeatCount = it + 1) }
+        assertNull(c.latch.consume())
+    }
+
+    @Test
+    fun `x402 R3-F1 a keyboard edit's end lands on it even after a later input began`() {
+        val c = Clock()
+        val at = c.now
+        c.latch.onInputStart(at) // the edit, recorded ahead of Chromium's task
+        val id = c.latch.latestInputId
+        c.now += 1
+        c.latch.onInputStart(c.now) // a key press lands in between
+        c.latch.onInputContinues(c.now + 1)
+        c.now = at + 100
+        c.latch.onInputContinues(c.now, id) // the edit's end: Chromium has stamped its keydown by now
+        c.topDocumentSaw(at + 90, isClick = false) // that keydown: past the key press's end, inside the edit
+        var confirmed = false
+        assertTrue(c.latch.whenInTopDocument(id) { confirmed = true })
+        assertTrue(confirmed)
+    }
+
+    @Test
+    fun `x402 an unconfirmed input the renderer was never heard past counts however old`() {
+        val c = Clock()
+        c.tap() // on the iframe; no echo (a renderer still stuck in it, or no detector)
+        c.now += 60_000
+        val next = c.tap()
+        c.topDocumentSaw(next)
+        val gesture = c.topNavigation()
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 an unconfirmed input dropped from the record still counts until the renderer is past it`() {
+        val c = Clock()
+        c.tap() // on the iframe, held up
+        repeat(40) { // a burst of top-page taps, past the record's cap
+            c.now += 50
+            c.topDocumentSaw(c.tap())
+        }
+        assertFalse(runBlocking { c.topNavigation().confirmed() })
+        c.latch.onRendererCaughtUp(c.latch.latestInputId)
+        c.now += UserGestureLatch.WINDOW_MS + 1
+        val next = c.tap()
+        c.topDocumentSaw(next)
+        c.latch.onRendererCaughtUp(c.latch.latestInputId)
+        assertTrue(runBlocking { c.topNavigation().confirmed() })
+    }
+
+    @Test
+    fun `x402 an echo can't name an input that hasn't happened`() {
+        val c = Clock()
+        c.latch.onRendererCaughtUp(5) // ahead of any input: ignored
+        c.tap() // on the iframe
+        c.now += UserGestureLatch.WINDOW_MS + 100
+        val next = c.tap()
+        c.topDocumentSaw(next)
+        val gesture = c.topNavigation()
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 no input at all, or a word too late, confirms nothing`() {
+        val c = Clock()
+        assertFalse(runBlocking { c.topNavigation().confirmed() })
+        val down = c.tap()
+        val gesture = c.topNavigation()
+        c.now += UserGestureLatch.CONFIRM_MS + 1 // a busy renderer's word
+        c.topDocumentSaw(down)
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 R5-F1 an iframe's navigation during the user's tap on the top page is never confirmed`() {
+        // The iframe was tapped long ago (enough to let it navigate the top
+        // frame at all), then sets top.location from its blur handler as the
+        // user taps the top page: hasGesture, and the only input is the top
+        // document's, confirmed — but the top document started no navigation.
+        val c = Clock()
+        c.tap() // into the iframe's field, long ago
+        c.latch.onRendererCaughtUp(c.latch.latestInputId)
+        c.now += 30_000
+        val next = c.tap() // a plain button on the top page
+        c.topDocumentSaw(next)
+        val gesture = c.latch.topDocumentGesture(PRICED)
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        c.latch.onInputStart(c.now) // anything that settles it
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 R5-F1 the top document's word on its navigation may come before or after it starts`() {
+        val c = Clock()
+        val down = c.tap()
+        c.topDocumentSaw(down)
+        val gesture = c.latch.topDocumentGesture(PRICED)
+        c.now += 30
+        c.latch.onTopDocumentNavigate(PRICED) // its navigate event, a task later
+        assertTrue(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 R5-F1 a word on another URL, a stale one, or one already used vouches for nothing`() {
+        val c = Clock()
+        val down = c.tap()
+        c.topDocumentSaw(down)
+        c.latch.onTopDocumentNavigate("http://localhost:8710/elsewhere")
+        val other = c.latch.topDocumentGesture(PRICED)
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        c.latch.onInputStart(c.now)
+        assertFalse(runBlocking { other.confirmed() })
+
+        val c2 = Clock()
+        c2.topDocumentSaw(c2.tap())
+        c2.latch.onTopDocumentNavigate(PRICED) // the top page's own, then cancelled by a later one
+        c2.now += UserGestureLatch.CONFIRM_MS + 1
+        val stale = c2.latch.topDocumentGesture(PRICED)
+        c2.now += UserGestureLatch.CONFIRM_MS + 1
+        c2.latch.onInputStart(c2.now)
+        assertFalse(runBlocking { stale.confirmed() })
+
+        val c3 = Clock()
+        c3.topDocumentSaw(c3.tap())
+        assertTrue(runBlocking { c3.topNavigation().confirmed() })
+        val again = c3.latch.topDocumentGesture(PRICED) // an iframe's, right after: no word of its own
+        c3.now += UserGestureLatch.CONFIRM_MS + 1
+        c3.latch.onInputStart(c3.now)
+        assertFalse(runBlocking { again.confirmed() })
+    }
+
+    @Test
+    fun `x402 382 R1-M1 the top document's word on a navigation without a gesture is used up by it`() {
+        // A timer on the top page navigates to the priced URL (no gesture);
+        // a cross-origin iframe's gestured load of the same URL right after
+        // must not take that word as its own.
+        for (wordFirst in listOf(true, false)) {
+            val c = Clock()
+            c.topDocumentSaw(c.tap())
+            if (wordFirst) c.latch.onTopDocumentNavigate(PRICED)
+            c.latch.onTopNavigationWithoutGesture(PRICED)
+            if (!wordFirst) {
+                c.now += 5
+                c.latch.onTopDocumentNavigate(PRICED)
+            }
+            c.now += 10
+            val iframe = c.latch.topDocumentGesture(PRICED)
+            c.now += UserGestureLatch.CONFIRM_MS + 1
+            c.latch.onInputStart(c.now)
+            assertFalse(runBlocking { iframe.confirmed() })
+        }
+        // With no such navigation, the top document's own gestured one still is.
+        val c = Clock()
+        c.topDocumentSaw(c.tap())
+        assertTrue(runBlocking { c.topNavigation().confirmed() })
+    }
+
+    @Test
+    fun `x402 R5-F2 a media key pressed into an iframe keeps the top document from vouching`() {
+        // Headset play/pause reaches the focused iframe as a trusted keydown
+        // and renews its activation: it is recorded, and never confirmed.
+        val c = Clock()
+        assertTrue(keyIsPageInput(android.view.KeyEvent.ACTION_DOWN, isModifier = false))
+        c.hardwareKey(repeatCount = 0)
+        c.now += 1_000
+        val next = c.tap() // the top page
+        c.topDocumentSaw(next)
+        val gesture = c.topNavigation()
+        c.now += UserGestureLatch.CONFIRM_MS + 1
+        c.latch.onInputStart(c.now)
+        assertFalse(runBlocking { gesture.confirmed() })
+    }
+
+    @Test
+    fun `x402 an accessibility click is confirmed by the top document's click`() {
+        val c = Clock()
+        c.latch.onInputStart(c.now, untilConfirmed = true)
+        c.latch.onInput()
+        val gesture = c.topNavigation()
+        c.now += 300 // Blink runs the simulated click late
+        c.topDocumentSaw(c.now - 5)
+        assertTrue(runBlocking { gesture.confirmed() })
+    }
+
     @Test
     fun `nor can a later top-document tap vouch for an earlier iframe tap`() {
         val c = Clock()
@@ -312,7 +716,7 @@ class ExternalAppsTest {
         var offered = 0
         assertTrue(c.latch.whenInTopDocument(id) { offered++ })
         c.now += 200
-        c.topDocumentSaw(c.now - 2)
+        c.topDocumentSaw(c.now - 5)
         assertEquals(1, offered)
     }
 
@@ -574,6 +978,17 @@ class ExternalAppsTest {
         assertFalse(keyArmsGestureLatch(down, repeatCount = 0, isSystem = true, isModifier = false))
         assertFalse(keyArmsGestureLatch(down, repeatCount = 0, isSystem = false, isModifier = true))
         assertFalse(keyArmsGestureLatch(up, repeatCount = 0, isSystem = false, isModifier = false))
+    }
+
+    @Test
+    fun `every press and auto-repeat of a page key is recorded as input`() {
+        val down = android.view.KeyEvent.ACTION_DOWN
+        val up = android.view.KeyEvent.ACTION_UP
+        // R4-F1: a repeat is a trusted keydown that renews the focused frame's activation.
+        assertTrue(keyIsPageInput(down, isModifier = false))
+        // R5-F2: a system key too — a media key or Search reaches the focused frame.
+        assertFalse(keyIsPageInput(down, isModifier = true))
+        assertFalse(keyIsPageInput(up, isModifier = false))
     }
 
     @Test

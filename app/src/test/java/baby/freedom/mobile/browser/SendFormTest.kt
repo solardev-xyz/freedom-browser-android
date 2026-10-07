@@ -1,0 +1,377 @@
+package baby.freedom.mobile.browser
+
+import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.chains.rpc.ChainSource
+import baby.freedom.mobile.chains.rpc.ChainTrust
+import baby.freedom.mobile.wallet.TokenBalance
+import baby.freedom.mobile.wallet.TokenRegistry
+import baby.freedom.mobile.wallet.TxRecord
+import baby.freedom.mobile.wallet.WalletAccount
+import java.math.BigInteger
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/** The Send form's validation, asset order and suggestions, the review's headline, Scan's Send/Pay and Receive's grouping (#422). */
+class SendFormTest {
+    private val eth = BuiltInChains.ETHEREUM
+    private val gnosis = BuiltInChains.GNOSIS
+    private val assets = listOf(eth, gnosis).flatMap { chain -> TokenRegistry.tokens(chain).map { chain to it } }
+    private val ethNative = TokenRegistry.tokens(eth).first()
+    private val usdc = TokenRegistry.tokens(eth).first { it.symbol == "USDC" }
+    private val xbzz = TokenRegistry.tokens(gnosis).first { it.symbol == "xBZZ" }
+    private val me = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+    private val other = "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"
+    private val third = "0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB"
+    private val trust = ChainTrust(
+        ChainTrust.Level.VERIFIED, ChainSource.QUORUM, listOf("a.example", "b.example"), emptyList(),
+        listOf("a.example", "b.example"), 3, 2, null,
+    )
+
+    private fun known(raw: Long) = TokenBalance.Known(BigInteger.valueOf(raw), trust)
+
+    // ---- asset order ----
+
+    @Test
+    fun `assets the account holds come first, each group in the wallet's own order`() {
+        val balances = mapOf(
+            xbzz.key to known(5),
+            usdc.key to known(0),
+            ethNative.key to known(0),
+            "${gnosis.id}:native" to known(7),
+        )
+        val order = assetOrder(assets, balances).map { it.second.key }
+        assertEquals(listOf("${gnosis.id}:native", xbzz.key), order.take(2))
+        // The rest keep the registry's order: Ethereum's native currency before its tokens.
+        assertEquals(assets.map { it.second.key }.filter { it !in order.take(2) }, order.drop(2))
+    }
+
+    @Test
+    fun `with nothing read the order is the wallet's own, and a failed read keeps its last balance`() {
+        assertEquals(assets, assetOrder(assets, emptyMap()))
+        val failed = TokenBalance.Failed("timeout", previous = known(3))
+        assertEquals(usdc.key, assetOrder(assets, mapOf(usdc.key to failed)).first().second.key)
+    }
+
+    // ---- amount checked while typing ----
+
+    @Test
+    fun `nothing typed says nothing, and a usable amount is its base units`() {
+        assertEquals(AmountCheck.Empty, amountCheck("", ethNative, eth, held = null, nativeHeld = null))
+        assertEquals(
+            AmountCheck.Ok(BigInteger("1500000000000000000")),
+            amountCheck("1.5", ethNative, eth, held = BigInteger.TEN.pow(19), nativeHeld = BigInteger.TEN.pow(19)),
+        )
+    }
+
+    @Test
+    fun `an unreadable amount says why, and isn't blamed on the balance`() {
+        val ambiguous = amountCheck("1,234", ethNative, eth, held = null, nativeHeld = null) as AmountCheck.Problem
+        assertEquals(ambiguousAmountNote("1,234"), ambiguous.note)
+        assertEquals(false, ambiguous.balance)
+        val tooPrecise = amountCheck("0.1234567", usdc, eth, held = null, nativeHeld = null) as AmountCheck.Problem
+        assertTrue(tooPrecise.note, tooPrecise.note.contains("6"))
+        assertEquals(false, tooPrecise.balance)
+        assertTrue(amountCheck("0", ethNative, eth, null, null) is AmountCheck.Problem)
+    }
+
+    @Test
+    fun `more than the balance is refused as it's typed, naming what the account has`() {
+        val check = amountCheck("2", usdc, eth, held = BigInteger.valueOf(1_500_000), nativeHeld = BigInteger.ONE) as AmountCheck.Problem
+        assertEquals("Not enough USDC: this account has 1.5 USDC.", check.note)
+        assertTrue(check.balance)
+        val empty = amountCheck("0.001", ethNative, eth, held = BigInteger.ZERO, nativeHeld = BigInteger.ZERO) as AmountCheck.Problem
+        assertEquals("Not enough ETH: this account has 0 ETH.", empty.note)
+        // Exactly the balance is the review's to price (Max takes the fee off a native send).
+        assertEquals(
+            AmountCheck.Ok(BigInteger.valueOf(1_500_000)),
+            amountCheck("1.5", usdc, eth, held = BigInteger.valueOf(1_500_000), nativeHeld = BigInteger.ONE),
+        )
+    }
+
+    @Test
+    fun `a token with none of the network's currency for the fee is refused, an unread balance blocks nothing`() {
+        val check = amountCheck("1", xbzz, gnosis, held = BigInteger.TEN.pow(17), nativeHeld = BigInteger.ZERO) as AmountCheck.Problem
+        assertEquals("This account has no xDAI on Gnosis Chain to pay the network fee.", check.note)
+        assertTrue(check.balance)
+        assertTrue(amountCheck("1", xbzz, gnosis, held = null, nativeHeld = null) is AmountCheck.Ok)
+    }
+
+    // ---- suggestions ----
+
+    private fun record(to: String, at: Long, from: String = me, name: String? = null, payee: Boolean = true) = TxRecord(
+        hash = "0x" + at.toString().padStart(64, '0'), chainId = gnosis.id, chainName = gnosis.name, chainSymbol = gnosis.symbol,
+        chainDecimals = 18, explorerUrl = gnosis.explorerUrl, from = from, to = to, toName = name, tokenAddress = null,
+        tokenSymbol = "xDAI", tokenDecimals = 18, amount = BigInteger.ONE, nonce = BigInteger.valueOf(at), sentAt = at,
+        status = TxRecord.Status.CONFIRMED, payee = payee,
+    )
+
+    @Test
+    fun `suggestions are the other accounts, then recent recipients newest first, each once`() {
+        val accounts = listOf(WalletAccount(0, "Account 1", me), WalletAccount(1, "Savings", other))
+        val records = listOf(
+            record(third, at = 10),
+            record(third.lowercase(), at = 30, name = "alice.eth"),
+            record(other, at = 40), // an own account: already listed as one
+            record(me, at = 50), // a self-send
+            record("0x0000000000000000000000000000000000000001", at = 20),
+            record("0x0000000000000000000000000000000000000002", at = 60, from = other), // another account's send
+        )
+        assertEquals(
+            listOf(
+                RecipientSuggestion("Savings", other, mine = true),
+                RecipientSuggestion("alice.eth", third.lowercase(), mine = false),
+                RecipientSuggestion(null, "0x0000000000000000000000000000000000000001", mine = false),
+            ),
+            recipientSuggestions(accounts, me, records),
+        )
+        assertEquals(1, recipientSuggestions(emptyList(), me, records, recent = 1).size)
+    }
+
+    @Test
+    fun `a composed call's contract, or a record not known to be a payment, is never suggested`() {
+        val records = listOf(
+            record("0x0000000000000000000000000000000000000003", at = 70, payee = false), // a DEX router, a Safe, the postage contract
+            record(third, at = 10),
+        )
+        assertEquals(listOf(RecipientSuggestion(null, third, mine = false)), recipientSuggestions(emptyList(), me, records))
+    }
+
+    // ---- review headline ----
+
+    @Test
+    fun `the review's headline says what goes where, with the name and the short address`() {
+        val to = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+        assertEquals(
+            "Send 0.001 ETH to vitalik.eth (0xd8dA…6045) on Ethereum",
+            sendHeadline("0.001", "ETH", to, "vitalik.eth", "Ethereum"),
+        )
+        assertEquals("Send 20 USDC to 0xd8dA…6045 on Ethereum", sendHeadline("20", "USDC", to, null, "Ethereum"))
+    }
+
+    @Test
+    fun `explorer links name the address page, and a chain without an explorer has none`() {
+        assertEquals("https://etherscan.io/address/$me", explorerAddressUrl(eth, me))
+        assertEquals("https://x.example/address/$me", explorerAddressUrl("https://x.example/", me))
+        assertNull(explorerAddressUrl(null, me))
+        assertNull(explorerAddressUrl("", me))
+        assertEquals(
+            listOf("etherscan.io" to "https://etherscan.io/address/$me", "gnosisscan.io" to "https://gnosisscan.io/address/$me"),
+            accountExplorerLinks(listOf(eth, gnosis, eth.copy(id = 999, explorerUrl = null)), me),
+        )
+    }
+
+    // ---- scan: Send / Pay ----
+
+    @Test
+    fun `a scanned address opens Send on the page's default asset`() {
+        val read = scannedRecipient(other) as ScannedRecipient.Fill
+        assertEquals(other, read.recipient)
+        val prefill = read.sendPrefill()
+        assertEquals(ANY_ASSET, prefill.tokenKey)
+        assertEquals(other, prefill.recipient)
+        assertNull(prefill.amount)
+        assertNull(prefill.origin)
+    }
+
+    @Test
+    fun `a payment request opens Send as its link would, and one Send can't pay says why`() {
+        val pay = scannedRecipient("ethereum:${xbzz.address}@100/transfer?address=$other&uint256=1.5e16") as ScannedRecipient.Fill
+        val prefill = pay.sendPrefill()
+        assertEquals(xbzz.key, prefill.tokenKey)
+        assertEquals(other, prefill.recipient)
+        assertEquals(BigInteger("15000000000000000"), prefill.amount)
+        assertNull(prefill.chainGuess)
+
+        val base = scannedRecipient("ethereum:$other@8453?value=1e15")
+        assertTrue(base.toString(), base is ScannedRecipient.Refused && base.reason.contains("Base"))
+        assertTrue(scannedRecipient("hello") is ScannedRecipient.Refused)
+    }
+
+    // ---- paste ----
+
+    @Test
+    fun `paste leaves out this wallet's phrase and key, and anything flagged sensitive, unread`() {
+        assertEquals(PastedRecipient.Secret, pastedRecipient(PhraseClipboard.CLIP_LABEL, sensitive = false, text = "abandon ability able"))
+        assertEquals(PastedRecipient.Secret, pastedRecipient(PhraseClipboard.KEY_CLIP_LABEL, sensitive = false, text = "0x" + "11".repeat(32)))
+        assertEquals(PastedRecipient.Secret, pastedRecipient("Password", sensitive = true, text = other))
+        assertEquals(PastedRecipient.Secret, pastedRecipient(PhraseClipboard.CLIP_LABEL, sensitive = false, text = null))
+    }
+
+    @Test
+    fun `paste fills in a request as Scan does, refuses one Send can't pay, and takes anything else as typed`() {
+        val pay = pastedRecipient("URL", false, " ethereum:${xbzz.address}@100/transfer?address=$other&uint256=1.5e16 ")
+        assertEquals(PastedRecipient.Fill(scannedRecipient("ethereum:${xbzz.address}@100/transfer?address=$other&uint256=1.5e16") as ScannedRecipient.Fill), pay)
+        assertEquals(xbzz.key, (pay as PastedRecipient.Fill).fill.prefill!!.tokenKey)
+        assertEquals(PastedRecipient.Fill(ScannedRecipient.Fill(other)), pastedRecipient(null, false, other))
+        val base = pastedRecipient(null, false, "ethereum:$other@8453?value=1e15")
+        assertTrue(base.toString(), base is PastedRecipient.Refused && base.reason.contains("Base"))
+        assertEquals(PastedRecipient.Text("vitalik.eth"), pastedRecipient(null, false, "  vitalik.eth\n"))
+        assertNull(pastedRecipient(null, false, "  "))
+    }
+
+    /** Safe Propose's Paste of [text] for a Safe on Gnosis, read the way the page reads the clip. */
+    private fun safePaste(text: String, chainId: Long = 100): SafePaste? =
+        safePastedRecipient(pastedRecipient(null, false, text), text.trim(), chainId)
+
+    @Test
+    fun `Safe Propose's Paste takes an address or a name, never just a payment request's address`() {
+        // Send would pay this one (Gnosis xBZZ); a Safe proposal takes none of its network, token or amount.
+        val request = "ethereum:${xbzz.address}@100/transfer?address=$other&uint256=1.5e16"
+        val payment = safePaste(request)
+        assertTrue(payment.toString(), payment is SafePaste.Note && payment.reason.contains("payment request"))
+        // No chain named, so Ethereum: the case an exchange's deposit request is.
+        assertTrue(safePaste("ethereum:$other?value=5e17") is SafePaste.Note)
+        // One Send can't pay is refused here the same way, not with Send's reason.
+        val base = safePaste("ethereum:$other@8453?value=1e15")
+        assertTrue(base.toString(), base is SafePaste.Note && base.reason.contains("payment request"))
+        assertEquals(SafePaste.Take(other), safePaste(other))
+        assertEquals(SafePaste.Take("vitalik.eth"), safePaste(" vitalik.eth "))
+        assertTrue(safePastedRecipient(PastedRecipient.Secret, null, 100) is SafePaste.Note)
+        assertNull(safePastedRecipient(null, null, 100))
+    }
+
+    @Test
+    fun `Safe Propose takes a bare request for an address, on no network or the Safe's own, pasted or scanned`() {
+        // A wallet's receive code: nothing but the address, so nothing is dropped by taking it.
+        assertEquals(SafePaste.Take(other), safePaste("ethereum:$other"))
+        assertEquals(SafePaste.Take(other), safePaste(" ethereum:$other@100 "))
+        assertEquals(SafePaste.Take(other), safePaste("ethereum:pay-$other@100"))
+        assertEquals(SafePaste.Take(other), safeScannedRecipient("ethereum:$other@100", 100))
+        assertEquals(SafePaste.Take(other), safeScannedRecipient("ethereum:${other.lowercase()}", 100))
+        assertEquals(SafePaste.Take(other), safeScannedRecipient(other, 100))
+        // A bare request for another network names one of its own: Ethereum (Send pays it), Base (Send doesn't).
+        assertTrue(safePaste("ethereum:$other@1") is SafePaste.Note)
+        assertTrue(safePaste("ethereum:$other@8453") is SafePaste.Note)
+        assertTrue(safeScannedRecipient("ethereum:$other@1", 100) is SafePaste.Note)
+        // The same request on a Safe on Ethereum is its own network.
+        assertEquals(SafePaste.Take(other), safePaste("ethereum:$other@1", chainId = 1))
+        // An amount, even of the native currency on the Safe's own network, or a token, is still the request's own.
+        assertTrue(safeScannedRecipient("ethereum:$other@100?value=1e15", 100) is SafePaste.Note)
+        assertTrue(safeScannedRecipient("ethereum:${xbzz.address}@100/transfer?address=$other", 100) is SafePaste.Note)
+        // Neither an address nor a request: the camera ignores it.
+        assertNull(safeScannedRecipient("hello", 100))
+    }
+
+    @Test
+    fun `Safe Receive's Share says which network the Safe takes funds on`() {
+        val shared = safeShareText(other, "Gnosis")
+        assertTrue(shared, shared.startsWith(other))
+        assertTrue(shared, shared.contains("Send only on Gnosis"))
+    }
+
+    @Test
+    fun `a request naming no network says which was assumed, worded for a link or for a request`() {
+        val guessed = (scannedRecipient("ethereum:$other?value=1e15") as ScannedRecipient.Fill).prefill!!
+        assertEquals(ChainGuess.ETHEREUM_DEFAULT, guessed.chainGuess)
+        assertTrue(chainGuessNote(ChainGuess.ETHEREUM_DEFAULT, FillSource.SCANNED, "Ethereum").startsWith("The request doesn’t name a network"))
+        assertTrue(chainGuessNote(ChainGuess.ETHEREUM_DEFAULT, FillSource.PASTED, "Ethereum").startsWith("The request doesn’t name a network"))
+        assertTrue(chainGuessNote(ChainGuess.ETHEREUM_DEFAULT, FillSource.LINK, "Ethereum").startsWith("The link doesn’t name a network"))
+        assertTrue(chainGuessNote(ChainGuess.ONLY_CHAIN_WITH_TOKEN, FillSource.SCANNED, "Gnosis Chain").contains("Gnosis Chain is filled in"))
+    }
+
+    @Test
+    fun `replacing the payee keeps a request's note, assumed network and all, and drops a plain address's`() {
+        val guessed = (scannedRecipient("ethereum:$other?value=1e15") as ScannedRecipient.Fill).prefill!!
+        val note = FillNote(guessed, FillSource.PASTED)
+        val replaced = note.afterPayeeReplaced()!!
+        assertTrue(replaced.payeeReplaced)
+        assertEquals(guessed, replaced.prefill)
+        assertEquals(ChainGuess.ETHEREUM_DEFAULT, replaced.prefill.chainGuess)
+        assertEquals(FillSource.PASTED, replaced.source)
+        assertEquals(replaced, replaced.afterPayeeReplaced())
+        assertFalse(note.payeeReplaced)
+
+        val plain = FillNote((scannedRecipient(other) as ScannedRecipient.Fill).sendPrefill(), FillSource.SCANNED)
+        assertNull(plain.afterPayeeReplaced())
+    }
+
+    @Test
+    fun `a request naming no amount empties the amount, even for the asset already picked`() {
+        val form = SendDraft()
+        form.fill(scannedRecipient("ethereum:$other?value=1e15") as ScannedRecipient.Fill, FillSource.SCANNED, assets)
+        assertEquals(ethNative.key, form.assetKey)
+        assertEquals("0.001", form.amount)
+        assertEquals(other, form.recipient)
+
+        val noAmount = scannedRecipient("ethereum:$third") as ScannedRecipient.Fill
+        assertNull(noAmount.prefill!!.amount)
+        assertEquals(ethNative.key, noAmount.prefill!!.tokenKey)
+        form.fill(noAmount, FillSource.SCANNED, assets)
+        assertEquals(ethNative.key, form.assetKey)
+        assertEquals("", form.amount)
+        assertEquals(third, form.recipient)
+        assertEquals(FillNote(noAmount.prefill!!, FillSource.SCANNED), form.note)
+
+        // A typed amount isn't the request's either.
+        form.amount = "2"
+        form.fill(noAmount, FillSource.PASTED, assets)
+        assertEquals("", form.amount)
+    }
+
+    @Test
+    fun `a plain address replaces a request's payee only when it's another one`() {
+        val form = SendDraft()
+        form.fill(scannedRecipient("ethereum:$other?value=1e15") as ScannedRecipient.Fill, FillSource.SCANNED, assets)
+        val filled = form.note!!
+        assertFalse(filled.payeeReplaced)
+
+        // The request's own address again, pasted or scanned to double-check: nothing replaced.
+        form.fill(ScannedRecipient.Fill(other), FillSource.PASTED, assets)
+        assertEquals(filled, form.note)
+        form.fill(ScannedRecipient.Fill(other.lowercase()), FillSource.SCANNED, assets)
+        assertEquals(filled, form.note)
+        assertEquals("0.001", form.amount)
+
+        // Another address: the note says the payee isn't the request's.
+        form.fill(ScannedRecipient.Fill(third), FillSource.PASTED, assets)
+        assertTrue(form.note!!.payeeReplaced)
+        assertEquals(third, form.recipient)
+        assertEquals("0.001", form.amount)
+    }
+
+    @Test
+    fun `the default asset follows balances as they're read, until one is named or an amount typed`() {
+        val form = SendDraft()
+        form.assetKey = assetOrder(assets, emptyMap()).first().second.key
+        assertEquals(ethNative.key, form.assetKey)
+        // Nothing read yet: the wallet's first asset; then xDAI's balance arrives.
+        form.followDefault(assets, mapOf("${gnosis.id}:native" to known(7)))
+        assertEquals("${gnosis.id}:native", form.assetKey)
+
+        // An amount typed against it keeps the asset put.
+        form.amount = "1"
+        form.followDefault(assets, mapOf(xbzz.key to known(5)))
+        assertEquals("${gnosis.id}:native", form.assetKey)
+        form.amount = ""
+        form.all = true
+        form.followDefault(assets, mapOf(xbzz.key to known(5)))
+        assertEquals("${gnosis.id}:native", form.assetKey)
+        form.all = false
+
+        // A request naming its asset is never overridden by a balance.
+        form.fill(scannedRecipient("ethereum:$other") as ScannedRecipient.Fill, FillSource.SCANNED, assets)
+        assertEquals(ethNative.key, form.assetKey)
+        assertEquals("", form.amount)
+        form.followDefault(assets, mapOf(xbzz.key to known(5)))
+        assertEquals(ethNative.key, form.assetKey)
+
+        // Nor is one picked on the sheet.
+        val picked = SendDraft().apply { assetKey = usdc.key; assetChosen = true }
+        picked.followDefault(assets, mapOf(xbzz.key to known(5)))
+        assertEquals(usdc.key, picked.assetKey)
+    }
+
+    // ---- receive ----
+
+    @Test
+    fun `receive groups the address in fours, 0x on the first group`() {
+        assertEquals(
+            listOf("0x5aAe", "b605", "3F3E", "94C9", "b9A0", "9f33", "6694", "35E7", "Ef1B", "eAed"),
+            addressGroups(me),
+        )
+        assertEquals(me, addressGroups(me).joinToString(""))
+    }
+}

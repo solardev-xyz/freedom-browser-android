@@ -115,15 +115,15 @@
     <string name="radicle_viewer_image">image</string>
     <string name="radicle_viewer_unreadable_response">unreadable response</string>
     <string name="radicle_viewer_off_title">Radicle is turned off</string>
-    <string name="radicle_viewer_off_body">Turn it on under Settings → Nodes → Radicle node to browse repositories.</string>
+    <string name="radicle_viewer_off_body">Turn it on under Settings → Nodes &amp; networks → Radicle node to browse repositories.</string>
     <string name="radicle_viewer_starting_title">The Radicle node is starting</string>
     <string name="radicle_viewer_starting_body">Reload this page in a moment.</string>
     <string name="radicle_viewer_stopped_title">The Radicle node is not running</string>
-    <string name="radicle_viewer_stopped_body">It runs alongside the Swarm node: check Settings → Nodes.</string>
+    <string name="radicle_viewer_stopped_body">It runs alongside the Swarm node: check Settings → Nodes &amp; networks.</string>
     <string name="radicle_viewer_repo_not_found_title">Repository not found on this device</string>
     <!-- %1$s is the repository's rad:// address. -->
     <string name="radicle_viewer_repo_not_found_body">%1$s isn’t in your node’s storage.</string>
-    <string name="radicle_viewer_repo_not_found_hint">Seed it from Settings → Nodes → Radicle node (paste the repository ID), then reload. It may also be mistyped, or not exist on the network.</string>
+    <string name="radicle_viewer_repo_not_found_hint">Seed it from Settings → Nodes &amp; networks → Radicle node (paste the repository ID), then reload. It may also be mistyped, or not exist on the network.</string>
     <string name="radicle_viewer_not_available_title">Not available</string>
     <string name="radicle_viewer_not_public">This repository is not public.</string>
     <string name="radicle_viewer_not_found_title">Not found</string>
@@ -198,19 +198,21 @@
     <string name="radicle_viewer_invalid_body">%1$s isn’t a repository ID.</string>
     <string name="radicle_viewer_invalid_hint">Repository IDs start with z followed by base58 characters, like rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5.</string>
     <string name="radicle_viewer_open_title">Open a repository</string>
-    <string name="radicle_viewer_open_body">Enter a Radicle repository ID. Repositories are read from your own node: seed one first from Settings → Nodes → Radicle node.</string>
+    <string name="radicle_viewer_open_body">Enter a Radicle repository ID. Repositories are read from your own node: seed one first from Settings → Nodes &amp; networks → Radicle node.</string>
     <string name="radicle_viewer_no_page">This repository has no page here.</string>
 
     <!-- OnchainApp.kt: web3:// onchain apps -->
-    <!-- %1$s is the chain's name, %2$s its chain ID. -->
-    <string name="radicle_onchain_detail_network">Network: %1$s (chain %2$s)</string>
+    <!-- %1$s is the chain's ID: its own line, shown before the (possibly site-chosen) name. -->
+    <string name="radicle_onchain_detail_chain_id">Chain ID: %1$s</string>
+    <!-- %1$s is the chain's name as the user's chain list has it; may have been chosen by a site. -->
+    <string name="radicle_onchain_detail_network">Network: %1$s</string>
     <string name="radicle_onchain_detail_contract">Contract: %1$s</string>
     <string name="radicle_onchain_detail_html_hash">HTML keccak256: %1$s</string>
     <!-- %1$s is the RPC server that answered. -->
     <string name="radicle_onchain_detail_from">From: %1$s (not cross-checked)</string>
     <string name="radicle_onchain_detail_answered">Answered: %1$s</string>
     <string name="radicle_onchain_detail_disagreed">Disagreed: %1$s</string>
-    <string name="radicle_onchain_failed_unknown_chain_add">Chain %1$s isn\'t in your chain list. Add it in Settings → Chains.</string>
+    <string name="radicle_onchain_failed_unknown_chain_add">Chain %1$s isn\'t in your chain list. Add it in Settings → Wallet &amp; chains.</string>
     <string name="radicle_onchain_failed_unknown_chain">Chain %1$s isn\'t in your chain list.</string>
     <!-- %1$d is a number of seconds. -->
     <string name="radicle_onchain_failed_timeout">No answer within %1$d s</string>

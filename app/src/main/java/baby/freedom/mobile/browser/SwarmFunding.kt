@@ -9,6 +9,7 @@ import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.wallet.SwarmFunder
 import java.io.File
 import java.math.BigInteger
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -55,6 +56,8 @@ internal class SwarmFunding(
      */
     private val connectFree: Flow<Boolean> =
         combine(StampClient.spend, StampClient.discovery, Publisher.state, StampClient::canRestartGateway),
+    /** Where its collectors and chain lookups run; a test passes one it drives. */
+    context: CoroutineContext = Dispatchers.Default,
 ) {
     /** Gnosis Chain reads for a call the wallet no longer follows. */
     interface ChainReader {
@@ -144,7 +147,7 @@ internal class SwarmFunding(
     private var receiptSeen: ReceiptSeen? = null
 
     private data class ReceiptSeen(val batchId: String, val reverted: Boolean, val at: Long)
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(SupervisorJob() + context)
 
     /**
      * Follows [sends] (every status, none conflated away; null once the
@@ -221,6 +224,7 @@ internal class SwarmFunding(
     internal fun noteSend(status: SendStatus) {
         val label = status.quote.request.dapp?.swarm ?: return
         var mined = false
+        var underway = false
         update { current ->
             val same = current?.takeIf { it.batchId == label.batchId }
             // Only a send still going out starts a record: a finished one with none
@@ -233,7 +237,10 @@ internal class SwarmFunding(
             when {
                 base == null -> current
                 stage is SendStatus.Stage.Confirmed ->
-                    base.copy(hash = status.hash ?: base.hash, mined = true, tracked = true).also { mined = !base.mined }
+                    base.copy(hash = status.hash ?: base.hash, mined = true, tracked = true).also {
+                        mined = !base.mined
+                        if (mined) underway = connectOfBatchUnderway(label.batchId)
+                    }
                 // Mined but failed, or certainly never sent: nothing was bought.
                 stage is SendStatus.Stage.Reverted || (stage is SendStatus.Stage.Failed && !stage.mayHaveGone) ->
                     if (same != null) null else current
@@ -242,7 +249,7 @@ internal class SwarmFunding(
         }
         if (mined) {
             Log.i(TAG, "the node's funding was mined; connecting its stamp")
-            connectMined()
+            connectMined(underway)
         }
     }
 
@@ -301,8 +308,20 @@ internal class SwarmFunding(
      * The record's call was just seen mined: connect its batch now, or —
      * refused, since other work holds the node — as soon as it's free
      * ([connectOwed]).
+     *
+     * [underway]: a connect of the batch was running (or had connected it)
+     * when the record was marked mined, read under the same lock as that
+     * write. That connect is the batch's: it connects it, or fails and
+     * leaves the card's Connect, so nothing is asked here. Judged then,
+     * not now: that connect can fail and free the node in the moment
+     * between the write and the ask below, and asking then started a
+     * second connect, an automatic retry of a failed one (#394).
      */
-    private fun connectMined() {
+    private fun connectMined(underway: Boolean) {
+        if (underway) {
+            Log.i(TAG, "a connect of the mined stamp was already running; not asking for another")
+            return
+        }
         val batchId = _pending.value?.takeIf { it.mined }?.batchId ?: return
         // Owed only once refused: owed before asking, the collector that
         // retries an owed connect could see it (the node free) and start a
@@ -350,10 +369,12 @@ internal class SwarmFunding(
             }
             val dropIt = outcome is SendStatus.Stage.Reverted && settled
             var connectIt = false
+            var underway = false
             when (outcome) {
                 is SendStatus.Stage.Confirmed -> if (settled) update { cur ->
                     if (cur?.batchId == p.batchId && !cur.mined) {
                         connectIt = true
+                        underway = connectOfBatchUnderway(p.batchId)
                         cur.copy(mined = true)
                     } else {
                         cur
@@ -366,7 +387,7 @@ internal class SwarmFunding(
             noteSuperseded(p.batchId, outcome == null && nonceUsed)
             if (connectIt) {
                 Log.i(TAG, "the funding the wallet stopped following was mined; connecting its stamp")
-                connectMined()
+                connectMined(underway)
             } else if (dropIt) {
                 Log.i(TAG, "the funding the wallet stopped following reverted; nothing was bought")
             } else if (outcome is SendStatus.Stage.Reverted) {

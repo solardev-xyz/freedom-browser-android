@@ -77,7 +77,6 @@
     <string name="send_self_send_note">This is the sending account itself.</string>
     <!-- %1$s: a fee with its currency symbol, fixed format. -->
     <string name="send_up_to">up to %1$s</string>
-    <string name="send_confirm_on_ledger">Confirm on Ledger</string>
     <string name="send_confirm_and_send">Confirm and send</string>
     <!-- %1$s: the amount, fixed format; %2$s: the token's symbol; %3$s: the network. -->
     <string name="send_amount_on_chain">%1$s %2$s on %3$s</string>
@@ -158,18 +157,18 @@
     <string name="send_interrupted">The app closed while this was going out, so it may or may not have gone out. Try again sends the very same transaction, so it can’t be paid twice.</string>
     <string name="send_stale_while_signing">The network fee was worked out over three minutes ago, before this was signed, so it may no longer get the transaction in. Nothing was sent; review the new fee and confirm again.</string>
     <string name="send_stale_before_signing">The network fee was worked out over a minute ago, so it may no longer get the transaction in. Nothing was signed or sent; review the new fee and confirm again.</string>
-    <string name="send_read_unknown_chain">This chain isn’t set up in Settings → Chains.</string>
+    <string name="send_read_unknown_chain">This chain isn’t set up in Settings → Wallet &amp; chains.</string>
     <string name="send_read_no_rpc">No RPC answered for this chain. Check the connection and try again.</string>
-    <string name="send_read_rpc_error">The RPC answered with an error: %1$s</string>
+    <string name="send_read_rpc_error">The RPC answered with an error: “%1$s”</string>
     <string name="send_read_nonsense">The RPC’s answer made no sense. Try again.</string>
     <string name="send_estimate_insufficient">Not enough %1$s to pay for this transaction.</string>
     <string name="send_estimate_contract_refuses">The contract would refuse this transaction.</string>
-    <string name="send_estimate_contract_refuses_reason">The contract would refuse this transaction: %1$s</string>
+    <string name="send_estimate_contract_refuses_reason">The contract would refuse this transaction: “%1$s”</string>
     <string name="send_estimate_recipient_refuses">The recipient would refuse this transfer.</string>
-    <string name="send_estimate_recipient_refuses_reason">The recipient would refuse this transfer: %1$s</string>
+    <string name="send_estimate_recipient_refuses_reason">The recipient would refuse this transfer: “%1$s”</string>
     <string name="send_estimate_token_refuses">The %1$s contract would refuse this transfer.</string>
-    <string name="send_estimate_token_refuses_reason">The %1$s contract would refuse this transfer: %2$s</string>
-    <string name="send_estimate_failed">The network couldn’t price this transaction: %1$s</string>
+    <string name="send_estimate_token_refuses_reason">The %1$s contract would refuse this transfer: “%2$s”</string>
+    <string name="send_estimate_failed">The network couldn’t price this transaction: “%1$s”</string>
     <string name="send_broadcast_uncertain">No RPC confirmed it took the transaction, so it may or may not have gone out. Try again sends the very same transaction, so it can’t be paid twice.</string>
     <string name="send_broadcast_one_unanswered">One RPC didn’t answer and may have taken it; another refused it (%1$s). Try again sends the very same transaction, so it can’t be paid twice.</string>
     <string name="send_broadcast_insufficient">Not sent: not enough %1$s for the amount and the fee any more.</string>
@@ -227,13 +226,12 @@
     <string name="send_eth_no_wallet">There\'s no wallet on this device yet. Set one up to connect — or reject, and keep browsing without one.</string>
     <string name="send_eth_set_up_wallet">Set up a wallet</string>
     <string name="send_eth_account_to_share">Account to share</string>
-    <string name="send_eth_connect_note">The site will see this account\'s address and can read its balances. It can ask you to sign messages and send transactions, and each one asks you here first (unless you later turn on auto-approve for a call). Disconnect it any time on the wallet page or in Settings → Site permissions.</string>
     <string name="send_eth_message">Message</string>
     <string name="send_eth_message_whole">The signature covers the whole message.</string>
     <string name="send_eth_message_hex">This message isn\'t readable text; it\'s shown as hex bytes.</string>
     <string name="send_eth_message_note">A signature can authorise actions off-chain, such as a login or an order. Only sign if you trust the site.</string>
-    <!-- %1$s: the network's name; %2$s: its chain ID. -->
-    <string name="send_eth_chain_with_id">%1$s (chain %2$s)</string>
+    <!-- Under a network's name, on a line of its own; %1$s: its chain ID. -->
+    <string name="send_eth_chain_id_line">Chain ID %1$s</string>
     <string name="send_eth_any_chain">Any — the signature names no chain</string>
     <string name="send_eth_application">Application</string>
     <string name="send_eth_type">Type</string>
@@ -267,7 +265,7 @@
     </plurals>
     <string name="send_eth_rpc">RPC</string>
     <string name="send_eth_explorer">Explorer</string>
-    <string name="send_eth_add_chain_note">The site chose these RPCs. They\'ll see your addresses and what you read and send on this network, and their answers aren\'t checked against other RPCs. You can change or remove the network in Settings → Chains.</string>
+    <string name="send_eth_add_chain_note">The site chose these RPCs. They\'ll see your addresses and what you read and send on this network, and their answers aren\'t checked against other RPCs. You can change or remove the network in Settings → Wallet &amp; chains.</string>
     <!-- %1$s: the Ledger's name. -->
     <string name="send_eth_ledger_note_hashes">You’ll confirm this on your Ledger (%1$s) next, where it shows only the two hashes above.</string>
     <string name="send_eth_ledger_note">You’ll check and confirm this on your Ledger (%1$s) next.</string>
@@ -294,8 +292,8 @@
     <string name="send_auto_approve_warning_switch">%1$s Only turn it on for a function you know.</string>
     <string name="send_auto_approve_warning_rule">%1$s Remove it unless you know the function.</string>
     <!-- %1$s: what the function does ("token transfers"). -->
-    <string name="send_auto_approve_switch_label">Always approve %1$s on this contract</string>
-    <string name="send_auto_approve_switch_label_unknown">Always approve this function on this contract</string>
+    <string name="send_auto_approve_switch_label">Don\'t ask again for %1$s on this contract…</string>
+    <string name="send_auto_approve_switch_label_unknown">Don\'t ask again for this function on this contract…</string>
     <!-- %1$s: the function's selector; %2$s: the contract; %3$s: the network. -->
     <string name="send_auto_approve_scope">Function %1$s on %2$s, on %3$s, from this site only. Every such call is covered, whatever its recipient, spender or amount. Calls that also send funds still ask.</string>
     <string name="send_auto_approve_function">Function %1$s</string>
@@ -305,7 +303,6 @@
     <string name="send_auto_approve_rule_detail_since">Function %1$s · %2$s · since %3$s</string>
     <!-- A network the chain list doesn't have, by its chain ID. -->
     <string name="send_chain_fallback">chain %1$s</string>
-    <string name="send_auto_approve_explainer">Transactions from this site that match a rule go out without asking while the wallet is unlocked. Each rule covers one function on one contract on one network — with any recipient, spender or amount — and only calls that send no funds. The best-known approval, permit, multicall and execute functions can\'t have a rule. Disconnecting the site removes its rules.</string>
     <string name="send_auto_approve_remove_failed">Couldn\'t remove the rule: the change couldn\'t be saved. Try again.</string>
     <string name="send_auto_approve_rules">Auto-approve rules</string>
     <string name="send_auto_approve_unreadable">Couldn\'t read the rules right now. None of them apply until they can be read.</string>
@@ -339,7 +336,7 @@
 
     <!-- Payment links (EIP-681 ethereum: links, #317): a page's link or the address bar opening Send. -->
     <string name="send_link_private">Payment links open in the wallet, which private tabs don’t use. Open this link in a normal tab to pay it.</string>
-    <string name="send_link_no_wallet">This is a payment link. To pay it, set up a wallet first in Settings → Wallet.</string>
+    <string name="send_link_no_wallet">This is a payment link. To pay it, set up a wallet first in Settings → Wallet &amp; chains.</string>
     <!-- %1$s: why, a sentence (e.g. “This payment request has no valid address in it.”). -->
     <string name="send_link_refused">Can’t open this payment link. %1$s</string>
     <string name="send_link_token_no_network">This token payment request doesn’t say which network the token is on.</string>
@@ -354,6 +351,174 @@
     <!-- %1$s: the site whose link it was. -->
     <string name="send_link_filled_from_site">Filled in from a payment link on %1$s. Check every field before you review.</string>
     <string name="send_link_filled">Filled in from a payment link. Check every field before you review.</string>
+    <!-- %1$s: the site whose link it was. Shown once the payee the link filled in has been changed. -->
+    <string name="send_link_rest_from_site">The payee is no longer the one in the payment link on %1$s; the rest was filled in from it. Check every field before you review.</string>
+    <string name="send_link_rest">The payee is no longer the one in the payment link; the rest was filled in from it. Check every field before you review.</string>
     <string name="send_link_chain_assumed">The link doesn’t name a network, so Ethereum is filled in. Pick another asset if the payment is meant for another network.</string>
     <string name="send_link_chain_from_token">The link doesn’t name a network. %1$s is filled in: it’s the only network Send knows this token on. Check the payment is meant for it.</string>
+    <!-- The shared transaction review (#422): TxReview.kt. -->
+    <!-- %1$s: the amount, fixed format; %2$s: its symbol; %3$s: who gets it (a short address, or tx_review_recipient_named); %4$s: the network. -->
+    <string name="tx_review_send_headline">Send %1$s %2$s to %3$s on %4$s</string>
+    <!-- %1$s: a name like vitalik.eth; %2$s: its short address, like 0xd8dA…6045. -->
+    <string name="tx_review_recipient_named">%1$s (%2$s)</string>
+    <string name="tx_review_details">Details</string>
+    <string name="tx_review_details_expanded">Expanded</string>
+    <string name="tx_review_details_collapsed">Collapsed</string>
+    <!-- Content description of a row's copy button; %1$s: the row's label, like "To". -->
+    <string name="tx_review_copy">Copy %1$s</string>
+    <!-- Content description of a row's explorer button; %1$s: the row's label. -->
+    <string name="tx_review_open_explorer">Open %1$s on the block explorer</string>
+
+    <!-- The Send form (#422). -->
+    <!-- %1$s: the account's name; %2$s: its short address. -->
+    <string name="send_from_line">From %1$s (%2$s)</string>
+    <string name="send_paste">Paste</string>
+    <string name="send_scan">Scan a QR code</string>
+    <string name="send_suggestions_mine">Your accounts</string>
+    <string name="send_suggestions_recent">Sent to recently</string>
+    <!-- The asset chip under the amount; %1$s: the symbol; %2$s: the network. -->
+    <string name="send_asset_chip">%1$s · %2$s</string>
+    <string name="send_asset_sheet_title">Choose what to send</string>
+    <string name="send_asset_selected">Selected</string>
+    <!-- %1$s: the symbol; %2$s: the balance, formatted. -->
+    <string name="send_not_enough">Not enough %1$s: this account has %2$s %1$s.</string>
+    <!-- %1$s: the network's currency symbol, like ETH; %2$s: the network. -->
+    <string name="send_no_fee_currency">This account has no %1$s on %2$s to pay the network fee.</string>
+    <string name="send_scan_title">Scan an address</string>
+    <string name="send_scan_not_address">That code isn’t an address or a payment request. Try another one.</string>
+    <string name="send_scan_filled">Filled in from the code you scanned. Check every field before you review.</string>
+    <string name="send_paste_filled">Filled in from the payment request you pasted. Check every field before you review.</string>
+    <string name="send_scan_rest">The payee is no longer the one in the code you scanned; the rest was filled in from it. Check every field before you review.</string>
+    <string name="send_paste_rest">The payee is no longer the one in the payment request you pasted; the rest was filled in from it. Check every field before you review.</string>
+    <string name="send_request_chain_assumed">The request doesn’t name a network, so Ethereum is filled in. Pick another asset if the payment is meant for another network.</string>
+    <!-- %1$s: the network filled in. -->
+    <string name="send_request_chain_from_token">The request doesn’t name a network. %1$s is filled in: it’s the only network Send knows this token on. Check the payment is meant for it.</string>
+    <string name="send_paste_secret">That’s a recovery phrase, private key or other secret, so it isn’t pasted here.</string>
+    <string name="send_name_proven_offchain">✓ Off-chain record, accepted by the name’s resolver</string>
+    <string name="send_name_verified">✓ Verified name</string>
+    <string name="send_name_about">How this name was checked</string>
+    <!-- The review's Total for a token: %1$s the amount, fixed format; %2$s its symbol; %3$s the most the fee can be, with its currency. -->
+    <string name="send_total_token">%1$s %2$s + up to %3$s</string>
+    <string name="send_label_gas">Gas</string>
+    <!-- %1$s: the token's symbol. -->
+    <string name="send_label_token_contract">%1$s contract</string>
+    <!-- The confirm button; %1$s: the amount, fixed format; %2$s: its symbol. -->
+    <string name="send_confirm_amount">Send %1$s %2$s</string>
+    <string name="send_confirm_amount_ledger">Send %1$s %2$s with Ledger</string>
+    <string name="send_sending">Sending…</string>
+    <!-- Approval sheets, #423 (audit W20–W32). -->
+    <string name="send_eth_cant_send_title">Can\'t send</string>
+    <!-- %1$s: the currency symbol, e.g. xDAI. -->
+    <string name="send_eth_cant_send_short">Not enough %1$s to pay for this</string>
+    <string name="send_eth_cant_send_headline">This transaction can\'t be sent</string>
+    <string name="send_eth_cant_send_note">Nothing was sent. The site is told when you close this.</string>
+    <!-- %1$s: the currency symbol, e.g. xDAI. -->
+    <string name="send_eth_cant_send_receive">Receive %1$s</string>
+    <string name="send_eth_high_fee">The network fee is unusually high for this network. Check it before you confirm.</string>
+    <string name="send_eth_add_chain_note_checked">Freedom\'s RPCs are used for this network, not the ones the site suggested. You can change or remove it any time in Settings → Wallet &amp; chains.</string>
+    <!-- %1$s: what the function does, e.g. "token transfers"; %2$s: the contract, shortened. -->
+    <string name="send_eth_call_named_headline">Run %1$s on %2$s</string>
+    <!-- %1$s: the contract, shortened; %2$s: the network. -->
+    <string name="send_eth_call_headline">Call contract %1$s on %2$s</string>
+    <string name="send_eth_unlock_failed">Couldn\'t open the wallet. Try again; if it keeps failing, check your screen lock in Android settings.</string>
+    <string name="send_eth_show_details">Show details</string>
+    <string name="send_eth_hide_details">Hide details</string>
+    <string name="send_eth_warning_caution">Caution</string>
+    <string name="send_eth_warning_danger">Warning</string>
+    <string name="send_eth_arming">Ready in a moment</string>
+    <string name="send_eth_working">Working</string>
+    <!-- %1$s: the network the site is on. -->
+    <string name="send_eth_connect_lead">On %1$s, this site will be able to:</string>
+    <string name="send_eth_connect_bullet_see">See this account\'s address and balances</string>
+    <string name="send_eth_connect_bullet_ask">Ask you to sign or send — each request shows here first</string>
+    <!-- %1$s: the account's name. -->
+    <string name="send_eth_sign_message_headline">Sign a message as %1$s</string>
+    <!-- %1$s: the application's name, as the signed data gives it. -->
+    <string name="send_eth_sign_data_headline_app">Sign data for “%1$s”</string>
+    <string name="send_eth_sign_data_headline">Sign data</string>
+    <string name="send_eth_any_network">any network</string>
+    <!-- %1$s: the account's name; %2$s: the network. -->
+    <string name="send_eth_from_on">From %1$s · on %2$s</string>
+    <string name="send_eth_spender">Spender</string>
+    <string name="send_eth_token">Token</string>
+    <!-- %1$s: the amount, fixed format; %2$s: its symbol. -->
+    <string name="send_eth_also_sends">Also sends %1$s %2$s</string>
+    <string name="send_eth_always_off">Off: you\'ll be asked every time</string>
+    <string name="send_eth_always_on">On, once you confirm: later calls go out without asking</string>
+    <string name="send_eth_always_confirm_title">Don\'t ask again?</string>
+    <string name="send_eth_always_confirm_note">Only while the wallet is unlocked. Remove it any time from the site\'s page on the wallet.</string>
+    <string name="send_eth_always_turn_on">Turn on</string>
+    <string name="send_eth_switch_headline_label">Switch this site to</string>
+    <!-- %1$s: the network switched from. -->
+    <string name="send_eth_switch_from">From %1$s</string>
+    <string name="send_eth_add_chain_headline_label">Add this network and switch this site to it</string>
+    <!-- Not "checked" or "verified": catalog RPCs are only filtered for API keys, not tested (R1-M4). -->
+    <string name="send_eth_add_checked">Use RPCs from Freedom\'s list (recommended)</string>
+    <plurals name="send_eth_add_checked_detail">
+        <item quantity="one">%1$d public RPC provider from Freedom\'s list, not chosen by the site</item>
+        <item quantity="other">%1$d public RPC providers from Freedom\'s list, not chosen by the site</item>
+    </plurals>
+    <string name="send_eth_add_site_rpcs">Use the site\'s RPCs</string>
+
+    <string name="send_undo">Undo</string>
+    <string name="send_undo_failed">Couldn\'t undo: it changed in the meantime.</string>
+    <!-- %1$s: the site. -->
+    <string name="send_undo_disconnected">Disconnected %1$s</string>
+    <!-- %1$s: what the rule covers, e.g. "Token transfers". -->
+    <string name="send_undo_rule_removed">Rule removed: %1$s</string>
+    <!-- %1$s: what the rule covers, e.g. "Token transfers". -->
+    <string name="send_auto_approve_remove_label">Remove the rule: %1$s</string>
+    <string name="send_auto_approve_explainer_short">Calls that match a rule go out without asking while the wallet is unlocked.</string>
+
+    <!-- What a transaction or a permit does (TxDecode, #423). -->
+    <!-- %1$s: a token contract, shortened. -->
+    <string name="send_decode_token_unlisted">token %1$s</string>
+    <!-- %1$s: the token, e.g. USDC. -->
+    <string name="send_decode_unlimited">UNLIMITED %1$s</string>
+    <!-- %1$s: an amount in the token\'s smallest units; %2$s: the token contract, shortened. -->
+    <string name="send_decode_units">%1$s units of token %2$s</string>
+    <string name="send_decode_no_end">no end date</string>
+    <string name="send_decode_ended">right away only</string>
+    <!-- %1$s: the amount and token; %2$s: the recipient, shortened. -->
+    <string name="send_decode_transfer">Send %1$s to %2$s</string>
+    <!-- %1$s: the amount and token; %2$s: whose tokens; %3$s: the recipient. -->
+    <string name="send_decode_transfer_from">Move %1$s from %2$s to %3$s</string>
+    <!-- %1$s: the spender, shortened; %2$s: the amount and token, e.g. UNLIMITED USDC. -->
+    <string name="send_decode_approve">Allow %1$s to spend %2$s</string>
+    <string name="send_decode_approve_up_to">Allow %1$s to spend up to %2$s</string>
+    <!-- %1$s: the spender, shortened; %2$s: the token. -->
+    <string name="send_decode_approve_revoke">Stop %1$s from spending your %2$s</string>
+    <!-- %1$s: the operator, shortened; %2$s: the collection contract, shortened. -->
+    <string name="send_decode_approve_all">Allow %1$s to move all your tokens from collection %2$s</string>
+    <string name="send_decode_approve_all_revoke">Stop %1$s from moving your tokens from collection %2$s</string>
+    <!-- %1$s: the spender, shortened; %2$s: the token. The first line is shown in bold. -->
+    <string name="send_decode_approve_unlimited_danger">No limit: %1$s could take all your %2$s, now or later, without asking again.\nOnly approve if you trust the site and expected this. You can take it back later by approving 0.</string>
+    <!-- %1$s: the spender, shortened; %2$s: the amount and token. -->
+    <string name="send_decode_approve_caution">%1$s can take up to %2$s from this account later, without asking again.</string>
+    <!-- %1$s: the operator, shortened. The first line is shown in bold. -->
+    <string name="send_decode_approve_all_danger">%1$s could take every token you hold in this collection, now or later, without asking again.\nOnly approve if you trust the site and expected this.</string>
+    <!-- %1$s: the spender, shortened; %2$d: how many tokens. -->
+    <plurals name="send_decode_permit_tokens">
+        <item quantity="one">Allow %1$s to spend %2$d token</item>
+        <item quantity="other">Allow %1$s to spend %2$d tokens</item>
+    </plurals>
+    <plurals name="send_decode_permit_transfer_tokens">
+        <item quantity="one">Let %1$s take %2$d token from this account, once</item>
+        <item quantity="other">Let %1$s take %2$d tokens from this account, once</item>
+    </plurals>
+    <!-- %1$s: the spender, shortened; %2$s: the amount and token. -->
+    <string name="send_decode_permit_transfer">Let %1$s take up to %2$s from this account, once</string>
+    <!-- %1$s: the amount and token. -->
+    <string name="send_decode_until_changed">%1$s, until it\'s used up or changed</string>
+    <!-- %1$s: the amount and token; %2$s: a date, or "no end date". -->
+    <string name="send_decode_until">%1$s, until %2$s</string>
+    <!-- %1$s: a date, or "no end date". -->
+    <string name="send_decode_signature_until">This signature can be used until %1$s</string>
+    <string name="send_decode_via_permit2">Through Permit2, an approval contract many apps share</string>
+    <string name="send_decode_permit_revoke_note">This takes a permission away; it lets nobody spend anything.</string>
+    <!-- %1$s: the spender, shortened. The first line is shown in bold. -->
+    <string name="send_decode_permit_unlimited_danger">No limit: %1$s could take all of this token, at any time, without asking again.\nOnly sign if you trust the site and expected this. No transaction is needed for it to take effect.</string>
+    <string name="send_decode_permit_long_danger">Long-lived: %1$s could use this for months or more, without asking again.\nOnly sign if you trust the site and expected this. No transaction is needed for it to take effect.</string>
+    <string name="send_decode_permit_transfer_caution">%1$s can use this signature once to take the amount above. No transaction is needed for it to take effect.</string>
+    <string name="send_decode_permit_caution">%1$s can spend up to this amount later, without asking again. No transaction is needed for it to take effect.</string>
 </resources>

@@ -71,7 +71,6 @@
     <string name="swarmnode_radicle_fetching_from">from %1$s</string>
 
     <!-- SwarmNode.kt: why a stamp or chequebook action failed; shown after "The deposit failed: " and the like -->
-    <string name="swarmnode_gateway_reload_failed">The gateway didn\'t come back after the node set up its chequebook</string>
     <string name="swarmnode_not_running">the Swarm node isn\'t running</string>
     <string name="swarmnode_not_light">the Swarm node isn\'t in light mode</string>
     <string name="swarmnode_no_account">the node has no account</string>

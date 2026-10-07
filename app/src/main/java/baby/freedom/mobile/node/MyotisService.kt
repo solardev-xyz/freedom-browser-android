@@ -10,6 +10,7 @@ import android.util.Log
 import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisNetwork
 import baby.freedom.swarm.MyotisNode
+import baby.freedom.swarm.MyotisReads
 import baby.freedom.swarm.MyotisStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -134,12 +135,44 @@ class MyotisService : Service() {
                 reply(result, if (json.length <= MAX_RESULT_CHARS) json else TOO_LARGE_JSON)
             }
         }
+
+        override fun read(chainId: Long, method: String?, paramsJson: String?, page: Boolean, result: IMyotisCallResult?) {
+            result ?: return
+            val node = node
+            val network = MyotisNetwork.forChain(chainId)
+            val params = paramsJson?.let { runCatching { org.json.JSONArray(it) }.getOrNull() }
+            if (node == null || network == null || method == null || params == null) {
+                reply(result, MyotisNode.NOT_READY_JSON)
+                return
+            }
+            // The router's reads have slots of their own, so a wallet or
+            // Swarm-node burst can't take name resolution's; one that runs
+            // the EVM also takes a lookup slot, since the engine runs at
+            // most eight EVM executions at once whoever asks. No slot: the
+            // router moves on to its next tier at once. A site's read
+            // (`page`) gets only a share ([RouterReadSlots]).
+            val release = routerSlots.admit(page, MyotisReads.executesEvm(method)) ?: run {
+                reply(result, BUSY_JSON)
+                return
+            }
+            reads.launch {
+                val json = try {
+                    node.read(network, method, params)
+                } catch (t: Throwable) {
+                    """{"status":"unavailable","reason":${JSONObject.quote(t.message ?: t.javaClass.simpleName)}}"""
+                } finally {
+                    release()
+                }
+                reply(result, if (json.length <= MAX_RESULT_CHARS) json else TOO_LARGE_JSON)
+            }
+        }
     }
 
-    /** Where [IMyotisService.ethCall]s run: each blocks for as long as the engine takes. */
+    /** Where [IMyotisService.ethCall]s and [IMyotisService.read]s run: each blocks for as long as the engine takes. */
     private val reads = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lookupsInFlight = AtomicInteger()
     private val probesInFlight = AtomicInteger()
+    private val routerSlots = RouterReadSlots(lookupsInFlight, MAX_CALLS_IN_FLIGHT - PROBE_SLOTS)
 
     private fun reply(result: IMyotisCallResult, json: String) {
         // The caller may be gone (its process died); nothing to tell it.
@@ -221,6 +254,7 @@ class MyotisService : Service() {
         private const val STOP_TIMEOUT_MS = 10_000L
         private const val MAX_CALLS_IN_FLIGHT = 8
         private const val PROBE_SLOTS = 1
+
         private const val MAX_RESULT_CHARS = 64 * 1024
         private const val BUSY_JSON = """{"status":"unavailable","reason":"busy","busy":true}"""
         private const val TOO_LARGE_JSON = """{"error":"result too large"}"""
@@ -228,5 +262,56 @@ class MyotisService : Service() {
         /** Set once this process has begun its shutdown-and-exit. */
         @Volatile
         private var exiting = false
+    }
+}
+
+/**
+ * Admission for [IMyotisService.read] (#329): at most [ROUTER_READ_SLOTS]
+ * router reads at once, both chains together, so a wallet or Swarm-node
+ * burst can't take name resolution's lookup slots; one that runs the EVM
+ * also takes one of [lookups] (capped at [lookupCap]), since the engine
+ * runs at most eight EVM executions whoever asks.
+ *
+ * A site's read (`page`: `window.ethereum`, `web3://`) is one the router
+ * stops waiting for after 2 s, while the engine can't cancel a started
+ * read and keeps its slots until it returns (up to ~90 s) — a page
+ * looping slow calls would otherwise hold every slot. So sites together
+ * get at most [PAGE_READ_SLOTS] of the router's, and at most
+ * [PAGE_EVM_SLOTS] of those may run the EVM: the wallet's and the Swarm
+ * node's reads always keep two, and name resolution loses at most one
+ * lookup slot to sites.
+ */
+internal class RouterReadSlots(private val lookups: AtomicInteger, private val lookupCap: Int) {
+    private val router = AtomicInteger()
+    private val pages = AtomicInteger()
+    private val pageEvm = AtomicInteger()
+
+    /** The slots for one read, and what gives them back (call once); `null` when one is taken. */
+    fun admit(page: Boolean, evm: Boolean): (() -> Unit)? {
+        val taken = ArrayList<AtomicInteger>(4)
+        fun take(counter: AtomicInteger, cap: Int): Boolean {
+            if (counter.incrementAndGet() > cap) {
+                counter.decrementAndGet()
+                return false
+            }
+            taken += counter
+            return true
+        }
+        val ok = (!page || take(pages, PAGE_READ_SLOTS)) &&
+            (!page || !evm || take(pageEvm, PAGE_EVM_SLOTS)) &&
+            take(router, ROUTER_READ_SLOTS) &&
+            (!evm || take(lookups, lookupCap))
+        if (!ok) {
+            taken.forEach { it.decrementAndGet() }
+            return null
+        }
+        val released = java.util.concurrent.atomic.AtomicBoolean(false)
+        return { if (released.compareAndSet(false, true)) taken.forEach { it.decrementAndGet() } }
+    }
+
+    companion object {
+        const val ROUTER_READ_SLOTS = 4
+        const val PAGE_READ_SLOTS = 2
+        const val PAGE_EVM_SLOTS = 1
     }
 }

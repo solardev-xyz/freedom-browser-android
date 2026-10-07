@@ -65,11 +65,27 @@
     <string name="signing_ledger_device_paired">Paired with this phone</string>
     <string name="signing_ledger_device_nearby">Nearby · not paired yet</string>
     <string name="signing_ledger_look_again">Look again</string>
-    <string name="signing_ledger_layout">Layout</string>
     <string name="signing_ledger_layout_explained">Ledger Live makes accounts at m/44\'/60\'/n\'/0/0; wallets like MyEtherWallet used m/44\'/60\'/0\'/n.</string>
-    <string name="signing_ledger_accounts_on_ledger">Accounts on this Ledger</string>
+    <!-- %1$s: the Ledger's name. -->
+    <string name="signing_ledger_accounts_on">Accounts on %1$s</string>
+    <!-- An account's number on the Ledger, counting from 1. -->
+    <string name="signing_ledger_account_n">Account %1$d</string>
+    <string name="signing_ledger_already_added">Already in this wallet</string>
+    <!-- %1$s: an amount with its symbol, %2$s: the network. -->
+    <string name="signing_ledger_balance">%1$s on %2$s</string>
+    <!-- A button on each Ledger account row: reads that one address's balance only when tapped. %1$s is the network. -->
+    <string name="signing_ledger_balance_check">Check balance on %1$s</string>
+    <string name="signing_ledger_balance_reading">Reading balance…</string>
+    <!-- %1$s: the network. -->
+    <string name="signing_ledger_balance_unknown">Couldn’t read its balance on %1$s</string>
+    <string name="signing_ledger_advanced">Advanced</string>
+    <!-- The derivation layout chooser's heading; %1$s is the layout in use (Ledger Live or Legacy). -->
+    <string name="signing_ledger_layout_with">Account layout: %1$s</string>
     <!-- %1$s: the derivation path, e.g. 44'/60'/0'/0/0 -->
-    <string name="signing_ledger_path_already_added">m/%1$s · already in this wallet</string>
+    <string name="signing_ledger_picked_path">The account picked is at m/%1$s.</string>
+    <!-- The Add button, naming the account picked by its number. -->
+    <string name="signing_ledger_add_account_n">Add account %1$d</string>
+    <string name="signing_ledger_pick_one">Pick an account to add</string>
     <string name="signing_ledger_reading_accounts">Reading accounts from the Ledger…</string>
     <string name="signing_ledger_show_more">Show more</string>
     <string name="signing_ledger_add_to_wallet">Add to the wallet</string>
@@ -77,7 +93,6 @@
     <string name="signing_ledger_account_already_in_wallet">That account is already in this wallet.</string>
     <string name="signing_ledger_add_failed">Couldn’t add the account. The phone may be out of storage.</string>
     <string name="signing_ledger_adding">Adding…</string>
-    <string name="signing_ledger_add_account">Add account</string>
     <string name="signing_ledger_stage_connecting">Connecting to your Ledger…</string>
     <string name="signing_ledger_stage_connecting_detail">Keep it unlocked and close to the phone.</string>
     <string name="signing_ledger_stage_pairing">Pair with your Ledger</string>
@@ -135,6 +150,8 @@
     <string name="signing_remote_title_sign_typed_data">Sign typed data</string>
     <string name="signing_remote_title_send_transaction">Send a transaction</string>
     <string name="signing_remote_action_confirm_send">Confirm and send</string>
+    <!-- Read by TalkBack on the approve button while it works. -->
+    <string name="signing_remote_working">Working…</string>
     <string name="signing_remote_pricing">Working out the network fee and nonce… Nothing is signed or sent until you confirm on the next screen.</string>
     <string name="signing_remote_title_cant_send">Can’t send this transaction</string>
     <string name="signing_remote_cant_send_explained">Nothing was signed or sent. The code you scanned is told why once you close this.</string>
@@ -188,7 +205,7 @@
     <!-- %1$d: seconds -->
     <string name="signing_x402_ledger_hurry">The site allows only %1$d s to confirm once the Ledger shows the payment; after that it isn\'t sent.</string>
     <!-- %1$s: how long (e.g. "1 day"); %2$s: token symbol; %3$s: network; %4$s: the amount of one payment (fixed format); %5$s: the account -->
-    <string name="signing_x402_allowance_note">For %1$s, this site\'s pages are paid for in %2$s on %3$s without asking — each at most %4$s %2$s, to the Pay to address above only — from %5$s only, up to that total. Only pages you open yourself or reach by tapping on the site, not ones it moves to on its own; and after the site refuses a payment, not until you open or reload it yourself. Only while the wallet is unlocked, never in a private tab. With another account active, you\'re asked again. Revoke it any time on the wallet page.</string>
+    <string name="signing_x402_allowance_note">For %1$s, this site\'s pages are paid for in %2$s on %3$s without asking — each at most %4$s %2$s, only to the address this payment goes to — from %5$s only, up to that total. Only pages you open yourself or reach by tapping on the site, not ones it moves to on its own; and after the site refuses a payment, not until you open or reload it yourself. Only while the wallet is unlocked, never in a private tab. With another account active, you\'re asked again. Revoke it any time on the wallet page.</string>
     <string name="signing_x402_cap_enter_amount">Enter an amount of %1$s</string>
     <!-- %1$s: amount (fixed format); %2$s: token symbol -->
     <string name="signing_x402_cap_at_least">At least this payment: %1$s %2$s</string>
@@ -204,6 +221,12 @@
     <string name="signing_x402_option">%1$s %2$s on %3$s</string>
     <string name="signing_x402_not_enough">Not enough %1$s</string>
     <string name="signing_x402_amount">Amount</string>
+    <!-- %1$s: the amount and token, e.g. 0.01 USDC. -->
+    <string name="signing_x402_headline">Pay %1$s to view this page</string>
+    <!-- %1$s: the balance and token; %2$s: the network. -->
+    <string name="signing_x402_you_have">You have %1$s on %2$s</string>
+    <!-- %1$s: the network. -->
+    <string name="signing_x402_balance_unreadable_line">Your balance on %1$s couldn\'t be read right now</string>
     <!-- %1$s: token symbol; %2$s: network -->
     <string name="signing_x402_unlisted_token">%1$s isn\'t in the wallet\'s token list: its symbol and decimals were read from the contract below, and verified on %2$s.</string>
     <string name="signing_x402_network">Network</string>
@@ -242,6 +265,11 @@
     <string name="signing_x402_chain_fallback">chain %1$s</string>
     <string name="signing_x402_no_allowances">No site pays automatically. A page that asks to be paid asks you here first.</string>
     <string name="signing_x402_revoke">Revoke</string>
+    <!-- %1$s: the site. -->
+    <string name="signing_x402_revoke_label">Revoke %1$s\'s allowance</string>
+    <!-- %1$s: the site. -->
+    <string name="signing_x402_revoke_failed">Couldn\'t revoke the allowance: the change couldn\'t be saved. Try again.</string>
+    <string name="signing_x402_undo_revoked">Revoked %1$s\'s allowance</string>
     <string name="signing_x402_payment_history">Payment history</string>
     <string name="signing_x402_no_payments">No payments yet</string>
     <plurals name="signing_x402_payments">
@@ -263,7 +291,7 @@
     <!-- %1$d: seconds -->
     <string name="signing_x402_timed_out">Not paid: the site allows %1$d s to sign a payment, and that ran out. Reload the page to try again.</string>
     <!-- %1$d: the offer's number; %2$s: a chain ID -->
-    <string name="signing_x402_offer_unknown_chain">Offer %1$d: pays on chain %2$s, which isn\'t in Settings → Chains</string>
+    <string name="signing_x402_offer_unknown_chain">Offer %1$d: pays on chain %2$s, which isn\'t in Settings → Wallet &amp; chains</string>
     <!-- %1$d: the offer's number; %2$s: network -->
     <string name="signing_x402_offer_token_unverified">Offer %1$d: its token on %2$s isn\'t in the wallet\'s token list, and its decimals couldn\'t be verified, so the amount can\'t be shown</string>
     <!-- %1$d: the offer's number; %2$s: network -->
@@ -292,5 +320,4 @@
     <!-- Something the site wrote, quoted as is -->
     <string name="signing_x402_quoted">“%1$s”</string>
     <string name="signing_x402_none">(none)</string>
-    <string name="signing_ledger_path" translatable="false">m/%1$s</string>
 </resources>

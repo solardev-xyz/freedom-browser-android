@@ -21,6 +21,10 @@
     <string name="node_address">Address</string>
     <string name="node_overlay">Overlay</string>
     <string name="node_error">Error</string>
+    <!-- The Swarm node's error when the wallet's node keys are on the device but couldn't be opened (#357): it doesn't start as the device's own identity instead. Unlocking the wallet seals the keys again. -->
+    <string name="node_swarm_identity_unreadable">Couldn\'t open your wallet\'s Swarm identity, so the node isn\'t running (it won\'t start as this device\'s own instead). Reopening the app or unlocking the wallet tries again.</string>
+    <!-- The Swarm node's error when the wallet file itself can't be read (#357): the wallet can't be unlocked, so the only ways out are the file becoming readable again or Settings › Wallet › Remove wallet -->
+    <string name="node_swarm_wallet_unreadable">Couldn\'t read your wallet, so the Swarm node isn\'t running (it won\'t start as this device\'s own identity instead). Reopening the app tries again. If the wallet still can\'t be read, removing it in Settings › Wallet &amp; chains starts the node as this device\'s own.</string>
     <string name="node_status">Status</string>
     <string name="node_mode_light">Light</string>
     <string name="node_mode_ultra_light">Ultra-light</string>
@@ -29,13 +33,15 @@
     <string name="node_chequebook">Chequebook</string>
     <string name="node_publish">Publish</string>
     <string name="node_set_up_publishing">Set up publishing</string>
-    <string name="node_postage_stamps">Postage stamps</string>
+    <string name="node_postage_stamps">Storage</string>
     <string name="node_checking">Checking…</string>
     <string name="node_chequebook_none">None yet (comes with the first postage stamp)</string>
     <string name="node_mode_light_running">Connected to Gnosis Chain, so the node can publish</string>
     <string name="node_mode_ultra_light_running">Browsing only. Light mode connects the node to Gnosis Chain so it can publish</string>
     <string name="node_mode_light_restarting">Restarting the node in light mode…</string>
     <string name="node_mode_ultra_light_restarting">Restarting the node in ultra-light mode…</string>
+    <string name="node_mode_light_owed">Switches to light mode once the wallet can be read. Reopen the app to try again</string>
+    <string name="node_mode_ultra_light_owed">Switches to ultra-light mode once the wallet can be read. Reopen the app to try again</string>
     <string name="node_mode_light_when_on">Runs in light mode when the node is on</string>
     <string name="node_mode_ultra_light_when_on">Runs in ultra-light mode (browsing only) when the node is on</string>
     <string name="node_gateway">Gateway</string>
@@ -101,6 +107,39 @@
     <string name="node_tor_connecting_progress">Connecting… %1$d%%</string>
     <string name="node_tor_connected">Connected</string>
 
+    <!-- Tor page, when Tor is off in Settings: opens Settings › Privacy & security, where it is switched on. -->
+    <string name="node_tor_open_settings">Turn on in Settings</string>
+
+    <!-- browser/NodesOverviewScreen.kt: the Nodes & networks overview -->
+    <string name="nodes_overview_on_device">On this device</string>
+    <string name="nodes_overview_remote">Remote services</string>
+    <string name="nodes_overview_swarm" translatable="false">Swarm</string>
+    <string name="nodes_overview_radicle" translatable="false">Radicle</string>
+    <string name="nodes_overview_rpc">Ethereum RPC providers</string>
+    <string name="nodes_overview_gateways">Gateways</string>
+    <!-- %1$s is the user's own Swarm node's address (Settings › Nodes & networks › Swarm endpoint). -->
+    <string name="nodes_overview_swarm_external">Using your node at %1$s</string>
+    <!-- %1$s is the user's own IPFS gateway's address. -->
+    <string name="nodes_overview_ipfs_external">Using your gateway at %1$s</string>
+    <!-- The Swarm row's peer count; %1$s is the formatted number. -->
+    <plurals name="nodes_overview_peers">
+        <item quantity="one">%1$s peer</item>
+        <item quantity="other">%1$s peers</item>
+    </plurals>
+    <!-- One light-client chain's state: %1$s is the chain (Ethereum, Gnosis), %2$s its state (Synced, Off…). -->
+    <string name="nodes_overview_chain_state">%1$s: %2$s</string>
+    <!-- %1$s and %2$s: settings_page_nodes_embedded, settings_page_nodes_external or nodes_overview_source_off. -->
+    <string name="nodes_overview_gateways_summary">Swarm: %1$s · IPFS: %2$s</string>
+    <!-- The embedded node serves the scheme but is switched off, so nothing does. -->
+    <string name="nodes_overview_source_off">off</string>
+    <!-- The menu's Nodes & networks sub-line when one node has failed; %1$s is its name (Swarm, Tor…). -->
+    <string name="nodes_menu_problem_one">%1$s has a problem</string>
+    <!-- The same, when more than one has. -->
+    <plurals name="nodes_menu_problem_many">
+        <item quantity="one">%1$d node has a problem</item>
+        <item quantity="other">%1$d nodes have a problem</item>
+    </plurals>
+
     <!-- browser/NodeLogsScreen.kt -->
     <string name="node_logs_title">Node logs</string>
     <!-- %1$s is the node (node_log_source_*). -->
@@ -110,7 +149,7 @@
     <string name="node_logs_share_title">Share %1$s logs?</string>
     <string name="node_logs_button">Logs</string>
     <string name="node_logs_not_running">%1$s isn\'t running, so there are no logs to show. They\'re shown only while it runs, and kept in memory only, never written to storage.</string>
-    <string name="node_logs_external_tor">Tor runs in an external app (Orbot, say), set in Settings → Tor. Its logs are in that app.</string>
+    <string name="node_logs_external_tor">Tor runs in an external app (Orbot, say), set in Settings → Privacy &amp; security → Tor. Its logs are in that app.</string>
     <string name="node_logs_share_warning">Logs can contain this device\'s node addresses and peer IDs, the addresses of the peers and servers the node talked to, and the IDs of Radicle repositories. The addresses and names of the pages you visited are taken out before a line is kept. Share them only with someone you trust.</string>
     <!-- Subject of the shared logs; %1$s is the node. -->
     <string name="node_logs_share_subject">Freedom %1$s logs</string>
@@ -122,9 +161,12 @@
     <string name="node_log_source_tor" translatable="false">Tor</string>
     <string name="node_log_source_light_client">Light client</string>
 
-    <!-- browser/NodeIdentityNotice.kt; %1$s is the wallet's Swarm address, shortened (0x6Fac…b9C0). -->
+    <!-- browser/NodeIdentityNotice.kt; %1$s is the wallet's Swarm address, shortened (0x6Fac…b9C0). For a wallet that was already here (made before #77). -->
     <string name="node_identity_adopted_restarting">Your Swarm node now uses your wallet\'s identity (%1$s). Restarting it…</string>
     <string name="node_identity_adopted_next_start">Your Swarm node will use your wallet\'s identity (%1$s) when it next starts.</string>
+    <!-- The snackbar when a wallet has just been set up (W8); the node page shows the node identity it gave. -->
+    <string name="wallet_created_notice">Wallet created</string>
+    <string name="wallet_ready_notice">Wallet ready</string>
     <string name="node_identity_dropped_restarting">Wallet removed. Your Swarm node is restarting with this device\'s own identity.</string>
     <string name="node_identity_dropped_next_start">Wallet removed. Your Swarm node will use this device\'s own identity.</string>
     <string name="node_identity_radicle_adopted_restarting">Your Radicle node is restarting as your wallet\'s identity (%1$s). Repositories it seeds stay seeded; what you published before stays signed by this device\'s own identity.</string>
@@ -167,24 +209,28 @@
     <!-- A native fetch's redirect failures; also end up in a download's "Network error: …". %1$s is the URL. -->
     <string name="node_fetch_not_http">Not an HTTP URL: %1$s</string>
     <string name="node_fetch_too_many_redirects">Too many redirects</string>
+    <!-- A redirect from a server to this device's own services (the Swarm node's API, another loopback port), refused. %1$s is the URL. -->
+    <string name="node_fetch_redirect_refused">Redirect to this device refused: %1$s</string>
+    <string name="node_fetch_redirect_no_route">Couldn\'t ask the system proxy how to reach the redirect target, so it wasn\'t followed: %1$s</string>
+    <string name="node_fetch_redirect_unresolved">Couldn\'t look up the redirect target, so it wasn\'t followed: %1$s</string>
     <!-- The refusal page for an onion site Freedom can't open. The descriptions are HTML
          (&lt;code>, &lt;em>, &amp;rarr;); %1$s is the external Tor proxy (host:port). -->
     <string name="node_tor_proxy_not_set">(not set)</string>
     <string name="node_tor_refusal_unsupported_title">Tor needs a newer WebView</string>
     <string name="node_tor_refusal_unsupported">This is an onion site, reachable only over Tor. This device\'s Android System WebView can\'t send just &lt;code>.onion&lt;/code> sites through Tor, so Freedom doesn\'t open them. Update Android System WebView, then try again.</string>
     <string name="node_tor_refusal_checking_title">Checking the Tor proxy</string>
-    <string name="node_tor_refusal_checking">This is an onion site, reachable only over Tor. Freedom is still checking the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Tor); this page loads by itself once it passes. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_checking">This is an onion site, reachable only over Tor. Freedom is still checking the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor); this page loads by itself once it passes. Freedom never opens onion sites without Tor.</string>
     <string name="node_tor_refusal_paused_title">Tor proxy not checked yet</string>
-    <string name="node_tor_refusal_paused">This is an onion site, reachable only over Tor. Freedom checks the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Tor) only while Freedom is on screen, and hasn\'t since it went to the background. Try again once you\'re back in Freedom. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_paused">This is an onion site, reachable only over Tor. Freedom checks the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor) only while Freedom is on screen, and hasn\'t since it went to the background. Try again once you\'re back in Freedom. Freedom never opens onion sites without Tor.</string>
     <string name="node_tor_refusal_unreached_title">Tor can\'t reach onion sites</string>
-    <string name="node_tor_refusal_unreached">This is an onion site, reachable only over Tor. The Tor client at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Tor) answers, but couldn\'t reach an onion site when Freedom last checked: its connection may be down or slow. Freedom is checking again; try again in a moment. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_unreached">This is an onion site, reachable only over Tor. The Tor client at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor) answers, but couldn\'t reach an onion site when Freedom last checked: its connection may be down or slow. Freedom is checking again; try again in a moment. Freedom never opens onion sites without Tor.</string>
     <string name="node_tor_refusal_proxy_down_title">Tor proxy isn\'t reachable</string>
-    <string name="node_tor_refusal_proxy_down">This is an onion site, reachable only over Tor. Freedom sends onion sites to the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Tor), and no Tor client answers there right now. Start Orbot (or your Tor app), then try again. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_proxy_down">This is an onion site, reachable only over Tor. Freedom sends onion sites to the Tor proxy at &lt;code>%1$s&lt;/code> (Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor), and no Tor client answers there right now. Start Orbot (or your Tor app), then try again. Freedom never opens onion sites without Tor.</string>
     <string name="node_tor_refusal_off_title">Tor is off</string>
-    <string name="node_tor_refusal_off">This is an onion site, reachable only over Tor. Turn on Tor in Settings &amp;rarr; Tor and start it, then try again. Only &lt;code>.onion&lt;/code> sites use Tor; every other site connects directly.</string>
+    <string name="node_tor_refusal_off">This is an onion site, reachable only over Tor. Turn on Tor in Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor and start it, then try again. Only &lt;code>.onion&lt;/code> sites use Tor; every other site connects directly.</string>
     <string name="node_tor_refusal_not_running_title">Tor isn\'t running</string>
-    <string name="node_tor_refusal_failed">Tor couldn\'t start, so this onion site wasn\'t opened. Try starting it again on the Nodes page.</string>
-    <string name="node_tor_refusal_not_running">This is an onion site, reachable only over Tor, and Tor isn\'t running. Start it on the Nodes page (or turn on &lt;em>Start Tor at launch&lt;/em> in Settings &amp;rarr; Tor), then try again. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_failed">Tor couldn\'t start, so this onion site wasn\'t opened. Try starting it again on the Tor page (menu &amp;rarr; Nodes &amp;amp; networks &amp;rarr; Tor).</string>
+    <string name="node_tor_refusal_not_running">This is an onion site, reachable only over Tor, and Tor isn\'t running. Start it on the Tor page (menu &amp;rarr; Nodes &amp;amp; networks &amp;rarr; Tor), or turn on &lt;em>Start Tor at launch&lt;/em> in Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor, then try again. Freedom never opens onion sites without Tor.</string>
 
     <!-- browser/TorProxy.kt: what the check of the external Tor proxy found; %1$s is the proxy (host:port). -->
     <string name="node_tor_probe_tor">Tor reached a .onion site through %1$s</string>
@@ -213,4 +259,34 @@
     <!-- %1$s is the node's own error message. -->
     <string name="node_notification_error">Error: %1$s</string>
     <string name="node_error_unknown">unknown</string>
+    <!-- The Swarm node's chunk cache, on the Swarm page and in Settings → Nodes & networks. -->
+    <string name="node_cache">Cache</string>
+    <!-- %1$s is how much is cached ("312 MB"), %2$s the cache size ("512 MB"). -->
+    <string name="node_cache_used">%1$s of %2$s</string>
+    <!-- Shown for a few seconds after the node starts while it counts a large cache. %1$s is the cache size ("512 MB"). -->
+    <string name="node_cache_counting">Counting… (%1$s max)</string>
+    <!-- %1$s is how much pinned content is kept outside the cache size ("1.2 GB"). -->
+    <string name="node_cache_pinned">%1$s pinned</string>
+    <string name="node_cache_about">Swarm pages and files you\'ve opened, kept on this device so they load faster next time. Pinned and published content doesn\'t count towards the size.</string>
+    <string name="node_cache_checking">Checking…</string>
+    <string name="node_cache_not_running">Shown while the Swarm node is running.</string>
+    <string name="node_cache_disk_off">The cache on this device couldn\'t be opened, so there\'s nothing on disk to clear. Restarting the node tries again.</string>
+    <string name="node_cache_unbound">The Swarm node isn\'t running.</string>
+    <string name="node_cache_clear">Clear cache</string>
+    <string name="node_cache_clearing">Clearing…</string>
+    <string name="node_cache_clear_title">Clear the Swarm cache?</string>
+    <string name="node_cache_clear_message">Swarm pages you\'ve opened will load from the network again. Pinned and published content is kept.</string>
+    <string name="node_cache_clear_confirm">Clear</string>
+    <!-- %1$s is how much the clear removed ("300 MB"). -->
+    <string name="node_cache_freed">Freed %1$s</string>
+    <!-- %1$s is why the clear failed, in the node's words. -->
+    <string name="node_cache_clear_failed">Couldn\'t clear the cache: %1$s</string>
+    <string name="node_cache_size">Cache size</string>
+    <string name="node_cache_size_title">Swarm cache size</string>
+    <!-- %1$s is a size ("512 MB"): the default one's label in the picker. -->
+    <string name="node_cache_size_default">%1$s (default)</string>
+    <string name="node_cache_size_note">A smaller size frees space right away: the oldest cached content goes first. Pinned and published content doesn\'t count and is kept.</string>
+    <!-- Toast after picking a smaller cache size. %1$s is the new size ("256 MB"). -->
+    <string name="node_cache_size_shrunk">Swarm cache set to %1$s: freeing space now</string>
+    <string name="node_cache_size_keywords">Swarm cache, storage, disk space, chunks, clear cache</string>
 </resources>

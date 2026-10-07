@@ -16,6 +16,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.transformLatest
 import org.json.JSONArray
@@ -29,6 +30,7 @@ import org.json.JSONObject
  *     "allow:<origin> <chainId> <asset> <account>" → {"cap": "…", "spent": "…", "each": "…", "payTo": "0x…",
  *                                           "created": ms, "expires": ms, "symbol": "USDC", "decimals": 6}
  *     "history" → [{…}, …] newest first, at most [MAX_HISTORY]
+ *     "held:<origin>" → ms: the site is held after a Refused paid request (#237, #347)
  *
  * An allowance is keyed by the site's origin (the provider origin key),
  * the chain, the token and the paying account: "1 USDC for example.com
@@ -44,6 +46,11 @@ import org.json.JSONObject
  * over one window, never renewed by itself: when [Allowance.expires]
  * passes or [Allowance.spent] reaches [Allowance.cap], the site asks again.
  * Amounts are base-unit integers in text.
+ *
+ * A site whose paid request was answered Refused is held ([hold]): its
+ * allowances pay nothing silently until the user navigates to it
+ * themselves ([lift]) — however long that is, across restarts, as the
+ * server may keep the refused authorization and collect it anyway (#347).
  *
  * Public data only — addresses, amounts, sites — never a key or a
  * signature. A private tab never reads or writes here. Never throws for
@@ -236,8 +243,10 @@ class X402Store internal constructor(
          * [Payment] recorded, and the allowance counted or granted.
          * [allowanceCreated] names the allowance touched (its
          * [Allowance.created]) for [withdraw]; null if none was.
+         * [replaced] is the allowance a grant replaced, as it was stored
+         * (null if there was none), for [withdraw] to put back (#346).
          */
-        data class Done(val allowanceCreated: Long?) : Commit
+        data class Done(val allowanceCreated: Long?, val replaced: String? = null) : Commit
 
         /** The payment was to come from an allowance that no longer covers it: nothing written. */
         data object NotCovered : Commit
@@ -270,6 +279,7 @@ class X402Store internal constructor(
             val now = clock()
             val key = allowKey(payment.origin, payment.chainId, payment.asset, payment.from)
             var created: Long? = null
+            var replaced: String? = null
             if (payment.auto) {
                 val a = prefs[key]?.let { decodeAllowance(key.name.removePrefix(ALLOW), it) }
                 if (a == null || !live(a, now) || !a.allows(payment.payTo, amount)) {
@@ -280,6 +290,7 @@ class X402Store internal constructor(
                 created = a.created
             } else if (grant != null) {
                 dropDead(prefs, now)
+                replaced = prefs[key]
                 val a = Allowance(
                     payment.origin, payment.chainId, payment.asset.lowercase(), payment.from.lowercase(),
                     grant.symbol, grant.decimals,
@@ -291,7 +302,7 @@ class X402Store internal constructor(
             }
             val list = prefs[HISTORY]?.let(::decodeHistory).orEmpty()
             prefs[HISTORY] = encodeHistory((listOf(payment) + list.filter { it.id != payment.id }).take(MAX_HISTORY))
-            result = Commit.Done(created)
+            result = Commit.Done(created, replaced)
         }
         return if (written) result else Commit.Failed
     }
@@ -299,11 +310,31 @@ class X402Store internal constructor(
     /**
      * Undo a [commit] whose payment was never sent: its history entry
      * goes, an allowance payment is given back to that allowance, and an
-     * allowance granted with it is taken away — only if it's still the
-     * one [commit] touched ([allowanceCreated]), never one the user has
-     * revoked or replaced since. `false` if it couldn't be written.
+     * allowance granted with it is taken away, and the allowance that
+     * grant replaced ([Commit.Done.replaced]) put back as it was (#346),
+     * charged with anything the granted one paid meanwhile besides this
+     * payment, so no sent payment goes uncounted (#346 R1-F1) —
+     * only if it's still the one [commit] touched ([Commit.Done.allowanceCreated]),
+     * never one the user has revoked or replaced since. `false` if it
+     * couldn't be written.
+     *
+     * The restore assumes the withdrawn grant is still the latest for its
+     * key. With two overlapping granting payments withdrawn oldest-first
+     * (P2 grants B, P4 grants C replacing B), withdrawing P2 finds C, not
+     * B, so it changes nothing; withdrawing P4 then puts B back even
+     * though P2, the payment that granted B, was withdrawn. B can
+     * outlive its own withdrawn grant this way, but only as a cap the
+     * user did approve on a sheet, never one they didn't.
+     *
+     * Deliberately conservative: an automatic payment carried over onto
+     * the allowance put back is never given back to it. If that payment
+     * is itself withdrawn later, its [Commit.Done.allowanceCreated] names
+     * the granted allowance, which is gone, so nothing changes and the
+     * restored one stays charged for it — an over-count that can only
+     * leave the site less to spend, never more (#346 R2-M1).
      */
-    suspend fun withdraw(payment: Payment, allowanceCreated: Long?): Boolean = write { prefs ->
+    suspend fun withdraw(payment: Payment, done: Commit.Done): Boolean = write { prefs ->
+        val allowanceCreated = done.allowanceCreated
         prefs[HISTORY]?.let(::decodeHistory)?.let { list ->
             prefs[HISTORY] = encodeHistory(list.filter { it.id != payment.id })
         }
@@ -313,6 +344,16 @@ class X402Store internal constructor(
         if (a.created != allowanceCreated) return@write
         if (payment.auto) {
             prefs[key] = encodeAllowance(a.copy(spent = (a.spent - payment.amount).max(BigInteger.ZERO)))
+        } else if (done.replaced != null) {
+            // Whatever the granted allowance paid besides this payment — an
+            // automatic payment committed against it and sent meanwhile —
+            // stays counted, now against the one put back (#346 R1-F1).
+            val since = a.spent - payment.amount
+            val back = if (since.signum() <= 0) done.replaced else {
+                decodeAllowance(key.name.removePrefix(ALLOW), done.replaced)
+                    ?.let { encodeAllowance(it.copy(spent = it.spent + since)) }
+            }
+            if (back != null) prefs[key] = back else prefs.remove(key)
         } else {
             prefs.remove(key)
         }
@@ -320,7 +361,52 @@ class X402Store internal constructor(
 
     /** Take away [origin]'s allowance for [asset] on [chainId] from [account]; `false` if it couldn't be written. */
     suspend fun revoke(origin: String, chainId: Long, asset: String, account: String): Boolean =
-        write { it.remove(allowKey(origin, chainId, asset, account)) }
+        take(origin, chainId, asset, account).saved
+
+    /**
+     * What [take] did: [saved] whether the removal was written; [was] the
+     * allowance it removed, as stored at that moment (null if none was).
+     */
+    data class Taken(val saved: Boolean, val was: Allowance?)
+
+    /**
+     * [revoke], also handing back the allowance removed, read in the same
+     * write — so an Undo puts back what was really stored, with every
+     * payment counted against it up to the revoke, not a copy the UI read
+     * earlier that a payment since has overtaken (#431 R3-M2).
+     */
+    suspend fun take(origin: String, chainId: Long, asset: String, account: String): Taken {
+        var was: Allowance? = null
+        val written = write { prefs ->
+            val key = allowKey(origin, chainId, asset, account)
+            was = prefs[key]?.let { decodeAllowance(key.name.removePrefix(ALLOW), it) }
+            prefs.remove(key)
+        }
+        return Taken(written, was.takeIf { written })
+    }
+
+    /**
+     * Put back [a], as it was, after the user revoked it and tapped Undo
+     * (#423): only if no [clear] began since [era] ([clearEra], taken when
+     * it was revoked — a removed wallet's allowances stay gone), it's still
+     * in its window, and the site hasn't been given a new one for that
+     * token meanwhile. `false` if it wasn't put back.
+     */
+    suspend fun restore(a: Allowance, era: Long): Boolean {
+        if (clearedSince(era) != false) return false
+        if (!live(a, clock())) return false
+        var put = false
+        val written = write { prefs ->
+            // Checked again in the write, which a clear's own write can't interleave with.
+            if (clearedSince(era) != false) return@write
+            val key = allowKey(a.origin, a.chainId, a.asset, a.account)
+            if (prefs[key] == null) {
+                prefs[key] = encodeAllowance(a)
+                put = true
+            }
+        }
+        return written && put
+    }
 
     /** Record [payment] at the top of the history; `false` if it couldn't be written. */
     suspend fun record(payment: Payment): Boolean = write { prefs ->
@@ -346,8 +432,58 @@ class X402Store internal constructor(
         prefs[HISTORY] = encodeHistory(list.map { if (it.status == Status.PENDING) it.copy(status = Status.UNCONFIRMED) else it })
     }
 
-    /** Forget every allowance and payment (the wallet was removed); `false` if it couldn't be written. */
-    suspend fun clear(): Boolean = write { it.clear() }
+    /**
+     * Every site held after a Refused paid request ([hold]), or null if
+     * they couldn't be read — not "none": any site may be held (#347).
+     */
+    suspend fun holds(): Set<String>? = data().first()?.asMap()?.keys
+        ?.mapNotNullTo(HashSet()) { k -> k.name.takeIf { it.startsWith(HELD) }?.removePrefix(HELD)?.ifEmpty { null } }
+
+    /** Hold [origin] after a Refused paid request (#237, #347); `false` if it couldn't be written. */
+    suspend fun hold(origin: String): Boolean = write { it[heldKey(origin)] = clock().toString() }
+
+    /** Lift [origin]'s hold, if it has one (#347); `false` if it couldn't be written. */
+    suspend fun lift(origin: String): Boolean = write { it.remove(heldKey(origin)) }
+
+    /** Forget every allowance, payment and hold (the wallet was removed); `false` if it couldn't be written. */
+    suspend fun clear(): Boolean {
+        val n = synchronized(clears) { (++clearsStarted).also { clearsWriting += it } }
+        var landed = false
+        try {
+            landed = write { it.clear() }
+            return landed
+        } finally {
+            synchronized(clears) {
+                clearsWriting -= n
+                if (landed && n > clearLanded) clearLanded = n
+            }
+        }
+    }
+
+    /**
+     * Tag for a hold queued now: [clearedSince] it later tells whether
+     * the store was cleared after it (#347 R1-M1, R2-M1).
+     */
+    val clearEra: Long get() = synchronized(clears) { clearsStarted }
+
+    /**
+     * Whether a [clear] begun after [era] ([clearEra]) has landed (true),
+     * is still being written (null: wait and ask again), or none did —
+     * a clear that failed to write counts as none: what it would have
+     * removed is still on disk (#347 R2-M1).
+     */
+    fun clearedSince(era: Long): Boolean? = synchronized(clears) {
+        when {
+            clearLanded > era -> true
+            clearsWriting.any { it > era } -> null
+            else -> false
+        }
+    }
+
+    private val clears = Any()
+    private var clearsStarted = 0L
+    private var clearLanded = 0L
+    private val clearsWriting = HashSet<Long>()
 
     private fun dropDead(prefs: MutablePreferences, now: Long) {
         prefs.asMap().forEach { (k, v) ->
@@ -368,6 +504,7 @@ class X402Store internal constructor(
     companion object {
         private const val TAG = "X402Store"
         private const val ALLOW = "allow:"
+        private const val HELD = "held:"
         private val HISTORY = stringPreferencesKey("history")
 
         /** The newest payments kept. */
@@ -384,6 +521,8 @@ class X402Store internal constructor(
 
         private val ADDRESS = Regex("^0x[0-9a-fA-F]{40}$")
         private val DIGITS = Regex("^[0-9]{1,78}$")
+
+        private fun heldKey(origin: String) = stringPreferencesKey("$HELD$origin")
 
         private fun allowKey(origin: String, chainId: Long, asset: String, account: String) =
             stringPreferencesKey("$ALLOW$origin $chainId ${asset.lowercase()} ${account.lowercase()}")

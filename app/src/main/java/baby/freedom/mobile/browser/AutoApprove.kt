@@ -1,18 +1,12 @@
 package baby.freedom.mobile.browser
 
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
@@ -43,6 +37,14 @@ data class AutoApproveRule(
 
     /** Whether this is the same scope as [other], whenever each was granted. */
     fun sameScope(other: AutoApproveRule): Boolean = key == other.key
+
+    /**
+     * Whether a sheet may offer to turn this rule on (#423, audit W25): only
+     * for a function the wallet can name ([selectorLabel]). A rule for
+     * another one, granted before, still covers its calls and still shows
+     * (with its warning) on the site's page, but none is offered anew.
+     */
+    val offerable: Boolean get() = selectorLabel(selector) != null
 
     companion object {
         private val ADDRESS = Regex("^0x[0-9a-fA-F]{40}$")
@@ -202,7 +204,7 @@ internal fun autoApproveRuleWarning(rule: AutoApproveRule): String? =
         Strings.get(R.string.send_auto_approve_warning_rule, UNKNOWN_FUNCTION_RISK)
     }
 
-/** The sheet's switch: "Always approve token transfers on this contract". */
+/** The sheet's row: "Don't ask again for token transfers on this contract…". */
 internal fun autoApproveSwitchLabel(rule: AutoApproveRule): String =
     selectorLabel(rule.selector)?.let { Strings.get(R.string.send_auto_approve_switch_label, it) }
         ?: Strings.get(R.string.send_auto_approve_switch_label_unknown)
@@ -226,13 +228,15 @@ internal fun autoApproveRuleDetail(rule: AutoApproveRule, chains: List<Chain>): 
 /** [address] (lower-case, valid) in EIP-55 form, as the sheets show addresses. */
 private fun checksumOf(address: String): String = EthereumProvider.checksummed(address) ?: address
 
-internal val AUTO_APPROVE_EXPLAINER: String get() = Strings.get(R.string.send_auto_approve_explainer)
+internal val AUTO_APPROVE_EXPLAINER: String get() = Strings.get(R.string.send_auto_approve_explainer_short)
 internal val AUTO_APPROVE_REMOVE_FAILED: String get() = Strings.get(R.string.send_auto_approve_remove_failed)
 
 /**
  * A connected site's auto-approve rules, each with Remove (#112). The
  * contract is shown whole: the end of an address is what a look-alike
- * changes. [failed] is the rule whose Remove couldn't be saved.
+ * changes. [failed] is the rule whose Remove couldn't be saved. The
+ * one-line explainer shows only above actual rules (W32): an empty list
+ * says only how one is turned on.
  */
 @Composable
 internal fun AutoApproveRulesSection(
@@ -245,11 +249,6 @@ internal fun AutoApproveRulesSection(
     loading: Boolean = false,
 ) {
     SectionCard(title = stringResource(R.string.send_auto_approve_rules)) {
-        Text(
-            stringResource(R.string.send_auto_approve_explainer),
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(bottom = 8.dp),
-        )
         if (loading) {
             // Nothing yet: a "None" here would be wrong for a moment on a site with rules.
         } else if (unreadable) {
@@ -264,38 +263,48 @@ internal fun AutoApproveRulesSection(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        } else {
+            Text(
+                stringResource(R.string.send_auto_approve_explainer_short),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(bottom = 4.dp).testTag("auto-approve-explainer"),
+            )
         }
         rules.forEach { rule ->
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().testTag("auto-approve-rule")) {
-                Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
-                    Text(autoApproveRuleTitle(rule), fontWeight = FontWeight.Medium)
-                    AddressText(
-                        checksumOf(rule.contract),
-                        MaterialTheme.typography.bodySmall,
-                        MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+            val title = autoApproveRuleTitle(rule)
+            PermissionRow(
+                title = title,
+                actionLabel = stringResource(R.string.common_remove),
+                actionDescription = stringResource(R.string.send_auto_approve_remove_label, title),
+                onAction = { onRemove(rule) },
+                actionTag = "auto-approve-remove",
+                modifier = Modifier.testTag("auto-approve-rule"),
+            ) {
+                AddressText(
+                    checksumOf(rule.contract),
+                    MaterialTheme.typography.bodySmall,
+                    MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    autoApproveRuleDetail(rule, chains),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                autoApproveRuleWarning(rule)?.let {
                     Text(
-                        autoApproveRuleDetail(rule, chains),
+                        it,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 2.dp).testTag("auto-approve-rule-warning"),
                     )
-                    autoApproveRuleWarning(rule)?.let {
-                        Text(
-                            it,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(top = 2.dp).testTag("auto-approve-rule-warning"),
-                        )
-                    }
-                    if (failed?.sameScope(rule) == true) {
-                        Text(
-                            stringResource(R.string.send_auto_approve_remove_failed),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
                 }
-                TextButton(onClick = { onRemove(rule) }, modifier = Modifier.testTag("auto-approve-remove")) { Text(stringResource(R.string.common_remove)) }
+                if (failed?.sameScope(rule) == true) {
+                    Text(
+                        stringResource(R.string.send_auto_approve_remove_failed),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         }
     }

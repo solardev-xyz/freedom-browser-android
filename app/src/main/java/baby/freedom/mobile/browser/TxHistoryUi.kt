@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -17,16 +18,20 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,6 +39,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -94,6 +101,18 @@ internal fun txDateFormat(): DateFormat = DateFormat.getDateTimeInstance(DateFor
 internal fun txRecordsFrom(records: List<TxRecord>, address: String?): List<TxRecord> =
     if (address == null) emptyList() else records.filter { it.from.equals(address, ignoreCase = true) }
 
+/**
+ * Where to see everything [address] did, sent from here or not (#422):
+ * each of [chains]' explorers' page for it, by the explorer's host name,
+ * in [chains]' order; a chain without an explorer has none.
+ */
+internal fun accountExplorerLinks(chains: List<Chain>, address: String): List<Pair<String, String>> =
+    chains.mapNotNull { chain ->
+        val url = explorerAddressUrl(chain, address) ?: return@mapNotNull null
+        val host = runCatching { java.net.URI(url).host }.getOrNull() ?: return@mapNotNull null
+        host to url
+    }.distinctBy { it.second }
+
 /** The block explorer's page for a record, or null when its chain had no explorer. */
 internal fun explorerTxUrl(r: TxRecord): String? = r.explorerUrl?.trimEnd('/')?.let { "$it/tx/${r.hash}" }
 
@@ -138,19 +157,32 @@ private fun TxRow(r: TxRecord, onOpen: (TxRecord) -> Unit) {
     }
 }
 
-/** The wallet page's latest sends from the active account, with a way to all of them. */
+/**
+ * The wallet page's latest sends from the active account, with a way to
+ * all of them. With none yet (#422): what the list shows and doesn't
+ * (money received isn't in it), Receive ([onReceive]), and the
+ * account's page on each explorer ([explorers], [accountExplorerLinks]).
+ */
 @Composable
-internal fun TxHistorySection(records: List<TxRecord>, onOpen: (TxRecord) -> Unit, onShowAll: () -> Unit) {
-    SectionCard(title = stringResource(R.string.wallet_history_title)) {
+internal fun TxHistorySection(
+    records: List<TxRecord>,
+    onOpen: (TxRecord) -> Unit,
+    onShowAll: () -> Unit,
+    onReceive: (() -> Unit)? = null,
+    explorers: List<Pair<String, String>> = emptyList(),
+    onOpenUrl: (String) -> Unit = {},
+    title: String = stringResource(R.string.wallet_history_title),
+    preview: Int = TX_HISTORY_PREVIEW,
+    // A row above the list (the wallet home's send in progress, W1).
+    top: (@Composable () -> Unit)? = null,
+) {
+    SectionCard(title = title) {
+        top?.invoke()
         if (records.isEmpty()) {
-            Text(
-                stringResource(R.string.wallet_history_empty),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            TxHistoryEmpty(onReceive, explorers, onOpenUrl)
         } else {
-            records.take(TX_HISTORY_PREVIEW).forEach { TxRow(it, onOpen) }
-            if (records.size > TX_HISTORY_PREVIEW) {
+            records.take(preview).forEach { TxRow(it, onOpen) }
+            if (records.size > preview) {
                 PageRow(
                     title = stringResource(R.string.wallet_history_all),
                     subtitle = pluralText(R.plurals.wallet_history_all_count, records.size, records.size),
@@ -158,6 +190,32 @@ internal fun TxHistorySection(records: List<TxRecord>, onOpen: (TxRecord) -> Uni
                     leadingIcon = Icons.Filled.History,
                     onClick = onShowAll,
                 )
+            }
+        }
+    }
+}
+
+/** No sends yet (#422): say so, and offer Receive and the explorers' full activity. */
+@Composable
+private fun TxHistoryEmpty(onReceive: (() -> Unit)?, explorers: List<Pair<String, String>>, onOpenUrl: (String) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            stringResource(R.string.wallet_history_empty),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        onReceive?.let {
+            Button(onClick = it, modifier = Modifier.heightIn(min = 48.dp)) {
+                Icon(Icons.Filled.QrCode, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.wallet_history_receive))
+            }
+        }
+        explorers.forEach { (host, url) ->
+            TextButton(onClick = { onOpenUrl(url) }, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text(stringResource(R.string.wallet_history_explorer_activity, host))
+                Spacer(Modifier.width(4.dp))
+                Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
             }
         }
     }
@@ -185,7 +243,11 @@ internal fun TxHistoryPage(accountName: String, records: List<TxRecord>, onOpen:
     }
 }
 
-/** One send in full: where it stands, what, to whom, on which chain, the fee, and its hash. */
+/**
+ * One send in full (#422): the amount and where it stands first, then to
+ * whom, on which network and when; who sent it, the token contract, the
+ * nonce and the hash under Details, each with Copy.
+ */
 @Composable
 internal fun TxDetailPage(r: TxRecord, onOpenUrl: (String) -> Unit, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
@@ -199,35 +261,61 @@ internal fun TxDetailPage(r: TxRecord, onOpenUrl: (String) -> Unit, onBack: () -
             modifier = Modifier.fillMaxSize(),
         ) {
             item("status") {
-                SectionCard(title = txTitle(r)) {
+                SectionCard(title = stringResource(R.string.wallet_history_field_amount)) {
+                    Text(
+                        txTitle(r),
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.semantics { heading() },
+                    )
+                    Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.Top) {
                         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+                            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium, color = tint)
                             SelectionContainer { Text(text, style = MaterialTheme.typography.bodyMedium) }
                         }
                     }
                     Spacer(Modifier.height(8.dp))
-                    TxField(
-                        stringResource(R.string.wallet_history_field_amount),
-                        "${SendAmounts.exact(r.amount, r.tokenDecimals)} ${r.tokenSymbol}",
-                        mono = true,
+                    HorizontalDivider()
+                    CopyableAddressRow(
+                        label = stringResource(R.string.wallet_history_field_to),
+                        address = r.to,
+                        name = r.toName,
+                        explorerUrl = explorerAddressUrl(r.explorerUrl, r.to),
+                        onOpenUrl = onOpenUrl,
                     )
-                    TxField(stringResource(R.string.wallet_history_field_to), r.toName, address = r.to)
-                    TxField(stringResource(R.string.wallet_history_field_from), null, address = r.from)
                     TxField(stringResource(R.string.wallet_history_field_network), r.chainName)
-                    r.tokenAddress?.let {
-                        TxField(stringResource(R.string.wallet_history_field_contract, r.tokenSymbol), null, address = it)
-                    }
                     TxField(stringResource(R.string.wallet_history_field_sent), format.format(Date(r.sentAt)))
-                    TxField(stringResource(R.string.wallet_history_field_nonce), r.nonce.toString(), mono = true)
-                    TxField(stringResource(R.string.wallet_history_field_transaction), r.hash, mono = true)
+                    DetailsExpander {
+                        CopyableAddressRow(
+                            label = stringResource(R.string.wallet_history_field_from),
+                            address = r.from,
+                            explorerUrl = explorerAddressUrl(r.explorerUrl, r.from),
+                            onOpenUrl = onOpenUrl,
+                        )
+                        r.tokenAddress?.let {
+                            CopyableAddressRow(
+                                label = stringResource(R.string.wallet_history_field_contract, r.tokenSymbol),
+                                address = it,
+                                explorerUrl = explorerAddressUrl(r.explorerUrl, it),
+                                onOpenUrl = onOpenUrl,
+                            )
+                        }
+                        CopyableAddressRow(stringResource(R.string.wallet_history_field_nonce), r.nonce.toString())
+                        CopyableAddressRow(
+                            label = stringResource(R.string.wallet_history_field_transaction),
+                            address = r.hash,
+                            explorerUrl = explorerTxUrl(r),
+                            onOpenUrl = onOpenUrl,
+                        )
+                    }
                 }
             }
             explorerTxUrl(r)?.let { url ->
                 item("explorer") {
-                    OutlinedButton(onClick = { onOpenUrl(url) }, modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(onClick = { onOpenUrl(url) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                         Text(
                             android.net.Uri.parse(url).host?.let { stringResource(R.string.wallet_history_view_on, it) }
                                 ?: stringResource(R.string.wallet_history_view_on_explorer),

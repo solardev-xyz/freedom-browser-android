@@ -25,6 +25,12 @@
     <string name="library_download_node_not_running">Node not running</string>
     <!-- %1$s: a URL scheme, e.g. ftp -->
     <string name="library_download_scheme_unsupported">%1$s: downloads aren\'t supported</string>
+    <!-- A blob: download: the file only exists inside the page that made it, which Freedom reads it from. -->
+    <string name="library_download_blob_unreachable">Couldn\'t reach the part of the page that made this file</string>
+    <string name="library_download_blob_gone">The page withdrew this file before it could be saved</string>
+    <string name="library_download_blob_too_big">The page let go of this file right away, and there wasn\'t room for Freedom to keep a copy. Closing other tabs frees room.</string>
+    <string name="library_download_blob_refused">This site\'s security policy doesn\'t let Freedom read files it makes</string>
+    <string name="library_download_blob_page_closed">The page that made this file is closed or stopped answering</string>
     <string name="library_download_gateway_no_answer">Gateway didn\'t answer</string>
     <string name="library_download_content_not_found">Content not found</string>
     <!-- %1$d: an HTTP status code -->
@@ -32,6 +38,8 @@
     <!-- %1$d: an HTTP status code -->
     <string name="library_download_server_error">Server error %1$s</string>
     <string name="library_download_too_many_redirects">Too many redirects</string>
+    <!-- The gateway redirected the download onto this device (the node's API or another local service); refused. -->
+    <string name="library_download_redirect_refused">Gateway redirected to this device; refused</string>
     <string name="library_download_write_to_downloads_failed">Couldn\'t write to Downloads</string>
     <!-- #322: the download was to be saved where the user picked in the Save as picker. -->
     <string name="library_download_write_to_picked_failed">Couldn\'t write to the chosen location</string>
@@ -122,6 +130,8 @@
     <string name="library_history_no_matches_hint">Nothing in your history matches that. Search looks at page titles and addresses.</string>
     <string name="library_history_search_placeholder">Search history</string>
     <string name="library_history_clear_search">Clear search</string>
+    <!-- History's first row (#418): opens Settings' Delete browsing data page over History. -->
+    <string name="library_history_delete_data">Delete browsing data…</string>
 
     <!-- HistoryDays.kt: day headers -->
     <string name="library_history_today">Today</string>
@@ -132,6 +142,15 @@
     <string name="library_bookmarks_empty_title">No bookmarks yet</string>
     <string name="library_bookmarks_empty_hint">Tap the star in the menu while on a page to save it.</string>
     <string name="library_bookmark_options">Bookmark options</string>
+    <!-- The ⋮ at the top of the Bookmarks page, as TalkBack names it -->
+    <string name="library_bookmarks_more">More options</string>
+    <string name="library_bookmarks_delete_all">Delete all bookmarks</string>
+    <string name="library_bookmarks_delete_all_title">Delete all bookmarks?</string>
+    <plurals name="library_bookmarks_delete_all_message">
+        <item quantity="one">Removes your one saved bookmark on this device. This can\'t be undone.</item>
+        <item quantity="other">Removes all %d saved bookmarks on this device. This can\'t be undone.</item>
+    </plurals>
+    <string name="library_bookmarks_delete_all_confirm">Delete all</string>
     <!-- The long-press on a history entry or a Home tile (#321), as TalkBack names it -->
     <string name="library_entry_options">Open options</string>
 
@@ -214,8 +233,10 @@
     <!-- Under the site's name: "example.com / wants to use your camera". %1$s: what it asks for. -->
     <string name="library_permission_prompt_wants_to">wants to %1$s</string>
     <string name="library_permission_prompt_private">Private tab: your answer lasts until you close your private tabs.</string>
-    <string name="library_permission_prompt_remember">Remember this decision</string>
-    <string name="library_permission_prompt_block">Block</string>
+    <string name="library_permission_prompt_session_hint">“Allow this session” lasts until you close Freedom, even after you leave the site.</string>
+    <string name="library_permission_prompt_allow_session">Allow this session</string>
+    <string name="library_permission_prompt_allow_always">Allow every visit</string>
+    <string name="library_permission_prompt_dont_allow">Don\'t allow</string>
     <!-- %1$s: e.g. "camera" or "camera and microphone" -->
     <string name="library_permission_android_refused">Freedom isn\'t allowed to use your %1$s. Turn it on in Android settings.</string>
     <string name="library_permission_android_settings">Settings</string>
@@ -227,7 +248,7 @@
     <string name="library_site_permissions_none">This site has no permissions. It will ask again if it needs one.</string>
     <string name="library_site_permissions_nothing_saved">Nothing is saved for this site any more.</string>
     <string name="library_site_permissions_private">Private tab: these last until you close your private tabs.</string>
-    <string name="library_site_permissions_removing_hint">Removing one lets the site ask again. Settings › Site permissions lists every site.</string>
+    <string name="library_site_permissions_removing_hint">Removing one lets the site ask again. Settings › Privacy &amp; security lists every site.</string>
     <string name="library_site_permissions_reload">Reload page</string>
     <!-- %1$s: "Allowed", "Blocked (this session)", … -->
     <string name="library_site_permissions_in_use_now">%1$s · in use now</string>

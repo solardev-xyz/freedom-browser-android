@@ -113,6 +113,38 @@ class BottomUiDetectorScriptTest {
           if (pageCancels) e.defaultPrevented = true;
           flushTimers();
         }
+        // The Navigation API (#348 R5-F1): `navigation` fires `navigate` with
+        // the destination's URL, read through native getters.
+        function NavigateEvent() {}
+        Object.defineProperty(NavigateEvent.prototype, 'destination', { configurable: true, get: function () { return this._d; } });
+        Object.defineProperty(NavigateEvent.prototype, 'navigationType', { configurable: true, get: function () { return this._ty; } });
+        Object.defineProperty(NavigateEvent.prototype, 'hashChange', { configurable: true, get: function () { return this._h; } });
+        Object.defineProperty(NavigateEvent.prototype, 'formData', { configurable: true, get: function () { return this._f; } });
+        function NavigationDestination() {}
+        Object.defineProperty(NavigationDestination.prototype, 'url', { configurable: true, get: function () { return this._u; } });
+        Object.defineProperty(NavigationDestination.prototype, 'sameDocument', { configurable: true, get: function () { return this._s; } });
+        function Navigation() {}
+        Navigation.prototype = new EventTarget();
+        Object.defineProperty(Navigation.prototype, 'transition', { configurable: true, get: function () { return this._t; } });
+        var navigation = new Navigation(); navigation._t = null;
+        function navFire(t, e) { var ls = navigation.ls || []; for (var i = 0; i < ls.length; i++) if (ls[i].t === t) ls[i].f(e); }
+        // A navigation of this document: our listener, then the page's handlers, then tasks.
+        // o: { type: 'push' (default) | 'replace' | 'reload' | 'traverse', same: a
+        // same-document one (pushState etc.), hash: a fragment change, intercept:
+        // 'now' (the page intercept()s it, committed at once) | 'held' (its commit waits),
+        // post: a POST form's submission (formData set) }.
+        function navigate(url, trusted, pageCancels, o) {
+          o = o || {};
+          var dest = new NavigationDestination(); dest._u = url; dest._s = !!(o.same || o.hash);
+          var e = new NavigateEvent(); e._d = dest; e.isTrusted = trusted; e.defaultPrevented = false;
+          e._ty = o.type || 'push'; e._h = !!o.hash; e._f = o.post ? {} : null;
+          navFire('navigate', e);
+          if (pageCancels) e.defaultPrevented = true;
+          if (dest._s || o.intercept === 'now') navFire('currententrychange', {});
+          if (o.intercept === 'held') navigation._t = {};
+          flushTimers();
+          navigation._t = null;
+        }
         var mutationObs = null;
         function mutationCbOpts() { return mutationObs.opts; }
         function MutationObserver(cb) { mutationCb = cb; mutationObs = this; this.observe = function (n, o) { this.target = n; this.opts = o; }; }
@@ -451,6 +483,141 @@ class BottomUiDetectorScriptTest {
         assertTrue(eval("mutationCb === null") as Boolean)
         // …and reports the page's say on a long-press (#84): the press may land in an iframe.
         assertEquals(1, num("contextMenuListeners.length"))
+    }
+
+    // ---- the renderer sync after an input (#348) ----------------------
+
+    private fun Page.synced(): String = Context.toString(eval("sent.filter(function (s) { return /^synced /.test(s); }).join('|')"))
+
+    @Test
+    fun `a sync is echoed a task and the settle time later, before first paint too`() = page {
+        documentStart()
+        eval("kotlinSays('${inputSyncRequest(7, 400)}')")
+        assertEquals("", synced()) // not at once: input queued ahead of it runs first
+        assertEquals(1, flush())
+        // Then it waits out a tap held back for a double tap (R2-F1).
+        assertEquals("", synced())
+        assertEquals(1, timers)
+        assertEquals(400, num("timers[0].ms"))
+        flush()
+        assertEquals("synced 7", synced())
+        assertEquals(7, parseInputSynced(synced()))
+        // Anything else in that shape isn't echoed.
+        eval("kotlinSays('sync x 1'); kotlinSays('sync 1234567890 1'); kotlinSays('sync 7'); kotlinSays('sync 7 12345')")
+        flush()
+        flush()
+        assertEquals("synced 7", synced())
+        assertEquals(null, parseInputSynced("synced 7 "))
+    }
+
+    @Test
+    fun `the settle time is the double-tap timeout plus margin`() {
+        assertEquals(300 + INPUT_SYNC_DELAY_MS, inputSyncSettleMs(300))
+        assertEquals(INPUT_SYNC_DELAY_MS, inputSyncSettleMs(-1))
+        assertEquals(5_000 + INPUT_SYNC_DELAY_MS, inputSyncSettleMs(Int.MAX_VALUE))
+    }
+
+    @Test
+    fun `a subframe's detector echoes no sync`() = page {
+        eval("top = {}")
+        documentStart()
+        assertEquals(0, num("channelListeners.length"))
+    }
+
+    // ---- navigations the top document started (#348 R5-F1) ----------
+
+    private fun Page.navigations(): String =
+        Context.toString(eval("sent.filter(function (s) { return /^navigate /.test(s); }).join('|')"))
+
+    @Test
+    fun `a navigation the top document starts is reported, from document start, once the page let it go`() = page {
+        documentStart()
+        eval("navigate('http://localhost:8710/priced?a=1#x', true, false)")
+        assertEquals("navigate http://localhost:8710/priced?a=1#x", navigations())
+        assertEquals("http://localhost:8710/priced?a=1#x", parseTopDocumentNavigate(navigations()))
+        // One the page cancelled, or a synthetic event, isn't.
+        eval("navigate('http://localhost:8710/b', true, true); navigate('http://localhost:8710/c', false, false)")
+        assertEquals("navigate http://localhost:8710/priced?a=1#x", navigations())
+    }
+
+    @Test
+    fun `a same-document navigation, a reload or a Back-Forward is never reported (R6-F1)`() = page {
+        documentStart()
+        // pushState / replaceState, a fragment, and one the page intercept()ed
+        // (committed at once, or with its commit held back) never reach
+        // shouldOverrideUrlLoading to claim their word.
+        eval("navigate('http://localhost:8710/priced', true, false, { same: true })")
+        eval("navigate('http://localhost:8710/priced', true, false, { type: 'replace', same: true })")
+        eval("navigate('http://localhost:8710/#x', true, false, { hash: true })")
+        eval("navigate('http://localhost:8710/priced', true, false, { intercept: 'now' })")
+        eval("navigate('http://localhost:8710/priced', true, false, { intercept: 'held' })")
+        // Nor do a reload or a traversal.
+        eval("navigate('http://localhost:8710/priced', true, false, { type: 'reload' })")
+        eval("navigate('http://localhost:8710/priced', true, false, { type: 'traverse' })")
+        assertEquals("", navigations())
+        // A cross-document push or replace still is.
+        eval("navigate('http://localhost:8710/a', true, false, { type: 'replace' })")
+        eval("navigate('http://localhost:8710/b', true, false)")
+        assertEquals("navigate http://localhost:8710/a|navigate http://localhost:8710/b", navigations())
+    }
+
+    @Test
+    fun `a POST form's submission is never reported, a GET form's is (382 R1-M1)`() = page {
+        documentStart()
+        // WebView never calls shouldOverrideUrlLoading for a POST navigation,
+        // so its word would sit unclaimed.
+        eval("navigate('http://localhost:8710/priced', true, false, { post: true })")
+        eval("navigate('http://localhost:8710/priced', true, false, { post: true, type: 'replace' })")
+        assertEquals("", navigations())
+        eval("navigate('http://localhost:8710/priced?q=1', true, false)")
+        assertEquals("navigate http://localhost:8710/priced?q=1", navigations())
+    }
+
+    @Test
+    fun `a page that replaces the formData getter later can't make a POST one reported`() = page {
+        documentStart()
+        eval("Object.defineProperty(NavigateEvent.prototype, 'formData', { get: function () { return null; } })")
+        eval("navigate('http://localhost:8710/priced', true, false, { post: true })")
+        assertEquals("", navigations())
+    }
+
+    @Test
+    fun `a page that replaces the navigation getters later can't make a same-document one reported`() = page {
+        documentStart()
+        eval(
+            "Object.defineProperty(NavigationDestination.prototype, 'sameDocument', { get: function () { return false; } });" +
+                "Object.defineProperty(NavigateEvent.prototype, 'navigationType', { get: function () { return 'push'; } });" +
+                "Object.defineProperty(Navigation.prototype, 'transition', { get: function () { return null; } })",
+        )
+        eval("navigate('http://localhost:8710/priced', true, false, { same: true, type: 'replace' })")
+        eval("navigate('http://localhost:8710/priced', true, false, { type: 'reload' })")
+        eval("navigate('http://localhost:8710/priced', true, false, { intercept: 'held' })")
+        assertEquals("", navigations())
+    }
+
+    @Test
+    fun `a page that replaces the getters later can't change the reported URL`() = page {
+        documentStart()
+        eval("Object.defineProperty(NavigationDestination.prototype, 'url', { get: function () { return 'http://evil.example/'; } })")
+        eval("navigate('http://localhost:8710/priced', true, false)")
+        assertEquals("navigate http://localhost:8710/priced", navigations())
+    }
+
+    @Test
+    fun `a subframe's detector reports no navigation`() = page {
+        eval("top = {}")
+        documentStart()
+        eval("navigate('http://localhost:8710/priced', true, false)")
+        assertEquals("", navigations())
+    }
+
+    @Test
+    fun `only an http(s) URL of bounded length parses as a navigation report`() {
+        assertEquals("https://a.example/x", parseTopDocumentNavigate("navigate https://a.example/x"))
+        assertEquals(null, parseTopDocumentNavigate("navigate javascript:alert(1)"))
+        assertEquals(null, parseTopDocumentNavigate("navigate https://a.example/x y"))
+        assertEquals(null, parseTopDocumentNavigate("navigate https://" + "a".repeat(TOP_DOCUMENT_NAVIGATE_MAX)))
+        assertEquals(null, parseTopDocumentNavigate("navigated https://a.example/x"))
     }
 
     // ---- the page's say on a long-press (#84) -------------------------

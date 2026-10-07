@@ -42,6 +42,95 @@ class UnverifiedOriginsTest {
     }
 
     @Test
+    fun `an origin only a private tab was served is swept but never written to disk`() {
+        val tab = Any()
+        UnverifiedOrigins.onSweep = { swept -> UnverifiedOrigins.hold(tab, swept) }
+        UnverifiedOrigins.record("https://gw.example", a, private = true)
+        UnverifiedOrigins.record("https://gw.example", b)
+        // Known to this process, so a switch still sweeps it…
+        assertEquals(setOf(a, b), UnverifiedOrigins.snapshot())
+        // …but the CID a private tab opened isn't in the persisted list (#86).
+        assertEquals(setOf(b) to emptySet<String>(), UnverifiedOrigins.persistedSnapshot())
+
+        val wiped = mutableSetOf<String>()
+        UnverifiedOrigins.sweep("") { wiped += it }
+        assertEquals(setOf(a, b), wiped)
+        assertEquals(setOf(a, b), UnverifiedOrigins.pendingClears())
+        assertEquals(emptySet<String>() to setOf(b), UnverifiedOrigins.persistedSnapshot())
+        // Its cleanup taken, then the held tab released: queued again,
+        // still in memory only.
+        assertTrue(UnverifiedOrigins.takeClearFor(a))
+        UnverifiedOrigins.release(tab)
+        assertTrue(a in UnverifiedOrigins.pendingClears())
+        assertFalse(a in UnverifiedOrigins.persistedSnapshot().second)
+    }
+
+    @Test
+    fun `a normal tab served a private tab's origin makes it a persisted one`() {
+        UnverifiedOrigins.record("https://gw.example", a, private = true)
+        UnverifiedOrigins.record("https://gw.example", a, private = true)
+        assertEquals(emptySet<String>() to emptySet<String>(), UnverifiedOrigins.persistedSnapshot())
+        UnverifiedOrigins.record("https://gw.example", a)
+        assertEquals(setOf(a) to emptySet<String>(), UnverifiedOrigins.persistedSnapshot())
+        // A private tab served it again afterwards doesn't take it back.
+        UnverifiedOrigins.record("https://gw.example", a, private = true)
+        assertEquals(setOf(a) to emptySet<String>(), UnverifiedOrigins.persistedSnapshot())
+    }
+
+    @Test
+    fun `a private tab served an origin a normal tab's earlier gateway left pending keeps that cleanup on disk`() {
+        UnverifiedOrigins.record("https://gw-a.example", a)
+        UnverifiedOrigins.sweep("https://gw-b.example") {}
+        assertEquals(emptySet<String>() to setOf(a), UnverifiedOrigins.persistedSnapshot())
+        // A private tab opens the same CID through the new gateway.
+        UnverifiedOrigins.record("https://gw-b.example", a, private = true)
+        // Gateway A's storage in the normal profile still gets its cleanup
+        // after a restart; the origin is a persisted one again too.
+        assertEquals(setOf(a) to setOf(a), UnverifiedOrigins.persistedSnapshot())
+    }
+
+    @Test
+    fun `a private tab served an origin a normal tab still holds keeps its release persisted`() {
+        val tab = Any()
+        UnverifiedOrigins.onSweep = { swept -> UnverifiedOrigins.hold(tab, swept) }
+        UnverifiedOrigins.record("https://gw-a.example", a)
+        UnverifiedOrigins.sweep("https://gw-b.example") {}
+        assertTrue(UnverifiedOrigins.takeClearFor(a, tab))
+        UnverifiedOrigins.record("https://gw-b.example", a, private = true)
+        UnverifiedOrigins.release(tab)
+        assertTrue(a in UnverifiedOrigins.persistedSnapshot().second)
+    }
+
+    @Test
+    fun `a private tab that took a normal tab's pending cleanup leaves the next sweep's cleanup on disk`() {
+        UnverifiedOrigins.record("https://gw-1.example", a)
+        UnverifiedOrigins.sweep("https://gw-2.example") {}
+        assertEquals(emptySet<String>() to setOf(a), UnverifiedOrigins.persistedSnapshot())
+        // A private tab's document request takes the one-shot cleanup
+        // (which clears only the private profile, #360), then is served.
+        assertTrue(UnverifiedOrigins.takeClearFor(a, Any(), private = true))
+        UnverifiedOrigins.record("https://gw-2.example", a, private = true)
+        // The normal profile's cleanup is still owed: the origin stays a
+        // persisted one, so the next sweep's cleanup survives a restart.
+        assertEquals(setOf(a) to emptySet<String>(), UnverifiedOrigins.persistedSnapshot())
+        UnverifiedOrigins.sweep("https://gw-3.example") {}
+        assertEquals(emptySet<String>() to setOf(a), UnverifiedOrigins.persistedSnapshot())
+    }
+
+    @Test
+    fun `once a normal tab took the cleanup a private tab's origin is private-only again`() {
+        UnverifiedOrigins.record("https://gw-1.example", a)
+        UnverifiedOrigins.sweep("https://gw-2.example") {}
+        assertTrue(UnverifiedOrigins.takeClearFor(a, Any(), private = true))
+        UnverifiedOrigins.record("https://gw-2.example", a, private = true)
+        UnverifiedOrigins.sweep("https://gw-3.example") {}
+        // A normal tab takes it: the normal profile is cleared.
+        assertTrue(UnverifiedOrigins.takeClearFor(a, Any()))
+        UnverifiedOrigins.record("https://gw-3.example", a, private = true)
+        assertEquals(emptySet<String>() to emptySet<String>(), UnverifiedOrigins.persistedSnapshot())
+    }
+
+    @Test
     fun `another external gateway wipes the previous one's origins too`() {
         UnverifiedOrigins.record("https://gw.example", a)
         val wiped = mutableSetOf<String>()

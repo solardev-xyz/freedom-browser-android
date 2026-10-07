@@ -10,14 +10,17 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -28,11 +31,15 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -41,12 +48,16 @@ import androidx.compose.ui.res.stringResource
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.data.SwarmCacheSize
 import baby.freedom.mobile.node.NodeLogSource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.swarm.MyotisChainStatus
@@ -66,18 +77,25 @@ import java.text.NumberFormat
 import java.util.Locale
 
 /**
- * Full-screen node-details page: the Swarm node's live status, peer
- * count, gateway URL and run-node on/off toggle, its mode and the ways into
- * publish setup (#114, [PublishSetupScreen]), the chequebook (#117,
- * [ChequebookScreen]), the postage stamps (#116, [StampsScreen]) and the
- * Publish page (#118, [PublishScreen]), the Tor client (#143)
- * with its start/stop switch, status and version, then the Myotis
- * Ethereum / Gnosis light client (#72) with a switch and a start-at-launch
- * choice per chain (#274) and each chain's sync state. Shares the same [FullScreenScaffold] chrome as Settings /
- * History / Bookmarks.
+ * A node's details page, one of three opened from the Nodes & networks
+ * overview (#416, [NodesOverviewScreen]), by [page]:
+ *
+ * - [NodeDestination.Swarm]: the Swarm node's live status, cache, peer
+ *   count, gateway URL and run-node on/off toggle, its mode and the ways
+ *   into publish setup (#114, [PublishSetupScreen]), the chequebook (#117,
+ *   [ChequebookScreen]), the postage stamps (#116, [StampsScreen]) and the
+ *   Publish page (#118, [PublishScreen]);
+ * - [NodeDestination.Tor]: the Tor client (#143) with its start/stop
+ *   switch, status and version;
+ * - [NodeDestination.LightClient]: the Myotis Ethereum / Gnosis light
+ *   client (#72) with a switch and a start-at-launch choice per chain
+ *   (#274) and each chain's sync state.
+ *
+ * Shares the same [FullScreenScaffold] chrome as Settings / History / Bookmarks.
  */
 @Composable
 fun NodeScreen(
+    page: NodeDestination,
     nodeInfo: NodeInfo,
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
@@ -98,6 +116,8 @@ fun NodeScreen(
     onOpenUrl: (String) -> Unit = {},
     /** Open the node logs page (#276) at this node's. */
     onOpenLogs: (NodeLogSource) -> Unit = {},
+    /** Settings › Privacy & security, where Tor is switched on (#416). */
+    onOpenTorSettings: () -> Unit = {},
 ) {
     val triple = nodeStatusTriple(nodeInfo.status)
     val context = LocalContext.current
@@ -122,10 +142,32 @@ fun NodeScreen(
     var showChequebook by rememberSaveable { mutableStateOf(false) }
     // Fund the node and buy a stamp in one wallet transaction (#115).
     var showFund by rememberSaveable { mutableStateOf(false) }
+    // The size and duration Fund opens on: Buy's pick when its Add funds opened it (#425).
+    var fundDepth by rememberSaveable { mutableIntStateOf(DEFAULT_STORAGE_CHOICE.depth) }
+    var fundDays by rememberSaveable { mutableLongStateOf(DEFAULT_STORAGE_CHOICE.days) }
+    // The stamp pages keep their page and pick while Fund is over them, so Back lands where Add funds was.
+    val stampsState = rememberSaveableStateHolder()
+    val openFund: (StorageChoice) -> Unit = { choice ->
+        fundDepth = choice.depth
+        fundDays = choice.days
+        showFund = true
+    }
 
     if (showFund) {
-        // Back lands on publish setup, which opened it.
-        FundNodeScreen(nodeInfo = nodeInfo, onOpenUrl = onOpenUrl, onDismiss = { showFund = false })
+        // Back lands on whichever page opened it.
+        FundNodeScreen(
+            nodeInfo = nodeInfo,
+            onOpenUrl = onOpenUrl,
+            onDismiss = { showFund = false },
+            start = StorageChoice(fundDepth, fundDays),
+            onSent = {
+                // Bought: Back from Fund shows the storage list, not a Buy page asking to pay again.
+                if (showStamps != null) {
+                    stampsState.removeState(STAMPS_STATE_KEY)
+                    showStamps = "list"
+                }
+            },
+        )
         return
     }
     if (showChequebook) {
@@ -135,7 +177,17 @@ fun NodeScreen(
     }
     showStamps?.let { start ->
         // Back from the stamps lands on whichever page opened them.
-        StampsScreen(nodeInfo = nodeInfo, startWithBuy = start == "buy", onDismiss = { showStamps = null })
+        stampsState.SaveableStateProvider(STAMPS_STATE_KEY) {
+            StampsScreen(
+                nodeInfo = nodeInfo,
+                startWithBuy = start == "buy",
+                onAddFunds = openFund,
+                onDismiss = {
+                    stampsState.removeState(STAMPS_STATE_KEY)
+                    showStamps = null
+                },
+            )
+        }
         return
     }
     if (showPublishSetup) {
@@ -147,7 +199,7 @@ fun NodeScreen(
             onBuyStamp = { showStamps = "buy" },
             onOpenChequebook = { showChequebook = true },
             onDismiss = { showPublishSetup = false },
-            onFundAndBuy = { showFund = true },
+            onFundAndBuy = { openFund(DEFAULT_STORAGE_CHOICE) },
         )
         return
     }
@@ -163,8 +215,25 @@ fun NodeScreen(
     }
     BackHandler(onBack = onDismiss)
 
+    // The Swarm node's chunk cache: read every few seconds while this
+    // page is on screen, and at once after a clear. Held here, not in the
+    // list item, so scrolling the card away doesn't lose it.
+    val swarmRunning = nodeInfo.status == NodeStatus.Running
+    val cacheClear by SwarmCache.clear.collectAsState()
+    val cacheSize by remember(settings) { settings.swarmCacheSize }.collectAsState(initial = null)
+    // Re-read at once when a clear ends or the size changes, not at the next poll.
+    val cacheStatus = rememberSwarmCacheStatus(swarmRunning, refresh = cacheClear to cacheSize)
+    var confirmCacheClear by rememberSaveable { mutableStateOf(false) }
+    var pickCacheSize by rememberSaveable { mutableStateOf(false) }
+    // A clear's "Freed …" is for this visit: gone once the page closes.
+    DisposableEffect(Unit) { onDispose { SwarmCache.forgetOutcome() } }
+
     FullScreenScaffold(
-        title = stringResource(R.string.node_screen_title),
+        title = when (page) {
+            NodeDestination.Tor -> torTitle()
+            NodeDestination.LightClient -> lightClientTitle()
+            else -> swarmTitle()
+        },
         onDismiss = onDismiss,
     ) {
         LazyColumn(
@@ -172,19 +241,27 @@ fun NodeScreen(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
-            item("status") {
+            if (page == NodeDestination.Swarm) item("status") {
                 StatusSection(
                     triple = triple,
                     runNodeEnabled = runNodeEnabled,
                     external = externalSwarm.isNotEmpty(),
                     onToggleRunNode = onToggleRunNode,
                     onOpenLogs = { onOpenLogs(NodeLogSource.Swarm) },
+                    cache = SwarmCacheView(
+                        running = swarmRunning,
+                        status = cacheStatus,
+                        size = cacheSize,
+                        clear = cacheClear,
+                    ),
+                    onClearCache = { confirmCacheClear = true },
+                    onPickCacheSize = { pickCacheSize = true },
                 )
             }
-            item("details") {
+            if (page == NodeDestination.Swarm) item("details") {
                 DetailsSection(nodeInfo = nodeInfo)
             }
-            item("publishing") {
+            if (page == NodeDestination.Swarm) item("publishing") {
                 PublishingSection(
                     nodeInfo = nodeInfo,
                     lightModeWanted = lightModeWanted,
@@ -195,13 +272,13 @@ fun NodeScreen(
                     onOpenChequebook = { showChequebook = true },
                 )
             }
-            item("gateway") {
+            if (page == NodeDestination.Swarm) item("gateway") {
                 GatewaySection(externalSwarm = externalSwarm)
             }
-            item("tor") {
-                TorSection(tor, onOpenLogs = { onOpenLogs(NodeLogSource.Tor) })
+            if (page == NodeDestination.Tor) item("tor") {
+                TorSection(tor, onOpenLogs = { onOpenLogs(NodeLogSource.Tor) }, onOpenSettings = onOpenTorSettings)
             }
-            item("myotis") {
+            if (page == NodeDestination.LightClient) item("myotis") {
                 LightClientSection(
                     info = myotisInfo,
                     running = myotisRunning,
@@ -214,6 +291,29 @@ fun NodeScreen(
             }
         }
     }
+    if (confirmCacheClear) {
+        ConfirmDialog(
+            title = stringResource(R.string.node_cache_clear_title),
+            message = stringResource(R.string.node_cache_clear_message),
+            confirmLabel = stringResource(R.string.node_cache_clear_confirm),
+            onConfirm = {
+                confirmCacheClear = false
+                SwarmCache.startClear()
+            },
+            onDismiss = { confirmCacheClear = false },
+        )
+    }
+    val pickingFrom = cacheSize
+    if (pickCacheSize && pickingFrom != null) {
+        SwarmCacheSizeDialog(
+            current = pickingFrom,
+            onPick = { size ->
+                pickCacheSize = false
+                pickSwarmCacheSize(context, scope, settings, pickingFrom, size)
+            },
+            onDismiss = { pickCacheSize = false },
+        )
+    }
 }
 
 @Composable
@@ -223,6 +323,9 @@ private fun StatusSection(
     external: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
     onOpenLogs: () -> Unit,
+    cache: SwarmCacheView,
+    onClearCache: () -> Unit,
+    onPickCacheSize: () -> Unit,
 ) {
     SectionCard(title = stringResource(R.string.node_swarm_node)) {
         Row(
@@ -257,7 +360,85 @@ private fun StatusSection(
                 onCheckedChange = null,
             )
         }
+        CacheRows(cache, onClearCache, onPickCacheSize)
         LogsButton(onOpenLogs)
+    }
+}
+
+/** What the Swarm node card shows of the chunk cache. [size] null until the setting is read. */
+internal data class SwarmCacheView(
+    val running: Boolean,
+    val status: SwarmCacheStatus?,
+    val size: SwarmCacheSize?,
+    val clear: SwarmCache.Clear,
+)
+
+/** The Cache row's value: the figures, or why there are none. */
+internal fun swarmCacheLine(cache: SwarmCacheView): String = when {
+    !cache.running -> Strings.get(R.string.node_cache_not_running)
+    cache.status == null -> Strings.get(R.string.node_cache_checking)
+    !cache.status.diskEnabled -> Strings.get(R.string.node_cache_disk_off)
+    else -> swarmCacheSummary(cache.status)
+}
+
+/** Clear cache is offered: the node runs, its disk cache opened, and no clear is running. */
+internal fun swarmCacheClearEnabled(cache: SwarmCacheView): Boolean =
+    cache.running && cache.status?.diskEnabled == true && cache.clear != SwarmCache.Clear.Running
+
+/**
+ * The cache in the Swarm node card: what it holds, its size (a row
+ * opening the picker), Clear cache, and how the last clear went. While
+ * the button is off, the Cache row above it says why.
+ */
+@Composable
+private fun CacheRows(cache: SwarmCacheView, onClear: () -> Unit, onPickSize: () -> Unit) {
+    Spacer(Modifier.height(8.dp))
+    DetailRow(stringResource(R.string.node_cache), swarmCacheLine(cache), singleLine = false)
+    Text(
+        stringResource(R.string.node_cache_about),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(vertical = 4.dp),
+    )
+    PageRow(
+        title = stringResource(R.string.node_cache_size),
+        subtitle = cache.size?.let(::swarmCacheSizeLabel).orEmpty(),
+        style = PageRowStyle.Inset,
+        leadingIcon = Icons.Filled.Storage,
+        enabled = cache.size != null,
+        onClick = onPickSize,
+        trailing = { Icon(Icons.Filled.ArrowDropDown, contentDescription = null) },
+    )
+    OutlinedButton(
+        onClick = onClear,
+        enabled = swarmCacheClearEnabled(cache),
+        modifier = Modifier.heightIn(min = 48.dp),
+    ) {
+        Text(
+            stringResource(
+                if (cache.clear == SwarmCache.Clear.Running) R.string.node_cache_clearing else R.string.node_cache_clear,
+            ),
+        )
+    }
+    val outcome = when (val c = cache.clear) {
+        is SwarmCache.Clear.Done -> swarmCacheFreedLine(c.cleared)
+        is SwarmCache.Clear.Failed -> Strings.get(R.string.node_cache_clear_failed, c.message)
+        else -> null
+    }
+    if (outcome != null) {
+        Text(
+            outcome,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (cache.clear is SwarmCache.Clear.Failed) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
+            // Read out when it appears: the button's tap gives no other sign the clear ended.
+            modifier = Modifier
+                .padding(vertical = 4.dp)
+                .semantics { liveRegion = LiveRegionMode.Polite },
+        )
     }
 }
 
@@ -408,6 +589,13 @@ internal fun swarmModeSubtitle(nodeInfo: NodeInfo, lightModeWanted: Boolean?): S
         } else {
             Strings.get(R.string.node_mode_ultra_light_running)
         }
+        // The restart couldn't read the wallet's identity (#357): it's
+        // waiting for the app's next foreground, not underway (R4-M1).
+        nodeInfo.reloadOwed && (running || nodeInfo.status == NodeStatus.Starting) -> if (lightModeWanted) {
+            Strings.get(R.string.node_mode_light_owed)
+        } else {
+            Strings.get(R.string.node_mode_ultra_light_owed)
+        }
         running || nodeInfo.status == NodeStatus.Starting -> if (lightModeWanted) {
             Strings.get(R.string.node_mode_light_restarting)
         } else {
@@ -439,16 +627,16 @@ internal data class NodeStatusTriple(
 
 internal fun nodeStatusTriple(status: NodeStatus): NodeStatusTriple = when (status) {
     NodeStatus.Running -> NodeStatusTriple(
-        Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.node_status_running),
+        STATUS_GREEN, Icons.Filled.CheckCircle, Strings.get(R.string.node_status_running),
     )
     NodeStatus.Starting -> NodeStatusTriple(
-        Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
+        STATUS_AMBER, Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
     )
     NodeStatus.Stopped -> NodeStatusTriple(
-        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_status_stopped),
+        STATUS_GREY, Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_status_stopped),
     )
     NodeStatus.Error -> NodeStatusTriple(
-        Color(0xFFEF4444), Icons.Filled.ErrorOutline, Strings.get(R.string.node_error),
+        STATUS_RED, Icons.Filled.ErrorOutline, Strings.get(R.string.node_error),
     )
 }
 
@@ -711,13 +899,13 @@ internal fun formatBlock(number: Long): String = String.format(Locale.US, "%,d",
  */
 internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when (info.status) {
     MyotisStatus.Stopped -> NodeStatusTriple(
-        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_off),
+        STATUS_GREY, Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_off),
     )
     MyotisStatus.Starting -> NodeStatusTriple(
-        Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
+        STATUS_AMBER, Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
     )
     MyotisStatus.Error -> NodeStatusTriple(
-        Color(0xFFEF4444), Icons.Filled.ErrorOutline, Strings.get(R.string.node_error),
+        STATUS_RED, Icons.Filled.ErrorOutline, Strings.get(R.string.node_error),
     )
     MyotisStatus.Running -> {
         val live = info.chains.filter { it.error == null }
@@ -728,9 +916,9 @@ internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when 
         val parked = live.count { it.staleAnchor || it.recovery != null }
         when {
             live.isNotEmpty() && ready == live.size ->
-                NodeStatusTriple(Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.node_synced))
+                NodeStatusTriple(STATUS_GREEN, Icons.Filled.CheckCircle, Strings.get(R.string.node_synced))
             live.isNotEmpty() && parked == live.size -> NodeStatusTriple(
-                Color(0xFFF59E0B),
+                STATUS_AMBER,
                 Icons.Filled.ErrorOutline,
                 when {
                     live.any { it.recovery?.phase == MyotisRecovery.Phase.Blocked } ->
@@ -740,17 +928,17 @@ internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when 
                 },
             )
             ready > 0 || parked > 0 -> NodeStatusTriple(
-                Color(0xFFF59E0B),
+                STATUS_AMBER,
                 Icons.Filled.HourglassTop,
                 Strings.plural(R.plurals.node_chains_synced, live.size, ready, live.size),
             )
             // A chain switched on that `:myotis` hasn't booted yet (its
             // previous engine still stopping): no row to sync.
             live.isEmpty() -> NodeStatusTriple(
-                Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
+                STATUS_AMBER, Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
             )
             else -> NodeStatusTriple(
-                Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.node_syncing_ellipsis),
+                STATUS_AMBER, Icons.Filled.HourglassTop, Strings.get(R.string.node_syncing_ellipsis),
             )
         }
     }
@@ -778,12 +966,8 @@ data class TorControls(
 )
 
 @Composable
-private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
-    val info = if (tor.enabled && (tor.running || tor.info.status == TorStatus.Error)) {
-        tor.info
-    } else {
-        TorInfo(version = tor.info.version)
-    }
+private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit, onOpenSettings: () -> Unit) {
+    val info = torShownInfo(tor)
     val triple = torStatusTriple(info)
     SectionCard(title = stringResource(R.string.node_tor)) {
         Row(
@@ -813,6 +997,12 @@ private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
                 onCheckedChange = null,
                 enabled = tor.enabled && tor.supported,
             )
+        }
+        // "Turn on Tor in Settings…" (#416): the way there, not just the words.
+        if (tor.supported && !tor.enabled) {
+            TextButton(onClick = onOpenSettings, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text(stringResource(R.string.node_tor_open_settings))
+            }
         }
         val proxy = tor.proxy
         if (proxy == null && info.version.isNotBlank()) {
@@ -873,10 +1063,10 @@ internal fun torSubtitle(tor: TorControls): String = when {
 /** The Tor client's status line: grey off, amber bootstrapping (with its progress), green connected. */
 internal fun torStatusTriple(info: TorInfo): NodeStatusTriple = when (info.status) {
     TorStatus.Stopped -> NodeStatusTriple(
-        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_off),
+        STATUS_GREY, Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_off),
     )
     TorStatus.Starting -> NodeStatusTriple(
-        Color(0xFFF59E0B), Icons.Filled.HourglassTop,
+        STATUS_AMBER, Icons.Filled.HourglassTop,
         if (info.progress > 0) {
             Strings.get(R.string.node_tor_connecting_progress, info.progress)
         } else {
@@ -884,7 +1074,10 @@ internal fun torStatusTriple(info: TorInfo): NodeStatusTriple = when (info.statu
         },
     )
     TorStatus.Running -> NodeStatusTriple(
-        Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.node_tor_connected),
+        STATUS_GREEN, Icons.Filled.CheckCircle, Strings.get(R.string.node_tor_connected),
     )
-    TorStatus.Error -> NodeStatusTriple(Color(0xFFEF4444), Icons.Filled.ErrorOutline, Strings.get(R.string.node_error))
+    TorStatus.Error -> NodeStatusTriple(STATUS_RED, Icons.Filled.ErrorOutline, Strings.get(R.string.node_error))
 }
+
+/** The stamp pages' saved state, kept while Fund is over them. */
+private const val STAMPS_STATE_KEY = "stamps"

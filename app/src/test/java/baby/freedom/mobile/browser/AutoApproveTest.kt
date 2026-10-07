@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import baby.freedom.mobile.chains.BuiltInChains
 import java.math.BigInteger
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -20,7 +21,7 @@ class AutoApproveTest {
         val rule = AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call("0xa9059cbb"), 100)
         assertEquals(AutoApproveRule(site, usdc.lowercase(), "0xa9059cbb", 100), rule)
         assertEquals("$site|${usdc.lowercase()}|0xa9059cbb|100", rule!!.key)
-        assertEquals("Always approve token transfers on this contract", autoApproveSwitchLabel(rule))
+        assertEquals("Don't ask again for token transfers on this contract…", autoApproveSwitchLabel(rule))
     }
 
     @Test
@@ -36,7 +37,7 @@ class AutoApproveTest {
         val rule = AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call("0xABCDEF01", 1), 100)
         assertNotNull(rule)
         assertEquals("0xabcdef01", rule!!.selector)
-        assertEquals("Always approve this function on this contract", autoApproveSwitchLabel(rule))
+        assertEquals("Don't ask again for this function on this contract…", autoApproveSwitchLabel(rule))
         assertEquals("Function 0xabcdef01", autoApproveRuleTitle(rule))
         assertEquals("Function 0xabcdef01 · Gnosis Chain", autoApproveRuleDetail(rule, BuiltInChains.ALL))
         assertEquals("Function 0xabcdef01 · chain 424242", autoApproveRuleDetail(rule.copy(chainId = 424242), BuiltInChains.ALL))
@@ -154,5 +155,12 @@ class AutoApproveTest {
         assertNull(AutoApproveRule.of(site, "0x1234", "0xa9059cbb", 1))
         assertNull(AutoApproveRule.of(site, usdc, "0xa9059c", 1))
         assertNull(AutoApproveRule.of(site, usdc, "0xa9059cbb", 0))
+    }
+
+    @Test
+    fun `a sheet offers a rule only for a function the wallet can name (#423)`() {
+        assertTrue(AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call("0xa9059cbb"), 100)!!.offerable)
+        assertTrue(AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call("0x23b872dd", 3), 100)!!.offerable)
+        assertFalse(AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call("0x38ed1739", 5), 100)!!.offerable)
     }
 }

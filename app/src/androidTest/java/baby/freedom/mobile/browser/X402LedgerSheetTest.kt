@@ -72,7 +72,7 @@ class X402LedgerSheetTest {
                 LedgerKey("44'/60'/0'/0/0", "AA:BB:CC:DD:EE:FF", "Ledger Nano X"),
             ),
         )
-        rule.onNodeWithText("Account 3 · Ledger").assertExists()
+        rule.onNodeWithText("From Account 3 · Ledger", substring = true).assertExists()
         rule.onNodeWithText("you confirm each payment on the Ledger", substring = true).assertExists()
         rule.onNodeWithTag("x402-auto").assertDoesNotExist()
     }
@@ -109,7 +109,7 @@ class X402LedgerSheetTest {
         // navigations and a site that refused a payment aren't paid silently.
         show(WalletAccount(0, "Account 1", "0x1111111111111111111111111111111111111111"))
         rule.onNodeWithTag("x402-auto").performClick()
-        rule.onNodeWithText("each at most 0.01 USDC, to the Pay to address above only", substring = true).assertExists()
+        rule.onNodeWithText("each at most 0.01 USDC, only to the address this payment goes to", substring = true).assertExists()
         rule.onNodeWithText("not ones it moves to on its own", substring = true).assertExists()
         rule.onNodeWithText("after the site refuses a payment, not until you open or reload it yourself", substring = true).assertExists()
     }

@@ -203,6 +203,68 @@ class SwarmManifestsTest {
     }
 
     @Test
+    fun `a manifest on an onion endpoint with no Tor routed is unresolved, not fetched`() {
+        // #356: the external Swarm endpoint can be an onion node; with no Tor route it is refused, not looked up.
+        val result = fetchManifest(
+            "http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion:1633/bzz/abc/freedom-manifest.json",
+            timeoutMs = 5_000,
+        )
+        assertEquals(ManifestDiscovery.Unresolved("RefusedException"), result)
+    }
+
+    @Test
+    fun `a manifest on an onion endpoint waits for a pending external proxy check`() {
+        // #376 R1-F1: as the interceptor holds a page's onion request
+        // (#305 R1-F1), discovery waits for the external proxy's verdict
+        // within its own deadline instead of being refused at once.
+        val url = "http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion:1633/bzz/abc/freedom-manifest.json"
+        val context = android.content.ContextWrapper(null)
+        val real = TorRouting.setOverride
+        val pending = java.util.Collections.synchronizedList(mutableListOf<Runnable>())
+        TorRouting.setOverride = { _, _, done -> pending += done }
+        // A port nothing listens on: once let through, the fetch fails to connect — not RefusedException.
+        val dead = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
+        val proxy = SocksEndpoint("127.0.0.1", dead)
+        val pool = java.util.concurrent.Executors.newCachedThreadPool()
+        try {
+            TorRouting.resetForTest(supported = true)
+            TorRouting.setEnabled(context, true)
+            pending.removeAt(0).run()
+
+            // Held; a failed check answers it with the refusal.
+            TorRouting.setExternal(context, proxy, confirmed = false, pending = true)
+            val refused = pool.submit<ManifestDiscovery> { fetchManifest(url, timeoutMs = 10_000) }
+            Thread.sleep(300)
+            assertFalse(refused.isDone)
+            TorRouting.setExternal(context, proxy, confirmed = false)
+            assertEquals(ManifestDiscovery.Unresolved("RefusedException"), refused.get(2, java.util.concurrent.TimeUnit.SECONDS))
+
+            // Held; a passing check (once the WebView confirms the override) lets it through to the proxy.
+            TorRouting.setExternal(context, proxy, confirmed = false, pending = true)
+            val through = pool.submit<ManifestDiscovery> { fetchManifest(url, timeoutMs = 10_000) }
+            Thread.sleep(300)
+            assertFalse(through.isDone)
+            TorRouting.setExternal(context, proxy, confirmed = true)
+            pending.removeAt(0).run()
+            val result = through.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            assertTrue("$result", result is ManifestDiscovery.Unresolved && result != ManifestDiscovery.Unresolved("RefusedException"))
+
+            // No verdict: the wait stays within the call's own deadline.
+            TorRouting.setExternal(context, proxy, confirmed = false, pending = true)
+            val t0 = System.nanoTime()
+            // "timed out", or refused right at the deadline — unresolved either way, and not before it.
+            val late = fetchManifest(url, timeoutMs = 400)
+            assertTrue("$late", late == ManifestDiscovery.Unresolved("timed out") || late == ManifestDiscovery.Unresolved("RefusedException"))
+            val ms = (System.nanoTime() - t0) / 1_000_000
+            assertTrue("took $ms ms", ms in 350..2_000)
+        } finally {
+            pool.shutdownNow()
+            TorRouting.setOverride = real
+            TorRouting.resetForTest(supported = null)
+        }
+    }
+
+    @Test
     fun `a body that dies part-way is transient, not invalid`() {
         val (url, t) = serveOnce { out ->
             out.write("HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n{\"schema\":".toByteArray())

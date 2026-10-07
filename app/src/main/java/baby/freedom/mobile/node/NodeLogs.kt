@@ -572,8 +572,8 @@ object NodeLogs {
     }
 
     /**
-     * Forget every line kept so far (part of *Clear cookies & site
-     * data*): what a line the scrubber missed, or the timing of the
+     * Forget every line kept so far (part of *Delete browsing data*'s
+     * *Cookies and site data*): what a line the scrubber missed, or the timing of the
      * user's browsing, says goes with the rest of the site data. Lines
      * logcat has already handed the reader but it hasn't kept yet are
      * dropped too — the reader starts logcat over from this moment. So

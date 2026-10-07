@@ -80,6 +80,8 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import baby.freedom.mobile.R
@@ -109,6 +111,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Sentinel URL for the home tab. We load `about:blank` into the
@@ -133,7 +136,7 @@ private val CHROME_MAX_WIDTH = 640.dp
  * cold starts on slow devices plus the handful of seconds it takes the
  * bee-lite gateway socket to bind after [NodeStatus.Running] flips on.
  */
-private const val NODE_READY_TIMEOUT_MS: Long = 90_000L
+internal const val NODE_READY_TIMEOUT_MS: Long = 90_000L
 
 /** Cross-fade of reserved mode's strip between two page colours (#66). */
 private const val STRIP_FADE_MS = 250
@@ -476,14 +479,20 @@ fun BrowserScreen(
     onPanelShown: (Boolean) -> Unit = {},
     /** A node's recent log lines (#276), or null while its process isn't running. Blocking. */
     readNodeLogs: (NodeLogSource) -> String? = { null },
-    /** Every running node forgets its kept log lines (part of Clear cookies & site data). */
+    /** Every running node forgets its kept log lines (part of Delete browsing data → Cookies and site data). */
     clearNodeLogs: () -> Unit = {},
     /** Hardware-keyboard shortcuts (#270): this screen is their target while composed. */
     shortcuts: KeyboardShortcutRouter? = null,
 ) {
     // Outside composition, so the tabs survive an Activity relaunch
-    // (#183, see [TabsSession]).
-    val tabs = viewModel { TabsSession(HOME_URL, createSavedStateHandle()) }.tabs
+    // (#183, see [TabsSession]) — and on disk, so they survive the app
+    // being closed (#400).
+    val tabsStore = TabsStore.get(LocalContext.current)
+    val tabsSession = viewModel { TabsSession(HOME_URL, createSavedStateHandle(), tabsStore) }
+    val tabs = tabsSession.tabs
+    // Going to the background is the last word the app may get before
+    // it's swiped away or killed: the tab list goes to disk now.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { tabsSession.persistNow() }
     // Shared with the request interceptor (which resolves
     // `<name>.ens.…` virtual hosts) so both sides use one cache.
     val ensResolver = Gateways.ensResolver
@@ -508,8 +517,25 @@ fun BrowserScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     var showSettings by rememberSaveable { mutableStateOf(false) }
-    var showNode by rememberSaveable { mutableStateOf(false) }
-    var showRadicle by rememberSaveable { mutableStateOf(false) }
+    // Settings opened straight at one of its cards (#416), from a node
+    // page; null from the menu. [settingsSectionRequest] moves a Settings
+    // that's already open (under the overview) to a card.
+    var settingsInitialSection by rememberSaveable { mutableStateOf<SettingsSection?>(null) }
+    var settingsSectionRequest by remember { mutableStateOf<SettingsSection?>(null) }
+    // The Nodes & networks overview (#416), and the node page over it (or
+    // over Settings, or straight from the home warm-up row).
+    var showNodes by rememberSaveable { mutableStateOf(false) }
+    var nodeDetail by rememberSaveable { mutableStateOf<NodeDestination?>(null) }
+    // What a Settings opened from a node page returns to on Back.
+    var settingsBackToNodes by rememberSaveable { mutableStateOf(false) }
+    var settingsBackToDetail by rememberSaveable { mutableStateOf<NodeDestination?>(null) }
+    // The same, for a Settings already open under the overview that a
+    // node page moved to a card: Back from that card's page comes here.
+    // One per request Settings holds, by depth (a request made from an
+    // earlier one's page stacks on it); [settingsRequestPending] is the
+    // one asked for, until Settings says at which depth it took it.
+    var settingsRequestBackTo by rememberSaveable { mutableStateOf(emptyList<NodeReturn>()) }
+    var settingsRequestPending by remember { mutableStateOf<NodeReturn?>(null) }
     // The node logs page (#276), at this node's; over whichever node card opened it.
     var showLogs by rememberSaveable { mutableStateOf<NodeLogSource?>(null) }
     var showWallet by rememberSaveable { mutableStateOf(false) }
@@ -560,6 +586,33 @@ fun BrowserScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     // The Undo notice of the switcher's last bulk close (#320).
     var tabsClosedNotice by remember { mutableStateOf<Job?>(null) }
+    // The tabs the last restore crashed the app with (#400): not loaded,
+    // but one tap away, and held on disk until answered. Run in the
+    // effect's own scope and cleared only by an answer: an Activity
+    // relaunch while it's up cancels it, and the next screen shows it
+    // again; Reopen closed tab or Delete browsing data ends the offer, and the
+    // notice with it. It waits on a host of its own: on the shared one
+    // its Indefinite notice would hold every later notice (a Close all's
+    // Undo, downloads, permission recovery) in the queue until answered.
+    // It's drawn only while the shared host has nothing up, so it steps
+    // aside for each of those notices and comes back after.
+    val heldTabsHostState = remember { SnackbarHostState() }
+    val heldTabs = tabsSession.heldTabs
+    LaunchedEffect(heldTabs) {
+        val held = heldTabs ?: return@LaunchedEffect
+        val n = held.group.tabs.size
+        val result = heldTabsHostState.showSnackbar(
+            message = Strings.plural(
+                if (held.afterCrash) R.plurals.browser_tabs_not_restored else R.plurals.browser_tabs_not_reopened,
+                n,
+                n,
+            ),
+            actionLabel = Strings.get(R.string.browser_tabs_restore),
+            withDismissAction = true,
+            duration = SnackbarDuration.Indefinite,
+        )
+        if (result == SnackbarResult.ActionPerformed) tabsSession.restoreHeld() else tabsSession.dismissHeld()
+    }
 
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
@@ -589,10 +642,36 @@ fun BrowserScreen(
         }
     }
     // Any full-screen panel over the browser (they're all opaque).
-    val overlayShown = showSettings || showNode || showRadicle || showLogs != null || showWallet || walletRequest != null ||
+    val overlayShown = showSettings || showNodes || nodeDetail != null || showLogs != null || showWallet || walletRequest != null ||
         linkSend != null ||
         showTabSwitcher ||
         showHistory || showBookmarks || showDownloads
+    // The menu's Nodes & networks sub-line (#416): only while a node has
+    // failed, read off the overview's own rows. Remembered, so the menu
+    // gets the same (usually null) note however often the peers change.
+    val externalSwarmBase by Gateways.externalSwarmBaseFlow.collectAsState()
+    val externalIpfsBase by Gateways.externalIpfsBaseFlow.collectAsState()
+    val nodesNote = remember(
+        nodeInfo.status, externalSwarmBase, ipfsInfo.status, externalIpfsBase,
+        radicle.info.status, radicle.enabled, tor.info.status, tor.enabled, tor.running,
+        myotisInfo, myotisRunning,
+    ) {
+        nodesMenuNote(
+            nodeOverviewRows(
+                NodeOverviewInput(
+                    nodeInfo = nodeInfo,
+                    externalSwarm = externalSwarmBase,
+                    ipfsInfo = ipfsInfo,
+                    externalIpfs = externalIpfsBase,
+                    radicleInfo = radicle.info,
+                    radicleEnabled = radicle.enabled,
+                    tor = tor,
+                    myotisInfo = myotisInfo,
+                    myotisRunning = myotisRunning,
+                ),
+            ),
+        )
+    }
     val downloads = remember(context) { DownloadManager.get(context) }
 
     // Download notices (#79): the start, and the end with an action —
@@ -604,6 +683,10 @@ fun BrowserScreen(
     // open, and a Long snackbar would sit over the bottom row's Retry
     // and × for ten seconds.
     val downloadNotices = remember { DownloadNotices() }
+    // The switcher's pane (#418): it opens on the active tab's kind, and
+    // only its Private pane shows private tabs' cards.
+    // Saveable like [showTabSwitcher], so a rotation keeps the pane.
+    var switcherPrivatePane by rememberSaveable(showTabSwitcher) { mutableStateOf(tabs.active.private) }
     // Is anything from a private session (#86) on screen? A private
     // download's notice (negative id) names its file, so it's only shown
     // while that's the case, and withdrawn when the screen goes back to
@@ -612,6 +695,7 @@ fun BrowserScreen(
         activePrivate = tabs.active.private,
         anyPrivate = tabs.tabs.any { it.private },
         switcherShown = showTabSwitcher,
+        switcherPrivatePane = switcherPrivatePane,
         downloadsShown = showDownloads,
     )
     val privateOnScreenNow by rememberUpdatedState(privateOnScreen)
@@ -1374,6 +1458,9 @@ fun BrowserScreen(
         }
 
         val url = UrlParser.toUrl(canonical, searchTemplate)
+        // What was typed, for "Search for … instead" if it isn't found (#419); a Reload keeps it.
+        target.typedAddress = (if (source == SubmitSource.User) typedAddressFor(canonical, url, searchTemplate) else null)
+            ?: target.typedAddress?.takeIf { it.isFor(url) }
         // Home is a special non-URL destination — clear the tab, blank
         // the WebView, and let the Compose [HomeScreen] overlay take
         // over. Fall-through into the gateway-probe / plain-load paths
@@ -1458,6 +1545,27 @@ fun BrowserScreen(
     } else {
         null
     }
+
+    // The menu's Add to Home screen (#400): a launcher shortcut to the
+    // page on screen, through the incoming-link path. Address, title and
+    // the site's cached favicon are taken at the tap, so a navigation
+    // landing while the icon is drawn can't retarget it. Null where it
+    // isn't offered — a private tab above all ([homeScreenShortcutTarget]).
+    val addToHomeScreen: (() -> Unit)? = homeScreenShortcutTarget(state.url, state.private, state.showsErrorPage)?.let { target ->
+        {
+            val label = homeScreenShortcutLabel(state.title, target)
+            val favicons = repo.favicon(target)
+            scope.launch {
+                val favicon = runCatching { withTimeoutOrNull(1_000) { favicons.first() } }.getOrNull()
+                val icon = withContext(Dispatchers.Default) { HomeScreenShortcuts.icon(target, label, favicon) }
+                if (!HomeScreenShortcuts.request(context, target, label, icon)) {
+                    snackbarHostState.showSnackbar(Strings.get(R.string.browser_add_to_home_screen_failed))
+                }
+            }
+        }
+    }
+    // The menu's Wallet row (#400) says "Not set up" while that holds.
+    val walletState by remember(context) { Vault.get(context) }.state.collectAsState()
 
     // The bar's New tab, and Ctrl+T (#270).
     val openNewTab: () -> Unit = {
@@ -1703,6 +1811,10 @@ fun BrowserScreen(
         // the link ([onDeepLinkHandled]) restarts this effect, so that
         // comes last, after the link has its tab.
         val url = link?.let { deepLinkUrl(it) }
+        // The tabs the app had, if it's coming back from being closed
+        // (#400): read from disk first, so the homepage isn't submitted
+        // into a tab they replace, and a link opens beside them.
+        tabsSession.ready.await()
         if (!tabs.initialLoadDone) {
             tabs.initialLoadDone = true
             if (link == null || url == null) {
@@ -1718,8 +1830,8 @@ fun BrowserScreen(
         // its own tab rather than replacing whatever the user was reading.
         // Whatever full-screen overlay was up would otherwise hide it.
         showSettings = false
-        showNode = false
-        showRadicle = false
+        showNodes = false
+        nodeDetail = null
         showLogs = null
         showWallet = false
         showTabSwitcher = false
@@ -2102,7 +2214,8 @@ fun BrowserScreen(
                     onOpenInNewTab = { url, private -> openInNewTab(url, background = true, private = private) },
                     nodeInfo = nodeInfo,
                     runNodeEnabled = runNodeEnabled,
-                    onOpenNode = { showNode = true },
+                    // The warm-up row is about the Swarm node: its page, straight.
+                    onOpenNode = { nodeDetail = NodeDestination.Swarm },
                     bottomContentPadding = capsuleOverlap,
                     modifier = Modifier.fillMaxSize(),
                     update = appUpdate.notice,
@@ -2155,8 +2268,9 @@ fun BrowserScreen(
         // engine loaded, no list exempting it — re-read whenever the
         // allowlist or the engine changes.
         val adblockRevision by Adblock.revision.collectAsState()
-        val adblockState = remember(adblockRevision, state.url, state.private) {
-            Adblock.siteState(state.url, state.private)
+        val adblockState = remember(adblockRevision, state.url, state.private, state.showsErrorPage) {
+            // An error page has no ads to block: no switch (#419).
+            if (state.showsErrorPage) null else Adblock.siteState(state.url, state.private)
         }
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             // Tap-to-dismiss catcher for the whole chrome band — the
@@ -2214,7 +2328,7 @@ fun BrowserScreen(
                 } else BottomToolbar(
                     state = state,
                     tabCount = tabs.tabs.size,
-                    nodeInfo = nodeInfo,
+                    nodesNote = nodesNote,
                     isBookmarked = isBookmarked,
                     addressFocused = addressFocused,
                     addressBarEdited = addressBarEdited,
@@ -2294,8 +2408,11 @@ fun BrowserScreen(
                     // drift, and it re-collapses only on a fresh
                     // downward gesture.
                     onExpandCapsule = { state.capsuleCollapse.expand() },
-                    onOpenSettings = { showSettings = true },
-                    onOpenNode = { showNode = true },
+                    onOpenSettings = {
+                        settingsInitialSection = null
+                        showSettings = true
+                    },
+                    onOpenNode = { showNodes = true },
                     onOpenTabs = { showTabSwitcher = true },
                     onOpenHistory = {
                         historyPrivate = state.private
@@ -2306,6 +2423,9 @@ fun BrowserScreen(
                         showBookmarks = true
                     },
                     onOpenDownloads = { showDownloads = true },
+                    onOpenWallet = { showWallet = true },
+                    walletNote = walletMenuNote(walletState),
+                    onAddToHomeScreen = addToHomeScreen,
                     onReload = reloadPage,
                     onHardReload = hardReloadPage,
                     // Stop covers both halves of a load: the WebView's
@@ -2340,11 +2460,12 @@ fun BrowserScreen(
                     // but never for a dweb page (no key). Toggling asks
                     // for the page again, as Reload does, and the load
                     // picks the user agent for its site.
-                    desktopSite = desktopSiteOf(state.zoomSite)
-                        ?.takeIf { state.url.isNotBlank() }
+                    // Nor on an error page, which has no site's page
+                    // to ask for again ([menuDesktopSite]).
+                    desktopSite = menuDesktopSite(state.zoomSite, state.url, state.showsErrorPage)
                         ?.let { desktopSites.isDesktop(it, state.private) },
                     onToggleDesktopSite = {
-                        desktopSiteOf(state.zoomSite)?.let { site ->
+                        menuDesktopSite(state.zoomSite, state.url, state.showsErrorPage)?.let { site ->
                             desktopSites.toggle(site, state.private)
                             val url = state.url.ifBlank { state.addressBarText }
                             if (url.isNotBlank()) submit(state, url)
@@ -2441,9 +2562,15 @@ fun BrowserScreen(
 
         // The pop-up blocker's notice (#261): the active tab's blocked
         // pop-ups, above the IPFS line when that is up. Only over the
-        // page — not while the address bar is open, nor under a panel.
+        // page — not while the address bar is open, nor under a panel,
+        // nor under a page's fullscreen view.
         val blockedPopups = state.blockedPopups
-        val popupNoticeShown = blockedPopups.entries.isNotEmpty() && !addressFocused && !overlayShown
+        val popupNoticeShown = blockedPopupNoticeShown(
+            hasEntries = blockedPopups.entries.isNotEmpty(),
+            addressFocused = addressFocused,
+            overlayShown = overlayShown,
+            fullscreen = tabs.fullscreen != null,
+        )
         var popupNoticeHeightPx by remember { mutableIntStateOf(0) }
         val popupNoticeTopInsets = WindowInsets.systemBars
             .union(WindowInsets.displayCutout)
@@ -2500,7 +2627,33 @@ fun BrowserScreen(
                     .windowInsetsPadding(chromeInsets)
                     .padding(bottom = capsuleSlot + CapsuleBottomMargin + snackbarLift),
             ) { data -> Snackbar(snackbarData = data) }
+            if (snackbarHostState.currentSnackbarData == null) {
+                SnackbarHost(
+                    hostState = heldTabsHostState,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .windowInsetsPadding(chromeInsets)
+                        .padding(bottom = capsuleSlot + CapsuleBottomMargin + snackbarLift),
+                ) { data -> Snackbar(snackbarData = data) }
+            }
         }
+    }
+
+    // Delete browsing data (#400), from Settings or History (#418).
+    val deleteBrowsingData: (DeleteChoice) -> Unit = { choice ->
+        // The reopen stack keeps closed tabs' pages, titles and
+        // back/forward lists — history by any other name. It has
+        // no dates, so a ranged delete takes all of it. So do the
+        // tabs a crashed restore held back (#402): the saved tab
+        // list is rewritten from the open tabs alone, now.
+        if (choice.forgetsClosedTabs) {
+            tabs.forgetClosedTabs()
+            tabsSession.forgetHeld()
+            tabsSession.persistNow()
+        }
+        if (choice.siteData || choice.cache) tabs.clearWebViewData?.invoke(choice.siteData, choice.cache)
+        // The nodes' logs can name what was browsed (#276).
+        if (choice.siteData) clearNodeLogs()
     }
 
     if (showSettings) {
@@ -2509,34 +2662,121 @@ fun BrowserScreen(
             ipfsInfo = ipfsInfo,
             onIpfsToggle = onIpfsToggle,
             radicle = radicle,
-            onOpenRadicle = { showRadicle = true },
+            onOpenRadicle = { nodeDetail = NodeDestination.Radicle },
             onOpenWallet = { showWallet = true },
+            // Settings → Nodes & networks → Node status: the same overview
+            // the menu opens (#416), over Settings; Back returns there.
+            onOpenNodes = { showNodes = true },
             // A newer release's page (#272): a new tab in front, never a
             // private one, with Settings closed so it's on screen.
             onOpenUrl = { url ->
                 showSettings = false
                 tabs.requestOpenInNewTab?.invoke(url, false, false)
             },
-            // The reopen stack keeps closed tabs' pages, titles and
-            // back/forward lists — history by any other name.
-            onClearHistory = { tabs.forgetClosedTabs() },
-            onClearWebViewData = {
-                // Closed tabs carry their saved back/forward history.
-                tabs.forgetClosedTabs()
-                tabs.clearWebViewData?.invoke()
-                // The nodes' logs can name what was browsed (#276).
-                clearNodeLogs()
+            onDeleteBrowsingData = deleteBrowsingData,
+            onDismiss = {
+                showSettings = false
+                settingsInitialSection = null
+                // Opened from a node page: Back goes back to it.
+                if (settingsBackToNodes || settingsBackToDetail != null) {
+                    showNodes = settingsBackToNodes
+                    nodeDetail = settingsBackToDetail
+                    settingsBackToNodes = false
+                    settingsBackToDetail = null
+                }
             },
-            onDismiss = { showSettings = false },
             onOpenIpfsLogs = { showLogs = NodeLogSource.Ipfs },
+            // Settings search's "Delete all bookmarks is on the Bookmarks
+            // page" hint (#400): Settings closes and Bookmarks opens.
+            onOpenBookmarks = {
+                showSettings = false
+                bookmarksPrivate = state.private
+                showBookmarks = true
+            },
+            initialSection = settingsInitialSection,
+            sectionRequest = settingsSectionRequest,
+            onSectionRequestTaken = { depth ->
+                settingsSectionRequest = null
+                settingsRequestBackTo = settingsRequestBackTo.take(depth) +
+                    listOfNotNull(settingsRequestPending)
+                settingsRequestPending = null
+            },
+            // Back from the card a node page moved this Settings to: the
+            // overview and node page come back over it.
+            onRequestedPageLeft = { depth ->
+                settingsRequestBackTo.getOrNull(depth)?.let {
+                    showNodes = it.nodes
+                    nodeDetail = it.detail
+                }
+                settingsRequestBackTo = settingsRequestBackTo.take(depth)
+            },
         )
     }
 
-    // NodeScreen is placed *after* SettingsScreen so it overlays it when
-    // the user drills in from Settings → Node details. Back / × dismisses
-    // only the node screen and returns them to Settings.
-    if (showNode) {
+    // Settings at one of its cards, from a node page (#416). Settings is
+    // composed under the node pages, so they close while it's up and
+    // come back when it's dismissed — or, when Settings is already open
+    // under them (the overview came from its Node status row), that
+    // Settings goes to the card and they come back on Back from its page.
+    val openSettingsAt: (SettingsSection) -> Unit = { target ->
+        if (showSettings) {
+            settingsRequestPending = NodeReturn(showNodes, nodeDetail)
+            settingsSectionRequest = target
+        } else {
+            settingsBackToNodes = showNodes
+            settingsBackToDetail = nodeDetail
+            settingsInitialSection = target
+            showSettings = true
+        }
+        showNodes = false
+        nodeDetail = null
+    }
+    // However Settings closed (its Back, or a page it opened in a new tab
+    // or the Bookmarks page), what it was opened at and from is done with.
+    LaunchedEffect(showSettings) {
+        if (!showSettings) {
+            settingsInitialSection = null
+            settingsSectionRequest = null
+            settingsBackToNodes = false
+            settingsBackToDetail = null
+            settingsRequestBackTo = emptyList()
+            settingsRequestPending = null
+        }
+    }
+
+    // The overview is placed after SettingsScreen, so Settings' Node
+    // status opens it over Settings, and before the node pages, which
+    // open over it; Back from each returns to the one below.
+    if (showNodes) {
+        NodesOverviewScreen(
+            input = NodeOverviewInput(
+                nodeInfo = nodeInfo,
+                externalSwarm = externalSwarmBase,
+                ipfsInfo = ipfsInfo,
+                externalIpfs = externalIpfsBase,
+                radicleInfo = radicle.info,
+                radicleEnabled = radicle.enabled,
+                tor = tor,
+                myotisInfo = myotisInfo,
+                myotisRunning = myotisRunning,
+            ),
+            onOpen = { destination ->
+                when (destination) {
+                    NodeDestination.Rpc -> openSettingsAt(SettingsSection.Rpc)
+                    NodeDestination.Gateways -> openSettingsAt(SettingsSection.Nodes)
+                    else -> nodeDetail = destination
+                }
+            },
+            onDismiss = { showNodes = false },
+        )
+    }
+
+    // A node's page, over the overview (or Settings, for Radicle); Back /
+    // ← dismisses only the node page.
+    val detail = nodeDetail
+    if (detail == NodeDestination.Swarm || detail == NodeDestination.Tor || detail == NodeDestination.LightClient) {
         NodeScreen(
+            page = detail,
             nodeInfo = nodeInfo,
             runNodeEnabled = runNodeEnabled,
             onToggleRunNode = onToggleRunNode,
@@ -2552,28 +2792,41 @@ fun BrowserScreen(
             // explorer page (#115): a new tab in front, never a private one,
             // with the pages the node page was opened over closed too.
             onOpenUrl = { url ->
-                showNode = false
+                nodeDetail = null
+                showNodes = false
                 showSettings = false
                 tabs.requestOpenInNewTab?.invoke(url, false, false)
             },
-            onDismiss = { showNode = false },
+            onDismiss = { nodeDetail = null },
             onOpenLogs = { showLogs = it },
+            // At the Tor card, its switch in view.
+            onOpenTorSettings = { openSettingsAt(SettingsSection.Tor) },
         )
     }
 
-    // Settings → Nodes → Radicle node (#73); over Settings, like NodeScreen.
-    if (showRadicle) {
+    if (detail == NodeDestination.Ipfs) {
+        IpfsScreen(
+            ipfsInfo = ipfsInfo,
+            onIpfsToggle = onIpfsToggle,
+            onOpenLogs = { showLogs = NodeLogSource.Ipfs },
+            onDismiss = { nodeDetail = null },
+        )
+    }
+
+    // The Radicle node (#73): from the overview, or Settings → Nodes & networks.
+    if (detail == NodeDestination.Radicle) {
         RadicleScreen(
             radicle = radicle.copy(
                 // A seeded repository, in the `rad://` browser (#124).
                 onOpen = { rid ->
-                    showRadicle = false
+                    nodeDetail = null
+                    showNodes = false
                     showSettings = false
                     submit(state, "rad://" + rid.removePrefix("rad:"))
                 },
             ),
             runNodeEnabled = runNodeEnabled,
-            onDismiss = { showRadicle = false },
+            onDismiss = { nodeDetail = null },
             onOpenLogs = { showLogs = NodeLogSource.Radicle },
         )
     }
@@ -2594,18 +2847,30 @@ fun BrowserScreen(
             onDismiss = { showTabSwitcher = false },
             onNewTab = openNewTab,
             onNewPrivateTab = newPrivateTab,
+            privatePane = switcherPrivatePane,
+            onPrivatePaneChange = { switcherPrivatePane = it },
             onTabsClosed = { closed ->
                 // Close all / Close other tabs (#320): say how many went,
                 // with an Undo that brings back the ones that are kept
-                // (none of a private tab's). A newer bulk close replaces
-                // the notice of the last one.
-                tabsClosedNotice?.cancel()
-                if (closed.count > 0) {
+                // (none of a private tab's). One tab's × (#418): "Tab
+                // closed" with its Undo — and no notice at all when there
+                // is nothing to undo (a private tab, #86, or an empty
+                // one), leaving an earlier Undo up. A newer close
+                // replaces the notice of the last one. Gone from disk at
+                // once (#400): an app killed while the notice is up
+                // doesn't bring them back. Undo writes them again.
+                tabsSession.persistNow()
+                if (closed.count > 0 && !(closed.single && closed.undo == null)) {
+                    tabsClosedNotice?.cancel()
                     tabsClosedNotice = scope.launch {
                         val undo = closed.undo
                         try {
                             val result = snackbarHostState.showSnackbar(
-                                message = Strings.plural(R.plurals.browser_tabs_closed, closed.count, closed.count),
+                                message = if (closed.single) {
+                                    Strings.get(R.string.browser_tab_closed)
+                                } else {
+                                    Strings.plural(R.plurals.browser_tabs_closed, closed.count, closed.count)
+                                },
                                 actionLabel = undo?.let { Strings.get(R.string.browser_tabs_undo) },
                                 duration = SnackbarDuration.Long,
                             )
@@ -2634,6 +2899,7 @@ fun BrowserScreen(
             onOpenInNewTab = { url, private ->
                 openInNewTab(url, background = true, private = private, onSwitch = { showHistory = false })
             },
+            onDeleteBrowsingData = deleteBrowsingData,
         )
     }
 
@@ -2758,7 +3024,10 @@ fun BrowserScreen(
                 if (tabs.pageContextMenu === request) tabs.pageContextMenu = null
             }
         } else if (owner != null && promptTurn == PromptTurn.ContextMenu) {
-            fun withImage(url: String, action: suspend (FetchedImage) -> Boolean, @androidx.annotation.StringRes failure: Int) {
+            fun withImage(url: String, action: suspend (FetchedImage, Long) -> Boolean, @androidx.annotation.StringRes failure: Int) {
+                // Taken now, not once the fetch is back: a private image
+                // fetched after its session ended is dropped (#86).
+                val session = privateImageSession()
                 scope.launch {
                     // The sheet is already gone: a refetch that isn't back
                     // almost at once says so, rather than leaving the user
@@ -2773,7 +3042,7 @@ fun BrowserScreen(
                     } finally {
                         progress.cancel()
                     }
-                    val ok = image != null && action(image)
+                    val ok = image != null && action(image, session)
                     if (!ok) Toast.makeText(context, failure, Toast.LENGTH_SHORT).show()
                 }
             }
@@ -2786,10 +3055,10 @@ fun BrowserScreen(
                     onShareLink = { url, title -> shareUrl(context, url, title) },
                     onOpenImage = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true, owner.private) },
                     onCopyImage = { url ->
-                        withImage(url, { copyImageToClipboard(context, it, url) }, R.string.browser_image_copy_failed)
+                        withImage(url, { image, session -> copyImageToClipboard(context, image, url, owner.private, session) }, R.string.browser_image_copy_failed)
                     },
                     onSaveImage = { url ->
-                        withImage(url, { image ->
+                        withImage(url, { image, _ ->
                             saveImage(context, image, url).also { saved ->
                                 if (saved) {
                                     Toast.makeText(context, R.string.browser_image_saved, Toast.LENGTH_SHORT).show()
@@ -2798,7 +3067,7 @@ fun BrowserScreen(
                         }, R.string.browser_image_save_failed)
                     },
                     onShareImage = { url ->
-                        withImage(url, { shareImage(context, it, url) }, R.string.browser_image_share_failed)
+                        withImage(url, { image, session -> shareImage(context, image, url, owner.private, session) }, R.string.browser_image_share_failed)
                     },
                     onDismiss = {
                         if (tabs.pageContextMenu === request) tabs.pageContextMenu = null
@@ -2941,7 +3210,8 @@ fun BrowserScreen(
                     linkSend = null
                     showWallet = false
                     showSettings = false
-                    showNode = false
+                    showNodes = false
+                    nodeDetail = null
                     tabs.requestOpenInNewTab?.invoke(url, false, false)
                 },
                 onDismiss = {
@@ -2975,6 +3245,15 @@ fun BrowserScreen(
                     .windowInsetsPadding(WindowInsets.systemBars)
                     .padding(bottom = 8.dp),
             ) { data -> Snackbar(snackbarData = data) }
+            if (snackbarHostState.currentSnackbarData == null) {
+                SnackbarHost(
+                    hostState = heldTabsHostState,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .windowInsetsPadding(WindowInsets.systemBars)
+                        .padding(bottom = 8.dp),
+                ) { data -> Snackbar(snackbarData = data) }
+            }
         }
     }
 
