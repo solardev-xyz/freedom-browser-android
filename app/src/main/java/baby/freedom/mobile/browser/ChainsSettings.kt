@@ -130,16 +130,20 @@ internal sealed interface ReadAssurance {
     val fallback: Boolean
 
     /**
-     * Whose RPC answers once the checked tiers fail: the direct tier walks
-     * the pool with the user's RPCs first ([ChainDataRouter.endpoints]),
-     * and labels their answers [ChainTrust.Level.USER_CONFIGURED].
+     * Whose RPC can answer once the checked tiers fail — the direct tier
+     * labels the user's answers [ChainTrust.Level.USER_CONFIGURED]. No
+     * order is promised when both kinds are in the pool: after a failed
+     * quorum the direct tier reuses whichever member answered
+     * ([QuorumRun.directCandidate], the highest seat that has, without
+     * waiting for a pending one) and skips the RPCs the quorum already
+     * asked, so a public member's answer can win over the user's.
      */
     enum class Fallback {
         /** Only public RPCs: unverified. */
         PUBLIC,
 
-        /** The user's own first, a public one (unverified) when theirs don't answer. */
-        YOURS_FIRST,
+        /** The user's own or a public one (unverified), whichever answers. */
+        EITHER,
 
         /** Only the user's own RPCs. */
         YOURS,
@@ -189,7 +193,7 @@ internal fun readAssurance(chain: Chain, policy: ChainAccessPolicy, wired: (Chai
     fun fallsBackAfter(index: Int): ReadAssurance.Fallback? = when {
         ChainSource.DIRECT !in order.drop(index + 1) || pool.isEmpty() -> null
         !hasYours -> ReadAssurance.Fallback.PUBLIC
-        hasPublic -> ReadAssurance.Fallback.YOURS_FIRST
+        hasPublic -> ReadAssurance.Fallback.EITHER
         else -> ReadAssurance.Fallback.YOURS
     }
     for ((index, source) in order.withIndex()) {
@@ -257,7 +261,7 @@ internal fun readAssuranceLine(assurance: ReadAssurance): String = when (assuran
     when (to) {
         null -> line
         ReadAssurance.Fallback.PUBLIC -> line + " " + Strings.get(R.string.names_assurance_fallback)
-        ReadAssurance.Fallback.YOURS_FIRST -> line + " " + Strings.get(R.string.names_assurance_fallback_yours_first)
+        ReadAssurance.Fallback.EITHER -> line + " " + Strings.get(R.string.names_assurance_fallback_either)
         ReadAssurance.Fallback.YOURS -> line + " " + Strings.get(R.string.names_assurance_fallback_yours)
     }
 }

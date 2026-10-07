@@ -155,7 +155,7 @@ class ChainDetailPageTest {
         assertEquals(ReadAssurance.Single(yours = false, fallback = false), assurance(lonely))
         // A second provider of the user's own makes a quorum of two.
         assertEquals(
-            ReadAssurance.CrossChecked(2, 2, 1, fallbackTo = ReadAssurance.Fallback.YOURS_FIRST),
+            ReadAssurance.CrossChecked(2, 2, 1, fallbackTo = ReadAssurance.Fallback.EITHER),
             assurance(lonely.copy(userRpcUrls = listOf("https://mine.example"))),
         )
         // The user's RPC on the chain's only provider is still one provider;
@@ -170,7 +170,7 @@ class ChainDetailPageTest {
             assurance(lonely.copy(rpcUrls = emptyList(), userRpcUrls = listOf("https://a.example/?key=1"))),
         )
         val allMine = lonely.copy(userRpcUrls = listOf("https://m1.example", "https://m2.example", "https://m3.example"))
-        assertEquals(ReadAssurance.CrossChecked(3, 2, 3, fallbackTo = ReadAssurance.Fallback.YOURS_FIRST), assurance(allMine))
+        assertEquals(ReadAssurance.CrossChecked(3, 2, 3, fallbackTo = ReadAssurance.Fallback.EITHER), assurance(allMine))
         // A custom chain with no public RPC: the fallback is the user's own, never "unverified".
         assertEquals(
             ReadAssurance.CrossChecked(3, 2, 3, fallbackTo = ReadAssurance.Fallback.YOURS),
@@ -279,11 +279,12 @@ class ChainDetailPageTest {
             readAssuranceLine(ReadAssurance.Single(yours = true, fallback = true)),
         )
         assertEquals("Reads come from your own RPC.", readAssuranceLine(ReadAssurance.Single(yours = true, fallback = false)))
-        // R2-M1: the direct tier asks the user's RPCs first and labels their
-        // answers as theirs — the line says so instead of "unverified" alone.
+        // R2-M1/R3-M1: the fallback can be the user's RPC or a public one —
+        // the direct tier reuses whichever quorum member answered, so the
+        // line promises no order, and says the answer is unverified.
         assertEquals(
             "Reads are cross-checked across 2 providers. If those checks can't answer, a read comes from a " +
-                "single RPC instead: your own first, then a public one, unverified.",
+                "single RPC instead, yours or a public one: unverified.",
             readAssuranceLine(assurance(lonely.copy(userRpcUrls = listOf("https://mine.example")))),
         )
         assertEquals(
