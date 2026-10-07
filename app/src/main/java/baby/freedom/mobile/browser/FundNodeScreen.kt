@@ -41,6 +41,7 @@ import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
+import baby.freedom.mobile.chains.rpc.undisputed
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.l10n.Said
 import baby.freedom.mobile.l10n.Strings
@@ -207,11 +208,7 @@ private class FundReviewing(val plan: SwarmFunder.Plan, val days: Long, val quot
  * open to a sandwich. And a funding call's reverted receipt drops its
  * record at once only so ([SwarmFunding.checkChain], #225 R5-F1).
  */
-internal fun chainReadTrusted(trust: ChainTrust): Boolean = when (trust.level) {
-    ChainTrust.Level.VERIFIED -> true
-    ChainTrust.Level.USER_CONFIGURED -> trust.dissented.isEmpty()
-    ChainTrust.Level.UNVERIFIED -> false
-}
+internal fun chainReadTrusted(trust: ChainTrust): Boolean = trust.undisputed
 
 /** The pool's price, as xDAI per xBZZ to 6 significant digits. */
 internal fun formatSpotPrice(sqrtPriceX96: BigInteger): String =

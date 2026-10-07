@@ -83,6 +83,16 @@ class LedgerException(val kind: Kind, private val words: Said? = null, cause: Th
         }
     }
 
+    /**
+     * Behind a [Kind.WRONG_DEVICE] from an address check (#365): the
+     * Ledger approved an address on its screen, but not the one asked
+     * about, so that one mustn't be used to receive.
+     */
+    class ShownDifferent : Exception("approved a different address")
+
+    /** Whether the Ledger approved a different address than the one it was asked to show (#365). */
+    val shownDifferent: Boolean get() = cause is ShownDifferent
+
     /** The status word behind a [LedgerException], for the log (it's never secret). */
     class StatusWord(val sw: Int) : Exception("status 0x%04x".format(sw))
 }

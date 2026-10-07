@@ -81,7 +81,8 @@ internal fun explorerAddressUrl(explorerUrl: String?, address: String): String? 
 
 /**
  * The top of a review: [headline] (one sentence, wrapped, never cut),
- * then [fee] as "Network fee" and, when given, [total] as "Total".
+ * then [fee] as "Network fee" and, when given, [total] as "Total" —
+ * each with its approximate value under it when given ([feeFiat], [totalFiat]).
  * [extra] goes under them (a self-send note, a warning) and stays above
  * any [DetailsExpander] the caller puts after this.
  */
@@ -91,6 +92,9 @@ internal fun TxReviewSummary(
     fee: String?,
     total: String? = null,
     modifier: Modifier = Modifier,
+    /** [fee] and [total] in euros or dollars (#439): a second, approximate line under each, with Show prices on. */
+    feeFiat: String? = null,
+    totalFiat: String? = null,
     extra: @Composable ColumnScope.() -> Unit = {},
 ) {
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -101,15 +105,15 @@ internal fun TxReviewSummary(
             modifier = Modifier.semantics { heading() },
         )
         Spacer(Modifier.padding(top = 4.dp))
-        fee?.let { SummaryLine(stringResource(R.string.send_label_network_fee), it) }
-        total?.let { SummaryLine(stringResource(R.string.send_label_total), it, strong = true) }
+        fee?.let { SummaryLine(stringResource(R.string.send_label_network_fee), it, secondary = feeFiat) }
+        total?.let { SummaryLine(stringResource(R.string.send_label_total), it, strong = true, secondary = totalFiat) }
         extra()
     }
 }
 
 /** "Network fee   up to 0.0001 ETH": label first, the value under it when both don't fit one line. */
 @Composable
-private fun SummaryLine(label: String, value: String, strong: Boolean = false) {
+private fun SummaryLine(label: String, value: String, strong: Boolean = false, secondary: String? = null) {
     Column(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(vertical = 4.dp), verticalArrangement = Arrangement.Center) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(
@@ -117,6 +121,9 @@ private fun SummaryLine(label: String, value: String, strong: Boolean = false) {
             fontFamily = FontFamily.Monospace,
             fontWeight = if (strong) FontWeight.SemiBold else FontWeight.Normal,
         )
+        secondary?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
