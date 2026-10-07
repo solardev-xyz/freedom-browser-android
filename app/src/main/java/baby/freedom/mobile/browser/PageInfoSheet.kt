@@ -304,6 +304,19 @@ internal fun siteCookieExpiries(
  * (#442), in the tab's own profile: a private tab's live in the private
  * session's ([PrivateProfile]), never the default one.
  */
+/** How a page's own clearing for Delete data ended ([siteDataInPageJs], [SiteData.cleanAndReload]). */
+internal enum class InPageCleaned {
+    /** It is reloading itself (`location.replace`, a GET). */
+    RELOADING_ITSELF,
+
+    /**
+     * It leaves the reload to the app: its address has a fragment, which
+     * no script navigation loads again without resending a POST page's
+     * form (R4-F1).
+     */
+    APP_RELOADS,
+}
+
 internal object SiteData {
     private fun jar(private: Boolean): CookieManager? =
         if (private) PrivateProfile.cookieManager() else runCatching { CookieManager.getInstance() }.getOrNull()
@@ -417,7 +430,11 @@ internal object SiteData {
      * document took it on — not one on another origin, nor an opaque one
      * (a `Content-Security-Policy: sandbox` page, whose `location.origin`
      * is `"null"`), which is reloaded from here at once rather than
-     * waited on (R3-F4). [cleaned] asks whether it has finished clearing.
+     * waited on (R3-F4). [cleaned] asks whether it has finished clearing
+     * (`null` if not), and whether it reloads itself or leaves that to
+     * [reload] — an address with a fragment, which only a script
+     * `location.reload()` would load again, and that resends a POST
+     * page's form unasked (R4-F1); [reload] then comes at once.
      * Only once it has — or after [IN_PAGE_WIPE_MAX_MS] at the most —
      * does the wait for its reload start, so a slow clearing (big caches,
      * many databases) isn't overtaken by a reload from here that the
@@ -441,7 +458,7 @@ internal object SiteData {
         tabId: Long,
         origin: String,
         clean: suspend (doneKey: String) -> Boolean,
-        cleaned: suspend (doneKey: String) -> Boolean,
+        cleaned: suspend (doneKey: String) -> InPageCleaned?,
         onOrigin: () -> Boolean,
         reload: () -> Unit,
         newDoneKey: () -> String = { "_" + UUID.randomUUID().toString().replace("-", "") },
@@ -451,11 +468,18 @@ internal object SiteData {
             try {
                 val doneKey = newDoneKey()
                 if (clean(doneKey)) {
+                    var done: InPageCleaned? = null
                     withTimeoutOrNull(IN_PAGE_WIPE_MAX_MS) {
-                        while (cleanupPending(tabId, mark) && !cleaned(doneKey)) delay(CLEANUP_POLL_MS)
+                        while (cleanupPending(tabId, mark) && cleaned(doneKey).also { done = it } == null) {
+                            delay(CLEANUP_POLL_MS)
+                        }
                     }
-                    withTimeoutOrNull(IN_PAGE_RELOAD_WAIT_MS) {
-                        while (cleanupPending(tabId, mark)) delay(CLEANUP_POLL_MS)
+                    // A page that leaves the reload to the app (a fragment
+                    // address, R4-F1) isn't waited on for one.
+                    if (done != InPageCleaned.APP_RELOADS) {
+                        withTimeoutOrNull(IN_PAGE_RELOAD_WAIT_MS) {
+                            while (cleanupPending(tabId, mark)) delay(CLEANUP_POLL_MS)
+                        }
                     }
                 }
                 if (cleanupPending(tabId, mark)) {

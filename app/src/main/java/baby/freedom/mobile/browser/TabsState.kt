@@ -267,11 +267,13 @@ class TabsState(
     /**
      * Hook installed by the [BrowserWebViewHost]: answer whether the given
      * tab's document has finished the clearing [cleanSiteInPage] asked of
-     * it under the given key ([siteDataInPageDoneJs]); `false` when the
-     * tab has no WebView. Main thread; the answer comes on it too.
+     * it under the given key ([siteDataInPageDoneJs]), and whether it is
+     * reloading itself or leaves that to the app; `null` while it hasn't,
+     * or when the tab has no WebView. Main thread; the answer comes on it
+     * too.
      */
     @Volatile
-    internal var siteCleanedInPage: ((BrowserState, String, (Boolean) -> Unit) -> Unit)? = null
+    internal var siteCleanedInPage: ((BrowserState, String, (InPageCleaned?) -> Unit) -> Unit)? = null
 
     /**
      * Hook installed by the [BrowserWebViewHost]: reload the given tab's

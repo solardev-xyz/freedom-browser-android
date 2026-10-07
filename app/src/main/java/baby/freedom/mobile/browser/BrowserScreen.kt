@@ -3369,11 +3369,15 @@ fun BrowserScreen(
                             },
                             cleaned = { key ->
                                 val ask = tabs.siteCleanedInPage
-                                ask != null && withTimeoutOrNull(1_000) {
-                                    suspendCancellableCoroutine { cont ->
-                                        ask(tab, key) { done -> if (cont.isActive) cont.resume(done) }
+                                if (ask == null) {
+                                    null
+                                } else {
+                                    withTimeoutOrNull(1_000) {
+                                        suspendCancellableCoroutine<InPageCleaned?> { cont ->
+                                            ask(tab, key) { done -> if (cont.isActive) cont.resume(done) }
+                                        }
                                     }
-                                } == true
+                                }
                             },
                             // Still on the site Delete was for (R3-F1).
                             onOrigin = { tab in tabs.tabs && SiteData.committedOrigin(tab.id) == dataOrigin },

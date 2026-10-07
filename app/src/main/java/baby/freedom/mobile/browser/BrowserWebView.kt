@@ -1426,10 +1426,10 @@ fun BrowserWebViewHost(
         tabs.siteCleanedInPage = { tab, doneKey, answer ->
             val wv = webViews[tab.id]
             if (wv == null) {
-                answer(false)
+                answer(null)
             } else {
-                runCatching { wv.evaluateJavascript(siteDataInPageDoneJs(doneKey)) { answer(it == "true") } }
-                    .onFailure { answer(false) }
+                runCatching { wv.evaluateJavascript(siteDataInPageDoneJs(doneKey)) { answer(inPageCleanedOf(it)) } }
+                    .onFailure { answer(null) }
             }
         }
         tabs.reloadDocument = reloadDocument@{ tab, origin ->
@@ -5001,7 +5001,9 @@ internal class PageWebView(context: Context) : WebView(context) {
         navigate = { step ->
             when (step) {
                 SweptReload.Step.RELOAD -> reload()
-                SweptReload.Step.GET -> siteDataReload.address?.let { loadUrl(it) }
+                // Without the fragment: with it, a load of the address the
+                // tab is on is a same-document navigation that loads nothing.
+                SweptReload.Step.GET -> siteDataReload.address?.let { loadUrl(it.substringBefore('#')) }
                 SweptReload.Step.BLANK -> Unit
             }
         },
@@ -6148,11 +6150,17 @@ private const val SITE_DATA_WIPE_JS = """
 """
 
 /**
- * Load the document's address again, as a new document. `location.replace`
- * of the same address — a GET even on a page a form POST answered — except
- * where the address has a fragment: navigating to it is then a same-
- * document fragment navigation, which loads nothing (R2-F1), so it's
- * `location.reload()`.
+ * The cleanup page's own reload: load the address again, as a new
+ * document. `location.replace` of the same address — a GET — except where
+ * the address has a fragment: navigating to it is then a same-document
+ * fragment navigation, which loads nothing (R2-F1), so it's
+ * `location.reload()`. That is safe here, and only here: this document
+ * answered the request in place of the network ([siteDataCleanupFor],
+ * [SiteData.takeCleanup]), so even if that request was a form POST its
+ * body never reached the site, and the reload sends it the one time. A
+ * real page reached by a POST must never `location.reload()` — script
+ * reloads skip `onFormResubmission` and send the form again (R4-F1);
+ * [siteDataInPageJs] leaves a fragment address to the app's own reload.
  */
 private const val SITE_DATA_RELOAD_JS = """
   if (location.href.includes('#')) location.reload(); else location.replace(location.href);"""
@@ -6170,7 +6178,17 @@ internal const val SITE_DATA_CLEANUP_HTML = """<!doctype html><meta charset="utf
  * itself, once the workers are gone, so the reload isn't one of theirs.
  * Just before it reloads it sets `window[doneKey]`, which
  * [siteDataInPageDoneJs] reads: the app's own fallback reload waits for
- * the clearing to end rather than racing it (R2-F3). [doneKey] is a
+ * the clearing to end rather than racing it (R2-F3).
+ *
+ * Its reload is `location.replace` of the address — a GET, even on a
+ * page a form POST answered. Where the address has a fragment that would
+ * be a same-document navigation that loads nothing (R2-F1), and the one
+ * script reload that does load, `location.reload()`, sends a POST page's
+ * form again with no `onFormResubmission` prompt (R4-F1). So there the
+ * page doesn't reload at all: `window[doneKey]` says the app is to
+ * ([InPageCleaned.APP_RELOADS]), and the app's reload — which WebView
+ * does ask about a POST, and which moves on to a GET when refused
+ * ([PageWebView.siteDataReload]) — comes at once. [doneKey] is a
  * fresh random name each time, nothing that names the app. Does nothing
  * at all in a document on any other origin — one that committed after
  * the caller last looked, or an opaque one (`Content-Security-Policy:
@@ -6182,14 +6200,31 @@ internal fun siteDataInPageJs(origin: String, doneKey: String): String =
     """(() => {
   if (location.origin !== ${org.json.JSONObject.quote(origin)}) return false;
   (async () => {$SITE_DATA_WIPE_JS
-  try { window[${org.json.JSONObject.quote(doneKey)}] = true; } catch (e) {}$SITE_DATA_RELOAD_JS
+  const self = !location.href.includes('#');
+  try { window[${org.json.JSONObject.quote(doneKey)}] = self ? '$IN_PAGE_RELOADING' : '$IN_PAGE_APP_RELOADS'; } catch (e) {}
+  if (self) location.replace(location.href);
   })();
   return true;
 })()"""
 
-/** Has [siteDataInPageJs] with [doneKey] finished clearing in this document? Evaluates to `true` if so. */
+/**
+ * Has [siteDataInPageJs] with [doneKey] finished clearing in this
+ * document? Evaluates to its done mark — read with [inPageCleanedOf] — or
+ * `null` if not.
+ */
 internal fun siteDataInPageDoneJs(doneKey: String): String =
-    "window[${org.json.JSONObject.quote(doneKey)}] === true"
+    "(() => { const v = window[${org.json.JSONObject.quote(doneKey)}]; " +
+        "return v === '$IN_PAGE_RELOADING' || v === '$IN_PAGE_APP_RELOADS' ? v : null; })()"
+
+private const val IN_PAGE_RELOADING = "reloading"
+private const val IN_PAGE_APP_RELOADS = "app"
+
+/** [siteDataInPageDoneJs]'s answer, as `evaluateJavascript` hands it back: `null` while still clearing. */
+internal fun inPageCleanedOf(result: String?): InPageCleaned? = when (result) {
+    "\"$IN_PAGE_RELOADING\"" -> InPageCleaned.RELOADING_ITSELF
+    "\"$IN_PAGE_APP_RELOADS\"" -> InPageCleaned.APP_RELOADS
+    else -> null
+}
 
 /**
  * The same clearing as [SITE_DATA_CLEANUP_HTML], ending by setting the

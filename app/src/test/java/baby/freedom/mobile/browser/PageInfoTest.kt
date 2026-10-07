@@ -200,7 +200,7 @@ class PageInfoTest {
         var reloads = 0
         SiteData.cleanAndReload(
             tabId = 12L, origin = "http://localhost:8721",
-            clean = { true }, cleaned = { true }, onOrigin = { true }, reload = { reloads++ },
+            clean = { true }, cleaned = { InPageCleaned.RELOADING_ITSELF }, onOrigin = { true }, reload = { reloads++ },
         )
         assertEquals(1, reloads)
         assertEquals(false, SiteData.takeCleanup(12L, "http://localhost:8721/index.html?later", "GET"))
@@ -224,7 +224,7 @@ class PageInfoTest {
         val job = launch {
             SiteData.cleanAndReload(
                 tabId = 13L, origin = "https://example.org",
-                clean = { true }, cleaned = { done }, onOrigin = { true }, reload = { reloadedAt = currentTime },
+                clean = { true }, cleaned = { if (done) InPageCleaned.RELOADING_ITSELF else null }, onOrigin = { true }, reload = { reloadedAt = currentTime },
             )
         }
         advanceTimeBy(10_000)
@@ -240,7 +240,7 @@ class PageInfoTest {
         val capped = launch {
             SiteData.cleanAndReload(
                 tabId = 14L, origin = "https://example.org",
-                clean = { true }, cleaned = { false }, onOrigin = { true }, reload = { reloadedAt = currentTime },
+                clean = { true }, cleaned = { null }, onOrigin = { true }, reload = { reloadedAt = currentTime },
             )
         }
         val start = currentTime
@@ -264,7 +264,7 @@ class PageInfoTest {
         SiteData.cleanAndReload(
             tabId = 15L, origin = "https://example.org",
             clean = { true },
-            cleaned = { SiteData.committed(15L, "https://other.example/"); false },
+            cleaned = { SiteData.committed(15L, "https://other.example/"); null },
             onOrigin = { SiteData.committedOrigin(15L) == "https://example.org" },
             reload = { reloads++ },
         )
@@ -287,11 +287,11 @@ class PageInfoTest {
             cleaned = {
                 if (asks == 1) {
                     SiteData.committed(16L, "https://example.org/next")
-                    false
+                    null
                 } else {
                     // The second time, the page's own reload takes the mark.
                     SiteData.takeCleanup(16L, "https://example.org/next", "GET")
-                    true
+                    InPageCleaned.RELOADING_ITSELF
                 }
             },
             onOrigin = { SiteData.committedOrigin(16L) == "https://example.org" },
@@ -304,7 +304,7 @@ class PageInfoTest {
         SiteData.cleanAndReload(
             tabId = 16L, origin = "https://example.org",
             clean = { asks++; true },
-            cleaned = { SiteData.committed(16L, "https://example.org/again"); false },
+            cleaned = { SiteData.committed(16L, "https://example.org/again"); null },
             onOrigin = { SiteData.committedOrigin(16L) == "https://example.org" },
             reload = { reloads++ },
         )
@@ -315,7 +315,7 @@ class PageInfoTest {
         SiteData.cleanAndReload(
             tabId = 16L, origin = "https://example.org",
             clean = { asks++; true },
-            cleaned = { SiteData.takeCleanup(16L, "https://example.org/login", "POST"); false },
+            cleaned = { SiteData.takeCleanup(16L, "https://example.org/login", "POST"); null },
             onOrigin = { true },
             reload = { reloads++ },
         )
@@ -366,9 +366,12 @@ class PageInfoTest {
         // It answers whether it started, so an opaque document isn't waited on (R3-F4).
         assertTrue(js.trimEnd().endsWith("return true;\n})()"))
         assertTrue("r.unregister()" in js)
-        assertTrue(js.indexOf("r.unregister()") < js.indexOf("window[\"_k1\"] = true"))
-        assertTrue(js.indexOf("window[\"_k1\"] = true") < js.indexOf("location.replace(location.href)"))
-        assertEquals("window[\"_k1\"] === true", siteDataInPageDoneJs("_k1"))
+        assertTrue(js.indexOf("r.unregister()") < js.indexOf("window[\"_k1\"] = self"))
+        assertTrue(js.indexOf("window[\"_k1\"] = self") < js.indexOf("if (self) location.replace(location.href);"))
+        assertTrue("window[\"_k1\"]" in siteDataInPageDoneJs("_k1"))
+        assertEquals(InPageCleaned.RELOADING_ITSELF, inPageCleanedOf("\"reloading\""))
+        assertEquals(InPageCleaned.APP_RELOADS, inPageCleanedOf("\"app\""))
+        for (r in listOf("null", "true", null, "\"other\"")) assertEquals(r, null, inPageCleanedOf(r))
         // An origin can't break out of the string it's compared with.
         assertTrue("\"a\\\"b\"" in siteDataInPageJs("a\"b", "_k"))
     }
@@ -376,10 +379,32 @@ class PageInfoTest {
     @Test
     fun `an address with a fragment is reloaded, not navigated to in place`() {
         // `location.replace(href)` with a #fragment is a same-document
-        // navigation that loads nothing (R2-F1).
-        for (js in listOf(siteDataInPageJs("https://example.org", "_k"), SITE_DATA_CLEANUP_HTML)) {
-            assertTrue(js, "if (location.href.includes('#')) location.reload(); else location.replace(location.href);" in js)
-        }
+        // navigation that loads nothing (R2-F1). The cleanup page, which
+        // answered its request in place of the site, reloads itself.
+        assertTrue("if (location.href.includes('#')) location.reload(); else location.replace(location.href);" in SITE_DATA_CLEANUP_HTML)
+        // A real page doesn't: a script `location.reload()` resends a POST
+        // page's form with no `onFormResubmission` prompt (R4-F1). It
+        // leaves the reload to the app's own.
+        val js = siteDataInPageJs("https://example.org", "_k")
+        assertFalse(js, "location.reload" in js)
+        assertTrue(js, "const self = !location.href.includes('#');" in js)
+        assertTrue(js, "self ? 'reloading' : 'app'" in js)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a page that leaves the reload to the app is reloaded at once`() = runTest {
+        // R4-F1: no 3 s wait for a reload the page said it won't do.
+        var reloadedAt = -1L
+        val start = currentTime
+        SiteData.cleanAndReload(
+            tabId = 19L, origin = "https://example.org",
+            clean = { true }, cleaned = { InPageCleaned.APP_RELOADS }, onOrigin = { true },
+            reload = { reloadedAt = currentTime },
+        )
+        assertEquals(start, reloadedAt)
+        assertEquals(false, SiteData.takeCleanup(19L, "https://example.org/", "GET"))
+        SiteData.tabClosed(19L)
     }
 
     @Test
