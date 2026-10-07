@@ -63,6 +63,42 @@ class TabsPopupTest {
     }
 
     @Test
+    fun `a popup's blank document asks in its opener's name until it commits or goes Home`() {
+        // #445 R1-F1: `window.open('')` + `document.write` leaves the popup
+        // on an uncommitted `about:blank` that inherits the opener's origin;
+        // its own getUserMedia/geolocation must still be asked about in
+        // that site's name, not refused for having no site.
+        val tabs = tabsWith(1)
+        val opener = tabs.active
+        opener.permissionOrigin = "http://localhost:8730"
+        val popup = tabs.adoptPopup(opener)
+        assertNull(popup.permissionOrigin)
+        assertEquals("http://localhost:8730", popup.permissionTop)
+        assertEquals(
+            PermissionScope("http://localhost:8730"),
+            permissionScopeFor("http://localhost:8730/", popup.permissionTop),
+        )
+        // A frame inside that blank document is the frame's pair, as anywhere.
+        assertEquals(
+            PermissionScope("https://meet.example", "http://localhost:8730"),
+            permissionScopeFor("https://meet.example/", popup.permissionTop),
+        )
+        // The popup's first commit takes over…
+        popup.blankIsPage = false
+        popup.permissionOrigin = "https://other.example"
+        assertEquals("https://other.example", popup.permissionTop)
+        // …and once it has no blank page of its own, nothing stands in.
+        popup.permissionOrigin = null
+        assertNull(popup.permissionTop)
+        // Home ends it too.
+        val again = tabs.adoptPopup(opener)
+        again.navigateHome()
+        assertNull(again.permissionTop)
+        // A user-opened tab never inherits anything.
+        assertNull(tabs.newTab().permissionTop)
+    }
+
+    @Test
     fun `user-opened tabs have no opener`() {
         val tabs = tabsWith(1)
         assertNull(tabs.newTab().openerId)

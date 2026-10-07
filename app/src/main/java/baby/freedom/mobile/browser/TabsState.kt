@@ -407,6 +407,9 @@ class TabsState(
         // Its blank document is the page's until something commits: not
         // the home overlay (see [BrowserState.blankIsPage]).
         tab.blankIsPage = true
+        // …and that document is the opener's origin's: its own permission
+        // requests are asked in that site's name (#363).
+        tab.blankOpenerOrigin = opener.permissionOrigin
         tab.showBlankPage()
         val openerIndex = tabs.indexOfFirst { it.id == opener.id }
         val at = if (openerIndex < 0) tabs.size else openerIndex + 1

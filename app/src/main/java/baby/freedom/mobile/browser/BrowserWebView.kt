@@ -3136,6 +3136,7 @@ private fun buildRefreshableWebView(
                 // A real document: a popup's blank start is over, and
                 // `about:blank` in this tab is the home sentinel again.
                 state.blankIsPage = false
+                state.blankOpenerOrigin = null
                 // Whatever is parked belongs to the document this one is
                 // replacing, and it never painted (a paint is what would
                 // have flushed it). Dropping it here is what keeps the

@@ -228,11 +228,12 @@ data class PermissionScope(val origin: String, val top: String = origin) {
 /**
  * The [PermissionScope] a request from [requesting] (the frame's origin,
  * as WebView hands it out) is decided under, inside a page whose
- * committed origin key is [page] ([BrowserState.permissionOrigin]); `null`
- * — denied without a prompt — when either can't hold a permission. A
- * frame in a page with no site of its own (an `about:blank` window a
- * script wrote into, a `data:` page) has no top-level site to ask in the
- * name of, so it gets nothing.
+ * top-level site is [page] ([BrowserState.permissionTop]); `null` —
+ * denied without a prompt — when either can't hold a permission. A popup's
+ * `about:blank` document a script wrote into has its opener's site
+ * ([BrowserState.blankOpenerOrigin]); a frame in a page with no site at
+ * all (a `data:` page, say) has no top-level site to ask in the name of,
+ * so it gets nothing.
  */
 fun permissionScopeFor(requesting: String?, page: String?): PermissionScope? {
     val origin = permissionOriginKey(requesting) ?: return null

@@ -205,8 +205,9 @@ class SitePermissionBroker private constructor(
         // Read at arrival, on the main thread: the request comes from the
         // committed document ([BrowserState.permissionOrigin] is set at
         // its `onPageStarted`, which also withdraws whatever the outgoing
-        // one asked).
-        val scope = permissionScopeFor(request.origin?.toString(), tab.permissionOrigin)
+        // one asked) — or a popup's blank one, whose site is its opener's
+        // ([BrowserState.permissionTop]).
+        val scope = permissionScopeFor(request.origin?.toString(), tab.permissionTop)
         if (byPermission.isEmpty() || scope == null) {
             request.deny()
             return
@@ -255,7 +256,7 @@ class SitePermissionBroker private constructor(
         callback: GeolocationPermissions.Callback?,
     ) {
         callback ?: return
-        val scope = permissionScopeFor(rawOrigin, tab.permissionOrigin)
+        val scope = permissionScopeFor(rawOrigin, tab.permissionTop)
         if (scope == null) {
             callback.invoke(rawOrigin, false, false)
             return
