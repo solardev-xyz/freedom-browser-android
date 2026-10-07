@@ -252,4 +252,46 @@ class EthereumSwitchTurnTest {
             assertTrue(lost.closed.isCompleted)
         }
     }
+
+    @Test
+    fun `a new document's first switch doesn't wait behind the old page's notice (#446 R6-M3)`() = runBlocking<Unit> {
+        val tab = tab()
+        val (_, notice) = switched(tab)
+        notice.received()
+        notice.shown()
+        settle()
+        // The user types another site into the tab; it's connected and switches at once.
+        EthereumProviders.onDocumentStarted(tab, site)
+        val next = EthAsk.SwitchNotice(site, BuiltInChains.ETHEREUM, BuiltInChains.BASE)
+        val answer = async { EthereumProviders.askOnDocument(tab, EthereumProviders.currentDocument(tab.id), next) }
+        assertSame(next, answerNext(tab, EthAnswer.Approved()).ask)
+        assertTrue(answer.await() is EthAnswer.Approved)
+        // The old notice is still up: the switch it names stays.
+        assertFalse(notice.closed.isCompleted)
+        next.switched.complete(null)
+        notice.close(undo = false)
+    }
+
+    @Test
+    fun `a notice a sheet covered isn't timed out behind it (#446 R6-M1)`() {
+        val main = UnconfinedTestDispatcher()
+        Dispatchers.setMain(main)
+        runTest(main) {
+            val tab = tab()
+            val (_, notice) = switched(tab)
+            notice.received()
+            notice.shown()
+            // The page asks to sign; the user reads the sheet for five minutes.
+            val signed = async { EthereumProviders.askOnDocument(tab, EthereumProviders.currentDocument(tab.id), sign) }
+            advanceTimeBy(300_000)
+            assertSame(sign, tab.ethereumPrompt?.ask)
+            assertFalse(notice.closed.isCompleted)
+            tab.ethereumPrompt!!.respond(EthAnswer.Approved())
+            assertTrue(signed.await() is EthAnswer.Approved)
+            // Back up after the sheet, its Undo still pauses the tab.
+            notice.close(undo = true)
+            advanceTimeBy(1_000)
+            assertEquals(EthAnswer.Paused, EthereumProviders.askOnDocument(tab, EthereumProviders.currentDocument(tab.id), sign))
+        }
+    }
 }

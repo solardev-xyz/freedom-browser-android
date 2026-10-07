@@ -767,11 +767,19 @@ fun BrowserScreen(
     // aside one already up — a Tab closed · Undo, a download's Open — and
     // with it that notice's action (#446 R5-F1). It tells the bridge once
     // it's actually on screen, which is when its hold starts (R4-M1).
-    var chainSwitchNotice by remember { mutableStateOf<ChainSwitchNoticeUi?>(null) }
+    //
+    // A newer notice replaces only its own tab's, or one already seen: one
+    // still waiting for another tab is kept, so that switch is still named
+    // when the user gets back to it (#446 R6-M2). A sheet the tab puts up
+    // over it (the sign or send that usually follows a switch) covers it:
+    // it comes down while the sheet is up and goes back up, with a fresh
+    // timer and its Undo, once the sheet is gone, so it doesn't run out
+    // unseen behind the sheet (#446 R6-M1).
+    val chainSwitchNotices = remember { mutableMapOf<Long, ChainSwitchNoticeUi>() }
     LaunchedEffect(Unit) {
         EthereumProviders.chainSwitches.collect { notice ->
             notice.received()
-            chainSwitchNotice?.job?.cancel()
+            chainSwitchNotices.values.filter { it.notice.tabId == notice.tabId || it.shown }.forEach { it.job?.cancel() }
             val ui = ChainSwitchNoticeUi(notice)
             ui.job = scope.launch {
                 try {
@@ -780,18 +788,25 @@ fun BrowserScreen(
                         Strings.get(R.string.send_eth_switched, permissionOriginDisplay(switch.origin), switch.to.name),
                         Strings.get(R.string.send_undo),
                     )
-                    var shown = false
+                    // On its tab, with no sheet of that tab's covering it.
+                    fun visible(): Boolean {
+                        val active = tabs.active
+                        return active.id == notice.tabId &&
+                            active.ethereumPrompt.let { it == null || it.ask is EthAsk.SwitchNotice }
+                    }
                     var result: SnackbarResult? = null
                     while (result == null) {
-                        snapshotFlow { tabs.active.id }.first { it == notice.tabId }
+                        // Covered after it was seen, then the user left the tab: down, as below.
+                        snapshotFlow { visible() || (ui.shown && tabs.active.id != notice.tabId) }.first { it }
+                        if (!visible()) return@launch
                         result = coroutineScope {
                             val showing = async { snackbarHostState.showSnackbar(visuals) }
                             val onScreen = launch {
                                 snapshotFlow { snackbarHostState.currentSnackbarData?.visuals }.first { it === visuals }
-                                shown = true
+                                ui.shown = true
                                 notice.shown()
                             }
-                            val left = async { snapshotFlow { tabs.active.id }.first { it != notice.tabId } }
+                            val left = async { snapshotFlow { visible() }.first { !it } }
                             select<SnackbarResult?> {
                                 showing.onAwait { it }
                                 left.onAwait { null }
@@ -801,8 +816,9 @@ fun BrowserScreen(
                                 left.cancel()
                             }
                         }
-                        // Left after it was seen: down for good, no Undo.
-                        if (result == null && shown) return@launch
+                        // Left the tab after it was seen: down for good, no Undo. Only
+                        // covered by a sheet, on its tab: back up once the sheet is gone.
+                        if (result == null && ui.shown && tabs.active.id != notice.tabId) return@launch
                     }
                     if (result == SnackbarResult.ActionPerformed) {
                         notice.close(undo = true)
@@ -822,8 +838,9 @@ fun BrowserScreen(
             scope.launch {
                 notice.awaitClosed()
                 ui.job?.cancel()
+                if (chainSwitchNotices[notice.tabId] === ui) chainSwitchNotices.remove(notice.tabId)
             }
-            chainSwitchNotice = ui
+            chainSwitchNotices[notice.tabId] = ui
         }
     }
 
@@ -3476,6 +3493,9 @@ private data class PageSheetTarget(val tabId: Long, val origin: String?, val doc
 /** The "<site> switched to <chain>" notice's job on screen (#440, #446). */
 private class ChainSwitchNoticeUi(val notice: EthereumProviders.SwitchNotice) {
     var job: Job? = null
+
+    /** It has been on screen at least once. */
+    var shown = false
 }
 
 /** Its own instance per notice, so the screen can tell when that one is the snackbar up. */

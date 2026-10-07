@@ -587,7 +587,9 @@ object EthereumProviders {
      *
      * Bounded where nobody owns the notice: [NOTICE_MAX_MS] for the browser
      * to take it ([SwitchNotice.received]: a screen being rebuilt may miss
-     * it), then [NOTICE_MAX_MS] once it's on screen. In between, the
+     * it), then [NOTICE_MAX_MS] on screen while it still holds the line.
+     * Once a sheet or a new document has ended the hold, the notice holds
+     * nothing and the browser keeps it until it's down (#446 R6-M1). In between, the
      * browser has it and closes it itself if it gives it up, so the wait
      * for its tab to be the active one again has no limit (#446 R5-M3):
      * until then the tab isn't on screen, and its line couldn't move
@@ -634,8 +636,20 @@ object EthereumProviders {
                         notice.closed.onAwait { false }
                     }
                     if (up) {
-                        val undone = withTimeoutOrNull(NOTICE_MAX_MS) { notice.closed.await() } ?: false
-                        if (undone && (documents[tabId] ?: 0) == doc) blockedTabs += tabId
+                        // Only a hold that's still on is bounded: once a sheet or a new document
+                        // has ended it, the notice holds nothing, and the browser may keep it (or
+                        // put it back up after a sheet that covered it) as long as it needs to
+                        // be seen (#446 R6-M1).
+                        val held = withTimeoutOrNull(NOTICE_MAX_MS) {
+                            select {
+                                notice.hold.onAwait { }
+                                notice.closed.onAwait { }
+                            }
+                        }
+                        if (held != null) {
+                            val undone = notice.closed.await()
+                            if (undone && (documents[tabId] ?: 0) == doc) blockedTabs += tabId
+                        }
                     }
                     notice.close(undo = false)
                     holding.join()
@@ -664,7 +678,10 @@ object EthereumProviders {
     fun onDocumentStarted(tab: BrowserState, url: String?) {
         documents[tab.id] = (documents[tab.id] ?: 0) + 1
         committedOrigins[tab.id] = providerOriginKey(url)
-        // A switch notice stays: the switch it names is the site's, not the document's (#446 R5-M1).
+        // A switch notice stays: the switch it names is the site's, not the document's (#446
+        // R5-M1). Its hold ends, though: the new document's own first switch doesn't wait
+        // behind the old page's notice (R6-M3).
+        notices[tab.id]?.hold?.complete(Unit)
         withdraw(tab.id)
     }
 
@@ -703,7 +720,8 @@ object EthereumProviders {
     /**
      * The longest a switch notice holds its tab's next no-sheet switch,
      * once on screen (and the longest it waits for the browser to take
-     * it): past a
+     * it). A notice whose hold has ended isn't bounded by it (#446
+     * R6-M1). Past a
      * snackbar's long duration, and its accessibility-extended one — up to
      * 2 minutes with Android's "Time to take action" (#446 R2-M1). Should a
      * notice still be up when this runs out, closing it takes it down
