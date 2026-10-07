@@ -34,25 +34,50 @@ class BackupRulesTest {
     private val root = File("..")
 
     /**
-     * The embedded nodes' data dirs (#338), each pinned to the source that
-     * names it: ant's dir and SwarmNode's deposit hold under the data dir
-     * NodeService hands the Swarm node, the Radicle profile, freedom-ipfs
-     * and Arti. Each holds a node identity (ant's plain-text device key,
-     * the Radicle profile key) or state tied to one, so a copy would run
-     * one node on two phones.
+     * The embedded nodes' data dirs (#338), each pinned to the source line
+     * that names it: ant's dir and SwarmNode's deposit hold (and its
+     * `.tmp`) under the data dir NodeService hands the Swarm node, the
+     * Radicle profile, freedom-ipfs and Arti. Each holds a node identity
+     * (ant's plain-text device key, the Radicle profile key) or state tied
+     * to one, so a copy would run one node on two phones.
      */
     private val nodeDirs = listOf(
+        // filesDir itself, which SwarmNode sees as `config.dataDir`: see [filesDirAliases].
         Pin("app/src/main/java/baby/freedom/mobile/node/NodeService.kt", "dataDir = filesDir.absolutePath", null),
         Pin("swarmnode/src/main/java/baby/freedom/swarm/SwarmNode.kt", "config.dataDir + \"/ant\"", "ant"),
         Pin(
             "swarmnode/src/main/java/baby/freedom/swarm/SwarmNode.kt",
-            "UNCONFIRMED_DEPOSIT_FILE = \"unconfirmed-deposit.json\"",
+            "File(config.dataDir, UNCONFIRMED_DEPOSIT_FILE)",
             "unconfirmed-deposit.json",
+        ),
+        Pin(
+            "swarmnode/src/main/java/baby/freedom/swarm/SwarmNode.kt",
+            "File(config.dataDir, \"\$UNCONFIRMED_DEPOSIT_FILE.tmp\")",
+            "unconfirmed-deposit.json.tmp",
         ),
         Pin("app/src/main/java/baby/freedom/mobile/node/NodeService.kt", "home = filesDir.resolve(\"radicle\")", "radicle"),
         Pin("app/src/main/java/baby/freedom/mobile/node/NodeService.kt", "dataDir = filesDir.resolve(\"ipfs\")", "ipfs"),
         Pin("app/src/main/java/baby/freedom/mobile/node/TorService.kt", "TorNode(filesDir.resolve(\"tor\"))", "tor"),
     )
+
+    /** The deposit hold's file name, behind the constant the pins above use. */
+    private val nodeNames = listOf(
+        "swarmnode/src/main/java/baby/freedom/swarm/SwarmNode.kt" to
+            "UNCONFIRMED_DEPOSIT_FILE = \"unconfirmed-deposit.json\"",
+    )
+
+    /**
+     * Names a source uses for `filesDir` itself, scanned like `filesDir`:
+     * NodeService hands SwarmNode `filesDir` as its data dir (the null pin
+     * above), so a file SwarmNode puts at `config.dataDir` lands at the
+     * root of `files/`.
+     */
+    private val filesDirAliases = mapOf(
+        "swarmnode/src/main/java/baby/freedom/swarm/SwarmNode.kt" to Regex("""(?<![A-Za-z])config\.dataDir(?![A-Za-z])"""),
+    )
+
+    /** `filesDir`, and Java's `getFilesDir()`; not `noBackupFilesDir`. */
+    private val filesDirUse = Regex("""(?i)(?<![a-z])(?:get)?filesDir(?![a-z])""")
 
     /** The key and identity files inside them, as seen on a device (#338): none may travel. */
     private val nodeKeyFiles = listOf(
@@ -61,6 +86,7 @@ class BackupRulesTest {
         "ant/accounts/0x0000000000000000000000000000000000000000/uploads",
         "ant/chunks.sqlite",
         "unconfirmed-deposit.json",
+        "unconfirmed-deposit.json.tmp",
         "radicle/keys/radicle",
         "radicle/keys/radicle.pub",
         "radicle/node/node.db",
@@ -127,8 +153,8 @@ class BackupRulesTest {
 
     @Test
     fun `the nodes' data dirs and the keys in them are excluded from every backup and transfer`() {
-        for (pin in nodeDirs) {
-            assertTrue("${pin.source} still has ${pin.text}", File(root, pin.source).readText().contains(pin.text))
+        for ((source, text) in nodeDirs.map { it.source to it.text } + nodeNames) {
+            assertTrue("$source still has $text", File(root, source).readText().contains(text))
         }
         val dirs = nodeDirs.mapNotNull { it.path }
         for ((file, section) in rules) {
@@ -144,17 +170,31 @@ class BackupRulesTest {
             assertTrue("$source still has $text", File(root, source).readText().contains(text))
         }
         val users = listOf("app/src/main/java", "swarmnode/src/main/java").flatMap { dir ->
-            File(root, dir).walk().filter { it.extension == "kt" }.flatMap { f ->
+            File(root, dir).walk().filter { it.extension == "kt" || it.extension == "java" }.flatMap { f ->
                 val rel = f.relativeTo(root).path
-                f.readLines().filter { Regex("""(?<![A-Za-z])filesDir""").containsMatchIn(it) }
+                val alias = filesDirAliases[rel]
+                f.readLines()
+                    .filter { filesDirUse.containsMatchIn(it) || alias?.containsMatchIn(it) == true }
                     .filterNot { it.trimStart().startsWith("*") || it.trimStart().startsWith("//") }
                     .map { rel to it.trim() }
             }.toList()
         }
+        // Each use is exactly one reviewed line, and each reviewed line
+        // covers exactly one use: a second node handed filesDir the same
+        // way as ant (`dataDir = filesDir.absolutePath`) can't pass as it.
+        val matched = mutableMapOf<Pair<String, String>, Int>()
         for ((source, line) in users) {
+            val hits = known.filter { (s, t) -> s == source && line.contains(t) }
             assertTrue(
                 "$source uses filesDir in `$line`: exclude it in the backup rules or list it as keyless",
-                known.any { (s, t) -> s == source && line.contains(t) },
+                hits.size == 1,
+            )
+            matched.merge(hits.single(), 1, Int::plus)
+        }
+        for (pin in known) {
+            assertTrue(
+                "${pin.first}: `${pin.second}` should be one filesDir use, found ${matched[pin] ?: 0}",
+                matched[pin] == 1,
             )
         }
     }

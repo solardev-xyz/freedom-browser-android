@@ -22,6 +22,7 @@
     <exclude domain="file" path="swarm-manifests.json" />
     <exclude domain="file" path="ant" />
     <exclude domain="file" path="unconfirmed-deposit.json" />
+    <exclude domain="file" path="unconfirmed-deposit.json.tmp" />
     <exclude domain="file" path="radicle" />
     <exclude domain="file" path="ipfs" />
     <exclude domain="file" path="tor" />

@@ -865,6 +865,7 @@ class SwarmNode internal constructor(
     private var unconfirmedDeposit: UnconfirmedDeposit? = null
     private var unconfirmedDepositLoaded = false
     private val unconfirmedDepositFile get() = File(config.dataDir, UNCONFIRMED_DEPOSIT_FILE)
+    private val unconfirmedDepositTmp get() = File(config.dataDir, "$UNCONFIRMED_DEPOSIT_FILE.tmp")
 
     /** Reads the persisted hold once, off the main thread (the first deposit). Under [lock]. */
     private fun loadUnconfirmedDeposit() {
@@ -897,11 +898,15 @@ class SwarmNode internal constructor(
                     .put("atMs", u.atMs)
                     .put("bootId", u.bootId ?: "")
                     .toString()
-                val tmp = File(config.dataDir, "$UNCONFIRMED_DEPOSIT_FILE.tmp")
+                val tmp = unconfirmedDepositTmp
                 tmp.writeText(json)
                 check(tmp.renameTo(unconfirmedDepositFile))
             }
-        }.onFailure { Log.w(TAG, "couldn't persist the deposit hold: ${it.javaClass.simpleName}") }
+        }.onFailure {
+            // Don't leave the half-written step lying in files/.
+            unconfirmedDepositTmp.delete()
+            Log.w(TAG, "couldn't persist the deposit hold: ${it.javaClass.simpleName}")
+        }
     }
 
     /** What the gateway's chequebook holds, in PLUR; null when it couldn't say. */

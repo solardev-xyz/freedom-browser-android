@@ -31,7 +31,8 @@
     ledgers; the same state for the account in use sits at the top. Two
     phones on one account would collide on cheques and stamps.
   - `unconfirmed-deposit.json` (SwarmNode, beside `ant/`): the hold on a
-    chequebook deposit this phone's node hasn't seen confirmed.
+    chequebook deposit this phone's node hasn't seen confirmed; and its
+    `.tmp`, which a failed write could leave behind.
   - `radicle/` (the Radicle profile, libradicle's home): `keys/` is its
     NID when there's no wallet Radicle identity; the node's databases,
     seeding policies and stored repositories go with it.
@@ -63,6 +64,7 @@
         <exclude domain="file" path="swarm-manifests.json" />
         <exclude domain="file" path="ant" />
         <exclude domain="file" path="unconfirmed-deposit.json" />
+        <exclude domain="file" path="unconfirmed-deposit.json.tmp" />
         <exclude domain="file" path="radicle" />
         <exclude domain="file" path="ipfs" />
         <exclude domain="file" path="tor" />
@@ -77,6 +79,7 @@
         <exclude domain="file" path="swarm-manifests.json" />
         <exclude domain="file" path="ant" />
         <exclude domain="file" path="unconfirmed-deposit.json" />
+        <exclude domain="file" path="unconfirmed-deposit.json.tmp" />
         <exclude domain="file" path="radicle" />
         <exclude domain="file" path="ipfs" />
         <exclude domain="file" path="tor" />

@@ -892,6 +892,28 @@ class SwarmNodeTest {
     }
 
     @Test
+    fun aHoldThatCantBeSavedLeavesNoTmpFileBehind() {
+        val dir = java.nio.file.Files.createTempDirectory("swarmnode-hold-tmp").toFile()
+        try {
+            // The rename can't land: a non-empty directory sits where the file goes.
+            File(dir, "unconfirmed-deposit.json/blocker").apply { parentFile!!.mkdirs(); writeText("x") }
+            val ops = FakeOps().apply {
+                chequebookHex = chequebook
+                walletPlur = milliBzz.multiply(java.math.BigInteger.TEN).toString()
+                chequebookBalancePlur = milliBzz.toString()
+                onDeposit = { null }
+            }
+            val node = lightNode(ops, dir.path, clock = { 1_000_000L })
+            assertThrows(DepositMaybeSentException::class.java) { node.depositChequebook(chequebook, milliBzz) }
+            node.dispose()
+            // The half-step would sit in files/, outside every backup exclude but its own.
+            assertFalse(File(dir, "unconfirmed-deposit.json.tmp").exists())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun theHoldAfterAnUnansweredDepositOutlivesAReboot() {
         val dir = java.nio.file.Files.createTempDirectory("swarmnode-hold-reboot").toFile()
         try {
