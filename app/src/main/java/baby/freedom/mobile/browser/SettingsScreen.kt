@@ -13,6 +13,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -289,6 +290,8 @@ internal fun SettingsScreen(
     var openSite by remember { mutableStateOf<String?>(null) }
     // The connected site whose × couldn't be saved: its row says so, as the site's page does.
     var disconnectFailed by remember { mutableStateOf<String?>(null) }
+    // Undo for a site's Disconnect and its rules' Remove (#423), here and on its page.
+    val undoNotices = rememberUndoNotices()
 
     val chainStore = remember(context) { ChainStore.get(context) }
     val chains by remember(chainStore) { chainStore.chains }
@@ -413,7 +416,8 @@ internal fun SettingsScreen(
             grant = site,
             accounts = walletAccounts,
             chains = chains,
-            onDisconnect = { EthereumProviders.disconnect(context, it) },
+            notices = undoNotices,
+            onDisconnect = { disconnectWithUndo(context, it, undoNotices) },
             onBack = { openSite = null },
         )
     }
@@ -499,10 +503,10 @@ internal fun SettingsScreen(
             chains = chains,
             onOpenSite = { openSite = it },
             disconnectFailed = disconnectFailed,
-            onDisconnect = { origin ->
+            onDisconnect = { grant ->
                 disconnectFailed = null
                 scope.launch {
-                    if (!EthereumProviders.disconnect(context, origin)) disconnectFailed = origin
+                    if (!disconnectWithUndo(context, grant, undoNotices)) disconnectFailed = grant.origin
                 }
             },
         )
@@ -594,6 +598,7 @@ internal fun SettingsScreen(
         // On a sub-page the ← goes up to the top level, as Back does.
         onDismiss = { if (page != null) pageUp() else onDismiss() },
     ) {
+      Box(Modifier.fillMaxSize()) {
         if (openPage == null) Column(modifier = Modifier.fillMaxSize()) {
             SettingsSearchField(
                 query = query,
@@ -669,6 +674,8 @@ internal fun SettingsScreen(
                 }
             }
         }
+        UndoSnackbarHost(undoNotices)
+      }
     }
 
     if (pickSearchEngine) {
@@ -2141,7 +2148,7 @@ private fun SitePermissionsSection(
     chains: List<Chain>,
     onOpenSite: (String) -> Unit,
     disconnectFailed: String?,
-    onDisconnect: (String) -> Unit,
+    onDisconnect: (DappGrantStore.Grant) -> Unit,
 ) {
     SectionCard(title = stringResource(R.string.settings_section_permissions)) {
         if (entries.isEmpty() && grants.isEmpty() && "empty" in visible) {
@@ -2152,44 +2159,31 @@ private fun SitePermissionsSection(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             )
         }
-        // Wallet connections first: they're what a site can do the most with.
+        // Wallet connections first: they're what a site can do the most with. The same
+        // row and labelled Disconnect as the wallet page's list (#423, audit W31).
         for (grant in grants) {
             if (DappConnectionRow(grant.origin) !in visible) continue
             val site = permissionOriginDisplay(grant.origin)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(MaterialTheme.shapes.small)
-                    .clickable(onClickLabel = stringResource(R.string.common_open)) { onOpenSite(grant.origin) }
-                    .padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            PermissionRow(
+                title = site,
+                actionLabel = stringResource(R.string.common_disconnect),
+                actionDescription = stringResource(R.string.settings_dapp_disconnect, site),
+                onAction = { onDisconnect(grant) },
+                onOpen = { onOpenSite(grant.origin) },
+                leading = Icons.Filled.AccountBalanceWallet,
+                actionTag = "dapp-disconnect",
+                modifier = Modifier.padding(start = 12.dp),
             ) {
-                Icon(
-                    Icons.Filled.AccountBalanceWallet,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurface,
+                Text(
+                    dappConnectionDetail(grant, accounts, chains),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Spacer(Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(site, fontWeight = FontWeight.Medium)
+                if (disconnectFailed == grant.origin) {
                     Text(
-                        dappConnectionDetail(grant, accounts, chains),
+                        DISCONNECT_FAILED,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    if (disconnectFailed == grant.origin) {
-                        Text(
-                            DISCONNECT_FAILED,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                }
-                IconButton(onClick = { onDisconnect(grant.origin) }) {
-                    Icon(
-                        Icons.Filled.Close,
-                        contentDescription = stringResource(R.string.settings_dapp_disconnect, site),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = MaterialTheme.colorScheme.error,
                     )
                 }
             }

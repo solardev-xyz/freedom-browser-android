@@ -58,9 +58,11 @@ class AutoApproveWarningSheetTest {
     }
 
     @Test
-    fun anUnknownFunctionsSwitchWarnsInRed() {
+    fun anUnknownFunctionsSheetOffersNoRule() {
+        // #423 (W25): a function the wallet can't name isn't offered "Don't ask again" at all.
         rule.setContent { FreedomTheme { EthereumApprovalSheet(EthereumPromptRequest(ask("0x38ed1739"), setUpWallet = {})) } }
-        rule.onNodeWithTag("ethereum-always-approve-warning").performScrollTo().assertExists()
+        rule.onNodeWithTag("ethereum-approval").assertExists()
+        rule.onNodeWithTag("ethereum-always-approve").assertDoesNotExist()
     }
 
     @Test

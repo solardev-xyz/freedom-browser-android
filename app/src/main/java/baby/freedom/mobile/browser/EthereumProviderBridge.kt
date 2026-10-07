@@ -11,6 +11,7 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.ChainlistService
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.RoutingContext
 import baby.freedom.mobile.data.AutoApproveStore
@@ -182,6 +183,11 @@ object EthereumProviders {
                 override suspend fun revokeOrigin(origin: String) = ruleStore.revokeOrigin(origin)
                 override suspend fun clear() = ruleStore.clear()
             },
+            // The catalog Settings → Chains → Add chain uses, bounded: an Add network sheet doesn't
+            // wait on a multi-MB download, it just offers the site's RPCs alone (#423).
+            catalog = { id ->
+                withTimeoutOrNull(CATALOG_WAIT_MS) { ChainlistService.get(app).entries().firstOrNull { it.id == id } }?.toChain()
+            },
         )
         p.events = EthereumProvider.Events { origin, event, data -> scope.launch { emit(origin, event, data) } }
         provider = p
@@ -236,6 +242,37 @@ object EthereumProviders {
     suspend fun disconnect(context: Context, origin: String): Boolean =
         provider?.disconnect(origin)
             ?: (AutoApproveStore.get(context).revokeOrigin(origin) && DappGrantStore.get(context).revoke(origin))
+
+    /**
+     * Undo the user's Disconnect of [origin] (#423): connected again with
+     * [account] on [chainId], with its auto-approve [rules] back
+     * ([EthereumProvider.reconnect]: only if nothing changed meanwhile).
+     * Before the provider exists there are no pages to tell, and only the
+     * stores are written, under the same conditions. False if it wasn't.
+     */
+    suspend fun reconnect(context: Context, origin: String, account: String, chainId: Long, rules: List<AutoApproveRule>): Boolean =
+        provider?.reconnect(origin, account, chainId, rules) ?: run {
+            val grants = DappGrantStore.get(context)
+            val now = grants.allOrUnreadable.first() ?: return false
+            if (now.any { it.origin == origin }) return false
+            val known = WalletAccounts.get(context).accounts.value?.accounts ?: return false
+            if (known.none { it.address.equals(account, ignoreCase = true) }) return false
+            if (!grants.grant(origin, account, chainId)) return false
+            val ruleStore = AutoApproveStore.get(context)
+            rules.filter { it.origin == origin }.forEach { ruleStore.grant(it) }
+            true
+        }
+
+    /**
+     * Undo removing [rule] (#423): back on only while its site is still
+     * connected with [account] ([EthereumProvider.restoreRule]). False if
+     * it isn't.
+     */
+    suspend fun restoreRule(context: Context, account: String, rule: AutoApproveRule): Boolean =
+        provider?.restoreRule(account, rule) ?: run {
+            val grant = DappGrantStore.get(context).allOrUnreadable.first()?.firstOrNull { it.origin == rule.origin } ?: return false
+            grant.account.equals(account, ignoreCase = true) && AutoApproveStore.get(context).grant(rule)
+        }
 
     /**
      * The Ledger account [address] is being removed: the sites connected
@@ -419,6 +456,9 @@ object EthereumProviders {
 
     /** How long a request waits for the account list to be read back after a launch. */
     private const val ACCOUNTS_WAIT_MS = 3_000L
+
+    /** The longest an Add network sheet waits for the chain catalog. */
+    private const val CATALOG_WAIT_MS = 4_000L
 }
 
 /** One `window.ethereum` request off the channel. */

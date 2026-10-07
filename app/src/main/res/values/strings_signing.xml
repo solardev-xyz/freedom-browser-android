@@ -173,7 +173,7 @@
     <!-- %1$d: seconds -->
     <string name="signing_x402_ledger_hurry">The site allows only %1$d s to confirm once the Ledger shows the payment; after that it isn\'t sent.</string>
     <!-- %1$s: how long (e.g. "1 day"); %2$s: token symbol; %3$s: network; %4$s: the amount of one payment (fixed format); %5$s: the account -->
-    <string name="signing_x402_allowance_note">For %1$s, this site\'s pages are paid for in %2$s on %3$s without asking — each at most %4$s %2$s, to the Pay to address above only — from %5$s only, up to that total. Only pages you open yourself or reach by tapping on the site, not ones it moves to on its own; and after the site refuses a payment, not until you open or reload it yourself. Only while the wallet is unlocked, never in a private tab. With another account active, you\'re asked again. Revoke it any time on the wallet page.</string>
+    <string name="signing_x402_allowance_note">For %1$s, this site\'s pages are paid for in %2$s on %3$s without asking — each at most %4$s %2$s, only to the address this payment goes to — from %5$s only, up to that total. Only pages you open yourself or reach by tapping on the site, not ones it moves to on its own; and after the site refuses a payment, not until you open or reload it yourself. Only while the wallet is unlocked, never in a private tab. With another account active, you\'re asked again. Revoke it any time on the wallet page.</string>
     <string name="signing_x402_cap_enter_amount">Enter an amount of %1$s</string>
     <!-- %1$s: amount (fixed format); %2$s: token symbol -->
     <string name="signing_x402_cap_at_least">At least this payment: %1$s %2$s</string>
@@ -189,6 +189,12 @@
     <string name="signing_x402_option">%1$s %2$s on %3$s</string>
     <string name="signing_x402_not_enough">Not enough %1$s</string>
     <string name="signing_x402_amount">Amount</string>
+    <!-- %1$s: the amount and token, e.g. 0.01 USDC. -->
+    <string name="signing_x402_headline">Pay %1$s to view this page</string>
+    <!-- %1$s: the balance and token; %2$s: the network. -->
+    <string name="signing_x402_you_have">You have %1$s on %2$s</string>
+    <!-- %1$s: the network. -->
+    <string name="signing_x402_balance_unreadable_line">Your balance on %1$s couldn\'t be read right now</string>
     <!-- %1$s: token symbol; %2$s: network -->
     <string name="signing_x402_unlisted_token">%1$s isn\'t in the wallet\'s token list: its symbol and decimals were read from the contract below, and verified on %2$s.</string>
     <string name="signing_x402_network">Network</string>
@@ -227,6 +233,11 @@
     <string name="signing_x402_chain_fallback">chain %1$s</string>
     <string name="signing_x402_no_allowances">No site pays automatically. A page that asks to be paid asks you here first.</string>
     <string name="signing_x402_revoke">Revoke</string>
+    <!-- %1$s: the site. -->
+    <string name="signing_x402_revoke_label">Revoke %1$s\'s allowance</string>
+    <!-- %1$s: the site. -->
+    <string name="signing_x402_revoke_failed">Couldn\'t revoke the allowance: the change couldn\'t be saved. Try again.</string>
+    <string name="signing_x402_undo_revoked">Revoked %1$s\'s allowance</string>
     <string name="signing_x402_payment_history">Payment history</string>
     <string name="signing_x402_no_payments">No payments yet</string>
     <plurals name="signing_x402_payments">

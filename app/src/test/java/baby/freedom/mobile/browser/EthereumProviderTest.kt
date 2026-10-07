@@ -157,6 +157,9 @@ class EthereumProviderTest {
     private var readAnswer: (String) -> Any? = { "0x1" }
     private val events = mutableListOf<Triple<String, String, String>>()
     private val asks = mutableListOf<EthAsk>()
+    /** The chainlist catalog's entries, by chain ID (#423). */
+    private val catalogChains = HashMap<Long, Chain>()
+    private var catalogFailure: Exception? = null
     private var answer: (EthAsk) -> EthAnswer = { EthAnswer.Rejected }
 
     private val provider = EthereumProvider(
@@ -173,6 +176,7 @@ class EthereumProviderTest {
         },
         sends = sends,
         autoApprove = rules,
+        catalog = { id -> catalogFailure?.let { throw it } ?: catalogChains[id] },
     ).also { p -> p.events = EthereumProvider.Events { o, e, d -> events += Triple(o, e, d.toString()) } }
 
     private fun call(method: String, params: JSONArray = JSONArray(), origin: String = site) = runBlocking {
@@ -1044,7 +1048,30 @@ class EthereumProviderTest {
         sends.prepareError = "Not enough xDAI for the network fee"
         val unpriced = call("eth_sendTransaction", tx("to" to second.address)) as EthereumProvider.Reply.Err
         assertEquals("Not enough xDAI for the network fee", unpriced.message)
-        assertTrue(asks.isEmpty())
+        // Said on a sheet too (#423, W23), which only informs: no currency named, so no Receive.
+        val sheet = asks.single() as EthAsk.CantSend
+        assertEquals("Not enough xDAI for the network fee", sheet.english)
+        assertNull(sheet.shortOf)
+    }
+
+    @Test
+    fun `an underfunded send shows the can't-send sheet naming the currency, and answers the page once it's closed`() {
+        connect()
+        sends.prepareFailure = SendException(Strings.said(R.string.send_not_enough_for_fee, "xDAI", "0.0001", "0"), shortOf = "xDAI")
+        // Closed, or Receive then Close: the page gets the reason, in English, either way.
+        for (closed in listOf<EthAnswer>(EthAnswer.Rejected, EthAnswer.Approved())) {
+            answer = { closed }
+            asks.clear()
+            val r = call("eth_sendTransaction", tx("to" to second.address)) as EthereumProvider.Reply.Err
+            assertEquals(-32603, r.code)
+            assertEquals("Not enough xDAI for the network fee (up to 0.0001 xDAI): this account has 0 xDAI", r.message)
+            val sheet = asks.single() as EthAsk.CantSend
+            assertEquals("xDAI", sheet.shortOf)
+            assertEquals(main, sheet.account)
+            assertEquals(BuiltInChains.GNOSIS, sheet.chain)
+            assertTrue(sheet.reason.startsWith("Not enough xDAI"))
+        }
+        assertTrue(sends.outcomes.isEmpty())
     }
 
     @Test
@@ -1559,5 +1586,184 @@ class EthereumProviderTest {
         assertNull(parseEthereumRequest("""{"id":1,"method":""}"""))
         assertNull(parseEthereumRequest("""{"id":1,"method":"x","params":"nope"}"""))
         assertNull(parseEthereumRequest("[".repeat(100_000)))
+    }
+
+    // ---- #423: checked RPCs for a known chain, rules offered only for named functions, Undo ----
+
+    private val polygonParams = JSONObject().put("chainId", "0x89").put("chainName", "Polygon by the site")
+        .put("nativeCurrency", JSONObject().put("name", "POL").put("symbol", "POL").put("decimals", 18))
+        .put("rpcUrls", JSONArray().put("https://rpc.site.example"))
+    private val polygonChecked = Chain(
+        id = 137,
+        name = "Polygon Mainnet",
+        symbol = "POL",
+        rpcUrls = listOf("https://polygon-rpc.com", "https://polygon.drpc.org"),
+    )
+
+    @Test
+    fun `adding a chain the catalog knows offers Freedom's RPCs and adds them unless the user picks the site's`() {
+        catalogChains[137] = polygonChecked
+        connect()
+        answer = { EthAnswer.Approved() }
+        ok(call("wallet_addEthereumChain", JSONArray().put(polygonParams)))
+        val ask = asks.single() as EthAsk.AddChain
+        assertEquals(polygonChecked, ask.checked)
+        assertEquals(listOf("https://rpc.site.example"), ask.chain.rpcUrls)
+        assertEquals(polygonChecked, grants.added.single())
+        // Back on Gnosis, then the same chain with the site's RPCs picked.
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x64"))))
+        chainList = BuiltInChains.ALL + sepolia
+        grants.added.clear()
+        asks.clear()
+        answer = { EthAnswer.Approved(siteRpcs = true) }
+        ok(call("wallet_addEthereumChain", JSONArray().put(polygonParams)))
+        assertEquals(listOf("https://rpc.site.example"), grants.added.single().rpcUrls)
+    }
+
+    @Test
+    fun `a chain the catalog doesn't have, or can't be read for, offers only the site's RPCs`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        ok(call("wallet_addEthereumChain", JSONArray().put(polygonParams)))
+        assertNull((asks.single() as EthAsk.AddChain).checked)
+        assertEquals(listOf("https://rpc.site.example"), grants.added.single().rpcUrls)
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x64"))))
+        asks.clear()
+        grants.added.clear()
+        catalogFailure = java.io.IOException("offline")
+        // Approved with "site RPCs" unset: there was no other choice, so the site's are added.
+        ok(call("wallet_addEthereumChain", JSONArray().put(polygonParams)))
+        assertNull((asks.single() as EthAsk.AddChain).checked)
+        assertEquals(listOf("https://rpc.site.example"), grants.added.single().rpcUrls)
+        // A catalog entry with no usable RPC isn't offered either.
+        catalogFailure = null
+        catalogChains[137] = polygonChecked.copy(rpcUrls = emptyList())
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x64"))))
+        asks.clear()
+        ok(call("wallet_addEthereumChain", JSONArray().put(polygonParams)))
+        assertNull((asks.single() as EthAsk.AddChain).checked)
+    }
+
+    @Test
+    fun `an unknown function's send offers no rule, but one granted before still covers it`() {
+        connect()
+        val swapData = "0x38ed1739" + "00".repeat(64)
+        answer = { EthAnswer.Approved(alwaysApprove = true) }
+        sends.outcomes += sent(1)
+        ok(call("eth_sendTransaction", tx("to" to token, "data" to swapData)))
+        assertNull((asks.single() as EthAsk.SendTransaction).autoApprove)
+        assertTrue(rules.rules.isEmpty())
+        // A rule from before #423 still applies: no sheet.
+        rules.rules += "$site|${token.lowercase()}|0x38ed1739|100"
+        asks.clear()
+        answer = { error("no sheet expected") }
+        sends.outcomes += sent(2)
+        ok(call("eth_sendTransaction", tx("to" to token, "data" to swapData)))
+        assertTrue(asks.isEmpty())
+    }
+
+    @Test
+    fun `undoing a disconnect connects the site again with its account, chain and rules, and tells its pages`() {
+        grantTransferRule()
+        val rule = AutoApproveRule(site, token.lowercase(), "0xa9059cbb", 100)
+        val before = grants.grants.getValue(site)
+        assertTrue(runBlocking { provider.disconnect(site) })
+        assertTrue(rules.rules.isEmpty())
+        events.clear()
+        assertTrue(runBlocking { provider.reconnect(site, before.account, before.chainId, listOf(rule)) })
+        assertEquals(before, grants.grants[site])
+        assertEquals(setOf(rule.key), rules.rules)
+        assertEquals(listOf(Triple(site, "accountsChanged", JSONArray().put(main.address).toString())), events)
+        assertEquals("[\"${main.address}\"]", ok(call("eth_accounts")).toString())
+    }
+
+    @Test
+    fun `undo doesn't overwrite a newer connection, bring back a removed account, or restore another site's rule`() {
+        connect()
+        val before = grants.grants.getValue(site)
+        assertTrue(runBlocking { provider.disconnect(site) })
+        // Connected again meanwhile, with the other account: Undo leaves that alone.
+        connect(second)
+        assertFalse(runBlocking { provider.reconnect(site, before.account, before.chainId, emptyList()) })
+        assertEquals(second.address, grants.grants.getValue(site).account)
+        assertTrue(runBlocking { provider.disconnect(site) })
+        // The account is gone from the wallet: nothing to connect with.
+        wallet.list = listOf(second)
+        assertFalse(runBlocking { provider.reconnect(site, main.address, 100, emptyList()) })
+        assertNull(grants.grants[site])
+        // Only this site's own rules come back.
+        wallet.list = listOf(main, second)
+        val other = AutoApproveRule("https://other.example", token.lowercase(), "0xa9059cbb", 100)
+        assertTrue(runBlocking { provider.reconnect(site, main.address, 100, listOf(other)) })
+        assertTrue(rules.rules.isEmpty())
+    }
+
+    @Test
+    fun `undoing a disconnect on another chain than the session's tells the pages the chain changed`() {
+        connect()
+        assertTrue(runBlocking { provider.disconnect(site) })
+        // Switched while disconnected: the session moved to Ethereum.
+        answer = { EthAnswer.Approved() }
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
+        events.clear()
+        assertTrue(runBlocking { provider.reconnect(site, main.address, 100, emptyList()) })
+        assertTrue(events.contains(Triple(site, "chainChanged", "0x64")))
+        assertEquals("0x64", ok(call("eth_chainId")))
+    }
+
+    @Test
+    fun `a removed rule comes back only while its site is connected with the account it was granted for`() {
+        connect()
+        val rule = AutoApproveRule(site, token.lowercase(), "0xa9059cbb", 100)
+        assertTrue(runBlocking { provider.restoreRule(main.address, rule) })
+        assertEquals(setOf(rule.key), rules.rules)
+        rules.rules.clear()
+        assertFalse(runBlocking { provider.restoreRule(second.address, rule) })
+        assertTrue(runBlocking { provider.disconnect(site) })
+        assertFalse(runBlocking { provider.restoreRule(main.address, rule) })
+        assertTrue(rules.rules.isEmpty())
+    }
+
+    @Test
+    fun `an EIP-2612 permit reaches the sheet decoded, from the fields the signature covers`() {
+        connect()
+        val usdc = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        chainList = BuiltInChains.ALL + sepolia
+        answer = { EthAnswer.Approved() }
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
+        asks.clear()
+        val typed = JSONObject()
+            .put(
+                "types",
+                JSONObject()
+                    .put(
+                        "EIP712Domain",
+                        JSONArray()
+                            .put(JSONObject().put("name", "name").put("type", "string"))
+                            .put(JSONObject().put("name", "chainId").put("type", "uint256"))
+                            .put(JSONObject().put("name", "verifyingContract").put("type", "address")),
+                    )
+                    .put(
+                        "Permit",
+                        JSONArray()
+                            .put(JSONObject().put("name", "owner").put("type", "address"))
+                            .put(JSONObject().put("name", "spender").put("type", "address"))
+                            .put(JSONObject().put("name", "value").put("type", "uint256"))
+                            .put(JSONObject().put("name", "nonce").put("type", "uint256"))
+                            .put(JSONObject().put("name", "deadline").put("type", "uint256")),
+                    ),
+            )
+            .put("primaryType", "Permit")
+            .put("domain", JSONObject().put("name", "USD Coin").put("chainId", 1).put("verifyingContract", usdc))
+            .put(
+                "message",
+                JSONObject().put("owner", main.address).put("spender", "0x1111111254EEB25477B68fb85Ed929f73A960582")
+                    .put("value", TxDecode.MAX_UINT256.toString()).put("nonce", 0).put("deadline", 1_893_456_000),
+            )
+        ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(typed.toString())))
+        val permit = (asks.single() as EthAsk.SignTypedData).permit!!
+        assertEquals("USDC", permit.grants.single().token.symbol)
+        assertTrue(permit.grants.single().unlimited)
+        assertEquals("Allow 0x1111…0582 to spend UNLIMITED USDC", permitHeadline(permit))
     }
 }

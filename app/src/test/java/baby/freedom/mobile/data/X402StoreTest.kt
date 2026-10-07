@@ -446,4 +446,40 @@ class X402StoreTest {
         // A hold queued after the clear isn't stale.
         assertEquals(false, s.clearedSince(s.clearEra))
     }
+
+    // ---- Undo after Revoke (#423) ----
+
+    @Test
+    fun `a revoked allowance comes back as it was on Undo`() = runBlocking {
+        val s = store()
+        assertTrue(s.grant(cap = 100, spent = 30))
+        val a = s.allowances.first().single()
+        val era = s.clearEra
+        assertTrue(s.revoke(a.origin, a.chainId, a.asset, a.account))
+        assertTrue(s.allowances.first().isEmpty())
+        assertTrue(s.restore(a, era))
+        assertEquals(listOf(a), s.allowances.first())
+    }
+
+    @Test
+    fun `Undo doesn't overwrite a newer allowance, revive one past its window, or undo a wallet removal`() = runBlocking {
+        val s = store()
+        s.grant(cap = 100, spent = 30)
+        val a = s.allowances.first().single()
+        val era = s.clearEra
+        s.revoke(a.origin, a.chainId, a.asset, a.account)
+        // A new one granted meanwhile stays.
+        s.grant(cap = 50)
+        assertFalse(s.restore(a, era))
+        assertEquals(BigInteger.valueOf(50), s.allowances.first().single().cap)
+        s.revoke(a.origin, a.chainId, a.asset, a.account)
+        // Past its window.
+        now += 2 * hour
+        assertFalse(s.restore(a, era))
+        now -= 2 * hour
+        // The wallet was removed (every allowance cleared) after the revoke.
+        assertTrue(s.clear())
+        assertFalse(s.restore(a, era))
+        assertTrue(s.allowances.first().isEmpty())
+    }
 }

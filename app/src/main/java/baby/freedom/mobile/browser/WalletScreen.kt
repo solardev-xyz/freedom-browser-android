@@ -743,6 +743,8 @@ fun WalletScreen(
     var x402HistoryOpen by remember { mutableStateOf(false) }
     // The connected site whose page is open (#111), by origin, so it follows the stored grant.
     var openSite by remember { mutableStateOf<String?>(null) }
+    // Undo for Disconnect, Revoke and Remove rule (#423): shown on the list and on a site's page.
+    val undoNotices = rememberUndoNotices()
     // The connected site whose Disconnect couldn't be saved: its line says so, as the site's page does.
     var disconnectFailed by remember { mutableStateOf<String?>(null) }
     val swarmGrants by remember(context) { SwarmGrantStore.get(context).all }.collectAsState(initial = emptyList())
@@ -1029,7 +1031,8 @@ fun WalletScreen(
                 grant = grant,
                 accounts = accountList?.accounts.orEmpty(),
                 chains = allChains.orEmpty(),
-                onDisconnect = { EthereumProviders.disconnect(context, it) },
+                notices = undoNotices,
+                onDisconnect = { disconnectWithUndo(context, it, undoNotices) },
                 onBack = { openSite = null },
             )
             return
@@ -1106,6 +1109,7 @@ fun WalletScreen(
     }
     BackHandler(onBack = dismiss)
     FullScreenScaffold(title = stringResource(R.string.wallet_title), onDismiss = dismiss) {
+      Box(Modifier.fillMaxSize()) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -1385,10 +1389,10 @@ fun WalletScreen(
                     accounts = accountList?.accounts.orEmpty(),
                     onOpen = { openSite = it },
                     disconnectFailed = disconnectFailed,
-                    onRevoke = { origin ->
+                    onRevoke = { grant ->
                         disconnectFailed = null
                         scope.launch {
-                            if (!EthereumProviders.disconnect(context, origin)) disconnectFailed = origin
+                            if (!disconnectWithUndo(context, grant, undoNotices)) disconnectFailed = grant.origin
                         }
                     },
                 )
@@ -1422,7 +1426,7 @@ fun WalletScreen(
                         allowances = x402Allowances,
                         payments = x402Payments.size,
                         chains = allChains.orEmpty(),
-                        onRevoke = { a -> scope.launch { x402.revoke(a.origin, a.chainId, a.asset, a.account) } },
+                        onRevoke = { a -> scope.launch { revokeWithUndo(x402, a, undoNotices) } },
                         onOpenHistory = {
                             error = null
                             x402HistoryOpen = true
@@ -1458,6 +1462,8 @@ fun WalletScreen(
                 }
             }
         }
+        UndoSnackbarHost(undoNotices)
+      }
     }
 
     if (choosingRestore && state == Vault.State.Empty && backupEntry == true) {

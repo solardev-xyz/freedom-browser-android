@@ -363,6 +363,29 @@ class X402Store internal constructor(
     suspend fun revoke(origin: String, chainId: Long, asset: String, account: String): Boolean =
         write { it.remove(allowKey(origin, chainId, asset, account)) }
 
+    /**
+     * Put back [a], as it was, after the user revoked it and tapped Undo
+     * (#423): only if no [clear] began since [era] ([clearEra], taken when
+     * it was revoked — a removed wallet's allowances stay gone), it's still
+     * in its window, and the site hasn't been given a new one for that
+     * token meanwhile. `false` if it wasn't put back.
+     */
+    suspend fun restore(a: Allowance, era: Long): Boolean {
+        if (clearedSince(era) != false) return false
+        if (!live(a, clock())) return false
+        var put = false
+        val written = write { prefs ->
+            // Checked again in the write, which a clear's own write can't interleave with.
+            if (clearedSince(era) != false) return@write
+            val key = allowKey(a.origin, a.chainId, a.asset, a.account)
+            if (prefs[key] == null) {
+                prefs[key] = encodeAllowance(a)
+                put = true
+            }
+        }
+        return written && put
+    }
+
     /** Record [payment] at the top of the history; `false` if it couldn't be written. */
     suspend fun record(payment: Payment): Boolean = write { prefs ->
         val list = prefs[HISTORY]?.let(::decodeHistory).orEmpty()

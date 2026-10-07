@@ -45,8 +45,14 @@ import org.json.JSONObject
  * in the app language) and what to tell a site or a peer that asked for
  * it ([english]: developer-facing, never the user's language, #280).
  */
-class SendException private constructor(message: String, cause: Throwable?, val english: String) : Exception(message, cause) {
-    constructor(said: Said, cause: Throwable? = null) : this(said.text, cause, said.english)
+class SendException private constructor(
+    message: String,
+    cause: Throwable?,
+    val english: String,
+    /** The currency the account hasn't enough of (its symbol), when that's the reason; a site's sheet then offers Receive (#423). */
+    val shortOf: String? = null,
+) : Exception(message, cause) {
+    constructor(said: Said, cause: Throwable? = null, shortOf: String? = null) : this(said.text, cause, said.english, shortOf)
 
     companion object {
         /**
@@ -1188,10 +1194,11 @@ class WalletSender internal constructor(
             val fees = async { gas.fees(chainId) }
             val held = tokenBalance.await() ?: native.await()
             // A site's call may carry no value: the fee check below says what's missing then.
-            if (held.signum() == 0 && request.dapp == null) throw SendException(Strings.said(R.string.send_no_token, token.symbol))
+            if (held.signum() == 0 && request.dapp == null) throw SendException(Strings.said(R.string.send_no_token, token.symbol), shortOf = token.symbol)
             if (!all && request.amount > held) {
                 throw SendException(
                     Strings.said(R.string.send_not_enough_token, token.symbol, SendAmounts.exact(held, token.decimals)),
+                    shortOf = token.symbol,
                 )
             }
             // Max: all of a token; all of the native currency is priced first, then less the fee.
@@ -1224,13 +1231,13 @@ class WalletSender internal constructor(
             val has = SendAmounts.exact(nativeBalance, request.chain.decimals)
             if (all && token.isNative) {
                 val rest = nativeBalance - maxFee
-                if (rest.signum() <= 0) throw SendException(Strings.said(R.string.send_not_enough_for_fee_all, symbol, fee, has))
+                if (rest.signum() <= 0) throw SendException(Strings.said(R.string.send_not_enough_for_fee_all, symbol, fee, has), shortOf = symbol)
                 sending = sending.copy(amount = rest)
                 tx = tx.copy(value = rest)
             }
             if (maxFee + tx.value > nativeBalance) {
                 val what = if (token.isNative && tx.value.signum() > 0) R.string.send_not_enough_for_amount_and_fee else R.string.send_not_enough_for_fee
-                throw SendException(Strings.said(what, symbol, fee, has))
+                throw SendException(Strings.said(what, symbol, fee, has), shortOf = symbol)
             }
             SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash, sendsBefore, all, l1Fee)
         }

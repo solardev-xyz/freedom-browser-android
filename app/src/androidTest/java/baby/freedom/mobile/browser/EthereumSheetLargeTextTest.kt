@@ -5,6 +5,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import baby.freedom.mobile.chains.ChainInput
 import baby.freedom.mobile.ui.FreedomTheme
@@ -46,6 +49,9 @@ class EthereumSheetLargeTextTest {
         )
         var request by androidx.compose.runtime.mutableStateOf(EthereumPromptRequest(ask(false), setUpWallet = {}))
         rule.setContent { FreedomTheme { EthereumApprovalSheet(request) } }
+        // The summary says it (#423), and Details names it as before.
+        rule.onNodeWithText("From Account 1 · on any network").assertExists()
+        rule.onNodeWithTag("ethereum-details").performScrollTo().performClick()
         rule.onNodeWithText("Any — the signature names no chain").assertExists()
         rule.onNodeWithText("Chain ID 100").assertDoesNotExist()
         request = EthereumPromptRequest(ask(true), setUpWallet = {})
@@ -69,6 +75,8 @@ class EthereumSheetLargeTextTest {
         val shown = rule.onNodeWithText(name).fetchSemanticsNode().boundsInRoot
         val id = rule.onNodeWithText("Chain ID 666").fetchSemanticsNode().boundsInRoot
         assertTrue("ID $id not right under the name $shown", id.top >= shown.bottom && id.top - shown.bottom < 24)
+        // The chain it leaves, with its ID, under Details (#423).
+        rule.onNodeWithTag("ethereum-details").performScrollTo().performClick()
         rule.onNodeWithText("Chain ID 100").assertExists()
     }
 

@@ -65,6 +65,8 @@ sealed interface EthAsk {
          * field by field, so it will show only these two hashes (#239).
          */
         val ledgerHashes: LedgerTypedDataHashes? = null,
+        /** What the data does, when it's a permit the wallet can read ([TxDecode.permit], #423): the sheet's summary. */
+        val permit: DecodedPermit? = null,
     ) : EthAsk
 
     /**
@@ -83,11 +85,33 @@ sealed interface EthAsk {
         val ruled: Boolean = false,
     ) : EthAsk
 
+    /**
+     * `eth_sendTransaction` that can't be sent as asked (#423, audit W23):
+     * not enough of [shortOf] (the currency it's short of; null when the
+     * reason is another, a call the chain refuses or no RPC answering),
+     * [reason] saying why in the app's language. The sheet only informs —
+     * Receive and Close — and the page gets [english] once it's closed.
+     */
+    data class CantSend(
+        override val origin: String,
+        val chain: Chain,
+        val account: WalletAccount,
+        val reason: String,
+        val english: String,
+        val shortOf: String?,
+    ) : EthAsk
+
     /** `wallet_switchEthereumChain` (or `wallet_addEthereumChain` for a chain the wallet already has). */
     data class SwitchChain(override val origin: String, val from: Chain, val to: Chain) : EthAsk
 
-    /** `wallet_addEthereumChain` for a chain the wallet doesn't have: add [chain] and switch the site to it. */
-    data class AddChain(override val origin: String, val chain: Chain) : EthAsk
+    /**
+     * `wallet_addEthereumChain` for a chain the wallet doesn't have: add
+     * [chain] (as the site describes it) and switch the site to it. [checked]
+     * is the same chain from Freedom's own list — built in, or the
+     * chainlist catalog's key-free RPCs — offered first instead of the
+     * site's RPCs (#423, audit W27); null when the chain isn't on it.
+     */
+    data class AddChain(override val origin: String, val chain: Chain, val checked: Chain? = null) : EthAsk
 
     /** A page answered `402 Payment Required` with x402 terms (#140): pay it ([X402Payments]). */
     data class Payment(override val origin: String, val payment: X402Ask) : EthAsk
@@ -122,12 +146,15 @@ sealed interface EthAnswer {
      * [account]: the one the user picked to share, for [EthAsk.Connect];
      * [payment]: the offer picked and any allowance granted, for [EthAsk.Payment];
      * [alwaysApprove]: for [EthAsk.SendTransaction], also turn its
-     * [EthAsk.SendTransaction.autoApprove] rule on.
+     * [EthAsk.SendTransaction.autoApprove] rule on;
+     * [siteRpcs]: for [EthAsk.AddChain] with [EthAsk.AddChain.checked], add
+     * the chain with the site's RPCs after all rather than the checked ones.
      */
     data class Approved(
         val account: WalletAccount? = null,
         val payment: X402Choice? = null,
         val alwaysApprove: Boolean = false,
+        val siteRpcs: Boolean = false,
     ) : EthAnswer
 }
 
@@ -168,6 +195,12 @@ class EthereumProvider(
     private val autoApprove: AutoApprove,
     /** Where typed data is parsed and hashed: never the main thread, which a page's payload could otherwise hold up. */
     private val compute: CoroutineContext = Dispatchers.Default,
+    /**
+     * Chain [id] from the chainlist catalog with its key-free RPCs, or null
+     * when the catalog doesn't have it (or can't be read quickly): what an
+     * Add network sheet offers instead of the site's RPCs (#423).
+     */
+    private val catalog: suspend (id: Long) -> Chain? = { null },
 ) {
     /**
      * Connected sites ([baby.freedom.mobile.data.DappGrantStore]) and the
@@ -397,6 +430,56 @@ class EthereumProvider(
     }
 
     /**
+     * Undo a [disconnect] (#423, audit W31): connect [origin] again with
+     * [account] on [chainId], and turn its [rules] back on — the user's own
+     * Undo, seconds after their Disconnect, so no sheet. Only while nothing
+     * has changed since: the site hasn't connected again meanwhile (with
+     * whatever account it was given then) and the wallet still has the
+     * account. Its pages are told as on a connection: `accountsChanged`,
+     * and `chainChanged` when [chainId] isn't the chain they were left on.
+     * False if it wasn't restored. Not cancellable, and holds [siteLinks],
+     * as [disconnect].
+     */
+    suspend fun reconnect(origin: String, account: String, chainId: Long, rules: List<AutoApproveRule>): Boolean =
+        withContext(NonCancellable) {
+            siteLinks.withLock {
+                val already = try {
+                    grants.grantFor(origin)
+                } catch (e: GrantsUnreadable) {
+                    return@withLock false
+                }
+                if (already != null) return@withLock false
+                val kept = wallet.accounts()?.firstOrNull { it.address.equals(account, ignoreCase = true) } ?: return@withLock false
+                val list = runCatching { chains() }.getOrNull() ?: return@withLock false
+                if (list.none { it.id == chainId }) return@withLock false
+                val before = synchronized(sessionChains) { sessionChains[origin] } ?: DEFAULT_CHAIN_ID
+                if (!grants.grant(origin, kept.address, chainId)) return@withLock false
+                synchronized(sessionChains) { sessionChains.remove(origin) }
+                // Only this site's own rules, each as it was.
+                rules.filter { it.origin == origin }.forEach { autoApprove.grant(it) }
+                events.emit(origin, "accountsChanged", JSONArray().put(kept.address))
+                if (before != chainId) events.emit(origin, "chainChanged", hex(chainId))
+                true
+            }
+        }
+
+    /**
+     * Undo removing [rule] (#423): turn it on again — only while its site
+     * is still connected with [account], the account it was granted for, as
+     * [grantRule] holds. False if it wasn't.
+     */
+    suspend fun restoreRule(account: String, rule: AutoApproveRule): Boolean = withContext(NonCancellable) {
+        siteLinks.withLock {
+            val now = try {
+                connectedAccount(rule.origin)
+            } catch (e: GrantsUnreadable) {
+                null
+            }
+            now != null && now.address.equals(account, ignoreCase = true) && autoApprove.grant(rule)
+        }
+    }
+
+    /**
      * Held while a site's connection or its auto-approve rules change
      * ([connect], [disconnect], [disconnectAll], [grantRule]), so a rule is
      * only ever written for a site that is connected, with the account it
@@ -576,12 +659,33 @@ class EthereumProvider(
         // does, approving an Add sheet showing the site's name and RPCs would keep the stored
         // ones instead (#215 R5-M1). Refuse rather than show a sheet that may not be true.
         if (list == null) return chainListUnreadable()
-        val chain = chainFromParams(id, p, allowLoopback = RpcUrls.isLoopbackUrl(origin))
-        ask(EthAsk.AddChain(origin, chain)).let { if (it !is EthAnswer.Approved) return refused(it) }
+        val siteChain = chainFromParams(id, p, allowLoopback = RpcUrls.isLoopbackUrl(origin))
+        val checked = checkedChain(id)
+        val answer = ask(EthAsk.AddChain(origin, siteChain, checked))
+        if (answer !is EthAnswer.Approved) return refused(answer)
+        val chain = if (checked != null && !answer.siteRpcs) checked else siteChain
         if (!grants.addChain(chain)) return Reply.Err(INTERNAL, "Couldn't add the chain")
         if (!setChainFor(origin, chain.id)) return Reply.Err(INTERNAL, "Couldn't save the change")
         events.emit(origin, "chainChanged", chain.hexId)
         return Reply.Ok(JSONObject.NULL)
+    }
+
+    /**
+     * Chain [id] as Freedom knows it, with RPCs it picked rather than the
+     * site: a built-in one (removed from the list, else it would just be
+     * switched to), or the chainlist catalog's entry with at least one
+     * key-free RPC. Null when neither has it; never the catalog's word for a
+     * built-in chain.
+     */
+    private suspend fun checkedChain(id: Long): Chain? {
+        BuiltInChains.ALL.firstOrNull { it.id == id }?.let { return it }
+        return try {
+            catalog(id)?.takeIf { it.id == id && it.rpcUrls.isNotEmpty() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun chainListUnreadable() = Reply.Err(INTERNAL, "Couldn't read the wallet's chain list; try again")
@@ -699,6 +803,8 @@ class EthereumProvider(
             // Only what the signature covers: a key the types don't declare isn't signed.
             messageJson = shown,
             ledgerHashes = ledgerHashes,
+            // Read from the same declared fields the digest covers; null for anything else.
+            permit = withContext(compute) { TxDecode.permit(data, chain.id) },
         )
         ask(ask0).let { if (it !is EthAnswer.Approved) return refused(it) }
         return signed { wallet.signTypedData(account, data, digest) }
@@ -750,12 +856,15 @@ class EthereumProvider(
         val request = SendRequest(chain, TokenRegistry.native(chain), account, to, value, DappCall(origin, data, gas))
         var quote = when (val q = prepare(request)) {
             is SendQuote -> q
-            else -> return q as Reply
+            else -> return cantSend(origin, request, q as SendException, ask)
         }
         // The one rule that could cover this call (#112): this site, this contract, this function, this chain.
         // None for a Ledger's account (#142): the Ledger asks for every transaction, so "goes out
         // without asking" can't hold, and its dialog would pop up with no sheet to say what for.
         val rule = if (account.isLedger) null else AutoApproveRule.eligible(origin, to, value, data, chain.id)
+        // Turned on from a sheet only for a function the wallet can name (#423, audit W25): a rule
+        // granted earlier for another still covers its calls ([ruled]), but none is offered anew.
+        val offered = rule?.takeIf { it.offerable }
         var repriced = false
         // Turned on in the last sheet confirmed; written only once its send has gone out (R2-M1).
         var turnedOn = false
@@ -767,17 +876,17 @@ class EthereumProvider(
             // for a send that takes the place of one the user stopped tracking: that warning is theirs
             // to read, and never at a fee above what one RPC's word may set (#233).
             if (!ruled || !wallet.unlocked() || quote.replaces != null || !GasOracle.quiet(quote.tx.fees, chain.id)) {
-                val answer = ask(EthAsk.SendTransaction(origin, quote, repriced, rule, ruled))
+                val answer = ask(EthAsk.SendTransaction(origin, quote, repriced, if (ruled) rule else offered, ruled))
                 if (answer !is EthAnswer.Approved) return refused(answer)
                 // A repriced sheet opens with the switch off: what counts is the one confirmed last.
-                turnedOn = answer.alwaysApprove && rule != null && !ruled
+                turnedOn = answer.alwaysApprove && offered != null && !ruled
             }
             when (val s = sends.submit(quote)) {
                 is Submitted.Sent -> {
                     // Only together with the send it was confirmed with: one that was busy,
                     // failed or ran out of reprices leaves no rule behind. A rule that couldn't
                     // be saved doesn't undo the send.
-                    if (turnedOn && rule != null) grantRule(origin, account, rule)
+                    if (turnedOn && offered != null) grantRule(origin, account, offered)
                     return Reply.Ok(s.hash)
                 }
                 Submitted.Busy -> return busy()
@@ -788,7 +897,7 @@ class EthereumProvider(
                 Submitted.Stale -> {
                     quote = when (val q = prepare(request)) {
                         is SendQuote -> q
-                        else -> return q as Reply
+                        else -> return cantSend(origin, request, q as SendException, ask)
                     }
                     repriced = true
                 }
@@ -803,14 +912,25 @@ class EthereumProvider(
     )
 
     /**
-     * The priced [request], or the [Reply] saying why it can't be sent (a
-     * [SendException]'s words, in English: the page must not learn the
-     * app language, #280).
+     * The priced [request], or the [SendException] saying why it can't be
+     * sent.
      */
     private suspend fun prepare(request: SendRequest): Any = try {
         sends.prepare(request)
     } catch (e: SendException) {
-        Reply.Err(INTERNAL, e.english)
+        e
+    }
+
+    /**
+     * [request] can't be sent ([e]): say so on a sheet rather than only to
+     * the page (#423, audit W23) — not enough funds names the currency,
+     * so the sheet can offer Receive — and once the sheet is closed, answer
+     * the page with the reason in English (the page must not learn the app
+     * language, #280).
+     */
+    private suspend fun cantSend(origin: String, request: SendRequest, e: SendException, ask: suspend (EthAsk) -> EthAnswer): Reply {
+        ask(EthAsk.CantSend(origin, request.chain, request.from, e.message ?: e.english, e.english, e.shortOf))
+        return Reply.Err(INTERNAL, e.english)
     }
 
     // ---- Reads ----
