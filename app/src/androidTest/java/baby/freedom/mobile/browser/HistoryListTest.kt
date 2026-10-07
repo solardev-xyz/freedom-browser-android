@@ -14,6 +14,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performClick
@@ -144,6 +145,8 @@ class HistoryListTest {
         // Flat rows (#418): the host, not the whole address.
         rule.onAllNodesWithText("example.com", substring = true).assertCountEquals(3)
         rule.onNodeWithText("https://example.com/1").assertDoesNotExist()
+        // TalkBack still reads the full address on the row.
+        rule.onNode(hasText("Page 1") and hasContentDescription("https://example.com/1")).assertExists()
         rule.onNode(hasText("Page 1") and hasClickAction()).performTouchInput { longClick(center) }
         rule.onNodeWithText("https://example.com/1").assertIsDisplayed()
     }
