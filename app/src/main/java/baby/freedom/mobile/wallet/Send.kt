@@ -1838,7 +1838,8 @@ class WalletSender internal constructor(
                 e.insufficientFunds -> Strings.said(R.string.send_estimate_insufficient, symbol)
                 e.data != null || e.code == ChainRpcException.EXECUTION_REVERTED || REVERTED.containsMatchIn(e.rpcMessage) -> {
                     val reason = e.data?.let(::revertReason) ?: REVERTED.find(e.rpcMessage)?.let { e.rpcMessage.substring(it.range.last + 1).trim(' ', ':') }
-                    val why = reason?.takeIf { it.isNotBlank() }?.let(::clip)
+                    // Judged after clipping: a reason made only of hidden characters is no reason (#431 R4-M2).
+                    val why = reason?.let(::clip)?.takeIf { it.isNotBlank() }
                     when {
                         request.dapp != null -> why?.let { Strings.said(R.string.send_estimate_contract_refuses_reason, it) }
                             ?: Strings.said(R.string.send_estimate_contract_refuses)
@@ -1935,7 +1936,8 @@ class WalletSender internal constructor(
          */
         internal fun clip(text: String): String {
             val out = StringBuilder()
-            val scan = MessageSigning.Scan()
+            // Judged on what's kept: a dropped code point doesn't end a mark run (#431 R4-M1).
+            val scan = MessageSigning.Scan(dropsHidden = true)
             var space = false
             text.codePoints().forEach { cp ->
                 if (Character.isWhitespace(cp) || Character.isSpaceChar(cp) || cp == 0x85) {

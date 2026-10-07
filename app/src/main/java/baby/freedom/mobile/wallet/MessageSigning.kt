@@ -127,13 +127,20 @@ object MessageSigning {
     /**
      * [hides] over a string, a code point at a time in order: carries the
      * previous code point and the length of the combining-mark run it ends.
+     *
+     * With [dropsHidden], for a caller that drops every code point that
+     * [hides] (as [WalletSender.clip] does), a hidden code point leaves the
+     * state as it was: what's judged is the text that's left, so marks on
+     * either side of a dropped U+200B/U+2060/U+2065 count as one run — they
+     * do stack on one letter once it's gone.
      */
-    class Scan {
+    class Scan(private val dropsHidden: Boolean = false) {
         private var prev = -1
         private var marks = 0
 
         fun hides(c: Int): Boolean {
             val hidden = hides(c, prev, marks)
+            if (hidden && dropsHidden) return true
             marks = if (isMark(c)) marks + 1 else 0
             prev = c
             return hidden

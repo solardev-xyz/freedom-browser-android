@@ -1281,6 +1281,13 @@ class SendTest {
     fun `a composed call a contract would refuse says so without calling it a transfer`() {
         val e = WalletSender.estimateFailure(ChainRpcException.Rpc(3, "execution reverted: nope", null), call())
         assertEquals("The contract would refuse this transaction: “nope”", e.message)
+        // A reason made only of hidden characters is no reason, not an empty quote (R4-M2).
+        for (hidden in listOf("execution reverted: \u200B\u202E", "execution reverted: \u2028 \u2060")) {
+            assertEquals(
+                "The contract would refuse this transaction.",
+                WalletSender.estimateFailure(ChainRpcException.Rpc(3, hidden, null), call()).message,
+            )
+        }
     }
 
     @Test
@@ -2197,6 +2204,12 @@ class SendTest {
         assertEquals("abcd", WalletSender.clip("a\u202Eb\u200Bc\uDB40\uDC41\uDB40\uDC7Fd\uDB40\uDD00"))
         // Combining marks stack three deep at most.
         assertEquals("e\u0301\u0301\u0301", WalletSender.clip("e" + "\u0301".repeat(20)))
+        // ... and a dropped invisible between runs doesn't restart the count: they'd stack on one letter (R4-M1).
+        for (gap in listOf("\u200B", "\u2060", "\u2065", "\uDB40\uDC01")) {
+            assertEquals("e\u0301\u0301\u0301", WalletSender.clip("e" + ("\u0301\u0301\u0301" + gap).repeat(30)))
+        }
+        // A space between runs is kept, so the next run sits on it, three deep again.
+        assertEquals("e\u0301\u0301\u0301 \u0301\u0301\u0301", WalletSender.clip("e\u0301\u0301\u0301 \u0301\u0301\u0301\u0301"))
         // Real text and emoji stay.
         assertEquals("ERC20: transfer amount exceeds balance ❤️ 🙂", WalletSender.clip(" ERC20: transfer amount exceeds balance ❤️ 🙂 "))
         // Cut at 160 code points without splitting a surrogate pair.
