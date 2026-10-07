@@ -659,7 +659,17 @@ class NodeSettings private constructor(
             true
         }
 
-    /** Whether name resolution asks the Colibri verifier for a proof first (#100). */
+    /**
+     * The *Colibri proofs* switch alone, straight from this file (no
+     * migration, no key store): what the chain-data router's Colibri tier
+     * follows ([baby.freedom.mobile.chains.rpc.ColibriReads], #329).
+     */
+    val ensColibri: Flow<Boolean> = store.data.map { prefs -> prefs[Keys.ENS_COLIBRI] ?: true }
+
+    /**
+     * Whether name resolution asks the Colibri verifier for a proof first
+     * (#100), and the chain-data router's reads go to it (#329).
+     */
     suspend fun setEnsColibri(enabled: Boolean): EnsEdit =
         editEnsRpc({ it }) {
             store.edit { it[Keys.ENS_COLIBRI] = enabled }

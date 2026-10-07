@@ -7,6 +7,7 @@ import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.ChainSource
 import baby.freedom.mobile.chains.rpc.ChainTrust
+import baby.freedom.mobile.chains.rpc.ProofTierGap
 import baby.freedom.mobile.data.ChainStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -140,6 +141,47 @@ class ChainDetailPageTest {
         for (r in ChainStore.RpcAddResult.entries - ChainStore.RpcAddResult.ADDED) {
             assert(!userRpcAddError(r).isNullOrBlank()) { r }
         }
+    }
+
+    @Test
+    fun eachProofTierThatIsntAnsweringSaysWhy() {
+        val gnosis = BuiltInChains.GNOSIS
+        // Both answering: nothing to explain.
+        assertEquals(emptyList<String>(), proofTierNotes(gnosis, emptyMap()))
+        // Light client syncing, Colibri answering: one note, the light client's.
+        val syncing = proofTierNotes(gnosis, mapOf(ChainSource.MYOTIS to ProofTierGap.NOT_READY))
+        assertEquals(1, syncing.size)
+        assertTrue(syncing[0].contains("P2P light client"))
+        // Colibri missing from the steps is never silent, whatever the cause.
+        for ((gap, words) in listOf(
+            ProofTierGap.OFF to "Colibri proofs are off",
+            ProofTierGap.UNREACHABLE to "couldn't be reached",
+            ProofTierGap.NOT_IN_BUILD to "isn't available in this build",
+        )) {
+            val notes = proofTierNotes(gnosis, mapOf(ChainSource.MYOTIS to ProofTierGap.NOT_READY, ChainSource.COLIBRI to gap))
+            assertEquals(2, notes.size)
+            assertTrue("$gap: ${notes[1]}", notes[1].contains("Colibri") && notes[1].contains(words) && notes[1].contains("Gnosis"))
+        }
+        // A chain neither covers: no notes.
+        val polygon = gnosis.copy(id = 137, name = "Polygon")
+        assertEquals(
+            emptyList<String>(),
+            proofTierNotes(polygon, mapOf(ChainSource.MYOTIS to ProofTierGap.NOT_SERVED, ChainSource.COLIBRI to ProofTierGap.NOT_SERVED)),
+        )
+    }
+
+    @Test
+    fun theOpeningLineAndTheStepsCountOnlyTheProofTiersAnsweringNow() {
+        // #329 on #426: the page's reassurance line and its steps share one
+        // predicate, so neither claims a proof tier that isn't answering.
+        val gnosis = BuiltInChains.GNOSIS
+        val policy = ChainAccessPolicy.default(gnosis.id).sanitized(gnosis.id)
+        val syncing = tierAnswers(mapOf(ChainSource.MYOTIS to ProofTierGap.NOT_READY))
+        assertEquals(ReadAssurance.Proof(ChainSource.COLIBRI, fallbackTo = ReadAssurance.Fallback.PUBLIC), readAssurance(gnosis, policy, syncing))
+        assertTrue(readSteps(gnosis, policy, syncing).none { "light client" in it })
+        assertEquals(ReadAssurance.Proof(ChainSource.MYOTIS, fallbackTo = ReadAssurance.Fallback.PUBLIC), readAssurance(gnosis, policy, tierAnswers(emptyMap())))
+        val neither = tierAnswers(mapOf(ChainSource.MYOTIS to ProofTierGap.NOT_READY, ChainSource.COLIBRI to ProofTierGap.OFF))
+        assertTrue(readAssurance(gnosis, policy, neither) is ReadAssurance.CrossChecked)
     }
 
     // #426: the list's status and the page's opening line, from one ReadAssurance.

@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.currentTime
@@ -22,6 +23,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -399,12 +401,75 @@ class ChainDataRouterTest {
     }
 
     @Test
+    fun aSitesChoiceReadWaitsForTheQuorumLikeTheWallets() = runTest {
+        // An x402 offer's token contract, read for the site
+        // (forSiteChoice): the site's for the proof tiers, but not a
+        // page's 2 s latency trade — only a verified decimals() counts, so
+        // on RPCs slower than 2 s it must still reach the quorum
+        // (#329 R5-F1). A page's own read of the same falls through.
+        val net = Net()
+        listOf(a, b, c, d).forEach { url -> net.handlers[url] = { delay(2_500); ok("0x6") } }
+        val policy: (Chain) -> ChainAccessPolicy = { ChainAccessPolicy(listOf(ChainSource.QUORUM, ChainSource.DIRECT), listOf(ChainSource.DIRECT), timeoutMs = 5_000) }
+
+        val choice = router(net, listOf(chain()), policy)
+            .request(137, "eth_blockNumber", context = RoutingContext.forSiteChoice("https://pay.example"))
+        assertEquals(ChainSource.QUORUM, choice.trust.source)
+        assertEquals(ChainTrust.Level.VERIFIED, choice.trust.level)
+
+        val page = router(net, listOf(chain()), policy)
+            .request(137, "eth_blockNumber", context = RoutingContext.forPage("https://pay.example"))
+        assertEquals(ChainSource.DIRECT, page.trust.source)
+        assertEquals(ChainTrust.Level.UNVERIFIED, page.trust.level)
+    }
+
+    @Test
+    fun aSitesChoiceGivesEachProofTierItsOwnCapAndFitsX402sBudget() = runTest {
+        // #329 R6-F1: an x402 offer's decimals() and symbol() on Gnosis,
+        // with the light client and the prover both hanging (a site's miss
+        // never backs them off) and every RPC slow but healthy. Each proof
+        // tier gets SITE_PROOF_DEADLINE_MS, the quorum its full timeout, and
+        // readToken's two reads still come back verified inside its budget.
+        val net = Net()
+        BuiltInChains.GNOSIS.rpcUrls.forEach { url -> net.handlers[url] = { delay(4_500); ok("0x" + "0".repeat(63) + "6") } }
+        val myotis = FakeSource { delay(60_000); ChainDataResult("0x0", proof) }
+        val colibri = FakeSource { delay(60_000); ChainDataResult("0x0", proof) }
+        val r = router(
+            net,
+            listOf(BuiltInChains.GNOSIS),
+            sources = mapOf(ChainSource.MYOTIS to myotis, ChainSource.COLIBRI to colibri),
+        )
+        val ctx = RoutingContext.forSiteChoice("https://pay.example")
+        val results = kotlinx.coroutines.withTimeoutOrNull(baby.freedom.mobile.browser.X402Payments.READ_TIMEOUT_MS) {
+            kotlinx.coroutines.coroutineScope {
+                listOf("0x313ce567", "0x95d89b41").map { data ->
+                    async { r.request(100, "eth_call", JSONArray().put(JSONObject().put("to", a).put("data", data)).put("latest"), context = ctx) }
+                }.map { it.await() }
+            }
+        }
+        assertNotNull("x402's token read ran out of its budget", results)
+        results!!.forEach {
+            assertEquals(ChainSource.QUORUM, it.trust.source)
+            assertEquals(ChainTrust.Level.VERIFIED, it.trust.level)
+        }
+        assertEquals(2 * ChainDataRouter.SITE_PROOF_DEADLINE_MS + 4_500, currentTime)
+        assertEquals(2, myotis.calls)
+        assertEquals(2, colibri.calls)
+    }
+
+    @Test
     fun routingContextNormalizesOrigins() {
         assertEquals(RoutingContext.WALLET, RoutingContext.forPage(null))
         assertEquals(RoutingContext.WALLET, RoutingContext.forPage("  "))
         assertEquals(RoutingContext.WALLET, RoutingContext.forPage("https://a\u0000b"))
         assertEquals(RoutingContext.WALLET, RoutingContext.forPage("x".repeat(2049)))
         assertEquals("https://app.example", RoutingContext.forPage(" https://app.example ").origin)
+        assertEquals(RoutingContext.WALLET, RoutingContext.forSiteChoice("  "))
+        val choice = RoutingContext.forSiteChoice(" https://app.example ")
+        assertEquals("https://app.example", choice.origin)
+        assertTrue("a site's for the proof tiers", choice.site)
+        assertFalse("but no page is waiting on a frame", choice.interactive)
+        assertTrue(RoutingContext.forPage("https://app.example").interactive)
+        assertNotEquals(RoutingContext.forPage("https://app.example"), choice)
     }
 
     // ---- verified sources ----
@@ -415,8 +480,18 @@ class ChainDataRouterTest {
     ) : VerifiedChainSource {
         var calls = 0
         override fun isAvailable(chainId: Long) = available
-        override suspend fun request(chainId: Long, method: String, params: JSONArray): ChainDataResult {
+        val rpcsSeen = CopyOnWriteArrayList<List<String>>()
+        val contextsSeen = CopyOnWriteArrayList<RoutingContext>()
+        override suspend fun request(
+            chainId: Long,
+            method: String,
+            params: JSONArray,
+            rpcs: List<String>,
+            context: RoutingContext,
+        ): ChainDataResult {
             calls++
+            rpcsSeen += rpcs
+            contextsSeen += context
             return answer()
         }
     }
@@ -452,6 +527,170 @@ class ChainDataRouterTest {
     }
 
     @Test
+    fun proofTiersAreAskedMyotisThenColibriThenTheQuorum() = runTest {
+        val net = Net()
+        BuiltInChains.GNOSIS.rpcUrls.forEach { url -> net.handlers[url] = { ok("0x5") } }
+        val order = CopyOnWriteArrayList<String>()
+        val colibriProof = proof.copy(source = ChainSource.COLIBRI, agreed = listOf("gnosis.colibri-proof.tech"))
+        // Myotis synced: it answers, and Colibri is never asked.
+        val myotis = FakeSource { order += "myotis"; ChainDataResult("0x77", proof) }
+        val colibri = FakeSource { order += "colibri"; ChainDataResult("0x78", colibriProof) }
+        val sources = mapOf(ChainSource.MYOTIS to myotis, ChainSource.COLIBRI to colibri)
+        val first = router(net, listOf(BuiltInChains.GNOSIS), sources = sources).request(100, "eth_getBalance")
+        assertEquals(ChainSource.MYOTIS, first.trust.source)
+        assertEquals(listOf("myotis"), order.toList())
+        assertTrue(net.calls.isEmpty())
+
+        // Myotis can't answer (a receipt it hasn't seen, busy): Colibri does.
+        order.clear()
+        val noAnswer = FakeSource { order += "myotis"; throw MyotisChainSource.Unanswered("not seen") }
+        val second = router(net, listOf(BuiltInChains.GNOSIS), sources = sources + (ChainSource.MYOTIS to noAnswer))
+            .request(100, "eth_getTransactionReceipt")
+        assertEquals(ChainSource.COLIBRI, second.trust.source)
+        assertEquals(listOf("myotis", "colibri"), order.toList())
+        assertTrue(net.calls.isEmpty())
+
+        // Myotis parked on a stale anchor (not available) and Colibri's
+        // proof failing: the quorum answers.
+        order.clear()
+        val parked = FakeSource(available = false) { order += "myotis"; ChainDataResult("0x0", proof) }
+        val badProof = FakeSource { order += "colibri"; throw IOException("proof failed verification") }
+        val third = router(net, listOf(BuiltInChains.GNOSIS), sources = mapOf(ChainSource.MYOTIS to parked, ChainSource.COLIBRI to badProof))
+            .request(100, "eth_getBalance")
+        assertEquals(ChainSource.QUORUM, third.trust.source)
+        assertEquals(listOf("colibri"), order.toList())
+    }
+
+    @Test
+    fun anUnreachableColibriProverCostsOneReadItsWaitNotEveryRead() = runTest {
+        // gnosis.colibri-proof.tech dropped: the first read waits out
+        // Colibri's tier timeout, then the quorum answers; the reads after
+        // it skip Colibri at once ("not available"), not wait again.
+        val net = Net()
+        BuiltInChains.GNOSIS.rpcUrls.forEach { url -> net.handlers[url] = { ok("0x5") } }
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val created = AtomicInteger()
+        val engine = object : baby.freedom.mobile.ens.EnsColibri.Engine {
+            override val available = true
+            override fun create(method: String, params: String, chainId: Long, proverFlags: Int, verifyFlags: Int, proverMode: Int): Long =
+                created.incrementAndGet().toLong()
+            override fun setMinLatestBlockTs(ctx: Long, unixSeconds: Long) = Unit
+            override fun execute(ctx: Long) = JSONObject().put("status", "pending")
+                .put("requests", JSONArray().put(JSONObject().put("type", "prover").put("req_ptr", "5"))).toString()
+            override fun setResponse(req: Long, data: ByteArray, nodeIndex: Int) = Unit
+            override fun setError(req: Long, error: String, nodeIndex: Int) = Unit
+            override fun free(ctx: Long) = Unit
+        }
+        val colibri = ColibriChainSource(
+            baby.freedom.mobile.ens.EnsColibri(engine, http = { _, _, _, _, _ ->
+                gate.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                throw IOException("dropped")
+            }),
+            present = { true },
+        )
+        val r = router(net, listOf(BuiltInChains.GNOSIS), sources = mapOf(ChainSource.COLIBRI to colibri))
+        try {
+            repeat(3) {
+                assertEquals(ChainSource.QUORUM, r.request(100, "eth_getBalance").trust.source)
+            }
+            assertEquals(1, created.get())
+            assertFalse(r.isWired(ChainSource.COLIBRI, 100))
+            assertEquals(ProofTierGap.UNREACHABLE, r.gap(ChainSource.COLIBRI, 100))
+        } finally {
+            gate.countDown()
+        }
+    }
+
+    @Test
+    fun aSitesSlowTokenContractThroughWalletRpcDoesntBackColibriOffForTheWallet() = kotlinx.coroutines.runBlocking {
+        // An x402 offer names a token contract whose decimals() the prover
+        // can't prove in time. Read as the site's (#329 R4-F1), the miss
+        // only asks a canary, which proves: the wallet's next balance read
+        // is still Colibri's, and the site's read took one of the sites'
+        // slots, not the wallet's.
+        val net = Net()
+        BuiltInChains.GNOSIS.rpcUrls.forEach { url -> net.handlers[url] = { ok("0x" + "0".repeat(63) + "6") } }
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val methods = CopyOnWriteArrayList<String>()
+        val byCtx = ConcurrentHashMap<Long, String>()
+        val next = AtomicLong(10)
+        val engine = object : baby.freedom.mobile.ens.EnsColibri.Engine {
+            override val available = true
+            override fun create(method: String, params: String, chainId: Long, proverFlags: Int, verifyFlags: Int, proverMode: Int): Long {
+                methods += method
+                return next.incrementAndGet().also { byCtx[it] = method }
+            }
+            override fun setMinLatestBlockTs(ctx: Long, unixSeconds: Long) = Unit
+            override fun execute(ctx: Long) = when (byCtx[ctx]) {
+                // The site's contract: a prover round that stalls.
+                "eth_call" -> JSONObject().put("status", "pending")
+                    .put("requests", JSONArray().put(JSONObject().put("type", "prover").put("req_ptr", "5")))
+                "eth_getBlockByNumber" -> JSONObject().put("status", "success").put("result", JSONObject().put("number", "0x10"))
+                else -> JSONObject().put("status", "success").put("result", "0x64")
+            }.toString()
+            override fun setResponse(req: Long, data: ByteArray, nodeIndex: Int) = Unit
+            override fun setError(req: Long, error: String, nodeIndex: Int) = Unit
+            override fun free(ctx: Long) = Unit
+        }
+        val colibri = ColibriChainSource(
+            baby.freedom.mobile.ens.EnsColibri(engine, http = { _, _, _, _, _ ->
+                gate.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                throw IOException("still stalled")
+            }),
+            present = { true },
+        )
+        // Real time: the router's wait mustn't run out on a virtual clock
+        // while the prover's (real) threads are still answering.
+        val r = ChainDataRouter(
+            chains = { listOf(BuiltInChains.GNOSIS) },
+            transport = net.transport,
+            verifiedSources = mapOf(ChainSource.COLIBRI to colibri),
+        )
+        val site = WalletRpc(r, RoutingContext.forSiteChoice("https://pay.example"))
+        val wallet = WalletRpc(r)
+        try {
+            val decimals = site.call(100, JSONObject().put("to", "0x" + "11".repeat(20)).put("data", "0x313ce567"))
+            assertEquals(ChainSource.QUORUM, decimals.trust.source)
+            val deadline = System.nanoTime() + 5_000_000_000L
+            while ("eth_getBlockByNumber" !in methods && System.nanoTime() < deadline) Thread.sleep(20)
+            Thread.sleep(100)
+            assertNull(colibri.backoffRemainingMs(100))
+            assertEquals(ChainSource.COLIBRI, wallet.balance(100, "0x" + "ab".repeat(20)).trust.source)
+        } finally {
+            gate.countDown()
+        }
+    }
+
+    @Test
+    fun aProofSourceIsGivenTheChainsPoolUsersRpcsFirst() = runTest {
+        val net = Net()
+        val colibri = FakeSource { ChainDataResult("0x1", proof.copy(source = ChainSource.COLIBRI)) }
+        router(
+            net, listOf(chain(id = 100, rpcs = listOf(a, b), user = listOf(mine))),
+            sources = mapOf(ChainSource.COLIBRI to colibri),
+        ).request(100, "eth_getBalance")
+        assertEquals(listOf(listOf(mine, a, b)), colibri.rpcsSeen.toList())
+    }
+
+    @Test
+    fun aBroadcastSkipsProofSourcesThatCantBroadcast() = runTest {
+        // A read-only light client is "not available" to a broadcast, never
+        // a source that may have taken the transaction: the RPC's refusal
+        // is still the whole answer.
+        val net = Net()
+        net.handlers[a] = { err(-32000, "insufficient funds for gas * price + value") }
+        val readOnly = FakeSource { ChainDataResult("0x1", proof) }
+        try {
+            router(net, listOf(chain(id = 100, rpcs = listOf(a))), sources = mapOf(ChainSource.MYOTIS to readOnly))
+                .broadcast(100, rawTx)
+            fail()
+        } catch (e: ChainRpcException.Rpc) {
+            assertTrue(e.insufficientFunds)
+        }
+        assertEquals(0, readOnly.calls)
+    }
+
+    @Test
     fun aSlowVerifiedSourceGetsTwoSecondsOnAPageRead() = runTest {
         val net = Net()
         BuiltInChains.ETHEREUM.rpcUrls.forEach { url -> net.handlers[url] = { ok("0x5") } }
@@ -460,6 +699,9 @@ class ChainDataRouterTest {
             .request(1, "eth_blockNumber", context = RoutingContext.forPage("web3://app.eth"))
         assertEquals(ChainSource.QUORUM, r.trust.source)
         assertEquals(ChainDataRouter.INTERACTIVE_DEADLINE_MS, currentTime)
+        // The source is told it's a page's read, so it can keep the miss
+        // off what the wallet's reads share (Colibri's back-off, Myotis's slots).
+        assertEquals(listOf(RoutingContext.forPage("web3://app.eth")), slow.contextsSeen.toList())
     }
 
     @Test
@@ -622,8 +864,9 @@ class ChainDataRouterTest {
         BuiltInChains.ETHEREUM.rpcUrls.forEach { url -> net.handlers[url] = { ok(txHash) } }
         val myotis = object : VerifiedChainSource {
             override fun isAvailable(chainId: Long) = true
-            override suspend fun request(chainId: Long, method: String, params: JSONArray): ChainDataResult =
+            override suspend fun request(chainId: Long, method: String, params: JSONArray, rpcs: List<String>, context: RoutingContext): ChainDataResult =
                 throw IOException()
+            override val canBroadcast = true
             override suspend fun broadcast(chainId: Long, rawTransaction: String): String =
                 throw ChainRpcException.BroadcastUncertain("devp2p")
         }

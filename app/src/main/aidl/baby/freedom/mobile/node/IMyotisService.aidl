@@ -49,6 +49,20 @@ interface IMyotisService {
      */
     oneway void ethCall(long chainId, String to, String data, boolean probe, IMyotisCallResult result);
 
+    /**
+     * One of the chain-data router's reads (#329): JSON-RPC `method` with
+     * `paramsJson` (a JSON array) at chain `chainId`'s verified head. The
+     * answer arrives on `result` as a `MyotisReads` reply — a proven
+     * `{"result",…}` or `{"revert",…}`, or `{"status":"unavailable",…}`
+     * (straight away while the chain isn't ready, or every slot for these
+     * reads is taken). Bounded and answered like [ethCall]: the caller
+     * bounds its own wait, and `result` is answered even after it stopped.
+     * `page`: a site's read (window.ethereum, web3://), not the wallet's
+     * or the Swarm node's — it gets only a share of the slots, since the
+     * site's wait ends long before the engine's read does.
+     */
+    oneway void read(long chainId, String method, String paramsJson, boolean page, IMyotisCallResult result);
+
     /** The light client's recent log lines (#276), like INodeService.getLogs. */
     String getLogs();
 

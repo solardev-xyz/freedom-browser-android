@@ -183,7 +183,12 @@ class SettingsPagesTest {
             }
             return settingsResultGroups(visible, isDefaultBrowser = false)
         }
-        assertEquals(listOf(SettingsPage.Wallet to listOf(SettingsSection.Chains)), groups("gnosis"))
+        // The Colibri proofs switch covers Gnosis reads too (#329), so its
+        // row is found as well.
+        assertEquals(
+            listOf(SettingsPage.Wallet to listOf(SettingsSection.Chains), SettingsPage.Names to listOf(SettingsSection.Ens)),
+            groups("gnosis"),
+        )
         assertEquals(listOf(SettingsPage.Privacy to listOf(SettingsSection.Tor)), groups("orbot"))
         // IPFS, once behind "Show advanced options", is found without it.
         assertEquals(

@@ -296,6 +296,58 @@ class EnsColibriTest {
     }
 
     @Test
+    fun `a prover's own refusal of one request is this call's failure, not an unreachable prover`() {
+        // HTTP 500 with the prover's JSON error, as the Gnosis provers
+        // answer for a block after the head: they were reached.
+        val refusal = """{"error":"The Block after 0x2a1b3c can not be found in the execution layer!"}"""
+        val engine = ScriptEngine(
+            rounds = listOf(listOf(request(1, "prover"))),
+            final = JSONObject().put("status", "error").put("error", "block not found"),
+        )
+        try {
+            call(EnsColibri(engine, ScriptHttp { EnsColibri.Http.Reply(500, refusal.toByteArray()) }))
+            fail("expected a failure")
+        } catch (e: EnsColibri.Failure) {
+            assertFalse(e.unreachable)
+        }
+        // Every prover was asked, and the core hears the prover's reason.
+        assertTrue(engine.errors.getValue(1L), "can not be found in the execution layer" in engine.errors.getValue(1L))
+    }
+
+    @Test
+    fun `a gateway error, an overloaded prover or a bare 500 still counts as unreachable`() {
+        val replies = listOf(
+            // Live: a prover whose backend is down or unconfigured answers
+            // a JSON error too, but with 502/503.
+            EnsColibri.Http.Reply(502, """{"error":"legacy prover forwarding failed"}""".toByteArray()),
+            EnsColibri.Http.Reply(503, """{"error":"Legacy prover is not configured on this server"}""".toByteArray()),
+            EnsColibri.Http.Reply(429, """{"error":"rate limited"}""".toByteArray()),
+            EnsColibri.Http.Reply(500, ByteArray(0)),
+            EnsColibri.Http.Reply(500, "<html>Internal Server Error</html>".toByteArray()),
+        )
+        for (reply in replies) {
+            val engine = ScriptEngine(
+                rounds = listOf(listOf(request(1, "prover"))),
+                final = JSONObject().put("status", "error").put("error", "all provers failed"),
+            )
+            try {
+                call(EnsColibri(engine, ScriptHttp { reply }))
+                fail("expected a failure")
+            } catch (e: EnsColibri.Failure) {
+                assertTrue("HTTP ${reply.code}", e.unreachable)
+            }
+        }
+    }
+
+    @Test
+    fun `Gnosis reads go to corpus core's three default Gnosis provers`() {
+        assertEquals(
+            listOf("https://gnosis.colibri-proof.tech", "https://gnosis1.colibri-proof.tech", "https://gnosis.colimind.com"),
+            EnsColibri(ScriptEngine(emptyList(), success)).serversFor(JSONObject().put("type", "prover"), rpcs, chainId = 100),
+        )
+    }
+
+    @Test
     fun `a latest proof refused as too old counts against every call, like an unreachable prover`() {
         // A prover lagging the chain, or this device's clock running
         // ahead of it, fails every name's head proof alike: the resolver

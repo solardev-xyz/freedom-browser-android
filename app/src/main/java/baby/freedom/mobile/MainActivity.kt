@@ -42,6 +42,7 @@ import baby.freedom.mobile.browser.NODE_READY_TIMEOUT_MS
 import baby.freedom.mobile.browser.IncomingLinks
 import baby.freedom.mobile.browser.KeyboardShortcutRouter
 import baby.freedom.mobile.browser.PageKeyEvents
+import baby.freedom.mobile.chains.rpc.ColibriReads
 import baby.freedom.mobile.browser.PrivateProfile
 import baby.freedom.mobile.browser.keyboardShortcutGroups
 import baby.freedom.mobile.browser.EthereumProviders
@@ -111,6 +112,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
@@ -224,6 +226,13 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
      * read. Main thread only.
      */
     private var swarmMode: SwarmRelay? = null
+
+    /**
+     * The *Colibri proofs* switch (#329) as last read, for this process's
+     * chain-data router ([ColibriReads]) and relayed to `:node` on every
+     * bind and change; null until first read. Main thread only.
+     */
+    private var colibriReads: Boolean? = null
 
     /**
      * "Pay peers from the chequebook", relayed to `:node` on every bind and
@@ -387,6 +396,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
             // The mode (#114) first, so the identity check below already
             // compares against it rather than restarting the node twice.
             relaySwarmMode(b, swarmMode)
+            colibriReads?.let { on -> runCatching { b.setColibriReads(on) } }
             // ant forgets the pay-peers switch at every init: `:node`
             // applies the latest relayed value after each one.
             relaySwapEnabled(b, swapEnabled)
@@ -536,6 +546,19 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                 .collect { mode ->
                     swarmMode = mode
                     relaySwarmMode(binder, mode)
+                }
+        }
+
+        // The Colibri proofs switch covers the chain-data router's reads
+        // too (#329): this process's, and `:node`'s through the relay.
+        lifecycleScope.launch {
+            settings.ensColibri
+                .catch { android.util.Log.w("MainActivity", "reading the Colibri proofs setting failed (${it.javaClass.simpleName})") }
+                .distinctUntilChanged()
+                .collect { on ->
+                    ColibriReads.set(on)
+                    colibriReads = on
+                    runCatching { binder?.setColibriReads(on) }
                 }
         }
 

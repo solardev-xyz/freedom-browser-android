@@ -72,6 +72,9 @@ object ColibriNative {
     /** Whether the verifier is in this build and was set up by [init]. */
     val available: Boolean get() = initialized == true
 
+    /** Whether [init] ran and couldn't set the verifier up: it won't be usable in this process. */
+    val initFailed: Boolean get() = initialized == false
+
     /**
      * Load the library and keep the verifier's state (the sync committee
      * it has checked, a few KB — and only that, [PERSISTED_PREFIXES]) in

@@ -297,7 +297,7 @@
     <string name="wallet_assets_trust_action">see how it was checked</string>
     <!-- %1$s: a token symbol, %2$s: its network -->
     <string name="wallet_assets_trust_title">%1$s on %2$s</string>
-    <string name="wallet_assets_trust_explain">Freedom reads each balance from the network through several RPC servers and compares their answers. Verified means they agreed, or the answer was proven; Unverified means only one server answered, so the figure is that server’s word. Pull down to read again.</string>
+    <string name="wallet_assets_trust_explain">Freedom reads each balance with a proof checked on this device, from the chain’s P2P light client or the Colibri prover, when one can answer; otherwise through several RPC servers, comparing their answers. Verified means the answer was proven, or the servers agreed; Unverified means only one server answered, so the figure is that server’s word. Pull down to read again.</string>
     <string name="wallet_lock_now_cd">Wallet unlocked. Lock it now</string>
     <string name="wallet_unlock_cd">Wallet locked. Unlock it</string>
     <string name="wallet_settings_title">Wallet settings</string>

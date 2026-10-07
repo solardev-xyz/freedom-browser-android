@@ -1,0 +1,101 @@
+package baby.freedom.mobile.chains.rpc
+
+import baby.freedom.mobile.node.MyotisLink
+import baby.freedom.swarm.MyotisReads
+import kotlinx.coroutines.CancellationException
+import org.json.JSONArray
+import org.json.JSONObject
+import org.json.JSONTokener
+
+/**
+ * The router's [ChainSource.MYOTIS] tier (#329): the embedded P2P light
+ * client, when the user runs it for the chain and it's ready — synced, a
+ * state peer at the head, not parked on a stale anchor or recovering,
+ * not asleep with the app in the background. Any of those, or a chain
+ * that's switched off, and [isAvailable] is false, so the router starts
+ * at Colibri.
+ *
+ * It answers [MyotisReads.METHODS] — block number, balance, nonce,
+ * code, `eth_call`, receipt and block reads, each proven at the light
+ * client's verified head — and nothing the engine can't prove: a
+ * `pending` nonce, a call with gas or fee fields, a receipt or block it
+ * hasn't seen (a transaction mined before it synced reads the same as
+ * one that doesn't exist, so that `null` is never passed on as a
+ * verified "no"). Those move on to the next tier. Never broadcasts.
+ *
+ * A site's read ([RoutingContext.site]) is sent as a page's: the
+ * router stops waiting for it after 2 s, but the engine can't cancel a
+ * started read, so the service keeps it to a share of its slots
+ * ([IMyotisService.read]'s `page`) and a site looping slow calls can't
+ * take the wallet's or name resolution's.
+ */
+internal class MyotisChainSource(private val link: Link = Link.Default) : VerifiedChainSource {
+    /** The light client as this source sees it; a seam for tests. */
+    interface Link {
+        fun isReady(chainId: Long): Boolean
+        /** [page]: a site's read ([RoutingContext.site]), which the service gives fewer slots. */
+        suspend fun read(chainId: Long, method: String, paramsJson: String, page: Boolean): String
+
+        object Default : Link {
+            override fun isReady(chainId: Long) = MyotisLink.isReady(chainId)
+            override suspend fun read(chainId: Long, method: String, paramsJson: String, page: Boolean) =
+                MyotisLink.read(chainId, method, paramsJson, page)
+        }
+    }
+
+    override fun isAvailable(chainId: Long): Boolean = gap(chainId) == null
+
+    override fun gap(chainId: Long): ProofTierGap? = when {
+        !ChainAccessPolicy.supports(ChainSource.MYOTIS, chainId) -> ProofTierGap.NOT_SERVED
+        !link.isReady(chainId) -> ProofTierGap.NOT_READY
+        else -> null
+    }
+
+    override suspend fun request(
+        chainId: Long,
+        method: String,
+        params: JSONArray,
+        rpcs: List<String>,
+        context: RoutingContext,
+    ): ChainDataResult {
+        if (method !in MyotisReads.METHODS) throw Unanswered("the light client doesn't serve $method")
+        val reply = try {
+            JSONTokener(link.read(chainId, method, params.toString(), context.site)).nextValue() as? JSONObject
+        } catch (e: CancellationException) {
+            // The router ending this tier's wait, or the caller going away:
+            // not the light client's failure (#329 R6-M1).
+            throw e
+        } catch (_: Exception) {
+            null
+        } ?: throw Unanswered("unexpected answer from the light client")
+        val block = reply.opt("blockNumber").let { (it as? Number)?.toLong() }
+        if (reply.has("revert")) {
+            throw ChainRpcException.Rpc(
+                ChainRpcException.EXECUTION_REVERTED,
+                "execution reverted",
+                (reply.opt("revert") as? String) ?: "0x",
+            )
+        }
+        if (!reply.has("result")) {
+            throw Unanswered(reply.optString("reason").ifEmpty { "no answer" }.take(200))
+        }
+        val result = reply.get("result")
+        if (result == JSONObject.NULL) throw Unanswered("no proven answer")
+        return ChainDataResult(
+            result,
+            ChainTrust(
+                level = ChainTrust.Level.VERIFIED,
+                source = ChainSource.MYOTIS,
+                agreed = listOf(ChainSource.MYOTIS.key),
+                dissented = emptyList(),
+                queried = listOf(ChainSource.MYOTIS.key),
+                k = 1,
+                m = 1,
+                block = block,
+            ),
+        )
+    }
+
+    /** No proven answer; the router moves on. */
+    class Unanswered(message: String) : Exception(message)
+}
