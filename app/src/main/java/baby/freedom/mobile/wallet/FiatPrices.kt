@@ -18,6 +18,7 @@ import java.text.NumberFormat
 import java.util.Currency
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -26,6 +27,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 /**
@@ -117,8 +119,33 @@ internal object PriceFeeds {
     /** `latestRoundData()`. */
     const val LATEST_ROUND_DATA = "0xfeaf968c"
 
+    /**
+     * The shortest window a pool's average is still taken over when it
+     * can't answer [TWAP_SECONDS]: ten minutes. Shorter, and it's too
+     * close to the spot price one trade can move — no price.
+     */
+    const val MIN_TWAP_SECONDS = 600
+
     /** `observe(uint32[] [TWAP_SECONDS, 0])`. */
-    val OBSERVE: String = "0x883bdbfd" + word(32) + word(2) + word(TWAP_SECONDS.toLong()) + word(0)
+    val OBSERVE: String = observe(TWAP_SECONDS)
+
+    /** `observe(uint32[] [seconds, 0])`. */
+    fun observe(seconds: Int): String = "0x883bdbfd" + word(32) + word(2) + word(seconds.toLong()) + word(0)
+
+    /** A Uniswap v3 pool's `slot0()`. */
+    const val SLOT0 = "0x3850c7bd"
+
+    /** A Uniswap v3 pool's `observations(uint256 [index])`. */
+    fun observations(index: Int): String = "0x252c09d7" + word(index.toLong())
+
+    /**
+     * Multicall3 (the same address on every chain it's deployed to), for
+     * its `getCurrentBlockTimestamp()`: the pinned block's own time.
+     */
+    const val MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
+
+    /** `getCurrentBlockTimestamp()`. */
+    const val BLOCK_TIMESTAMP = "0x0f28c97d"
 
     private fun word(n: Long) = n.toString(16).padStart(64, '0')
 }
@@ -159,6 +186,51 @@ internal object FiatMath {
         val tick = if (r.signum() < 0) q - BigInteger.ONE else q
         if (tick.abs() > BigInteger.valueOf(MAX_TICK)) return null
         return tick.toLong()
+    }
+
+    /**
+     * From a pool's `slot0()`: the index of the oldest observation it
+     * keeps, `(observationIndex + 1) % observationCardinality` — or null
+     * for an answer of the wrong shape.
+     */
+    fun oldestObservationIndex(slot0Hex: String): Int? {
+        val words = words(slot0Hex) ?: return null
+        if (words.size != 7) return null
+        val index = words[2]
+        val cardinality = words[3]
+        if (cardinality.signum() <= 0 || cardinality.bitLength() > 16 || index >= cardinality) return null
+        return ((index.toInt() + 1) % cardinality.toInt())
+    }
+
+    /**
+     * From `observations(i)`: its timestamp, or null when that slot isn't
+     * initialized yet (a pool still filling a ring it grew) or the answer
+     * is the wrong shape.
+     */
+    fun observationTimestamp(hex: String): Long? {
+        val words = words(hex) ?: return null
+        if (words.size != 4 || words[3] != BigInteger.ONE) return null
+        if (words[0].bitLength() > 32) return null
+        return words[0].toLong()
+    }
+
+    /** A single uint word (a block timestamp), or null. */
+    fun uint(hex: String): Long? {
+        val words = words(hex) ?: return null
+        if (words.size != 1 || words[0].bitLength() > 62) return null
+        return words[0].toLong()
+    }
+
+    /**
+     * The window to average a pool over when it can't answer [full]: as
+     * far back as its oldest observation reaches at [blockTimestamp], at
+     * most [full] — or null when that's shorter than [min] (or the oldest
+     * observation is from the future).
+     */
+    fun fallbackWindow(blockTimestamp: Long, oldestObservation: Long, full: Int, min: Int): Int? {
+        val reach = blockTimestamp - oldestObservation
+        if (reach < min) return null
+        return minOf(reach, full.toLong()).toInt()
     }
 
     /** One whole token0 in whole token1 at [tick]: 1.0001^tick, scaled by the two tokens' decimals. */
@@ -220,7 +292,7 @@ internal object FiatMath {
 /**
  * The wallet's approximate values (#439), off by default: [currency] is
  * the user's choice, and [quotes] the prices last read for it — null
- * while off, before the first read, or when nothing could be read.
+ * while off and before the first read, empty when nothing could be read.
  *
  * While [currency] is [FiatCurrency.OFF], [refresh] returns before
  * anything is asked: no price request leaves the device. With a currency
@@ -228,8 +300,9 @@ internal object FiatMath {
  * verified path as balances — each chain's reads pinned to one block a
  * little behind its head, so every RPC is asked the same question; an
  * answer that wasn't verified (one RPC's word) is dropped. They are kept
- * for [TTL_MS], in memory only. A price that couldn't be read leaves
- * that token without a value; it never holds anything up.
+ * for [TTL_MS], in memory only, and only one read runs at a time. A
+ * price a read couldn't get keeps the previous one for up to [HOLD_MS];
+ * with none, that token has no value. It never holds anything up.
  */
 class FiatPrices internal constructor(
     private val loadSetting: suspend () -> FiatCurrency,
@@ -249,6 +322,15 @@ class FiatPrices internal constructor(
     private var readAt: Long? = null
     private var generation = 0L
 
+    /** The generation a read is running for, if one is: never two at once for the same choice. */
+    private var reading: Long? = null
+
+    /** The last read missed a price an earlier one had (or found none): try again after [RETRY_MS]. */
+    private var retrySoon = false
+
+    /** Each price on show, and when (on [elapsed]) it was read. */
+    private var held: Map<String, Pair<BigDecimal, Long>> = emptyMap()
+
     /** The stored choice, read once. */
     suspend fun load() {
         mutex.withLock {
@@ -266,37 +348,61 @@ class FiatPrices internal constructor(
             _currency.value = value
             _quotes.value = null
             readAt = null
+            reading = null
+            retrySoon = false
+            held = emptyMap()
         }
         saveSetting(value)
     }
 
     /**
-     * Read prices again if a currency is chosen and the last read is
-     * older than [TTL_MS] (or failed more than [RETRY_MS] ago). Off: does
-     * nothing at all.
+     * Read prices again if a currency is chosen, no read is already
+     * running, and the last read is older than [TTL_MS] (or came back
+     * short more than [RETRY_MS] ago). Off: does nothing at all.
+     *
+     * A price the new read couldn't get (an RPC outage, a pool that can't
+     * answer for a moment) keeps the one read before it, for up to
+     * [HOLD_MS] after that one was read — so a short outage doesn't wipe
+     * every value on screen, and a source that stays dead doesn't leave
+     * an old price up for long.
      */
     suspend fun refresh() {
         load()
         val (currency, mine) = mutex.withLock {
             val c = _currency.value
             if (c == FiatCurrency.OFF) return
+            if (reading == generation) return
             val at = readAt
             val now = elapsed()
-            val wait = if (_quotes.value?.perToken.isNullOrEmpty()) RETRY_MS else TTL_MS
+            val wait = if (retrySoon || _quotes.value?.perToken.isNullOrEmpty()) RETRY_MS else TTL_MS
             if (at != null && now - at in 0 until wait) return
             readAt = now
+            reading = generation
             c to generation
         }
         val read = try {
             read(currency)
-        } catch (e: CancellationException) {
-            mutex.withLock { if (mine == generation) readAt = null }
+        } catch (e: Throwable) {
+            // Cancelled (or anything else): this read is over, the next one may start.
+            withContext(NonCancellable) {
+                mutex.withLock {
+                    if (mine == generation) {
+                        readAt = null
+                        reading = null
+                    }
+                }
+            }
             throw e
         }
         mutex.withLock {
             // Switched off, or to the other currency, while this read ran: file nothing.
             if (mine != generation) return
-            _quotes.value = FiatQuotes(currency, read)
+            reading = null
+            val now = elapsed()
+            val kept = held.filter { (key, v) -> key !in read && now - v.second in 0 until HOLD_MS }
+            held = read.mapValues { it.value to now } + kept
+            retrySoon = read.isEmpty() || kept.isNotEmpty()
+            _quotes.value = FiatQuotes(currency, held.mapValues { it.value.first })
         }
     }
 
@@ -352,11 +458,47 @@ class FiatPrices internal constructor(
         FiatMath.chainlinkPrice(r.value, feed.decimals, wallClockSeconds())
     }
 
+    /**
+     * The pool's [PriceFeeds.TWAP_SECONDS] average; and when it can't go
+     * that far back — a pool keeping only a couple of observations (BZZ /
+     * WETH keeps two) reverts `OLD` while its last two trades are less
+     * than that apart — the average over as far back as it does reach,
+     * down to [PriceFeeds.MIN_TWAP_SECONDS].
+     */
     private suspend fun twap(rpc: WalletRpc, t: PriceFeeds.Twap, block: String?): BigDecimal? = guarded {
         if (block == null) return@guarded null
-        val r = rpc.call(t.chainId, JSONObject().put("to", t.pool).put("data", PriceFeeds.OBSERVE), block)
-        if (!trusted(r.trust)) return@guarded null
-        FiatMath.twapTick(r.value, PriceFeeds.TWAP_SECONDS)?.let { FiatMath.tickPrice(it, t.baseDecimals, t.quoteDecimals) }
+        val full = try {
+            poolCall(rpc, t, t.pool, PriceFeeds.OBSERVE, block)
+        } catch (e: ChainRpcException.Rpc) {
+            if (!e.deterministic) throw e
+            null
+        }
+        val tick = if (full != null) {
+            FiatMath.twapTick(full, PriceFeeds.TWAP_SECONDS)
+        } else {
+            val window = fallbackWindow(rpc, t, block) ?: return@guarded null
+            poolCall(rpc, t, t.pool, PriceFeeds.observe(window), block)?.let { FiatMath.twapTick(it, window) }
+        }
+        tick?.let { FiatMath.tickPrice(it, t.baseDecimals, t.quoteDecimals) }
+    }
+
+    /** How far back [t]'s pool can average at [block], or null for too short a reach. */
+    private suspend fun fallbackWindow(rpc: WalletRpc, t: PriceFeeds.Twap, block: String): Int? = coroutineScope {
+        val now = async { poolCall(rpc, t, PriceFeeds.MULTICALL3, PriceFeeds.BLOCK_TIMESTAMP, block)?.let(FiatMath::uint) }
+        val slot0 = poolCall(rpc, t, t.pool, PriceFeeds.SLOT0, block) ?: return@coroutineScope null
+        val oldest = FiatMath.oldestObservationIndex(slot0) ?: return@coroutineScope null
+        // Not filled yet (the ring was grown and hasn't wrapped): slot 0 is the oldest.
+        val at = poolCall(rpc, t, t.pool, PriceFeeds.observations(oldest), block)?.let(FiatMath::observationTimestamp)
+            ?: if (oldest == 0) null else poolCall(rpc, t, t.pool, PriceFeeds.observations(0), block)?.let(FiatMath::observationTimestamp)
+        val time = now.await()
+        if (at == null || time == null) return@coroutineScope null
+        FiatMath.fallbackWindow(time, at, PriceFeeds.TWAP_SECONDS, PriceFeeds.MIN_TWAP_SECONDS)
+    }
+
+    /** An `eth_call` to [to] on [t]'s chain at [block]; null unless the answer is trusted. */
+    private suspend fun poolCall(rpc: WalletRpc, t: PriceFeeds.Twap, to: String, data: String, block: String): String? {
+        val r = rpc.call(t.chainId, JSONObject().put("to", to).put("data", data), block)
+        return if (trusted(r.trust)) r.value else null
     }
 
     private suspend fun <T> guarded(block: suspend () -> T?): T? = try {
@@ -377,8 +519,11 @@ class FiatPrices internal constructor(
         /** How long prices are kept before the next read: five minutes. */
         const val TTL_MS = 5 * 60_000L
 
-        /** After a read that found nothing, how long before trying again. */
+        /** After a read that found nothing (or missed a price it had before), how long before trying again. */
         const val RETRY_MS = 60_000L
+
+        /** How long a price a later read couldn't get is still shown: half an hour. */
+        const val HOLD_MS = 30 * 60_000L
 
         /** Blocks behind the head the reads are pinned to, so every RPC has the block. */
         private const val PINNED_BEHIND = 2L

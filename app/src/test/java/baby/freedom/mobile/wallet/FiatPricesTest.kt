@@ -5,12 +5,19 @@ import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.RpcTransport
 import baby.freedom.mobile.chains.rpc.WalletRpc
+import java.io.IOException
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.util.Locale
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -40,6 +47,22 @@ class FiatPricesTest {
     /** Each pool's average tick over the window. */
     private val ticks = mutableMapOf(PriceFeeds.BZZ_WETH.pool to -63235L, PriceFeeds.EURC_USDC.pool to 1126L)
 
+    /**
+     * How far back each pool's oldest kept observation reaches, in seconds
+     * before the pinned block (absent: far enough for the full window).
+     * Asked further back, the pool reverts `OLD` as Uniswap v3 does.
+     */
+    private val reach = mutableMapOf<String, Long>()
+
+    /** The pinned block's time. */
+    private val blockTime = now - 30
+
+    /** Every RPC fails (an outage) while set. */
+    private var down = false
+
+    /** While set, every request waits for it. */
+    private var gate: CompletableDeferred<Unit>? = null
+
     /** The RPC hosts whose answers differ from the rest (so nothing is agreed). */
     private var liars = emptySet<String>()
 
@@ -60,9 +83,29 @@ class FiatPricesTest {
             val raw = v.first.movePointRight(8).toBigInteger() + BigInteger.valueOf(lie)
             return "\"result\":\"0x" + word(7) + word(raw) + word(v.second) + word(v.second) + word(7) + "\""
         }
-        ticks.entries.firstOrNull { it.key.equals(to, true) }?.let { (_, tick) ->
+        val data = call.getString("data")
+        if (to.equals(PriceFeeds.MULTICALL3, true) && data == PriceFeeds.BLOCK_TIMESTAMP) {
+            return "\"result\":\"0x" + word(blockTime) + "\""
+        }
+        ticks.entries.firstOrNull { it.key.equals(to, true) }?.let { (pool, tick) ->
+            val back = reach[pool] ?: 86_400L
+            when {
+                data == PriceFeeds.SLOT0 ->
+                    // sqrtPrice, tick, observationIndex 0, cardinality 2, next 2, fee protocol, unlocked
+                    return "\"result\":\"0x" + word(1) + word(tick) + word(0) + word(2) + word(2) + word(0) + word(1) + "\""
+                data == PriceFeeds.observations(1) ->
+                    return "\"result\":\"0x" + word(blockTime - back) + word(5) + word(0) + word(1) + "\""
+                data == PriceFeeds.observations(0) ->
+                    return "\"result\":\"0x" + word(blockTime - 60) + word(5) + word(0) + word(1) + "\""
+            }
+            val seconds = BigInteger(data.substring(data.length - 128, data.length - 64), 16).toLong()
+            if (seconds > back) {
+                // Error("OLD")
+                return "\"error\":{\"code\":3,\"message\":\"execution reverted: OLD\",\"data\":\"0x08c379a0" +
+                    word(32) + word(3) + "4f4c44".padEnd(64, '0') + "\"}"
+            }
             val c0 = 1_000_000L
-            val c1 = c0 + tick * PriceFeeds.TWAP_SECONDS + lie
+            val c1 = c0 + tick * seconds + lie
             return "\"result\":\"0x" + word(64) + word(192) + word(2) + word(c0) + word(c1) + word(2) + word(1) + word(2) + "\""
         }
         return "\"result\":\"0x\""
@@ -80,6 +123,8 @@ class FiatPricesTest {
                     transport = RpcTransport { url, body, _ ->
                         val req = JSONObject(body)
                         synchronized(sent) { sent += url to req }
+                        gate?.await()
+                        if (down) throw IOException("down")
                         """{"jsonrpc":"2.0","id":1,${answer(url, req)}}"""
                     },
                 ),
@@ -246,5 +291,110 @@ class FiatPricesTest {
         val q = FiatQuotes(FiatCurrency.EUR, mapOf(eth.key to BigDecimal("2000")))
         assertEquals(0, BigDecimal("3").compareTo(q.value(eth.key, BigInteger("1500000000000000"), 18)))
         assertNull(q.value(token("EURe").key, BigInteger.ONE, 18))
+    }
+
+    private fun observeWindows(pool: String) = sent.mapNotNull { (_, req) ->
+        val call = req.optJSONArray("params")?.optJSONObject(0) ?: return@mapNotNull null
+        val data = call.getString("data")
+        if (!call.getString("to").equals(pool, true) || !data.startsWith("0x883bdbfd")) return@mapNotNull null
+        BigInteger(data.substring(data.length - 128, data.length - 64), 16).toLong()
+    }.toSet()
+
+    @Test
+    fun `a pool that can't reach back half an hour averages over as far as it does`() = runBlocking {
+        // BZZ / WETH keeps two observations: its last two trades 1092 s apart, observe([1800, 0]) reverts OLD.
+        setting = FiatCurrency.USD
+        reach[PriceFeeds.BZZ_WETH.pool] = 1092
+        val p = prices()
+        p.refresh()
+        val q = p.quotes.value!!
+        val bzz = q.perToken[token("BZZ").key]
+        assertNotNull("BZZ still has a price", bzz)
+        assertEquals(0.04484, bzz!!.toDouble(), 0.0001)
+        assertEquals(bzz, q.perToken[token("xBZZ").key])
+        assertEquals(setOf(1800L, 1092L), observeWindows(PriceFeeds.BZZ_WETH.pool))
+        // The other pool answered the full window and wasn't asked again.
+        assertEquals(setOf(1800L), observeWindows(PriceFeeds.EURC_USDC.pool))
+        val all = sent.filter { it.second.getString("method") == "eth_call" }
+        assertTrue(all.all { it.second.getJSONArray("params").getString(1) == "0xfe" })
+    }
+
+    @Test
+    fun `a pool reaching back less than ten minutes gives no price`() = runBlocking {
+        setting = FiatCurrency.USD
+        reach[PriceFeeds.BZZ_WETH.pool] = PriceFeeds.MIN_TWAP_SECONDS - 1L
+        val p = prices()
+        p.refresh()
+        val q = p.quotes.value!!
+        assertNull(q.perToken[token("BZZ").key])
+        assertNull(q.perToken[token("xBZZ").key])
+        assertTrue(observeWindows(PriceFeeds.BZZ_WETH.pool) == setOf(1800L))
+        assertEquals(0, BigDecimal("2500").compareTo(q.perToken[eth.key]))
+    }
+
+    @Test
+    fun `fallback window arithmetic`() {
+        assertEquals(1092, FiatMath.fallbackWindow(2000, 908, 1800, 600))
+        assertEquals(1800, FiatMath.fallbackWindow(10_000, 1, 1800, 600))
+        assertNull(FiatMath.fallbackWindow(1000, 401, 1800, 600))
+        assertNull(FiatMath.fallbackWindow(1000, 2000, 1800, 600))
+        fun slot0(index: Long, cardinality: Long) = "0x" + word(1) + word(-5) + word(index) + word(cardinality) + word(cardinality) + word(0) + word(1)
+        assertEquals(1, FiatMath.oldestObservationIndex(slot0(0, 2)))
+        assertEquals(0, FiatMath.oldestObservationIndex(slot0(1, 2)))
+        assertEquals(0, FiatMath.oldestObservationIndex(slot0(0, 1)))
+        assertNull(FiatMath.oldestObservationIndex(slot0(2, 2)))
+        assertNull(FiatMath.oldestObservationIndex(slot0(0, 0)))
+        assertEquals(77L, FiatMath.observationTimestamp("0x" + word(77) + word(1) + word(0) + word(1)))
+        assertNull(FiatMath.observationTimestamp("0x" + word(77) + word(1) + word(0) + word(0)))
+    }
+
+    @Test
+    fun `a short outage keeps the prices on screen, for half an hour at most`() = runBlocking {
+        setting = FiatCurrency.USD
+        val p = prices()
+        p.refresh()
+        val before = p.quotes.value!!.perToken
+        assertTrue(before.isNotEmpty())
+        down = true
+        clock += FiatPrices.TTL_MS
+        p.refresh()
+        assertEquals(before, p.quotes.value!!.perToken)
+        // Short of what it had: tried again after a minute, not five.
+        val asked = sent.size
+        clock += FiatPrices.RETRY_MS
+        p.refresh()
+        assertTrue(sent.size > asked)
+        assertEquals(before, p.quotes.value!!.perToken)
+        // A source that stays dead doesn't leave its old price up.
+        clock += FiatPrices.HOLD_MS
+        p.refresh()
+        assertTrue(p.quotes.value!!.perToken.isEmpty())
+        // Back: everything priced again.
+        down = false
+        clock += FiatPrices.RETRY_MS
+        p.refresh()
+        assertEquals(before, p.quotes.value!!.perToken)
+    }
+
+    @Test
+    fun `one read at a time, however slow`() = runBlocking {
+        setting = FiatCurrency.USD
+        fun ethFeedCalls() = synchronized(sent) {
+            sent.count { it.second.optJSONArray("params")?.optJSONObject(0)?.optString("to").equals(PriceFeeds.ETH_USD.address, true) }
+        }
+        val p = prices()
+        val g = CompletableDeferred<Unit>()
+        gate = g
+        val first = launch(Dispatchers.IO) { p.refresh() }
+        withTimeout(5_000) { while (synchronized(sent) { sent.isEmpty() }) delay(5) }
+        // Past the retry wait with no quotes yet: a second refresh returns at once and starts nothing.
+        clock += FiatPrices.RETRY_MS * 2
+        withTimeout(5_000) { p.refresh() }
+        g.complete(Unit)
+        first.join()
+        gate = null
+        // One read asks ETH / USD of each of the three RPCs at most; a second would ask again.
+        assertTrue(ethFeedCalls() in 1..ethUrls.size)
+        assertNotNull(p.quotes.value)
     }
 }
