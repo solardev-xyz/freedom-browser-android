@@ -233,8 +233,10 @@
     <!-- Under the site's name: "example.com / wants to use your camera". %1$s: what it asks for. -->
     <string name="library_permission_prompt_wants_to">wants to %1$s</string>
     <string name="library_permission_prompt_private">Private tab: your answer lasts until you close your private tabs.</string>
-    <string name="library_permission_prompt_remember">Remember this decision</string>
-    <string name="library_permission_prompt_block">Block</string>
+    <string name="library_permission_prompt_session_hint">“Allow this session” lasts until you close Freedom, even after you leave the site.</string>
+    <string name="library_permission_prompt_allow_session">Allow this session</string>
+    <string name="library_permission_prompt_allow_always">Allow every visit</string>
+    <string name="library_permission_prompt_dont_allow">Don\'t allow</string>
     <!-- %1$s: e.g. "camera" or "camera and microphone" -->
     <string name="library_permission_android_refused">Freedom isn\'t allowed to use your %1$s. Turn it on in Android settings.</string>
     <string name="library_permission_android_settings">Settings</string>

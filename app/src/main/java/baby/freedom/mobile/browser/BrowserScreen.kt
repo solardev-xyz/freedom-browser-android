@@ -1458,6 +1458,9 @@ fun BrowserScreen(
         }
 
         val url = UrlParser.toUrl(canonical, searchTemplate)
+        // What was typed, for "Search for … instead" if it isn't found (#419); a Reload keeps it.
+        target.typedAddress = (if (source == SubmitSource.User) typedAddressFor(canonical, url, searchTemplate) else null)
+            ?: target.typedAddress?.takeIf { it.isFor(url) }
         // Home is a special non-URL destination — clear the tab, blank
         // the WebView, and let the Compose [HomeScreen] overlay take
         // over. Fall-through into the gateway-probe / plain-load paths
@@ -2265,8 +2268,9 @@ fun BrowserScreen(
         // engine loaded, no list exempting it — re-read whenever the
         // allowlist or the engine changes.
         val adblockRevision by Adblock.revision.collectAsState()
-        val adblockState = remember(adblockRevision, state.url, state.private) {
-            Adblock.siteState(state.url, state.private)
+        val adblockState = remember(adblockRevision, state.url, state.private, state.showsErrorPage) {
+            // An error page has no ads to block: no switch (#419).
+            if (state.showsErrorPage) null else Adblock.siteState(state.url, state.private)
         }
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             // Tap-to-dismiss catcher for the whole chrome band — the
