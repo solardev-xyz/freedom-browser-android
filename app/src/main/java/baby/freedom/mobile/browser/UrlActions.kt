@@ -193,8 +193,9 @@ internal fun CapsuleUrlActionsMenu(
     onDismiss: () -> Unit,
 ) {
     val gapPx = with(LocalDensity.current) { CapsuleMenuGap.roundToPx() }
+    val marginPx = with(LocalDensity.current) { PopupEdgeMargin.roundToPx() }
     Popup(
-        popupPositionProvider = AnchoredAboveProvider(anchor, gapPx, alignToEnd = false),
+        popupPositionProvider = AnchoredAboveProvider(anchor, gapPx, alignToEnd = false, marginPx = marginPx),
         onDismissRequest = onDismiss,
         properties = PopupProperties(focusable = true),
     ) {
