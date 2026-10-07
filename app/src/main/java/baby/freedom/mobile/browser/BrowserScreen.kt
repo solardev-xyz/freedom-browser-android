@@ -54,6 +54,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.SnackbarVisuals
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -90,6 +91,8 @@ import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.node.NodeLogSource
+import baby.freedom.mobile.wallet.OpenLvSession
+import baby.freedom.mobile.wallet.ledger.Ledger
 import baby.freedom.mobile.wallet.NodeIdentitySync
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.ens.EnsInput
@@ -105,11 +108,14 @@ import baby.freedom.swarm.RadicleStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -743,6 +749,107 @@ fun BrowserScreen(
                     }
                 }
             }
+        }
+    }
+
+    // A connected site switched itself to a built-in network, no sheet
+    // (#440), while its tab had the turn on screen: say so, with Undo. One
+    // at a time — a newer notice replaces this one — and closed when it's
+    // down, which lets that tab's next switch through (#446 R1-F1). On the
+    // screen's scope, so the next notice arriving can't cancel an Undo
+    // already running. Closed by the bridge instead (its tab closed, or the
+    // notice ran past its longest hold), it comes down too (#446 R2-M1).
+    //
+    // A switch it reports is already made, so it isn't dropped (#446 R4-M2,
+    // R5-M3): it waits for its tab to be the active one, however long that
+    // takes, and if the user leaves the tab before it's on screen it waits
+    // for them to come back again. Once it has been on screen, leaving the
+    // tab takes it down, so it never sits over another one. It takes its
+    // place in the snackbar queue like any other notice: it doesn't push
+    // aside one already up — a Tab closed · Undo, a download's Open — and
+    // with it that notice's action (#446 R5-F1). It tells the bridge once
+    // it's actually on screen, which is when its hold starts (R4-M1).
+    //
+    // A newer notice replaces only its own tab's, or one already seen: one
+    // still waiting for another tab is kept, so that switch is still named
+    // when the user gets back to it (#446 R6-M2). Anything over its page
+    // covers it ([switchNoticeUncovered]): a sheet the tab puts up (the
+    // sign or send that usually follows a switch, a Swarm or Radicle
+    // sheet), a permission prompt or download offer, a full-screen panel,
+    // HTML5 fullscreen, or a window of its own (Android's permission
+    // dialog, a Ledger conversation, a remote-signing sheet).
+    // It comes down while covered and goes back up, with a fresh timer and
+    // its Undo, once the page is clear, so it doesn't run out unseen behind
+    // it (#446 R6-M1, R1-M1 of round 1007) — and, covered, it stops holding
+    // the tab's next switch ([EthereumProviders.SwitchNotice.covered]).
+    val chainSwitchNotices = remember { mutableMapOf<Long, ChainSwitchNoticeUi>() }
+    // The tab whose page nothing covers right now: set below, once the
+    // prompt turn and panels are known.
+    var switchNoticeClearTab by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(Unit) {
+        EthereumProviders.chainSwitches.collect { notice ->
+            notice.received()
+            switchNoticesReplaced(chainSwitchNotices.values, notice.tabId, { it.notice.tabId }, { it.shown })
+                .forEach { it.job?.cancel() }
+            val ui = ChainSwitchNoticeUi(notice)
+            ui.job = scope.launch {
+                try {
+                    val switch = notice.switch
+                    val visuals = ChainSwitchVisuals(
+                        Strings.get(R.string.send_eth_switched, permissionOriginDisplay(switch.origin), switch.to.name),
+                        Strings.get(R.string.send_undo),
+                    )
+                    // On its tab, with nothing covering its page.
+                    fun visible(): Boolean = tabs.active.id == notice.tabId && switchNoticeClearTab == notice.tabId
+                    var result: SnackbarResult? = null
+                    while (result == null) {
+                        // Covered after it was seen, then the user left the tab: down, as below.
+                        snapshotFlow { visible() || (ui.shown && tabs.active.id != notice.tabId) }.first { it }
+                        if (!visible()) return@launch
+                        result = coroutineScope {
+                            val showing = async { snackbarHostState.showSnackbar(visuals) }
+                            val onScreen = launch {
+                                snapshotFlow { snackbarHostState.currentSnackbarData?.visuals }.first { it === visuals }
+                                ui.shown = true
+                                notice.shown()
+                            }
+                            val left = async { snapshotFlow { visible() }.first { !it } }
+                            select<SnackbarResult?> {
+                                showing.onAwait { it }
+                                left.onAwait { null }
+                            }.also {
+                                showing.cancel()
+                                onScreen.cancel()
+                                left.cancel()
+                            }
+                        }
+                        // Left the tab after it was seen: down for good, no Undo. Only
+                        // covered, on its tab: back up once the page is clear, holding
+                        // nothing meanwhile.
+                        if (result == null && ui.shown && tabs.active.id != notice.tabId) return@launch
+                        if (result == null && ui.shown) notice.covered()
+                    }
+                    if (result == SnackbarResult.ActionPerformed) {
+                        notice.close(undo = true)
+                        scope.launch {
+                            val failed = when (EthereumProviders.undoSwitch(notice)) {
+                                EthereumProvider.UndoResult.UNDONE -> null
+                                EthereumProvider.UndoResult.MOVED -> R.string.send_undo_failed
+                                EthereumProvider.UndoResult.FAILED -> R.string.send_undo_save_failed
+                            }
+                            if (failed != null) snackbarHostState.showSnackbar(Strings.get(failed), duration = SnackbarDuration.Long)
+                        }
+                    }
+                } finally {
+                    notice.close(undo = false)
+                }
+            }
+            scope.launch {
+                notice.awaitClosed()
+                ui.job?.cancel()
+                if (chainSwitchNotices[notice.tabId] === ui) chainSwitchNotices.remove(notice.tabId)
+            }
+            chainSwitchNotices[notice.tabId] = ui
         }
     }
 
@@ -3297,7 +3404,12 @@ fun BrowserScreen(
     }
     state.ethereumPrompt?.takeIf { promptTurn == PromptTurn.Ethereum }?.let { prompt ->
         val ask = prompt.ask
-        if (ask is EthAsk.SendLink) {
+        if (ask is EthAsk.SwitchNotice) {
+            // A built-in network switch with no sheet (#440): its turn is
+            // the tab on screen, uncovered, with no sheet before it — the
+            // switch goes ahead and its notice comes up (#446 R1-F1).
+            LaunchedEffect(prompt) { prompt.respond(EthAnswer.Approved()) }
+        } else if (ask is EthAsk.SendLink) {
             // A payment link (#317) isn't a sheet: its turn opens the Send
             // page, filled in, which answers the ask when it's left.
             LaunchedEffect(prompt) {
@@ -3339,6 +3451,22 @@ fun BrowserScreen(
         pageOnScreen && lifecycleState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
     }
     androidx.compose.runtime.SideEffect { sitePermissions.onScreenTab.value = onScreenTabId }
+    // Where a dApp's "switched to" notice may be up (#446 R1-M1, round 1007).
+    // Windows of their own over the page count too (#446 R2-M1, round
+    // 1007): HTML5 fullscreen (drawn over both snackbar hosts), Android's
+    // permission dialog (its turn reads as None), a Ledger conversation, a
+    // remote-signing sheet, or the app not in the foreground at all.
+    val ledgerActivity by remember(context) { Ledger.get(context) }.activity.collectAsState()
+    val remoteApproval by remember(context) { OpenLvSession.get(context) }.approval.collectAsState()
+    val switchNoticeClear = switchNoticeUncovered(
+        pageUncovered = pageUncovered,
+        promptTurn = promptTurn,
+        switchTurn = state.ethereumPrompt?.ask is EthAsk.SwitchNotice,
+        pageSheetUp = sheetShown != null,
+        windowOver = tabs.fullscreen != null || androidDialogUp || ledgerActivity != null ||
+            remoteApproval != null || !lifecycleState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED),
+    )
+    androidx.compose.runtime.SideEffect { switchNoticeClearTab = state.id.takeIf { switchNoticeClear } }
     DisposableEffect(sitePermissions) {
         onDispose { sitePermissions.onScreenTab.value = null }
     }
@@ -3386,3 +3514,52 @@ private fun IpfsStatusLine(text: String, modifier: Modifier = Modifier) {
 
 /** The tab and document a page's Site permissions sheet (#266) was opened over. */
 private data class PageSheetTarget(val tabId: Long, val origin: String?, val doc: Int?)
+
+/**
+ * Whether a dApp's "switched to" notice (#440) may be up over the active
+ * tab: nothing covers its page — no full-screen panel ([pageUncovered]), no
+ * prompt or sheet of any kind having the tab's turn ([promptTurn]: the
+ * site-permission prompt, a download offer, a Radicle, Ethereum or Swarm
+ * sheet, a page's JS dialog, the long-press menu), and not the page's Site
+ * permissions sheet ([pageSheetUp]), and no window of its own over it
+ * ([windowOver]: HTML5 fullscreen, Android's permission dialog, a Ledger
+ * conversation, a remote-signing sheet, or the app not resumed). The one
+ * turn that doesn't cover it is a no-sheet switch's own ([switchTurn]),
+ * which is answered at once and brings the next notice (#446 R1-M1, R2-M1,
+ * round 1007).
+ */
+internal fun switchNoticeUncovered(
+    pageUncovered: Boolean,
+    promptTurn: PromptTurn,
+    switchTurn: Boolean,
+    pageSheetUp: Boolean,
+    windowOver: Boolean = false,
+): Boolean = pageUncovered && !pageSheetUp && !windowOver &&
+    (promptTurn == PromptTurn.None || (promptTurn == PromptTurn.Ethereum && switchTurn))
+
+/**
+ * Which of the "switched to" notices the screen has are replaced by a new
+ * one for [tabId] (#446 R6-M2): its own tab's, and any already seen. One
+ * still waiting for another tab, never shown, is kept, so that switch is
+ * still named when the user gets back to its tab.
+ */
+internal fun <T> switchNoticesReplaced(
+    notices: Collection<T>,
+    tabId: Long,
+    tabOf: (T) -> Long,
+    shown: (T) -> Boolean,
+): List<T> = notices.filter { tabOf(it) == tabId || shown(it) }
+
+/** The "<site> switched to <chain>" notice's job on screen (#440, #446). */
+private class ChainSwitchNoticeUi(val notice: EthereumProviders.SwitchNotice) {
+    var job: Job? = null
+
+    /** It has been on screen at least once. */
+    var shown = false
+}
+
+/** Its own instance per notice, so the screen can tell when that one is the snackbar up. */
+private class ChainSwitchVisuals(override val message: String, override val actionLabel: String) : SnackbarVisuals {
+    override val withDismissAction = true
+    override val duration = SnackbarDuration.Long
+}

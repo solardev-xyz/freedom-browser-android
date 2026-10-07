@@ -25,6 +25,7 @@ import baby.freedom.mobile.wallet.ledger.LedgerTypedDataHashes
 import java.math.BigInteger
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
@@ -105,6 +106,19 @@ sealed interface EthAsk {
     data class SwitchChain(override val origin: String, val from: Chain, val to: Chain) : EthAsk
 
     /**
+     * A connected site's switch to a built-in chain (#440): no sheet, but
+     * it takes the tab's turn as one would (#446 R1-F1) — the tab answers
+     * [EthAnswer.Approved] once it's this switch's turn on screen, then the
+     * provider switches ([from] and [to] are as the site asked; the switch
+     * actually made is [switched], null if none) and the tab shows "<site>
+     * switched to <chain>" with Undo, its next ask waiting until that
+     * notice is down.
+     */
+    class SwitchNotice(override val origin: String, val from: Chain, val to: Chain) : EthAsk {
+        val switched = CompletableDeferred<EthereumProvider.ChainSwitched?>()
+    }
+
+    /**
      * `wallet_addEthereumChain` for a chain the wallet doesn't have: add
      * [chain] (as the site describes it) and switch the site to it. [checked]
      * is the same chain from Freedom's own list — built in, or the
@@ -175,7 +189,9 @@ sealed interface EthAnswer {
  *  - Anyone: `eth_chainId`, `net_version`, `eth_accounts` (empty until
  *    connected), the chain reads ([ChainDataRouter.READ_METHODS], through
  *    the chain-data router as the page's reads), and the chain switch
- *    requests, which ask the user.
+ *    requests, which ask the user — except a connected site's switch to a
+ *    built-in chain, which happens at once with an Undo notice
+ *    ([switchesWithoutSheet], #440).
  *  - `eth_requestAccounts` asks once and remembers the site with the
  *    account the user chose ([Grants]).
  *  - Connected sites only: `personal_sign`, `eth_signTypedData_v4` and
@@ -325,6 +341,13 @@ class EthereumProvider(
     @Volatile
     var events: Events = Events { _, _, _ -> }
 
+    /**
+     * A connected site moved itself from [from] to [to], a built-in chain,
+     * with no sheet ([switchesWithoutSheet], #440): what the "switched to"
+     * notice names, and what its Undo ([undoSwitch]) puts back.
+     */
+    data class ChainSwitched(val origin: String, val from: Chain, val to: Chain)
+
     /** Chains picked by sites that aren't connected: for this process only, never written down. */
     private val sessionChains = HashMap<String, Long>()
 
@@ -352,7 +375,10 @@ class EthereumProvider(
         // Only the user's own yes on a sheet is wallet activity (#236): a page polling
         // eth_chainId or eth_blockNumber mustn't hold the idle lock off for hours, and with
         // it the "only while unlocked" gate of auto-approve rules and x402 auto-pay.
-        val ask: suspend (EthAsk) -> EthAnswer = { a -> ask0(a).also { if (it is EthAnswer.Approved) wallet.noteActivity() } }
+        // A switch's notice turn ([EthAsk.SwitchNotice]) is no yes from the user either.
+        val ask: suspend (EthAsk) -> EthAnswer = { a ->
+            ask0(a).also { if (it is EthAnswer.Approved && a !is EthAsk.SwitchNotice) wallet.noteActivity() }
+        }
         return when (method) {
             "eth_chainId" -> Reply.Ok(chainFor(origin).hexId)
             "net_version" -> Reply.Ok(chainFor(origin).id.toString())
@@ -368,8 +394,8 @@ class EthereumProvider(
             "personal_sign" -> personalSign(origin, connected ?: return notConnected(), params, ask)
             "eth_signTypedData_v4" -> signTypedData(origin, connected ?: return notConnected(), params, ask)
             "eth_sendTransaction" -> sendTransaction(origin, connected ?: return notConnected(), params, ask)
-            "wallet_switchEthereumChain" -> switchChain(origin, params, ask)
-            "wallet_addEthereumChain" -> addChain(origin, params, ask)
+            "wallet_switchEthereumChain" -> switchChain(origin, connected != null, params, ask)
+            "wallet_addEthereumChain" -> addChain(origin, connected != null, params, ask)
             "eth_sign", "eth_signTransaction", "eth_sendRawTransaction", "eth_signTypedData", "eth_signTypedData_v1",
             "eth_signTypedData_v3",
             -> Reply.Err(UNSUPPORTED, "Method not supported: $method")
@@ -645,7 +671,7 @@ class EthereumProvider(
         Chain(id = e.id, name = Strings.get(R.string.send_eth_custom_network), symbol = "", rpcUrls = emptyList())
     }
 
-    private suspend fun switchChain(origin: String, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
+    private suspend fun switchChain(origin: String, connected: Boolean, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
         val id = chainIdParam(params)
         val current = switchingFrom(origin)
         if (current.id == id) return Reply.Ok(JSONObject.NULL)
@@ -654,17 +680,131 @@ class EthereumProvider(
         val target = (list ?: BuiltInChains.ALL).firstOrNull { it.id == id }
             // Unreadable list: the chain may well be set up, so 4902 ("add it first") would be a lie.
             ?: return if (list == null) chainListUnreadable() else Reply.Err(UNRECOGNIZED_CHAIN, "Unrecognized chain ID ${hex(id)}. Try adding the chain using wallet_addEthereumChain first.")
-        return switchTo(origin, current, target, ask)
+        return switchTo(origin, connected, current, target, ask)
     }
 
-    private suspend fun switchTo(origin: String, current: Chain, target: Chain, ask: suspend (EthAsk) -> EthAnswer): Reply {
+    /**
+     * Move [origin] from [current] to [target], a chain the wallet has: with
+     * the Switch network sheet, or — for a connected site going to a
+     * built-in chain ([switchesWithoutSheet]) — with a notice and Undo
+     * instead ([switchWithNotice]).
+     */
+    private suspend fun switchTo(origin: String, connected: Boolean, current: Chain, target: Chain, ask: suspend (EthAsk) -> EthAnswer): Reply {
+        if (switchesWithoutSheet(connected, target)) return switchWithNotice(origin, current, target, ask)
         ask(EthAsk.SwitchChain(origin, current, target)).let { if (it !is EthAnswer.Approved) return refused(it) }
-        if (!setChainFor(origin, target.id)) return Reply.Err(INTERNAL, "Couldn't save the change")
-        events.emit(origin, "chainChanged", target.hexId)
-        return Reply.Ok(JSONObject.NULL)
+        // Under [chainMoves], as [undoSwitch] and [moveOffRemoved]: a check-then-write of
+        // theirs can't straddle this write (#446 R1-M1).
+        val saved = withContext(NonCancellable) {
+            chainMoves.withLock {
+                setChainFor(origin, target.id).also { if (it) events.emit(origin, "chainChanged", target.hexId) }
+            }
+        }
+        return if (saved) Reply.Ok(JSONObject.NULL) else Reply.Err(INTERNAL, "Couldn't save the change")
     }
 
-    private suspend fun addChain(origin: String, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
+    /**
+     * The no-sheet switch (#440). It still takes the tab's turn first
+     * ([EthAsk.SwitchNotice]), so it's held to what a sheet is (#446
+     * R1-F1): one at a time per tab, after any sheet or notice before it;
+     * only once the tab is on screen; and not at all once its sheets are
+     * paused. The site's chain is read again and written under
+     * [chainMoves] (R1-M1, R1-M2), and the switch made — null if none —
+     * goes to [EthAsk.SwitchNotice.switched], always, for its notice.
+     *
+     * Whether the site is connected was decided when the request came in,
+     * and the turn can be a long wait: it's checked again under
+     * [siteLinks], as [disconnect] holds, at the write (#446 R2-F1). A site
+     * disconnected meanwhile gets the Switch network sheet instead, as any
+     * site that isn't connected does.
+     */
+    private suspend fun switchWithNotice(origin: String, current: Chain, target: Chain, ask: suspend (EthAsk) -> EthAnswer): Reply {
+        val turn = EthAsk.SwitchNotice(origin, current, target)
+        var made: ChainSwitched? = null
+        var disconnected = false
+        val saved = try {
+            ask(turn).let { if (it !is EthAnswer.Approved) return refused(it) }
+            withContext(NonCancellable) {
+                // [siteLinks] first, then [chainMoves]: nothing takes them the other way round.
+                siteLinks.withLock { chainMoves.withLock {
+                    // Still connected now that it's the tab's turn (R2-F1)?
+                    if (connectedAccount(origin) == null) {
+                        disconnected = true
+                        return@withLock true
+                    }
+                    // Where it is now, not where it was before the wait: another tab of the site
+                    // may have switched it meanwhile, and Undo must go back to that (R1-M2).
+                    val now = storedChain(origin) ?: DEFAULT_CHAIN_ID
+                    if (now == target.id) return@withLock true
+                    val from = if (now == current.id) {
+                        current
+                    } else {
+                        (runCatching { chains() }.getOrNull() ?: BuiltInChains.ALL).firstOrNull { it.id == now }
+                            ?: Chain(id = now, name = Strings.get(R.string.send_eth_custom_network), symbol = "", rpcUrls = emptyList())
+                    }
+                    if (!setChainFor(origin, target.id)) return@withLock false
+                    events.emit(origin, "chainChanged", target.hexId)
+                    made = ChainSwitched(origin, from, target)
+                    true
+                } }
+            }
+        } finally {
+            turn.switched.complete(made)
+        }
+        if (disconnected) {
+            // The turn is given back above, with no notice; the sheet takes a turn of its own,
+            // from wherever the site is by now.
+            val now = switchingFrom(origin)
+            if (now.id == target.id) return Reply.Ok(JSONObject.NULL)
+            return switchTo(origin, connected = false, now, target, ask)
+        }
+        return if (saved) Reply.Ok(JSONObject.NULL) else Reply.Err(INTERNAL, "Couldn't save the change")
+    }
+
+    /**
+     * Undo a [ChainSwitched] (#440): [switch]'s site back on the chain it
+     * left, and its pages told with `chainChanged` again — only while it's
+     * still on the chain it switched to (it hasn't switched again, been
+     * moved, …) and the chain it left is still on the wallet's list.
+     * [UndoResult.MOVED] if it wasn't put back for one of those, and
+     * [UndoResult.FAILED] if the store couldn't be read or written — a
+     * different thing to tell the user (#446 R4-M3). Not cancellable, as
+     * [disconnect]: the Undo runs on a notice's job, and a write that
+     * commits must also tell the pages.
+     */
+    suspend fun undoSwitch(switch: ChainSwitched): UndoResult = withContext(NonCancellable) {
+        // [siteLinks] too (first, as [switchWithNotice]): a disconnect can't land between the
+        // read and the write, so a write that fails is the store's failure, not the site
+        // having moved on (#446 R4-M3).
+        siteLinks.withLock { chainMoves.withLock {
+            val origin = switch.origin
+            if (pinnedChain(origin) != null) return@withLock UndoResult.MOVED
+            try {
+                val now = storedChain(origin) ?: DEFAULT_CHAIN_ID
+                if (now != switch.to.id) return@withLock UndoResult.MOVED
+                val list = runCatching { chains() }.getOrNull()
+                val back = (list ?: BuiltInChains.ALL).firstOrNull { it.id == switch.from.id } ?: return@withLock UndoResult.MOVED
+                if (!setChainFor(origin, back.id)) return@withLock UndoResult.FAILED
+                events.emit(origin, "chainChanged", back.hexId)
+                UndoResult.UNDONE
+            } catch (e: GrantsUnreadable) {
+                UndoResult.FAILED
+            }
+        } }
+    }
+
+    /** What [undoSwitch] did. */
+    enum class UndoResult {
+        /** The site is back on the chain it left. */
+        UNDONE,
+
+        /** Not put back: the site isn't where the switch left it any more (or the chain it left is gone). */
+        MOVED,
+
+        /** Not put back: the site's chain couldn't be read or saved. */
+        FAILED,
+    }
+
+    private suspend fun addChain(origin: String, connected: Boolean, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
         val p = params.opt(0) as? JSONObject ?: throw BadParams("Expected [{chainId, chainName, nativeCurrency, rpcUrls}]")
         val id = chainIdOf(p.opt("chainId"))
         val current = switchingFrom(origin)
@@ -672,7 +812,7 @@ class EthereumProvider(
         pinnedChain(origin)?.let { return pinnedRefusal(current) }
         // A chain the wallet has keeps its own settings: this only switches to it.
         val list = runCatching { chains() }.getOrNull()
-        (list ?: BuiltInChains.ALL).firstOrNull { it.id == id }?.let { return switchTo(origin, current, it, ask) }
+        (list ?: BuiltInChains.ALL).firstOrNull { it.id == id }?.let { return switchTo(origin, connected, current, it, ask) }
         // Unreadable list: whether the wallet already has this chain is unknown, and if it
         // does, approving an Add sheet showing the site's name and RPCs would keep the stored
         // ones instead (#215 R5-M1). Refuse rather than show a sheet that may not be true.
@@ -1052,6 +1192,17 @@ class EthereumProvider(
 
         /** Desktop's default: Gnosis Chain. */
         val DEFAULT_CHAIN_ID = BuiltInChains.GNOSIS.id
+
+        /**
+         * Whether a switch to [target] goes through without the Switch
+         * network sheet (#440, audit W26): only for a [connected] site, and
+         * only to a chain built into the app — one whose name, ID and
+         * verified reads (light client or RPC quorum) are Freedom's, never a
+         * site's. Any other chain, and any site that isn't connected, still
+         * asks. Which chain the site left doesn't matter: Undo puts it back.
+         */
+        internal fun switchesWithoutSheet(connected: Boolean, target: Chain): Boolean =
+            connected && BuiltInChains.isBuiltIn(target.id)
 
         /** How many times a send is priced again after the user took too long to confirm. */
         private const val MAX_REPRICES = 3

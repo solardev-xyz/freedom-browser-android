@@ -34,8 +34,14 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -200,6 +206,109 @@ object EthereumProviders {
         // A list that couldn't be read (null) moves nobody: that's a read error, not a removal (#215 R4-F1).
         scope.launch { chainStore.chainsOrUnreadable.collect { list -> list?.let { p.chainsChanged(it) } } }
     }
+
+    /**
+     * One "<site> switched to <chain>" notice with Undo (#440), on [tabId]:
+     * that tab's next no-sheet switch waits until it's [close]d (#446
+     * R1-F1) — a sheet the tab's page asks for ends that hold instead and
+     * comes up at once, leaving the notice up (R4-F1, R5-M2) — and an Undo
+     * pauses the tab's asks as a refused sheet does.
+     */
+    class SwitchNotice internal constructor(val tabId: Long, val switch: EthereumProvider.ChainSwitched) {
+        internal val closed = CompletableDeferred<Boolean>()
+        internal val onScreen = CompletableDeferred<Unit>()
+        internal val received = CompletableDeferred<Unit>()
+
+        /** Holding the tab's next no-sheet switch: ended by [close], or by a sheet asking. */
+        internal val hold = CompletableDeferred<Unit>()
+
+        /**
+         * The browser has the notice. From here it owns taking it down
+         * ([close]), so it may wait as long as it takes for its tab to be
+         * the active one again: the switch is made, and is announced
+         * whenever the user comes back (#446 R5-M3).
+         */
+        fun received() {
+            received.complete(Unit)
+        }
+
+        /**
+         * The notice is actually on screen now. Its hold on the tab is timed
+         * from here, not from when it was handed over: one queued behind
+         * another snackbar mustn't run out before it's ever seen (#446 R4-M1).
+         */
+        fun shown() {
+            onScreen.complete(Unit)
+        }
+
+        /**
+         * Something covered the notice after it was on screen — a sheet or
+         * prompt of any kind, or a full-screen panel — and the browser took
+         * it down until its page is clear again. Like a sheet asking, that ends its hold: the next no-sheet
+         * switch can't come up while the page is covered anyway, and the
+         * notice is no longer bounded by [NOTICE_MAX_MS], so it isn't timed
+         * out unseen behind whatever covers it (#446 R1-M1, round 1007).
+         *
+         * That includes covers the page raises itself — an `alert()`, a
+         * download offer, a permission request — so a page can end the
+         * hold early that way. Each of those still needs the user's tap
+         * to clear before its next switch's notice can come up, so a page
+         * looping switch → `alert()` still gets one switch per user action,
+         * not a silent run of them (#446 R2-M2, round 1007).
+         */
+        fun covered() {
+            hold.complete(Unit)
+        }
+
+        /** The notice is down: [undo] if the user tapped Undo. Only the first call counts. */
+        fun close(undo: Boolean) {
+            closed.complete(undo)
+            hold.complete(Unit)
+        }
+
+        /**
+         * Returns once the notice is closed, from here or by the bridge —
+         * its tab closed, or [NOTICE_MAX_MS] on screen ran out — so the
+         * browser takes its snackbar down with it: an Undo offered past that
+         * point would outlast the turn it holds (#446 R2-M1, R2-M2). A new
+         * document in the tab doesn't close it: the switch is the site's
+         * and stays, so it's announced either way (#446 R4-M2, R5-M1).
+         */
+        suspend fun awaitClosed() {
+            closed.await()
+        }
+    }
+
+    private val switchedFlow = MutableSharedFlow<SwitchNotice>(
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /**
+     * A connected site switched itself to a built-in chain with no sheet
+     * (#440), while its tab was on screen: the browser shows "<site>
+     * switched to <chain>" with Undo ([undoSwitch]), says it has it
+     * ([SwitchNotice.received]) and once it's on screen
+     * ([SwitchNotice.shown]), and [SwitchNotice.close]s it when it's down —
+     * a newer notice replacing it, the user leaving the tab once it was up,
+     * or the notice timing out all count as no Undo.
+     */
+    val chainSwitches: SharedFlow<SwitchNotice> = switchedFlow.asSharedFlow()
+
+    /**
+     * The Undo of a [chainSwitches] notice: closes it as undone (pausing
+     * its tab's asks) and puts the site back ([EthereumProvider.undoSwitch]).
+     */
+    suspend fun undoSwitch(notice: SwitchNotice): EthereumProvider.UndoResult {
+        notice.close(undo = true)
+        return provider?.undoSwitch(notice.switch) ?: EthereumProvider.UndoResult.FAILED
+    }
+
+    /** Notices up, by tab: closed (no Undo) when their tab closes; their hold ends when a sheet asks. */
+    private val notices = HashMap<Long, SwitchNotice>()
+
+    /** How many sheet asks (anything but a no-sheet switch) are waiting for each tab's turn (#446 R4-F1). */
+    private val sheetsWaiting = HashMap<Long, Int>()
 
     /**
      * Signs and broadcasts [quote] through the wallet's own send flow and
@@ -412,6 +521,22 @@ object EthereumProviders {
         if (!live()) return EthAnswer.Rejected
         if (ask is EthAsk.CantSend && tab.id in cantSendClosed) return EthAnswer.Unseen
         val lock = promptLocks.getOrPut(tab.id) { Mutex() }
+        if (ask is EthAsk.SwitchNotice) return switchTurn(tab, doc, ask, lock)
+        // A sheet takes the turn from a "switched to" notice holding it: the page's sign or
+        // send right after its switch comes up at once, not once the notice has timed out
+        // (#446 R4-F1). The notice's hold is only there to space out no-sheet switches; a
+        // sheet is a gate of its own. The notice itself stays up, with its Undo (R5-M2).
+        sheetsWaiting[tab.id] = (sheetsWaiting[tab.id] ?: 0) + 1
+        notices[tab.id]?.hold?.complete(Unit)
+        try {
+            return sheetTurn(tab, ask, lock, ::live)
+        } finally {
+            val left = (sheetsWaiting[tab.id] ?: 1) - 1
+            if (left > 0) sheetsWaiting[tab.id] = left else sheetsWaiting.remove(tab.id)
+        }
+    }
+
+    private suspend fun sheetTurn(tab: BrowserState, ask: EthAsk, lock: Mutex, live: () -> Boolean): EthAnswer {
         return lock.withLock {
             if (!live()) return@withLock EthAnswer.Rejected
             // Checked again here: asks that queued behind the one the user closed must not each come up in turn.
@@ -438,6 +563,125 @@ object EthereumProviders {
         }
     }
 
+    /**
+     * A no-sheet chain switch's turn on [tab] (#440, #446 R1-F1): taken in
+     * the same line as the tab's sheets ([lock]) and put up as its prompt,
+     * which the browser answers [EthAnswer.Approved] at once — but only
+     * when it's the prompt's turn, so the tab is on screen and uncovered.
+     * A background tab's switch waits there like its sheet would, and a
+     * paused tab's is refused. Once approved, [lock] stays held through
+     * the switch and its notice ([showNotice]), so a page switching in a
+     * loop gets one switch per notice, each named rightly, and its Undo
+     * pauses the tab. A sheet asked meanwhile ends that hold (#446 R4-F1),
+     * but not the notice.
+     */
+    private suspend fun switchTurn(tab: BrowserState, doc: Int, ask: EthAsk.SwitchNotice, lock: Mutex): EthAnswer {
+        fun live() = (documents[tab.id] ?: 0) == doc && tab.id !in blockedTabs
+        lock.lock()
+        var handedOn = false
+        try {
+            if (!live()) return EthAnswer.Rejected
+            val request = EthereumPromptRequest(ask) { }
+            pending.getOrPut(tab.id) { mutableSetOf() }.add(request)
+            tab.ethereumPrompt = request
+            val answer = try {
+                request.answer.await()
+            } finally {
+                pending[tab.id]?.remove(request)
+                if (tab.ethereumPrompt === request) tab.ethereumPrompt = null
+            }
+            // Never shown (withdrawn, or the tab moved on): nothing was turned down, so no pause.
+            if (answer !is EthAnswer.Approved || !live()) return EthAnswer.Rejected
+            handedOn = true
+            scope.launch { showNotice(tab.id, doc, ask) { lock.unlock() } }
+            return answer
+        } finally {
+            if (!handedOn) lock.unlock()
+        }
+    }
+
+    /**
+     * The notice for [ask]'s switch, once made, until it's closed, holding
+     * the tab's line until then ([release]s it when the hold ends).
+     *
+     * Bounded where nobody owns the notice: [NOTICE_MAX_MS] for the browser
+     * to take it ([SwitchNotice.received]: a screen being rebuilt may miss
+     * it), then [NOTICE_MAX_MS] on screen while it still holds the line.
+     * Once a sheet or a new document has ended the hold, the notice holds
+     * nothing and the browser keeps it until it's down (#446 R6-M1). In between, the
+     * browser has it and closes it itself if it gives it up, so the wait
+     * for its tab to be the active one again has no limit (#446 R5-M3):
+     * until then the tab isn't on screen, and its line couldn't move
+     * anyway.
+     *
+     * A switch made is always announced (#446 R4-M2, R5-M1), even if its
+     * page has started a new document since: the switch is the site's, and
+     * stays. Its Undo then puts the site back but pauses nothing, as
+     * there's no page left to pause. A sheet already waiting for the tab,
+     * or one asked while the notice is up, has the turn (R4-F1): the hold
+     * ends, so the sheet comes up at once, but the notice stays — a switch
+     * that got the turn just ahead of a sheet is still named (R5-M2).
+     */
+    private suspend fun showNotice(tabId: Long, doc: Int, ask: EthAsk.SwitchNotice, release: () -> Unit) {
+        var released = false
+        fun free() {
+            if (!released) {
+                released = true
+                release()
+            }
+        }
+        try {
+            val switch = withTimeoutOrNull(SWITCH_WAIT_MS) { ask.switched.await() } ?: return
+            // The tab closed: there's nowhere left to show it.
+            if (tabId !in documents) return
+            val notice = SwitchNotice(tabId, switch)
+            notices[tabId] = notice
+            if ((sheetsWaiting[tabId] ?: 0) > 0) notice.hold.complete(Unit)
+            try {
+                coroutineScope {
+                    val holding = launch {
+                        notice.hold.await()
+                        free()
+                    }
+                    switchedFlow.tryEmit(notice)
+                    val taken = withTimeoutOrNull(NOTICE_MAX_MS) {
+                        select {
+                            notice.received.onAwait { true }
+                            notice.closed.onAwait { false }
+                        }
+                    } ?: false
+                    val up = taken && select {
+                        notice.onScreen.onAwait { true }
+                        notice.closed.onAwait { false }
+                    }
+                    if (up) {
+                        // Only a hold that's still on is bounded: once a sheet or a new document
+                        // has ended it, the notice holds nothing, and the browser may keep it (or
+                        // put it back up after a sheet that covered it) as long as it needs to
+                        // be seen (#446 R6-M1).
+                        val held = withTimeoutOrNull(NOTICE_MAX_MS) {
+                            select {
+                                notice.hold.onAwait { }
+                                notice.closed.onAwait { }
+                            }
+                        }
+                        if (held != null) {
+                            val undone = notice.closed.await()
+                            if (undone && (documents[tabId] ?: 0) == doc) blockedTabs += tabId
+                        }
+                    }
+                    notice.close(undo = false)
+                    holding.join()
+                }
+            } finally {
+                notice.close(undo = false)
+                if (notices[tabId] === notice) notices.remove(tabId)
+            }
+        } finally {
+            free()
+        }
+    }
+
     /** Which of [tabId]'s documents is its current one (bumped by [onDocumentStarted]). */
     internal fun currentDocument(tabId: Long): Int = documents[tabId] ?: 0
 
@@ -453,18 +697,24 @@ object EthereumProviders {
     fun onDocumentStarted(tab: BrowserState, url: String?) {
         documents[tab.id] = (documents[tab.id] ?: 0) + 1
         committedOrigins[tab.id] = providerOriginKey(url)
+        // A switch notice stays: the switch it names is the site's, not the document's (#446
+        // R5-M1). Its hold ends, though: the new document's own first switch doesn't wait
+        // behind the old page's notice (R6-M3).
+        notices[tab.id]?.hold?.complete(Unit)
         withdraw(tab.id)
     }
 
     /** The tab closed. */
     fun onTabClosed(tabId: Long) {
         withdraw(tabId)
+        notices[tabId]?.close(undo = false)
         documents.remove(tabId)
         committedOrigins.remove(tabId)
         promptLocks.remove(tabId)
         pending.remove(tabId)
         blockedTabs.remove(tabId)
         cantSendClosed.remove(tabId)
+        sheetsWaiting.remove(tabId)
     }
 
     /** The user navigated [tabId] themselves: its pages may ask again. */
@@ -482,6 +732,21 @@ object EthereumProviders {
 
     /** How long a request waits for the account list to be read back after a launch. */
     private const val ACCOUNTS_WAIT_MS = 3_000L
+
+    /** The longest a no-sheet switch's turn waits for the provider to have switched (one store write). */
+    private const val SWITCH_WAIT_MS = 30_000L
+
+    /**
+     * The longest a switch notice holds its tab's next no-sheet switch,
+     * once on screen (and the longest it waits for the browser to take
+     * it). A notice whose hold has ended isn't bounded by it (#446
+     * R6-M1). Past a
+     * snackbar's long duration, and its accessibility-extended one — up to
+     * 2 minutes with Android's "Time to take action" (#446 R2-M1). Should a
+     * notice still be up when this runs out, closing it takes it down
+     * ([SwitchNotice.awaitClosed]), so no Undo outlives the turn it holds.
+     */
+    private const val NOTICE_MAX_MS = 150_000L
 
     /** The longest an Add network sheet waits for the chain catalog. */
     private const val CATALOG_WAIT_MS = 4_000L

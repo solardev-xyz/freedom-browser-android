@@ -27,9 +27,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
@@ -59,7 +61,15 @@ class EthereumProviderTest {
             grants[origin] = EthereumProvider.Grant(account, chainId)
             return true
         }
+        /** When set, a chain write waits here before it commits; [setChainStarted] says one got there. */
+        var setChainGate: CompletableDeferred<Unit>? = null
+        var setChainStarted = CompletableDeferred<Unit>()
+        /** A chain write isn't written. */
+        var failSetChain = false
         override suspend fun setChain(origin: String, chainId: Long): Boolean {
+            setChainStarted.complete(Unit)
+            setChainGate?.await()
+            if (failSetChain) return false
             val g = grants[origin] ?: return false
             grants[origin] = g.copy(chainId = chainId)
             return true
@@ -160,6 +170,11 @@ class EthereumProviderTest {
     private var readAnswer: (String) -> Any? = { "0x1" }
     private val events = mutableListOf<Triple<String, String, String>>()
     private val asks = mutableListOf<EthAsk>()
+    /** Switches made with no sheet (#440): each one's notice with Undo. */
+    private val switched = mutableListOf<EthereumProvider.ChainSwitched>()
+    /** The no-sheet switches' turns on the tab ([EthAsk.SwitchNotice], #446 R1-F1), and how the tab answers them. */
+    private val turns = mutableListOf<EthAsk.SwitchNotice>()
+    private var turnAnswer: (EthAsk.SwitchNotice) -> EthAnswer = { EthAnswer.Approved() }
     /** The chainlist catalog's entries, by chain ID (#423). */
     private val catalogChains = HashMap<Long, Chain>()
     private var catalogFailure: Exception? = null
@@ -180,10 +195,18 @@ class EthereumProviderTest {
         sends = sends,
         autoApprove = rules,
         catalog = { id -> catalogFailure?.let { throw it } ?: catalogChains[id] },
-    ).also { p -> p.events = EthereumProvider.Events { o, e, d -> events += Triple(o, e, d.toString()) } }
+    ).also { p ->
+        p.events = EthereumProvider.Events { o, e, d -> events += Triple(o, e, d.toString()) }
+    }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private fun call(method: String, params: JSONArray = JSONArray(), origin: String = site) = runBlocking {
         provider.request(origin, method, params) { ask ->
+            if (ask is EthAsk.SwitchNotice) {
+                turns += ask
+                ask.switched.invokeOnCompletion { ask.switched.getCompleted()?.let { switched += it } }
+                return@request turnAnswer(ask)
+            }
             asks += ask
             answer(ask)
         }
@@ -259,7 +282,8 @@ class EthereumProviderTest {
         assertEquals(4001, code(call("personal_sign", JSONArray().put("0x68656c6c6f").put(main.address))))
         assertEquals(4001, code(call("eth_sendTransaction", tx("to" to second.address))))
         answer = { EthAnswer.Paused }
-        assertEquals(4001, code(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1")))))
+        // A chain that isn't built in, so the switch still asks (#440).
+        assertEquals(4001, code(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0xaa36a7")))))
         assertTrue(asks.isNotEmpty())
         assertEquals(0, wallet.activity)
     }
@@ -318,7 +342,10 @@ class EthereumProviderTest {
         ok(call("eth_sendTransaction", tx("to" to second.address)))
         assertTrue(wallet.activity > 0)
         wallet.activity = 0
+        // A connected site's switch to a built-in chain has no sheet (#440): nothing the user approved.
         ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
+        assertEquals(0, wallet.activity)
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0xaa36a7"))))
         assertTrue(wallet.activity > 0)
     }
 
@@ -462,7 +489,112 @@ class EthereumProviderTest {
         val err = call("personal_sign", JSONArray().put("hello").put(main.address)) as EthereumProvider.Reply.Err
         assertEquals(4001, err.code)
         assertTrue(err.message, err.message.contains("reload"))
-        assertEquals(4001, code(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1")))))
+        assertEquals(4001, code(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0xaa36a7")))))
+        // A switch with no sheet is held back by the pause too (#446 R1-F1): its turn is refused.
+        turnAnswer = { EthAnswer.Paused }
+        val paused = call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))) as EthereumProvider.Reply.Err
+        assertEquals(4001, paused.code)
+        assertTrue(paused.message, paused.message.contains("reload"))
+        assertEquals(100L, grants.grants[site]?.chainId)
+        assertTrue(events.isEmpty())
+        assertTrue(switched.isEmpty())
+        assertNull(turns.single().switched.let { runBlocking { it.await() } })
+    }
+
+    @Test
+    fun `a no-sheet switch waits for the tab's turn, switches only once it has it, and isn't wallet activity (#446 R1-F1)`() {
+        connect()
+        wallet.activity = 0
+        // The tab isn't on screen yet: nothing is written or told while it waits.
+        turnAnswer = { ask ->
+            assertEquals(100L, grants.grants[site]?.chainId)
+            assertTrue(events.isEmpty())
+            assertEquals(EthAsk.SwitchNotice::class, ask::class)
+            assertEquals(BuiltInChains.ETHEREUM, ask.to)
+            EthAnswer.Approved()
+        }
+        ok(switchTo("0x1"))
+        assertEquals(1, turns.size)
+        assertEquals(1L, grants.grants[site]?.chainId)
+        assertEquals(EthereumProvider.ChainSwitched(site, BuiltInChains.GNOSIS, BuiltInChains.ETHEREUM), switched.single())
+        assertEquals(0, wallet.activity)
+        // Withdrawn before its turn (the tab moved on): no switch, and the notice is told there's none.
+        turnAnswer = { EthAnswer.Rejected }
+        assertEquals(4001, code(switchTo("0x2105")))
+        assertEquals(1L, grants.grants[site]?.chainId)
+        assertNull(runBlocking { turns.last().switched.await() })
+        assertEquals(1, switched.size)
+    }
+
+    @Test
+    fun `Undo waits for a page's switch already writing, and then leaves it standing (#446 R1-M1)`() {
+        connect()
+        ok(switchTo("0x1"))
+        val first = switched.single()
+        runBlocking {
+            val gate = CompletableDeferred<Unit>()
+            grants.setChainGate = gate
+            grants.setChainStarted = CompletableDeferred()
+            val page = launch {
+                ok(provider.request(site, "wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x2105"))) { EthAnswer.Approved() })
+            }
+            grants.setChainStarted.await()
+            // The page's write is in flight: the site still reads as on Ethereum, the chain Undo checks for.
+            val undo = async { provider.undoSwitch(first) }
+            yield()
+            assertFalse(undo.isCompleted)
+            grants.setChainGate = null
+            gate.complete(Unit)
+            page.join()
+            assertEquals(EthereumProvider.UndoResult.MOVED, undo.await())
+        }
+        // The page's last switch, which it was told succeeded, stands.
+        assertEquals(8453L, grants.grants[site]?.chainId)
+        assertEquals("0x2105", ok(call("eth_chainId")))
+    }
+
+    @Test
+    fun `a no-sheet switch names where the site is when it writes, not where it was when it asked (#446 R1-M2)`() {
+        connect()
+        // Another tab of the site moves it to Base while this switch waits for its turn.
+        turnAnswer = { grants.grants[site] = EthereumProvider.Grant(main.address, 8453); EthAnswer.Approved() }
+        ok(switchTo("0x1"))
+        assertEquals(EthereumProvider.ChainSwitched(site, BuiltInChains.BASE, BuiltInChains.ETHEREUM), switched.single())
+        // Undo goes back to Base, the chain it actually left.
+        assertEquals(EthereumProvider.UndoResult.UNDONE, runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(8453L, grants.grants[site]?.chainId)
+        // Already on the chain by the time it writes: nothing is written, told or noticed.
+        switched.clear()
+        events.clear()
+        turnAnswer = { grants.grants[site] = EthereumProvider.Grant(main.address, 1); EthAnswer.Approved() }
+        ok(switchTo("0x1"))
+        assertTrue(events.isEmpty())
+        assertTrue(switched.isEmpty())
+    }
+
+    @Test
+    fun `a site disconnected while its no-sheet switch waited gets the sheet instead (#446 R2-F1)`() {
+        connect()
+        // Disconnected (another tab's wallet_revokePermissions, Settings) before the tab's turn came.
+        turnAnswer = { runBlocking { assertTrue(provider.disconnect(site)) }; EthAnswer.Approved() }
+        events.clear()
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(switchTo("0x1")))
+        // No switch, no notice: the Switch network sheet was asked, from where the site is.
+        assertNull(grants.grants[site])
+        assertEquals(listOf<EthAsk>(EthAsk.SwitchChain(site, BuiltInChains.GNOSIS, BuiltInChains.ETHEREUM)), asks)
+        assertTrue(switched.isEmpty())
+        assertNull(runBlocking { turns.single().switched.await() })
+        assertEquals("0x64", ok(call("eth_chainId")))
+        assertTrue(events.none { it.second == "chainChanged" })
+        // Approving that sheet does switch it, as for any site that isn't connected.
+        connect()
+        asks.clear()
+        answer = { EthAnswer.Approved() }
+        ok(switchTo("0x1"))
+        assertEquals("0x1", ok(call("eth_chainId")))
+        assertEquals(1, asks.filterIsInstance<EthAsk.SwitchChain>().size)
+        assertTrue(switched.isEmpty())
     }
 
     @Test
@@ -787,18 +919,19 @@ class EthereumProviderTest {
         answer = { EthAnswer.Approved() }
         connect()
         chainList = null
-        // A built-in chain: switched to as normal, not 4902.
+        // A built-in chain: switched to as normal (no sheet for a connected site, #440), not 4902.
         ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
         assertEquals(1L, grants.grants[site]?.chainId)
-        assertEquals(EthAsk.SwitchChain(site, BuiltInChains.GNOSIS, BuiltInChains.ETHEREUM), asks.single())
-        asks.clear()
+        assertTrue(asks.isEmpty())
+        assertEquals(EthereumProvider.ChainSwitched(site, BuiltInChains.GNOSIS, BuiltInChains.ETHEREUM), switched.single())
+        switched.clear()
         // Adding a built-in chain under the site's own name and RPCs only switches, as with a readable list.
         val evil = JSONObject().put("chainId", "0x64").put("chainName", "Evil Gnosis")
             .put("nativeCurrency", JSONObject().put("name", "x").put("symbol", "X").put("decimals", 18))
             .put("rpcUrls", JSONArray().put("https://rpc.evil.example"))
         ok(call("wallet_addEthereumChain", JSONArray().put(evil)))
-        assertEquals(EthAsk.SwitchChain(site, BuiltInChains.ETHEREUM, BuiltInChains.GNOSIS), asks.single())
-        asks.clear()
+        assertTrue(asks.isEmpty())
+        assertEquals(EthereumProvider.ChainSwitched(site, BuiltInChains.ETHEREUM, BuiltInChains.GNOSIS), switched.single())
         // A chain that may or may not be stored: neither a 4902 nor an Add sheet whose values might not be used.
         assertEquals(-32603, code(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0xaa36a7")))))
         val custom = JSONObject(evil.toString()).put("chainId", "0xaa36a7").put("chainName", "Evil Sepolia")
@@ -817,9 +950,10 @@ class EthereumProviderTest {
         events.clear()
         chainList = null
         ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
-        val ask = asks.single() as EthAsk.SwitchChain
-        assertEquals(11155111L, ask.from.id)
-        assertEquals(BuiltInChains.ETHEREUM, ask.to)
+        assertTrue(asks.isEmpty())
+        val switch = switched.single()
+        assertEquals(11155111L, switch.from.id)
+        assertEquals(BuiltInChains.ETHEREUM, switch.to)
         assertEquals(1L, grants.grants[site]?.chainId)
         assertEquals(listOf(Triple(site, "chainChanged", "0x1")), events)
     }
@@ -912,6 +1046,184 @@ class EthereumProviderTest {
         answer = { EthAnswer.Approved() }
         assertEquals(4200, code(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x64")), origin = app)))
         assertTrue(asks.isEmpty())
+    }
+
+    private fun switchTo(chainId: String, origin: String = site) =
+        call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", chainId)), origin = origin)
+
+    @Test
+    fun `which switches go without a sheet (#440)`() {
+        // Only a connected site, and only to a chain built into the app.
+        assertTrue(EthereumProvider.switchesWithoutSheet(connected = true, target = BuiltInChains.ETHEREUM))
+        assertTrue(EthereumProvider.switchesWithoutSheet(connected = true, target = BuiltInChains.GNOSIS))
+        assertTrue(EthereumProvider.switchesWithoutSheet(connected = true, target = BuiltInChains.BASE))
+        // A built-in chain as the store keeps it, with the user's own RPCs added, is still the built-in chain.
+        assertTrue(EthereumProvider.switchesWithoutSheet(true, BuiltInChains.ETHEREUM.copy(userRpcUrls = listOf("https://my.node"))))
+        assertFalse(EthereumProvider.switchesWithoutSheet(connected = true, target = sepolia))
+        assertFalse(EthereumProvider.switchesWithoutSheet(connected = false, target = BuiltInChains.ETHEREUM))
+        assertFalse(EthereumProvider.switchesWithoutSheet(connected = false, target = sepolia))
+        // A custom chain dressed up as Ethereum is judged by its ID, not its name or flags.
+        assertFalse(EthereumProvider.switchesWithoutSheet(true, sepolia.copy(name = "Ethereum", builtIn = true)))
+    }
+
+    @Test
+    fun `a connected site switches to a built-in chain at once, tells its pages, and the notice gets the switch (#440)`() {
+        connect()
+        wallet.activity = 0
+        answer = { error("no sheet expected, got $it") }
+        assertEquals(JSONObject.NULL, ok(switchTo("0x1")))
+        assertTrue(asks.isEmpty())
+        assertEquals(1L, grants.grants[site]?.chainId)
+        assertEquals(listOf(Triple(site, "chainChanged", "0x1")), events)
+        assertEquals(listOf(EthereumProvider.ChainSwitched(site, BuiltInChains.GNOSIS, BuiltInChains.ETHEREUM)), switched)
+        assertEquals("0x1", ok(call("eth_chainId")))
+        // Other sites stay where they were.
+        assertEquals("0x64", ok(call("eth_chainId", origin = "https://other.example")))
+        // No sheet means nothing the user approved: the idle lock isn't held off (#236).
+        assertEquals(0, wallet.activity)
+        // The chain it's already on: nothing happens, no notice.
+        ok(switchTo("0x1"))
+        assertEquals(1, events.size)
+        assertEquals(1, switched.size)
+    }
+
+    @Test
+    fun `a site that isn't connected, or a chain that isn't built in, still gets the sheet (#440)`() {
+        // Not connected: the sheet, and no notice.
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(switchTo("0x1")))
+        assertEquals(EthAsk.SwitchChain(site, BuiltInChains.GNOSIS, BuiltInChains.ETHEREUM), asks.single())
+        assertEquals("0x64", ok(call("eth_chainId")))
+        answer = { EthAnswer.Approved() }
+        ok(switchTo("0x1"))
+        assertEquals(2, asks.size)
+        assertTrue(switched.isEmpty())
+        // Connected, to a chain the user added themselves: the sheet.
+        connect()
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(switchTo("0xaa36a7")))
+        assertEquals(EthAsk.SwitchChain(site, BuiltInChains.ETHEREUM, sepolia), asks.single())
+        assertEquals(1L, grants.grants[site]?.chainId)
+        // Connected, to a chain the wallet doesn't have: the Add network sheet, as before.
+        asks.clear()
+        val params = JSONObject().put("chainId", "0x539").put("chainName", "Local")
+            .put("nativeCurrency", JSONObject().put("name", "Ether").put("symbol", "ETH").put("decimals", 18))
+            .put("rpcUrls", JSONArray().put("https://rpc.local.example"))
+        assertEquals(4001, code(call("wallet_addEthereumChain", JSONArray().put(params))))
+        assertTrue(asks.single() is EthAsk.AddChain)
+        assertTrue(switched.isEmpty())
+        assertTrue(grants.added.isEmpty())
+    }
+
+    @Test
+    fun `a connected site's wallet_addEthereumChain for a built-in chain only switches, with no sheet (#440)`() {
+        connect()
+        answer = { error("no sheet expected, got $it") }
+        val evil = JSONObject().put("chainId", "0x2105").put("chainName", "Evil Base")
+            .put("nativeCurrency", JSONObject().put("name", "x").put("symbol", "X").put("decimals", 18))
+            .put("rpcUrls", JSONArray().put("https://rpc.evil.example"))
+        ok(call("wallet_addEthereumChain", JSONArray().put(evil)))
+        // The app's own Base, not the site's name or RPCs.
+        assertEquals(EthereumProvider.ChainSwitched(site, BuiltInChains.GNOSIS, BuiltInChains.BASE), switched.single())
+        assertTrue(grants.added.isEmpty())
+        assertEquals(8453L, grants.grants[site]?.chainId)
+    }
+
+    @Test
+    fun `an onchain app can't switch even when connected, and gets no notice (#440)`() {
+        val app = "https://0x1234567890123456789012345678901234567890-8453.web3.freedom.baby"
+        grants.grants[app] = EthereumProvider.Grant(main.address, 8453)
+        assertEquals(4200, code(switchTo("0x1", origin = app)))
+        assertTrue(asks.isEmpty())
+        assertTrue(switched.isEmpty())
+        assertTrue(events.isEmpty())
+    }
+
+    @Test
+    fun `Undo puts the site back and tells its pages again, once (#440)`() {
+        connect()
+        ok(switchTo("0x1"))
+        events.clear()
+        assertEquals(EthereumProvider.UndoResult.UNDONE, runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(100L, grants.grants[site]?.chainId)
+        assertEquals(listOf(Triple(site, "chainChanged", "0x64")), events)
+        assertEquals("0x64", ok(call("eth_chainId")))
+        // Already undone: nothing more to do, and no second event.
+        assertEquals(EthereumProvider.UndoResult.MOVED, runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(1, events.size)
+    }
+
+    @Test
+    fun `Undo back to a custom chain works while it's still on the list (#440)`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        ok(switchTo("0xaa36a7"))
+        ok(switchTo("0x1"))
+        val switch = switched.single()
+        assertEquals(sepolia, switch.from)
+        events.clear()
+        assertEquals(EthereumProvider.UndoResult.UNDONE, runBlocking { provider.undoSwitch(switch) })
+        assertEquals(11155111L, grants.grants[site]?.chainId)
+        assertEquals(listOf(Triple(site, "chainChanged", "0xaa36a7")), events)
+    }
+
+    @Test
+    fun `Undo does nothing once the site has moved on, or the chain it left is gone (#440)`() {
+        connect()
+        ok(switchTo("0x1"))
+        // Switched again since: that switch stands; its own notice has the newer Undo.
+        ok(switchTo("0x2105"))
+        events.clear()
+        assertEquals(EthereumProvider.UndoResult.MOVED, runBlocking { provider.undoSwitch(switched.first()) })
+        assertEquals(8453L, grants.grants[site]?.chainId)
+        assertTrue(events.isEmpty())
+        assertEquals(EthereumProvider.UndoResult.UNDONE, runBlocking { provider.undoSwitch(switched.last()) })
+        assertEquals(1L, grants.grants[site]?.chainId)
+
+        // Left a custom chain that has since been removed in Settings: nothing to go back to.
+        answer = { EthAnswer.Approved() }
+        ok(switchTo("0xaa36a7"))
+        switched.clear()
+        ok(switchTo("0x64"))
+        chainList = BuiltInChains.ALL
+        events.clear()
+        assertEquals(EthereumProvider.UndoResult.MOVED, runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(100L, grants.grants[site]?.chainId)
+        assertTrue(events.isEmpty())
+
+        // Connected sites can't be read: not undone, rather than guessed at.
+        chainList = BuiltInChains.ALL + sepolia
+        switched.clear()
+        ok(switchTo("0x1"))
+        grants.unreadable = true
+        assertEquals(EthereumProvider.UndoResult.FAILED, runBlocking { provider.undoSwitch(switched.single()) })
+    }
+
+    @Test
+    fun `an Undo the store couldn't write says so, not that the site moved on (#446 R4-M3)`() {
+        connect()
+        ok(switchTo("0x1"))
+        events.clear()
+        grants.failSetChain = true
+        assertEquals(EthereumProvider.UndoResult.FAILED, runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(1L, grants.grants[site]?.chainId)
+        assertTrue(events.isEmpty())
+        // Written next time: undone.
+        grants.failSetChain = false
+        assertEquals(EthereumProvider.UndoResult.UNDONE, runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(100L, grants.grants[site]?.chainId)
+    }
+
+    @Test
+    fun `Undo after the site disconnected puts back the chain it keeps for the session (#440)`() {
+        connect()
+        ok(switchTo("0x1"))
+        assertTrue(runBlocking { provider.disconnect(site) })
+        events.clear()
+        assertEquals(EthereumProvider.UndoResult.UNDONE, runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals("0x64", ok(call("eth_chainId")))
+        assertEquals(listOf(Triple(site, "chainChanged", "0x64")), events)
+        assertTrue(grants.grants.isEmpty())
     }
 
     @Test
