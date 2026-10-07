@@ -98,16 +98,48 @@ class WalletRpc(
             agreeOn = { it != null && it != JSONObject.NULL },
         ) { it == true }
 
+    /**
+     * Block [block]'s own `timestamp`, from its header. The quorum compares
+     * only the block's number and timestamp: providers shape the rest of a
+     * block object differently. (An `eth_call` reading `block.timestamp`
+     * is no substitute: Colibri's proven EVM answers it 0.)
+     */
+    suspend fun blockTimestamp(chainId: Long, block: Long): Reading<Long> {
+        val tag = "0x" + block.toString(16)
+        return read(
+            chainId, "eth_getBlockByNumber", JSONArray().put(tag).put(false),
+            agreeOn = { (it as? JSONObject)?.let { b -> JSONObject().put("number", b.opt("number")).put("timestamp", b.opt("timestamp")) } ?: it },
+        ) {
+            val b = it as? JSONObject ?: throw invalid("eth_getBlockByNumber", it)
+            // The block asked for, not another the RPCs happen to agree on.
+            if (b.opt("number") != tag) throw invalid("eth_getBlockByNumber", it)
+            quantity(b.opt("timestamp")).toLong().takeIf { t -> t > 0 } ?: throw invalid("eth_getBlockByNumber", it)
+        }
+    }
+
     /** Gas for the call object [tx] (`from`, `to`, `value`, `data`, …). */
     suspend fun estimateGas(chainId: Long, tx: JSONObject): Reading<BigInteger> =
         read(chainId, "eth_estimateGas", JSONArray().put(tx), ::quantity)
 
     /**
      * `eth_call`: the return data (`0x…`). A revert is thrown as a
-     * deterministic [ChainRpcException.Rpc] carrying its data.
+     * deterministic [ChainRpcException.Rpc] carrying its data. [accept],
+     * when given, judges each tier's return data: one it refuses sends the
+     * call on to the next tier; tiers in [skip] aren't asked at all
+     * ([ChainDataRouter.request]).
      */
-    suspend fun call(chainId: Long, tx: JSONObject, block: String = "latest"): Reading<String> =
-        read(chainId, "eth_call", JSONArray().put(tx).put(block)) {
+    suspend fun call(
+        chainId: Long,
+        tx: JSONObject,
+        block: String = "latest",
+        accept: ((String) -> Boolean)? = null,
+        skip: Set<ChainSource> = emptySet(),
+    ): Reading<String> =
+        read(
+            chainId, "eth_call", JSONArray().put(tx).put(block), agreeOn = null,
+            accept = accept?.let { a -> { r: Any? -> (r as? String)?.let(a) ?: false } },
+            skip = skip,
+        ) {
             (it as? String)?.takeIf { s -> HEX.matches(s) } ?: throw invalid("eth_call", it)
         }
 
@@ -143,16 +175,18 @@ class WalletRpc(
     }
 
     private suspend fun <T> read(chainId: Long, method: String, params: JSONArray, parse: (Any?) -> T): Reading<T> =
-        read(chainId, method, params, null, parse)
+        read(chainId, method, params, null, parse = parse)
 
     private suspend fun <T> read(
         chainId: Long,
         method: String,
         params: JSONArray,
         agreeOn: ((Any?) -> Any?)?,
+        accept: ((Any?) -> Boolean)? = null,
+        skip: Set<ChainSource> = emptySet(),
         parse: (Any?) -> T,
     ): Reading<T> {
-        val r = router.request(chainId, method, params, context, agreeOn)
+        val r = router.request(chainId, method, params, context, agreeOn, accept = accept, skip = skip)
         return Reading(parse(r.result), r.trust)
     }
 

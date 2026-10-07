@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.DeleteForever
@@ -27,6 +29,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.wallet.FiatCurrency
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultProtection
 
@@ -207,5 +210,27 @@ internal fun RemoveWalletSection(enabled: Boolean, onRemove: () -> Unit) {
             onClick = onRemove,
             modifier = Modifier.testTag("wallet-remove-row"),
         )
+    }
+}
+
+/**
+ * Show prices (#439): Off (the default), Euro or US dollar. Off means no
+ * price is looked up at all; on, the wallet shows approximate values
+ * under its amounts, read from price records on the chain itself.
+ */
+@Composable
+internal fun WalletPricesSection(selected: FiatCurrency, onSelect: (FiatCurrency) -> Unit) {
+    SectionCard(title = stringResource(R.string.fiat_setting_title)) {
+        Text(
+            stringResource(R.string.fiat_setting_detail),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(4.dp))
+        Column(Modifier.selectableGroup().testTag("wallet-prices")) {
+            FiatCurrency.entries.forEach { c ->
+                EngineRadioRow(label = fiatChoiceLabel(c), selected = c == selected, onClick = { onSelect(c) })
+            }
+        }
     }
 }

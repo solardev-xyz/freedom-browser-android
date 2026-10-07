@@ -629,6 +629,8 @@ internal fun SendPage(
     val sender = remember(context) { WalletSender.get(context) }
     val status by sender.status.collectAsState()
     val scope = rememberCoroutineScope()
+    // Approximate values (#439), with Show prices on.
+    val fiat = rememberFiatQuotes()
     val assets = remember(chains) {
         TokenRegistry.WALLET_CHAIN_IDS.mapNotNull { id -> chains.firstOrNull { it.id == id } }
             .flatMap { chain -> TokenRegistry.tokens(chain).map { chain to it } }
@@ -1028,6 +1030,7 @@ internal fun SendPage(
                     }
                     item("amount") {
                         val held = token?.let { (balances[it.key] as? TokenBalance.Known)?.raw }
+                        val amountFiat = token?.let { t -> fiatText(fiat, t.key, (amountCheckNow as? AmountCheck.Ok)?.raw, t.decimals) }
                         SectionCard(title = stringResource(R.string.send_label_amount)) {
                             OutlinedTextField(
                                 value = amount,
@@ -1045,6 +1048,15 @@ internal fun SendPage(
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 modifier = Modifier.fillMaxWidth(),
                             )
+                            // The approximate value (#439), with Show prices on: a line under the amount.
+                            amountFiat?.let {
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 4.dp).testTag("send-amount-fiat"),
+                                )
+                            }
                             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                 if (token != null && chain != null) {
                                     AssistChip(
@@ -1325,12 +1337,16 @@ private fun SendReviewSection(
     val armed = tap.armed
     val amount = SendAmounts.exact(request.amount, token.decimals)
     val fee = feeText(quote.maxFee, chain)
+    val fiat = rememberFiatQuotes()
     SectionCard(title = stringResource(R.string.send_review_title)) {
         TxReviewSummary(
             headline = sendHeadline(amount, token.symbol, request.to, request.toName, chain.name),
             fee = stringResource(R.string.send_up_to, fee),
             total = quote.nativeTotal?.let { stringResource(R.string.send_up_to, feeText(it, chain)) }
                 ?: stringResource(R.string.send_total_token, amount, token.symbol, fee),
+            feeFiat = fiatNative(fiat, chain, quote.maxFee),
+            totalFiat = quote.nativeTotal?.let { fiatNative(fiat, chain, it) }
+                ?: fiatTokenTotal(fiat, token, request.amount, chain, quote.maxFee),
         ) {
             if (request.to.equals(request.from.address, ignoreCase = true)) {
                 FieldNote(stringResource(R.string.send_self_send_note), error = false)

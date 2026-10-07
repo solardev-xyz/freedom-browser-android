@@ -119,4 +119,29 @@ class WalletRpcTest {
         WalletRpc(router, RoutingContext.forSiteChoice("https://pay.example")).call(100, tx)
         assertEquals(listOf(RoutingContext.WALLET, RoutingContext.forSiteChoice("https://pay.example")), seen.toList())
     }
+
+    @Test
+    fun aBlocksTimestampIsAgreedOnByNumberAndTimeAlone() = runBlocking {
+        // Each provider shapes the rest of the block its own way; only the
+        // number and timestamp are compared (#439).
+        var number = "0xfe"
+        val w = WalletRpc(
+            ChainDataRouter(
+                chains = { listOf(Chain(id = 10, name = "Test", symbol = "T", rpcUrls = urls)) },
+                transport = RpcTransport { url, _, _ ->
+                    """{"jsonrpc":"2.0","id":1,"result":{"number":"$number","timestamp":"0x6b49d200","extra":"$url"}}"""
+                },
+            ),
+        )
+        val t = w.blockTimestamp(10, 0xfe)
+        assertEquals(1_800_000_000L, t.value)
+        assertEquals(ChainTrust.Level.VERIFIED, t.trust.level)
+        // Another block than the one asked for is refused.
+        number = "0xff"
+        try {
+            w.blockTimestamp(10, 0xfe)
+            fail()
+        } catch (_: ChainRpcException) {
+        }
+    }
 }
