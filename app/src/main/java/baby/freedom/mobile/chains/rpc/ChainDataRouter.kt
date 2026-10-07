@@ -140,9 +140,16 @@ class ChainDataRouter internal constructor(
      *
      * [accept], when given, judges each tier's answer: one it refuses is
      * that tier's miss and the walk asks the next tier, as for a failure.
-     * For an answer only some tiers can give right — an `eth_call` whose
-     * result depends on `block.timestamp`, which Colibri's proven EVM runs
-     * at 0 — so the walk reaches a tier whose EVM has the block's context.
+     * It is for answers only some tiers can give correctly. For example,
+     * an `eth_call` whose result depends on `block.timestamp` is wrong from
+     * Colibri, whose proven EVM runs at time 0, so refusing that answer
+     * lets the walk reach a tier whose EVM has the block's real context.
+     *
+     * [skip] lists tiers the caller already knows can't give a usable
+     * answer (that same timed `eth_call` and Colibri): they aren't asked at
+     * all, so no proof is built and no slot of theirs is taken for an
+     * answer [accept] would only refuse. The walk is the policy's order
+     * without them; with every tier skipped, nothing is asked.
      */
     suspend fun request(
         chainId: Long,
@@ -152,10 +159,12 @@ class ChainDataRouter internal constructor(
         agreeOn: ((Any?) -> Any?)? = null,
         rankError: ((ChainFailure) -> Int)? = null,
         accept: ((Any?) -> Boolean)? = null,
+        skip: Set<ChainSource> = emptySet(),
     ): ChainDataResult {
         if (method !in READ_METHODS) throw ChainRpcException.UnsupportedMethod(method)
         val chain = chain(chainId)
         val policy = policy(chain)
+        val readOrder = if (skip.isEmpty()) policy.readOrder else policy.readOrder.filter { it !in skip }
         val normalized = JsonRpc.normalizeParams(method, params)
         val body = JsonRpc.body(method, normalized)
         val pool = pool(chain)
@@ -165,9 +174,9 @@ class ChainDataRouter internal constructor(
         val keeper = ErrorKeeper(rankError)
         val started = clock()
         try {
-            for ((index, source) in policy.readOrder.withIndex()) {
+            for ((index, source) in readOrder.withIndex()) {
                 if (method in DIRECT_ONLY_METHODS && source != ChainSource.DIRECT) continue
-                val hasFallback = index < policy.readOrder.lastIndex
+                val hasFallback = index < readOrder.lastIndex
                 val waitMs = when {
                     !hasFallback -> policy.timeoutMs
                     context.interactive -> minOf(policy.timeoutMs, INTERACTIVE_DEADLINE_MS)
@@ -188,7 +197,7 @@ class ChainDataRouter internal constructor(
                         if (members.size < policy.quorumM) {
                             "needs ${policy.quorumM} RPC providers, the chain has ${quorumMembers(pool).size}"
                         } else {
-                            val keepLegs = policy.readOrder.getOrNull(index + 1) == ChainSource.DIRECT
+                            val keepLegs = readOrder.getOrNull(index + 1) == ChainSource.DIRECT
                             val run = QuorumRun(members, policy.quorumM, legScope) { url ->
                                 // Every leg keeps the full endpoint timeout,
                                 // whatever the quorum waits: a page read's
@@ -241,7 +250,7 @@ class ChainDataRouter internal constructor(
                 // A member's answer the direct tier reuses without a new
                 // request beats any error, a final one included — so is one
                 // still in flight, bounded by its own endpoint timeout.
-                val reusable = source == ChainSource.QUORUM && policy.readOrder.getOrNull(index + 1) == ChainSource.DIRECT &&
+                val reusable = source == ChainSource.QUORUM && readOrder.getOrNull(index + 1) == ChainSource.DIRECT &&
                     quorum?.let { it.hasAnswer() || it.pending() > 0 } == true
                 if (keeper.final && !reusable) {
                     Log.i(TAG, "[chain-data] $method chain=$chainId: a source refused the query itself; not asking further")

@@ -6,6 +6,7 @@ import android.util.Log
 import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
+import baby.freedom.mobile.chains.rpc.ChainSource
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.chains.rpc.undisputed
@@ -539,10 +540,13 @@ class FiatPrices internal constructor(
      * if the EVM that ran it had [blockTime], the block header's time: a
      * proof covers the pool's storage, not the time an EVM is given, and
      * Colibri's runs at 0 — where `observe()` doesn't revert `OLD` but
-     * answers the spot tick as the average. Such an answer is that tier's
-     * miss: the router asks the next tier (the RPC quorum, whose EVM has
-     * the block's time) for both the full window and the fallback's, and
-     * only when no tier answers on time is there no price.
+     * answers the spot tick as the average. So Colibri isn't asked an
+     * `observe()` at all ([NO_BLOCK_TIME]): no proof is built, nor one of
+     * its few slots (ENS shares them) taken, for an answer that could
+     * never count. Any other tier's answer that isn't on time is that
+     * tier's miss: the router asks the next one, for both the full window
+     * and the fallback's, and only when no tier answers on time is there
+     * no price.
      * Without the header's time, nothing is asked.
      */
     private suspend fun twap(rpc: WalletRpc, t: PriceFeeds.Twap, block: String?, blockTime: Long?): BigDecimal? = guarded {
@@ -551,7 +555,7 @@ class FiatPrices internal constructor(
         val full = try {
             rpc.call(
                 t.chainId, JSONObject().put("to", PriceFeeds.MULTICALL3).put("data", PriceFeeds.timed(t.pool, PriceFeeds.OBSERVE)),
-                block, accept = onTime,
+                block, accept = onTime, skip = NO_BLOCK_TIME,
             )
         } catch (e: ChainRpcException.Rpc) {
             if (!e.deterministic) throw e
@@ -562,7 +566,7 @@ class FiatPrices internal constructor(
             FiatMath.timedResult(full.value, blockTime)?.let { FiatMath.twapTick(it, PriceFeeds.TWAP_SECONDS) }
         } else {
             val window = fallbackWindow(rpc, t, block, blockTime) ?: return@guarded null
-            poolCall(rpc, t, PriceFeeds.MULTICALL3, PriceFeeds.timed(t.pool, PriceFeeds.observe(window)), block, onTime)
+            poolCall(rpc, t, PriceFeeds.MULTICALL3, PriceFeeds.timed(t.pool, PriceFeeds.observe(window)), block, onTime, NO_BLOCK_TIME)
                 ?.let { FiatMath.timedResult(it, blockTime) }
                 ?.let { FiatMath.twapTick(it, window) }
         }
@@ -588,8 +592,9 @@ class FiatPrices internal constructor(
         data: String,
         block: String,
         accept: ((String) -> Boolean)? = null,
+        skip: Set<ChainSource> = emptySet(),
     ): String? {
-        val r = rpc.call(t.chainId, JSONObject().put("to", to).put("data", data), block, accept)
+        val r = rpc.call(t.chainId, JSONObject().put("to", to).put("data", data), block, accept, skip)
         return if (trusted(r.trust)) r.value else null
     }
 
@@ -607,6 +612,12 @@ class FiatPrices internal constructor(
 
     companion object {
         private const val TAG = "FiatPrices"
+
+        /**
+         * Tiers whose EVM doesn't run at the block's own time — Colibri's
+         * proven EVM runs at 0 — and so aren't asked a timed `observe()`.
+         */
+        private val NO_BLOCK_TIME = setOf(ChainSource.COLIBRI)
 
         /** How long prices are kept before the next read: five minutes. */
         const val TTL_MS = 5 * 60_000L

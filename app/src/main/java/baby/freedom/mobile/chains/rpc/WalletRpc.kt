@@ -125,17 +125,20 @@ class WalletRpc(
      * `eth_call`: the return data (`0x…`). A revert is thrown as a
      * deterministic [ChainRpcException.Rpc] carrying its data. [accept],
      * when given, judges each tier's return data: one it refuses sends the
-     * call on to the next tier ([ChainDataRouter.request]).
+     * call on to the next tier; tiers in [skip] aren't asked at all
+     * ([ChainDataRouter.request]).
      */
     suspend fun call(
         chainId: Long,
         tx: JSONObject,
         block: String = "latest",
         accept: ((String) -> Boolean)? = null,
+        skip: Set<ChainSource> = emptySet(),
     ): Reading<String> =
         read(
             chainId, "eth_call", JSONArray().put(tx).put(block), agreeOn = null,
             accept = accept?.let { a -> { r: Any? -> (r as? String)?.let(a) ?: false } },
+            skip = skip,
         ) {
             (it as? String)?.takeIf { s -> HEX.matches(s) } ?: throw invalid("eth_call", it)
         }
@@ -172,7 +175,7 @@ class WalletRpc(
     }
 
     private suspend fun <T> read(chainId: Long, method: String, params: JSONArray, parse: (Any?) -> T): Reading<T> =
-        read(chainId, method, params, null, null, parse)
+        read(chainId, method, params, null, parse = parse)
 
     private suspend fun <T> read(
         chainId: Long,
@@ -180,9 +183,10 @@ class WalletRpc(
         params: JSONArray,
         agreeOn: ((Any?) -> Any?)?,
         accept: ((Any?) -> Boolean)? = null,
+        skip: Set<ChainSource> = emptySet(),
         parse: (Any?) -> T,
     ): Reading<T> {
-        val r = router.request(chainId, method, params, context, agreeOn, accept = accept)
+        val r = router.request(chainId, method, params, context, agreeOn, accept = accept, skip = skip)
         return Reading(parse(r.result), r.trust)
     }
 

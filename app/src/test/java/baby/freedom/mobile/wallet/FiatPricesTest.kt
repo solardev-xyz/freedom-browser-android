@@ -462,6 +462,7 @@ class FiatPricesTest {
      */
     private inner class Colibri : VerifiedChainSource {
         val observes = mutableListOf<String>()
+        val calls = mutableListOf<String>()
         override fun isAvailable(chainId: Long) = chainId == 1L
         override suspend fun request(
             chainId: Long,
@@ -473,6 +474,7 @@ class FiatPricesTest {
             if (method != "eth_call") throw IOException("not proven here")
             val call = params.getJSONObject(0)
             val data = call.getString("data")
+            synchronized(calls) { calls += data }
             if (data.contains("883bdbfd")) synchronized(observes) { observes += data }
             val r = evm("colibri", call.getString("to"), data, time = 0)
             val result = r.substringAfter("\"result\":\"", "").substringBefore("\"")
@@ -485,7 +487,7 @@ class FiatPricesTest {
     }
 
     @Test
-    fun `an observe colibri answers at time 0 is asked again of the quorum, the fallback's too`() = runBlocking {
+    fun `colibri is never asked an observe, full window or fallback's, but still reads the pool`() = runBlocking {
         setting = FiatCurrency.USD
         // BZZ / WETH can't reach back half an hour: the quorum reverts OLD on
         // the full window; Colibri, at time 0, would answer every window.
@@ -497,12 +499,13 @@ class FiatPricesTest {
         assertEquals(0.04484, q.perToken[token("BZZ").key]!!.toDouble(), 0.0001)
         assertEquals(q.perToken[token("BZZ").key], q.perToken[token("xBZZ").key])
         assertEquals(1.1192, q.perToken[token("EURC").key]!!.toDouble(), 0.0001)
-        // Colibri was asked every observe() first — full windows and the fallback's —
-        // and its answers, at time 0, went on to the quorum.
-        val windows = colibri.observes.map { d -> subCalls(d)[1].second }
-        assertTrue(PriceFeeds.observe(1092) in windows)
-        assertTrue(PriceFeeds.OBSERVE in windows)
+        // No observe() — full window or the fallback's — went to Colibri: at
+        // time 0 its answer could never count, so no proof was built for it.
+        // The quorum answered both windows.
+        assertTrue(colibri.observes.isEmpty())
         assertEquals(setOf(1800L, 1092L), observeWindows(PriceFeeds.BZZ_WETH.pool))
+        // Untimed reads (the fallback's slot0 / observations, the feeds) still went to Colibri.
+        assertTrue(colibri.calls.any { it.startsWith(PriceFeeds.SLOT0) })
     }
 
     @Test

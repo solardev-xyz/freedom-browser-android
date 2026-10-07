@@ -684,6 +684,25 @@ class ChainDataRouterTest {
     }
 
     @Test
+    fun aSkippedTierIsntAsked() = runTest {
+        val net = Net()
+        listOf(a, b, c).forEach { url -> net.handlers[url] = { ok("0x2a") } }
+        val colibri = FakeSource { ChainDataResult("0x00", proof.copy(source = ChainSource.COLIBRI)) }
+        val r = router(net, listOf(chain(id = 100)), sources = mapOf(ChainSource.COLIBRI to colibri))
+        val skipped = r.request(100, "eth_call", skip = setOf(ChainSource.COLIBRI))
+        assertEquals("0x2a", skipped.result)
+        assertEquals(ChainSource.QUORUM, skipped.trust.source)
+        assertEquals(0, colibri.calls)
+        // Every tier skipped: nothing is asked, and nothing answers.
+        try {
+            r.request(100, "eth_call", skip = ChainSource.entries.toSet())
+            fail()
+        } catch (_: ChainRpcException.AllSourcesFailed) {
+        }
+        assertEquals(0, colibri.calls)
+    }
+
+    @Test
     fun aProofSourceIsGivenTheChainsPoolUsersRpcsFirst() = runTest {
         val net = Net()
         val colibri = FakeSource { ChainDataResult("0x1", proof.copy(source = ChainSource.COLIBRI)) }
