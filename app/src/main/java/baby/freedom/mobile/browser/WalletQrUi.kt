@@ -206,7 +206,7 @@ internal fun addressGroups(address: String): List<String> {
 
 /** [address] as Receive shows it: grouped, the first and last group emphasised (they're what people check). */
 @Composable
-private fun groupedAddress(address: String): AnnotatedString {
+internal fun groupedAddress(address: String): AnnotatedString {
     val groups = addressGroups(address)
     val strong = SpanStyle(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
     val muted = SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant)

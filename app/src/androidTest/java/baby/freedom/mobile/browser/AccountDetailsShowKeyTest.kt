@@ -1,8 +1,8 @@
 package baby.freedom.mobile.browser
 
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -10,39 +10,37 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.wallet.WalletAccount
-import baby.freedom.mobile.wallet.WalletAccountList
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * #334 R1-M2: Show private key is gated on `busy` like its sibling account
- * actions (Remove, switching, Add), so it can't open while an account
+ * #334 R1-M2: Show private key — Export private key… on the account's
+ * details page since W5 — is gated on `busy` like its sibling account
+ * actions (Remove, switching, Rename), so it can't open while an account
  * operation is still pending.
  */
 @RunWith(AndroidJUnit4::class)
-class AccountsSectionShowKeyTest {
+class AccountDetailsShowKeyTest {
     @get:Rule val rule = createComposeRule()
 
     @Test
     fun showKeyFollowsBusy() {
-        val list = WalletAccountList(
-            listOf(WalletAccount(0, "Account 1", "0x000000000000000000000000000000000000dEaD")),
-            activeIndex = 0,
-        )
+        val account = WalletAccount(0, "Account 1", "0x000000000000000000000000000000000000dEaD")
         var busy by mutableStateOf(true)
         rule.setContent {
             FreedomTheme {
-                AccountsSection(
-                    list = list,
-                    locked = false,
+                AccountDetailsPage(
+                    account = account,
+                    active = true,
                     busy = busy,
-                    onSelect = {},
-                    onAdd = {},
+                    error = null,
+                    onRename = {},
+                    onUse = {},
                     onReceive = {},
-                    onConnectLedger = {},
+                    onExportKey = {},
                     onRemoveLedger = {},
-                    onShowKey = {},
+                    onBack = {},
                 )
             }
         }

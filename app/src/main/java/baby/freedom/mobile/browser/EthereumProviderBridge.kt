@@ -33,10 +33,12 @@ import java.util.WeakHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -254,23 +256,29 @@ object EthereumProviders {
      * stores are written, under the same conditions. False if it wasn't.
      */
     suspend fun reconnect(context: Context, origin: String, account: String, chainId: Long, rules: List<AutoApproveRule>): Boolean =
-        provider?.reconnect(origin, account, chainId, rules) ?: run {
-            val grants = DappGrantStore.get(context)
-            val now = grants.allOrUnreadable.first() ?: return false
-            if (now.any { it.origin == origin }) return false
-            val known = WalletAccounts.get(context).accounts.value?.accounts ?: return false
-            if (known.none { it.address.equals(account, ignoreCase = true) }) return false
-            // Not on a chain removed in Settings meanwhile, as the provider's own check (R1-M3).
-            val chains = ChainStore.get(context).chainsOrUnreadable.first() ?: return false
-            if (chains.none { it.id == chainId }) return false
-            if (!grants.grant(origin, account, chainId)) return false
-            val ruleStore = AutoApproveStore.get(context)
-            // All the rules back, or none and no connection either (R5-M1), as the provider's.
-            if (rules.filter { it.origin == origin }.all { ruleStore.grant(it) }) return true
-            ruleStore.revokeOrigin(origin)
-            grants.revoke(origin)
-            false
-        }
+        provider?.reconnect(origin, account, chainId, rules)
+            // Not cancellable, as the provider's (R6-M1): Undo runs on a job a second notice or
+            // leaving the page cancels, and a cancel between the grant and its rules would
+            // leave the site connected without them.
+            ?: withContext(NonCancellable) { reconnectStores(context, origin, account, chainId, rules) }
+
+    private suspend fun reconnectStores(context: Context, origin: String, account: String, chainId: Long, rules: List<AutoApproveRule>): Boolean {
+        val grants = DappGrantStore.get(context)
+        val now = grants.allOrUnreadable.first() ?: return false
+        if (now.any { it.origin == origin }) return false
+        val known = WalletAccounts.get(context).accounts.value?.accounts ?: return false
+        if (known.none { it.address.equals(account, ignoreCase = true) }) return false
+        // Not on a chain removed in Settings meanwhile, as the provider's own check (R1-M3).
+        val chains = ChainStore.get(context).chainsOrUnreadable.first() ?: return false
+        if (chains.none { it.id == chainId }) return false
+        if (!grants.grant(origin, account, chainId)) return false
+        val ruleStore = AutoApproveStore.get(context)
+        // All the rules back, or none and no connection either (R5-M1), as the provider's.
+        if (rules.filter { it.origin == origin }.all { ruleStore.grant(it) }) return true
+        ruleStore.revokeOrigin(origin)
+        grants.revoke(origin)
+        return false
+    }
 
     /**
      * Undo removing [rule] (#423): back on only while its site is still

@@ -145,12 +145,24 @@ class MainMenuTest {
     }
 
     @Test
-    fun `the Wallet row says Not set up only when there is no wallet`() {
+    fun `the Wallet row says Not set up only when there is no wallet, and nothing once backed up`() {
         assertEquals("Not set up", walletMenuNote(Vault.State.Empty))
         assertEquals("Can’t be read", walletMenuNote(Vault.State.Unreadable))
         val info = Vault.Info(VaultProtection.SCREEN_LOCK, strongBox = false, backedUp = true)
         assertNull(walletMenuNote(Vault.State.Locked(info)))
         assertNull(walletMenuNote(Vault.State.Unlocked(info)))
+    }
+
+    @Test
+    fun `the Wallet row asks for a backup until the check has passed (W10)`() {
+        val notBackedUp = Vault.Info(VaultProtection.SCREEN_LOCK, strongBox = false, backedUp = false)
+        assertEquals("Back up your wallet", walletMenuNote(Vault.State.Locked(notBackedUp)))
+        assertEquals("Back up your wallet", walletMenuNote(Vault.State.Unlocked(notBackedUp)))
+        // Shown but not checked (#421): still not backed up.
+        val shown = notBackedUp.copy(phraseShown = true)
+        assertEquals("Back up your wallet", walletMenuNote(Vault.State.Unlocked(shown)))
+        // Google backup on doesn't count (#244 R5-F1).
+        assertEquals("Back up your wallet", walletMenuNote(Vault.State.Unlocked(notBackedUp.copy(cloudBackup = true))))
     }
 
     @Test

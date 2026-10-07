@@ -171,13 +171,18 @@ internal fun TxHistorySection(
     onReceive: (() -> Unit)? = null,
     explorers: List<Pair<String, String>> = emptyList(),
     onOpenUrl: (String) -> Unit = {},
+    title: String = stringResource(R.string.wallet_history_title),
+    preview: Int = TX_HISTORY_PREVIEW,
+    // A row above the list (the wallet home's send in progress, W1).
+    top: (@Composable () -> Unit)? = null,
 ) {
-    SectionCard(title = stringResource(R.string.wallet_history_title)) {
+    SectionCard(title = title) {
+        top?.invoke()
         if (records.isEmpty()) {
             TxHistoryEmpty(onReceive, explorers, onOpenUrl)
         } else {
-            records.take(TX_HISTORY_PREVIEW).forEach { TxRow(it, onOpen) }
-            if (records.size > TX_HISTORY_PREVIEW) {
+            records.take(preview).forEach { TxRow(it, onOpen) }
+            if (records.size > preview) {
                 PageRow(
                     title = stringResource(R.string.wallet_history_all),
                     subtitle = pluralText(R.plurals.wallet_history_all_count, records.size, records.size),

@@ -74,7 +74,10 @@ class NodeIdentitySyncTest {
     @Test
     fun `create adopts the derived identity and seals it`() = runBlocking {
         vault.create(abandon12, auth, imported = false)
-        assertEquals(NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", ABANDON_DID), reconcile())
+        assertEquals(
+            NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", ABANDON_DID, setUp = Vault.SetUp.CREATED),
+            reconcile(),
+        )
         val tag = vault.identityTag()!!
         assertEquals(tag, store.storedTag())
         val read = store.read(tag)!!
@@ -113,6 +116,34 @@ class NodeIdentitySyncTest {
         assertTrue(store.isEmpty())
         vault.unlock(auth)
         assertEquals(NodeIdentitySync.Change.Adopted("0x0D3eB21b6b21833A4939Cfff4810E9AE0758e12C", LEGAL_DID), reconcile())
+    }
+
+    @Test
+    fun `the adoption says how the wallet was just set up, and an unlock says none`() = runBlocking {
+        // W8 (#432 R1-F1, R1-M2): a restore is "Wallet ready", not "Wallet created",
+        // though its phrase was never shown here; and a plain unlock is no set-up at all.
+        vault.create(abandon12, auth, imported = true, restored = true)
+        assertEquals(Vault.SetUp.RESTORED, (reconcile() as NodeIdentitySync.Change.Adopted).setUp)
+        assertEquals("Wallet ready", nodeIdentityNotice(changes.last(), restarting = true))
+        vault.remove()
+        reconcile()
+        vault.create(legal12, auth, imported = true)
+        assertEquals(Vault.SetUp.IMPORTED, (reconcile() as NodeIdentitySync.Change.Adopted).setUp)
+        vault.remove()
+        reconcile()
+        vault.create(abandon12, auth, imported = false)
+        assertEquals(Vault.SetUp.CREATED, (reconcile() as NodeIdentitySync.Change.Adopted).setUp)
+        assertEquals("Wallet created", nodeIdentityNotice(changes.last(), restarting = true))
+        // The pre-#77 wallet's first unlock (no keys stored yet): the node notice.
+        store.wipe()
+        vault.lock()
+        vault.unlock(auth)
+        val unlocked = reconcile() as NodeIdentitySync.Change.Adopted
+        assertNull(unlocked.setUp)
+        assertEquals(
+            "Your Swarm node now uses your wallet's identity (0x6Fac…b9C0). Restarting it…",
+            nodeIdentityNotice(unlocked, restarting = true),
+        )
     }
 
     @Test
@@ -172,7 +203,10 @@ class NodeIdentitySyncTest {
         // The leftover is never handed out for the new wallet.
         assertNull(store.read(newTag))
         assertNull(store.boot(vaultStore))
-        assertEquals(NodeIdentitySync.Change.Adopted("0x0D3eB21b6b21833A4939Cfff4810E9AE0758e12C", LEGAL_DID), reconcile())
+        assertEquals(
+            NodeIdentitySync.Change.Adopted("0x0D3eB21b6b21833A4939Cfff4810E9AE0758e12C", LEGAL_DID, setUp = Vault.SetUp.IMPORTED),
+            reconcile(),
+        )
         assertNull(store.read(oldTag))
         assertEquals("0x0D3eB21b6b21833A4939Cfff4810E9AE0758e12C", store.read(newTag)!!.swarmAddress)
     }
@@ -222,6 +256,9 @@ class NodeIdentitySyncTest {
         vault.create(abandon12, auth, imported = false)
         writeVersion1(vault.identityTag()!!, NodeIdentity.derive(abandon12.seed()))
         keys.key = null
+        // Found on an unlock of the wallet that was already here: no set-up (#432 R1-M2).
+        vault.lock()
+        vault.unlock(auth)
         // The Radicle identity really is new (the node ran as its own key),
         // and so, as far as `:node` knows, is the Swarm one: it couldn't open
         // the file either, so its Swarm boot failed (#357).
@@ -230,6 +267,11 @@ class NodeIdentitySyncTest {
             withGrants.reconcile(vault.state.value),
         )
         assertEquals(1, takenBack)
+        // So it's told as the node's change, not as "Wallet created".
+        assertEquals(
+            "Your Swarm node now uses your wallet's identity (0x6Fac…b9C0). Restarting it…",
+            nodeIdentityNotice(withGrants.notices.first(), restarting = true),
+        )
     }
 
     @Test
@@ -476,6 +518,7 @@ class NodeIdentitySyncTest {
     @Test
     fun `notices say what changed and whether the node restarts`() {
         val adopted = NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", ABANDON_DID)
+        // A wallet that was already here (made before #77) adopting them on an unlock: the node notice.
         assertEquals(
             "Your Swarm node now uses your wallet's identity (0x6Fac…b9C0). Restarting it…",
             nodeIdentityNotice(adopted, restarting = true),
@@ -484,6 +527,12 @@ class NodeIdentitySyncTest {
             "Your Swarm node will use your wallet's identity (0x6Fac…b9C0) when it next starts.",
             nodeIdentityNotice(adopted, restarting = false),
         )
+        // A wallet just set up is told as only that (W8): the node page shows the identity.
+        val created = adopted.copy(setUp = Vault.SetUp.CREATED)
+        assertEquals("Wallet created", nodeIdentityNotice(created, restarting = true))
+        assertEquals("Wallet created", nodeIdentityNotice(created, restarting = false))
+        assertEquals("Wallet ready", nodeIdentityNotice(adopted.copy(setUp = Vault.SetUp.IMPORTED), restarting = true))
+        assertEquals("Wallet ready", nodeIdentityNotice(adopted.copy(setUp = Vault.SetUp.RESTORED), restarting = false))
         assertEquals(
             "Wallet removed. Your Swarm node is restarting with this device's own identity.",
             nodeIdentityNotice(NodeIdentitySync.Change.Dropped, restarting = true),
@@ -503,6 +552,15 @@ class NodeIdentitySyncTest {
             "Your Swarm node will use your wallet's identity (0x6Fac…b9C0) when it next starts. " +
                 "Your Radicle node will use your wallet's identity (z6Mkgb…8gAn) when it next starts. $kept",
             nodeIdentityNotice(adopted, restarting = false, radicleOn = true, radicleRestarting = false),
+        )
+        // A new wallet's notice stays "Wallet created" with Radicle on too (W8).
+        assertEquals(
+            "Wallet created",
+            nodeIdentityNotice(adopted.copy(setUp = Vault.SetUp.CREATED), restarting = true, radicleOn = true, radicleRestarting = true),
+        )
+        assertEquals(
+            "Wallet ready",
+            nodeIdentityNotice(adopted.copy(setUp = Vault.SetUp.RESTORED), restarting = false, radicleOn = true, radicleRestarting = false),
         )
         // A pre-#328 wallet's upgrade: only Radicle changed.
         val radicleOnly = adopted.copy(swarmChanged = false)

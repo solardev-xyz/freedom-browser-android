@@ -131,6 +131,9 @@ class Vault internal constructor(
         val phraseKnown: Boolean get() = backedUp || phraseShown
     }
 
+    /** How the wallet on the device came to be, as far as this process saw it ([justSetUp]). */
+    enum class SetUp { CREATED, IMPORTED, RESTORED }
+
     sealed interface State {
         data object Empty : State
         data class Locked(val info: Info) : State
@@ -168,6 +171,20 @@ class Vault internal constructor(
      * on disk must have been derived from (#77).
      */
     fun identityTag(): String? = store.read()?.identityTag()
+
+    /**
+     * Set by [create] — a new phrase, an import or a Google-backup
+     * restore — and cleared by [unlock] and [remove]: whether the wallet
+     * now open was set up in this process just now, and how (W8). The
+     * node-identity notice reads it, so a restored wallet says "Wallet
+     * ready", and a plain unlock that adopts the node identities (a
+     * pre-#77 wallet) isn't announced as a wallet set up at all.
+     */
+    @Volatile
+    private var setUp: SetUp? = null
+
+    /** See [setUp]. */
+    fun justSetUp(): SetUp? = setUp
 
     /** Whether Google backup (#231) is on for the wallet on the device. */
     fun cloudBackupOn(): Boolean = when (val s = _state.value) {
@@ -226,8 +243,15 @@ class Vault internal constructor(
                 cloudBackupOffered = restored,
             )
             withContext(io) { store.write(record) }
+            // Before the state turns Unlocked: the node-identity sync reads it then.
+            setUp = when {
+                restored -> SetUp.RESTORED
+                imported -> SetUp.IMPORTED
+                else -> SetUp.CREATED
+            }
             deriveAndOpen(mnemonic, record)
         } catch (t: Throwable) {
+            setUp = null
             // Nothing half-made stays behind: no key without a file, no file without a key.
             withContext(NonCancellable + io) { store.wipe() }
             throw t
@@ -237,6 +261,7 @@ class Vault internal constructor(
     /** Asks the user (unless the vault is [VaultProtection.DEVICE_ONLY]) and opens the vault. */
     suspend fun unlock(auth: VaultAuthenticator) = ops.withLock {
         if (_state.value is State.Unlocked) return@withLock
+        setUp = null
         val record = storedRecord()
         val mnemonic = openMnemonic(record, auth, VaultAuthPurpose.UNLOCK)
         deriveAndOpen(mnemonic, record)
@@ -419,6 +444,7 @@ class Vault internal constructor(
         // key are gone the state must say so, even if the caller's scope
         // (the Wallet page) was cancelled meanwhile and the resume throws.
         withContext(NonCancellable + io) {
+            setUp = null
             store.wipe()
             _state.value = State.Empty
             alsoWipe()

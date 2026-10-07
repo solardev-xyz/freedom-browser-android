@@ -59,6 +59,7 @@
     <string name="wallet_account_default_name">Account %1$d</string>
     <!-- %1$d: the Ledger account's number, from 1 -->
     <string name="wallet_account_default_ledger_name">Ledger %1$d</string>
+    <string name="wallet_account_name_control_chars">A name can’t have line breaks or invisible formatting characters.</string>
     <string name="wallet_account_too_many">this wallet has as many accounts as it can hold</string>
 
     <!-- WalletScreen.kt -->
@@ -154,18 +155,16 @@
     <string name="wallet_action_find_accounts">find your accounts</string>
     <string name="wallet_action_switch_account">switch account</string>
     <string name="wallet_action_add_account">add an account</string>
+    <string name="wallet_action_rename_account">rename the account</string>
     <string name="wallet_action_remove_ledger_account">remove the Ledger account</string>
     <string name="wallet_action_remove">remove the wallet</string>
     <string name="wallet_error_remove_ledger_sites">Couldn’t remove the Ledger account: the sites connected to it couldn’t be disconnected. Try again.</string>
     <!-- The wallet page. -->
     <string name="wallet_needed_title">Wallet needed</string>
     <string name="wallet_restore_no_screen_lock">Restoring asks for your fingerprint, face or screen lock, and this phone has none. Set a PIN, pattern or password first.</string>
-    <string name="wallet_scan_section">Scan</string>
-    <string name="wallet_scan_subtitle">An address, a payment request, a pairing code or a Safe request</string>
     <string name="wallet_phrase_section">Recovery phrase</string>
     <string name="wallet_phrase_asks">Asks for your fingerprint, face or PIN each time</string>
     <string name="wallet_phrase_opens_without_asking">Opens without asking: no screen lock</string>
-    <string name="wallet_no_screen_lock_section">No screen lock</string>
     <string name="wallet_no_screen_lock_detail">This wallet was made when the phone had no screen lock, so nothing asks who you are before it opens: anyone holding the phone can use it. To protect it, write down its recovery phrase and set a screen lock, then remove the wallet and import the phrase again.</string>
     <string name="wallet_publishing_section">Publishing</string>
     <string name="wallet_remove_section">Remove</string>
@@ -186,10 +185,8 @@
     <string name="wallet_detail_key_kept_in">Key kept in</string>
     <string name="wallet_detail_key_strongbox">StrongBox secure chip</string>
     <string name="wallet_detail_key_keystore">Android Keystore</string>
-    <string name="wallet_detail_backup">Backup</string>
     <string name="wallet_unlocking">Unlocking…</string>
     <string name="wallet_unlock">Unlock</string>
-    <string name="wallet_lock_now">Lock now</string>
     <string name="wallet_screen_lock_settings">Screen lock settings</string>
     <string name="wallet_import_title">Import wallet</string>
     <string name="wallet_import_intro">Type or paste the words, separated by spaces. They’re encrypted on this phone only and never sent anywhere. A phrase pasted in, or copied out of this field, is taken off the clipboard when you tap Import wallet or leave this page.</string>
@@ -262,18 +259,84 @@
     <string name="wallet_accounts_balance_read_failed">Couldn’t read: %1$s</string>
     <string name="wallet_accounts_account_title">Account</string>
     <string name="wallet_accounts_show_qr">Show QR code</string>
-    <string name="wallet_accounts_switch">Switch account</string>
     <string name="wallet_accounts_working">Working…</string>
-    <string name="wallet_accounts_unlock_to_add">Unlock to add an account</string>
     <string name="wallet_accounts_add">Add account</string>
     <string name="wallet_accounts_connect_ledger">Connect a Ledger</string>
     <string name="wallet_accounts_locked_unlock">Unlock the wallet to see its accounts and their balances.</string>
     <string name="wallet_accounts_locked_failed">Couldn’t set up this wallet’s accounts. The phone may be out of storage.</string>
     <string name="wallet_accounts_locked_finding">Finding your accounts…</string>
-    <string name="wallet_accounts_balances_title">Balances</string>
     <string name="wallet_accounts_balances_reading">Reading from the chains…</string>
-    <string name="wallet_accounts_balances_source">Read through each chain’s RPCs</string>
-    <string name="wallet_accounts_refresh">Refresh</string>
+
+    <!-- WalletAccountsUi.kt: the wallet home (W1, W6, W7) -->
+    <string name="wallet_home_send">Send</string>
+    <string name="wallet_home_receive">Receive</string>
+    <string name="wallet_home_scan">Scan</string>
+    <!-- TalkBack's "double-tap to …" for the account chip -->
+    <string name="wallet_home_chip_action">switch or manage accounts</string>
+    <!-- %1$s: a network's name, e.g. Gnosis -->
+    <string name="wallet_home_on_chain">on %1$s</string>
+    <plurals name="wallet_home_more_assets">
+        <item quantity="one">%d more asset</item>
+        <item quantity="other">%d more assets</item>
+    </plurals>
+    <string name="wallet_home_not_updated">not updated</string>
+    <string name="wallet_home_unverified">unverified · one RPC’s word</string>
+    <string name="wallet_home_no_funds">No funds yet</string>
+    <string name="wallet_home_no_funds_detail">Share your address to receive money or tokens on Ethereum or Gnosis.</string>
+    <string name="wallet_home_some_unread">Couldn’t read every balance</string>
+    <string name="wallet_home_activity">Activity</string>
+    <string name="wallet_assets_title">Assets</string>
+    <plurals name="wallet_assets_no_balance">
+        <item quantity="one">%d token with no balance</item>
+        <item quantity="other">%d tokens with no balance</item>
+    </plurals>
+    <!-- %1$s: the token's name, %2$s: its network, e.g. "Swarm Token · Gnosis" -->
+    <string name="wallet_assets_token_on_chain">%1$s · %2$s</string>
+    <string name="wallet_assets_refresh">Refresh balances</string>
+    <!-- TalkBack's "double-tap to …" for a balance row -->
+    <string name="wallet_assets_trust_action">see how it was checked</string>
+    <!-- %1$s: a token symbol, %2$s: its network -->
+    <string name="wallet_assets_trust_title">%1$s on %2$s</string>
+    <string name="wallet_assets_trust_explain">Freedom reads each balance from the network through several RPC servers and compares their answers. Verified means they agreed, or the answer was proven; Unverified means only one server answered, so the figure is that server’s word. Pull down to read again.</string>
+    <string name="wallet_lock_now_cd">Wallet unlocked. Lock it now</string>
+    <string name="wallet_unlock_cd">Wallet locked. Unlock it</string>
+    <string name="wallet_settings_title">Wallet settings</string>
+    <string name="wallet_settings_security">Security</string>
+    <string name="wallet_settings_lock_icon_hint">The lock at the top of the wallet locks it now</string>
+    <string name="wallet_settings_auto_lock">Locks by itself</string>
+    <string name="wallet_settings_backup">Backup</string>
+    <string name="wallet_settings_kept_on">Kept on</string>
+    <string name="wallet_settings_backup_row">Recovery phrase and Google backup</string>
+    <string name="wallet_settings_backup_checked">Recovery phrase written down and checked</string>
+    <!-- %1$s: Google backup's short status, e.g. "Off" -->
+    <string name="wallet_settings_google_line">Google backup: %1$s</string>
+    <string name="wallet_settings_sites">Connected sites</string>
+    <string name="wallet_settings_no_sites">No sites are connected to this wallet.</string>
+    <string name="wallet_accounts_sheet_title">Accounts</string>
+    <string name="wallet_accounts_add_subtitle">The next account from your recovery phrase</string>
+    <string name="wallet_accounts_add_subtitle_locked">The next account from your recovery phrase · asks to unlock</string>
+    <string name="wallet_accounts_connect_ledger_subtitle">Use an account whose key stays on a Ledger</string>
+    <string name="wallet_accounts_balance_not_read_yet">Balance not read yet</string>
+    <!-- %1$s: the account's name -->
+    <string name="wallet_accounts_details_of">Details of %1$s</string>
+    <!-- %1$s: the account's name, after it was added -->
+    <string name="wallet_accounts_added">%1$s added</string>
+    <string name="wallet_accounts_details_title">Account details</string>
+    <string name="wallet_accounts_name_section">Name</string>
+    <string name="wallet_accounts_in_use">The account the wallet uses now</string>
+    <string name="wallet_accounts_use">Use this account</string>
+    <string name="wallet_accounts_rename">Rename</string>
+    <string name="wallet_accounts_rename_title">Rename account</string>
+    <string name="wallet_accounts_name_label">Name</string>
+    <string name="wallet_accounts_name_hint">Only on this phone. Leave it empty for the default name.</string>
+    <!-- Under the rename field once a longer paste was cut; %1$d is the most a name can hold (64). -->
+    <string name="wallet_accounts_name_cut">A name holds at most %1$d characters, so the rest was left out.</string>
+    <string name="wallet_accounts_address_section">Address</string>
+    <string name="wallet_accounts_advanced">Advanced</string>
+    <string name="wallet_accounts_remove_ledger">Remove from wallet</string>
+    <string name="wallet_accounts_remove_ledger_subtitle">The key stays on the Ledger; you can add it again</string>
+    <string name="wallet_key_export">Export private key…</string>
+    <string name="wallet_key_export_warning">Anyone with it can take this account’s funds</string>
 
     <!-- WalletBackupUi.kt -->
     <string name="wallet_backup_google_title">Google backup</string>

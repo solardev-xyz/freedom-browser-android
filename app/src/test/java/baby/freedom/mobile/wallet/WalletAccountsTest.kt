@@ -228,6 +228,118 @@ class WalletAccountsTest {
     }
 
     @Test
+    fun `rename names an account, saves it, survives an unlock and needs no seed (W6)`() = runBlocking {
+        val a = accounts()
+        vault.create(abandon12, auth, imported = true)
+        a.reconcile(vault.state.value)
+        a.add()
+        vault.lock()
+        a.rename(1, "  Savings  ")
+        assertEquals(WalletAccount(1, "Savings", abandonAddresses[1]), a.accounts.value!!.accounts[1])
+        val tag = vault.identityTag()!!
+        assertEquals(a.accounts.value, store.read(tag))
+        // The active account doesn't change, and an unlock's address check keeps the name.
+        assertEquals(1, a.accounts.value!!.activeIndex)
+        vault.unlock(auth)
+        a.reconcile(vault.state.value)
+        assertEquals("Savings", a.accounts.value!!.accounts[1].name)
+        // Blank gives the default name back; an unknown index changes nothing.
+        a.rename(1, "   ")
+        assertEquals("Account 2", a.accounts.value!!.accounts[1].name)
+        val before = a.accounts.value
+        a.rename(9, "Nope")
+        assertEquals(before, a.accounts.value)
+    }
+
+    @Test
+    fun `rename refuses invisible and line-breaking characters but keeps emoji joiners (W6)`() = runBlocking {
+        val a = accounts()
+        vault.create(abandon12, auth, imported = true)
+        a.reconcile(vault.state.value)
+        for (bad in listOf("Sav\u202Eings", "two\nlines", "a\u2028b", "zero\u200Bwidth", "tab\there")) {
+            try {
+                a.rename(0, bad)
+                fail("accepted ${bad.map { it.code }}")
+            } catch (_: IllegalArgumentException) {
+            }
+            assertEquals("Account 1", a.accounts.value!!.active.name)
+            assertTrue(WalletAccounts.accountNameProblem(bad) != null)
+        }
+        // A family emoji (ZWJ) and a subdivision flag (tag characters) are fine.
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67"
+        val wales = "\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC77\uDB40\uDC6C\uDB40\uDC73\uDB40\uDC7F"
+        a.rename(0, "Home $family $wales")
+        assertEquals("Home $family $wales", a.accounts.value!!.active.name)
+    }
+
+    @Test
+    fun `a long name is cut to the limit without splitting a character (W6)`() {
+        val name = "a".repeat(WalletAccountStore.MAX_NAME - 1) + "\uD83D\uDE00tail"
+        val cut = WalletAccounts.cleanAccountName(name)!!
+        assertEquals("a".repeat(WalletAccountStore.MAX_NAME - 1), cut)
+        assertEquals("x".repeat(WalletAccountStore.MAX_NAME), WalletAccounts.cleanAccountName("x".repeat(80)))
+        assertNull(WalletAccounts.cleanAccountName(" \t "))
+        // The rename field's own cut of a longer paste: untrimmed, same boundary rule (#432 R1-M3).
+        assertEquals("a".repeat(WalletAccountStore.MAX_NAME - 1), WalletAccounts.cutAccountName(name))
+        assertEquals(" x ", WalletAccounts.cutAccountName(" x "))
+        assertEquals(WalletAccountStore.MAX_NAME, WalletAccounts.cutAccountName("y".repeat(70)).length)
+    }
+
+    @Test
+    fun `a renamed Ledger account goes back to its Ledger name when cleared (W6)`() = runBlocking {
+        val a = accounts()
+        vault.create(abandon12, auth, imported = true)
+        a.reconcile(vault.state.value)
+        a.addLedger(ledgerKey, ledgerAddress, "")
+        a.rename(-1, "Cold storage")
+        assertEquals("Cold storage", a.accounts.value!!.accounts.first { it.index == -1 }.name)
+        assertEquals(ledgerKey, a.accounts.value!!.accounts.first { it.index == -1 }.ledger)
+        a.rename(-1, "")
+        assertEquals("Ledger 1", a.accounts.value!!.accounts.first { it.index == -1 }.name)
+    }
+
+    @Test
+    fun `a cleared Ledger name is the same after removals, and never another account's (W6)`() = runBlocking {
+        // #432 R1-M4: the default came from the Ledger's place in the list, which moves.
+        val a = accounts()
+        vault.create(abandon12, auth, imported = true)
+        a.reconcile(vault.state.value)
+        a.addLedger(ledgerKey, ledgerAddress, "")
+        a.addLedger(ledgerKey.copy(path = "44'/60'/1'/0/0"), legalAddresses[1], "")
+        fun name(index: Int) = a.accounts.value!!.accounts.first { it.index == index }.name
+        assertEquals(listOf("Ledger 1", "Ledger 2"), listOf(name(-1), name(-2)))
+        a.removeLedger(-1)
+        // The next one down: no second "Ledger 2".
+        a.addLedger(ledgerKey.copy(path = "44'/60'/2'/0/0"), legalAddresses[0], "")
+        assertEquals("Ledger 3", name(-3))
+        a.rename(-2, "Cold")
+        a.rename(-2, "")
+        assertEquals("Ledger 2", name(-2))
+        // A default another account already uses (here by hand) gives the lowest free one.
+        a.rename(0, "Ledger 3")
+        a.rename(-3, "Warm")
+        a.rename(-3, " ")
+        assertEquals("Ledger 1", name(-3))
+        assertEquals(a.accounts.value!!.accounts.size, a.accounts.value!!.accounts.map { it.name }.toSet().size)
+    }
+
+    @Test
+    fun `a rename that can't be saved throws and changes nothing (W6)`() = runBlocking {
+        val a = accounts()
+        vault.create(abandon12, auth, imported = true)
+        a.reconcile(vault.state.value)
+        val before = a.accounts.value
+        file.parentFile!!.deleteRecursively()
+        file.parentFile!!.writeText("in the way")
+        try {
+            a.rename(0, "Savings")
+            fail("expected the failed save to throw")
+        } catch (_: Exception) {
+        }
+        assertEquals(before, a.accounts.value)
+    }
+
+    @Test
     fun `a corrupt or malformed list reads as none`() {
         val tag = "t"
         file.parentFile!!.mkdirs()

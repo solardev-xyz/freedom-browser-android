@@ -23,20 +23,23 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalanceWallet
-import androidx.compose.material.icons.filled.Badge
-import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -53,16 +56,16 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -638,9 +641,15 @@ private fun lostWalletAdvice(
  * as [request]). With no wallet it offers Create (one tap, then the
  * screen-lock prompt: 24 new words, then the guided backup with its
  * three-word check, which "Later" skips — #421) and Import (12
- * to 24 words, checksum checked); with one, Unlock or Lock, how it's
- * protected, the backup reminder, Show recovery phrase (#78) and
- * Remove wallet.
+ * to 24 words, checksum checked). With one, the home (W1) is three
+ * sections: a header (the account chip, which opens the account sheet;
+ * the balance; Send, Receive and Scan), Assets and Activity, under the
+ * backup banner while the phrase isn't checked. The top bar's lock shows
+ * whether the wallet is open and locks or unlocks it in one tap (W2);
+ * balances show either way, and whatever needs the key asks for it. The
+ * gear opens Wallet settings ([WalletSettingsPage]): Security, Backup
+ * (recovery phrase and Google backup, W4), Connected sites, Site
+ * payments, Publishing and Remove wallet.
  *
  * The phrase is only ever on screen on the import page and the
  * recovery-phrase page, both `FLAG_SECURE` ([SecureWindow]); the import
@@ -689,7 +698,8 @@ fun WalletScreen(
     var creatingSafe by remember { mutableStateOf(false) }
     var coSigning by remember { mutableStateOf<String?>(null) }
     // The receive and scan pages (#106).
-    var receiving by remember { mutableStateOf(false) }
+    // Receive for an account, by address (the active one from the home, or one from its details page).
+    var receivingOf by remember { mutableStateOf<String?>(null) }
     var scanning by remember { mutableStateOf(false) }
     // What a scanned code filled Send in with (#422), for as long as that Send page is open.
     var scanPrefill by remember { mutableStateOf<SendPrefill?>(null) }
@@ -715,6 +725,16 @@ fun WalletScreen(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
+    // The home's gear (W1): Wallet settings, and its Backup page (W4).
+    var settingsOpen by remember { mutableStateOf(false) }
+    var backupOpen by remember { mutableStateOf(false) }
+    // The account sheet from the header's chip (W6), and one account's details page, by address.
+    var accountSheetOpen by remember { mutableStateOf(false) }
+    var detailsOf by remember { mutableStateOf<String?>(null) }
+    // The home's own notices ("Account 2 added"): the browser's host sits under this page's content.
+    val snackbar = remember { SnackbarHostState() }
+    // Pull-to-refresh's spinner: only for a read the user pulled for, not the one on opening.
+    var pulled by remember { mutableStateOf(false) }
     // Google backup (#231): whether it's possible here, whether Block Store holds an
     // entry, where this wallet's backup stands, and the delete confirmations.
     val phraseBackup = remember(context) { PhraseBackup.get(context) }
@@ -774,6 +794,7 @@ fun WalletScreen(
             if (refreshGeneration[0] == mine) refreshing = false
         }
     }
+    LaunchedEffect(refreshing) { if (!refreshing) pulled = false }
 
     // Pending sends the sender isn't following (stopped tracking, no receipt in time, an
     // earlier run's) are settled from the chain: on opening, on Refresh, on a new pending
@@ -878,7 +899,11 @@ fun WalletScreen(
         if (request != null || (state !is Vault.State.Locked && state !is Vault.State.Unlocked)) {
             publishing = false
             sending = false
-            receiving = false
+            receivingOf = null
+            settingsOpen = false
+            backupOpen = false
+            accountSheetOpen = false
+            detailsOf = null
             scanning = false
             connectingLedger = false
             historyOpen = false
@@ -953,9 +978,9 @@ fun WalletScreen(
             return
         }
     }
-    val receivingAccount = accountList?.active
-    if (receiving && receivingAccount != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
-        ReceivePage(account = receivingAccount, onBack = { receiving = false })
+    val receivingAccount = receivingOf?.let { address -> accountList?.accounts?.firstOrNull { it.address.equals(address, ignoreCase = true) } }
+    if (receivingAccount != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
+        ReceivePage(account = receivingAccount, onBack = { receivingOf = null })
         return
     }
     if (connectingLedger && accountList != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
@@ -1107,259 +1132,82 @@ fun WalletScreen(
         request?.finish(false)
         onDismiss()
     }
-    BackHandler(onBack = dismiss)
-    FullScreenScaffold(title = stringResource(R.string.wallet_title), onDismiss = dismiss) {
-      Box(Modifier.fillMaxSize()) {
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            modifier = Modifier.fillMaxSize(),
+    val info = stored
+    val walletOpen = state is Vault.State.Locked || state is Vault.State.Unlocked
+    val locked = state is Vault.State.Locked
+    val unlockAction = { run(Strings.get(R.string.wallet_action_unlock)) { vault.unlock(auth) } }
+    val turnOnBackup = {
+        run(Strings.get(R.string.wallet_action_turn_on_google_backup)) {
+            vault.enableCloudBackup(auth, phraseBackup)
+            backupCheck++
+        }
+    }
+    val openPhrase = {
+        error = null
+        phraseFlowAfterCreate = false
+        phraseFlow = BackupFlowState(startWithIntro = false, needsCheck = info?.backedUp == false)
+    }
+    val list = accountList
+    // An account's details page, looked up by the address it was opened for: gone from the list closes it.
+    val detailsAccount = detailsOf?.let { address -> list?.accounts?.firstOrNull { it.address.equals(address, ignoreCase = true) } }
+    LaunchedEffect(detailsOf != null && (detailsAccount == null || !walletOpen)) {
+        if (detailsAccount == null || !walletOpen) detailsOf = null
+    }
+    LaunchedEffect(backupOpen && info == null) { if (info == null) backupOpen = false }
+    val removeLedger = { account: WalletAccount ->
+        run(Strings.get(R.string.wallet_action_remove_ledger_account)) {
+            // Its sites first (#220 R2-M2): told they lost it now, and not
+            // quietly reconnected if the same Ledger account is added again.
+            if (!EthereumProviders.accountRemoved(context, account.address)) {
+                error = Strings.get(R.string.wallet_error_remove_ledger_sites)
+                return@run
+            }
+            // And desktop's OpenLV session, if it was given it (#220 R1-M2).
+            OpenLvSession.accountRemovedFromWallet(account.address)
+            walletAccounts.removeLedger(account.index)
+        }
+    }
+
+    when {
+        detailsAccount != null && list != null && walletOpen -> AccountDetailsPage(
+            account = detailsAccount,
+            active = detailsAccount.index == list.active.index,
+            busy = busy,
+            error = error,
+            onRename = { name -> run(Strings.get(R.string.wallet_action_rename_account)) { walletAccounts.rename(detailsAccount.index, name) } },
+            // Through run(): saving the choice can fail (a full disk), and that's an error line, not a crash.
+            onUse = { run(Strings.get(R.string.wallet_action_switch_account)) { walletAccounts.select(detailsAccount.index) } },
+            onReceive = {
+                error = null
+                receivingOf = detailsAccount.address
+            },
+            onExportKey = {
+                error = null
+                showingKeyOf = detailsAccount.address
+            },
+            onRemoveLedger = { removeLedger(detailsAccount) },
+            onBack = {
+                error = null
+                detailsOf = null
+            },
+        )
+        backupOpen && info != null -> WalletSettingsPage(
+            error = error,
+            title = stringResource(R.string.wallet_settings_backup),
+            onBack = {
+                error = null
+                backupOpen = false
+            },
         ) {
-            if (request != null) item("request") {
-                SectionCard(title = stringResource(R.string.wallet_needed_title)) {
-                    Text(request.reason, style = MaterialTheme.typography.bodyMedium)
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        // Declines only the feature's request: the page stays
-                        // if the user opened it themselves (Settings → Wallet),
-                        // and closes with the request if the request opened it.
-                        TextButton(onClick = { request.finish(false) }) { Text(stringResource(R.string.common_not_now)) }
-                    }
-                }
-            }
-            // Until the phrase is checked (#421). Google backup doesn't end it: its upload hangs
-            // on Android's own Google backup, which may be off (#244 R5-F1).
-            if (stored != null && !stored.backedUp) item("backup-banner") {
-                BackupBanner(enabled = !busy) {
-                    error = null
-                    phraseFlowAfterCreate = false
-                    phraseFlow = BackupFlowState(startWithIntro = true, needsCheck = true)
-                }
-            }
-            if (state == Vault.State.Empty && backupEntry == true) item("restore") {
-                RestoreFromBackupSection(
-                    busy = busy,
-                    deviceSecure = deviceSecure,
-                    onRestore = {
-                        run(Strings.get(R.string.wallet_action_restore)) {
-                            vault.restore(auth, phraseBackup)
-                            backupCheck++
-                        }
-                    },
-                    onDelete = { confirmBackupDelete = true },
-                    noScreenLock = {
-                        NoScreenLockWarning(text = stringResource(R.string.wallet_restore_no_screen_lock))
-                        ScreenLockSettingsButton()
-                    },
+            item("phrase") {
+                WalletPhraseSection(
+                    info = info,
+                    keptOn = walletBackupDetail(info.cloudBackup, backupKnown, walletAddress),
+                    enabled = !busy,
+                    onOpen = openPhrase,
                 )
             }
-            item("state") {
-                when (val s = state) {
-                    Vault.State.Empty -> SetupSection(
-                        busy = busy,
-                        deviceSecure = deviceSecure,
-                        onCreate = {
-                            run(Strings.get(R.string.wallet_action_create)) {
-                                vault.create(Mnemonic.generate(), auth, imported = false)
-                                // Straight into the backup, which "Later" skips (#421).
-                                phraseFlowAfterCreate = true
-                                phraseFlow = BackupFlowState(startWithIntro = true, needsCheck = true)
-                            }
-                        },
-                        onHaveOne = {
-                            error = null
-                            if (backupEntry == true) choosingRestore = true else importing = true
-                        },
-                    )
-                    is Vault.State.Locked -> StatusSection(
-                        locked = true,
-                        info = s.info,
-                        backupKnown = backupKnown,
-                        walletAddress = walletAddress,
-                        busy = busy,
-                        onAction = { run(Strings.get(R.string.wallet_action_unlock)) { vault.unlock(auth) } },
-                    )
-                    is Vault.State.Unlocked -> StatusSection(
-                        locked = false,
-                        info = s.info,
-                        backupKnown = backupKnown,
-                        walletAddress = walletAddress,
-                        busy = busy,
-                        onAction = { vault.lock() },
-                    )
-                    Vault.State.Unreadable -> SectionCard(title = stringResource(R.string.wallet_title)) {
-                        StatusLine(
-                            icon = Icons.Filled.ErrorOutline,
-                            color = Color(0xFFEF4444),
-                            title = stringResource(R.string.wallet_summary_unreadable),
-                            detail = unreadableWalletDetail(googleBackupThere = backupEntry),
-                        )
-                    }
-                }
-            }
-            error?.let { message ->
-                item("error") { ErrorText(message) }
-            }
-            val info = stored
-            val turnOnBackup = {
-                run(Strings.get(R.string.wallet_action_turn_on_google_backup)) {
-                    vault.enableCloudBackup(auth, phraseBackup)
-                    backupCheck++
-                }
-            }
-            if (info != null &&
-                showGoogleBackupOffer(info.cloudBackupOffered, info.cloudBackup, backupAvailability, backupEntry, entryIsThisWallet)
-            ) {
-                item("backup-offer") {
-                    GoogleBackupOffer(
-                        busy = busy,
-                        onTurnOn = turnOnBackup,
-                        onNotNow = { run(Strings.get(R.string.wallet_action_save_answer)) { vault.markCloudBackupOffered() } },
-                    )
-                }
-            }
-            if (info != null) {
-                val list = accountList
-                if (list == null) {
-                    item("accounts") {
-                        AccountsLockedSection(
-                            locked = state is Vault.State.Locked,
-                            failed = accountSyncFailed,
-                            busy = busy,
-                            onRetry = { run(Strings.get(R.string.wallet_action_find_accounts)) { walletAccounts.retry() } },
-                        )
-                    }
-                } else {
-                    item("accounts") {
-                        AccountsSection(
-                            list = list,
-                            locked = state is Vault.State.Locked,
-                            busy = busy,
-                            // Through run(): saving the choice can fail
-                            // (a full disk), and that's an error line, not a crash.
-                            onSelect = { index -> run(Strings.get(R.string.wallet_action_switch_account)) { walletAccounts.select(index) } },
-                            onAdd = {
-                                run(Strings.get(R.string.wallet_action_add_account)) {
-                                    if (!vault.unlockedNow()) vault.unlock(auth)
-                                    walletAccounts.add()
-                                }
-                            },
-                            onReceive = {
-                                error = null
-                                receiving = true
-                            },
-                            onConnectLedger = {
-                                error = null
-                                connectingLedger = true
-                            },
-                            onShowKey = { account ->
-                                error = null
-                                showingKeyOf = account.address
-                            },
-                            onRemoveLedger = { account ->
-                                run(Strings.get(R.string.wallet_action_remove_ledger_account)) {
-                                    // Its sites first (#220 R2-M2): told they lost it now, and not
-                                    // quietly reconnected if the same Ledger account is added again.
-                                    if (!EthereumProviders.accountRemoved(context, account.address)) {
-                                        error = Strings.get(R.string.wallet_error_remove_ledger_sites)
-                                        return@run
-                                    }
-                                    // And desktop's OpenLV session, if it was given it (#220 R1-M2).
-                                    OpenLvSession.accountRemovedFromWallet(account.address)
-                                    walletAccounts.removeLedger(account.index)
-                                }
-                            },
-                        )
-                    }
-                    item("send") {
-                        SendEntrySection(
-                            status = sendStatus,
-                            enabled = !busy && walletChains != null,
-                            onOpen = {
-                                error = null
-                                sending = true
-                            },
-                        )
-                    }
-                    item("history") {
-                        TxHistorySection(
-                            records = accountTx,
-                            onReceive = {
-                                error = null
-                                receiving = true
-                            },
-                            explorers = historyAccount?.let { accountExplorerLinks(walletChains.orEmpty(), it.address) }.orEmpty(),
-                            onOpenUrl = onOpenUrl,
-                            onOpen = {
-                                error = null
-                                openTx = it.hash
-                            },
-                            onShowAll = {
-                                error = null
-                                historyOpen = true
-                            },
-                        )
-                    }
-                    item("safes") {
-                        SafeAccountsSection(
-                            state = safeState,
-                            enabled = !busy,
-                            onOpen = {
-                                error = null
-                                openSafe = it
-                            },
-                            onCreate = {
-                                error = null
-                                creatingSafe = true
-                            },
-                        )
-                    }
-                    item("balances") {
-                        BalancesSection(
-                            chains = walletChains.orEmpty(),
-                            balances = allBalances[list.active.address.lowercase()].orEmpty(),
-                            refreshing = refreshing,
-                            onRefresh = { refreshTick++ },
-                        )
-                    }
-                }
-            }
-            if (info != null) item("scan") {
-                SectionCard(title = stringResource(R.string.wallet_scan_section)) {
-                    PageRow(
-                        title = SCAN_TITLE,
-                        subtitle = stringResource(R.string.wallet_scan_subtitle),
-                        style = PageRowStyle.Inset,
-                        leadingIcon = Icons.Filled.QrCodeScanner,
-                        enabled = !busy,
-                        onClick = {
-                            error = null
-                            scanning = true
-                        },
-                    )
-                }
-            }
-            val openPhrase = {
-                error = null
-                phraseFlowAfterCreate = false
-                phraseFlow = BackupFlowState(startWithIntro = false, needsCheck = info?.backedUp == false)
-            }
-            if (info != null) item("phrase") {
-                SectionCard(title = stringResource(R.string.wallet_phrase_section)) {
-                    PageRow(
-                        title = stringResource(R.string.wallet_show_phrase),
-                        subtitle = if (info.protection == VaultProtection.SCREEN_LOCK) {
-                            stringResource(R.string.wallet_phrase_asks)
-                        } else {
-                            stringResource(R.string.wallet_phrase_opens_without_asking)
-                        },
-                        style = PageRowStyle.Inset,
-                        leadingIcon = Icons.Filled.Key,
-                        enabled = !busy,
-                        onClick = openPhrase,
-                    )
-                }
-            }
-            if (info != null) item("google-backup") {
+            item("google-backup") {
                 GoogleBackupSection(
                     on = info.cloudBackup,
                     availability = backupAvailability,
@@ -1373,15 +1221,37 @@ fun WalletScreen(
                     deviceSecure = deviceSecure,
                 )
             }
-            if (info?.protection == VaultProtection.DEVICE_ONLY) item("no-lock") {
-                SectionCard(title = stringResource(R.string.wallet_no_screen_lock_section)) {
-                    NoScreenLockWarning(text = stringResource(R.string.wallet_no_screen_lock_detail))
-                    ScreenLockSettingsButton()
+        }
+        settingsOpen -> WalletSettingsPage(
+            error = error,
+            onBack = {
+                error = null
+                settingsOpen = false
+            },
+            // Undo for Disconnect and Revoke (#423), over the sections they act on.
+            overlay = { UndoSnackbarHost(undoNotices) },
+        ) {
+            if (info != null) {
+                item("security") { WalletSecuritySection(info, locked = locked) }
+                item("backup") {
+                    WalletBackupRow(
+                        backedUp = info.backedUp,
+                        googleStatus = googleBackupStatus(
+                            info.cloudBackup, backupAvailability, backupKnown?.status,
+                            entryKnown = backupEntry != null, deviceSecure = deviceSecure,
+                        ),
+                        enabled = !busy,
+                        onOpen = {
+                            error = null
+                            backupOpen = true
+                        },
+                    )
                 }
             }
             // Sites connected through `window.ethereum` (#110), and the way to disconnect them.
             // Shown whatever the vault's state: a connection left behind (a remove whose
             // grant wipe failed) must never be out of the user's reach.
+            if (dappGrants.isEmpty() && swarmGrants.isEmpty()) item("no-sites") { NoConnectedSitesSection() }
             if (dappGrants.isNotEmpty()) item("dapps") {
                 DappSitesSection(
                     grants = dappGrants,
@@ -1420,7 +1290,7 @@ fun WalletScreen(
                 )
             }
             // Shown whatever the vault's state once there's anything in it, like the connected sites.
-            if (state is Vault.State.Locked || state is Vault.State.Unlocked || x402Allowances.isNotEmpty() || x402Payments.isNotEmpty()) {
+            if (walletOpen || x402Allowances.isNotEmpty() || x402Payments.isNotEmpty()) {
                 item("x402") {
                     X402Section(
                         allowances = x402Allowances,
@@ -1434,37 +1304,267 @@ fun WalletScreen(
                     )
                 }
             }
-            if (state is Vault.State.Locked || state is Vault.State.Unlocked) item("publishing") {
-                SectionCard(title = stringResource(R.string.wallet_publishing_section)) {
-                    PageRow(
-                        title = PUBLISHER_IDENTITIES_TITLE,
-                        subtitle = publisherIdentitiesSummary(publisherSites),
-                        style = PageRowStyle.Inset,
-                        leadingIcon = Icons.Filled.Badge,
-                        enabled = !busy,
+            if (walletOpen) item("publishing") {
+                WalletPublishingSection(publisherSites, enabled = !busy) {
+                    error = null
+                    publishing = true
+                }
+            }
+            if (state != Vault.State.Empty) item("remove") { RemoveWalletSection(enabled = !busy) { confirmRemove = true } }
+        }
+        else -> WalletHome(
+            title = stringResource(R.string.wallet_title),
+            onDismiss = dismiss,
+            snackbar = snackbar,
+            refreshing = pulled && refreshing,
+            onRefresh = if (list != null && walletOpen) ({
+                pulled = true
+                refreshTick++
+            }) else null,
+            topBar = {
+                if (walletOpen) {
+                    // W2: the wallet's state at a glance, and Lock now / Unlock in one tap.
+                    IconButton(onClick = { if (locked) unlockAction() else vault.lock() }, enabled = !busy, modifier = Modifier.testTag("wallet-lock")) {
+                        Icon(
+                            if (locked) Icons.Filled.Lock else Icons.Filled.LockOpen,
+                            contentDescription = stringResource(if (locked) R.string.wallet_unlock_cd else R.string.wallet_lock_now_cd),
+                        )
+                    }
+                }
+                // Everything else the wallet has (W1): whenever there's something in it to manage.
+                if (state != Vault.State.Empty || dappGrants.isNotEmpty() || swarmGrants.isNotEmpty() ||
+                    x402Allowances.isNotEmpty() || x402Payments.isNotEmpty()
+                ) {
+                    IconButton(
                         onClick = {
                             error = null
-                            publishing = true
+                            settingsOpen = true
+                        },
+                        modifier = Modifier.testTag("wallet-settings-button"),
+                    ) {
+                        Icon(Icons.Filled.Settings, contentDescription = stringResource(R.string.wallet_settings_title))
+                    }
+                }
+            },
+        ) {
+            if (request != null) item("request") {
+                SectionCard(title = stringResource(R.string.wallet_needed_title)) {
+                    Text(request.reason, style = MaterialTheme.typography.bodyMedium)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                        // Declines only the feature's request: the page stays
+                        // if the user opened it themselves (Settings → Wallet),
+                        // and closes with the request if the request opened it.
+                        TextButton(onClick = { request.finish(false) }) { Text(stringResource(R.string.common_not_now)) }
+                        // The lock moved to the top bar (W2); the request still needs a plain way in.
+                        if (locked) {
+                            Spacer(Modifier.width(8.dp))
+                            Button(onClick = unlockAction, enabled = !busy) {
+                                Text(stringResource(if (busy) R.string.wallet_unlocking else R.string.wallet_unlock))
+                            }
+                        }
+                    }
+                }
+            }
+            // Until the phrase is checked (#421). Google backup doesn't end it: its upload hangs
+            // on Android's own Google backup, which may be off (#244 R5-F1).
+            if (info != null && !info.backedUp) item("backup-banner") {
+                BackupBanner(enabled = !busy) {
+                    error = null
+                    phraseFlowAfterCreate = false
+                    phraseFlow = BackupFlowState(startWithIntro = true, needsCheck = true)
+                }
+            }
+            if (state == Vault.State.Empty && backupEntry == true) item("restore") {
+                RestoreFromBackupSection(
+                    busy = busy,
+                    deviceSecure = deviceSecure,
+                    onRestore = {
+                        run(Strings.get(R.string.wallet_action_restore)) {
+                            vault.restore(auth, phraseBackup)
+                            backupCheck++
+                        }
+                    },
+                    onDelete = { confirmBackupDelete = true },
+                    noScreenLock = {
+                        NoScreenLockWarning(text = stringResource(R.string.wallet_restore_no_screen_lock))
+                        ScreenLockSettingsButton()
+                    },
+                )
+            }
+            when (state) {
+                Vault.State.Empty -> item("setup") {
+                    SetupSection(
+                        busy = busy,
+                        deviceSecure = deviceSecure,
+                        onCreate = {
+                            run(Strings.get(R.string.wallet_action_create)) {
+                                vault.create(Mnemonic.generate(), auth, imported = false)
+                                // Straight into the backup, which "Later" skips (#421).
+                                phraseFlowAfterCreate = true
+                                phraseFlow = BackupFlowState(startWithIntro = true, needsCheck = true)
+                            }
+                        },
+                        onHaveOne = {
+                            error = null
+                            if (backupEntry == true) choosingRestore = true else importing = true
+                        },
+                    )
+                }
+                Vault.State.Unreadable -> {
+                    item("unreadable") {
+                        SectionCard(title = stringResource(R.string.wallet_title)) {
+                            StatusLine(
+                                icon = Icons.Filled.ErrorOutline,
+                                color = Color(0xFFEF4444),
+                                title = stringResource(R.string.wallet_summary_unreadable),
+                                detail = unreadableWalletDetail(googleBackupThere = backupEntry),
+                            )
+                        }
+                    }
+                    // The one thing to do with a wallet that can't be read: no need to look for it.
+                    item("remove") { RemoveWalletSection(enabled = !busy) { confirmRemove = true } }
+                }
+                is Vault.State.Locked, is Vault.State.Unlocked -> if (list == null) {
+                    item("accounts") {
+                        AccountsLockedSection(
+                            locked = locked,
+                            failed = accountSyncFailed,
+                            busy = busy,
+                            onRetry = { run(Strings.get(R.string.wallet_action_find_accounts)) { walletAccounts.retry() } },
+                            onUnlock = unlockAction,
+                        )
+                    }
+                } else {
+                    val active = list.active
+                    val activeBalances = allBalances[active.address.lowercase()].orEmpty()
+                    item("header") {
+                        WalletHeader(
+                            account = active,
+                            headline = headlineBalance(walletAssets(walletChains.orEmpty(), activeBalances), refreshing),
+                            enabled = !busy,
+                            sendEnabled = walletChains != null,
+                            onAccounts = {
+                                error = null
+                                accountSheetOpen = true
+                            },
+                            onSend = {
+                                error = null
+                                sending = true
+                            },
+                            onReceive = {
+                                error = null
+                                receivingOf = active.address
+                            },
+                            onScan = {
+                                error = null
+                                scanning = true
+                            },
+                        )
+                    }
+                }
+            }
+            error?.let { message ->
+                item("error") { WalletErrorText(message) }
+            }
+            if (info != null &&
+                showGoogleBackupOffer(info.cloudBackupOffered, info.cloudBackup, backupAvailability, backupEntry, entryIsThisWallet)
+            ) {
+                item("backup-offer") {
+                    GoogleBackupOffer(
+                        busy = busy,
+                        onTurnOn = turnOnBackup,
+                        onNotNow = { run(Strings.get(R.string.wallet_action_save_answer)) { vault.markCloudBackupOffered() } },
+                    )
+                }
+            }
+            if (walletOpen && list != null) {
+                item("assets") {
+                    AssetsSection(
+                        chains = walletChains.orEmpty(),
+                        balances = allBalances[list.active.address.lowercase()].orEmpty(),
+                        refreshing = refreshing,
+                        onReceive = {
+                            error = null
+                            receivingOf = list.active.address
+                        },
+                        onRefresh = { refreshTick++ },
+                    )
+                }
+                item("activity") {
+                    TxHistorySection(
+                        records = accountTx,
+                        title = stringResource(R.string.wallet_home_activity),
+                        preview = WALLET_HOME_ACTIVITY,
+                        // Receive is the header's; the empty list only points at the explorers.
+                        onReceive = null,
+                        explorers = historyAccount?.let { accountExplorerLinks(walletChains.orEmpty(), it.address) }.orEmpty(),
+                        onOpenUrl = onOpenUrl,
+                        onOpen = {
+                            error = null
+                            openTx = it.hash
+                        },
+                        onShowAll = {
+                            error = null
+                            historyOpen = true
+                        },
+                        // A send under way stays in sight, and a tap goes back to it.
+                        top = sendStatus?.let { status ->
+                            {
+                                SendStatusRow(status, enabled = !busy && walletChains != null) {
+                                    error = null
+                                    sending = true
+                                }
+                            }
                         },
                     )
                 }
             }
-            if (state != Vault.State.Empty) item("remove") {
-                SectionCard(title = stringResource(R.string.wallet_remove_section)) {
-                    PageRow(
-                        title = stringResource(R.string.wallet_remove_title),
-                        subtitle = stringResource(R.string.wallet_remove_subtitle),
-                        style = PageRowStyle.Inset,
-                        leadingIcon = Icons.Filled.DeleteForever,
-                        enabled = !busy,
-                        onClick = { confirmRemove = true },
-                    )
-                }
-            }
         }
-        UndoSnackbarHost(undoNotices)
-      }
     }
+
+    if (accountSheetOpen && list != null && walletOpen && !settingsOpen && !backupOpen && detailsAccount == null) {
+        AccountSheet(
+            list = list,
+            chains = walletChains.orEmpty(),
+            balances = allBalances,
+            safes = safeState,
+            locked = locked,
+            busy = busy,
+            onSelect = { account ->
+                // Through run(): saving the choice can fail (a full disk), and that's an error line, not a crash.
+                run(Strings.get(R.string.wallet_action_switch_account)) { walletAccounts.select(account.index) }
+            },
+            onDetails = { account ->
+                error = null
+                detailsOf = account.address
+            },
+            onAdd = {
+                run(Strings.get(R.string.wallet_action_add_account)) {
+                    // The key is needed here: the first action that needs it asks (W2).
+                    if (!vault.unlockedNow()) vault.unlock(auth)
+                    val added = walletAccounts.add()
+                    // Not inside run(): the notice's few seconds mustn't hold the page busy.
+                    scope.launch { snackbar.showSnackbar(Strings.get(R.string.wallet_accounts_added, accountLabel(added))) }
+                }
+            },
+            onConnectLedger = {
+                error = null
+                connectingLedger = true
+            },
+            onOpenSafe = {
+                error = null
+                openSafe = it
+            },
+            onCreateSafe = {
+                error = null
+                creatingSafe = true
+            },
+            onDismiss = { accountSheetOpen = false },
+        )
+    } else if (accountSheetOpen && (list == null || !walletOpen)) {
+        LaunchedEffect(Unit) { accountSheetOpen = false }
+    }
+
 
     if (choosingRestore && state == Vault.State.Empty && backupEntry == true) {
         RestoreChoiceDialog(
@@ -1680,72 +1780,49 @@ private fun RestoreChoiceDialog(
     )
 }
 
+/** How many sends the wallet home's Activity shows before "All transactions" (W1). */
+internal const val WALLET_HOME_ACTIVITY = 3
+
+/**
+ * The wallet home's frame (W1): the page header with the lock and the
+ * gear in its top bar ([topBar]), pull-to-refresh over the list when
+ * there are balances to read again ([onRefresh]; [refreshing] is its
+ * spinner), and the home's own snackbar host above the list.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun StatusSection(
-    locked: Boolean,
-    info: Vault.Info,
-    backupKnown: PhraseBackup.Known?,
-    walletAddress: String?,
-    busy: Boolean,
-    onAction: () -> Unit,
+private fun WalletHome(
+    title: String,
+    onDismiss: () -> Unit,
+    snackbar: SnackbarHostState,
+    refreshing: Boolean,
+    onRefresh: (() -> Unit)?,
+    topBar: @Composable RowScope.() -> Unit,
+    content: LazyListScope.() -> Unit,
 ) {
-    SectionCard(title = stringResource(R.string.wallet_title)) {
-        if (locked) {
-            StatusLine(
-                icon = Icons.Filled.Lock,
-                color = Color(0xFF94A3B8),
-                title = stringResource(R.string.wallet_summary_locked),
-                detail = if (info.protection == VaultProtection.SCREEN_LOCK) {
-                    stringResource(R.string.wallet_locked_detail)
-                } else {
-                    stringResource(R.string.wallet_locked_detail_no_screen_lock)
-                },
-            )
-        } else {
-            StatusLine(
-                icon = Icons.Filled.LockOpen,
-                color = Color(0xFF22C55E),
-                title = stringResource(R.string.wallet_summary_unlocked),
-                detail = stringResource(R.string.wallet_unlocked_detail),
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-        DetailRow(
-            stringResource(R.string.wallet_detail_unlock_with),
-            stringResource(
-                if (info.protection == VaultProtection.SCREEN_LOCK) {
-                    R.string.wallet_detail_unlock_with_screen_lock
-                } else {
-                    R.string.wallet_detail_unlock_with_nothing
-                },
-            ),
-            singleLine = false,
-        )
-        DetailRow(
-            stringResource(R.string.wallet_detail_key_kept_in),
-            stringResource(if (info.strongBox) R.string.wallet_detail_key_strongbox else R.string.wallet_detail_key_keystore),
-            singleLine = false,
-        )
-        DetailRow(
-            stringResource(R.string.wallet_detail_backup),
-            walletBackupDetail(info.cloudBackup, backupKnown, walletAddress),
-            singleLine = false,
-        )
-        Spacer(Modifier.height(8.dp))
-        if (locked) {
-            Button(onClick = onAction, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                Text(stringResource(if (busy) R.string.wallet_unlocking else R.string.wallet_unlock))
+    BackHandler(onBack = onDismiss)
+    FullScreenScaffold(title = title, onDismiss = onDismiss, trailing = topBar) {
+        Box(Modifier.fillMaxSize()) {
+            val list = @Composable {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                    modifier = Modifier.fillMaxSize().testTag("wallet-home"),
+                    content = content,
+                )
             }
-        } else {
-            OutlinedButton(onClick = onAction, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                Text(stringResource(R.string.wallet_lock_now))
+            if (onRefresh != null) {
+                PullToRefreshBox(isRefreshing = refreshing, onRefresh = onRefresh, modifier = Modifier.fillMaxSize()) { list() }
+            } else {
+                list()
             }
+            SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp))
         }
     }
 }
 
 @Composable
-private fun StatusLine(
+internal fun StatusLine(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     color: Color,
     title: String,
@@ -1766,7 +1843,7 @@ private fun StatusLine(
 }
 
 @Composable
-private fun NoScreenLockWarning(text: String) {
+internal fun NoScreenLockWarning(text: String) {
     // Amber, as Settings' unverified-endpoint warning.
     val color = if (MaterialTheme.colorScheme.isLight) Color(0xFFB45309) else Color(0xFFF59E0B)
     Row(verticalAlignment = Alignment.Top) {
@@ -1777,7 +1854,7 @@ private fun NoScreenLockWarning(text: String) {
 }
 
 @Composable
-private fun ScreenLockSettingsButton() {
+internal fun ScreenLockSettingsButton() {
     val context = LocalContext.current
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         TextButton(onClick = {
@@ -1813,7 +1890,7 @@ private fun ReleaseCoveredFocus() {
 }
 
 @Composable
-private fun ErrorText(message: String) {
+internal fun WalletErrorText(message: String) {
     Text(
         message,
         style = MaterialTheme.typography.bodyMedium,
@@ -1958,7 +2035,7 @@ internal fun ImportPhrasePage(
                     ) { Text(stringResource(if (busy) R.string.wallet_importing else R.string.wallet_import_button)) }
                 }
             }
-            error?.let { message -> item("error") { ErrorText(message) } }
+            error?.let { message -> item("error") { WalletErrorText(message) } }
         }
     }
 }
@@ -2226,7 +2303,7 @@ internal fun RecoveryPhrasePage(
                     }
                 }
             }
-            error?.let { message -> item("error") { ErrorText(message) } }
+            error?.let { message -> item("error") { WalletErrorText(message) } }
         }
     }
     val copyWords = words
@@ -2406,7 +2483,7 @@ private fun PrivateKeyPage(
                     }
                 }
             }
-            error?.let { message -> item("error") { ErrorText(message) } }
+            error?.let { message -> item("error") { WalletErrorText(message) } }
         }
     }
 }
