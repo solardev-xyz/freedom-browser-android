@@ -109,6 +109,20 @@ class StorageUxTest {
     }
 
     @Test
+    fun `after a deposit the pick suits what the node holds once it lands, not the balance before it (W44)`() {
+        // Holds 0.15, deposits 0.1: 0.05 left, so the largest preset it can pay.
+        assertEquals(xbzz("0.01").toString(), depositPickAfterDeposit(xbzz("0.1"), xbzz("0.15")))
+        // Not the stale pre-deposit default, which it could no longer pay.
+        assertEquals(xbzz("0.1").toString(), depositPick(null, xbzz("0.15")))
+        // Plenty left: 0.1 still.
+        assertEquals(xbzz("0.1").toString(), depositPickAfterDeposit(xbzz("0.1"), xbzz("3")))
+        // Emptied it: the usual default, and the page says what it holds.
+        assertEquals(xbzz("0.1").toString(), depositPickAfterDeposit(xbzz("0.5"), xbzz("0.5")))
+        // Balance unknown: nothing yet; the page picks once it's read.
+        assertEquals(null, depositPickAfterDeposit(xbzz("0.1"), null))
+    }
+
+    @Test
     fun `the chequebook headline is the spendable credit, an upper bound said as such (W44)`() {
         val state = ChequebookState(address = "0x" + "37".repeat(20), balancePlur = xbzz("0.011"), availablePlur = xbzz("0.0082"))
         assertEquals("0.0082 xBZZ", creditHeadline(state))

@@ -141,10 +141,13 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
     // W44), picked once when the balance is first known and kept from then
     // on, so a later balance read never moves the highlight by itself.
     // Nothing is highlighted before that; Deposit waits for the balance anyway.
+    // depositPick keeps a pick already made, so this only ever fills a
+    // missing one. After a deposit the pick is redone for what the node
+    // will hold once it lands (depositPickAfterDeposit).
     var amount by rememberSaveable { mutableStateOf<String?>(null) }
     val walletKnown = state.walletPlur != null
     LaunchedEffect(amount == null, walletKnown) {
-        if (amount == null) amount = depositPick(null, state.walletPlur)
+        amount = depositPick(amount, state.walletPlur)
     }
     val amountPlur = amount?.let(::BigInteger)
     // What the confirmation shows, captured when it opens: that's what's sent.
@@ -223,7 +226,7 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
             confirmLabel = stringResource(R.string.stamps_deposit),
             onConfirm = {
                 confirming = null
-                if (StampClient.deposit(address, plur)) amount = null
+                if (StampClient.deposit(address, plur)) amount = depositPickAfterDeposit(plur, state.walletPlur)
             },
             onDismiss = { confirming = null },
         )

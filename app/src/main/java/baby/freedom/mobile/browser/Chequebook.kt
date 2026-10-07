@@ -60,6 +60,17 @@ internal fun depositPick(current: String?, walletPlur: BigInteger?): String? =
     current ?: walletPlur?.let { defaultDepositPreset(it).toString() }
 
 /**
+ * The deposit page's pick right after a deposit of [deposited] went out:
+ * the default for what the node's account will hold once it lands
+ * ([walletPlur], read before it, less [deposited]), not for the balance
+ * read before the deposit, which would leave a preset highlighted that
+ * the node can no longer pay. Null while the balance isn't known; the
+ * page then picks once it is.
+ */
+internal fun depositPickAfterDeposit(deposited: BigInteger, walletPlur: BigInteger?): String? =
+    depositPick(null, walletPlur?.let { (it - deposited).max(BigInteger.ZERO) })
+
+/**
  * What the credit pays for, as the cost note measures it: about 0.16 xBZZ
  * per hour of HD video when the free tier carries most of it.
  */
