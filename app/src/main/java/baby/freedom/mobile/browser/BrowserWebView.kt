@@ -3104,7 +3104,7 @@ private fun buildRefreshableWebView(
                 val zoomSite = zoomSiteKey(url)
                 state.zoomSite = zoomSite
                 state.providerOrigin = providerOriginKey(url)
-                state.permissionOrigin = permissionOriginKey(url)
+                state.permissionOrigin = documentPermissionOrigin(url)
                 // …with the user agent it was fetched with (#180). One
                 // that crossed the desktop/mobile line was corrected
                 // before its request went out, where it could be (see
@@ -3172,6 +3172,7 @@ private fun buildRefreshableWebView(
                 // A real document: a popup's blank start is over, and
                 // `about:blank` in this tab is the home sentinel again.
                 state.blankIsPage = false
+                state.blankOpenerOrigin = null
                 // Whatever is parked belongs to the document this one is
                 // replacing, and it never painted (a paint is what would
                 // have flushed it). Dropping it here is what keeps the

@@ -47,6 +47,28 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     internal var blankIsPage: Boolean = false
 
+    /**
+     * The opener's site-permission top ([permissionTop]: its committed
+     * origin, or what its own blank document inherited) when this popup
+     * was opened ([TabsState.adoptPopup]). A popup's
+     * `about:blank` document inherits the origin of the page that opened
+     * it, but commits nothing, so [permissionOrigin] stays null while it
+     * shows; this stands in for it as the top-level site of that blank
+     * document's own permission requests (see [permissionTop]).
+     */
+    internal var blankOpenerOrigin: String? = null
+
+    /**
+     * The top-level site a site-permission request from this tab's
+     * document is decided under (#363): the committed [permissionOrigin],
+     * or, for a popup's own blank document ([blankIsPage]), the origin it
+     * inherited from its opener ([blankOpenerOrigin]). Null when the page
+     * has no site that can hold a permission.
+     */
+    val permissionTop: String?
+        get() = permissionOrigin
+            ?: blankOpenerOrigin.takeIf { blankIsPage }
+
     /** Present the WebView's `about:blank` as a page; see [blankIsPage]. */
     internal fun showBlankPage() {
         url = ABOUT_BLANK
@@ -1141,6 +1163,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     fun navigateHome() {
         // Home is home, even for a popup whose opener left it blank.
         blankIsPage = false
+        blankOpenerOrigin = null
         userNavigated()
         cancelPendingProbe()
         capsuleCollapse.expand()

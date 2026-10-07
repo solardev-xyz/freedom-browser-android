@@ -55,7 +55,7 @@ class SitePermissionsTest {
         assertEquals("know your location", describePermissionRequest(listOf(SitePermission.LOCATION)))
     }
 
-    private val o = "https://meet.jit.si"
+    private val o = PermissionScope("https://meet.jit.si")
     private val av = listOf(SitePermission.CAMERA, SitePermission.MICROPHONE)
 
     @Test
@@ -93,7 +93,7 @@ class SitePermissionsTest {
         // Other origins are untouched.
         assertEquals(
             PermissionPlan.Ask(listOf(SitePermission.CAMERA)),
-            planFor("https://other.example", listOf(SitePermission.CAMERA), emptyMap(), s),
+            planFor(PermissionScope("https://other.example"), listOf(SitePermission.CAMERA), emptyMap(), s),
         )
     }
 
@@ -322,7 +322,7 @@ class SitePermissionsTest {
 
     @Test
     fun `a prompt is superseded when another tab answers the same question`() = runBlocking {
-        val o = "https://example.com"
+        val o = PermissionScope("https://example.com")
         val cam = SitePermission.CAMERA
         val mic = SitePermission.MICROPHONE
         val session = PermissionSession()
@@ -331,7 +331,7 @@ class SitePermissionsTest {
         }
         // Unrelated changes leave the prompt up: another origin, another
         // permission, a dismissal short of the embargo.
-        session.record("https://other.example", cam, PermissionDecision.ALLOW, remembered = false)
+        session.record(PermissionScope("https://other.example"), cam, PermissionDecision.ALLOW, remembered = false)
         session.record(o, SitePermission.LOCATION, PermissionDecision.ALLOW, remembered = false)
         session.dismiss(o, cam)
         repeat(3) { yield() }
@@ -343,7 +343,7 @@ class SitePermissionsTest {
 
     @Test
     fun `a remembered answer elsewhere supersedes even once it left the session tier`() = runBlocking {
-        val o = "https://example.com"
+        val o = PermissionScope("https://example.com")
         val cam = SitePermission.CAMERA
         val session = PermissionSession()
         var stored = emptyMap<SiteCapability, PermissionDecision>()
@@ -360,7 +360,7 @@ class SitePermissionsTest {
 
     @Test
     fun `an embargo reached elsewhere supersedes the prompt`() = runBlocking {
-        val o = "https://example.com"
+        val o = PermissionScope("https://example.com")
         val loc = SitePermission.LOCATION
         val session = PermissionSession()
         val wait = async(start = CoroutineStart.UNDISPATCHED) {
@@ -521,19 +521,28 @@ class SitePermissionsTest {
 
     // --- The page's own Site permissions (#266) ---
 
-    private fun entry(origin: String, p: SiteCapability, d: PermissionDecision = PermissionDecision.ALLOW, remembered: Boolean = true) =
-        SitePermissionEntry(origin, p, d, remembered)
+    private fun entry(
+        origin: String,
+        p: SiteCapability,
+        d: PermissionDecision = PermissionDecision.ALLOW,
+        remembered: Boolean = true,
+        top: String = origin,
+    ) = SitePermissionEntry(origin, p, d, remembered, top = top)
 
     @Test
-    fun `page sheet lists the page's own decisions first, then a frame's that asked from it`() {
+    fun `page sheet lists the page's own decisions first, then a frame's made on this site`() {
         val all = listOf(
             entry("https://a.example", SitePermission.LOCATION),
-            entry("https://frame.example", SitePermission.CAMERA),
+            entry("https://frame.example", SitePermission.CAMERA, top = "https://page.example"),
+            // The frame's origin as a site of its own, and framed by
+            // another site: neither is this page's (#363).
+            entry("https://frame.example", SitePermission.LOCATION),
+            entry("https://frame.example", SitePermission.MICROPHONE, top = "https://other.example"),
             entry("https://other.example", SitePermission.MICROPHONE),
             entry("https://page.example", SitePermission.CAMERA),
             entry("https://page.example", SitePermission.POPUPS, PermissionDecision.ALLOW),
         )
-        val listed = pageSitePermissionEntries("https://page.example", setOf("https://frame.example"), all)
+        val listed = pageSitePermissionEntries("https://page.example", all)
         assertEquals(
             listOf(
                 "https://page.example" to SitePermission.CAMERA,
@@ -547,7 +556,7 @@ class SitePermissionsTest {
     @Test
     fun `page sheet lists nothing for a page with no site`() {
         val all = listOf(entry("https://a.example", SitePermission.LOCATION))
-        assertEquals(emptyList<SitePermissionEntry>(), pageSitePermissionEntries(null, emptySet(), all))
+        assertEquals(emptyList<SitePermissionEntry>(), pageSitePermissionEntries(null, all))
     }
 
     @Test
@@ -564,11 +573,11 @@ class SitePermissionsTest {
     fun `a camera removed while the document holds it stays noted with the document until granted again`() {
         val page = "https://page.example"
         val doc = SitePermissionBroker.DocumentPermissions(doc = 3)
-            .granting(page, listOf(SitePermission.CAMERA))
+            .granting(PermissionScope(page), listOf(SitePermission.CAMERA))
         val revoked = doc.revoking(entry(page, SitePermission.CAMERA))
         // Kept on the document, not the sheet: reading it again (a
         // reopened sheet) still says the camera is held.
-        assertEquals(mapOf(page to setOf(SitePermission.CAMERA)), revoked.revokedHeld)
+        assertEquals(mapOf(PermissionScope(page) to setOf(SitePermission.CAMERA)), revoked.revokedHeld)
         assertEquals(setOf(SitePermission.CAMERA), revoked.stillHeld(setOf(SitePermission.CAMERA)))
         // Once the page stops using it, it doesn't have it any more.
         assertEquals(emptySet<SitePermission>(), revoked.stillHeld(emptySet()))
@@ -578,14 +587,14 @@ class SitePermissionsTest {
         // A microphone the document was never given isn't held either.
         assertEquals(revoked, revoked.revoking(entry(page, SitePermission.MICROPHONE)))
         // Asked and allowed again: no longer removed.
-        assertEquals(emptyMap<String, Set<SitePermission>>(), revoked.granting(page, listOf(SitePermission.CAMERA)).revokedHeld)
+        assertEquals(emptyMap<PermissionScope, Set<SitePermission>>(), revoked.granting(PermissionScope(page), listOf(SitePermission.CAMERA)).revokedHeld)
     }
 
     @Test
     fun `a location removed from a document that was given it stays held until reload, used or not`() {
         val page = "https://page.example"
         val doc = SitePermissionBroker.DocumentPermissions(doc = 1)
-            .granting(page, listOf(SitePermission.LOCATION))
+            .granting(PermissionScope(page), listOf(SitePermission.LOCATION))
         val revoked = doc.revoking(entry(page, SitePermission.LOCATION))
         // WebView keeps answering this document's watch and new requests:
         // no camera/microphone "in use" signal needed for it to count.
@@ -600,10 +609,10 @@ class SitePermissionsTest {
     @Test
     fun `a removal from Settings or another tab reaches every document on that site that holds it`() {
         val page = "https://page.example"
-        val given = SitePermissionBroker.DocumentPermissions(doc = 1).granting(page, listOf(SitePermission.LOCATION))
-        val askedOnly = SitePermissionBroker.DocumentPermissions(doc = 4).granting(page, emptyList())
+        val given = SitePermissionBroker.DocumentPermissions(doc = 1).granting(PermissionScope(page), listOf(SitePermission.LOCATION))
+        val askedOnly = SitePermissionBroker.DocumentPermissions(doc = 4).granting(PermissionScope(page), emptyList())
         val other = SitePermissionBroker.DocumentPermissions(doc = 2)
-            .granting("https://other.example", listOf(SitePermission.LOCATION))
+            .granting(PermissionScope("https://other.example"), listOf(SitePermission.LOCATION))
         val all = mapOf(1L to given, 2L to given, 3L to other, 4L to askedOnly, 5L to given)
         // Tab 5 is in the other tier (private vs normal): not reached.
         val after = SitePermissionBroker.revokingInDocuments(all, entry(page, SitePermission.LOCATION)) { it != 5L }
@@ -620,41 +629,41 @@ class SitePermissionsTest {
     fun `allowed again from another tab clears the kept-until-reload note in every document of that tier`() {
         val page = "https://page.example"
         val removed = SitePermissionBroker.DocumentPermissions(doc = 1)
-            .granting(page, listOf(SitePermission.LOCATION, SitePermission.CAMERA))
+            .granting(PermissionScope(page), listOf(SitePermission.LOCATION, SitePermission.CAMERA))
             .revoking(entry(page, SitePermission.LOCATION))
             .revoking(entry(page, SitePermission.CAMERA))
         val other = SitePermissionBroker.DocumentPermissions(doc = 2)
-            .granting("https://other.example", listOf(SitePermission.LOCATION))
+            .granting(PermissionScope("https://other.example"), listOf(SitePermission.LOCATION))
             .revoking(entry("https://other.example", SitePermission.LOCATION))
         val all = mapOf(1L to removed, 2L to removed, 3L to other, 5L to removed)
         // Tab A (1) re-allowed location; tab 5 is in the other tier.
-        val after = SitePermissionBroker.allowingAgainInDocuments(all, page, listOf(SitePermission.LOCATION)) { it != 5L }
+        val after = SitePermissionBroker.allowingAgainInDocuments(all, PermissionScope(page), listOf(SitePermission.LOCATION)) { it != 5L }
         // Tab B (2), not the one that asked, no longer offers a reload for location…
-        assertEquals(setOf(SitePermission.CAMERA), after.getValue(2L).revokedHeld.getValue(page))
+        assertEquals(setOf(SitePermission.CAMERA), after.getValue(2L).revokedHeld.getValue(PermissionScope(page)))
         assertEquals(emptySet<SitePermission>(), after.getValue(2L).stillHeld(emptySet()))
         assertNull(stillHeldNote(after.getValue(2L).stillHeld(emptySet())))
         // …but keeps a camera still in use and removed, and its own grants.
         assertEquals(setOf(SitePermission.CAMERA), after.getValue(2L).stillHeld(setOf(SitePermission.CAMERA)))
         assertEquals(removed.grants, after.getValue(2L).grants)
-        assertEquals(removed.origins, after.getValue(2L).origins)
+        assertEquals(removed.scopes, after.getValue(2L).scopes)
         // Another site and the other tier are left alone.
         assertEquals(other, after.getValue(3L))
         assertEquals(removed, after.getValue(5L))
         // Both allowed again: nothing is kept "removed" for the site.
-        val both = after.getValue(1L).allowedAgain(page, listOf(SitePermission.CAMERA))
-        assertEquals(emptyMap<String, Set<SitePermission>>(), both.revokedHeld)
+        val both = after.getValue(1L).allowedAgain(PermissionScope(page), listOf(SitePermission.CAMERA))
+        assertEquals(emptyMap<PermissionScope, Set<SitePermission>>(), both.revokedHeld)
     }
 
     @Test
     fun `a removal is counted per site and permission, so a waiting grant can tell it lost its allow`() {
         val tier = PermissionSession()
-        val site = "https://a.example"
+        val site = PermissionScope("https://a.example")
         val asked = listOf(SitePermission.LOCATION)
         tier.record(site, SitePermission.LOCATION, PermissionDecision.ALLOW, remembered = true)
         val before = tier.removalCount(site, asked)
         // Unrelated removals don't touch it.
         tier.revoke(site, SitePermission.CAMERA)
-        tier.revoke("https://b.example", SitePermission.LOCATION)
+        tier.revoke(PermissionScope("https://b.example"), SitePermission.LOCATION)
         assertEquals(before, tier.removalCount(site, asked))
         // A remembered Allow (not in the session tier at all) removed from Settings does.
         tier.revoke(site, SitePermission.LOCATION)
@@ -670,7 +679,7 @@ class SitePermissionsTest {
     @Test
     fun `a remembered Allow being removed from the store isn't read from it meanwhile`() = runBlocking {
         val tier = PermissionSession()
-        val site = "https://a.example"
+        val site = PermissionScope("https://a.example")
         val asked = listOf<SiteCapability>(SitePermission.CAMERA)
         // The store still holds the Allow: its removal hasn't landed yet.
         val store = mapOf<SiteCapability, PermissionDecision>(
@@ -684,7 +693,7 @@ class SitePermissionsTest {
         assertTrue(planFor(site, asked, stored, tier) is PermissionPlan.Ask)
         // …and nothing else is hidden: not another permission, not another site.
         assertEquals(PermissionDecision.ALLOW, stored[SitePermission.LOCATION])
-        assertEquals(store, tier.readWithoutStoreRemovals("https://b.example") { store })
+        assertEquals(store, tier.readWithoutStoreRemovals(PermissionScope("https://b.example")) { store })
 
         // A read that started before the removal landed is still masked,
         // even though the removal is done by the time it returns.
@@ -712,8 +721,8 @@ class SitePermissionsTest {
         val frame = "https://frame.example"
         // The page was given the camera; the frame only asked for location.
         val doc = SitePermissionBroker.DocumentPermissions(doc = 1)
-            .granting(page, listOf(SitePermission.CAMERA))
-            .granting(frame, listOf(SitePermission.LOCATION))
+            .granting(PermissionScope(page), listOf(SitePermission.CAMERA))
+            .granting(PermissionScope(frame), listOf(SitePermission.LOCATION))
         val camera = setOf(SitePermission.CAMERA)
         // The frame's remembered camera Allow isn't what's in use.
         assertTrue(doc.inUse(entry(page, SitePermission.CAMERA), camera))
@@ -724,7 +733,7 @@ class SitePermissionsTest {
         assertEquals(emptySet<SitePermission>(), afterFrame.stillHeld(camera))
         // Nor does a re-grant to the frame clear the page's own removal.
         val afterPage = doc.revoking(entry(page, SitePermission.CAMERA))
-        assertEquals(camera, afterPage.granting(frame, listOf(SitePermission.CAMERA)).stillHeld(camera))
+        assertEquals(camera, afterPage.granting(PermissionScope(frame), listOf(SitePermission.CAMERA)).stillHeld(camera))
         // The indicator still sees everything the document was given.
         assertEquals(setOf(SitePermission.CAMERA, SitePermission.LOCATION), doc.granted)
     }
@@ -759,7 +768,7 @@ class SitePermissionsTest {
 
     @Test
     fun `MIDI goes through the same tiers and embargo as the camera`() {
-        val origin = "https://synth.example"
+        val origin = PermissionScope("https://synth.example")
         val session = PermissionSession()
         assertEquals(
             PermissionPlan.Ask(listOf(SitePermission.MIDI)),
@@ -782,7 +791,7 @@ class SitePermissionsTest {
     fun `MIDI removed from a document that was given it stays held until reload`() {
         val page = "https://synth.example"
         val revoked = SitePermissionBroker.DocumentPermissions(doc = 1)
-            .granting(page, listOf(SitePermission.MIDI))
+            .granting(PermissionScope(page), listOf(SitePermission.MIDI))
             .revoking(entry(page, SitePermission.MIDI))
         // The page's MIDIAccess keeps working; WebView can't take it back.
         assertEquals(setOf(SitePermission.MIDI), revoked.stillHeld(emptySet()))
@@ -853,10 +862,10 @@ class SitePermissionsTest {
     fun `revoking in one session tier leaves the other alone`() {
         val normal = PermissionSession()
         val private = PermissionSession(embargoes = false)
-        normal.record("https://a.example", SitePermission.CAMERA, PermissionDecision.ALLOW, remembered = false)
-        private.record("https://a.example", SitePermission.CAMERA, PermissionDecision.ALLOW, remembered = false)
-        private.revoke("https://a.example", SitePermission.CAMERA)
-        assertNull(private.decisionFor("https://a.example", SitePermission.CAMERA))
-        assertEquals(PermissionDecision.ALLOW, normal.decisionFor("https://a.example", SitePermission.CAMERA))
+        normal.record(PermissionScope("https://a.example"), SitePermission.CAMERA, PermissionDecision.ALLOW, remembered = false)
+        private.record(PermissionScope("https://a.example"), SitePermission.CAMERA, PermissionDecision.ALLOW, remembered = false)
+        private.revoke(PermissionScope("https://a.example"), SitePermission.CAMERA)
+        assertNull(private.decisionFor(PermissionScope("https://a.example"), SitePermission.CAMERA))
+        assertEquals(PermissionDecision.ALLOW, normal.decisionFor(PermissionScope("https://a.example"), SitePermission.CAMERA))
     }
 }

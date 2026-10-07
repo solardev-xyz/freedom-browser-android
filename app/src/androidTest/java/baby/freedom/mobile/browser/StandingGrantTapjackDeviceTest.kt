@@ -175,7 +175,7 @@ class StandingGrantTapjackDeviceTest {
     @Test
     fun aTapBeforeArmingDoesNotChangeTheScannedCodesConnectAccount() = pickingEarly { remotePicker(60_000) }
 
-    private val cameraPrompt get() = PermissionPrompt("https://game.example", listOf(SitePermission.CAMERA))
+    private val cameraPrompt get() = PermissionPrompt(PermissionScope("https://game.example"), listOf(SitePermission.CAMERA))
 
     @Test
     fun anObscuredTapDoesNotAllowEveryVisitOnASitePermissionPrompt() {

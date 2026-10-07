@@ -134,7 +134,6 @@ fun PageSitePermissionsSheet(
                 for (entry in entries) {
                     PageSitePermissionRow(
                         entry = entry,
-                        pageOrigin = pageOrigin,
                         inUse = document?.inUse(entry, inUse) == true,
                         private = private,
                         onRevoke = { onRevoke(entry) },
@@ -181,7 +180,6 @@ fun PageSitePermissionsSheet(
 @Composable
 private fun PageSitePermissionRow(
     entry: SitePermissionEntry,
-    pageOrigin: String?,
     inUse: Boolean,
     private: Boolean,
     onRevoke: () -> Unit,
@@ -208,8 +206,9 @@ private fun PageSitePermissionRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            // A frame inside the page asked for this one, under its own site.
-            if (entry.origin != pageOrigin) {
+            // A frame from another origin asked for this one; it was
+            // decided for this site (#363).
+            if (entry.scope.embedded) {
                 Text(
                     stringResource(R.string.library_site_permissions_embedded, site),
                     style = MaterialTheme.typography.bodySmall,
@@ -220,7 +219,16 @@ private fun PageSitePermissionRow(
         IconButton(onClick = onRevoke) {
             Icon(
                 Icons.Filled.Close,
-                contentDescription = stringResource(R.string.library_site_permissions_remove, entry.permission.label, site),
+                contentDescription = if (entry.scope.embedded) {
+                    stringResource(
+                        R.string.library_site_permissions_remove_embedded,
+                        entry.permission.label,
+                        site,
+                        permissionOriginDisplay(entry.top),
+                    )
+                } else {
+                    stringResource(R.string.library_site_permissions_remove, entry.permission.label, site)
+                },
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
