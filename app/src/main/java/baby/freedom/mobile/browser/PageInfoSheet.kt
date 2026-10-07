@@ -155,15 +155,14 @@ internal fun pageConnectionFor(url: String, errorPage: Boolean, protocol: Protoc
 }
 
 /**
- * Whether [url]'s host is a `.onion` name. [url] is the address the tab
- * committed, which Chromium has already normalized (case-folded,
- * percent-decoded), so its host reads as it is.
+ * Whether [url]'s host is a `.onion` name — by the same test the Tor
+ * routing applies ([isOnionHost]), so the badge and the routing can't
+ * disagree (R2-M1). [url] is the address the tab committed, which
+ * Chromium has already normalized (case-folded, percent-decoded), so its
+ * host reads as it is.
  */
-private fun onionHostOf(url: String): Boolean {
-    val host = runCatching { java.net.URI(url).host }.getOrNull()
-        ?.lowercase()?.trimEnd('.') ?: return false
-    return host.endsWith(".onion") && host.length > ".onion".length
-}
+private fun onionHostOf(url: String): Boolean =
+    isOnionHost(runCatching { java.net.URI(url).host }.getOrNull())
 
 /** Whether [url]'s host is a loopback one ([isLoopbackHost]), as WHATWG parses it. */
 private fun loopbackHostOf(url: String): Boolean {
@@ -588,6 +587,11 @@ internal object SiteData {
      */
     suspend fun delete(context: Context, origin: String, pageUrl: String, private: Boolean): Boolean =
         withContext(NonCancellable) {
+            // A private tab's data is the session's it was asked in: the
+            // one live now. Every step below checks it still is — if the
+            // last private tab closes meanwhile and a new one opens, the
+            // new session's data is not this Delete's to clear (R2-M2).
+            val session = if (private) PrivateProfile.liveProfileName() ?: return@withContext false else null
             val cm = jar(private)
             if (cm != null) {
                 withContext(Dispatchers.IO) {
@@ -603,14 +607,16 @@ internal object SiteData {
                     runCatching { cm.flush() }
                 }
             }
+            if (session != null && !PrivateProfile.isLiveSession(session)) return@withContext false
             runCatching { storage(private)?.deleteOrigin(origin) }
-            wipeOnOrigin(context, origin, private)
+            wipeOnOrigin(context, origin, session)
         }
 
     /**
      * Run [siteDataWipeHtml] as a document on [origin], in a WebView of
      * its own on the tab's profile (a private tab's on the private
-     * session's, [PrivateProfile]): `loadDataWithBaseURL` commits it with
+     * session [session] names, [PrivateProfile], only while it is still
+     * the live one): `loadDataWithBaseURL` commits it with
      * the origin's identity without fetching anything, so no service
      * worker answers it and no page script runs beside it. The WebView
      * loads nothing from the network ([WebSettings.setBlockNetworkLoads],
@@ -618,15 +624,16 @@ internal object SiteData {
      * document said it was done within [WIPE_TIMEOUT_MS]. Main thread.
      */
     @MainThread
-    private suspend fun wipeOnOrigin(context: Context, origin: String, private: Boolean): Boolean {
+    private suspend fun wipeOnOrigin(context: Context, origin: String, session: String?): Boolean {
         val wv = runCatching { WebView(context.applicationContext) }.getOrNull() ?: return false
         try {
             // Before anything else touches it: Chromium refuses a profile
             // change once a WebView is used. A private tab's storage is
             // never wiped through the default profile instead; and one
             // whose last tab closed while this delete ran is already gone
-            // — no new session is started for it (R1-M1).
-            if (private && !runCatching { PrivateProfile.attachToLive(wv) }.getOrDefault(false)) return false
+            // — no new session is started for it (R1-M1), and one opened
+            // since is not wiped in its place (R2-M2).
+            if (session != null && !runCatching { PrivateProfile.attachToLive(wv, session) }.getOrDefault(false)) return false
             wv.settings.javaScriptEnabled = true
             wv.settings.domStorageEnabled = true
             wv.settings.blockNetworkLoads = true

@@ -461,6 +461,36 @@ class PageInfoTest {
     }
 
     @Test
+    fun `the wipe only ever attaches to the private session the Delete started in`() {
+        // R2-M2: the session a Delete is pinned to is checked by name, so
+        // once it has ended a different (newer) session never matches it.
+        assertNull(PrivateProfile.liveProfileName())
+        assertFalse(PrivateProfile.isLiveSession("private-0d6e"))
+        assertFalse(PrivateProfile.isLiveSession(""))
+    }
+
+    @Test
+    fun `a private Delete with no live session clears nothing and starts nothing`() = runTest {
+        // R2-M2: there is no session to pin the Delete to, so it returns
+        // before any cookie, storage or wipe step.
+        val done = SiteData.delete(
+            android.content.ContextWrapper(null), "https://example.org", "https://example.org/", private = true,
+        )
+        assertFalse(done)
+        assertFalse(PrivateProfile.isLive())
+    }
+
+    @Test
+    fun `the onion badge and the Tor routing agree on what an onion host is`() {
+        // R2-M1: the badge uses the routing's own test.
+        val onion = "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"
+        for (host in listOf(onion, "$onion.", onion.uppercase(), "x..onion", ".onion", "onion", "a.onion.example")) {
+            val badge = pageConnectionFor("http://$host/", errorPage = false, protocol = null) == PageConnection.Onion
+            assertEquals(host, isOnionHost(host), badge)
+        }
+    }
+
+    @Test
     fun `a blob document is on the origin that minted it`() {
         SiteData.committed(31L, "blob:https://example.org/0d6e-41")
         assertEquals("https://example.org", SiteData.committedOrigin(31L))
