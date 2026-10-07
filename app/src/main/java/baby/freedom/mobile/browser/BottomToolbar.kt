@@ -55,7 +55,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.Cached
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Computer
@@ -137,6 +136,11 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.role
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.toggleableState
@@ -160,6 +164,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.sp
@@ -1040,8 +1045,36 @@ internal val AddressLabelCompactScale: Float =
  * exactly `bodyMedium`'s own size at every scale rather than only at
  * the default one.
  */
-internal fun Density.addressLabelCompactScale(): Float =
-    AddressLabelCompactFontSize.toPx() / AddressLabelRestingFontSize.toPx()
+internal fun Density.addressLabelCompactScale(
+    restingFontSize: TextUnit = AddressLabelRestingFontSize,
+): Float = (AddressLabelCompactFontSize.toPx() / restingFontSize.toPx()).coerceAtMost(1f)
+
+/**
+ * The type sizes the resting domain label may take, largest first (#417):
+ * the resting [AddressLabelRestingFontSize] down to
+ * [AddressLabelMinFitFontSize] in half-sp steps.
+ */
+internal val AddressLabelFitSizes: List<TextUnit> =
+    (0..6).map { (AddressLabelRestingFontSize.value - it * 0.5f).sp }
+
+/** The smallest the domain label is shrunk to before it is middle-ellipsised. */
+internal val AddressLabelMinFitFontSize: TextUnit = AddressLabelFitSizes.last()
+
+/**
+ * The resting domain label's type size: the largest of
+ * [AddressLabelFitSizes] at which the whole name [fits] the label's
+ * fixed width ([addressLabelMaxWidth]), else the smallest — where the
+ * middle ellipsis then takes over, keeping the name's tail, the part
+ * that says who is being trusted, on screen (#417). Shrinking first is
+ * what lets `app.swarmit.eth` read whole on a 411 dp phone rather than
+ * as `app.sw…mit.eth`.
+ *
+ * The compact capsule never draws the label larger than it rests: a name
+ * fitted below [AddressLabelCompactFontSize] keeps its size as the bar
+ * collapses ([Density.addressLabelCompactScale] is capped at 1).
+ */
+internal fun fitAddressLabelFontSize(fits: (TextUnit) -> Boolean): TextUnit =
+    AddressLabelFitSizes.firstOrNull(fits) ?: AddressLabelMinFitFontSize
 
 /**
  * How much of its resting size the domain label is drawn at — 1 at rest,
@@ -1578,10 +1611,6 @@ internal fun BottomToolbar(
     // the label). See [addressLabelRestingCenter].
     val badge = protocolBadgeFor(state)
     val labelRestingCenter = addressLabelRestingCenter(navPill, badge != null)
-    // How far the settled compact label is scaled down from the settled
-    // resting one, read off this density rather than assumed to be 14/16
-    // (see [Density.addressLabelCompactScale]).
-    val labelCompactScale = with(density) { addressLabelCompactScale() }
 
     // Each control states its own ink (`onSurface`) rather than
     // inheriting it: the surfaces are drawn by us now, so there is no
@@ -1619,12 +1648,38 @@ internal fun BottomToolbar(
             restingWidth = restingWidth,
             hasBadge = badge != null,
         )
-        val labelWidth = remember(restingLabel, restingLabelStyle, labelMaxWidth, density) {
+        // The type size the label rests at: the resting 16 sp where the
+        // name fits, else the largest step down to 13 sp at which it
+        // does, so a name with only a little too much to it is shown
+        // whole rather than middle-ellipsised (#417). Decided here, off
+        // the one fixed width, for the same reason the ellipsis is.
+        val labelFontSize = remember(restingLabel, restingLabelStyle, labelMaxWidth, density) {
+            if (restingLabel.isEmpty()) AddressLabelRestingFontSize
+            else {
+                val maxPx = with(density) { labelMaxWidth.roundToPx() }
+                fitAddressLabelFontSize { size ->
+                    textMeasurer.measure(
+                        text = restingLabel,
+                        style = restingLabelStyle.copy(fontSize = size),
+                        maxLines = 1,
+                        softWrap = false,
+                    ).size.width <= maxPx
+                }
+            }
+        }
+        val labelLayoutStyle = remember(restingLabelStyle, labelFontSize) {
+            restingLabelStyle.copy(fontSize = labelFontSize)
+        }
+        // How far the settled compact label is scaled down from the
+        // settled resting one, read off this density rather than assumed
+        // to be 14/16 (see [Density.addressLabelCompactScale]).
+        val labelCompactScale = with(density) { addressLabelCompactScale(labelFontSize) }
+        val labelWidth = remember(restingLabel, labelLayoutStyle, labelMaxWidth, density) {
             if (restingLabel.isEmpty()) 0.dp
             else with(density) {
                 textMeasurer.measure(
                     text = restingLabel,
-                    style = restingLabelStyle,
+                    style = labelLayoutStyle,
                     maxLines = 1,
                     softWrap = false,
                     constraints = Constraints(maxWidth = labelMaxWidth.roundToPx()),
@@ -1856,8 +1911,9 @@ internal fun BottomToolbar(
                 // One layout, at the resting type size, at every
                 // fraction of the collapse — the step down to
                 // `bodyMedium` is the scale below, not a re-layout. See
-                // [AddressLabelCompactScale].
-                fontSize = AddressLabelRestingFontSize,
+                // [AddressLabelCompactScale]. Fitted to the name
+                // ([fitAddressLabelFontSize]) at rest only.
+                fontSize = labelFontSize,
                 lineHeight = AddressLabelRestingLineHeight,
                 maxLines = 1,
                 softWrap = false,
@@ -2908,6 +2964,7 @@ private fun OverflowMenuButton(
     // Lift the popup clear of the toolbar's own top padding plus a
     // little air, so it floats above the pill instead of touching it.
     val popupGapPx = with(LocalDensity.current) { 12.dp.roundToPx() }
+    val popupMarginPx = with(LocalDensity.current) { PopupEdgeMargin.roundToPx() }
     val statusBarPx = WindowInsets.statusBars.getTop(LocalDensity.current)
 
     Box(
@@ -2959,13 +3016,22 @@ private fun OverflowMenuButton(
                 addressBarText = state.addressBarText,
                 isBookmarked = isBookmarked,
                 loading = isCapsuleLoading(state),
+                hasPageToActOn = state.hasPageToActOn,
             )
             val close: (() -> Unit) -> Unit = { action ->
                 menuExpanded = false
                 action()
             }
             Popup(
-                popupPositionProvider = AnchoredAboveProvider(anchorBounds!!, popupGapPx),
+                // Hung off the ≡'s leading edge — the button sits at the
+                // capsule's leading end (#415) — and held [PopupEdgeMargin]
+                // clear of the screen's edge (#417).
+                popupPositionProvider = AnchoredAboveProvider(
+                    anchorBounds!!,
+                    popupGapPx,
+                    alignToEnd = false,
+                    marginPx = popupMarginPx,
+                ),
                 onDismissRequest = { menuExpanded = false },
                 properties = PopupProperties(focusable = true),
             ) {
@@ -2990,56 +3056,79 @@ private fun OverflowMenuButton(
                     // Scrolls: at a large font scale and display size
                     // the menu is taller than the space above the bar,
                     // and its last rows (Settings, Nodes) were cut off
-                    // with no way to reach them (#279).
-                    Column(
-                        modifier = Modifier
-                            .width(IntrinsicSize.Max)
-                            .verticalScroll(rememberScrollState())
-                            .padding(vertical = 8.dp),
-                    ) {
-                        MainMenuIconRow(
-                            icons = icons,
-                            onToggleBookmark = { close(onToggleBookmark) },
-                            onShare = {
-                                close { icons.shareUrl?.let { shareUrl(context, it, state.title) } }
-                            },
-                            onReload = { close(onReload) },
-                            onStop = { close(onStop) },
-                        )
-                        for (group in groups) {
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                            for (row in group) {
-                                MainMenuRowItem(
-                                    row = row,
-                                    state = state,
-                                    nodesNote = nodesNote,
-                                    close = close,
-                                    onShowTrust = { trustShown = true },
-                                    onHome = onHome,
-                                    onNewTab = onNewTab,
-                                    onNewPrivateTab = onNewPrivateTab,
-                                    onFindInPage = onFindInPage,
-                                    zoomLevel = zoomLevel,
-                                    onZoom = onZoom,
-                                    desktopSite = desktopSite,
-                                    onToggleDesktopSite = onToggleDesktopSite,
-                                    onPrint = onPrint,
-                                    adblockState = adblockState,
-                                    onToggleAdblock = onToggleAdblock,
-                                    sitePermissionsSummary = sitePermissionsSummary,
-                                    onOpenSitePermissions = onOpenSitePermissions,
-                                    onHardReload = onHardReload,
-                                    onAddToHomeScreen = onAddToHomeScreen,
-                                    onOpenHistory = onOpenHistory,
-                                    onOpenBookmarks = onOpenBookmarks,
-                                    onOpenDownloads = onOpenDownloads,
-                                    onOpenWallet = onOpenWallet,
-                                    walletNote = walletNote,
-                                    onOpenSettings = onOpenSettings,
-                                    onOpenNode = onOpenNode,
+                    // with no way to reach them (#279). A page's menu
+                    // runs past the fold even at the default scale, so
+                    // the edge it continues past fades out (#417) —
+                    // the sign that there is more.
+                    val scroll = rememberScrollState()
+                    Box(modifier = Modifier.width(IntrinsicSize.Max)) {
+                        Column(
+                            modifier = Modifier
+                                .width(IntrinsicSize.Max)
+                                .verticalScroll(scroll)
+                                .padding(vertical = 8.dp),
+                        ) {
+                            if (icons.shown) {
+                                MainMenuIconRow(
+                                    icons = icons,
+                                    onToggleBookmark = { close(onToggleBookmark) },
+                                    onShare = {
+                                        close { icons.shareUrl?.let { shareUrl(context, it, state.title) } }
+                                    },
+                                    onReload = { close(onReload) },
+                                    onHardReload = { close(onHardReload) },
+                                    onStop = { close(onStop) },
                                 )
                             }
+                            for ((index, group) in groups.withIndex()) {
+                                // A divider *between* sections: none above
+                                // the first list group when there's no
+                                // icon row over it.
+                                if (index > 0 || icons.shown) {
+                                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                                }
+                                for (row in group) {
+                                    MainMenuRowItem(
+                                        row = row,
+                                        state = state,
+                                        nodesNote = nodesNote,
+                                        close = close,
+                                        onShowTrust = { trustShown = true },
+                                        onHome = onHome,
+                                        onNewTab = onNewTab,
+                                        onNewPrivateTab = onNewPrivateTab,
+                                        onFindInPage = onFindInPage,
+                                        zoomLevel = zoomLevel,
+                                        onZoom = onZoom,
+                                        desktopSite = desktopSite,
+                                        onToggleDesktopSite = onToggleDesktopSite,
+                                        onPrint = onPrint,
+                                        adblockState = adblockState,
+                                        onToggleAdblock = onToggleAdblock,
+                                        sitePermissionsSummary = sitePermissionsSummary,
+                                        onOpenSitePermissions = onOpenSitePermissions,
+                                        onAddToHomeScreen = onAddToHomeScreen,
+                                        onOpenHistory = onOpenHistory,
+                                        onOpenBookmarks = onOpenBookmarks,
+                                        onOpenDownloads = onOpenDownloads,
+                                        onOpenWallet = onOpenWallet,
+                                        walletNote = walletNote,
+                                        onOpenSettings = onOpenSettings,
+                                        onOpenNode = onOpenNode,
+                                    )
+                                }
+                            }
                         }
+                        MenuScrollFade(
+                            visible = scroll.canScrollBackward,
+                            top = true,
+                            modifier = Modifier.align(Alignment.TopCenter),
+                        )
+                        MenuScrollFade(
+                            visible = scroll.canScrollForward,
+                            top = false,
+                            modifier = Modifier.align(Alignment.BottomCenter),
+                        )
                     }
                 }
             }
@@ -3062,6 +3151,7 @@ private fun MainMenuIconRow(
     onToggleBookmark: () -> Unit,
     onShare: () -> Unit,
     onReload: () -> Unit,
+    onHardReload: () -> Unit,
     onStop: () -> Unit,
 ) {
     Row(
@@ -3088,14 +3178,99 @@ private fun MainMenuIconRow(
             onClick = onShare,
         )
         val stop = icons.reload == MainMenuReload.Stop
-        MainMenuIconButton(
-            icon = if (stop) Icons.Filled.Close else Icons.Filled.Refresh,
-            label = stringResource(if (stop) R.string.browser_stop_loading else R.string.browser_reload),
-            enabled = icons.reload != MainMenuReload.None,
-            onClick = if (stop) onStop else onReload,
+        if (icons.hardReload) {
+            ReloadIconButton(
+                stop = stop,
+                onClick = if (stop) onStop else onReload,
+                onHardReload = onHardReload,
+            )
+        } else {
+            MainMenuIconButton(
+                icon = if (stop) Icons.Filled.Close else Icons.Filled.Refresh,
+                label = stringResource(if (stop) R.string.browser_stop_loading else R.string.browser_reload),
+                enabled = icons.reload != MainMenuReload.None,
+                onClick = if (stop) onStop else onReload,
+            )
+        }
+    }
+}
+
+/**
+ * The icon row's Reload (or, mid-load, Stop) where a hard reload can
+ * follow it (#417): a tap reloads (or stops), a long-press reloads past
+ * the caches (#262) — the menu row Hard reload used to be, and which
+ * worked mid-load too. The long-press is taken, so this button has no
+ * name tooltip like its neighbours; instead its long-press is labelled
+ * where it can be: TalkBack says "double-tap and hold to hard reload"
+ * ([onLongClickLabel]) and offers Hard reload as a custom action, and a
+ * long-press that fired ticks the haptics. Ctrl+Shift+R does the same
+ * from a keyboard.
+ */
+@Composable
+private fun ReloadIconButton(stop: Boolean, onClick: () -> Unit, onHardReload: () -> Unit) {
+    val haptics = LocalHapticFeedback.current
+    val label = stringResource(if (stop) R.string.browser_stop_loading else R.string.browser_reload)
+    val hardLabel = stringResource(R.string.browser_menu_hard_reload)
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .combinedClickable(
+                role = Role.Button,
+                onClickLabel = label,
+                onLongClickLabel = hardLabel,
+                onLongClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onHardReload()
+                },
+                onClick = onClick,
+            )
+            .semantics {
+                customActions = listOf(
+                    CustomAccessibilityAction(hardLabel) {
+                        onHardReload()
+                        true
+                    },
+                )
+            },
+    ) {
+        Icon(
+            imageVector = if (stop) Icons.Filled.Close else Icons.Filled.Refresh,
+            contentDescription = label,
         )
     }
 }
+
+/**
+ * The fade over the edge a scrolling menu continues past (#417): the
+ * menu's own surface colour running out to transparent, so the rows cut
+ * by the edge read as going on rather than as the menu's end. Draws
+ * only; it takes no touches.
+ */
+@Composable
+private fun MenuScrollFade(visible: Boolean, top: Boolean, modifier: Modifier = Modifier) {
+    val alpha by animateFloatAsState(if (visible) 1f else 0f, label = "menuScrollFade")
+    val color = MaterialTheme.colorScheme.surfaceContainerHigh
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(MenuScrollFadeHeight)
+            .graphicsLayer { this.alpha = alpha }
+            .background(
+                Brush.verticalGradient(
+                    if (top) listOf(color, color.copy(alpha = 0f))
+                    else listOf(color.copy(alpha = 0f), color),
+                ),
+            ),
+    )
+}
+
+/** How tall [MenuScrollFade] is: most of a row, so a cut row visibly dissolves. */
+private val MenuScrollFadeHeight = 40.dp
+
+/** Air [AnchoredAboveProvider] keeps between a menu and the screen's side edges (#417). */
+internal val PopupEdgeMargin = 8.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -3146,7 +3321,6 @@ private fun MainMenuRowItem(
     onToggleAdblock: () -> Unit,
     sitePermissionsSummary: String?,
     onOpenSitePermissions: () -> Unit,
-    onHardReload: () -> Unit,
     onAddToHomeScreen: (() -> Unit)?,
     onOpenHistory: () -> Unit,
     onOpenBookmarks: () -> Unit,
@@ -3232,7 +3406,10 @@ private fun MainMenuRowItem(
         MainMenuRow.BlockAds -> adblockState?.let { ads ->
             DropdownMenuItem(
                 text = {
-                    Column(modifier = Modifier.padding(end = 32.dp)) {
+                    // Only a little air before the switch: the label is
+                    // short enough for one line (#417), and the switch
+                    // already holds the row's trailing edge.
+                    Column(modifier = Modifier.padding(end = 8.dp)) {
                         Text(stringResource(R.string.browser_menu_block_ads))
                         ads.note?.let { note -> MenuItemNote(note) }
                     }
@@ -3269,16 +3446,6 @@ private fun MainMenuRowItem(
                 onClick = { close(onOpenSitePermissions) },
             )
         }
-        // Reload past the caches (#262): what a site that just deployed
-        // new files, or a gateway that served a stale answer, needs.
-        // Nothing to reload in a tab whose renderer went away (#260) —
-        // its Reload rebuilds the page.
-        MainMenuRow.HardReload -> DropdownMenuItem(
-            text = { MenuItemLabel(stringResource(R.string.browser_menu_hard_reload)) },
-            leadingIcon = { Icon(Icons.Filled.Cached, contentDescription = null) },
-            enabled = state.hasPageToActOn,
-            onClick = { close(onHardReload) },
-        )
         // A launcher shortcut to the page (#400); never in a private tab.
         MainMenuRow.AddToHomeScreen -> onAddToHomeScreen?.let { add ->
             DropdownMenuItem(
@@ -3463,10 +3630,12 @@ internal fun MenuItemLabel(text: String) {
 /**
  * Places a [Popup] [gapPx] above an anchor's *top* edge (it opens
  * upwards, since the anchor lives in the bottom toolbar), aligned to the
- * anchor's trailing edge when [alignToEnd] (the overflow menu, hanging
- * off its button) or its leading edge otherwise (the URL-actions menu,
- * hanging off the label that was pressed), clamping to the window so the
- * popup never runs off-screen. The anchor bounds are captured by the
+ * anchor's trailing edge when [alignToEnd] or its leading edge otherwise
+ * (both the overflow menu, hanging off the ≡ at the capsule's leading
+ * end, and the URL-actions menu, hanging off the label that was pressed),
+ * clamping to the window — and [marginPx] inside its side edges (#417),
+ * so a popup whose anchor sits near an edge floats clear of it rather
+ * than touching it. The anchor bounds are captured by the
  * caller via [Modifier.onGloballyPositioned]; we deliberately ignore the
  * [anchorBounds] argument the framework hands in, since that's the
  * very value that mis-fires on the first open for Material3's default
@@ -3476,6 +3645,7 @@ internal class AnchoredAboveProvider(
     private val anchor: IntRect,
     private val gapPx: Int,
     private val alignToEnd: Boolean = true,
+    private val marginPx: Int = 0,
 ) : PopupPositionProvider {
     override fun calculatePosition(
         anchorBounds: IntRect,
@@ -3487,7 +3657,13 @@ internal class AnchoredAboveProvider(
         val x = when (alignToEnd) {
             true -> if (startEdge) anchor.right - popupContentSize.width else anchor.left
             false -> if (startEdge) anchor.left else anchor.right - popupContentSize.width
-        }.coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
+        }.let { wanted ->
+            // A popup too wide for both margins is centred instead, so
+            // what little room there is is shared out evenly.
+            val room = windowSize.width - popupContentSize.width
+            if (room >= 2 * marginPx) wanted.coerceIn(marginPx, room - marginPx)
+            else (room / 2).coerceAtLeast(0)
+        }
         val y = (anchor.top - gapPx - popupContentSize.height)
             .coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))
         return IntOffset(x, y)
@@ -3590,22 +3766,66 @@ private fun AddressPlaceholder(
         val largest = if (style.fontSize.isSp) style.fontSize else floor
         val smallest = if (floor.value < largest.value) floor else largest
         val available = constraints.maxWidth
-        val text = remember(available, style, smallest, density) {
-            val atFloor = style.copy(fontSize = smallest)
-            AddressPlaceholders.firstOrNull {
-                measurer.measure(it, atFloor, maxLines = 1, softWrap = false).size.width <= available
-            } ?: AddressPlaceholders.last()
+        val words = AddressPlaceholders
+        val fit = remember(available, style, smallest, largest, density, words) {
+            fitAddressPlaceholder(
+                wordings = words,
+                sizes = placeholderFitSizes(largest.value, smallest.value),
+            ) { text, size ->
+                measurer.measure(
+                    text,
+                    style.copy(fontSize = size.sp),
+                    maxLines = 1,
+                    softWrap = false,
+                ).size.width <= available
+            }
         }
+        // Sized here rather than with `TextAutoSize`: on the AVD at
+        // 308 dp and font scale 1.3, beside the Back + Forward pill, the
+        // auto-size left the type at full size and the wording came out
+        // "Sea…" (#417). Measured against the same width, the chosen
+        // wording and size are known to fit.
         Text(
-            text = text,
+            text = fit.text,
             color = color,
+            fontSize = fit.size.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             textAlign = textAlign,
-            autoSize = TextAutoSize.StepBased(minFontSize = smallest, maxFontSize = largest),
             modifier = Modifier.fillMaxWidth(),
         )
     }
+}
+
+/** What [AddressPlaceholder] draws: one of [AddressPlaceholders], at [size] sp. */
+internal data class PlaceholderFit(val text: String, val size: Float)
+
+/** The type sizes the placeholder may take, largest first, half an sp apart. */
+internal fun placeholderFitSizes(largest: Float, smallest: Float): List<Float> {
+    if (smallest >= largest) return listOf(largest)
+    val steps = generateSequence(largest) { it - 0.5f }.takeWhile { it > smallest }.toList()
+    return steps + smallest
+}
+
+/**
+ * The placeholder that fits (#279, #417): the longest wording that fits
+ * at some size, at the largest size it fits at — a long wording a little
+ * smaller is worth more than a short one at full size, but no wording is
+ * shrunk past the last of [sizes]. Where not even the shortest wording
+ * fits at the smallest size, that one is drawn at that size and
+ * ellipsised.
+ */
+internal fun fitAddressPlaceholder(
+    wordings: List<String>,
+    sizes: List<Float>,
+    fits: (String, Float) -> Boolean,
+): PlaceholderFit {
+    for (text in wordings) {
+        for (size in sizes) {
+            if (fits(text, size)) return PlaceholderFit(text, size)
+        }
+    }
+    return PlaceholderFit(wordings.last(), sizes.last())
 }
 
 /**

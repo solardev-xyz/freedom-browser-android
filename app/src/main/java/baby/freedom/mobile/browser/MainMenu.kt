@@ -28,7 +28,6 @@ internal enum class MainMenuRow {
     Print,
     BlockAds,
     SitePermissions,
-    HardReload,
     AddToHomeScreen,
 
     // Library.
@@ -71,6 +70,11 @@ internal data class MainMenuContext(
  * site on a dweb page, Find in a tab whose renderer went away) the row
  * stays, disabled, so the menu doesn't change shape from page to page.
  * Home itself goes too: the tab is already there.
+ *
+ * Hard reload has no row (#417): it is a long-press on the icon row's
+ * Reload ([MainMenuIcons.hardReload]), as on a desktop browser's
+ * Shift+Reload, which keeps the page group short enough that the
+ * library and the app's own rows aren't pushed far below the fold.
  */
 internal fun mainMenuGroups(c: MainMenuContext): List<List<MainMenuRow>> {
     val trust = listOfNotNull(MainMenuRow.NameTrust.takeIf { c.hasNameTrust && !c.isHome })
@@ -89,7 +93,6 @@ internal fun mainMenuGroups(c: MainMenuContext): List<List<MainMenuRow>> {
             MainMenuRow.Print,
             MainMenuRow.BlockAds.takeIf { c.hasAdblock },
             MainMenuRow.SitePermissions.takeIf { c.hasSitePermissions },
-            MainMenuRow.HardReload,
             MainMenuRow.AddToHomeScreen.takeIf { c.canAddToHomeScreen },
         )
     }
@@ -117,7 +120,9 @@ internal enum class MainMenuReload {
 /**
  * The icon row at the top of the menu: Bookmark · Share · Reload. Always
  * all three, in the same places, disabled where they can't act, so a
- * finger that learned where Reload is finds it on every page.
+ * finger that learned where Reload is finds it on every page — and not
+ * shown at all where *none* of them can act ([shown]): on the home
+ * surface that would be a row of grey icons with nothing to do (#417).
  *
  * No Forward (#415): the capsule's Back button grows a Forward half
  * exactly when there is somewhere to go forward ([navControlsFor]), so a
@@ -129,7 +134,20 @@ internal data class MainMenuIcons(
     /** What Share hands to the share sheet, or null (disabled). */
     val shareUrl: String?,
     val reload: MainMenuReload,
-)
+    /**
+     * A long-press on Reload — or on Stop, mid-load — reloads past the
+     * caches (#262, #417), wherever there is a live page to reload, as
+     * the old Hard reload row was enabled on that alone: a page stuck
+     * loading behind a stalling gateway is exactly when it's wanted, and
+     * it shouldn't take a Stop first. Not on home, nor for a tab whose
+     * renderer went away, which rebuilds the page on a plain Reload (#260).
+     */
+    val hardReload: Boolean = false,
+) {
+    /** The row is drawn: at least one of its buttons can act. */
+    val shown: Boolean
+        get() = bookmarkEnabled || shareUrl != null || reload != MainMenuReload.None
+}
 
 /**
  * The icon row for a tab. Share shares what the address field's long-press Share does
@@ -142,6 +160,7 @@ internal fun mainMenuIconsFor(
     addressBarText: String,
     isBookmarked: Boolean,
     loading: Boolean,
+    hasPageToActOn: Boolean = true,
 ): MainMenuIcons {
     val reload = when (
         capsuleTrailingControl(
@@ -161,6 +180,7 @@ internal fun mainMenuIconsFor(
         bookmarked = isBookmarked,
         shareUrl = urlActionTarget(addressBarText, url),
         reload = reload,
+        hardReload = reload != MainMenuReload.None && hasPageToActOn,
     )
 }
 
