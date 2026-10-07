@@ -1,7 +1,10 @@
 package baby.freedom.mobile
 
+import androidx.lifecycle.viewModelScope
 import baby.freedom.mobile.browser.Incoming
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.job
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -26,12 +29,20 @@ class IncomingSessionTest {
     @Before
     fun setUp() = Dispatchers.setMain(UnconfinedTestDispatcher())
 
+    /** Every session a test made, stopped and waited for before Main is reset (#455). */
+    private val sessions = mutableListOf<IncomingSession>()
+
+    private fun session() = IncomingSession().also { sessions += it }
+
     @After
-    fun tearDown() = Dispatchers.resetMain()
+    fun tearDown() {
+        runBlocking { sessions.forEach { it.viewModelScope.coroutineContext.job.cancelAndJoin() } }
+        Dispatchers.resetMain()
+    }
 
     @Test
     fun queuedLinkWaitsInTheSessionUntilHandled() {
-        val session = IncomingSession()
+        val session = session()
         assertNull(session.submit(Incoming.Open("https://example.com/")))
         assertNull(session.submit(Incoming.Search("fox")))
         // No Activity involved: whichever one composes next reads the same queue.
@@ -44,7 +55,7 @@ class IncomingSessionTest {
 
     @Test
     fun coldStartStillParsingIsHandedToTheNextActivity() = runBlocking {
-        val session = IncomingSession()
+        val session = session()
         // A Unicode ENS virtual-origin link needs the ENSIP-15 tables: off Main.
         val job = session.submit(Incoming.Open("https://xn---eth-9y14c.ens.freedom.baby/"))
         session.coldStart = job
