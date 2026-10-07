@@ -277,9 +277,7 @@
     <string name="settings_ipfs_gateway_label">Gateway</string>
     <string name="settings_ipfs_client">Client</string>
     <string name="settings_ipfs_error">Error</string>
-    <string name="settings_ipfs_connected">Connected</string>
     <string name="settings_ipfs_connecting">Connecting…</string>
-    <string name="settings_ipfs_disconnected">Disconnected</string>
 
     <!-- SearchEngines.kt -->
     <string name="settings_search_engine_custom">Custom</string>

@@ -145,12 +145,8 @@
     <string name="browser_menu_wallet_not_set_up">Not set up</string>
     <string name="browser_menu_add_to_home_screen">Add to Home screen</string>
     <string name="browser_add_to_home_screen_failed">Couldn\'t add to Home screen</string>
-    <plurals name="browser_menu_peers">
-        <item quantity="one">%d peer</item>
-        <item quantity="other">%d peers</item>
-    </plurals>
-    <!-- TalkBack's name for the menu's Nodes row: %1$s is the peer count, e.g. "12 peers". -->
-    <string name="browser_menu_nodes_description">Nodes, %1$s</string>
+    <!-- The menu's last row: opens the Nodes & networks overview. -->
+    <string name="browser_menu_nodes">Nodes &amp; networks</string>
     <string name="browser_menu_zoom">Zoom</string>
     <string name="browser_zoom_out">Zoom out</string>
     <string name="browser_zoom_in">Zoom in</string>
@@ -175,7 +171,7 @@
     <string name="browser_explore_swarmit_subtitle">Decentralized social feed on Swarm</string>
     <string name="browser_intro_title">Welcome to Freedom</string>
     <string name="browser_intro_body_web">Freedom opens the web you know and the decentralized web: sites stored on Swarm (bzz://) and IPFS (ipfs://), and ENS names such as app.swarmit.eth.</string>
-    <string name="browser_intro_body_nodes">It reaches them through its own nodes, running on this phone and talking straight to peers. The nodes use data and battery while they run; the peers row in the menu shows them and can switch them off.</string>
+    <string name="browser_intro_body_nodes">It reaches them through its own nodes, running on this phone and talking straight to peers. The nodes use data and battery while they run; Nodes &amp; networks in the menu shows how they\'re doing and can switch them off.</string>
     <string name="browser_intro_body_wallet">You don\'t need a wallet to browse. If you want one later, it\'s in Settings.</string>
     <string name="browser_intro_got_it">Got it</string>
     <!-- %1$s is the name of a curated site, e.g. "Swarmit". -->

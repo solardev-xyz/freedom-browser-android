@@ -517,8 +517,18 @@ fun BrowserScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     var showSettings by rememberSaveable { mutableStateOf(false) }
-    var showNode by rememberSaveable { mutableStateOf(false) }
-    var showRadicle by rememberSaveable { mutableStateOf(false) }
+    // Settings opened straight at one of its pages (#416), from a node
+    // page; null from the menu. [settingsPageRequest] moves a Settings
+    // that's already open (under the overview) to a page.
+    var settingsInitialPage by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
+    var settingsPageRequest by remember { mutableStateOf<SettingsPage?>(null) }
+    // The Nodes & networks overview (#416), and the node page over it (or
+    // over Settings, or straight from the home warm-up row).
+    var showNodes by rememberSaveable { mutableStateOf(false) }
+    var nodeDetail by rememberSaveable { mutableStateOf<NodeDestination?>(null) }
+    // What a Settings opened from a node page returns to on Back.
+    var settingsBackToNodes by rememberSaveable { mutableStateOf(false) }
+    var settingsBackToDetail by rememberSaveable { mutableStateOf<NodeDestination?>(null) }
     // The node logs page (#276), at this node's; over whichever node card opened it.
     var showLogs by rememberSaveable { mutableStateOf<NodeLogSource?>(null) }
     var showWallet by rememberSaveable { mutableStateOf(false) }
@@ -625,10 +635,36 @@ fun BrowserScreen(
         }
     }
     // Any full-screen panel over the browser (they're all opaque).
-    val overlayShown = showSettings || showNode || showRadicle || showLogs != null || showWallet || walletRequest != null ||
+    val overlayShown = showSettings || showNodes || nodeDetail != null || showLogs != null || showWallet || walletRequest != null ||
         linkSend != null ||
         showTabSwitcher ||
         showHistory || showBookmarks || showDownloads
+    // The menu's Nodes & networks sub-line (#416): only while a node has
+    // failed, read off the overview's own rows. Remembered, so the menu
+    // gets the same (usually null) note however often the peers change.
+    val externalSwarmBase by Gateways.externalSwarmBaseFlow.collectAsState()
+    val externalIpfsBase by Gateways.externalIpfsBaseFlow.collectAsState()
+    val nodesNote = remember(
+        nodeInfo.status, externalSwarmBase, ipfsInfo.status, externalIpfsBase,
+        radicle.info.status, radicle.enabled, tor.info.status, tor.enabled, tor.running,
+        myotisInfo, myotisRunning,
+    ) {
+        nodesMenuNote(
+            nodeOverviewRows(
+                NodeOverviewInput(
+                    nodeInfo = nodeInfo,
+                    externalSwarm = externalSwarmBase,
+                    ipfsInfo = ipfsInfo,
+                    externalIpfs = externalIpfsBase,
+                    radicleInfo = radicle.info,
+                    radicleEnabled = radicle.enabled,
+                    tor = tor,
+                    myotisInfo = myotisInfo,
+                    myotisRunning = myotisRunning,
+                ),
+            ),
+        )
+    }
     val downloads = remember(context) { DownloadManager.get(context) }
 
     // Download notices (#79): the start, and the end with an action —
@@ -1779,8 +1815,8 @@ fun BrowserScreen(
         // its own tab rather than replacing whatever the user was reading.
         // Whatever full-screen overlay was up would otherwise hide it.
         showSettings = false
-        showNode = false
-        showRadicle = false
+        showNodes = false
+        nodeDetail = null
         showLogs = null
         showWallet = false
         showTabSwitcher = false
@@ -2163,7 +2199,8 @@ fun BrowserScreen(
                     onOpenInNewTab = { url, private -> openInNewTab(url, background = true, private = private) },
                     nodeInfo = nodeInfo,
                     runNodeEnabled = runNodeEnabled,
-                    onOpenNode = { showNode = true },
+                    // The warm-up row is about the Swarm node: its page, straight.
+                    onOpenNode = { nodeDetail = NodeDestination.Swarm },
                     bottomContentPadding = capsuleOverlap,
                     modifier = Modifier.fillMaxSize(),
                     update = appUpdate.notice,
@@ -2275,7 +2312,7 @@ fun BrowserScreen(
                 } else BottomToolbar(
                     state = state,
                     tabCount = tabs.tabs.size,
-                    nodeInfo = nodeInfo,
+                    nodesNote = nodesNote,
                     isBookmarked = isBookmarked,
                     addressFocused = addressFocused,
                     addressBarEdited = addressBarEdited,
@@ -2355,8 +2392,11 @@ fun BrowserScreen(
                     // drift, and it re-collapses only on a fresh
                     // downward gesture.
                     onExpandCapsule = { state.capsuleCollapse.expand() },
-                    onOpenSettings = { showSettings = true },
-                    onOpenNode = { showNode = true },
+                    onOpenSettings = {
+                        settingsInitialPage = null
+                        showSettings = true
+                    },
+                    onOpenNode = { showNodes = true },
                     onOpenTabs = { showTabSwitcher = true },
                     onOpenHistory = {
                         historyPrivate = state.private
@@ -2589,11 +2629,11 @@ fun BrowserScreen(
             ipfsInfo = ipfsInfo,
             onIpfsToggle = onIpfsToggle,
             radicle = radicle,
-            onOpenRadicle = { showRadicle = true },
+            onOpenRadicle = { nodeDetail = NodeDestination.Radicle },
             onOpenWallet = { showWallet = true },
-            // Settings → Nodes & networks → Node status: over Settings,
-            // like the Radicle page; Back returns there.
-            onOpenNodes = { showNode = true },
+            // Settings → Nodes & networks → Node status: the same overview
+            // the menu opens (#416), over Settings; Back returns there.
+            onOpenNodes = { showNodes = true },
             // A newer release's page (#272): a new tab in front, never a
             // private one, with Settings closed so it's on screen.
             onOpenUrl = { url ->
@@ -2615,7 +2655,17 @@ fun BrowserScreen(
                 // The nodes' logs can name what was browsed (#276).
                 if (choice.siteData) clearNodeLogs()
             },
-            onDismiss = { showSettings = false },
+            onDismiss = {
+                showSettings = false
+                settingsInitialPage = null
+                // Opened from a node page: Back goes back to it.
+                if (settingsBackToNodes || settingsBackToDetail != null) {
+                    showNodes = settingsBackToNodes
+                    nodeDetail = settingsBackToDetail
+                    settingsBackToNodes = false
+                    settingsBackToDetail = null
+                }
+            },
             onOpenIpfsLogs = { showLogs = NodeLogSource.Ipfs },
             // Settings search's "Delete all bookmarks is on the Bookmarks
             // page" hint (#400): Settings closes and Bookmarks opens.
@@ -2624,14 +2674,71 @@ fun BrowserScreen(
                 bookmarksPrivate = state.private
                 showBookmarks = true
             },
+            initialPage = settingsInitialPage,
+            pageRequest = settingsPageRequest,
+            onPageRequestTaken = { settingsPageRequest = null },
         )
     }
 
-    // NodeScreen is placed *after* SettingsScreen so it overlays it when
-    // the user drills in from Settings → Node details. Back / × dismisses
-    // only the node screen and returns them to Settings.
-    if (showNode) {
+    // Settings at one of its pages, from a node page (#416). Settings is
+    // composed under the node pages, so they close while it's up and
+    // come back when it's dismissed — unless Settings is already open
+    // under them (the overview came from its Node status row): then they
+    // close and that Settings goes to the page.
+    val openSettingsAt: (SettingsPage) -> Unit = { target ->
+        if (showSettings) {
+            settingsPageRequest = target
+        } else {
+            settingsBackToNodes = showNodes
+            settingsBackToDetail = nodeDetail
+            settingsInitialPage = target
+            showSettings = true
+        }
+        showNodes = false
+        nodeDetail = null
+    }
+    // However Settings closed (its Back, or a page it opened in a new tab
+    // or the Bookmarks page), what it was opened at and from is done with.
+    LaunchedEffect(showSettings) {
+        if (!showSettings) {
+            settingsInitialPage = null
+            settingsPageRequest = null
+            settingsBackToNodes = false
+            settingsBackToDetail = null
+        }
+    }
+
+    // The overview is placed after SettingsScreen, so Settings' Node
+    // status opens it over Settings, and before the node pages, which
+    // open over it; Back from each returns to the one below.
+    if (showNodes) {
+        NodesOverviewScreen(
+            input = NodeOverviewInput(
+                nodeInfo = nodeInfo,
+                ipfsInfo = ipfsInfo,
+                radicleInfo = radicle.info,
+                radicleEnabled = radicle.enabled,
+                tor = tor,
+                myotisInfo = myotisInfo,
+                myotisRunning = myotisRunning,
+            ),
+            onOpen = { destination ->
+                when (destination) {
+                    NodeDestination.Rpc -> openSettingsAt(SettingsPage.Names)
+                    NodeDestination.Gateways -> openSettingsAt(SettingsPage.Nodes)
+                    else -> nodeDetail = destination
+                }
+            },
+            onDismiss = { showNodes = false },
+        )
+    }
+
+    // A node's page, over the overview (or Settings, for Radicle); Back /
+    // ← dismisses only the node page.
+    val detail = nodeDetail
+    if (detail == NodeDestination.Swarm || detail == NodeDestination.Tor || detail == NodeDestination.LightClient) {
         NodeScreen(
+            page = detail,
             nodeInfo = nodeInfo,
             runNodeEnabled = runNodeEnabled,
             onToggleRunNode = onToggleRunNode,
@@ -2647,28 +2754,40 @@ fun BrowserScreen(
             // explorer page (#115): a new tab in front, never a private one,
             // with the pages the node page was opened over closed too.
             onOpenUrl = { url ->
-                showNode = false
+                nodeDetail = null
+                showNodes = false
                 showSettings = false
                 tabs.requestOpenInNewTab?.invoke(url, false, false)
             },
-            onDismiss = { showNode = false },
+            onDismiss = { nodeDetail = null },
             onOpenLogs = { showLogs = it },
+            onOpenTorSettings = { openSettingsAt(SettingsPage.Privacy) },
         )
     }
 
-    // Settings → Nodes & networks → Radicle node (#73); over Settings, like NodeScreen.
-    if (showRadicle) {
+    if (detail == NodeDestination.Ipfs) {
+        IpfsScreen(
+            ipfsInfo = ipfsInfo,
+            onIpfsToggle = onIpfsToggle,
+            onOpenLogs = { showLogs = NodeLogSource.Ipfs },
+            onDismiss = { nodeDetail = null },
+        )
+    }
+
+    // The Radicle node (#73): from the overview, or Settings → Nodes & networks.
+    if (detail == NodeDestination.Radicle) {
         RadicleScreen(
             radicle = radicle.copy(
                 // A seeded repository, in the `rad://` browser (#124).
                 onOpen = { rid ->
-                    showRadicle = false
+                    nodeDetail = null
+                    showNodes = false
                     showSettings = false
                     submit(state, "rad://" + rid.removePrefix("rad:"))
                 },
             ),
             runNodeEnabled = runNodeEnabled,
-            onDismiss = { showRadicle = false },
+            onDismiss = { nodeDetail = null },
             onOpenLogs = { showLogs = NodeLogSource.Radicle },
         )
     }
@@ -3042,7 +3161,8 @@ fun BrowserScreen(
                     linkSend = null
                     showWallet = false
                     showSettings = false
-                    showNode = false
+                    showNodes = false
+                    nodeDetail = null
                     tabs.requestOpenInNewTab?.invoke(url, false, false)
                 },
                 onDismiss = {

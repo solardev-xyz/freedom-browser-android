@@ -74,18 +74,25 @@ import java.text.NumberFormat
 import java.util.Locale
 
 /**
- * Full-screen node-details page: the Swarm node's live status, peer
- * count, gateway URL and run-node on/off toggle, its mode and the ways into
- * publish setup (#114, [PublishSetupScreen]), the chequebook (#117,
- * [ChequebookScreen]), the postage stamps (#116, [StampsScreen]) and the
- * Publish page (#118, [PublishScreen]), the Tor client (#143)
- * with its start/stop switch, status and version, then the Myotis
- * Ethereum / Gnosis light client (#72) with a switch and a start-at-launch
- * choice per chain (#274) and each chain's sync state. Shares the same [FullScreenScaffold] chrome as Settings /
- * History / Bookmarks.
+ * A node's details page, one of three opened from the Nodes & networks
+ * overview (#416, [NodesOverviewScreen]), by [page]:
+ *
+ * - [NodeDestination.Swarm]: the Swarm node's live status, cache, peer
+ *   count, gateway URL and run-node on/off toggle, its mode and the ways
+ *   into publish setup (#114, [PublishSetupScreen]), the chequebook (#117,
+ *   [ChequebookScreen]), the postage stamps (#116, [StampsScreen]) and the
+ *   Publish page (#118, [PublishScreen]);
+ * - [NodeDestination.Tor]: the Tor client (#143) with its start/stop
+ *   switch, status and version;
+ * - [NodeDestination.LightClient]: the Myotis Ethereum / Gnosis light
+ *   client (#72) with a switch and a start-at-launch choice per chain
+ *   (#274) and each chain's sync state.
+ *
+ * Shares the same [FullScreenScaffold] chrome as Settings / History / Bookmarks.
  */
 @Composable
 fun NodeScreen(
+    page: NodeDestination,
     nodeInfo: NodeInfo,
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
@@ -106,6 +113,8 @@ fun NodeScreen(
     onOpenUrl: (String) -> Unit = {},
     /** Open the node logs page (#276) at this node's. */
     onOpenLogs: (NodeLogSource) -> Unit = {},
+    /** Settings › Privacy & security, where Tor is switched on (#416). */
+    onOpenTorSettings: () -> Unit = {},
 ) {
     val triple = nodeStatusTriple(nodeInfo.status)
     val context = LocalContext.current
@@ -185,7 +194,11 @@ fun NodeScreen(
     DisposableEffect(Unit) { onDispose { SwarmCache.forgetOutcome() } }
 
     FullScreenScaffold(
-        title = stringResource(R.string.node_screen_title),
+        title = when (page) {
+            NodeDestination.Tor -> torTitle()
+            NodeDestination.LightClient -> lightClientTitle()
+            else -> swarmTitle()
+        },
         onDismiss = onDismiss,
     ) {
         LazyColumn(
@@ -193,7 +206,7 @@ fun NodeScreen(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
-            item("status") {
+            if (page == NodeDestination.Swarm) item("status") {
                 StatusSection(
                     triple = triple,
                     runNodeEnabled = runNodeEnabled,
@@ -210,10 +223,10 @@ fun NodeScreen(
                     onPickCacheSize = { pickCacheSize = true },
                 )
             }
-            item("details") {
+            if (page == NodeDestination.Swarm) item("details") {
                 DetailsSection(nodeInfo = nodeInfo)
             }
-            item("publishing") {
+            if (page == NodeDestination.Swarm) item("publishing") {
                 PublishingSection(
                     nodeInfo = nodeInfo,
                     lightModeWanted = lightModeWanted,
@@ -224,13 +237,13 @@ fun NodeScreen(
                     onOpenChequebook = { showChequebook = true },
                 )
             }
-            item("gateway") {
+            if (page == NodeDestination.Swarm) item("gateway") {
                 GatewaySection(externalSwarm = externalSwarm)
             }
-            item("tor") {
-                TorSection(tor, onOpenLogs = { onOpenLogs(NodeLogSource.Tor) })
+            if (page == NodeDestination.Tor) item("tor") {
+                TorSection(tor, onOpenLogs = { onOpenLogs(NodeLogSource.Tor) }, onOpenSettings = onOpenTorSettings)
             }
-            item("myotis") {
+            if (page == NodeDestination.LightClient) item("myotis") {
                 LightClientSection(
                     info = myotisInfo,
                     running = myotisRunning,
@@ -579,16 +592,16 @@ internal data class NodeStatusTriple(
 
 internal fun nodeStatusTriple(status: NodeStatus): NodeStatusTriple = when (status) {
     NodeStatus.Running -> NodeStatusTriple(
-        Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.node_status_running),
+        STATUS_GREEN, Icons.Filled.CheckCircle, Strings.get(R.string.node_status_running),
     )
     NodeStatus.Starting -> NodeStatusTriple(
-        Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
+        STATUS_AMBER, Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
     )
     NodeStatus.Stopped -> NodeStatusTriple(
-        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_status_stopped),
+        STATUS_GREY, Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_status_stopped),
     )
     NodeStatus.Error -> NodeStatusTriple(
-        Color(0xFFEF4444), Icons.Filled.ErrorOutline, Strings.get(R.string.node_error),
+        STATUS_RED, Icons.Filled.ErrorOutline, Strings.get(R.string.node_error),
     )
 }
 
@@ -851,13 +864,13 @@ internal fun formatBlock(number: Long): String = String.format(Locale.US, "%,d",
  */
 internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when (info.status) {
     MyotisStatus.Stopped -> NodeStatusTriple(
-        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_off),
+        STATUS_GREY, Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_off),
     )
     MyotisStatus.Starting -> NodeStatusTriple(
-        Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
+        STATUS_AMBER, Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
     )
     MyotisStatus.Error -> NodeStatusTriple(
-        Color(0xFFEF4444), Icons.Filled.ErrorOutline, Strings.get(R.string.node_error),
+        STATUS_RED, Icons.Filled.ErrorOutline, Strings.get(R.string.node_error),
     )
     MyotisStatus.Running -> {
         val live = info.chains.filter { it.error == null }
@@ -868,9 +881,9 @@ internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when 
         val parked = live.count { it.staleAnchor || it.recovery != null }
         when {
             live.isNotEmpty() && ready == live.size ->
-                NodeStatusTriple(Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.node_synced))
+                NodeStatusTriple(STATUS_GREEN, Icons.Filled.CheckCircle, Strings.get(R.string.node_synced))
             live.isNotEmpty() && parked == live.size -> NodeStatusTriple(
-                Color(0xFFF59E0B),
+                STATUS_AMBER,
                 Icons.Filled.ErrorOutline,
                 when {
                     live.any { it.recovery?.phase == MyotisRecovery.Phase.Blocked } ->
@@ -880,17 +893,17 @@ internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when 
                 },
             )
             ready > 0 || parked > 0 -> NodeStatusTriple(
-                Color(0xFFF59E0B),
+                STATUS_AMBER,
                 Icons.Filled.HourglassTop,
                 Strings.plural(R.plurals.node_chains_synced, live.size, ready, live.size),
             )
             // A chain switched on that `:myotis` hasn't booted yet (its
             // previous engine still stopping): no row to sync.
             live.isEmpty() -> NodeStatusTriple(
-                Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
+                STATUS_AMBER, Icons.Filled.HourglassTop, Strings.get(R.string.node_status_starting),
             )
             else -> NodeStatusTriple(
-                Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.node_syncing_ellipsis),
+                STATUS_AMBER, Icons.Filled.HourglassTop, Strings.get(R.string.node_syncing_ellipsis),
             )
         }
     }
@@ -918,12 +931,8 @@ data class TorControls(
 )
 
 @Composable
-private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
-    val info = if (tor.enabled && (tor.running || tor.info.status == TorStatus.Error)) {
-        tor.info
-    } else {
-        TorInfo(version = tor.info.version)
-    }
+private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit, onOpenSettings: () -> Unit) {
+    val info = torShownInfo(tor)
     val triple = torStatusTriple(info)
     SectionCard(title = stringResource(R.string.node_tor)) {
         Row(
@@ -953,6 +962,12 @@ private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
                 onCheckedChange = null,
                 enabled = tor.enabled && tor.supported,
             )
+        }
+        // "Turn on Tor in Settings…" (#416): the way there, not just the words.
+        if (tor.supported && !tor.enabled) {
+            TextButton(onClick = onOpenSettings, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text(stringResource(R.string.node_tor_open_settings))
+            }
         }
         val proxy = tor.proxy
         if (proxy == null && info.version.isNotBlank()) {
@@ -1013,10 +1028,10 @@ internal fun torSubtitle(tor: TorControls): String = when {
 /** The Tor client's status line: grey off, amber bootstrapping (with its progress), green connected. */
 internal fun torStatusTriple(info: TorInfo): NodeStatusTriple = when (info.status) {
     TorStatus.Stopped -> NodeStatusTriple(
-        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_off),
+        STATUS_GREY, Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_off),
     )
     TorStatus.Starting -> NodeStatusTriple(
-        Color(0xFFF59E0B), Icons.Filled.HourglassTop,
+        STATUS_AMBER, Icons.Filled.HourglassTop,
         if (info.progress > 0) {
             Strings.get(R.string.node_tor_connecting_progress, info.progress)
         } else {
@@ -1024,7 +1039,7 @@ internal fun torStatusTriple(info: TorInfo): NodeStatusTriple = when (info.statu
         },
     )
     TorStatus.Running -> NodeStatusTriple(
-        Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.node_tor_connected),
+        STATUS_GREEN, Icons.Filled.CheckCircle, Strings.get(R.string.node_tor_connected),
     )
-    TorStatus.Error -> NodeStatusTriple(Color(0xFFEF4444), Icons.Filled.ErrorOutline, Strings.get(R.string.node_error))
+    TorStatus.Error -> NodeStatusTriple(STATUS_RED, Icons.Filled.ErrorOutline, Strings.get(R.string.node_error))
 }
