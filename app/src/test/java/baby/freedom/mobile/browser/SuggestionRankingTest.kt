@@ -156,24 +156,17 @@ class SuggestionRankingTest {
     }
 
     @Test
-    fun `history visits fold into pages with count, latest visit and newest title`() {
-        val pages = historyCandidates(
-            listOf(
-                Triple("https://a.example/", "A new", 300L),
-                Triple("https://b.example/", "B", 200L),
-                Triple("https://a.example/", "A old", 100L),
-                Triple("https://c.example/", "", 50L),
-                Triple("https://c.example/", "C", 40L),
-            ),
+    fun `a popup's blank document is not offered as a tab`() {
+        val tabs = listOf(
+            tab(1, "about:blank"),
+            tab(2, "About:Blank", title = "about:blank"),
+            tab(3, "https://blank.example/", title = "Blank page"),
         )
-        assertEquals(
-            listOf(
-                HistoryCandidate("https://a.example/", "A new", 2, 300L),
-                HistoryCandidate("https://b.example/", "B", 1, 200L),
-                HistoryCandidate("https://c.example/", "C", 2, 50L),
-            ),
-            pages,
-        )
+        assertEquals(listOf("https://blank.example/"), rank("blank", tabs = tabs).map { it.url })
+        assertTrue(rank("about", tabs = tabs).isEmpty())
+        assertTrue(!isSuggestibleTab("about:blank"))
+        assertTrue(!isSuggestibleTab(""))
+        assertTrue(isSuggestibleTab("https://example.com/"))
     }
 
     @Test

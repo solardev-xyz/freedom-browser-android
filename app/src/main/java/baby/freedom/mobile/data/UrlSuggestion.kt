@@ -19,13 +19,13 @@ data class UrlSuggestion(
 
 /**
  * What the address bar's text matched in the database (#443): the
- * bookmarks, and the history visits as `(url, title, visitedAt)`,
- * newest first — ranked against the open tabs by the browser
- * (`rankSuggestions`).
+ * bookmarks, and the history [pages] with their visit counts, each
+ * best candidate first ([HistoryDao.suggest]) — ranked against the open
+ * tabs by the browser (`rankSuggestions`).
  */
 data class LocalMatches(
     val bookmarks: List<UrlSuggestion>,
-    val visits: List<Triple<String, String, Long>>,
+    val pages: List<HistoryPage>,
 )
 
 /**

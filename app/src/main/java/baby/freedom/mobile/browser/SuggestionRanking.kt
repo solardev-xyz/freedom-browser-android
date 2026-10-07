@@ -163,7 +163,7 @@ internal fun rankSuggestions(
     }
 
     for (t in tabs) {
-        if (t.private != private || t.id == currentTabId || t.url.isBlank()) continue
+        if (t.private != private || t.id == currentTabId || !isSuggestibleTab(t.url)) continue
         offer(
             UrlSuggestion(t.url, t.title, UrlSuggestion.Source.TAB, tabId = t.id),
             matchStrength(query, t.url, t.title),
@@ -199,25 +199,12 @@ internal fun rankSuggestions(
 }
 
 /**
- * History rows (one per visit, newest first) as pages: one
- * [HistoryCandidate] per URL with its newest title, visit count and
- * latest visit, in order of that latest visit.
+ * Whether an open tab showing [url] is worth offering: not a home tab
+ * (blank) and not a popup's own blank document — `window.open()` gives
+ * the tab `about:blank` as its address ([BrowserState.blankIsPage]),
+ * which names no page anyone would type to get back to.
  */
-internal fun historyCandidates(visits: List<Triple<String, String, Long>>): List<HistoryCandidate> {
-    val byUrl = LinkedHashMap<String, HistoryCandidate>()
-    for ((url, title, at) in visits) {
-        val held = byUrl[url]
-        byUrl[url] = if (held == null) {
-            HistoryCandidate(url, title, 1, at)
-        } else {
-            held.copy(
-                title = if (at > held.lastVisit || held.title.isBlank()) title.ifBlank { held.title } else held.title,
-                visits = held.visits + 1,
-                lastVisit = maxOf(held.lastVisit, at),
-            )
-        }
-    }
-    return byUrl.values.toList()
-}
+internal fun isSuggestibleTab(url: String): Boolean =
+    url.isNotBlank() && !url.trim().equals(ABOUT_BLANK, ignoreCase = true)
 
 internal const val DEFAULT_SUGGESTION_LIMIT = 8

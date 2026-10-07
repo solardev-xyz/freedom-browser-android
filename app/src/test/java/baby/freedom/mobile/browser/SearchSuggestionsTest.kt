@@ -151,4 +151,26 @@ class SearchSuggestionsTest {
         assertNull(out.last())
         job.cancel()
     }
+
+    @Test
+    fun `an answer for the previous query is withheld until the new query's own answer lands`() = runTest {
+        val requests = MutableStateFlow<SuggestRequest?>(SuggestRequest("swarm", "u1"))
+        val out = mutableListOf<EngineSuggestions?>()
+        val job = launch {
+            engineSuggestions(requests, debounceMs = 250) { listOf(it.query + " answer") }.toList(out)
+        }
+        advanceTimeBy(300)
+        assertEquals(listOf("swarm answer"), shownEngineSuggestions(requests.value, out.last()))
+        // Typed on: the old answer is still the latest emitted, but it
+        // answers "swarm", not "swarm b" — nothing shows meanwhile.
+        requests.value = SuggestRequest("swarm b", "u2")
+        advanceTimeBy(100)
+        assertEquals(EngineSuggestions("swarm", listOf("swarm answer")), out.last())
+        assertEquals(emptyList<String>(), shownEngineSuggestions(requests.value, out.last()))
+        advanceTimeBy(300)
+        assertEquals(listOf("swarm b answer"), shownEngineSuggestions(requests.value, out.last()))
+        assertEquals(emptyList<String>(), shownEngineSuggestions(null, out.last()))
+        assertEquals(emptyList<String>(), shownEngineSuggestions(requests.value, null))
+        job.cancel()
+    }
 }

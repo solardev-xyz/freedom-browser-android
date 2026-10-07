@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteException
 import android.util.Log
 import androidx.room.withTransaction
 import baby.freedom.mobile.browser.BookmarkUrls
+import baby.freedom.mobile.browser.typedForm
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
@@ -129,26 +130,32 @@ class BrowsingRepository internal constructor(
 
     /**
      * What the address bar's text matches (#443): bookmarks and history
-     * visits whose title or URL contains [query]. History is read one
-     * row per visit and oversampled ([visitLimit]), so the browser can
-     * count a page's visits and rank a page visited 20 times above one
-     * visited once (`rankSuggestions`), which also de-duplicates them
-     * against each other and the open tabs. Re-emits when either table
+     * pages whose title or URL contains [query]. History comes one row
+     * per page with its visit count, so the browser can rank a page
+     * visited 20 times above one visited once (`rankSuggestions`), which
+     * also de-duplicates them against each other and the open tabs. Both
+     * queries keep their best [bookmarkLimit]/[pageLimit] candidates by
+     * match strength, then visits or age ([HistoryDao.suggest]), so an
+     * old but often-visited page the text is a prefix of isn't pushed out
+     * by a crowd of recent weaker matches. Re-emits when either table
      * changes.
      */
     fun suggestionMatches(
         query: String,
-        bookmarkLimit: Int = 20,
-        visitLimit: Int = 200,
+        bookmarkLimit: Int = 30,
+        pageLimit: Int = 60,
     ): Flow<LocalMatches> {
-        val pattern = "%" + query.trim().escapeForLike() + "%"
+        val text = query.trim()
+        val pattern = "%" + text.escapeForLike() + "%"
+        val prefix = typedForm(text).escapeForLike() + "%"
+        val word = text.escapeForLike() + "%"
         return combine(
-            db.bookmarks().search(pattern, bookmarkLimit),
-            db.history().search(pattern, visitLimit),
-        ) { bookmarks, history ->
+            db.bookmarks().suggest(pattern, prefix, word, bookmarkLimit),
+            db.history().suggest(pattern, prefix, word, pageLimit),
+        ) { bookmarks, pages ->
             LocalMatches(
                 bookmarks = bookmarks.map { UrlSuggestion(it.url, it.title, UrlSuggestion.Source.BOOKMARK) },
-                visits = history.map { Triple(it.url, it.title, it.visitedAt) },
+                pages = pages,
             )
         }
     }

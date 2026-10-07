@@ -155,8 +155,11 @@ internal data class EngineSuggestions(val query: String, val suggestions: List<S
  * The engine suggestions for a stream of [requests] (`null` when none
  * may be sent): each request waits [debounceMs] for typing to pause and
  * is cancelled — its connection closed — as soon as the next one
- * arrives, so a stale answer never shows over a newer query. A `null`
- * request clears the list at once, without waiting.
+ * arrives. Each answer carries its query, and the panel shows one only
+ * while it still answers the text in the field
+ * ([shownEngineSuggestions]), so a stale answer never shows over a
+ * newer query, even while that query's own fetch is still pending. A
+ * `null` request clears the list at once, without waiting.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal fun engineSuggestions(

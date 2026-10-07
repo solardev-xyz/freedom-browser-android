@@ -151,7 +151,9 @@ internal fun SuggestionsPanel(
     // fresh results if the underlying tables change too.
     val matchesFlow = remember(repo, query) { repo.suggestionMatches(query) }
     val matches by matchesFlow.collectAsState(initial = null)
-    val history = remember(matches) { historyCandidates(matches?.visits.orEmpty()) }
+    val history = remember(matches) {
+        matches?.pages.orEmpty().map { HistoryCandidate(it.url, it.title, it.visits, it.lastVisit) }
+    }
     val suggestions = rankSuggestions(
         query = query,
         tabs = tabs,
@@ -173,7 +175,7 @@ internal fun SuggestionsPanel(
         query = query,
         actions = actions,
         suggestions = suggestions,
-        engineSuggestions = if (request == null) emptyList() else engine?.suggestions.orEmpty(),
+        engineSuggestions = shownEngineSuggestions(request, engine),
         searchTemplate = searchTemplate,
         onPick = onPick,
         onSwitchToTab = onSwitchToTab,
@@ -183,6 +185,17 @@ internal fun SuggestionsPanel(
         modifier = modifier,
     )
 }
+
+/**
+ * The engine rows to show for [request], the latest answer being
+ * [engine]: only an answer to that very query. Until the debounced
+ * fetch for a newer query lands, the previous query's answer is
+ * withheld rather than shown under it — tapping one would search for
+ * the old text. None while no request may be sent.
+ */
+internal fun shownEngineSuggestions(request: SuggestRequest?, engine: EngineSuggestions?): List<String> =
+    if (request == null || engine == null || engine.query != request.query) emptyList()
+    else engine.suggestions
 
 /**
  * Text a suggestion row's arrow asks the address field to take (#443).
