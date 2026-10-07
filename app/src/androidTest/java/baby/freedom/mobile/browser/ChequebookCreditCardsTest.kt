@@ -78,7 +78,7 @@ class ChequebookCreditCardsTest {
         Case("off", funded, swap(enabled = false, paying = false), false, "Free tier: paying peers is switched off."),
         Case(
             "lost", funded.copy(availablePlur = xbzz("0.011"), availableUpperBound = true, ledgerLost = true),
-            swap(enabled = true, paying = false), true, "Free tier: the payment record was lost. See below.",
+            swap(enabled = true, paying = false), true, "Free tier: payments are paused. See below.",
         ),
         // Confirmed since: ant reports an exact-looking figure that leaves
         // out the pre-loss cheques, so the page keeps it an upper bound.
@@ -141,6 +141,9 @@ class ChequebookCreditCardsTest {
     private fun showsState(case: Case, dark: Boolean) {
         render(case, dark)
         rule.onNodeWithText(case.expect).assertExists()
+        // One headline figure; the rest waits under Details (#425, W44).
+        rule.onNodeWithText("Spendable credit").assertDoesNotExist()
+        rule.onNodeWithText("Details").performClick()
         // The spendable credit sits next to the on-chain figure.
         rule.onNodeWithText("Spendable credit").assertExists()
         rule.onNodeWithText("On-chain balance").assertExists()
@@ -167,10 +170,12 @@ class ChequebookCreditCardsTest {
     @Test
     fun aConfirmedLostLedgerStillReadsAsAnUpperBound() {
         render(cases[4], dark = false)
+        // The headline says it's an upper bound, and so does the note under Details.
         rule.onNodeWithText("At most 0.011 xBZZ").assertExists()
-        rule.onNodeWithText("you confirmed it", substring = true).assertExists()
         rule.onNodeWithText("may run out sooner", substring = true).assertExists()
-        rule.onNodeWithText("Payment record lost").assertDoesNotExist()
+        rule.onNodeWithText("Payments paused").assertDoesNotExist()
+        rule.onNodeWithText("Details").performClick()
+        rule.onNodeWithText("you confirmed it", substring = true).assertExists()
     }
 
     /** At 200% font the credit figures move under their labels whole, never broken mid-number. */
@@ -212,6 +217,6 @@ class ChequebookCreditCardsTest {
     @Test
     fun noLostCardWithoutALoss() {
         render(cases[0], dark = false)
-        rule.onNodeWithText("Payment record lost").assertDoesNotExist()
+        rule.onNodeWithText("Payments paused").assertDoesNotExist()
     }
 }

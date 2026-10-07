@@ -8,11 +8,11 @@
     <!-- SwarmPrompt.kt: the sheets' copy, per tier (desktop's swarm-connect.js wording) -->
     <string name="swarm_connect_title">Connect to Swarm</string>
     <string name="swarm_connect_request">wants to connect to your Swarm node</string>
-    <string name="swarm_connect_warning">It can ask to publish data and files to Swarm with your postage stamps, to create and update feeds signed with a publisher identity of its own, and to send and receive messages. Each of those asks first.</string>
+    <string name="swarm_connect_warning">It can then ask to publish with your storage, to keep feeds signed with an identity of its own, and to send and receive messages. Each of those asks first.</string>
     <string name="swarm_connect_approve">Connect</string>
     <string name="swarm_publish_title">Publish to Swarm</string>
     <string name="swarm_publish_request">wants to publish to Swarm</string>
-    <string name="swarm_publish_warning">Publishing uses your postage stamps, and what\'s published can\'t be taken back: anyone with its address can read it.</string>
+    <string name="swarm_publish_warning">Anyone with its address can read what\'s published, and it can\'t be taken back. It uses your storage.</string>
     <string name="swarm_publish_approve">Publish</string>
     <string name="swarm_publish_always">Always allow this site to publish without asking</string>
     <string name="swarm_manifest_title">App permissions</string>
@@ -20,19 +20,20 @@
     <string name="swarm_allow_all">Allow all</string>
     <string name="swarm_signing_title">Publisher signing</string>
     <string name="swarm_signing_request">wants to use your publisher identity</string>
-    <string name="swarm_signing_warning">Publisher signing can create Single Owner Chunks and reveal the active publisher owner for this site.</string>
+    <string name="swarm_signing_warning">The site can sign content as you, with this site\'s publisher identity, and see that identity\'s address.</string>
     <string name="swarm_signing_always">Always allow this site to use this publisher identity without asking</string>
     <string name="swarm_feeds_title">Feed access</string>
     <string name="swarm_feeds_request">wants to create and manage feeds</string>
-    <string name="swarm_feeds_warning">Feeds provide stable URLs that this app can update over time. Uses your stamps and bandwidth.</string>
+    <string name="swarm_feeds_warning">The site can keep a fixed address and change what it points to, signed in your name. Uses your storage and data.</string>
     <string name="swarm_feeds_always">Always allow this site to manage feeds without asking</string>
     <string name="swarm_messaging_title">Messaging access</string>
     <string name="swarm_messaging_request">wants to send and receive real-time messages</string>
-    <string name="swarm_messaging_warning">Messaging discloses your node\'s identity key to this site. It\'s the same key every site with messaging access sees, so those sites can tell they\'re talking to the same person. Sending uses your stamps; open subscriptions use bandwidth while the page is loaded. A subscription can also read any PSS traffic your node decrypts for the topic it joins, not only this site\'s own messages.</string>
+    <string name="swarm_messaging_warning">This site will be able to recognise you: it learns your node\'s identity, the same one every site with messaging sees, so those sites can tell they\'re talking to the same person. Sending uses your storage, and listening uses data while the page is open. Listening can also pick up other messages your node receives on the same topic, not only this site\'s.</string>
     <string name="swarm_message_title">Confirm message</string>
-    <string name="swarm_message_request_pss">wants to send a private message (PSS)</string>
-    <string name="swarm_message_request_gsoc">wants to broadcast a message (GSOC)</string>
-    <string name="swarm_message_warning">Sending this message uses your stamps and is visible to the Swarm network.</string>
+    <string name="swarm_message_request_pss">wants to send a private message</string>
+    <string name="swarm_message_request_gsoc">wants to post a message to a public room</string>
+    <string name="swarm_message_warning_pss">Only the recipient can read this message, but the Swarm network carries it, so others can see that one was sent. It uses your storage.</string>
+    <string name="swarm_message_warning_gsoc">Anyone who knows this room can read this message: it is posted unencrypted. It uses your storage.</string>
     <string name="swarm_message_approve">Send</string>
     <string name="swarm_message_always">Always allow this site to send messages without asking</string>
     <!-- What a publish is: a count of files, the content type, or these -->
@@ -67,19 +68,19 @@
 
     <!-- SwarmManifestSheet.kt: the permission-manifest sheet -->
     <string name="swarm_manifest_publish_label">Publish content</string>
-    <string name="swarm_manifest_publish_meaning">Upload to Swarm with your postage stamps and bandwidth, without asking each time.</string>
+    <string name="swarm_manifest_publish_meaning">Upload to Swarm with your storage and data, without asking each time.</string>
     <string name="swarm_manifest_feeds_label">Manage feeds</string>
     <string name="swarm_manifest_feeds_meaning">Create and update this app\'s feeds without asking each time.</string>
     <string name="swarm_manifest_signing_label">Sign Swarm content</string>
     <string name="swarm_manifest_signing_meaning">Sign with this app\'s publisher identity without asking each time.</string>
     <string name="swarm_manifest_messaging_label">Send and receive messages</string>
-    <string name="swarm_manifest_messaging_meaning">Use PSS and GSOC messaging.</string>
+    <string name="swarm_manifest_messaging_meaning">Send and receive messages, private ones and in public rooms.</string>
     <string name="swarm_manifest_note_new_identity">Feeds and signing use a new app-scoped publisher identity for this site.</string>
     <string name="swarm_manifest_note_identity_kept">The site\'s existing publisher identity is kept.</string>
     <string name="swarm_manifest_note_needs_wallet">You don\'t have a wallet yet: the first signature asks you to set one up.</string>
     <!-- %1$s: the rows no longer asked for, comma-separated -->
     <string name="swarm_manifest_note_removed">No longer asked for: %1$s. What the manifest allowed for them has been taken back.</string>
-    <string name="swarm_manifest_note_still_asks">Uploads still need a usable postage stamp, and signing an unlocked wallet. Use individual approvals to be asked before each upload and signature instead.</string>
+    <string name="swarm_manifest_note_still_asks">Uploads still need storage, and signing an unlocked wallet. Use individual approvals to be asked before each upload and signature instead.</string>
     <string name="swarm_manifest_update_title">App asks for more</string>
     <string name="swarm_manifest_update_request">now asks for these Swarm permissions too</string>
     <string name="swarm_manifest_request_rows">asks for these Swarm permissions</string>
@@ -94,7 +95,7 @@
     <!-- SwarmProvider.kt: the signing sheet's request row, and why the wallet page opens -->
     <string name="swarm_sign_detail_identity">Signing identity</string>
     <!-- %1$s: the chunk's identifier, in hex -->
-    <string name="swarm_sign_detail_soc">Single Owner Chunk %1$s</string>
+    <string name="swarm_sign_detail_soc">Signed data %1$s</string>
     <!-- %1$s: the site -->
     <string name="swarm_wallet_reason">%1$s wants to sign Swarm content with a publisher identity</string>
 </resources>

@@ -131,7 +131,10 @@ private fun swarmMessagingCopy(ask: SwarmAsk.Message): SwarmPromptCopy = when {
         Strings.get(
             if (ask.send == SwarmAsk.Message.Kind.Pss) R.string.swarm_message_request_pss else R.string.swarm_message_request_gsoc,
         ),
-        Strings.get(R.string.swarm_message_warning),
+        // Only a private message is encrypted (to its recipient's key); a room's is in the clear.
+        Strings.get(
+            if (ask.send == SwarmAsk.Message.Kind.Pss) R.string.swarm_message_warning_pss else R.string.swarm_message_warning_gsoc,
+        ),
         Strings.get(R.string.swarm_message_approve),
         Strings.get(R.string.swarm_message_always),
     )
@@ -317,6 +320,13 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                     .weight(1f, fill = false)
                     .verticalScroll(rememberScrollState()),
             ) {
+                // What it means first (#425, W47), then the request's details.
+                Text(
+                    copy.warning,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp).testTag("swarm-warning"),
+                )
                 when (ask) {
                     is SwarmAsk.Connect, is SwarmAsk.Manifest -> Unit
                     is SwarmAsk.Publish -> {
@@ -343,12 +353,6 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                         if (ask.send != null) DetailRow(stringResource(R.string.swarm_detail_size), formatStampBytes(ask.size.toLong()))
                     }
                 }
-                Text(
-                    copy.warning,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(vertical = 8.dp),
-                )
                 if (needsWallet) {
                     Text(
                         swarmNeedsWalletNote(copy),

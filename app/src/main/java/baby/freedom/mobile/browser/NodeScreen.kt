@@ -36,7 +36,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -139,10 +142,32 @@ fun NodeScreen(
     var showChequebook by rememberSaveable { mutableStateOf(false) }
     // Fund the node and buy a stamp in one wallet transaction (#115).
     var showFund by rememberSaveable { mutableStateOf(false) }
+    // The size and duration Fund opens on: Buy's pick when its Add funds opened it (#425).
+    var fundDepth by rememberSaveable { mutableIntStateOf(DEFAULT_STORAGE_CHOICE.depth) }
+    var fundDays by rememberSaveable { mutableLongStateOf(DEFAULT_STORAGE_CHOICE.days) }
+    // The stamp pages keep their page and pick while Fund is over them, so Back lands where Add funds was.
+    val stampsState = rememberSaveableStateHolder()
+    val openFund: (StorageChoice) -> Unit = { choice ->
+        fundDepth = choice.depth
+        fundDays = choice.days
+        showFund = true
+    }
 
     if (showFund) {
-        // Back lands on publish setup, which opened it.
-        FundNodeScreen(nodeInfo = nodeInfo, onOpenUrl = onOpenUrl, onDismiss = { showFund = false })
+        // Back lands on whichever page opened it.
+        FundNodeScreen(
+            nodeInfo = nodeInfo,
+            onOpenUrl = onOpenUrl,
+            onDismiss = { showFund = false },
+            start = StorageChoice(fundDepth, fundDays),
+            onSent = {
+                // Bought: Back from Fund shows the storage list, not a Buy page asking to pay again.
+                if (showStamps != null) {
+                    stampsState.removeState(STAMPS_STATE_KEY)
+                    showStamps = "list"
+                }
+            },
+        )
         return
     }
     if (showChequebook) {
@@ -152,7 +177,17 @@ fun NodeScreen(
     }
     showStamps?.let { start ->
         // Back from the stamps lands on whichever page opened them.
-        StampsScreen(nodeInfo = nodeInfo, startWithBuy = start == "buy", onDismiss = { showStamps = null })
+        stampsState.SaveableStateProvider(STAMPS_STATE_KEY) {
+            StampsScreen(
+                nodeInfo = nodeInfo,
+                startWithBuy = start == "buy",
+                onAddFunds = openFund,
+                onDismiss = {
+                    stampsState.removeState(STAMPS_STATE_KEY)
+                    showStamps = null
+                },
+            )
+        }
         return
     }
     if (showPublishSetup) {
@@ -164,7 +199,7 @@ fun NodeScreen(
             onBuyStamp = { showStamps = "buy" },
             onOpenChequebook = { showChequebook = true },
             onDismiss = { showPublishSetup = false },
-            onFundAndBuy = { showFund = true },
+            onFundAndBuy = { openFund(DEFAULT_STORAGE_CHOICE) },
         )
         return
     }
@@ -1043,3 +1078,6 @@ internal fun torStatusTriple(info: TorInfo): NodeStatusTriple = when (info.statu
     )
     TorStatus.Error -> NodeStatusTriple(STATUS_RED, Icons.Filled.ErrorOutline, Strings.get(R.string.node_error))
 }
+
+/** The stamp pages' saved state, kept while Fund is over them. */
+private const val STAMPS_STATE_KEY = "stamps"

@@ -6,7 +6,6 @@ import baby.freedom.mobile.browser.MainMenuRow.Bookmarks
 import baby.freedom.mobile.browser.MainMenuRow.DesktopSite
 import baby.freedom.mobile.browser.MainMenuRow.Downloads
 import baby.freedom.mobile.browser.MainMenuRow.FindInPage
-import baby.freedom.mobile.browser.MainMenuRow.HardReload
 import baby.freedom.mobile.browser.MainMenuRow.History
 import baby.freedom.mobile.browser.MainMenuRow.Home
 import baby.freedom.mobile.browser.MainMenuRow.NameTrust
@@ -44,7 +43,7 @@ class MainMenuTest {
             listOf(
                 listOf(NameTrust),
                 listOf(Home, NewTab, NewPrivateTab),
-                listOf(FindInPage, Zoom, DesktopSite, Print, BlockAds, SitePermissions, HardReload, AddToHomeScreen),
+                listOf(FindInPage, Zoom, DesktopSite, Print, BlockAds, SitePermissions, AddToHomeScreen),
                 listOf(History, Bookmarks, Downloads, Wallet),
                 listOf(Settings, Nodes),
             ),
@@ -64,7 +63,7 @@ class MainMenuTest {
             home,
         )
         val shown = home.flatten()
-        for (row in listOf(NameTrust, FindInPage, Zoom, DesktopSite, Print, HardReload, AddToHomeScreen, Home)) {
+        for (row in listOf(NameTrust, FindInPage, Zoom, DesktopSite, Print, AddToHomeScreen, Home)) {
             assertFalse("$row on home", row in shown)
         }
     }
@@ -74,7 +73,7 @@ class MainMenuTest {
         assertEquals(
             listOf(
                 listOf(Home, NewTab),
-                listOf(FindInPage, Zoom, DesktopSite, Print, HardReload),
+                listOf(FindInPage, Zoom, DesktopSite, Print),
                 listOf(History, Bookmarks, Downloads, Wallet),
                 listOf(Settings, Nodes),
             ),
@@ -111,7 +110,38 @@ class MainMenuTest {
         addressBarText: String = "https://example.org/",
         isBookmarked: Boolean = false,
         loading: Boolean = false,
-    ) = mainMenuIconsFor(url, addressBarText, isBookmarked, loading)
+        hasPageToActOn: Boolean = true,
+    ) = mainMenuIconsFor(url, addressBarText, isBookmarked, loading, hasPageToActOn)
+
+    @Test
+    fun `Hard reload has no row - it is the icon row's long-press (#417)`() {
+        assertFalse(MainMenuRow.entries.any { it.name.contains("reload", ignoreCase = true) })
+    }
+
+    @Test
+    fun `a long-press on Reload or Stop hard-reloads wherever there is a live page`() {
+        assertTrue(icons().hardReload)
+        // Mid-load the button is Stop, and its long-press still hard-reloads,
+        // as the old row did (R1-M2): a page stuck on a stalling gateway.
+        assertEquals(MainMenuReload.Stop, icons(loading = true).reload)
+        assertTrue(icons(loading = true).hardReload)
+        // Nothing to reload on home.
+        assertFalse(icons(url = "", addressBarText = "").hardReload)
+        // A typed address loading from home: Stop, but no page yet to hard-reload.
+        assertEquals(MainMenuReload.Stop, icons(url = "", addressBarText = "example.org", loading = true, hasPageToActOn = false).reload)
+        assertFalse(icons(url = "", addressBarText = "example.org", loading = true, hasPageToActOn = false).hardReload)
+        // A tab whose renderer went away rebuilds on a plain Reload (#260).
+        assertFalse(icons(hasPageToActOn = false).hardReload)
+        assertEquals(MainMenuReload.Reload, icons(hasPageToActOn = false).reload)
+    }
+
+    @Test
+    fun `the icon row is hidden on home, where none of it can act (#417)`() {
+        assertFalse(icons(url = "", addressBarText = "").shown)
+        assertTrue(icons().shown)
+        // A typed address loading from home: Stop can act, so the row shows.
+        assertTrue(icons(url = "", addressBarText = "ens://x.eth", loading = true).shown)
+    }
 
     @Test
     fun `the icon row has no Forward - the capsule's pill carries it`() {
