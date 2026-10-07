@@ -502,6 +502,39 @@ class VaultTest {
     }
 
     @Test
+    fun `a check-page save cancelled mid-write still publishes backedUp`() = runBlocking {
+        // #429 R3-M1: Back/Home cancels the check page's scope after the record write
+        // landed; the state must still say backed up, or the banner stays until relaunch.
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        store.onWrite = {
+            entered.countDown()
+            release.await()
+        }
+        val job = launch(Dispatchers.Default) { v.markBackedUp() }
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        job.cancel()
+        release.countDown()
+        job.join()
+        store.onWrite = {}
+        assertTrue(store.record!!.backedUp)
+        assertTrue((v.state.value as Vault.State.Unlocked).info.backedUp)
+    }
+
+    @Test
+    fun `markBackedUp republishes a backup already on disk`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        // Disk already says checked while the published state doesn't.
+        store.record = store.record!!.withBackedUp(true)
+        assertFalse((v.state.value as Vault.State.Unlocked).info.backedUp)
+        v.markBackedUp()
+        assertTrue((v.state.value as Vault.State.Unlocked).info.backedUp)
+    }
+
+    @Test
     fun `requireUnlocked doesn't trust an Unlocked state past its deadline`() = runBlocking {
         val v = vault()
         v.create(phrase, auth, imported = false)

@@ -297,11 +297,22 @@ class Vault internal constructor(
         }
     }
 
-    /** The backup check has passed (#78, #421): the backup reminder goes. */
+    /**
+     * The backup check has passed (#78, #421): the backup reminder goes.
+     *
+     * The write and its state publish run as one non-cancellable step: the
+     * check page's scope is cancelled by Back/Home, and a cancel between the
+     * two would leave "checked" on disk but the banner up in memory (#429
+     * R3-M1). A record already marked on disk is republished rather than
+     * skipped, so a check redone after any such gap still clears the banner.
+     */
     suspend fun markBackedUp() = ops.withLock {
         val record = storedRecord()
-        if (record.backedUp) return@withLock
-        rewrite(record.withBackedUp(true))
+        if (record.backedUp) {
+            publish(record)
+            return@withLock
+        }
+        withContext(NonCancellable) { rewrite(record.withBackedUp(true)) }
     }
 
     /**
@@ -363,10 +374,14 @@ class Vault internal constructor(
     /** Writes [updated] (same sealed phrase, new flags) and publishes it. Call under [ops]. */
     private suspend fun rewrite(updated: VaultRecord) {
         withContext(io) { store.write(updated) }
+        publish(updated)
+    }
+
+    private fun publish(record: VaultRecord) {
         // Under the seed lock, and keyed on the seed rather than the state
         // read before it: an auto-lock landing meanwhile must not be undone.
         synchronized(lock) {
-            _state.value = if (seed != null) State.Unlocked(updated.info()) else State.Locked(updated.info())
+            _state.value = if (seed != null) State.Unlocked(record.info()) else State.Locked(record.info())
         }
     }
 

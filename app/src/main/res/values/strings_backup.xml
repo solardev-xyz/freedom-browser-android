@@ -27,7 +27,6 @@
         <item quantity="other">Write these %d words on paper</item>
     </plurals>
     <string name="wallet_backup_intro_title_any">Write your recovery phrase on paper</string>
-    <string name="wallet_backup_intro_only_way">They’re the only way to get this wallet back if the phone is lost, broken or reset.</string>
     <string name="wallet_backup_intro_paper">Use pen and paper. No screenshot, photo or notes app.</string>
     <string name="wallet_backup_intro_secret">Anyone who sees them can take everything in the wallet.</string>
     <string name="wallet_backup_intro_check">Then pick three of them to check you have them right.</string>
