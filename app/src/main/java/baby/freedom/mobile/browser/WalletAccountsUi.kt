@@ -259,7 +259,8 @@ internal fun walletAssets(chains: List<Chain>, balances: Map<String, TokenBalanc
 /**
  * The wallet home's large balance (W1): the first asset held, in the
  * wallet's order — there are no prices to add different tokens up — and
- * the line under it: on which network, and how many more are held; or
+ * the line under it: on which network, and how many more are held —
+ * flagged amber when that figure is stale or one RPC's word alone; or
  * "No funds yet", or that the balances are still being read or couldn't
  * all be. [amount] is "—" when there's no figure to show.
  */
@@ -275,9 +276,15 @@ internal fun headlineBalance(assets: WalletAssets, refreshing: Boolean): Headlin
         val note = listOfNotNull(
             Strings.get(R.string.wallet_home_on_chain, first.chain.name),
             if (more > 0) Strings.plural(R.plurals.wallet_home_more_assets, more, more) else null,
-            if (balance is TokenBalance.Failed) Strings.get(R.string.wallet_home_not_updated) else null,
+            when {
+                balance is TokenBalance.Failed -> Strings.get(R.string.wallet_home_not_updated)
+                // The same caveat its Assets row carries: the largest figure on the home mustn't look settled when it isn't.
+                known.trust.level == ChainTrust.Level.UNVERIFIED -> Strings.get(R.string.wallet_home_unverified)
+                else -> null
+            },
         ).joinToString(" · ")
-        return HeadlineBalance(TokenAmounts.format(known.raw, first.token.decimals), first.token.symbol, note, warn = balance is TokenBalance.Failed)
+        val warn = balance is TokenBalance.Failed || known.trust.level == ChainTrust.Level.UNVERIFIED
+        return HeadlineBalance(TokenAmounts.format(known.raw, first.token.decimals), first.token.symbol, note, warn = warn)
     }
     return when {
         assets.noFunds -> HeadlineBalance("0", null, Strings.get(R.string.wallet_home_no_funds))

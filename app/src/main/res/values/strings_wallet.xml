@@ -280,6 +280,7 @@
         <item quantity="other">%d more assets</item>
     </plurals>
     <string name="wallet_home_not_updated">not updated</string>
+    <string name="wallet_home_unverified">unverified · one RPC’s word</string>
     <string name="wallet_home_no_funds">No funds yet</string>
     <string name="wallet_home_no_funds_detail">Share your address to receive money or tokens on Ethereum or Gnosis.</string>
     <string name="wallet_home_some_unread">Couldn’t read every balance</string>

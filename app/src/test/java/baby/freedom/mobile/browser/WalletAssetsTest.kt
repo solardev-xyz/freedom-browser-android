@@ -128,6 +128,16 @@ class WalletAssetsTest {
         // Held before, not updated now: the figure stays, flagged.
         val stale = walletAssets(chains, allZero() + (xdai.key to TokenBalance.Failed("x", some("1500000000000000000"))))
         assertEquals(HeadlineBalance("1.5", "xDAI", "on Gnosis Chain · not updated", warn = true), headlineBalance(stale, refreshing = false))
+        // Above zero on one RPC's word alone: the figure shows, flagged like its Assets row.
+        val single = walletAssets(chains, allZero() + (xdai.key to some("1500000000000000000", unverified)))
+        assertEquals(
+            HeadlineBalance("1.5", "xDAI", "on Gnosis Chain · unverified · one RPC’s word", warn = true),
+            headlineBalance(single, refreshing = false),
+        )
+        assertEquals("1.5 xDAI · on Gnosis Chain · unverified · one RPC’s word", accountBalanceLine(chains, allZero() + (xdai.key to some("1500000000000000000", unverified))))
+        // A node of the user's own isn't one RPC's word: no caveat.
+        val mine = walletAssets(chains, allZero() + (xdai.key to some("1500000000000000000", own)))
+        assertEquals(HeadlineBalance("1.5", "xDAI", "on Gnosis Chain"), headlineBalance(mine, refreshing = false))
     }
 
     @Test
