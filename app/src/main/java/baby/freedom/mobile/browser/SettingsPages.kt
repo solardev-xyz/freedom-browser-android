@@ -190,3 +190,28 @@ internal fun nodesPageSummary(externalSwarm: String, externalIpfs: String, radic
     )
     return Strings.get(R.string.settings_page_nodes_summary, source(externalSwarm), source(externalIpfs), radicle)
 }
+
+/**
+ * A page a section request (#416) moved an open Settings to, and the
+ * page (or the top level, null) it moved from. Requests stack: a second
+ * one made while the first one's page is open keeps the first's return
+ * point under it (R2-M1), so Back unwinds them in turn.
+ */
+internal data class SettingsRequestedPage(
+    val page: SettingsPage,
+    val from: SettingsPage?,
+) : java.io.Serializable
+
+/**
+ * Up from [page] through the [stack] of requests: entries whose page
+ * isn't the one open any more (left another way) are dropped first,
+ * then the top one, if it's [page], is popped. Returns the stack left
+ * and the popped entry, or null when Back from [page] isn't a request's.
+ */
+internal fun requestedPageUp(
+    stack: List<SettingsRequestedPage>,
+    page: SettingsPage?,
+): Pair<List<SettingsRequestedPage>, SettingsRequestedPage?> {
+    val live = stack.dropLastWhile { it.page != page }
+    return if (live.isEmpty()) live to null else live.dropLast(1) to live.last()
+}

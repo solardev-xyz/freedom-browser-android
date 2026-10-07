@@ -169,9 +169,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
-import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
-import baby.freedom.swarm.NodeInfo
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -1415,7 +1413,8 @@ internal fun CapsuleSurface(
 internal fun BottomToolbar(
     state: BrowserState,
     tabCount: Int,
-    nodeInfo: NodeInfo,
+    /** The menu's Nodes & networks sub-line: only while a node has failed ([nodesMenuNote]). */
+    nodesNote: String?,
     isBookmarked: Boolean,
     addressFocused: Boolean,
     addressBarEdited: Boolean,
@@ -1740,7 +1739,7 @@ internal fun BottomToolbar(
             menu = {
                 OverflowMenuButton(
                     state = state,
-                    nodeInfo = nodeInfo,
+                    nodesNote = nodesNote,
                     isBookmarked = isBookmarked,
                     onHome = onHome,
                     onToggleBookmark = onToggleBookmark,
@@ -2856,8 +2855,8 @@ private fun CapsuleTrailingButton(
  * The node-status dot that used to ride the button's corner is gone with
  * the move: a coloured dot on a control *inside* the address field is a
  * badge on the trust surface, which is the one place in the chrome it
- * must not be. The menu's own "N peers" row is where the user goes to
- * act on the node anyway, and the Node screen behind it is unchanged.
+ * must not be. The menu's own Nodes & networks row is where the user
+ * goes to see and act on the nodes (#416).
  *
  * The popup still anchors on the button's own window bounds, so it
  * follows the button to its new position with no arithmetic of its own
@@ -2866,7 +2865,7 @@ private fun CapsuleTrailingButton(
 @Composable
 private fun OverflowMenuButton(
     state: BrowserState,
-    nodeInfo: NodeInfo,
+    nodesNote: String?,
     isBookmarked: Boolean,
     onHome: () -> Unit,
     onToggleBookmark: () -> Unit,
@@ -2906,7 +2905,6 @@ private fun OverflowMenuButton(
     // and feeding them to a [Popup] + custom [PopupPositionProvider]
     // produces a stable anchor from the first frame.
     var anchorBounds by remember { mutableStateOf<IntRect?>(null) }
-    val peerCount = nodeInfo.connectedPeers
     // Lift the popup clear of the toolbar's own top padding plus a
     // little air, so it floats above the pill instead of touching it.
     val popupGapPx = with(LocalDensity.current) { 12.dp.roundToPx() }
@@ -3014,7 +3012,7 @@ private fun OverflowMenuButton(
                                 MainMenuRowItem(
                                     row = row,
                                     state = state,
-                                    peerCount = peerCount,
+                                    nodesNote = nodesNote,
                                     close = close,
                                     onShowTrust = { trustShown = true },
                                     onHome = onHome,
@@ -3132,7 +3130,7 @@ private fun MainMenuIconButton(
 private fun MainMenuRowItem(
     row: MainMenuRow,
     state: BrowserState,
-    peerCount: Long,
+    nodesNote: String?,
     close: (() -> Unit) -> Unit,
     onShowTrust: () -> Unit,
     onHome: () -> Unit,
@@ -3320,10 +3318,7 @@ private fun MainMenuRowItem(
             leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) },
             onClick = { close(onOpenSettings) },
         )
-        MainMenuRow.Nodes -> {
-            val peersLabel = pluralText(R.plurals.browser_menu_peers, peerCount.toInt(), peerCount)
-            NodesMenuItem(peersLabel) { close(onOpenNode) }
-        }
+        MainMenuRow.Nodes -> NodesMenuItem(nodesNote) { close(onOpenNode) }
     }
 }
 
@@ -3500,16 +3495,21 @@ internal class AnchoredAboveProvider(
 }
 
 /**
- * The overflow menu's Nodes row: the drawn text is only the peer count,
- * so its TalkBack name says where it goes (#279). The count is replaced
- * in the semantics, not added to, so it is read once.
+ * The overflow menu's last row (#416): "Nodes & networks", opening the
+ * overview of every node. No live count — the menu shouldn't change with
+ * every peer that comes and goes — only a [note] while a node has failed.
  */
 @Composable
-internal fun NodesMenuItem(peersLabel: String, onClick: () -> Unit) {
+internal fun NodesMenuItem(note: String?, onClick: () -> Unit) {
     DropdownMenuItem(
         text = {
-            Box(Modifier.clearAndSetSemantics { contentDescription = nodesMenuDescription(peersLabel) }) {
-                MenuItemLabel(peersLabel)
+            if (note == null) {
+                MenuItemLabel(stringResource(R.string.browser_menu_nodes))
+            } else {
+                Column(modifier = Modifier.padding(end = 32.dp)) {
+                    Text(stringResource(R.string.browser_menu_nodes))
+                    MenuItemNote(note)
+                }
             }
         },
         leadingIcon = {
@@ -3530,10 +3530,6 @@ internal fun NodesMenuItem(peersLabel: String, onClick: () -> Unit) {
  */
 internal fun popupMaxHeightAbove(anchorTop: Int, gapPx: Int, topInsetPx: Int): Int =
     (anchorTop - gapPx - topInsetPx).coerceAtLeast(0)
-
-/** TalkBack's name for the overflow menu's Nodes row (#279): where it goes, then the count it shows. */
-internal fun nodesMenuDescription(peersLabel: String): String =
-    Strings.get(R.string.browser_menu_nodes_description, peersLabel)
 
 /**
  * What TalkBack says of a load on the address bar (#279): the phase the

@@ -151,7 +151,7 @@ import java.text.NumberFormat
  * query before it closes the screen.
  */
 @Composable
-fun SettingsScreen(
+internal fun SettingsScreen(
     repo: BrowsingRepository,
     ipfsInfo: IpfsInfo,
     onIpfsToggle: (Boolean) -> Unit,
@@ -176,6 +176,27 @@ fun SettingsScreen(
      * bookmarks moved there (#400).
      */
     onOpenBookmarks: () -> Unit = {},
+    /**
+     * Opened straight at one card's page, scrolled to that card, from the
+     * Nodes & networks overview (#416): its RPC providers or gateways
+     * row, or the Tor page's "Turn on in Settings". Back from that page
+     * leaves Settings, back to where it came from, rather than stopping
+     * at the top level.
+     */
+    initialSection: SettingsSection? = null,
+    /**
+     * A card to go to while already open (the overview was opened from
+     * this Settings' Node status row, over it); [onSectionRequestTaken]
+     * says it's been taken, with its depth among the requests still
+     * open (0 for the first; a request made from the page an earlier
+     * one moved to stacks on it). Back from its page goes back to the
+     * page Settings was on and calls [onRequestedPageLeft] with that
+     * depth, so what asked (the overview, a node page) can come back
+     * over it.
+     */
+    sectionRequest: SettingsSection? = null,
+    onSectionRequestTaken: (depth: Int) -> Unit = {},
+    onRequestedPageLeft: (depth: Int) -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     // Settings search (#93). Registered after the dismiss handler so it
@@ -185,11 +206,46 @@ fun SettingsScreen(
     // The sub-page open in place of the top level (#400), if any; its
     // handler, registered last, wins: Back goes one level up, to the
     // search results when the page was opened from one.
-    var page by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
-    // The card a page opened from a search result starts scrolled to.
-    var scrollTo by remember { mutableStateOf<SettingsSection?>(null) }
+    // None of the cards opened from outside is Default browser, the one
+    // card whose page depends on whether Freedom is the default browser.
+    val initialPage = initialSection?.page(isDefaultBrowser = false)
+    var page by rememberSaveable { mutableStateOf(initialPage) }
+    // The card a page opened from a search result (or from outside) starts scrolled to.
+    // Saveable, and cleared once scrolled to, so a recreated Activity
+    // keeps the page where it was instead of jumping back to the card.
+    var scrollTo by rememberSaveable { mutableStateOf(initialSection) }
+    // The pages [sectionRequest]s moved to, each with the page (or top
+    // level) it moved from, which Back from it goes back to; a stack, so
+    // a request made from an earlier one's page keeps that one's way back.
+    var requested by rememberSaveable { mutableStateOf(emptyList<SettingsRequestedPage>()) }
+    // Up from a sub-page: back to where a request moved it from, out of
+    // Settings when it was opened straight at that page, else the top level.
+    val pageUp = {
+        val (rest, left) = requestedPageUp(requested, page)
+        requested = rest
+        when {
+            left != null -> {
+                page = left.from
+                onRequestedPageLeft(rest.size)
+            }
+            initialPage != null && page == initialPage -> onDismiss()
+            else -> page = null
+        }
+    }
     BackHandler(enabled = query.isNotEmpty() && page == null) { query = "" }
-    BackHandler(enabled = page != null) { page = null }
+    BackHandler(enabled = page != null, onBack = pageUp)
+    LaunchedEffect(sectionRequest) {
+        if (sectionRequest != null) {
+            val target = sectionRequest.page(isDefaultBrowser = false)
+            query = ""
+            // Requests whose page was since left another way are done with.
+            val live = requested.dropLastWhile { it.page != page }
+            requested = live + SettingsRequestedPage(target, from = page)
+            page = target
+            scrollTo = sectionRequest
+            onSectionRequestTaken(live.size)
+        }
+    }
 
     val context = LocalContext.current
     val settings = remember(context) { NodeSettings.get(context) }
@@ -530,12 +586,13 @@ fun SettingsScreen(
     // Held out here, not inside the scaffold: a Chains, Connected-site or
     // Licences page replaces the whole scaffold while open, and Back must
     // land on the sub-page scrolled where it was left. A new page (or the
-    // same one opened again from the top level) starts at the top.
-    val pageState = remember(openPage) { LazyListState() }
+    // same one opened again from the top level) starts at the top. Saveable,
+    // so a recreated Activity keeps the position too.
+    val pageState = rememberSaveable(openPage, saver = LazyListState.Saver) { LazyListState() }
     if (chainPage == null && site == null && !licencesOpen && !deleteDataOpen) FullScreenScaffold(
         title = openPage?.title ?: stringResource(R.string.settings_title),
         // On a sub-page the ← goes up to the top level, as Back does.
-        onDismiss = { if (page != null) page = null else onDismiss() },
+        onDismiss = { if (page != null) pageUp() else onDismiss() },
     ) {
         if (openPage == null) Column(modifier = Modifier.fillMaxSize()) {
             SettingsSearchField(
@@ -593,11 +650,13 @@ fun SettingsScreen(
             val sections = settingsSections(openPage, isDefaultBrowser)
             // Re-runs after a Chains/site/Licences page closes, by which
             // time scrollTo is null, so it leaves the kept position alone.
-            LaunchedEffect(Unit) {
-                val target = scrollTo
+            // Keyed on scrollTo too: a request for a card on the page
+            // already open scrolls to it without re-opening the page.
+            LaunchedEffect(scrollTo) {
+                val target = scrollTo ?: return@LaunchedEffect
                 scrollTo = null
                 val index = sections.indexOf(target)
-                if (index > 0) pageState.scrollToItem(index)
+                if (index >= 0) pageState.scrollToItem(index)
             }
             LazyColumn(
                 state = pageState,
@@ -2401,7 +2460,7 @@ internal fun ipfsRows(info: IpfsInfo) = listOf(
 )
 
 @Composable
-private fun IpfsSection(
+internal fun IpfsSection(
     visible: Set<Any>,
     settings: NodeSettings,
     ipfsInfo: IpfsInfo,
@@ -2548,7 +2607,7 @@ internal fun ConfirmDialog(
     )
 }
 
-private data class IpfsStatusTriple(
+internal data class IpfsStatusTriple(
     val color: Color,
     val icon: ImageVector,
     val label: String,
@@ -2558,22 +2617,24 @@ private data class IpfsStatusTriple(
  * Translate the live IPFS [IpfsInfo] into an icon + color + user-
  * facing label for the master IPFS toggle. Visible to the user:
  *
- *  - `Disconnected` — node not running (toggle off)
- *  - `Connecting…`  — node starting, or running but still peer-less
- *  - `Connected`    — node running with at least one peer
+ *  - `Off`          — node not running (toggle off; not "Disconnected", #416)
+ *  - `Connecting…`  — node starting
+ *  - `Running`      — the gateway is up, as the other nodes say it
  *  - `Error`        — last start attempt threw
+ *
+ * The Nodes & networks overview's IPFS row reads the same label.
  */
-private fun ipfsStatusTriple(info: IpfsInfo): IpfsStatusTriple = when (info.status) {
+internal fun ipfsStatusTriple(info: IpfsInfo): IpfsStatusTriple = when (info.status) {
     // freedom-ipfs is an on-demand reader: the gateway being up means
     // the node is usable — there is no peer set to wait for.
     IpfsStatus.Running -> IpfsStatusTriple(
-        Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.settings_ipfs_connected),
+        Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.node_status_running),
     )
     IpfsStatus.Starting -> IpfsStatusTriple(
         Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.settings_ipfs_connecting),
     )
     IpfsStatus.Stopped -> IpfsStatusTriple(
-        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.settings_ipfs_disconnected),
+        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_off),
     )
     IpfsStatus.Error -> IpfsStatusTriple(
         Color(0xFFEF4444), Icons.Filled.ErrorOutline, Strings.get(R.string.settings_ipfs_error),
