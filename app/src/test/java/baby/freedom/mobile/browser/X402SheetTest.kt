@@ -115,7 +115,7 @@ class X402SheetTest {
     fun `#237 the allowance note says whom it pays, how much at a time, and for which navigations`() {
         val o = ask(balance = 1_000_000, "10000").options.single()
         val note = allowanceNote(X402Window.DAY, o, "Account 1")
-        assertTrue(note, note.contains("each at most 0.01 USDC, to the Pay to address above only"))
+        assertTrue(note, note.contains("each at most 0.01 USDC, only to the address this payment goes to"))
         assertTrue(note, note.contains("from Account 1 only"))
         assertTrue(note, note.contains("not ones it moves to on its own"))
         assertTrue(note, note.contains("after the site refuses a payment, not until you open or reload it yourself"))
@@ -226,5 +226,12 @@ class X402SheetTest {
             "Not paid: the site allows 25 s to sign a payment, and that ran out. Reload the page to try again.",
             X402Payments.timedOutMessage(ledger = false, offer = o),
         )
+    }
+
+    @Test
+    fun `#423 the sheet leads with what the page costs and the balance`() {
+        val o = ask(balance = 3_200_000, "10000").options.single()
+        assertEquals("Pay 0.01 USDC to view this page", x402Headline(o))
+        assertTrue(x402BalanceLine(o), x402BalanceLine(o).startsWith("You have 3.2 USDC on "))
     }
 }

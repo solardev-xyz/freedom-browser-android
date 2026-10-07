@@ -24,7 +24,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -93,7 +92,9 @@ private fun chainName(chains: List<Chain>, id: Long) = chains.firstOrNull { it.i
 /**
  * The wallet page's x402 section (#140): each site allowed to pay
  * without asking — how much of its allowance it has used, on which
- * network, until when — with Revoke, and the way to the payment history.
+ * network, until when — with Revoke (the same labelled control as
+ * Disconnect, #423; the caller offers Undo), and the way to the payment
+ * history.
  */
 @Composable
 internal fun X402Section(
@@ -112,16 +113,20 @@ internal fun X402Section(
             )
         }
         allowances.forEach { a ->
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.testTag("x402-allowance")) {
-                Column(modifier = Modifier.weight(1f).padding(vertical = 4.dp)) {
-                    Text(permissionOriginDisplay(a.origin), fontWeight = FontWeight.Medium)
-                    Text(
-                        x402AllowanceLine(a, chainName(chains, a.chainId)),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                TextButton(onClick = { onRevoke(a) }, modifier = Modifier.testTag("x402-revoke")) { Text(stringResource(R.string.signing_x402_revoke)) }
+            val site = permissionOriginDisplay(a.origin)
+            PermissionRow(
+                title = site,
+                actionLabel = stringResource(R.string.signing_x402_revoke),
+                actionDescription = stringResource(R.string.signing_x402_revoke_label, site),
+                onAction = { onRevoke(a) },
+                actionTag = "x402-revoke",
+                modifier = Modifier.testTag("x402-allowance"),
+            ) {
+                Text(
+                    x402AllowanceLine(a, chainName(chains, a.chainId)),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
         PageRow(
@@ -198,4 +203,23 @@ private fun Field(label: String, value: String) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         SelectionContainer { Text(value, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
     }
+}
+
+/**
+ * Revoke [a] in [store] and offer Undo on [notices], which puts it back as
+ * it was when revoked ([X402Store.restore]: not after the wallet's removal
+ * cleared the store, nor once its window ended). What comes back is the
+ * allowance as stored at the revoke ([X402Store.take]), not [a] as the list
+ * last showed it — a payment counted since then stays counted (#431 R3-M2).
+ * Says so when it couldn't be saved; no Undo when nothing was there to take.
+ */
+internal suspend fun revokeWithUndo(store: X402Store, a: X402Store.Allowance, notices: UndoNotices) {
+    val era = store.clearEra
+    val taken = store.take(a.origin, a.chainId, a.asset, a.account)
+    if (!taken.saved) {
+        notices.say(Strings.get(R.string.signing_x402_revoke_failed))
+        return
+    }
+    val was = taken.was ?: return
+    notices.show(Strings.get(R.string.signing_x402_undo_revoked, permissionOriginDisplay(a.origin))) { store.restore(was, era) }
 }

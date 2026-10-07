@@ -2,6 +2,8 @@ package baby.freedom.mobile.browser
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,24 +36,29 @@ import baby.freedom.mobile.wallet.VaultProtection
  * Connected sites, Site payments, Publishing and Remove wallet. The page
  * is only the frame: [WalletScreen] fills [content] with these sections,
  * since it holds the state they act on. [error] is the wallet's error
- * line, shown here too so an action taken on this page reports here.
+ * line, shown here too so an action taken on this page reports here;
+ * [overlay] draws over the list (the Undo snackbar for Disconnect/Revoke).
  */
 @Composable
 internal fun WalletSettingsPage(
     error: String?,
     onBack: () -> Unit,
     title: String = stringResource(R.string.wallet_settings_title),
+    overlay: @Composable BoxScope.() -> Unit = {},
     content: LazyListScope.() -> Unit,
 ) {
     BackHandler(onBack = onBack)
     FullScreenScaffold(title = title, onDismiss = onBack) {
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            modifier = Modifier.fillMaxSize().testTag("wallet-settings"),
-        ) {
-            error?.let { item("error") { WalletErrorText(it) } }
-            content()
+        Box(Modifier.fillMaxSize()) {
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                modifier = Modifier.fillMaxSize().testTag("wallet-settings"),
+            ) {
+                error?.let { item("error") { WalletErrorText(it) } }
+                content()
+            }
+            overlay()
         }
     }
 }

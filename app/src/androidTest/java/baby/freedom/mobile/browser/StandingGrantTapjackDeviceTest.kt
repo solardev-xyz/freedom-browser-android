@@ -72,7 +72,8 @@ class StandingGrantTapjackDeviceTest {
         }
     }
 
-    private fun showing(content: @Composable () -> Unit, label: String) {
+    /** [confirm]: the label of the button on the confirm step a clean tap opens first (#423), if any. */
+    private fun showing(content: @Composable () -> Unit, label: String, confirm: String? = null) {
         ActivityScenario.launch(ComponentActivity::class.java).use { scenario ->
             scenario.onActivity { it.setContent { FreedomTheme { content() } } }
             findToggle(label)
@@ -84,12 +85,21 @@ class StandingGrantTapjackDeviceTest {
             assertTrue(onScreen(OBSCURED_TAP_MESSAGE))
             // The notice grows a bottom sheet upwards: find the switch again where it is now.
             tap(findToggle(label))
+            if (confirm != null) {
+                // Only the confirm turns it on (#423, W25); it arms like any prompt.
+                SystemClock.sleep(500)
+                assertFalse("the row turned the switch on without its confirm", checked(label))
+                val button = findText(confirm)
+                SystemClock.sleep(1_500)
+                tap(button)
+            }
             assertTrue("a clean tap didn't turn the switch on", waitChecked(label))
         }
     }
 
     @Test
-    fun anObscuredTapDoesNotTurnOnAlwaysApprove() = showing({ ethereumSwitch() }, autoApproveSwitchLabel(rule))
+    fun anObscuredTapDoesNotTurnOnAlwaysApprove() =
+        showing({ ethereumSwitch() }, autoApproveSwitchLabel(rule), confirm = InstrumentationRegistry.getInstrumentation().targetContext.getString(baby.freedom.mobile.R.string.send_eth_always_turn_on))
 
     @Test
     fun anObscuredTapDoesNotTurnOnSwarmAlwaysAllow() {
@@ -271,6 +281,19 @@ class StandingGrantTapjackDeviceTest {
     }
 
     private fun checked(label: String): Boolean = toggle(label)?.isChecked == true
+
+    /** Where the text [label] is (a button's label: tapping its middle taps the button). */
+    private fun findText(label: String): Rect {
+        val until = SystemClock.uptimeMillis() + 5_000
+        while (SystemClock.uptimeMillis() < until) {
+            roots().firstNotNullOfOrNull { find(it, label) }?.let { node ->
+                val r = Rect().also { node.getBoundsInScreen(it) }
+                if (!r.isEmpty) return r
+            }
+            SystemClock.sleep(100)
+        }
+        throw AssertionError("no \"$label\" on screen")
+    }
 
     private fun waitChecked(label: String, want: Boolean = true): Boolean {
         val until = SystemClock.uptimeMillis() + 2_000

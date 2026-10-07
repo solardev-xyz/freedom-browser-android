@@ -361,7 +361,52 @@ class X402Store internal constructor(
 
     /** Take away [origin]'s allowance for [asset] on [chainId] from [account]; `false` if it couldn't be written. */
     suspend fun revoke(origin: String, chainId: Long, asset: String, account: String): Boolean =
-        write { it.remove(allowKey(origin, chainId, asset, account)) }
+        take(origin, chainId, asset, account).saved
+
+    /**
+     * What [take] did: [saved] whether the removal was written; [was] the
+     * allowance it removed, as stored at that moment (null if none was).
+     */
+    data class Taken(val saved: Boolean, val was: Allowance?)
+
+    /**
+     * [revoke], also handing back the allowance removed, read in the same
+     * write — so an Undo puts back what was really stored, with every
+     * payment counted against it up to the revoke, not a copy the UI read
+     * earlier that a payment since has overtaken (#431 R3-M2).
+     */
+    suspend fun take(origin: String, chainId: Long, asset: String, account: String): Taken {
+        var was: Allowance? = null
+        val written = write { prefs ->
+            val key = allowKey(origin, chainId, asset, account)
+            was = prefs[key]?.let { decodeAllowance(key.name.removePrefix(ALLOW), it) }
+            prefs.remove(key)
+        }
+        return Taken(written, was.takeIf { written })
+    }
+
+    /**
+     * Put back [a], as it was, after the user revoked it and tapped Undo
+     * (#423): only if no [clear] began since [era] ([clearEra], taken when
+     * it was revoked — a removed wallet's allowances stay gone), it's still
+     * in its window, and the site hasn't been given a new one for that
+     * token meanwhile. `false` if it wasn't put back.
+     */
+    suspend fun restore(a: Allowance, era: Long): Boolean {
+        if (clearedSince(era) != false) return false
+        if (!live(a, clock())) return false
+        var put = false
+        val written = write { prefs ->
+            // Checked again in the write, which a clear's own write can't interleave with.
+            if (clearedSince(era) != false) return@write
+            val key = allowKey(a.origin, a.chainId, a.asset, a.account)
+            if (prefs[key] == null) {
+                prefs[key] = encodeAllowance(a)
+                put = true
+            }
+        }
+        return written && put
+    }
 
     /** Record [payment] at the top of the history; `false` if it couldn't be written. */
     suspend fun record(payment: Payment): Boolean = write { prefs ->
