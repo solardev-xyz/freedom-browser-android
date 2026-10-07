@@ -3068,7 +3068,7 @@ private fun buildRefreshableWebView(
                 val zoomSite = zoomSiteKey(url)
                 state.zoomSite = zoomSite
                 state.providerOrigin = providerOriginKey(url)
-                state.permissionOrigin = permissionOriginKey(url)
+                state.permissionOrigin = documentPermissionOrigin(url)
                 // …with the user agent it was fetched with (#180). One
                 // that crossed the desktop/mobile line was corrected
                 // before its request went out, where it could be (see

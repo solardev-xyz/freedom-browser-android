@@ -210,6 +210,22 @@ fun permissionOriginKey(raw: String?): String? {
 }
 
 /**
+ * The permission origin of a top-level document at [url] — what
+ * [BrowserState.permissionOrigin] is set to when it commits. Like
+ * [permissionOriginKey], except a `blob:` document
+ * (`blob:https://site/<uuid>`, what `URL.createObjectURL` hands a page
+ * that opens or navigates to a generated page) has the origin of the
+ * page that minted it, the way its `location.origin` does: it asks in
+ * that site's name, not in no one's (#445 R3-F1). A `blob:null/…` URL,
+ * minted by an opaque origin, still has none.
+ */
+fun documentPermissionOrigin(url: String?): String? {
+    val s = url?.trim().orEmpty()
+    val inner = if (s.startsWith("blob:", ignoreCase = true)) s.substring(5) else s
+    return permissionOriginKey(inner)
+}
+
+/**
  * Who a site-permission decision is about (#363): the [origin] that asks
  * (a page, or a frame inside one), on the [top]-level site it asks from —
  * double-keyed like Chrome. A page asking for itself has `top == origin`

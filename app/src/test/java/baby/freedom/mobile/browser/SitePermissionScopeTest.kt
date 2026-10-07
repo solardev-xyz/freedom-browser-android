@@ -58,6 +58,23 @@ class SitePermissionScopeTest {
     }
 
     @Test
+    fun `R3-F1 - a blob document asks in the name of the site that minted it`() {
+        val top = documentPermissionOrigin("blob:http://localhost:8730/6f1c2d3e-uuid")
+        assertEquals("http://localhost:8730", top)
+        assertEquals("https://meet.example", documentPermissionOrigin("BLOB:https://Meet.example:443/x"))
+        // …so its own getUserMedia is that site asking for itself, prompted as usual.
+        assertEquals(
+            PermissionScope("http://localhost:8730"),
+            permissionScopeFor("http://localhost:8730/", top),
+        )
+        // An opaque origin's blob, and non-http(s) documents, still have none.
+        assertNull(documentPermissionOrigin("blob:null/6f1c2d3e"))
+        assertNull(documentPermissionOrigin("data:text/html,hi"))
+        assertNull(documentPermissionOrigin("about:blank"))
+        assertEquals(meet, documentPermissionOrigin("https://meet.example/room"))
+    }
+
+    @Test
     fun `issue 363 - a remembered top-level grant does not answer the same site framed by another`() = runBlocking {
         val store = SitePermissionStore(MemoryStore())
         val session = PermissionSession()
