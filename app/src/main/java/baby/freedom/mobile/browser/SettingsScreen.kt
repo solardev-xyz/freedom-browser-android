@@ -1,7 +1,6 @@
 package baby.freedom.mobile.browser
 
 import android.content.Context
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -430,9 +429,7 @@ internal fun SettingsScreen(
         DeleteBrowsingDataPage(
             repo = repo,
             onDelete = { choice ->
-                onDeleteBrowsingData(choice)
-                deleteDataOpen = false
-                Toast.makeText(context, deleteDoneMessage(choice), Toast.LENGTH_LONG).show()
+                afterDeleteBrowsingData(context, choice, onDeleteBrowsingData) { deleteDataOpen = false }
             },
             onBack = { deleteDataOpen = false },
         )

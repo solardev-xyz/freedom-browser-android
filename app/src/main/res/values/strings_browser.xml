@@ -197,13 +197,23 @@
 
     <!-- TabSwitcher.kt -->
     <string name="browser_tabs_new_tab">New tab</string>
-    <!-- The switcher's button that opens a new private tab. -->
-    <string name="browser_tabs_new_private">Private</string>
+    <!-- The switcher's button that opens a new private tab, on its Private pane. -->
+    <string name="browser_tabs_new_private_tab">New private tab</string>
+    <!-- The switcher's Tabs | Private toggle (#418): the pane of normal tabs. -->
+    <string name="browser_tabs_pane_tabs">Tabs</string>
+    <!-- The switcher's Tabs | Private toggle (#418): the pane of private tabs. -->
+    <string name="browser_tabs_pane_private">Private</string>
+    <string name="browser_tabs_empty_title">No open tabs</string>
+    <string name="browser_tabs_empty_hint">Tap New tab to open one.</string>
+    <string name="browser_tabs_private_empty_title">No private tabs</string>
+    <string name="browser_tabs_private_empty_hint">Pages you open in private tabs aren\'t kept in your history, and their cookies and site data are deleted when you close your last private tab.</string>
     <string name="browser_tabs_reopen">Reopen</string>
     <string name="browser_tabs_close_switcher">Close tab switcher</string>
     <!-- TalkBack's name for the switcher's ⋮ menu button. -->
     <string name="browser_tabs_menu">More tab options</string>
     <string name="browser_tabs_close_all">Close all tabs</string>
+    <!-- The Tabs pane's menu while private tabs are open: closes the normal tabs, the private ones stay. -->
+    <string name="browser_tabs_close_normal">Close normal tabs</string>
     <string name="browser_tabs_close_private">Close private tabs</string>
     <!-- A tab card's menu (long-press) and accessibility action: close every tab but this one. -->
     <string name="browser_tabs_close_others">Close other tabs</string>
@@ -212,6 +222,8 @@
         <item quantity="one">%d tab closed</item>
         <item quantity="other">%d tabs closed</item>
     </plurals>
+    <!-- Snackbar after closing one tab in the tab switcher (#418), with Undo. -->
+    <string name="browser_tab_closed">Tab closed</string>
     <string name="browser_tabs_undo">Undo</string>
     <!-- Snackbar on launch when the tabs restored last time crashed the app (#400): they weren't loaded, and its action brings them back. -->
     <plurals name="browser_tabs_not_restored">

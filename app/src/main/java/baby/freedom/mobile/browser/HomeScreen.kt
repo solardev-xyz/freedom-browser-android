@@ -654,7 +654,7 @@ private fun LetterTile(entry: BookmarkEntry) {
  * or if decoding fails — callers should show a fallback in that case.
  */
 @Composable
-private fun rememberFavicon(repo: BrowsingRepository, url: String): ImageBitmap? {
+internal fun rememberFavicon(repo: BrowsingRepository, url: String): ImageBitmap? {
     val bytes by remember(url) { repo.favicon(url) }.collectAsState(initial = null)
     return remember(bytes) {
         val data = bytes ?: return@remember null

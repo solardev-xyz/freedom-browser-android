@@ -65,21 +65,18 @@ class BrowsingRepository internal constructor(
     val hasHistory: Flow<Boolean> = db.history().any()
 
     /**
-     * Most recently visited pages, deduplicated by URL so a site visited
-     * 20 times in a row doesn't crowd out other entries. Backs the home
-     * page's "Recent pages" list.
+     * Most recently visited pages, deduplicated by page so a site visited
+     * 20 times in a row doesn't crowd out other entries — and jumps to a
+     * section of a page (`page#intro`) count as that page (#418,
+     * [PageVisits.distinctPages]). Backs the home page's "Recent pages"
+     * list.
      *
      * We dedupe in-memory off [history] (which already orders by
-     * `visitedAt DESC`) so the first occurrence we see is the most
-     * recent visit — exactly what [distinctBy] keeps.
+     * `visitedAt DESC`), so pages come in the order of their most recent
+     * visit.
      */
     fun recentDistinct(limit: Int = 10): Flow<List<HistoryEntry>> =
-        history.map { list ->
-            list.asSequence()
-                .distinctBy { it.url }
-                .take(limit)
-                .toList()
-        }
+        history.map { list -> PageVisits.distinctPages(list, limit) }
 
     /**
      * Record a page visit. No-ops for empty URLs, `about:*`, `data:*`, and
@@ -109,18 +106,25 @@ class BrowsingRepository internal constructor(
         // runs ENSIP-15 normalisation for a non-ASCII name, and this is
         // called from composition each time the page's address changes
         // (#296 R3-M2).
-        val key by lazy { BookmarkUrls.key(url) }
+        val key by lazy { bookmarkKey(url) }
         return bookmarks
-            .map { list -> list.any { BookmarkUrls.key(it.url) == key } }
+            .map { list -> list.any { bookmarkKey(it.url) == key } }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
     }
 
-    /** The bookmark that is [url] under any spelling of it ([BookmarkUrls.key]). */
+    /**
+     * The page a bookmark [url] is for: [BookmarkUrls.key], with an
+     * empty trailing `#` dropped first (#418) — `x#` and `x` are one
+     * page, also for a bookmark saved as `x#` before bookmarks dropped it.
+     */
+    private fun bookmarkKey(url: String): String = BookmarkUrls.key(PageVisits.withoutEmptyFragment(url))
+
+    /** The bookmark that is [url] under any spelling of it ([bookmarkKey]). */
     private suspend fun bookmarkFor(url: String, except: Long? = null): BookmarkEntry? {
         db.bookmarks().byUrl(url)?.takeIf { it.id != except }?.let { return it }
-        val key = BookmarkUrls.key(url)
-        return db.bookmarks().allOnce().firstOrNull { it.id != except && BookmarkUrls.key(it.url) == key }
+        val key = bookmarkKey(url)
+        return db.bookmarks().allOnce().firstOrNull { it.id != except && bookmarkKey(it.url) == key }
     }
 
     /**
@@ -156,14 +160,17 @@ class BrowsingRepository internal constructor(
     }
 
     /**
-     * Bookmark [url] under [title], above every other bookmark. Completes
-     * with the bookmark — an existing bookmark for [url] is kept as it is
+     * Bookmark [address] under [title], above every other bookmark — with
+     * an empty trailing `#` dropped ([PageVisits.withoutEmptyFragment]).
+     * Completes with the bookmark — an existing bookmark for it is kept as it is
      * (its name and place) and given with [Bookmarked.added] false — or
      * null for an address that isn't bookmarked ([isRecordable]). The
      * write runs in the repository's scope, so a caller that stops
      * waiting (the screen that asked went away) doesn't stop it.
      */
-    fun bookmark(url: String, title: String): Deferred<Bookmarked?> = scope.async {
+    fun bookmark(address: String, title: String): Deferred<Bookmarked?> = scope.async {
+        // `page#` is saved as `page` (#418): the `#` names no place.
+        val url = PageVisits.withoutEmptyFragment(address)
         if (!isRecordable(url)) return@async null
         try {
             db.withTransaction {
@@ -205,7 +212,7 @@ class BrowsingRepository internal constructor(
         try {
             db.withTransaction {
                 val current = db.bookmarks().byId(id) ?: return@withTransaction BookmarkEditResult.Gone
-                val samePage = current.url == url || BookmarkUrls.key(current.url) == BookmarkUrls.key(url)
+                val samePage = current.url == url || bookmarkKey(current.url) == bookmarkKey(url)
                 val other = if (samePage) null else bookmarkFor(url, except = id)
                 when {
                     other != null ->
@@ -253,9 +260,9 @@ class BrowsingRepository internal constructor(
         scope.launch {
             try {
                 db.withTransaction {
-                    val key = BookmarkUrls.key(url)
+                    val key = bookmarkKey(url)
                     db.bookmarks().allOnce()
-                        .filter { it.url == url || BookmarkUrls.key(it.url) == key }
+                        .filter { it.url == url || bookmarkKey(it.url) == key }
                         .forEach { db.bookmarks().delete(it.id) }
                 }
             } catch (e: SQLiteException) {
@@ -310,6 +317,17 @@ class BrowsingRepository internal constructor(
 
     fun deleteHistory(id: Long) {
         scope.launch { db.history().delete(id) }
+    }
+
+    /** Remove the visits [ids] — one History row standing for several (#418). */
+    fun deleteHistory(ids: Collection<Long>) {
+        scope.launch {
+            try {
+                db.withTransaction { ids.forEach { db.history().delete(it) } }
+            } catch (e: SQLiteException) {
+                Log.w(TAG, "deleteHistory: ${e.message}")
+            }
+        }
     }
 
     /**

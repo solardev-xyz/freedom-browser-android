@@ -145,9 +145,10 @@ class TabsState(
      * [closePrivateTabs]) did: [count] tabs closed, and [undo] the
      * reopen-stack entry that brings back the ones that are kept — null
      * when none is: private tabs are never kept (#86), nor tabs with
-     * nothing in them ([rememberClosed]).
+     * nothing in them ([rememberClosed]). [single] is one tab's own
+     * close ([closeTab]) rather than a bulk one.
      */
-    class BulkClose(val count: Int, val undo: ClosedGroup?)
+    class BulkClose(val count: Int, val undo: ClosedGroup?, val single: Boolean = false)
 
     /**
      * Most recently closed last. Capped at [MAX_CLOSED_TABS] tabs in
@@ -470,12 +471,19 @@ class TabsState(
      * Close the tab at [index]. With [remember] (the user closing it)
      * the tab goes onto the reopen stack ([reopenClosedTab]); a window
      * the page closed itself ([closePopup]) doesn't, and neither does a
-     * private tab: closing it is the end of it (#86).
+     * private tab: closing it is the end of it (#86) — its WebView goes,
+     * and with the last private tab the whole private session, so there
+     * is nothing an Undo could bring back.
+     *
+     * With [offerUndo] (the switcher's ×, #418) the caller puts a
+     * "Tab closed · Undo" notice on screen for the returned
+     * [BulkClose.undo], held like a bulk close's ([undoWithdrawn]).
+     * Without it (Ctrl+W) the tab is only on the reopen stack.
      */
-    fun closeTab(index: Int, remember: Boolean = true) {
-        if (index !in tabs.indices) return
+    fun closeTab(index: Int, remember: Boolean = true, offerUndo: Boolean = false): BulkClose {
+        if (index !in tabs.indices) return BulkClose(0, null)
         val closing = tabs[index]
-        closeWhere(remember, bulk = false) { it === closing }
+        return closeWhere(remember, bulk = false, offerUndo = offerUndo) { it === closing }
     }
 
     /**
@@ -499,6 +507,31 @@ class TabsState(
     }
 
     /**
+     * *Close other tabs* from a card in one of the switcher's panes
+     * (#418): only the tabs of [keep]'s own kind — the other normal
+     * tabs for a normal tab, the other private ones for a private tab —
+     * since the other pane's tabs aren't on screen. [keep] is left
+     * active.
+     */
+    fun closeOtherTabsOfItsKind(keep: BrowserState): BulkClose {
+        if (tabs.none { it.id == keep.id }) return BulkClose(0, null)
+        val closed = closeWhere { it.id != keep.id && it.private == keep.private }
+        val at = tabs.indexOfFirst { it.id == keep.id }
+        if (at >= 0 && at != activeIndex) switchTo(at)
+        return closed
+    }
+
+    /**
+     * The *Tabs* pane's *Close all tabs* (#418): every normal tab, the
+     * private ones staying in their own pane. The normal tabs go onto
+     * the reopen stack as one entry, as [closeAllTabs] has them, and a
+     * blank normal tab takes their place (active, if a normal tab was) —
+     * the active tab doesn't become a private one. With no private tab
+     * open it is the same as [closeAllTabs].
+     */
+    fun closeRegularTabs(): BulkClose = closeWhere { !it.private }
+
+    /**
      * The switcher's *Close private tabs* (#320): the private group
      * only. Ends the private session as closing its last tab does; there
      * is nothing to undo (#86).
@@ -512,13 +545,16 @@ class TabsState(
      * with something in them go onto the reopen stack as one entry.
      *
      * The list is never left empty: closing every tab puts a blank one
-     * in their place. If the active tab closes, the tab that slid into
-     * its place (or the new last one) becomes active; otherwise the
-     * active tab stays.
+     * in their place, and so does closing the last normal tabs while
+     * the active one is among them and private tabs stay open. If the
+     * active tab closes, the next tab of its kind — the one that slid
+     * into its place, or the nearest before it ([nextActiveOfKind]) —
+     * becomes active; otherwise the active tab stays.
      */
     private fun closeWhere(
         remember: Boolean = true,
         bulk: Boolean = true,
+        offerUndo: Boolean = bulk,
         closing: (BrowserState) -> Boolean,
     ): BulkClose {
         val indices = tabs.indices.filter { closing(tabs[it]) }
@@ -534,23 +570,48 @@ class TabsState(
             // WebView about to be destroyed (#246).
             tab.jsDialog?.withdraw()
         }
-        // The list is never empty: the last tabs are replaced by a blank one.
-        val placeholder = if (indices.size == tabs.size) newBlankTab() else null
-        val undo = if (remember) rememberClosed(indices, oldActive, placeholder?.id, bulk) else null
+        val activeCloses = oldActive in indices
+        val activePrivate = tabs[oldActive].private
+        // The list is never empty: the last tabs are replaced by a blank
+        // one. Nor is a normal active tab's place handed to a private
+        // tab (#418): closing the last normal tabs while private ones
+        // stay open puts a blank normal tab in their place too, so the
+        // tab on screen after the switcher isn't private by surprise.
+        val noneLeft = indices.size == tabs.size
+        val noNormalLeft = activeCloses && !activePrivate &&
+            tabs.indices.none { it !in indices && !tabs[it].private }
+        val placeholder = if (noneLeft || noNormalLeft) newBlankTab() else null
+        val undo = if (remember) rememberClosed(indices, oldActive, placeholder?.id, bulk, offerUndo) else null
         for (i in indices.asReversed()) tabs.removeAt(i)
+        // The survivors before the active tab keep their places: the one
+        // after them is the tab that slid into its place.
+        val before = oldActive - indices.count { it < oldActive }
         if (placeholder != null) {
-            tabs.add(placeholder)
-            activeIndex = 0
-        } else if (oldActive in indices) {
-            // The survivors before it keep their places: the one after
-            // them is the tab that slid into its place.
-            val before = oldActive - indices.count { it < oldActive }
-            activeIndex = before.coerceIn(0, tabs.lastIndex)
+            val at = before.coerceIn(0, tabs.size)
+            tabs.add(at, placeholder)
+            activeIndex = at
+        } else if (activeCloses) {
+            activeIndex = nextActiveOfKind(before, activePrivate)
         } else {
             // Shifts left by however many closed before it.
             activeIndex = tabs.indexOfFirst { it.id == activeId }.coerceIn(0, tabs.lastIndex)
         }
-        return BulkClose(indices.size, undo)
+        return BulkClose(indices.size, undo, single = !bulk)
+    }
+
+    /**
+     * Which tab takes over from a closed active tab of kind [private]:
+     * the first of that kind from [slidInto] (the tab that slid into its
+     * place) on, else the nearest one before it — a pane's active tab
+     * passes to a tab in the same pane (#418) — and only when none of
+     * its kind is left, the tab at [slidInto] (closing the last private
+     * tab ends the private session, and a normal tab takes over).
+     */
+    private fun nextActiveOfKind(slidInto: Int, private: Boolean): Int {
+        val from = slidInto.coerceIn(0, tabs.lastIndex)
+        val after = (from..tabs.lastIndex).firstOrNull { tabs[it].private == private }
+        val beforeIt = (from - 1 downTo 0).firstOrNull { tabs[it].private == private }
+        return after ?: beforeIt ?: from
     }
 
     /**
@@ -568,6 +629,7 @@ class TabsState(
         activeAtClose: Int,
         placeholderId: Long?,
         bulk: Boolean,
+        offerUndo: Boolean,
     ): ClosedGroup? {
         var activeAt: Int? = null
         val kept = ArrayList<ClosedTab>()
@@ -597,9 +659,10 @@ class TabsState(
         if (kept.isEmpty()) return null
         val group = ClosedGroup(kept, activeAt, placeholderId, bulk)
         closedTabs.add(group)
-        // A bulk close's Undo goes on screen ([BulkClose.undo]); a
-        // single close is undone by Reopen, not by a notice.
-        if (bulk) offeredUndo = group
+        // A bulk close's Undo goes on screen ([BulkClose.undo]), and so
+        // does a single close's from the switcher (#418); Ctrl+W's is
+        // undone by Reopen (Ctrl+Shift+T), not by a notice.
+        if (offerUndo) offeredUndo = group
         trimClosed()
         return group
     }
@@ -639,17 +702,20 @@ class TabsState(
     }
 
     /**
-     * The Undo of a bulk close (#320): bring back [group] if it is still
-     * on the reopen stack — not if Reopen already did, or the stack was
-     * forgotten ([forgetClosedTabs]) since. Returns whether it was.
+     * The Undo of a close (#320, and a single tab's, #418): bring back
+     * [group] if it is still on the reopen stack — not if Reopen already
+     * did, or the stack was forgotten ([forgetClosedTabs]) since.
+     * Returns whether it was. An Undo puts things back as they were: a
+     * tab comes back active only if it was the active one when it
+     * closed, otherwise the tab on screen now stays on screen.
      */
     fun reopenClosed(group: ClosedGroup): Boolean {
         if (!closedTabs.remove(group)) return false
-        reopen(group)
+        reopen(group, undo = true)
         return true
     }
 
-    private fun reopen(group: ClosedGroup): BrowserState {
+    private fun reopen(group: ClosedGroup, undo: Boolean = false): BrowserState {
         group.reopened = true
         val activeId = active.id
         // Undoing the close of the last tabs: the blank tab put in their
@@ -670,7 +736,7 @@ class TabsState(
         }
         val target = when {
             group.activeAt != null -> reopened[group.activeAt]
-            !group.bulk -> reopened[0]
+            !group.bulk && !undo -> reopened[0]
             else -> tabs.firstOrNull { it.id == activeId } ?: reopened[0]
         }
         activeIndex = tabs.indexOfFirst { it.id == target.id }
