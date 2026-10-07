@@ -1179,6 +1179,7 @@ fun BrowserWebViewHost(
             ClientCertificates.onTabClosed(id)
             RadicleProviders.onTabClosed(id)
             EthereumProviders.onTabClosed(id)
+            SiteData.tabClosed(id)
             SwarmProviders.onTabClosed(id)
             X402Payments.onTabClosed(id)
             if (wv == null) continue
@@ -1402,6 +1403,47 @@ fun BrowserWebViewHost(
         tabs.dropMemoryCache = { tab ->
             webViews[tab.id]?.let { wv -> runCatching { wv.clearCache(false) } }
         }
+        tabs.pageCertificate = { tab ->
+            webViews[tab.id]?.let { wv -> runCatching { wv.certificate }.getOrNull() }?.let { cert ->
+                CertFacts(
+                    errors = emptySet(),
+                    notBeforeMs = cert.validNotBeforeDate?.time,
+                    notAfterMs = cert.validNotAfterDate?.time,
+                    issuedTo = cert.issuedTo?.let { it.cName.ifBlank { it.oName } },
+                    issuedBy = cert.issuedBy?.let { it.cName.ifBlank { it.oName } },
+                )
+            }
+        }
+        tabs.cleanSiteInPage = cleanSiteInPage@{ tab, origin, doneKey, answer ->
+            val wv = webViews[tab.id]
+            if (wv == null || SiteData.committedOrigin(tab.id) != origin) {
+                answer(false)
+                return@cleanSiteInPage
+            }
+            runCatching { wv.evaluateJavascript(siteDataInPageJs(origin, doneKey)) { answer(it == "true") } }
+                .onFailure { answer(false) }
+        }
+        tabs.siteCleanedInPage = { tab, doneKey, answer ->
+            val wv = webViews[tab.id]
+            if (wv == null) {
+                answer(null)
+            } else {
+                runCatching { wv.evaluateJavascript(siteDataInPageDoneJs(doneKey)) { answer(inPageCleanedOf(it)) } }
+                    .onFailure { answer(null) }
+            }
+        }
+        tabs.reloadDocument = reloadDocument@{ tab, origin ->
+            val wv = webViews[tab.id] ?: return@reloadDocument false
+            // Only the document Delete was for: a tab that has since gone
+            // to another site keeps its page, and its draft (R3-F1).
+            if (SiteData.committedOrigin(tab.id) != origin) return@reloadDocument true
+            // A plain reload is refused on a page a form POST answered
+            // (`onFormResubmission`, "don't resend"), and nothing loads
+            // (R3-F3): [PageWebView.siteDataReload] moves on to a GET of
+            // the same address, which the cleanup mark answers.
+            runCatching { if (wv is PageWebView) wv.siteDataReload.swept(wv.url) else wv.reload() }
+            true
+        }
         tabs.clearWebViewData = { siteData, cache ->
             if (siteData) {
                 // Globally-scoped stores: cookies and DOM storage / IndexedDB /
@@ -1466,6 +1508,10 @@ fun BrowserWebViewHost(
             tabs.find = null
             tabs.printPage = null
             tabs.dropMemoryCache = null
+            tabs.pageCertificate = null
+            tabs.cleanSiteInPage = null
+            tabs.siteCleanedInPage = null
+            tabs.reloadDocument = null
             UnverifiedOrigins.onSweep = null
             tabs.setAudioMuted = null
         }
@@ -2957,7 +3003,10 @@ private fun buildRefreshableWebView(
             override fun onFormResubmission(view: WebView?, dontResend: Message?, resend: Message?) {
                 dontResend?.sendToTarget()
                 if (view is PageWebView) {
-                    view.post { view.sweptReload.refused() }
+                    view.post {
+                        view.sweptReload.refused()
+                        view.siteDataReload.refused()
+                    }
                     // A Hard reload's own moves on to a GET; any other
                     // ends its bypass (#262, R4-F1).
                     view.cacheBypass.reloadRefused()
@@ -2984,6 +3033,8 @@ private fun buildRefreshableWebView(
                 failedLoad = null
                 pendingCertErrors.clear()
                 certRefusal.committed(url)
+                // Page info's cleanup mark (#442) lasts this one load.
+                SiteData.committed(state.id, url)
                 // The page that held a blob: download's file is gone, and
                 // its file with it: such a download fails now, not after
                 // a chunk times out.
@@ -3022,6 +3073,7 @@ private fun buildRefreshableWebView(
                 // its frames (#125, [TabDocuments.committed]).
                 if (view is PageWebView) {
                     view.sweptReload.committed()
+                    view.siteDataReload.committed()
                     UnverifiedOrigins.release(view)
                     view.documents.committed(
                         url,
@@ -3909,6 +3961,12 @@ private fun buildRefreshableWebView(
                 // A certificate-refused load issued again: its page, in
                 // its own entry, never reaching the network (#259).
                 val certPage = if (mainFrame) request!!.url?.toString()?.let(certRefusal::take) else null
+                // Page info's Delete data for this site (#442): the reload
+                // after it is answered first with the cleanup page, on the
+                // site's own origin — the only way to reach its
+                // localStorage, Cache Storage and service workers.
+                val cleanup = mainFrame && certPage == null &&
+                    request!!.url?.toString()?.let { SiteData.takeCleanup(state.id, it, request.method) } == true
                 // A dweb subresource the page already gave up on, before
                 // WebView got round to asking for it: answered at once,
                 // nothing fetched. Any other is told if the page gives up
@@ -3923,6 +3981,8 @@ private fun buildRefreshableWebView(
                 val work = state.gatewayWork.start(generation)
                 val response = if (heldBack) heldBackResponse() else if (certPage != null) {
                     certPageResponse(certPage)
+                } else if (cleanup) {
+                    siteDataCleanupResponse()
                 } else try {
                     interceptVirtualRequest(
                         request, ensPins, view, state::assertedProtocolFor, state.onchain,
@@ -4928,6 +4988,28 @@ internal class PageWebView(context: Context) : WebView(context) {
         schedule = { delayMs, action -> mainHandler.postDelayed(action, delayMs) },
     )
 
+    /**
+     * Page info's Delete data reload (#442), when the page's own didn't
+     * come: a reload, and if WebView refuses it — a page a form POST
+     * answered, `onFormResubmission` answered "don't resend" — a GET of
+     * the same address, which the cleanup mark answers (R3-F3). No
+     * deadlines, unlike [sweptReload]: a reload that is merely slow is
+     * waited for, not replaced; only a refused one moves on, and never
+     * to `about:blank`.
+     */
+    val siteDataReload: SweptReload = SweptReload(
+        navigate = { step ->
+            when (step) {
+                SweptReload.Step.RELOAD -> reload()
+                // Without the fragment: with it, a load of the address the
+                // tab is on is a same-document navigation that loads nothing.
+                SweptReload.Step.GET -> siteDataReload.address?.let { loadUrl(it.substringBefore('#')) }
+                SweptReload.Step.BLANK -> Unit
+            }
+        },
+        schedule = { _, _ -> },
+    )
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
@@ -5133,6 +5215,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         // Any load but a sweep's own step supersedes its reload: a later
         // resubmission prompt is that load's, not the sweep's (R1-F1).
         sweptReload.navigationStarted()
+        siteDataReload.navigationStarted()
         // A Hard reload's load bypasses the cache; any other ends that
         // bypass — but not a `javascript:` URL, which loads nothing,
         // unless it's a history step (#262).
@@ -6024,16 +6107,25 @@ private fun siteDataCleanupFor(req: WebResourceRequest, url: String, tab: Any?, 
     // document must not get ahead of that.
     Gateways.awaitExternalEndpointsBlocking()
     if (!UnverifiedOrigins.takeClearFor(origin, tab, private)) return null
-    return WebResourceResponse(
+    return siteDataCleanupResponse()
+}
+
+/** [SITE_DATA_CLEANUP_HTML] as the answer to a document request. */
+internal fun siteDataCleanupResponse(): WebResourceResponse =
+    WebResourceResponse(
         "text/html", "utf-8", 200, "OK",
         // `Vary: *`: a service worker's Cache Storage won't keep it.
         mapOf("Cache-Control" to "no-store", "Vary" to "*"),
         ByteArrayInputStream(SITE_DATA_CLEANUP_HTML.toByteArray(Charsets.UTF_8)),
     )
-}
 
-internal const val SITE_DATA_CLEANUP_HTML = """<!doctype html><meta charset="utf-8"><script>
-(async () => {
+/**
+ * The steps of [SITE_DATA_CLEANUP_HTML] that clear the origin the
+ * document runs on, as the body of an async function: localStorage,
+ * sessionStorage, IndexedDB, Cache Storage, service workers, script-
+ * visible cookies.
+ */
+private const val SITE_DATA_WIPE_JS = """
   const quietly = async (f) => { try { await f(); } catch (e) {} };
   await quietly(() => localStorage.clear());
   await quietly(() => sessionStorage.clear());
@@ -6055,7 +6147,94 @@ internal const val SITE_DATA_CLEANUP_HTML = """<!doctype html><meta charset="utf
       if (name) document.cookie = name + '=; Max-Age=0; path=/';
     }
   });
-  location.replace(location.href);
+"""
+
+/**
+ * The cleanup page's own reload: load the address again, as a new
+ * document. `location.replace` of the same address — a GET — except where
+ * the address has a fragment: navigating to it is then a same-document
+ * fragment navigation, which loads nothing (R2-F1), so it's
+ * `location.reload()`. That is safe here, and only here: this document
+ * answered the request in place of the network ([siteDataCleanupFor],
+ * [SiteData.takeCleanup]), so even if that request was a form POST its
+ * body never reached the site, and the reload sends it the one time. A
+ * real page reached by a POST must never `location.reload()` — script
+ * reloads skip `onFormResubmission` and send the form again (R4-F1);
+ * [siteDataInPageJs] leaves a fragment address to the app's own reload.
+ */
+private const val SITE_DATA_RELOAD_JS = """
+  if (location.href.includes('#')) location.reload(); else location.replace(location.href);"""
+
+internal const val SITE_DATA_CLEANUP_HTML = """<!doctype html><meta charset="utf-8"><script>
+(async () => {$SITE_DATA_WIPE_JS$SITE_DATA_RELOAD_JS
+})();
+</script>"""
+
+/**
+ * Page info's Delete data for this site (#442), run in the tab's own
+ * document on [origin] — the one place its service workers can be
+ * unregistered from (a `loadDataWithBaseURL` document is refused them):
+ * the same clearing as [SITE_DATA_CLEANUP_HTML], then the page reloads
+ * itself, once the workers are gone, so the reload isn't one of theirs.
+ * Just before it reloads it sets `window[doneKey]`, which
+ * [siteDataInPageDoneJs] reads: the app's own fallback reload waits for
+ * the clearing to end rather than racing it (R2-F3).
+ *
+ * Its reload is `location.replace` of the address — a GET, even on a
+ * page a form POST answered. Where the address has a fragment that would
+ * be a same-document navigation that loads nothing (R2-F1), and the one
+ * script reload that does load, `location.reload()`, sends a POST page's
+ * form again with no `onFormResubmission` prompt (R4-F1). So there the
+ * page doesn't reload at all: `window[doneKey]` says the app is to
+ * ([InPageCleaned.APP_RELOADS]), and the app's reload — which WebView
+ * does ask about a POST, and which moves on to a GET when refused
+ * ([PageWebView.siteDataReload]) — comes at once. [doneKey] is a
+ * fresh random name each time, nothing that names the app. Does nothing
+ * at all in a document on any other origin — one that committed after
+ * the caller last looked, or an opaque one (`Content-Security-Policy:
+ * sandbox`, `location.origin` `"null"`). Evaluates to whether it started
+ * the clearing, so the app doesn't wait on a done-key that will never be
+ * set (R3-F4).
+ */
+internal fun siteDataInPageJs(origin: String, doneKey: String): String =
+    """(() => {
+  if (location.origin !== ${org.json.JSONObject.quote(origin)}) return false;
+  (async () => {$SITE_DATA_WIPE_JS
+  const self = !location.href.includes('#');
+  try { window[${org.json.JSONObject.quote(doneKey)}] = self ? '$IN_PAGE_RELOADING' : '$IN_PAGE_APP_RELOADS'; } catch (e) {}
+  if (self) location.replace(location.href);
+  })();
+  return true;
+})()"""
+
+/**
+ * Has [siteDataInPageJs] with [doneKey] finished clearing in this
+ * document? Evaluates to its done mark — read with [inPageCleanedOf] — or
+ * `null` if not.
+ */
+internal fun siteDataInPageDoneJs(doneKey: String): String =
+    "(() => { const v = window[${org.json.JSONObject.quote(doneKey)}]; " +
+        "return v === '$IN_PAGE_RELOADING' || v === '$IN_PAGE_APP_RELOADS' ? v : null; })()"
+
+private const val IN_PAGE_RELOADING = "reloading"
+private const val IN_PAGE_APP_RELOADS = "app"
+
+/** [siteDataInPageDoneJs]'s answer, as `evaluateJavascript` hands it back: `null` while still clearing. */
+internal fun inPageCleanedOf(result: String?): InPageCleaned? = when (result) {
+    "\"$IN_PAGE_RELOADING\"" -> InPageCleaned.RELOADING_ITSELF
+    "\"$IN_PAGE_APP_RELOADS\"" -> InPageCleaned.APP_RELOADS
+    else -> null
+}
+
+/**
+ * The same clearing as [SITE_DATA_CLEANUP_HTML], ending by setting the
+ * title to [doneTitle] instead of reloading — for Page info's throwaway
+ * WebView ([SiteData.delete]), which waits for that title.
+ */
+internal fun siteDataWipeHtml(doneTitle: String): String =
+    """<!doctype html><meta charset="utf-8"><script>
+(async () => {$SITE_DATA_WIPE_JS
+  document.title = '$doneTitle';
 })();
 </script>"""
 

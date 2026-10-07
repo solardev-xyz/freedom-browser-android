@@ -14,7 +14,6 @@ import baby.freedom.mobile.browser.MainMenuRow.NewTab
 import baby.freedom.mobile.browser.MainMenuRow.Nodes
 import baby.freedom.mobile.browser.MainMenuRow.Print
 import baby.freedom.mobile.browser.MainMenuRow.Settings
-import baby.freedom.mobile.browser.MainMenuRow.SitePermissions
 import baby.freedom.mobile.browser.MainMenuRow.Wallet
 import baby.freedom.mobile.browser.MainMenuRow.Zoom
 import baby.freedom.mobile.wallet.Vault
@@ -33,7 +32,6 @@ class MainMenuTest {
         hasNameTrust = true,
         canOpenPrivateTab = true,
         hasAdblock = true,
-        hasSitePermissions = true,
         canAddToHomeScreen = true,
     )
 
@@ -43,7 +41,7 @@ class MainMenuTest {
             listOf(
                 listOf(NameTrust),
                 listOf(Home, NewTab, NewPrivateTab),
-                listOf(FindInPage, Zoom, DesktopSite, Print, BlockAds, SitePermissions, AddToHomeScreen),
+                listOf(FindInPage, Zoom, DesktopSite, Print, BlockAds, AddToHomeScreen),
                 listOf(History, Bookmarks, Downloads, Wallet),
                 listOf(Settings, Nodes),
             ),
@@ -88,14 +86,13 @@ class MainMenuTest {
 
     @Test
     fun `no group is ever empty, so no two dividers meet`() {
-        for (home in listOf(true, false)) for (bits in 0 until 32) {
+        for (home in listOf(true, false)) for (bits in 0 until 16) {
             val c = MainMenuContext(
                 isHome = home,
                 hasNameTrust = bits and 1 != 0,
                 canOpenPrivateTab = bits and 2 != 0,
                 hasAdblock = bits and 4 != 0,
-                hasSitePermissions = bits and 8 != 0,
-                canAddToHomeScreen = bits and 16 != 0,
+                canAddToHomeScreen = bits and 8 != 0,
             )
             val groups = mainMenuGroups(c)
             assertTrue(groups.none { it.isEmpty() })
