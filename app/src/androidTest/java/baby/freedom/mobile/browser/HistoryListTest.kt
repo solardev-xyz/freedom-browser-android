@@ -33,7 +33,8 @@ import java.time.ZoneId
 /**
  * The History page's day headers (#263) are headings for TalkBack, and
  * a header still reads whole at 200% font scale; an entry's long-press
- * and TalkBack actions open it in a new or a private tab (#321).
+ * and TalkBack actions open it in a new or a private tab (#321); a row
+ * names the site and keeps the full address for its long-press (#418).
  */
 @RunWith(AndroidJUnit4::class)
 class HistoryListTest {
@@ -135,6 +136,16 @@ class HistoryListTest {
         rule.onNode(hasText("Page 2") and hasClickAction()).performTouchInput { longClick(center) }
         rule.onNodeWithText("Open in private tab").performClick()
         assertEquals(listOf("https://example.com/1" to false, "https://example.com/2" to true), opened)
+    }
+
+    @Test
+    fun rowsNameTheSiteAndLongPressShowsTheFullAddress() {
+        show(fontScale = 1f)
+        // Flat rows (#418): the host, not the whole address.
+        rule.onAllNodesWithText("example.com", substring = true).assertCountEquals(3)
+        rule.onNodeWithText("https://example.com/1").assertDoesNotExist()
+        rule.onNode(hasText("Page 1") and hasClickAction()).performTouchInput { longClick(center) }
+        rule.onNodeWithText("https://example.com/1").assertIsDisplayed()
     }
 
     @Test

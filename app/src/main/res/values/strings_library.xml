@@ -130,6 +130,8 @@
     <string name="library_history_no_matches_hint">Nothing in your history matches that. Search looks at page titles and addresses.</string>
     <string name="library_history_search_placeholder">Search history</string>
     <string name="library_history_clear_search">Clear search</string>
+    <!-- History's first row (#418): opens Settings' Delete browsing data page over History. -->
+    <string name="library_history_delete_data">Delete browsing data…</string>
 
     <!-- HistoryDays.kt: day headers -->
     <string name="library_history_today">Today</string>

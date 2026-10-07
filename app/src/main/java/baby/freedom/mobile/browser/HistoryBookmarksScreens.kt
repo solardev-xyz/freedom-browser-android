@@ -5,6 +5,23 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import androidx.activity.compose.BackHandler
+import android.widget.Toast
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.style.TextOverflow
+import baby.freedom.mobile.data.PageVisits
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -87,6 +104,13 @@ import java.util.Date
  * a private tab behind this one instead (#321): [onOpenInNewTab], with
  * whether the new tab is private — always, when [private] (the page was
  * opened from a private tab; see [entryOpenTargets]).
+ *
+ * Rows are flat (#418): favicon, title and site; the full address is in
+ * the long-press menu. Back-to-back visits of one page that differ only
+ * in their `#section` are one row ([PageVisits.mergeRuns]), whose × removes
+ * all of them. The first row opens Delete browsing data
+ * ([DeleteBrowsingDataPage]) over this page, which hands the choice to
+ * [onDeleteBrowsingData] as Settings' does.
  */
 @Composable
 fun HistoryScreen(
@@ -95,8 +119,10 @@ fun HistoryScreen(
     onDismiss: () -> Unit,
     onOpen: (String) -> Unit,
     onOpenInNewTab: (url: String, private: Boolean) -> Unit,
+    onDeleteBrowsingData: (DeleteChoice) -> Unit,
 ) {
     BackHandler(onBack = onDismiss)
+    var deleteDataOpen by rememberSaveable { mutableStateOf(false) }
     // Registered after the dismiss handler so it wins while there's a
     // query: Back clears the search first, as on the Settings page.
     var query by rememberSaveable(saver = LibraryQuerySaver) { mutableStateOf("") }
@@ -111,8 +137,9 @@ fun HistoryScreen(
         repo.searchHistory(q).collect { value = q to it }
     }
     val calendar = rememberCalendarDay()
-    val days = remember(results, calendar) {
-        historyDays(results?.second.orEmpty(), calendar.date, calendar.zone)
+    val merged = remember(results) { PageVisits.mergeRuns(results?.second.orEmpty()) }
+    val days = remember(merged, calendar) {
+        historyDays(merged.rows, calendar.date, calendar.zone)
     }
     // DateFormat captures the default time zone when it's built, so a
     // zone change needs a fresh one for the rows' times to follow.
@@ -122,38 +149,83 @@ fun HistoryScreen(
         title = stringResource(R.string.library_history_title),
         onDismiss = onDismiss,
     ) {
-        when {
-            // Nothing read yet: draw nothing rather than a wrong state.
-            hasHistory == null -> Unit
-            hasHistory == false && query.isBlank() -> EmptyState(
-                icon = Icons.Outlined.History,
-                title = stringResource(R.string.library_history_empty_title),
-                hint = stringResource(R.string.library_history_empty_hint),
-            )
-            else -> Column(modifier = Modifier.fillMaxSize()) {
-                LibrarySearchField(
-                    query = query,
-                    onQueryChange = { query = it },
-                    placeholder = stringResource(R.string.library_history_search_placeholder),
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Cookies, cache and closed tabs are there to delete even with
+            // no history, so this row is always there.
+            DeleteDataRow(onClick = { deleteDataOpen = true })
+            when {
+                // Nothing read yet: draw nothing rather than a wrong state.
+                hasHistory == null -> Unit
+                hasHistory == false && query.isBlank() -> EmptyState(
+                    icon = Icons.Outlined.History,
+                    title = stringResource(R.string.library_history_empty_title),
+                    hint = stringResource(R.string.library_history_empty_hint),
                 )
-                if (showsNoMatches(results, query)) {
-                    EmptyState(
-                        icon = Icons.Filled.SearchOff,
-                        title = stringResource(R.string.library_history_no_matches_title),
-                        hint = stringResource(R.string.library_history_no_matches_hint),
+                else -> Column(modifier = Modifier.fillMaxSize()) {
+                    LibrarySearchField(
+                        query = query,
+                        onQueryChange = { query = it },
+                        placeholder = stringResource(R.string.library_history_search_placeholder),
                     )
-                } else {
-                    HistoryList(
-                        days = days,
-                        timeFormat = timeFormat,
-                        fromPrivate = private,
-                        onOpen = onOpen,
-                        onOpenInNewTab = onOpenInNewTab,
-                        onRemove = { repo.deleteHistory(it) },
-                    )
+                    if (showsNoMatches(results, query)) {
+                        EmptyState(
+                            icon = Icons.Filled.SearchOff,
+                            title = stringResource(R.string.library_history_no_matches_title),
+                            hint = stringResource(R.string.library_history_no_matches_hint),
+                        )
+                    } else {
+                        HistoryList(
+                            days = days,
+                            timeFormat = timeFormat,
+                            fromPrivate = private,
+                            repo = repo,
+                            onOpen = onOpen,
+                            onOpenInNewTab = onOpenInNewTab,
+                            onRemove = { repo.deleteHistory(merged.idsOf(it)) },
+                        )
+                    }
                 }
             }
         }
+    }
+    // Over History, which Back from it returns to.
+    if (deleteDataOpen) {
+        val context = LocalContext.current
+        DeleteBrowsingDataPage(
+            repo = repo,
+            onDelete = { choice ->
+                onDeleteBrowsingData(choice)
+                deleteDataOpen = false
+                Toast.makeText(context, deleteDoneMessage(choice), Toast.LENGTH_LONG).show()
+            },
+            onBack = { deleteDataOpen = false },
+        )
+    }
+}
+
+/** History's first row (#418): opens Delete browsing data. */
+@Composable
+private fun DeleteDataRow(onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Outlined.DeleteSweep,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+        )
+        Spacer(Modifier.width(16.dp))
+        Text(
+            stringResource(R.string.library_history_delete_data),
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Medium,
+        )
     }
 }
 
@@ -222,10 +294,11 @@ internal fun HistoryList(
     onOpen: (String) -> Unit,
     onOpenInNewTab: (url: String, private: Boolean) -> Unit,
     onRemove: (Long) -> Unit,
+    // Where the rows' favicons come from; without it, letter tiles.
+    repo: BrowsingRepository? = null,
 ) {
     LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 8.dp),
+        contentPadding = PaddingValues(start = 8.dp, end = 8.dp, bottom = 8.dp),
         modifier = Modifier.fillMaxSize(),
     ) {
         for (day in days) {
@@ -238,15 +311,16 @@ internal fun HistoryList(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(MaterialTheme.colorScheme.background)
-                        .padding(start = 4.dp, top = 12.dp, bottom = 4.dp)
+                        .padding(start = 12.dp, top = 12.dp, bottom = 4.dp)
                         .semantics { heading() },
                 )
             }
             items(items = day.entries, key = { it.id }) { entry ->
                 EntryRow(
+                    url = entry.url,
                     title = entry.title.ifBlank { entry.url },
-                    subtitle = entry.url,
                     timestamp = timeFormat.format(Date(entry.visitedAt)),
+                    repo = repo,
                     onClick = { onOpen(entry.url) },
                     openActions = entryOpenActions(fromPrivate) { private -> onOpenInNewTab(entry.url, private) },
                     onRemove = { onRemove(entry.id) },
@@ -296,47 +370,145 @@ internal val LibraryQuerySaver = Saver<MutableState<String>, String>(
     restore = { mutableStateOf(it) },
 )
 
+/**
+ * The site a History row names (#418): the address's host, without
+ * `www.` — `https://www.example.org/a?b` reads "example.org", a dweb
+ * address its name or content hash. The whole address is in the row's
+ * long-press menu.
+ */
+internal fun historyHost(url: String): String {
+    val rest = url.substringAfter("://", url)
+    val end = rest.indexOfFirst { it == '/' || it == '?' || it == '#' }
+    val authority = if (end < 0) rest else rest.substring(0, end)
+    val host = authority.substringAfterLast('@')
+    return host.removePrefix("www.").ifBlank { url }
+}
+
+/**
+ * One History row (#418): favicon, title and site on a flat row, the
+ * visit's time at the end, and its ×. A long-press opens a menu that
+ * starts with the full address, then the open-in-new-tab items (#321).
+ */
 @Composable
 private fun EntryRow(
+    url: String,
     title: String,
-    subtitle: String,
-    timestamp: String?,
+    timestamp: String,
+    repo: BrowsingRepository?,
     onClick: () -> Unit,
     openActions: List<Pair<String, () -> Unit>>,
     onRemove: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     val removeLabel = stringResource(R.string.common_remove)
-    PageRow(
-        title = title,
-        subtitle = subtitle,
-        thirdLine = timestamp,
-        onClick = onClick,
-        // Long-press for the open-in-new-tab menu (#321); TalkBack gets
-        // its items as actions on the row itself.
-        onLongClick = { menuOpen = true },
-        onLongClickLabel = stringResource(R.string.library_entry_options),
-        modifier = Modifier.semantics { customActions = openActions.asAccessibilityActions() },
-        trailing = {
-            // The long-press menu, dropped from the row's end.
-            Box {
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    EntryOpenMenuItems(openActions, onClose = { menuOpen = false })
-                }
-            }
-            // Material's own size: a full 48 dp target (#279).
-            IconButton(
-                onClick = onRemove,
-                shapes = IconButtonDefaults.shapes(),
-            ) {
-                Icon(
-                    Icons.Filled.Close,
-                    contentDescription = removeLabel,
-                    modifier = Modifier.size(18.dp),
+    val host = historyHost(url)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .clip(MaterialTheme.shapes.medium)
+            // Long-press for the menu (#321); TalkBack gets its items as
+            // actions on the row itself.
+            .combinedClickable(
+                onLongClickLabel = stringResource(R.string.library_entry_options),
+                onLongClick = { menuOpen = true },
+                onClick = onClick,
+            )
+            .semantics { customActions = openActions.asAccessibilityActions() }
+            .padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        EntryFavicon(repo = repo, url = url, title = title)
+        Spacer(Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            // The site, and when: the time is a fact of its own, so it
+            // keeps its place when the site is long or the font large.
+            FlowRow(itemVerticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    host,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp),
+                )
+                Text(
+                    timestamp,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
                 )
             }
-        },
-    )
+        }
+        Box {
+            // The long-press menu, dropped from the row's end: the full
+            // address first, then where to open it.
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                Text(
+                    url,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .widthIn(max = 280.dp)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+                HorizontalDivider()
+                EntryOpenMenuItems(openActions, onClose = { menuOpen = false })
+            }
+        }
+        // Material's own size: a full 48 dp target (#279).
+        IconButton(
+            onClick = onRemove,
+            shapes = IconButtonDefaults.shapes(),
+        ) {
+            Icon(
+                Icons.Filled.Close,
+                contentDescription = removeLabel,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+}
+
+/** A History row's site icon: its cached favicon, or a letter tile until there is one. */
+@Composable
+private fun EntryFavicon(repo: BrowsingRepository?, url: String, title: String) {
+    val favicon = repo?.let { rememberFavicon(repo = it, url = url) }
+    Box(
+        modifier = Modifier
+            // A picture of the site the row's text already names.
+            .clearAndSetSemantics {}
+            .size(32.dp)
+            .clip(MaterialTheme.shapes.small)
+            .background(if (favicon != null) Color.White else tileAccentFor(url)),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (favicon != null) {
+            Image(
+                bitmap = favicon,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.size(20.dp),
+            )
+        } else {
+            Text(
+                initialChar(title, url).toString(),
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White,
+            )
+        }
+    }
 }
 
 @Composable

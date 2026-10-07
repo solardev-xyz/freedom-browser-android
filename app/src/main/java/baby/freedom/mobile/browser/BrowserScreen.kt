@@ -683,6 +683,9 @@ fun BrowserScreen(
     // open, and a Long snackbar would sit over the bottom row's Retry
     // and × for ten seconds.
     val downloadNotices = remember { DownloadNotices() }
+    // The switcher's pane (#418): it opens on the active tab's kind, and
+    // only its Private pane shows private tabs' cards.
+    var switcherPrivatePane by remember(showTabSwitcher) { mutableStateOf(tabs.active.private) }
     // Is anything from a private session (#86) on screen? A private
     // download's notice (negative id) names its file, so it's only shown
     // while that's the case, and withdrawn when the screen goes back to
@@ -691,6 +694,7 @@ fun BrowserScreen(
         activePrivate = tabs.active.private,
         anyPrivate = tabs.tabs.any { it.private },
         switcherShown = showTabSwitcher,
+        switcherPrivatePane = switcherPrivatePane,
         downloadsShown = showDownloads,
     )
     val privateOnScreenNow by rememberUpdatedState(privateOnScreen)
@@ -2630,6 +2634,23 @@ fun BrowserScreen(
         }
     }
 
+    // Delete browsing data (#400), from Settings or History (#418).
+    val deleteBrowsingData: (DeleteChoice) -> Unit = { choice ->
+        // The reopen stack keeps closed tabs' pages, titles and
+        // back/forward lists — history by any other name. It has
+        // no dates, so a ranged delete takes all of it. So do the
+        // tabs a crashed restore held back (#402): the saved tab
+        // list is rewritten from the open tabs alone, now.
+        if (choice.forgetsClosedTabs) {
+            tabs.forgetClosedTabs()
+            tabsSession.forgetHeld()
+            tabsSession.persistNow()
+        }
+        if (choice.siteData || choice.cache) tabs.clearWebViewData?.invoke(choice.siteData, choice.cache)
+        // The nodes' logs can name what was browsed (#276).
+        if (choice.siteData) clearNodeLogs()
+    }
+
     if (showSettings) {
         SettingsScreen(
             repo = repo,
@@ -2647,21 +2668,7 @@ fun BrowserScreen(
                 showSettings = false
                 tabs.requestOpenInNewTab?.invoke(url, false, false)
             },
-            onDeleteBrowsingData = { choice ->
-                // The reopen stack keeps closed tabs' pages, titles and
-                // back/forward lists — history by any other name. It has
-                // no dates, so a ranged delete takes all of it. So do the
-                // tabs a crashed restore held back (#402): the saved tab
-                // list is rewritten from the open tabs alone, now.
-                if (choice.forgetsClosedTabs) {
-                    tabs.forgetClosedTabs()
-                    tabsSession.forgetHeld()
-                    tabsSession.persistNow()
-                }
-                if (choice.siteData || choice.cache) tabs.clearWebViewData?.invoke(choice.siteData, choice.cache)
-                // The nodes' logs can name what was browsed (#276).
-                if (choice.siteData) clearNodeLogs()
-            },
+            onDeleteBrowsingData = deleteBrowsingData,
             onDismiss = {
                 showSettings = false
                 settingsInitialSection = null
@@ -2835,21 +2842,30 @@ fun BrowserScreen(
             onDismiss = { showTabSwitcher = false },
             onNewTab = openNewTab,
             onNewPrivateTab = newPrivateTab,
+            privatePane = switcherPrivatePane,
+            onPrivatePaneChange = { switcherPrivatePane = it },
             onTabsClosed = { closed ->
                 // Close all / Close other tabs (#320): say how many went,
                 // with an Undo that brings back the ones that are kept
-                // (none of a private tab's). A newer bulk close replaces
-                // the notice of the last one. Gone from disk at once
-                // (#400): an app killed while the notice is up doesn't
-                // bring them back. Undo writes them again.
+                // (none of a private tab's). One tab's × (#418): "Tab
+                // closed" with its Undo — and no notice at all when there
+                // is nothing to undo (a private tab, #86, or an empty
+                // one), leaving an earlier Undo up. A newer close
+                // replaces the notice of the last one. Gone from disk at
+                // once (#400): an app killed while the notice is up
+                // doesn't bring them back. Undo writes them again.
                 tabsSession.persistNow()
-                tabsClosedNotice?.cancel()
-                if (closed.count > 0) {
+                if (closed.count > 0 && !(closed.single && closed.undo == null)) {
+                    tabsClosedNotice?.cancel()
                     tabsClosedNotice = scope.launch {
                         val undo = closed.undo
                         try {
                             val result = snackbarHostState.showSnackbar(
-                                message = Strings.plural(R.plurals.browser_tabs_closed, closed.count, closed.count),
+                                message = if (closed.single) {
+                                    Strings.get(R.string.browser_tab_closed)
+                                } else {
+                                    Strings.plural(R.plurals.browser_tabs_closed, closed.count, closed.count)
+                                },
                                 actionLabel = undo?.let { Strings.get(R.string.browser_tabs_undo) },
                                 duration = SnackbarDuration.Long,
                             )
@@ -2878,6 +2894,7 @@ fun BrowserScreen(
             onOpenInNewTab = { url, private ->
                 openInNewTab(url, background = true, private = private, onSwitch = { showHistory = false })
             },
+            onDeleteBrowsingData = deleteBrowsingData,
         )
     }
 
