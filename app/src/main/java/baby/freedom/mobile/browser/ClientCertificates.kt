@@ -123,10 +123,13 @@ internal class ClientCertChoices {
 
     /**
      * Per tab with a refusal holding: the servers ([key]) of the latest
-     * link the user followed there — its first hop and its redirects
-     * ([followed]) — which ask again.
+     * link the user followed there — its first hop and its current
+     * redirect hop, never more ([followed]) — which ask again.
      */
     private val followedHosts = HashMap<Long, MutableSet<String>>()
+
+    /** Per tab, the first hop's server ([key]) of its latest followed link ([followed]). */
+    private val followFirst = HashMap<Long, String>()
 
     /** Per tab, the user's input that bought its latest followed link ([followed]). */
     private val followInputs = HashMap<Long, Int>()
@@ -172,30 +175,43 @@ internal class ClientCertChoices {
      * re-issued for its user agent) keeps it. Each new link replaces
      * the servers the previous one exempted.
      *
+     * A redirect hop exempts its own server in place of the previous
+     * hop's: the link exempts its first hop and its current hop, never
+     * more, so a chain of redirects through server after server (each
+     * hop a page's poller could then connect to) doesn't exempt them
+     * all (#333 R2-F1). And any Deny in the tab ends the link's
+     * exemption ([answered]): its later hops are refused like
+     * everything else.
+     *
      * Returns whether that exempted a server not exempted before.
      */
     fun followed(tabId: Long, host: String, port: Int, input: Int?, redirect: Boolean = false): Boolean {
         if (!refusing(tabId)) return false
         val k = key(host, port)
+        val mine = followedHosts[tabId].orEmpty()
         if (redirect) {
             if (tabId !in followChains) return false
         } else {
-            val mine = followedHosts[tabId].orEmpty()
             if (input == null || followInputs[tabId] == input) {
-                if (input == null || k !in mine) endFollow(tabId, keepInput = true)
+                if (input == null || k != followFirst[tabId]) endFollow(tabId, keepInput = true)
                 return false
             }
             followInputs[tabId] = input
-            followedHosts.remove(tabId)
             followChains += tabId
+            followFirst[tabId] = k
         }
-        if (k in deniedHosts[tabId].orEmpty()) return false
-        return followedHosts.getOrPut(tabId) { HashSet() }.add(k)
+        val now = HashSet<String>()
+        followFirst[tabId]?.let { now += it }
+        now += k
+        now.removeAll(deniedHosts[tabId].orEmpty())
+        followedHosts[tabId] = now
+        return now.any { it !in mine }
     }
 
     /** No link followed in tab [tabId] exempts a server any more. */
     private fun endFollow(tabId: Long, keepInput: Boolean = false) {
         followedHosts.remove(tabId)
+        followFirst.remove(tabId)
         followChains -= tabId
         if (!keepInput) followInputs.remove(tabId)
     }
@@ -276,14 +292,12 @@ internal class ClientCertChoices {
             return
         }
         // A refusal no longer holding for later requests starts afresh.
-        if (!refusing(tabId)) {
-            deniedHosts.remove(tabId)
-            endFollow(tabId, keepInput = true)
-        }
+        if (!refusing(tabId)) deniedHosts.remove(tabId)
+        // A Deny ends the followed link's exemption, so its later
+        // redirect hops can't each bring the chooser back (#333 R2-F1).
+        endFollow(tabId, keepInput = true)
         declined[tabId] = tickets
-        val k = key(host, port)
-        deniedHosts.getOrPut(tabId) { HashSet() }.add(k)
-        followedHosts[tabId]?.remove(k)
+        deniedHosts.getOrPut(tabId) { HashSet() }.add(key(host, port))
     }
 
     /** The picked certificate can't be read any more (removed from the device): ask again next time. */
@@ -296,6 +310,7 @@ internal class ClientCertChoices {
         declined.clear()
         deniedHosts.clear()
         followedHosts.clear()
+        followFirst.clear()
         followChains.clear()
         followInputs.clear()
         generation++

@@ -183,6 +183,36 @@ class ClientCertificatesTest {
     }
 
     @Test
+    fun `a followed link's redirects exempt only its current hop, and a Deny ends them`() {
+        val c = ClientCertChoices()
+        c.loaded(2L)
+        c.answered("a1.evil.example", 8443, 2L, null, c.generation)
+        // One tap to evil/r, which 302s through a2..a20 (R2-F1).
+        assertEquals(true, c.followed(2L, "evil.example", 443, input = 1))
+        for (n in 2..20) {
+            assertEquals(true, c.followed(2L, "a$n.evil.example", 443, input = 1, redirect = true))
+        }
+        // Only the link's own server and its current hop ask; every
+        // earlier hop is refused again.
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "evil.example", 443, 2L, c.ticket()))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "a20.evil.example", 443, 2L, c.ticket()))
+        for (n in 2..19) {
+            assertEquals(ClientCertPlan.Refuse, c.planFor(false, "a$n.evil.example", 443, 2L, c.ticket()))
+        }
+        // A Deny (here for the current hop) ends the link: its own server
+        // and every later hop are refused, with no chooser.
+        c.answered("a20.evil.example", 443, 2L, null, c.generation)
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "evil.example", 443, 2L, c.ticket()))
+        for (n in 21..40) {
+            assertEquals(false, c.followed(2L, "a$n.evil.example", 443, input = 1, redirect = true))
+            assertEquals(ClientCertPlan.Refuse, c.planFor(false, "a$n.evil.example", 443, 2L, c.ticket()))
+        }
+        // The user's next tap is a link of its own again.
+        assertEquals(true, c.followed(2L, "bank.example", 443, input = 2))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "bank.example", 443, 2L, c.ticket()))
+    }
+
+    @Test
     fun `a refusal and a followed link are per server, host and port`() {
         val c = ClientCertChoices()
         c.loaded(2L)
