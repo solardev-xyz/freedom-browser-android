@@ -143,6 +143,14 @@ sealed interface EthAnswer {
     data object Unseen : EthAnswer
 
     /**
+     * An informational sheet ([EthAsk.CantSend]) was closed: the user
+     * turned nothing down, so the tab's other asks aren't paused — only
+     * that sheet stays down for the tab until the user navigates it, so a
+     * page retrying in a loop can't keep putting it back up (R1-F1).
+     */
+    data object Closed : EthAnswer
+
+    /**
      * [account]: the one the user picked to share, for [EthAsk.Connect];
      * [payment]: the offer picked and any allowance granted, for [EthAsk.Payment];
      * [alwaysApprove]: for [EthAsk.SendTransaction], also turn its
@@ -804,7 +812,8 @@ class EthereumProvider(
             messageJson = shown,
             ledgerHashes = ledgerHashes,
             // Read from the same declared fields the digest covers; null for anything else.
-            permit = withContext(compute) { TxDecode.permit(data, chain.id) },
+            // Tokens are named only by the chain the signature is bound to (R1-M2).
+            permit = withContext(compute) { TxDecode.permit(data, chain.id.takeIf { chainBound }) },
         )
         ask(ask0).let { if (it !is EthAnswer.Approved) return refused(it) }
         return signed { wallet.signTypedData(account, data, digest) }

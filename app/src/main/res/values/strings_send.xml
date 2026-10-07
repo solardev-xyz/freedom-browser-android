@@ -452,7 +452,8 @@
     <!-- %1$s: the network switched from. -->
     <string name="send_eth_switch_from">From %1$s</string>
     <string name="send_eth_add_chain_headline_label">Add this network and switch this site to it</string>
-    <string name="send_eth_add_checked">Use Freedom\'s checked RPCs (recommended)</string>
+    <!-- Not "checked" or "verified": catalog RPCs are only filtered for API keys, not tested (R1-M4). -->
+    <string name="send_eth_add_checked">Use RPCs from Freedom\'s list (recommended)</string>
     <plurals name="send_eth_add_checked_detail">
         <item quantity="one">%1$d public RPC provider from Freedom\'s list, not chosen by the site</item>
         <item quantity="other">%1$d public RPC providers from Freedom\'s list, not chosen by the site</item>

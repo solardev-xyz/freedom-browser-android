@@ -255,7 +255,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
     val payment = remember(request) { (ask as? EthAsk.Payment)?.let { X402SheetState(it.payment) } }
     // The auto-approve row (#112): off every time the sheet comes up.
     var always by remember(request) { mutableStateOf(false) }
-    // Add network (W27): Freedom's checked RPCs unless the user picks the site's.
+    // Add network (W27): the RPCs from Freedom's own list unless the user picks the site's.
     var siteRpcs by remember(request) { mutableStateOf(false) }
     var receiving by remember(request) { mutableStateOf(false) }
     val nowSeconds = remember(request) { System.currentTimeMillis() / 1000 }
@@ -317,7 +317,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
 
     ModalBottomSheet(
         onDismissRequest = {
-            if (guard.accepts() && !busy) request.respond(EthAnswer.Rejected) else guard.noteInput()
+            if (guard.accepts() && !busy) request.respond(if (ask is EthAsk.CantSend) EthAnswer.Closed else EthAnswer.Rejected) else guard.noteInput()
         },
         sheetState = sheetState,
         modifier = Modifier.testTag("ethereum-approval"),
@@ -391,7 +391,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
             if (ask is EthAsk.CantSend) {
                 SheetButtonRow {
                     OutlinedButton(
-                        onClick = { if (guard.accepts()) request.respond(EthAnswer.Rejected) },
+                        onClick = { if (guard.accepts()) request.respond(EthAnswer.Closed) },
                         enabled = armed,
                         modifier = Modifier.testTag("ethereum-close"),
                     ) { Text(stringResource(R.string.common_close)) }

@@ -98,6 +98,9 @@ object EthereumProviders {
     private val pending = HashMap<Long, MutableSet<EthereumPromptRequest>>()
     private val blockedTabs = HashSet<Long>()
 
+    /** Tabs whose can't-send sheet the user closed: further ones are skipped (the page still gets the error) until they navigate it. */
+    private val cantSendClosed = HashSet<Long>()
+
     private class Bridge(val tab: BrowserState) {
         /** The origin and channel of the top-level document that last spoke. */
         var origin: String? = null
@@ -257,6 +260,9 @@ object EthereumProviders {
             if (now.any { it.origin == origin }) return false
             val known = WalletAccounts.get(context).accounts.value?.accounts ?: return false
             if (known.none { it.address.equals(account, ignoreCase = true) }) return false
+            // Not on a chain removed in Settings meanwhile, as the provider's own check (R1-M3).
+            val chains = ChainStore.get(context).chainsOrUnreadable.first() ?: return false
+            if (chains.none { it.id == chainId }) return false
             if (!grants.grant(origin, account, chainId)) return false
             val ruleStore = AutoApproveStore.get(context)
             rules.filter { it.origin == origin }.forEach { ruleStore.grant(it) }
@@ -393,6 +399,7 @@ object EthereumProviders {
         fun live() = (documents[tab.id] ?: 0) == doc && tab.id !in blockedTabs
         if (tab.id in blockedTabs && (documents[tab.id] ?: 0) == doc) return EthAnswer.Paused
         if (!live()) return EthAnswer.Rejected
+        if (ask is EthAsk.CantSend && tab.id in cantSendClosed) return EthAnswer.Unseen
         val lock = promptLocks.getOrPut(tab.id) { Mutex() }
         return lock.withLock {
             if (!live()) return@withLock EthAnswer.Rejected
@@ -409,7 +416,11 @@ object EthereumProviders {
                 pending[tab.id]?.remove(request)
                 if (tab.ethereumPrompt === request) tab.ethereumPrompt = null
             }
-            if (answer !is EthAnswer.Approved && answer != EthAnswer.Unseen && live()) blockedTabs += tab.id
+            when {
+                !live() -> Unit
+                answer == EthAnswer.Closed -> cantSendClosed += tab.id
+                answer !is EthAnswer.Approved && answer != EthAnswer.Unseen -> blockedTabs += tab.id
+            }
             if (live()) answer else EthAnswer.Rejected
         }
     }
@@ -440,11 +451,13 @@ object EthereumProviders {
         promptLocks.remove(tabId)
         pending.remove(tabId)
         blockedTabs.remove(tabId)
+        cantSendClosed.remove(tabId)
     }
 
     /** The user navigated [tabId] themselves: its pages may ask again. */
     fun allowPrompts(tabId: Long) {
         blockedTabs.remove(tabId)
+        cantSendClosed.remove(tabId)
     }
 
     private fun withdraw(tabId: Long) {

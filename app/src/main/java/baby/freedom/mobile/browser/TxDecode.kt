@@ -37,9 +37,10 @@ data class TokenRef(val address: String, val symbol: String?, val decimals: Int?
     internal val label: String get() = symbol ?: Strings.get(R.string.send_decode_token_unlisted, shortAddress(address))
 
     companion object {
-        internal fun of(chainId: Long, address: String): TokenRef {
+        /** [chainId] null: the data names no chain, so no list can say what the token is. */
+        internal fun of(chainId: Long?, address: String): TokenRef {
             val checksummed = EthereumProvider.checksummed(address) ?: address
-            val known = X402Payments.knownToken(chainId, address)
+            val known = chainId?.let { X402Payments.knownToken(it, address) }
             return TokenRef(checksummed, known?.first, known?.second)
         }
     }
@@ -114,6 +115,9 @@ internal object TxDecode {
      * it isn't one of the calls above in exactly its standard encoding: the
      * selector, then one 32-byte word per argument and nothing more, each
      * address word with its upper 12 bytes zero and each bool 0 or 1.
+     * `approve` and `transferFrom` are decoded only for a listed token:
+     * on any other contract they may be an NFT's (ERC-721), whose last
+     * argument is a token ID, not an amount.
      */
     fun call(to: String, data: ByteArray, chainId: Long): DecodedCall? {
         if (data.size < 4) return null
@@ -130,11 +134,16 @@ internal object TxDecode {
             TRANSFER -> if (words != 2) null else {
                 DecodedCall.Transfer(TokenRef.of(chainId, to), address(0) ?: return null, uint(1))
             }
+            // ERC-721's transferFrom and approve have these same selectors and
+            // encodings, the last word a token ID rather than an amount (R1-M1):
+            // read as ERC-20 only for a token on the wallet's own list.
             TRANSFER_FROM -> if (words != 3) null else {
-                DecodedCall.Transfer(TokenRef.of(chainId, to), address(1) ?: return null, uint(2), from = address(0) ?: return null)
+                val token = TokenRef.of(chainId, to).takeIf { it.listed } ?: return null
+                DecodedCall.Transfer(token, address(1) ?: return null, uint(2), from = address(0) ?: return null)
             }
             APPROVE -> if (words != 2) null else {
-                DecodedCall.Approve(TokenRef.of(chainId, to), address(0) ?: return null, uint(1))
+                val token = TokenRef.of(chainId, to).takeIf { it.listed } ?: return null
+                DecodedCall.Approve(token, address(0) ?: return null, uint(1))
             }
             SET_APPROVAL_FOR_ALL -> if (words != 2) null else {
                 val flag = uint(1)
@@ -151,16 +160,18 @@ internal object TxDecode {
      * `PermitTransferFrom` and `PermitBatchTransferFrom` — each matched on
      * its exact field names and types, with every field present, and the
      * token (or Permit2) as the domain's signed `verifyingContract`.
-     * [chainId] is the site's chain, for naming tokens.
+     * [chainId] is the chain the signature is bound to, for naming tokens:
+     * null when the domain signs none (R1-M2), and then no token is named
+     * by symbol, since the same address may be another token elsewhere.
      */
-    fun permit(data: Eip712.TypedData, chainId: Long): DecodedPermit? = try {
+    fun permit(data: Eip712.TypedData, chainId: Long?): DecodedPermit? = try {
         decodePermit(data, chainId)
     } catch (e: Exception) {
         // A value that isn't what its type says: not a permit this sheet can describe.
         null
     }
 
-    private fun decodePermit(data: Eip712.TypedData, chainId: Long): DecodedPermit? {
+    private fun decodePermit(data: Eip712.TypedData, chainId: Long?): DecodedPermit? {
         val contract = Eip712.signedDomainString(data, "verifyingContract")?.trim() ?: return null
         val contractAddress = EthereumProvider.checksummed(contract.takeIf { ADDRESS.matches(it) } ?: return null) ?: return null
         val permit2 = contractAddress.equals(PERMIT2, ignoreCase = true)

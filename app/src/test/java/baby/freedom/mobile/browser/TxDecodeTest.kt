@@ -83,6 +83,24 @@ class TxDecodeTest {
     }
 
     @Test
+    fun `approve and transferFrom on an unlisted contract aren't read as ERC-20, since an NFT's share the selectors`() {
+        // ERC-721 approve(op, tokenId=3): not "spend up to 3 units".
+        assertNull(TxDecode.call(unlisted, bytes("095ea7b3" + word(spender) + word(BigInteger.valueOf(3))), 1))
+        // An ENS-style huge token ID: not "UNLIMITED".
+        assertNull(TxDecode.call(unlisted, bytes("095ea7b3" + word(spender) + word(TxDecode.MAX_UINT256)), 1))
+        assertNull(TxDecode.call(unlisted, bytes("23b872dd" + word(owner) + word(recipient) + word(BigInteger.valueOf(7))), 1))
+        // USDC's Ethereum address on Gnosis isn't a token the wallet lists there either.
+        assertNull(TxDecode.call(usdc, bytes("095ea7b3" + word(spender) + word(BigInteger.TEN)), 100))
+        // ERC-721 has no transfer(to, amount): that one is still read.
+        assertTrue(TxDecode.call(unlisted, bytes("a9059cbb" + word(recipient) + word(BigInteger.TEN)), 1) is DecodedCall.Transfer)
+        // And the generic sheet names the contract.
+        assertEquals(
+            "Call contract 0x1234…5678 on Ethereum",
+            sendTxHeadline(sendAsk(unlisted, bytes("095ea7b3" + word(spender) + word(BigInteger.valueOf(3))))),
+        )
+    }
+
+    @Test
     fun `setApprovalForAll is a danger when it grants, nothing when it takes back`() {
         val on = TxDecode.call(unlisted, bytes("a22cb465" + word(spender) + word(BigInteger.ONE)), 1) as DecodedCall.ApproveAll
         assertEquals(WarningLevel.Danger, callWarning(on)!!.level)

@@ -1059,7 +1059,7 @@ class EthereumProviderTest {
         connect()
         sends.prepareFailure = SendException(Strings.said(R.string.send_not_enough_for_fee, "xDAI", "0.0001", "0"), shortOf = "xDAI")
         // Closed, or Receive then Close: the page gets the reason, in English, either way.
-        for (closed in listOf<EthAnswer>(EthAnswer.Rejected, EthAnswer.Approved())) {
+        for (closed in listOf<EthAnswer>(EthAnswer.Closed, EthAnswer.Rejected, EthAnswer.Approved())) {
             answer = { closed }
             asks.clear()
             val r = call("eth_sendTransaction", tx("to" to second.address)) as EthereumProvider.Reply.Err
@@ -1765,5 +1765,19 @@ class EthereumProviderTest {
         assertEquals("USDC", permit.grants.single().token.symbol)
         assertTrue(permit.grants.single().unlimited)
         assertEquals("Allow 0x1111…0582 to spend UNLIMITED USDC", permitHeadline(permit))
+
+        // The same permit with no chainId in its signed domain (R1-M2): still decoded, still
+        // unlimited, but the token isn't named by the site's chain, as the signature isn't tied to it.
+        asks.clear()
+        val domainTypes = typed.getJSONObject("types").getJSONArray("EIP712Domain")
+        domainTypes.remove(1)
+        typed.getJSONObject("domain").remove("chainId")
+        ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(typed.toString())))
+        val chainless = asks.single() as EthAsk.SignTypedData
+        assertFalse(chainless.chainBound)
+        val unbound = chainless.permit!!
+        assertNull(unbound.grants.single().token.symbol)
+        assertTrue(unbound.grants.single().unlimited)
+        assertEquals("Allow 0x1111…0582 to spend UNLIMITED token 0xA0b8…eB48", permitHeadline(unbound))
     }
 }
