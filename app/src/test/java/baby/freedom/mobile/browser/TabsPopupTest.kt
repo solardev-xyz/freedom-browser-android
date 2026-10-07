@@ -99,6 +99,28 @@ class TabsPopupTest {
     }
 
     @Test
+    fun `a popup opened from a blank popup still asks in the first opener's name`() {
+        // #445 R2-F1: `w = window.open(''); w2 = w.open('')` — the middle
+        // popup has no committed origin, but its blank document is the
+        // opener's site, and so is the grandchild's.
+        val tabs = tabsWith(1)
+        val opener = tabs.active
+        opener.permissionOrigin = "http://localhost:8730"
+        val popup = tabs.adoptPopup(opener)
+        val grandchild = tabs.adoptPopup(popup)
+        assertNull(grandchild.permissionOrigin)
+        assertEquals("http://localhost:8730", grandchild.permissionTop)
+        assertEquals(
+            PermissionScope("http://localhost:8730"),
+            permissionScopeFor("http://localhost:8730/", grandchild.permissionTop),
+        )
+        // A middle popup that has committed elsewhere passes on its own site.
+        popup.blankIsPage = false
+        popup.permissionOrigin = "https://other.example"
+        assertEquals("https://other.example", tabs.adoptPopup(popup).permissionTop)
+    }
+
+    @Test
     fun `user-opened tabs have no opener`() {
         val tabs = tabsWith(1)
         assertNull(tabs.newTab().openerId)

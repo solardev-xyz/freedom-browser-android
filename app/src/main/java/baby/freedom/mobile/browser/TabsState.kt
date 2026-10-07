@@ -408,8 +408,11 @@ class TabsState(
         // the home overlay (see [BrowserState.blankIsPage]).
         tab.blankIsPage = true
         // …and that document is the opener's origin's: its own permission
-        // requests are asked in that site's name (#363).
-        tab.blankOpenerOrigin = opener.permissionOrigin
+        // requests are asked in that site's name (#363). The opener's
+        // own top, not its committed origin: an opener that is itself a
+        // script-written blank popup has no committed origin, but its
+        // document — and so this one's — is still its opener's site.
+        tab.blankOpenerOrigin = opener.permissionTop
         tab.showBlankPage()
         val openerIndex = tabs.indexOfFirst { it.id == opener.id }
         val at = if (openerIndex < 0) tabs.size else openerIndex + 1

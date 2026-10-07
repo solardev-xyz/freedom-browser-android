@@ -48,8 +48,9 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     internal var blankIsPage: Boolean = false
 
     /**
-     * The opener's site-permission origin key ([permissionOrigin]) when
-     * this popup was opened ([TabsState.adoptPopup]). A popup's
+     * The opener's site-permission top ([permissionTop]: its committed
+     * origin, or what its own blank document inherited) when this popup
+     * was opened ([TabsState.adoptPopup]). A popup's
      * `about:blank` document inherits the origin of the page that opened
      * it, but commits nothing, so [permissionOrigin] stays null while it
      * shows; this stands in for it as the top-level site of that blank

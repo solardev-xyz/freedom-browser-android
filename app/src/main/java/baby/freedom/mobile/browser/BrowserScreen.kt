@@ -781,8 +781,11 @@ fun BrowserScreen(
     // The page's own site permissions (#266): what the site on screen —
     // and any frame in it that asked — holds, for the menu's row and
     // its sheet; and the camera/microphone its document is using now,
-    // for the indicator over the page.
-    val pageOrigin = state.permissionOrigin
+    // for the indicator over the page. Keyed to the site the broker
+    // decides this document's requests under ([BrowserState.permissionTop]),
+    // so a popup's blank document lists what it was granted in its
+    // opener's name.
+    val pageOrigin = state.permissionTop
     val pagePermissions by remember(sitePermissions, state, pageOrigin) {
         sitePermissions.pageEntries(state, pageOrigin)
     }.collectAsState(initial = emptyList())
