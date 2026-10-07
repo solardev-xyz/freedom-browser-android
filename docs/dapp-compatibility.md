@@ -75,7 +75,8 @@ such request to the external Swarm node set in Settings (on its own
 host and port — `http` and `https` on the default ports 80/443 count as
 one, since one proxy server block often listens on both — under its
 path: a node at `https://me.example/bee` is only `/bee` and what's under
-it, the rest of `me.example` being some other site) is answered `403` by the app and never reaches the node:
+it, the rest of `me.example` being some other site) is answered `403`
+by the app and never reaches the node:
 
 ```js
 await fetch('http://127.0.0.1:1633/bzz', { method: 'POST', body, headers }) // 403
