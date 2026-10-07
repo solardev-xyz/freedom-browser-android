@@ -3662,9 +3662,11 @@ private fun buildRefreshableWebView(
                 // here — the download a navigation turns into has the
                 // final hop's URL.
                 if (request.isForMainFrame) pendingNavigationUrls.add(target)
-                // A link the user tapped (and its redirects) to a server
-                // other than one they refused a client certificate for
-                // in this tab asks for one again (#333 R6-M1). Not a
+                // A link the user tapped to a server other than one they
+                // refused a client certificate for in this tab asks for
+                // one again (#333 R6-M1): its first hop and its current
+                // redirect hop, never earlier hops, and a Deny other than
+                // for its first hop ends it (#333 R2-F1, R3-M2). Not a
                 // page's own navigation: that would let a page reopen
                 // the chooser it was refused. Nor more than one per
                 // input of the user's: the page's script can start any

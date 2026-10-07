@@ -87,14 +87,18 @@ internal sealed interface ClientCertPlan {
  * a link the user taps in that tab to a server (host and port) they
  * didn't refuse: its server asks ([followed], #333 R6-M1). A page's own
  * connections don't count — only a main-frame navigation with the
- * user's gesture, and its redirects — and only one such navigation per
+ * user's gesture: its first hop and its current redirect hop, never the
+ * hops it went through before (#333 R2-F1) — and only one such navigation per
  * input of the user's (a tap, a key, an accessibility click): WebView
  * reports a gesture on every navigation a page's script starts while
  * that input's activation lasts, so without that a single tap would let
  * the refusing page navigate to server after server (each answering
  * `204`, so it stays) and reopen the chooser for each (#333 R1-F1). The
  * servers a link exempts are only the latest such navigation's: the
- * next one replaces them. The
+ * next one replaces them. A Deny in the tab ends the link's exemption,
+ * its later hops refused with no chooser — except a Deny for the link's
+ * own first hop, which refuses that server but lets its redirects still
+ * ask (#333 R3-M2). The
  * tab's next load — a reload, the address bar, Back/Forward — asks
  * again, so installing the certificate, or taking back an accidental
  * Deny, only needs a reload (which also empties WebView's own record of
@@ -179,9 +183,11 @@ internal class ClientCertChoices {
      * hop's: the link exempts its first hop and its current hop, never
      * more, so a chain of redirects through server after server (each
      * hop a page's poller could then connect to) doesn't exempt them
-     * all (#333 R2-F1). And any Deny in the tab ends the link's
+     * all (#333 R2-F1). And a Deny in the tab ends the link's
      * exemption ([answered]): its later hops are refused like
-     * everything else.
+     * everything else — except a Deny for the link's first hop, which
+     * refuses only that server, so a redirect it then sends on to a
+     * server needing a certificate still asks (#333 R3-M2).
      *
      * Returns whether that exempted a server not exempted before.
      */
@@ -294,10 +300,16 @@ internal class ClientCertChoices {
         // A refusal no longer holding for later requests starts afresh.
         if (!refusing(tabId)) deniedHosts.remove(tabId)
         // A Deny ends the followed link's exemption, so its later
-        // redirect hops can't each bring the chooser back (#333 R2-F1).
-        endFollow(tabId, keepInput = true)
+        // redirect hops can't each bring the chooser back (#333 R2-F1) —
+        // unless it was for the link's own first hop: that server is
+        // refused from now on, but the link's redirects still ask, so a
+        // portal the user turned down can still hand them on to an SSO
+        // server that needs a certificate (#333 R3-M2). The first hop is
+        // one server, so that spares the link once at most.
+        val k = key(host, port)
+        if (k == followFirst[tabId]) followedHosts[tabId]?.remove(k) else endFollow(tabId, keepInput = true)
         declined[tabId] = tickets
-        deniedHosts.getOrPut(tabId) { HashSet() }.add(key(host, port))
+        deniedHosts.getOrPut(tabId) { HashSet() }.add(k)
     }
 
     /** The picked certificate can't be read any more (removed from the device): ask again next time. */

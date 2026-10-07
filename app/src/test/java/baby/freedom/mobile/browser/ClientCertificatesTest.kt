@@ -213,6 +213,44 @@ class ClientCertificatesTest {
     }
 
     @Test
+    fun `a Deny for a followed link's first hop still lets its redirects ask`() {
+        val c = ClientCertChoices()
+        c.loaded(2L)
+        c.answered("tracker.example", 443, 2L, null, c.generation)
+        // The user taps a link to portal (optional client auth) and
+        // Denies there (R3-M2).
+        assertEquals(true, c.followed(2L, "portal.example", 443, input = 1))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "portal.example", 443, 2L, c.ticket()))
+        c.answered("portal.example", 443, 2L, null, c.generation)
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "portal.example", 443, 2L, c.ticket()))
+        // Portal 302s to its SSO server, which needs a certificate: asks.
+        assertEquals(true, c.followed(2L, "sso.portal.example", 443, input = 1, redirect = true))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "sso.portal.example", 443, 2L, c.ticket()))
+        // The portal stays refused, re-issued on the same input too.
+        assertEquals(false, c.followed(2L, "portal.example", 443, input = 1))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "portal.example", 443, 2L, c.ticket()))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "sso.portal.example", 443, 2L, c.ticket()))
+        // A second Deny, for the redirect hop, ends the link: no more
+        // choosers from it, so a first-hop Deny spares a link once at most.
+        c.answered("sso.portal.example", 443, 2L, null, c.generation)
+        for (n in 1..20) {
+            assertEquals(false, c.followed(2L, "a$n.evil.example", 443, input = 1, redirect = true))
+            assertEquals(ClientCertPlan.Refuse, c.planFor(false, "a$n.evil.example", 443, 2L, c.ticket()))
+        }
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "sso.portal.example", 443, 2L, c.ticket()))
+        // A first-hop Deny after the link has redirected keeps the current
+        // hop asking, and nothing more.
+        assertEquals(true, c.followed(2L, "evil.example", 443, input = 2))
+        assertEquals(true, c.followed(2L, "b1.evil.example", 443, input = 2, redirect = true))
+        c.answered("evil.example", 443, 2L, null, c.generation)
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "b1.evil.example", 443, 2L, c.ticket()))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "evil.example", 443, 2L, c.ticket()))
+        c.answered("b1.evil.example", 443, 2L, null, c.generation)
+        assertEquals(false, c.followed(2L, "b2.evil.example", 443, input = 2, redirect = true))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "b2.evil.example", 443, 2L, c.ticket()))
+    }
+
+    @Test
     fun `a refusal and a followed link are per server, host and port`() {
         val c = ClientCertChoices()
         c.loaded(2L)
