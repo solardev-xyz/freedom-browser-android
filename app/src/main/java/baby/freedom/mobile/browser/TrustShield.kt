@@ -194,6 +194,19 @@ internal fun nameTrustFor(displayUrl: String): NameTrust? {
 internal fun nameIn(displayUrl: String): String? =
     EnsInput.parse(displayUrl)?.name ?: EnsInput.parseConstrained(displayUrl)?.name
 
+/**
+ * What the protocol badge is read out as: "via Swarm", or with its
+ * shield, "via Swarm, proven name" — on the mark itself, and on the
+ * address bar's Page info button that carries it (#442).
+ */
+@Composable
+internal fun protocolBadgeDescription(badge: ProtocolBadge, trust: NameTrust?): String =
+    if (trust != null) {
+        stringResource(R.string.names_badge_with_trust, badge.contentDescription, trust.tier.markLabel)
+    } else {
+        badge.contentDescription
+    }
+
 /** Diameter of the shield riding the protocol badge's corner. */
 private val ShieldMarkSize = 11.dp
 
@@ -215,11 +228,7 @@ internal fun ProtocolBadgeMark(
     trust: NameTrust?,
     modifier: Modifier = Modifier,
 ) {
-    val description = if (trust != null) {
-        stringResource(R.string.names_badge_with_trust, badge.contentDescription, trust.tier.markLabel)
-    } else {
-        badge.contentDescription
-    }
+    val description = protocolBadgeDescription(badge, trust)
     Box(modifier = modifier.semantics { contentDescription = description }) {
         Image(
             painter = painterResource(badge.drawableRes),
@@ -257,7 +266,6 @@ internal fun TrustDetailsDialog(
     trust: NameTrust,
     onDismiss: () -> Unit,
 ) {
-    val answer = trust.answer
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = {
@@ -275,30 +283,7 @@ internal fun TrustDetailsDialog(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Text(trust.summary)
-                    TrustFact(stringResource(R.string.names_fact_name), trust.name)
-                    if (answer != null) TrustFact(stringResource(R.string.names_fact_resolves_to), answer)
-                    TrustFact(
-                        stringResource(R.string.names_fact_block),
-                        trust.trust.block?.let { "#$it" } ?: stringResource(R.string.names_fact_block_latest),
-                    )
-                    if (trust.trust.agreed.isNotEmpty()) {
-                        TrustFact(
-                            when (trust.tier) {
-                                TrustTier.Proven -> stringResource(
-                                    if (trust.trust.lightClient) R.string.names_fact_verified_by else R.string.names_fact_proof_from,
-                                )
-                                TrustTier.Verified -> stringResource(R.string.names_fact_agreed, trust.trust.agreed.size)
-                                TrustTier.Unverified -> stringResource(R.string.names_fact_answered_by)
-                            },
-                            trust.trust.shownAgreed.joinToString("\n"),
-                        )
-                    }
-                    if (trust.trust.dissented.isNotEmpty()) {
-                        TrustFact(
-                            stringResource(R.string.names_fact_outvoted, trust.trust.dissented.size),
-                            trust.trust.dissented.joinToString("\n"),
-                        )
-                    }
+                    TrustFacts(trust)
                 }
             }
         },
@@ -306,6 +291,42 @@ internal fun TrustDetailsDialog(
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_done)) }
         },
     )
+}
+
+/**
+ * The evidence behind [trust]: the name, its answer, the block, the
+ * servers that gave it and the ones outvoted — in the shield's details
+ * dialog, and under the name in Page info (#442).
+ */
+@Composable
+internal fun TrustFacts(trust: NameTrust) {
+    val answer = trust.answer
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        TrustFact(stringResource(R.string.names_fact_name), trust.name)
+        if (answer != null) TrustFact(stringResource(R.string.names_fact_resolves_to), answer)
+        TrustFact(
+            stringResource(R.string.names_fact_block),
+            trust.trust.block?.let { "#$it" } ?: stringResource(R.string.names_fact_block_latest),
+        )
+        if (trust.trust.agreed.isNotEmpty()) {
+            TrustFact(
+                when (trust.tier) {
+                    TrustTier.Proven -> stringResource(
+                        if (trust.trust.lightClient) R.string.names_fact_verified_by else R.string.names_fact_proof_from,
+                    )
+                    TrustTier.Verified -> stringResource(R.string.names_fact_agreed, trust.trust.agreed.size)
+                    TrustTier.Unverified -> stringResource(R.string.names_fact_answered_by)
+                },
+                trust.trust.shownAgreed.joinToString("\n"),
+            )
+        }
+        if (trust.trust.dissented.isNotEmpty()) {
+            TrustFact(
+                stringResource(R.string.names_fact_outvoted, trust.trust.dissented.size),
+                trust.trust.dissented.joinToString("\n"),
+            )
+        }
+    }
 }
 
 @Composable

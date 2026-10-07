@@ -806,6 +806,14 @@ fun BrowserScreen(
     val sheetTarget = sitePermissionsSheet?.takeIf { t ->
         t.tabId == state.id && t.origin == pageOrigin && t.doc == pageDocument?.doc
     }
+    // Page info (#442), from the address bar's badge: pinned the same way.
+    var pageInfoSheet by remember { mutableStateOf<PageSheetTarget?>(null) }
+    val openPageInfo: () -> Unit = {
+        pageInfoSheet = PageSheetTarget(state.id, pageOrigin, pageDocument?.doc)
+    }
+    val pageInfoTarget = pageInfoSheet?.takeIf { t ->
+        t.tabId == state.id && t.origin == pageOrigin && t.doc == pageDocument?.doc
+    }
 
     // IPFS load progress (#94): while the active tab is busy on content
     // the IPFS node serves, poll the node's retrieval-progress snapshot
@@ -1523,6 +1531,27 @@ fun BrowserScreen(
             val url = state.reloadUrl()
             if (url.isNotBlank()) submit(state, url)
         }
+    }
+
+    // The per-site ad-blocking switch (#126), in the page menu and in
+    // Page info: whether blocking is really on for the page — not
+    // allowlisted, an engine loaded, no list exempting it — re-read
+    // whenever the allowlist or the engine changes.
+    val adblockRevision by Adblock.revision.collectAsState()
+    val adblockState = remember(adblockRevision, state.url, state.private, state.showsErrorPage) {
+        // An error page has no ads to block: no switch (#419).
+        if (state.showsErrorPage) null else Adblock.siteState(state.url, state.private)
+    }
+    val toggleAdblock: () -> Unit = toggle@{
+        val site = adblockSiteFor(state.url) ?: return@toggle
+        val current = Adblock.siteState(state.url, state.private) ?: return@toggle
+        if (!current.toggleable) return@toggle
+        Adblock.setAllowlisted(site, allowed = current.checked, private = state.private)
+        if (dropsMemoryCache(current)) tabs.dropMemoryCache?.invoke(state)
+        // Already-loaded ads (or already-blocked content)
+        // only change with the next load of the page.
+        val url = state.url.ifBlank { state.addressBarText }
+        if (url.isNotBlank()) submit(state, url)
     }
 
     // The menu's Hard reload (#262): the same reload, with the HTTP cache
@@ -2267,15 +2296,6 @@ fun BrowserScreen(
         // asks for and strictly better at "no layout shifts" — an
         // overlay on fixed geometry can't move anything, whereas the
         // strip's reserved slot was 14 dp of permanently dead band.
-        // The page menu's per-site ad-blocking switch (#126): whether
-        // blocking is really on for the page — not allowlisted, an
-        // engine loaded, no list exempting it — re-read whenever the
-        // allowlist or the engine changes.
-        val adblockRevision by Adblock.revision.collectAsState()
-        val adblockState = remember(adblockRevision, state.url, state.private, state.showsErrorPage) {
-            // An error page has no ads to block: no switch (#419).
-            if (state.showsErrorPage) null else Adblock.siteState(state.url, state.private)
-        }
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             // Tap-to-dismiss catcher for the whole chrome band — the
             // capsule's own gutters, the side margins and the padding
@@ -2476,23 +2496,9 @@ fun BrowserScreen(
                         }
                     },
                     onPrint = { tabs.printPage?.invoke(state) },
-                    sitePermissionsSummary = sitePermissionsSummary(
-                        pagePermissions,
-                        pageDocument?.stillHeld(mediaInUse).orEmpty(),
-                    ),
-                    onOpenSitePermissions = openSitePermissions,
+                    onOpenPageInfo = openPageInfo,
                     adblockState = adblockState,
-                    onToggleAdblock = {
-                        val site = adblockSiteFor(state.url) ?: return@BottomToolbar
-                        val current = Adblock.siteState(state.url, state.private) ?: return@BottomToolbar
-                        if (!current.toggleable) return@BottomToolbar
-                        Adblock.setAllowlisted(site, allowed = current.checked, private = state.private)
-                        if (dropsMemoryCache(current)) tabs.dropMemoryCache?.invoke(state)
-                        // Already-loaded ads (or already-blocked content)
-                        // only change with the next load of the page.
-                        val url = state.url.ifBlank { state.addressBarText }
-                        if (url.isNotBlank()) submit(state, url)
-                    },
+                    onToggleAdblock = toggleAdblock,
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),
@@ -3290,6 +3296,53 @@ fun BrowserScreen(
             onRevoke = { entry -> sitePermissions.revokeOnTab(state, entry) },
             onReload = reloadPage,
             onDismiss = { sitePermissionsSheet = null },
+        )
+    }
+    // Page info (#442): like the Site permissions sheet, the user's own
+    // doing, over the page only, and gone when the document changes.
+    val pageInfoShown = pageInfoTarget?.takeIf { pageUncovered && promptTurn == PromptTurn.None }
+    LaunchedEffect(pageInfoSheet, pageInfoShown) {
+        if (pageInfoShown == null) pageInfoSheet = null
+    }
+    pageInfoShown?.let { target ->
+        val connection = pageConnectionFor(state.url, state.showsErrorPage, protocolBadgeFor(state))
+        // Read once, when the sheet opens over this document.
+        val certificate = remember(target) {
+            if (connection?.hasCertificate == true) tabs.pageCertificate?.invoke(state) else null
+        }
+        // The site's data, where it has a site that can hold any: not on
+        // an error page, which stands in for a load that never arrived.
+        val dataOrigin = target.origin?.takeIf { !state.showsErrorPage }
+        val dataUrl = dataOrigin?.let { origin ->
+            state.url.takeIf { permissionOriginKey(it) == origin } ?: "$origin/"
+        }
+        PageInfoSheet(
+            site = AddressLabel.resting(state.addressBarText).ifEmpty { state.url },
+            connection = connection,
+            certificate = certificate,
+            nameTrust = state.nameTrust,
+            permissions = pagePermissions,
+            inUse = mediaInUse,
+            document = pageDocument,
+            private = state.private,
+            onRevokePermission = { entry -> sitePermissions.revokeOnTab(state, entry) },
+            adblock = adblockState,
+            onToggleAdblock = toggleAdblock,
+            siteDataOrigin = dataOrigin,
+            siteDataUrl = dataUrl,
+            onDeleteSiteData = {
+                if (dataOrigin != null && dataUrl != null) {
+                    val tab = state
+                    pageInfoSheet = null
+                    scope.launch {
+                        SiteData.delete(tab.id, dataOrigin, dataUrl, tab.private)
+                        // What the page holds in memory goes with a reload.
+                        if (tabs.active === tab) reloadPage()
+                    }
+                }
+            },
+            onReload = reloadPage,
+            onDismiss = { pageInfoSheet = null },
         )
     }
     state.radiclePrompt?.takeIf { promptTurn == PromptTurn.Radicle }?.let { prompt ->

@@ -135,7 +135,6 @@
     <string name="browser_menu_desktop_site">Desktop site</string>
     <string name="browser_menu_print">Print</string>
     <string name="browser_menu_block_ads">Block ads here</string>
-    <string name="browser_menu_site_permissions">Site permissions</string>
     <string name="browser_menu_history">History</string>
     <string name="browser_menu_bookmarks">Bookmarks</string>
     <string name="browser_menu_downloads">Downloads</string>

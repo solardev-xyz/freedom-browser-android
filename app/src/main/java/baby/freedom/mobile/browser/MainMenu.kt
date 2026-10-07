@@ -27,7 +27,6 @@ internal enum class MainMenuRow {
     DesktopSite,
     Print,
     BlockAds,
-    SitePermissions,
     AddToHomeScreen,
 
     // Library.
@@ -51,8 +50,6 @@ internal data class MainMenuContext(
     val canOpenPrivateTab: Boolean = true,
     /** The page has an ad-blocking switch (#126). */
     val hasAdblock: Boolean = false,
-    /** The site holds a permission (#266). */
-    val hasSitePermissions: Boolean = false,
     /**
      * The page can be pinned to the launcher: not a private tab, an
      * address another app could open, and a launcher that takes pins.
@@ -70,6 +67,9 @@ internal data class MainMenuContext(
  * site on a dweb page, Find in a tab whose renderer went away) the row
  * stays, disabled, so the menu doesn't change shape from page to page.
  * Home itself goes too: the tab is already there.
+ *
+ * Site permissions have no row either (#442): they are in Page info,
+ * which the address bar's badge opens for every page.
  *
  * Hard reload has no row (#417): it is a long-press on the icon row's
  * Reload ([MainMenuIcons.hardReload]), as on a desktop browser's
@@ -92,7 +92,6 @@ internal fun mainMenuGroups(c: MainMenuContext): List<List<MainMenuRow>> {
             MainMenuRow.DesktopSite,
             MainMenuRow.Print,
             MainMenuRow.BlockAds.takeIf { c.hasAdblock },
-            MainMenuRow.SitePermissions.takeIf { c.hasSitePermissions },
             MainMenuRow.AddToHomeScreen.takeIf { c.canAddToHomeScreen },
         )
     }

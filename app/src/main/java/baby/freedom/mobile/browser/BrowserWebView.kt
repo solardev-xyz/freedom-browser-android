@@ -1402,6 +1402,17 @@ fun BrowserWebViewHost(
         tabs.dropMemoryCache = { tab ->
             webViews[tab.id]?.let { wv -> runCatching { wv.clearCache(false) } }
         }
+        tabs.pageCertificate = { tab ->
+            webViews[tab.id]?.let { wv -> runCatching { wv.certificate }.getOrNull() }?.let { cert ->
+                CertFacts(
+                    errors = emptySet(),
+                    notBeforeMs = cert.validNotBeforeDate?.time,
+                    notAfterMs = cert.validNotAfterDate?.time,
+                    issuedTo = cert.issuedTo?.let { it.cName.ifBlank { it.oName } },
+                    issuedBy = cert.issuedBy?.let { it.cName.ifBlank { it.oName } },
+                )
+            }
+        }
         tabs.clearWebViewData = { siteData, cache ->
             if (siteData) {
                 // Globally-scoped stores: cookies and DOM storage / IndexedDB /
@@ -1466,6 +1477,7 @@ fun BrowserWebViewHost(
             tabs.find = null
             tabs.printPage = null
             tabs.dropMemoryCache = null
+            tabs.pageCertificate = null
             UnverifiedOrigins.onSweep = null
             tabs.setAudioMuted = null
         }
@@ -3909,6 +3921,12 @@ private fun buildRefreshableWebView(
                 // A certificate-refused load issued again: its page, in
                 // its own entry, never reaching the network (#259).
                 val certPage = if (mainFrame) request!!.url?.toString()?.let(certRefusal::take) else null
+                // Page info's Delete data for this site (#442): the reload
+                // after it is answered first with the cleanup page, on the
+                // site's own origin — the only way to reach its
+                // localStorage, Cache Storage and service workers.
+                val cleanup = mainFrame && certPage == null &&
+                    request!!.url?.toString()?.let { SiteData.takeCleanup(state.id, it) } == true
                 // A dweb subresource the page already gave up on, before
                 // WebView got round to asking for it: answered at once,
                 // nothing fetched. Any other is told if the page gives up
@@ -3923,6 +3941,8 @@ private fun buildRefreshableWebView(
                 val work = state.gatewayWork.start(generation)
                 val response = if (heldBack) heldBackResponse() else if (certPage != null) {
                     certPageResponse(certPage)
+                } else if (cleanup) {
+                    siteDataCleanupResponse()
                 } else try {
                     interceptVirtualRequest(
                         request, ensPins, view, state::assertedProtocolFor, state.onchain,
@@ -6024,13 +6044,17 @@ private fun siteDataCleanupFor(req: WebResourceRequest, url: String, tab: Any?, 
     // document must not get ahead of that.
     Gateways.awaitExternalEndpointsBlocking()
     if (!UnverifiedOrigins.takeClearFor(origin, tab, private)) return null
-    return WebResourceResponse(
+    return siteDataCleanupResponse()
+}
+
+/** [SITE_DATA_CLEANUP_HTML] as the answer to a document request. */
+internal fun siteDataCleanupResponse(): WebResourceResponse =
+    WebResourceResponse(
         "text/html", "utf-8", 200, "OK",
         // `Vary: *`: a service worker's Cache Storage won't keep it.
         mapOf("Cache-Control" to "no-store", "Vary" to "*"),
         ByteArrayInputStream(SITE_DATA_CLEANUP_HTML.toByteArray(Charsets.UTF_8)),
     )
-}
 
 internal const val SITE_DATA_CLEANUP_HTML = """<!doctype html><meta charset="utf-8"><script>
 (async () => {

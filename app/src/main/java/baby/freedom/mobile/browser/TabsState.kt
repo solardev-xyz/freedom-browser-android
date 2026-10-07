@@ -240,6 +240,16 @@ class TabsState(
     var dropMemoryCache: ((BrowserState) -> Unit)? = null
 
     /**
+     * Hook installed by the [BrowserWebViewHost]: the certificate of the
+     * page on screen in the given tab (`WebView.getCertificate()`), for
+     * Page info (#442), or null where there is none (not https, a page
+     * the app answered itself, no WebView yet). `null` before the host
+     * has composed, or after it disposes.
+     */
+    @Volatile
+    internal var pageCertificate: ((BrowserState) -> CertFacts?)? = null
+
+    /**
      * Hook installed by the [BrowserWebViewHost]: mute or unmute the
      * given tab's WebView (#91, `WebViewCompat.setAudioMuted`) — only the
      * host knows which WebView backs a tab. `null` before the host has
