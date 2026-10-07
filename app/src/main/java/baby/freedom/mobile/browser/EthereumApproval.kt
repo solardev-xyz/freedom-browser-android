@@ -822,10 +822,15 @@ private fun SendBody(
     val request = quote.request
     val chain = request.chain
     val data = quote.tx.data
+    // Approximate values (#439), with Show prices on.
+    val fiat = rememberFiatQuotes()
+    val total = quote.nativeTotal?.takeIf { request.amount.signum() > 0 }
     TxReviewSummary(
         headline = sendTxHeadline(ask),
         fee = stringResource(R.string.send_up_to, feeText(quote.maxFee, chain)),
-        total = quote.nativeTotal?.takeIf { request.amount.signum() > 0 }?.let { stringResource(R.string.send_up_to, feeText(it, chain)) },
+        total = total?.let { stringResource(R.string.send_up_to, feeText(it, chain)) },
+        feeFiat = fiatNative(fiat, chain, quote.maxFee),
+        totalFiat = total?.let { fiatNative(fiat, chain, it) },
     ) {
         SummarySub(stringResource(R.string.send_eth_from_on, accountLabel(request.from), chain.name))
         alsoSendsLine(quote)?.let { SummarySub(it) }

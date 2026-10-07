@@ -102,6 +102,7 @@ import baby.freedom.mobile.wallet.SafeState
 import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.TokenAmounts
 import baby.freedom.mobile.wallet.Token
+import baby.freedom.mobile.wallet.FiatQuotes
 import baby.freedom.mobile.wallet.TokenBalance
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.WalletAccount
@@ -317,6 +318,8 @@ internal fun accountBalanceLine(chains: List<Chain>, balances: Map<String, Token
 internal fun WalletHeader(
     account: WalletAccount,
     headline: HeadlineBalance,
+    /** The approximate value under the balance (#439, [headlineFiat]); null with Show prices off or no price. */
+    fiat: String? = null,
     enabled: Boolean,
     sendEnabled: Boolean,
     onAccounts: () -> Unit,
@@ -339,6 +342,15 @@ internal fun WalletHeader(
             textAlign = TextAlign.Center,
             modifier = Modifier.testTag("wallet-headline"),
         )
+        fiat?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.testTag("wallet-headline-fiat"),
+            )
+        }
         headline.note?.let {
             Text(
                 it,
@@ -467,6 +479,8 @@ internal fun AssetsSection(
     refreshing: Boolean,
     onReceive: () -> Unit,
     onRefresh: () -> Unit = {},
+    /** Approximate values (#439), with Show prices on. */
+    fiat: FiatQuotes? = null,
 ) {
     val assets = walletAssets(chains, balances)
     var explain by remember { mutableStateOf<AssetRow?>(null) }
@@ -485,7 +499,7 @@ internal fun AssetsSection(
                 )
             }
         } else {
-            AssetRows(assets, refreshing, showEmpty, { showEmpty = it }, { explain = it }, onRefresh, onReceive)
+            AssetRows(assets, refreshing, showEmpty, { showEmpty = it }, { explain = it }, onRefresh, onReceive, fiat)
         }
     }
     explain?.let { row ->
@@ -919,10 +933,11 @@ private fun AssetRows(
     onExplain: (AssetRow) -> Unit,
     onRefresh: () -> Unit,
     onReceive: () -> Unit,
+    fiat: FiatQuotes?,
 ) {
     if (assets.noFunds) NoFunds(onReceive)
     assets.shown.forEach { row ->
-        BalanceRow(row, balanceText(row.balance, row.token.decimals, refreshing), onExplain = { onExplain(row) }, onRefresh = onRefresh)
+        BalanceRow(row, balanceText(row.balance, row.token.decimals, refreshing), assetFiat(fiat, row), onExplain = { onExplain(row) }, onRefresh = onRefresh)
     }
     if (assets.noBalance.isEmpty()) return
     val n = assets.noBalance.size
@@ -946,7 +961,7 @@ private fun AssetRows(
     }
     if (showEmpty) {
         assets.noBalance.forEach { row ->
-            BalanceRow(row, balanceText(row.balance, row.token.decimals, refreshing), onExplain = { onExplain(row) }, onRefresh = onRefresh)
+            BalanceRow(row, balanceText(row.balance, row.token.decimals, refreshing), assetFiat(fiat, row), onExplain = { onExplain(row) }, onRefresh = onRefresh)
         }
     }
 }
@@ -966,7 +981,7 @@ private fun AssetRows(
  * explains either way, and has Refresh as a TalkBack action.
  */
 @Composable
-private fun BalanceRow(row: AssetRow, text: BalanceText, onExplain: () -> Unit, onRefresh: () -> Unit) {
+private fun BalanceRow(row: AssetRow, text: BalanceText, fiat: String?, onExplain: () -> Unit, onRefresh: () -> Unit) {
     val amber = if (MaterialTheme.colorScheme.isLight) Color(0xFFB45309) else Color(0xFFF59E0B)
     val amount = text.amount ?: "—"
     val mono = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace)
@@ -998,6 +1013,16 @@ private fun BalanceRow(row: AssetRow, text: BalanceText, onExplain: () -> Unit, 
         )
     }
     val detail = @Composable {
+        // The approximate value (#439): under the amount, never in place of it.
+        fiat?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.End,
+                modifier = Modifier.fillMaxWidth().testTag("wallet-asset-fiat"),
+            )
+        }
         if (showDetail) {
             Text(
                 text.detail,

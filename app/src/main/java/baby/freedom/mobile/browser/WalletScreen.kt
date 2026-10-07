@@ -117,6 +117,7 @@ import baby.freedom.mobile.wallet.RestoreNeedsScreenLockException
 import baby.freedom.mobile.wallet.OpenLvSession
 import baby.freedom.mobile.wallet.PublisherIdentityStore
 import baby.freedom.mobile.wallet.SafeAccounts
+import baby.freedom.mobile.wallet.FiatPrices
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultAuthCancelledException
 import baby.freedom.mobile.wallet.VaultAuthFailedException
@@ -776,6 +777,10 @@ fun WalletScreen(
         swarmManifestRows = withContext(Dispatchers.IO) { SwarmProviders.manifestRows() }
     }
     val allChains by chainStore.chains.collectAsState(initial = null)
+    // Show prices (#439): off by default; only then are prices read at all.
+    val fiatPrices = remember(context) { FiatPrices.get(context) }
+    val fiatCurrency by fiatPrices.currency.collectAsState()
+    val fiat = rememberFiatQuotes()
     val walletChains = allChains?.filter { it.id in TokenRegistry.WALLET_CHAIN_IDS }
     val activeAddress = accountList?.active?.address
     var refreshTick by remember { mutableStateOf(0) }
@@ -1248,6 +1253,9 @@ fun WalletScreen(
                         },
                     )
                 }
+                item("prices") {
+                    WalletPricesSection(fiatCurrency) { c -> scope.launch { fiatPrices.set(c) } }
+                }
             }
             // Sites connected through `window.ethereum` (#110), and the way to disconnect them.
             // Shown whatever the vault's state: a connection left behind (a remove whose
@@ -1442,6 +1450,7 @@ fun WalletScreen(
                         WalletHeader(
                             account = active,
                             headline = headlineBalance(walletAssets(walletChains.orEmpty(), activeBalances), refreshing),
+                            fiat = headlineFiat(walletAssets(walletChains.orEmpty(), activeBalances), fiat),
                             enabled = !busy,
                             sendEnabled = walletChains != null,
                             onAccounts = {
@@ -1484,6 +1493,7 @@ fun WalletScreen(
                         chains = walletChains.orEmpty(),
                         balances = allBalances[list.active.address.lowercase()].orEmpty(),
                         refreshing = refreshing,
+                        fiat = fiat,
                         onReceive = {
                             error = null
                             receivingOf = list.active.address

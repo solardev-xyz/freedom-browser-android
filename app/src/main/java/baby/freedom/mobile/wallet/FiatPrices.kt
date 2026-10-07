@@ -1,0 +1,400 @@
+package baby.freedom.mobile.wallet
+
+import android.content.Context
+import android.os.SystemClock
+import android.util.Log
+import baby.freedom.mobile.R
+import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.chains.rpc.ChainRpcException
+import baby.freedom.mobile.chains.rpc.ChainTrust
+import baby.freedom.mobile.chains.rpc.WalletRpc
+import baby.freedom.mobile.data.FiatSettingStore
+import baby.freedom.mobile.l10n.Strings
+import java.math.BigDecimal
+import java.math.BigInteger
+import java.math.MathContext
+import java.math.RoundingMode
+import java.text.NumberFormat
+import java.util.Currency
+import java.util.Locale
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import org.json.JSONObject
+
+/**
+ * The currency the wallet shows approximate values in (#439): none by
+ * default. Only with one chosen does the wallet read a price at all.
+ */
+enum class FiatCurrency(val code: String?) {
+    OFF(null),
+    EUR("EUR"),
+    USD("USD"),
+    ;
+
+    companion object {
+        /** The stored [name], or [OFF] for anything else (nothing stored, an unknown value). */
+        fun parse(stored: String?): FiatCurrency = entries.firstOrNull { it.name == stored } ?: OFF
+    }
+}
+
+/**
+ * Prices the wallet read, per token key ([Token.key]): what one whole
+ * token is worth in [currency], approximately.
+ */
+data class FiatQuotes(val currency: FiatCurrency, val perToken: Map<String, BigDecimal>) {
+    /** [raw] base units of the token with [tokenKey] in [currency]; null when there's no price for it. */
+    fun value(tokenKey: String, raw: BigInteger, decimals: Int): BigDecimal? =
+        perToken[tokenKey]?.let { FiatMath.value(raw, decimals, it) }
+}
+
+/**
+ * Where a built-in token's price comes from (#439). No price service:
+ * every price is read from the chain itself, through the wallet's own
+ * verified read path ([WalletRpc]) — Chainlink's aggregators, and for
+ * the two tokens Chainlink has no feed for, a Uniswap v3 pool's
+ * 30-minute average price (a TWAP, not the pool's spot price, which one
+ * trade can move).
+ */
+internal object PriceFeeds {
+    /** A Chainlink aggregator answering in USD with [decimals] decimals. */
+    data class Chainlink(val chainId: Long, val address: String, val decimals: Int)
+
+    /**
+     * A Uniswap v3 pool's time-weighted price of its token0 in its token1
+     * (with [baseDecimals] and [quoteDecimals]), turned into USD by
+     * [quoteUsd], token1's own feed.
+     */
+    data class Twap(
+        val chainId: Long,
+        val pool: String,
+        val baseDecimals: Int,
+        val quoteDecimals: Int,
+        val quoteUsd: Chainlink,
+    )
+
+    // Checked on chain (description(), decimals()) on 2026-10-07.
+    val ETH_USD = Chainlink(TokenRegistry.ETHEREUM, "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419", 8)
+    val EUR_USD = Chainlink(TokenRegistry.ETHEREUM, "0xb49f677943BC038e9857d61E7d053CaA2C1734C1", 8)
+    val USDC_USD = Chainlink(TokenRegistry.ETHEREUM, "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6", 8)
+    val USDT_USD = Chainlink(TokenRegistry.ETHEREUM, "0x3E7d1eAB13ad0104d2750B8863b489D65364e32D", 8)
+    val DAI_USD = Chainlink(TokenRegistry.ETHEREUM, "0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9", 8)
+
+    /** Gnosis' DAI / USD feed: xDAI is DAI bridged to Gnosis. */
+    val XDAI_USD = Chainlink(TokenRegistry.GNOSIS, "0x678df3415fc31947dA4324eC63212874be5a82f8", 8)
+
+    /** BZZ / WETH, 1 % (Uniswap v3 on Ethereum): BZZ's deepest pool. BZZ (0x1906…) is token0. */
+    val BZZ_WETH = Twap(TokenRegistry.ETHEREUM, "0x5696c2c2fcb7e304a5b9faaec9cd37d369c9d067", 16, 18, ETH_USD)
+
+    /** EURC / USDC, 0.05 % (Uniswap v3 on Ethereum). EURC (0x1aBa…) is token0. */
+    val EURC_USDC = Twap(TokenRegistry.ETHEREUM, "0x95dbb3c7546f22bce375900abfdd64a4e5bd73d6", 6, 6, USDC_USD)
+
+    /**
+     * Each priced token's source, by [Token.key]. xBZZ is BZZ bridged to
+     * Gnosis, so it takes BZZ's price. Monerium's EURe has no on-chain
+     * source here: it shows no value.
+     */
+    val byToken: Map<String, Any> = mapOf(
+        "1:native" to ETH_USD,
+        "1:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" to USDC_USD,
+        "1:0xdac17f958d2ee523a2206206994597c13d831ec7" to USDT_USD,
+        "1:0x6b175474e89094c44da98b954eedeac495271d0f" to DAI_USD,
+        "1:0x1abaea1f7c830bd89acc67ec4af516284b1bc33c" to EURC_USDC,
+        "1:0x19062190b1925b5b6689d7073fdfc8c2976ef8cb" to BZZ_WETH,
+        "100:native" to XDAI_USD,
+        "100:0xdbf3ea6f5bee45c02255b2c26a16f300502f68da" to BZZ_WETH,
+    )
+
+    /** The TWAP's window: half an hour. */
+    const val TWAP_SECONDS = 1800
+
+    /** `latestRoundData()`. */
+    const val LATEST_ROUND_DATA = "0xfeaf968c"
+
+    /** `observe(uint32[] [TWAP_SECONDS, 0])`. */
+    val OBSERVE: String = "0x883bdbfd" + word(32) + word(2) + word(TWAP_SECONDS.toLong()) + word(0)
+
+    private fun word(n: Long) = n.toString(16).padStart(64, '0')
+}
+
+/** The arithmetic behind [FiatPrices], kept pure for tests. */
+internal object FiatMath {
+    private val MC = MathContext(20, RoundingMode.HALF_EVEN)
+
+    /**
+     * Chainlink `latestRoundData()`'s answer as a number, or null when it
+     * isn't one to show: not five words, not above zero, or updated more
+     * than [maxAgeSeconds] before [nowSeconds] — or, beyond a few minutes'
+     * clock slack, after it (a clock that's wrong reads as no price).
+     */
+    fun chainlinkPrice(hex: String, decimals: Int, nowSeconds: Long, maxAgeSeconds: Long = MAX_FEED_AGE_SECONDS): BigDecimal? {
+        val words = words(hex) ?: return null
+        if (words.size != 5) return null
+        val answer = signed(words[1])
+        if (answer.signum() <= 0) return null
+        val updatedAt = words[3]
+        if (updatedAt.bitLength() > 62) return null
+        val age = nowSeconds - updatedAt.toLong()
+        if (age !in -CLOCK_SLACK_SECONDS..maxAgeSeconds) return null
+        return BigDecimal(answer, decimals)
+    }
+
+    /**
+     * The average tick over [seconds] from a Uniswap v3 `observe([seconds, 0])`
+     * answer, rounded toward negative infinity as the pool's own oracle
+     * library does; null for an answer of the wrong shape.
+     */
+    fun twapTick(hex: String, seconds: Int): Long? {
+        val words = words(hex) ?: return null
+        // offset, offset, n=2, c0, c1, n=2, s0, s1
+        if (words.size != 8 || words[2] != BIG_TWO || words[5] != BIG_TWO) return null
+        val delta = signed(words[4]) - signed(words[3])
+        val (q, r) = delta.divideAndRemainder(BigInteger.valueOf(seconds.toLong()))
+        val tick = if (r.signum() < 0) q - BigInteger.ONE else q
+        if (tick.abs() > BigInteger.valueOf(MAX_TICK)) return null
+        return tick.toLong()
+    }
+
+    /** One whole token0 in whole token1 at [tick]: 1.0001^tick, scaled by the two tokens' decimals. */
+    fun tickPrice(tick: Long, decimals0: Int, decimals1: Int): BigDecimal {
+        val ratio = Math.pow(1.0001, tick.toDouble())
+        return BigDecimal(ratio, MC).scaleByPowerOfTen(decimals0 - decimals1)
+    }
+
+    /** [raw] base units with [decimals] decimals at [price] per whole token. */
+    fun value(raw: BigInteger, decimals: Int, price: BigDecimal): BigDecimal =
+        BigDecimal(raw, decimals).multiply(price, MC)
+
+    /** A USD price in EUR, given EUR/USD (dollars per euro). */
+    fun usdToEur(usd: BigDecimal, eurUsd: BigDecimal): BigDecimal = usd.divide(eurUsd, MC)
+
+    /**
+     * [value] in [currency] for the UI, always marked approximate: "≈ €12.40",
+     * cents rounded half-up. An amount above zero that rounds to nothing
+     * reads "< €0.01", never "≈ €0.00".
+     */
+    fun format(value: BigDecimal, currency: FiatCurrency, locale: Locale): String? {
+        val code = currency.code ?: return null
+        val format = NumberFormat.getCurrencyInstance(locale).apply {
+            this.currency = Currency.getInstance(code)
+            minimumFractionDigits = 2
+            maximumFractionDigits = 2
+            roundingMode = RoundingMode.HALF_UP
+        }
+        val cents = value.setScale(2, RoundingMode.HALF_UP)
+        return if (value.signum() > 0 && cents.signum() == 0) {
+            Strings.get(R.string.fiat_less_than, format.format(BigDecimal("0.01")))
+        } else {
+            Strings.get(R.string.fiat_approximately, format.format(cents))
+        }
+    }
+
+    private fun words(hex: String): List<BigInteger>? {
+        if (!hex.startsWith("0x") || (hex.length - 2) % 64 != 0 || hex.length == 2) return null
+        val digits = hex.substring(2)
+        if (!digits.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) return null
+        return digits.chunked(64).map { BigInteger(it, 16) }
+    }
+
+    private val BIG_TWO = BigInteger.valueOf(2)
+
+    private val TWO_256 = BigInteger.ONE.shiftLeft(256)
+
+    private fun signed(word: BigInteger): BigInteger = if (word.testBit(255)) word - TWO_256 else word
+
+    /** Uniswap v3's tick range. */
+    private const val MAX_TICK = 887_272L
+
+    /** Older than this, a Chainlink answer is no price: its heartbeats are an hour to a day. */
+    const val MAX_FEED_AGE_SECONDS = 48L * 3600
+
+    private const val CLOCK_SLACK_SECONDS = 600L
+}
+
+/**
+ * The wallet's approximate values (#439), off by default: [currency] is
+ * the user's choice, and [quotes] the prices last read for it — null
+ * while off, before the first read, or when nothing could be read.
+ *
+ * While [currency] is [FiatCurrency.OFF], [refresh] returns before
+ * anything is asked: no price request leaves the device. With a currency
+ * on, prices are read from the chain through [WalletRpc] — the same
+ * verified path as balances — each chain's reads pinned to one block a
+ * little behind its head, so every RPC is asked the same question; an
+ * answer that wasn't verified (one RPC's word) is dropped. They are kept
+ * for [TTL_MS], in memory only. A price that couldn't be read leaves
+ * that token without a value; it never holds anything up.
+ */
+class FiatPrices internal constructor(
+    private val loadSetting: suspend () -> FiatCurrency,
+    private val saveSetting: suspend (FiatCurrency) -> Unit,
+    private val rpc: () -> WalletRpc,
+    private val elapsed: () -> Long = SystemClock::elapsedRealtime,
+    private val wallClockSeconds: () -> Long = { System.currentTimeMillis() / 1000 },
+) {
+    private val _currency = MutableStateFlow(FiatCurrency.OFF)
+    val currency: StateFlow<FiatCurrency> = _currency.asStateFlow()
+
+    private val _quotes = MutableStateFlow<FiatQuotes?>(null)
+    val quotes: StateFlow<FiatQuotes?> = _quotes.asStateFlow()
+
+    private val mutex = Mutex()
+    private var loaded = false
+    private var readAt: Long? = null
+    private var generation = 0L
+
+    /** The stored choice, read once. */
+    suspend fun load() {
+        mutex.withLock {
+            if (loaded) return
+            loaded = true
+            _currency.value = loadSetting()
+        }
+    }
+
+    /** Choose [value] (Off forgets every price read). */
+    suspend fun set(value: FiatCurrency) {
+        load()
+        mutex.withLock {
+            generation++
+            _currency.value = value
+            _quotes.value = null
+            readAt = null
+        }
+        saveSetting(value)
+    }
+
+    /**
+     * Read prices again if a currency is chosen and the last read is
+     * older than [TTL_MS] (or failed more than [RETRY_MS] ago). Off: does
+     * nothing at all.
+     */
+    suspend fun refresh() {
+        load()
+        val (currency, mine) = mutex.withLock {
+            val c = _currency.value
+            if (c == FiatCurrency.OFF) return
+            val at = readAt
+            val now = elapsed()
+            val wait = if (_quotes.value?.perToken.isNullOrEmpty()) RETRY_MS else TTL_MS
+            if (at != null && now - at in 0 until wait) return
+            readAt = now
+            c to generation
+        }
+        val read = try {
+            read(currency)
+        } catch (e: CancellationException) {
+            mutex.withLock { if (mine == generation) readAt = null }
+            throw e
+        }
+        mutex.withLock {
+            // Switched off, or to the other currency, while this read ran: file nothing.
+            if (mine != generation) return
+            _quotes.value = FiatQuotes(currency, read)
+        }
+    }
+
+    private suspend fun read(currency: FiatCurrency): Map<String, BigDecimal> = coroutineScope {
+        val rpc = rpc()
+        val chains = PriceFeeds.byToken.values.map { chainOf(it) }.toSet()
+        val blocks = chains.map { id -> async { id to pinnedBlock(rpc, id) } }.awaitAll().toMap()
+        val feeds = buildSet {
+            PriceFeeds.byToken.values.forEach {
+                when (it) {
+                    is PriceFeeds.Chainlink -> add(it)
+                    is PriceFeeds.Twap -> add(it.quoteUsd)
+                }
+            }
+            if (currency == FiatCurrency.EUR) add(PriceFeeds.EUR_USD)
+        }
+        val twaps = PriceFeeds.byToken.values.filterIsInstance<PriceFeeds.Twap>().toSet()
+        val usd = feeds.map { f -> async { f to chainlink(rpc, f, blocks[f.chainId]) } }
+        val ticks = twaps.map { t -> async { t to twap(rpc, t, blocks[t.chainId]) } }
+        val feedPrices = usd.awaitAll().toMap()
+        val twapPrices = ticks.awaitAll().toMap()
+        val eurUsd = feedPrices[PriceFeeds.EUR_USD]
+        PriceFeeds.byToken.mapNotNull { (key, source) ->
+            val priceUsd = when (source) {
+                is PriceFeeds.Chainlink -> feedPrices[source]
+                is PriceFeeds.Twap -> twapPrices[source]?.let { p -> feedPrices[source.quoteUsd]?.let { p.multiply(it) } }
+                else -> null
+            } ?: return@mapNotNull null
+            val price = when (currency) {
+                FiatCurrency.USD -> priceUsd
+                FiatCurrency.EUR -> eurUsd?.let { FiatMath.usdToEur(priceUsd, it) } ?: return@mapNotNull null
+                FiatCurrency.OFF -> return@mapNotNull null
+            }
+            key to price
+        }.toMap()
+    }
+
+    private fun chainOf(source: Any): Long = when (source) {
+        is PriceFeeds.Chainlink -> source.chainId
+        is PriceFeeds.Twap -> source.chainId
+        else -> error("unknown price source")
+    }
+
+    private suspend fun pinnedBlock(rpc: WalletRpc, chainId: Long): String? = guarded {
+        val head = rpc.blockNumber(chainId).value
+        "0x" + maxOf(0L, head - PINNED_BEHIND).toString(16)
+    }
+
+    private suspend fun chainlink(rpc: WalletRpc, feed: PriceFeeds.Chainlink, block: String?): BigDecimal? = guarded {
+        if (block == null) return@guarded null
+        val r = rpc.call(feed.chainId, JSONObject().put("to", feed.address).put("data", PriceFeeds.LATEST_ROUND_DATA), block)
+        if (!trusted(r.trust)) return@guarded null
+        FiatMath.chainlinkPrice(r.value, feed.decimals, wallClockSeconds())
+    }
+
+    private suspend fun twap(rpc: WalletRpc, t: PriceFeeds.Twap, block: String?): BigDecimal? = guarded {
+        if (block == null) return@guarded null
+        val r = rpc.call(t.chainId, JSONObject().put("to", t.pool).put("data", PriceFeeds.OBSERVE), block)
+        if (!trusted(r.trust)) return@guarded null
+        FiatMath.twapTick(r.value, PriceFeeds.TWAP_SECONDS)?.let { FiatMath.tickPrice(it, t.baseDecimals, t.quoteDecimals) }
+    }
+
+    private suspend fun <T> guarded(block: suspend () -> T?): T? = try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: ChainRpcException) {
+        null
+    } catch (e: Exception) {
+        // A price is never worth more than a missing value.
+        Log.w(TAG, "price read failed", e)
+        null
+    }
+
+    companion object {
+        private const val TAG = "FiatPrices"
+
+        /** How long prices are kept before the next read: five minutes. */
+        const val TTL_MS = 5 * 60_000L
+
+        /** After a read that found nothing, how long before trying again. */
+        const val RETRY_MS = 60_000L
+
+        /** Blocks behind the head the reads are pinned to, so every RPC has the block. */
+        private const val PINNED_BEHIND = 2L
+
+        /** Only a verified answer, or the user's own RPC's, prices anything. */
+        internal fun trusted(trust: ChainTrust): Boolean = trust.level != ChainTrust.Level.UNVERIFIED
+
+        @Volatile
+        private var instance: FiatPrices? = null
+
+        fun get(context: Context): FiatPrices {
+            val app = context.applicationContext
+            return instance ?: synchronized(this) {
+                val store = FiatSettingStore.get(app)
+                instance ?: FiatPrices(store::load, store::save, { WalletRpc(ChainDataRouter.get(app)) }).also { instance = it }
+            }
+        }
+    }
+}

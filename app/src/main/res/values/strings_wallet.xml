@@ -460,4 +460,17 @@
     <!-- %1$s: the block explorer's host name, like etherscan.io. -->
     <string name="wallet_history_explorer_activity">See full activity on %1$s</string>
     <string name="wallet_history_receive">Receive</string>
+    <!-- Show prices (#439): approximate values, off by default -->
+    <string name="fiat_setting_title">Show prices</string>
+    <string name="fiat_setting_detail">Shows roughly what your balances, fees and totals are worth. Prices are read from public price records on Ethereum and Gnosis, the same way as your balances — no price website is asked. When off, no prices are looked up at all.</string>
+    <string name="fiat_setting_off">Off</string>
+    <string name="fiat_setting_eur">Euro (€)</string>
+    <string name="fiat_setting_usd">US dollar ($)</string>
+    <string name="fiat_approximately">≈ %1$s</string>
+    <string name="fiat_less_than">&lt; %1$s</string>
+    <string name="fiat_headline_total">%1$s in total</string>
+    <plurals name="fiat_headline_partial">
+        <item quantity="one">%1$s for %2$d of %3$d asset</item>
+        <item quantity="other">%1$s for %2$d of %3$d assets</item>
+    </plurals>
 </resources>
