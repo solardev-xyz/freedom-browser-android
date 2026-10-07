@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -50,7 +51,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -58,8 +63,14 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.R
+import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.wallet.BalanceFetcher
 import baby.freedom.mobile.wallet.DuplicateAccountException
+import baby.freedom.mobile.wallet.TokenBalance
+import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.ledger.Ledger
@@ -185,15 +196,16 @@ private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
                         },
                         style = MaterialTheme.typography.bodyMedium,
                     )
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        if (blocked) {
-                            TextButton(onClick = { openAppSettings(context) }) { Text(stringResource(R.string.common_open_android_settings)) }
-                        } else {
-                            TextButton(
-                                onClick = { permissions.launch(ledger.permissions()) },
-                                modifier = Modifier.testTag("ledger-permission"),
-                            ) { Text(stringResource(R.string.common_allow)) }
+                    Spacer(Modifier.height(8.dp))
+                    if (blocked) {
+                        Button(onClick = { openAppSettings(context) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                            Text(stringResource(R.string.common_open_android_settings))
                         }
+                    } else {
+                        Button(
+                            onClick = { permissions.launch(ledger.permissions()) },
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("ledger-permission"),
+                        ) { Text(stringResource(R.string.common_allow)) }
                     }
                 }
             }
@@ -246,7 +258,34 @@ private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
     }
 }
 
-/** One Ledger's Ethereum accounts, five at a time, to pick one to add. */
+/** What the accounts list offers under its rows (W38). */
+internal enum class LedgerFooter { TRY_AGAIN, SHOW_MORE, NONE }
+
+/**
+ * The accounts list's footer: Try again only when *reading* the Ledger
+ * failed ([loadError]) — that's what it retries. A failed Add keeps its
+ * own error, in the Add bar, so it never turns this into a Try again that
+ * has nothing to read (#424, W38).
+ */
+internal fun ledgerFooter(loadError: String?, found: Int): LedgerFooter = when {
+    loadError != null -> LedgerFooter.TRY_AGAIN
+    found > 0 -> LedgerFooter.SHOW_MORE
+    else -> LedgerFooter.NONE
+}
+
+/** Whether another page of accounts is still to be read: [found] so far, [wanted] asked for. */
+internal fun ledgerNeedsRead(found: Int, wanted: Int): Boolean = found < wanted
+
+/** The account picked when a page comes in (W39): the first of [found] (path to address) not already in the wallet. */
+internal fun ledgerFirstNew(found: List<Pair<String, String>>, inWallet: Set<String>): Pair<String, String>? =
+    found.firstOrNull { it.second.lowercase() !in inWallet }
+
+/**
+ * One Ledger's Ethereum accounts, five at a time, to pick one to add
+ * (W39): each with what it holds on Ethereum, the first new one picked
+ * already, and Add in a bar that stays on screen. The derivation layout
+ * is Ledger Live's unless changed under Advanced.
+ */
 @Composable
 private fun LedgerAccountsStep(
     ledger: Ledger,
@@ -254,147 +293,233 @@ private fun LedgerAccountsStep(
     inWallet: Set<String>,
     add: suspend (path: String, address: String, name: String) -> Unit,
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val alreadyInWallet = stringResource(R.string.signing_ledger_account_already_in_wallet)
     val addFailed = stringResource(R.string.signing_ledger_add_failed)
     var scheme by remember { mutableStateOf(LedgerScheme.LIVE) }
     var found by remember(scheme) { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    // Reading the Ledger and adding to the wallet fail apart: Try again retries only the read (W38).
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var addError by remember { mutableStateOf<String?>(null) }
     var picked by remember(scheme) { mutableStateOf<Pair<String, String>?>(null) }
     var name by remember { mutableStateOf("") }
     var adding by remember { mutableStateOf(false) }
     var loadTick by remember { mutableIntStateOf(0) }
     // A page is read when asked for: the first on opening or switching layout, the next on Show more.
     var wanted by remember(scheme) { mutableIntStateOf(ACCOUNTS_PER_PAGE) }
+    // What each address holds on Ethereum (lower case → balance), read once it's listed.
+    var balances by remember { mutableStateOf<Map<String, TokenBalance>>(emptyMap()) }
+    val ethereum = BuiltInChains.ETHEREUM
+    val fetcher = remember(context) { BalanceFetcher(WalletRpc(ChainDataRouter.get(context))) }
 
     LaunchedEffect(device, scheme, wanted, loadTick) {
-        if (found.size >= wanted) return@LaunchedEffect
+        if (!ledgerNeedsRead(found.size, wanted)) return@LaunchedEffect
         loading = true
-        error = null
+        loadError = null
         try {
             found = found + ledger.accounts(device, scheme, found.size, wanted - found.size)
         } catch (e: CancellationException) {
             throw e
         } catch (e: LedgerException) {
-            error = e.message
+            loadError = e.message
         } catch (e: Exception) {
-            error = LedgerException.Kind.UNKNOWN.message
+            loadError = LedgerException.Kind.UNKNOWN.message
         } finally {
             loading = false
         }
     }
+    LaunchedEffect(found) {
+        if (picked == null) picked = ledgerFirstNew(found, inWallet)
+        val token = TokenRegistry.native(ethereum)
+        for ((_, address) in found) {
+            if (address.lowercase() in balances) continue
+            // A balance is a nicety here: no failure of its read may take the page down.
+            val read = try {
+                fetcher.fetch(address, listOf(token))[token.key]
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            } ?: TokenBalance.Failed("", null)
+            balances = balances + (address.lowercase() to read)
+        }
+    }
 
-    LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        item("device") {
-            SectionCard(title = device.name) {
-                Text(stringResource(R.string.signing_ledger_layout), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    LedgerScheme.entries.forEach { s ->
-                        FilterChip(
-                            selected = s == scheme,
-                            enabled = !loading && !adding,
-                            onClick = { scheme = s },
-                            label = { Text(s.label) },
+    Column(Modifier.fillMaxSize()) {
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+        ) {
+            item("accounts") {
+                SectionCard(title = stringResource(R.string.signing_ledger_accounts_on, device.name)) {
+                    found.forEachIndexed { i, (path, address) ->
+                        val added = address.lowercase() in inWallet
+                        if (i > 0) HorizontalDivider()
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .selectable(
+                                    selected = picked?.first == path,
+                                    enabled = !added && !adding,
+                                    role = Role.RadioButton,
+                                    onClick = {
+                                        picked = path to address
+                                        addError = null
+                                    },
+                                )
+                                .heightIn(min = 56.dp)
+                                .padding(vertical = 6.dp)
+                                .testTag("ledger-account"),
+                        ) {
+                            RadioButton(selected = picked?.first == path, onClick = null, enabled = !added && !adding)
+                            Spacer(Modifier.width(8.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(stringResource(R.string.signing_ledger_account_n, i + 1), fontWeight = FontWeight.Medium)
+                                AddressText(address, MaterialTheme.typography.bodyMedium, MaterialTheme.colorScheme.onSurface)
+                                Text(
+                                    if (added) {
+                                        stringResource(R.string.signing_ledger_already_added)
+                                    } else {
+                                        ledgerBalanceLine(balances[address.lowercase()], ethereum)
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                    if (loading) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 8.dp)) {
+                            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(stringResource(R.string.signing_ledger_reading_accounts), style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                    loadError?.let {
+                        Text(
+                            it,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.testTag("ledger-error").semantics { liveRegion = LiveRegionMode.Polite },
                         )
                     }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        when (ledgerFooter(loadError, found.size)) {
+                            LedgerFooter.TRY_AGAIN -> TextButton(onClick = { loadTick++ }, enabled = !loading, modifier = Modifier.testTag("ledger-retry")) {
+                                Text(stringResource(R.string.common_try_again))
+                            }
+                            LedgerFooter.SHOW_MORE -> TextButton(onClick = { wanted = found.size + ACCOUNTS_PER_PAGE }, enabled = !loading && !adding) {
+                                Text(stringResource(R.string.signing_ledger_show_more))
+                            }
+                            LedgerFooter.NONE -> Unit
+                        }
+                    }
                 }
-                Text(
-                    stringResource(R.string.signing_ledger_layout_explained),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
-        }
-        item("accounts") {
-            SectionCard(title = stringResource(R.string.signing_ledger_accounts_on_ledger)) {
-                found.forEachIndexed { i, (path, address) ->
-                    val added = address.lowercase() in inWallet
-                    if (i > 0) HorizontalDivider()
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .selectable(
-                                selected = picked?.first == path,
-                                enabled = !added && !adding,
-                                role = Role.RadioButton,
-                                onClick = { picked = path to address },
-                            )
-                            .padding(vertical = 6.dp)
-                            .testTag("ledger-account"),
-                    ) {
-                        RadioButton(selected = picked?.first == path, onClick = null, enabled = !added && !adding)
-                        Spacer(Modifier.width(8.dp))
-                        Column(Modifier.weight(1f)) {
-                            AddressText(address, MaterialTheme.typography.bodyMedium, MaterialTheme.colorScheme.onSurface)
+            if (picked != null) item("name") {
+                SectionCard(title = stringResource(R.string.signing_ledger_add_to_wallet)) {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it.take(64) },
+                        enabled = !adding,
+                        singleLine = true,
+                        label = { Text(stringResource(R.string.signing_ledger_name_optional)) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+            item("advanced") {
+                SectionCard(title = stringResource(R.string.signing_ledger_advanced)) {
+                    DetailsExpander(title = stringResource(R.string.signing_ledger_layout_with, scheme.label)) {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            LedgerScheme.entries.forEach { s ->
+                                FilterChip(
+                                    selected = s == scheme,
+                                    enabled = !loading && !adding,
+                                    onClick = {
+                                        scheme = s
+                                        loadError = null
+                                        addError = null
+                                    },
+                                    label = { Text(s.label) },
+                                )
+                            }
+                        }
+                        Text(
+                            stringResource(R.string.signing_ledger_layout_explained),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        picked?.let { (path, _) ->
                             Text(
-                                if (added) stringResource(R.string.signing_ledger_path_already_added, path) else stringResource(R.string.signing_ledger_path, path),
+                                stringResource(R.string.signing_ledger_picked_path, path),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp),
                             )
                         }
                     }
                 }
-                if (loading) {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 8.dp)) {
-                        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(stringResource(R.string.signing_ledger_reading_accounts), style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-                error?.let {
-                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("ledger-error"))
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    if (error != null) {
-                        TextButton(onClick = { loadTick++ }, enabled = !loading) { Text(stringResource(R.string.common_try_again)) }
-                    } else if (found.isNotEmpty()) {
-                        TextButton(onClick = { wanted = found.size + ACCOUNTS_PER_PAGE }, enabled = !loading && !adding) { Text(stringResource(R.string.signing_ledger_show_more)) }
-                    }
-                }
             }
         }
-        if (picked != null) item("add") {
-            SectionCard(title = stringResource(R.string.signing_ledger_add_to_wallet)) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it.take(64) },
-                    enabled = !adding,
-                    singleLine = true,
-                    label = { Text(stringResource(R.string.signing_ledger_name_optional)) },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
+        // The Add bar stays on screen below the list, so the action is never scrolled away (W39).
+        Surface(tonalElevation = 3.dp, shadowElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                addError?.let {
+                    Text(
+                        it,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(bottom = 8.dp).testTag("ledger-add-error").semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                }
+                val addingLabel = stringResource(R.string.signing_ledger_adding)
                 Button(
                     onClick = {
                         val (path, address) = picked ?: return@Button
                         adding = true
-                        error = null
+                        addError = null
                         scope.launch {
                             try {
                                 add(path, address, name)
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: DuplicateAccountException) {
-                                error = alreadyInWallet
+                                addError = alreadyInWallet
                             } catch (e: Exception) {
-                                error = addFailed
+                                addError = addFailed
                             } finally {
                                 adding = false
                             }
                         }
                     },
-                    enabled = !adding,
-                    modifier = Modifier.fillMaxWidth().testTag("ledger-add"),
-                ) { Text(if (adding) stringResource(R.string.signing_ledger_adding) else stringResource(R.string.signing_ledger_add_account)) }
+                    enabled = !adding && picked != null,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("ledger-add"),
+                ) {
+                    if (adding) {
+                        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp).semantics { contentDescription = addingLabel })
+                    } else {
+                        Text(
+                            picked?.let { p -> stringResource(R.string.signing_ledger_add_account_n, found.indexOfFirst { it.first == p.first } + 1) }
+                                ?: stringResource(R.string.signing_ledger_pick_one),
+                        )
+                    }
+                }
             }
         }
     }
+}
+
+/** What an account holds on [chain], for its row; "Reading balance…" until read. */
+@Composable
+private fun ledgerBalanceLine(balance: TokenBalance?, chain: baby.freedom.mobile.chains.Chain): String = when (balance) {
+    null -> stringResource(R.string.signing_ledger_balance_reading)
+    is TokenBalance.Known -> stringResource(R.string.signing_ledger_balance, feeText(balance.raw, chain), chain.name)
+    is TokenBalance.Failed -> stringResource(R.string.signing_ledger_balance_unknown, chain.name)
 }
 
 /**

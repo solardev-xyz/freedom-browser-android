@@ -87,6 +87,7 @@ import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.GasOracle
 import baby.freedom.mobile.wallet.SendAmounts
+import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultAuthFailedException
 import baby.freedom.mobile.wallet.VaultKeyLostException
@@ -180,14 +181,17 @@ internal fun sentCall(ask: EthAsk.SendTransaction): DecodedCall? {
  * ("Send 20 USDC to 0xd8dA…6045"), a plain send of the native currency,
  * or which contract it calls — never "0 ETH" for a token transfer.
  */
-internal fun sendTxHeadline(ask: EthAsk.SendTransaction): String {
-    val request = ask.quote.request
+internal fun sendTxHeadline(ask: EthAsk.SendTransaction): String = sendTxHeadline(ask.quote)
+
+/** [sendTxHeadline] for any priced transaction: the site's sheet and desktop's over OpenLV (W40) say it alike. */
+internal fun sendTxHeadline(quote: SendQuote): String {
+    val request = quote.request
     val chain = request.chain
-    sentCall(ask)?.let { return callHeadline(it) }
-    if (ask.quote.tx.data.isEmpty()) {
+    TxDecode.call(request.to, quote.tx.data, chain.id)?.let { return callHeadline(it) }
+    if (quote.tx.data.isEmpty()) {
         return sendHeadline(SendAmounts.exact(request.amount, chain.decimals), chain.symbol, request.to, null, chain.name)
     }
-    val function = selectorLabel("0x" + hexOf(ask.quote.tx.data, 4))
+    val function = selectorLabel("0x" + hexOf(quote.tx.data, 4))
     return function?.let { Strings.get(R.string.send_eth_call_named_headline, it, shortAddress(request.to)) }
         ?: Strings.get(R.string.send_eth_call_headline, shortAddress(request.to), chain.name)
 }
