@@ -213,6 +213,18 @@ data class ChainTrust(
     }
 }
 
+/**
+ * Whether a read is good enough to act on without a second look: verified
+ * (a proof, or a quorum agreeing), or one RPC's word when it is an RPC the
+ * user added and none dissented. A lone public RPC's word is not.
+ */
+val ChainTrust.undisputed: Boolean
+    get() = when (level) {
+        ChainTrust.Level.VERIFIED -> true
+        ChainTrust.Level.USER_CONFIGURED -> dissented.isEmpty()
+        ChainTrust.Level.UNVERIFIED -> false
+    }
+
 /** A chain read with where it came from. [result] is the JSON-RPC `result` (`null` for JSON null). */
 data class ChainDataResult(
     val result: Any?,

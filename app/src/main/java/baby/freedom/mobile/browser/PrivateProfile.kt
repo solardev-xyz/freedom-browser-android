@@ -74,6 +74,8 @@ object PrivateProfile {
         val profile = ProfileStore.getInstance().getOrCreateProfile(PREFIX + UUID.randomUUID())
         current = profile
         cookies = profile.cookieManager
+        // A gateway switch from now on cleans this profile's storage too (#351).
+        UnverifiedOrigins.privateSessionStarted()
         // Service-worker fetches go through the virtual-origin
         // interceptor in private tabs too — the controller is per
         // profile, so the default one's client ([ServiceWorkerInterception])
@@ -125,6 +127,7 @@ object PrivateProfile {
         current = null
         cookies = null
         wipe(profile)
+        UnverifiedOrigins.privateSessionEnded()
         Log.i(TAG, "private session ended")
     }
 
