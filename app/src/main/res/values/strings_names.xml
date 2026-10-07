@@ -41,6 +41,8 @@
     <string name="names_assurance_single_yours_fallback">Reads come from your own RPC. If it doesn\'t answer, a public RPC answers instead, unverified.</string>
     <!-- Appended to a verified line when the router falls back to one RPC once the checked tiers fail. -->
     <string name="names_assurance_fallback">If those checks can\'t answer, a read comes from a single RPC instead, unverified.</string>
+    <string name="names_assurance_fallback_yours_first">If those checks can\'t answer, a read comes from a single RPC instead: your own first, then a public one, unverified.</string>
+    <string name="names_assurance_fallback_yours">If those checks can\'t answer, a read comes from one of your own RPCs instead.</string>
     <string name="names_use_my_own_rpc">Use my own RPC</string>
     <string name="names_advanced">Advanced</string>
     <string name="names_show_details">Show details</string>

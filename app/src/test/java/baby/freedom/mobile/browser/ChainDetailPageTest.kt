@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainAccessPolicy
+import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.ChainSource
 import baby.freedom.mobile.chains.rpc.ChainTrust
@@ -146,15 +147,15 @@ class ChainDetailPageTest {
     @Test
     fun readAssuranceFollowsTheRoutersSeats() {
         assertEquals(
-            ReadAssurance.CrossChecked(providers = 3, needed = 2, yours = 0, fallback = true),
+            ReadAssurance.CrossChecked(providers = 3, needed = 2, yours = 0, fallbackTo = ReadAssurance.Fallback.PUBLIC),
             assurance(BuiltInChains.ETHEREUM),
         )
-        assertEquals(ReadAssurance.Proof(ChainSource.MYOTIS, fallback = true), assurance(BuiltInChains.ETHEREUM) { true })
+        assertEquals(ReadAssurance.Proof(ChainSource.MYOTIS, fallbackTo = ReadAssurance.Fallback.PUBLIC), assurance(BuiltInChains.ETHEREUM) { true })
         // One provider: no quorum can form.
         assertEquals(ReadAssurance.Single(yours = false, fallback = false), assurance(lonely))
         // A second provider of the user's own makes a quorum of two.
         assertEquals(
-            ReadAssurance.CrossChecked(2, 2, 1, fallback = true),
+            ReadAssurance.CrossChecked(2, 2, 1, fallbackTo = ReadAssurance.Fallback.YOURS_FIRST),
             assurance(lonely.copy(userRpcUrls = listOf("https://mine.example"))),
         )
         // The user's RPC on the chain's only provider is still one provider;
@@ -169,7 +170,12 @@ class ChainDetailPageTest {
             assurance(lonely.copy(rpcUrls = emptyList(), userRpcUrls = listOf("https://a.example/?key=1"))),
         )
         val allMine = lonely.copy(userRpcUrls = listOf("https://m1.example", "https://m2.example", "https://m3.example"))
-        assertEquals(ReadAssurance.CrossChecked(3, 2, 3, fallback = true), assurance(allMine))
+        assertEquals(ReadAssurance.CrossChecked(3, 2, 3, fallbackTo = ReadAssurance.Fallback.YOURS_FIRST), assurance(allMine))
+        // A custom chain with no public RPC: the fallback is the user's own, never "unverified".
+        assertEquals(
+            ReadAssurance.CrossChecked(3, 2, 3, fallbackTo = ReadAssurance.Fallback.YOURS),
+            assurance(allMine.copy(rpcUrls = emptyList())),
+        )
         val directOnly = ChainAccessPolicy(listOf(ChainSource.DIRECT), listOf(ChainSource.DIRECT))
         assertEquals(
             ReadAssurance.Single(yours = false, fallback = false),
@@ -178,18 +184,35 @@ class ChainDetailPageTest {
     }
 
     @Test
+    fun readAssuranceFoldsSpellingsOfOneEndpointLikeTheRouter() {
+        // R2-M2: the router asks `https://a.example:443/` once, as the user's
+        // (ChainDataRouter.endpoints) — so there's no public RPC left to fall
+        // back on, and the page mustn't promise one.
+        for (spelling in listOf("https://a.example:443", "https://a.example/", "HTTPS://A.EXAMPLE:443/")) {
+            val chain = lonely.copy(userRpcUrls = listOf(spelling))
+            assertEquals(listOf(spelling), ChainDataRouter.endpoints(chain))
+            assertEquals(spelling, ReadAssurance.Single(yours = true, fallback = false), assurance(chain))
+            assertEquals("Custom · Reads from your RPC", chainStatus(chain, assurance(chain)))
+        }
+        // The same fold for a checked tier's fallback: two of the user's
+        // own, one of them the listed public RPC — no public one remains.
+        val folded = lonely.copy(userRpcUrls = listOf("https://a.example:443", "https://mine.example"))
+        assertEquals(ReadAssurance.CrossChecked(2, 2, 2, fallbackTo = ReadAssurance.Fallback.YOURS), assurance(folded))
+    }
+
+    @Test
     fun noFallbackTierMeansEveryReadIsChecked() {
         // A policy with no direct tier after the quorum: a read the quorum
         // can't settle fails rather than coming back unverified.
         val quorumOnly = ChainAccessPolicy(listOf(ChainSource.QUORUM), listOf(ChainSource.DIRECT))
         val a = readAssurance(BuiltInChains.ETHEREUM, quorumOnly, wiredRpcsOnly)
-        assertEquals(ReadAssurance.CrossChecked(3, 2, 0, fallback = false), a)
+        assertEquals(ReadAssurance.CrossChecked(3, 2, 0, fallbackTo = null), a)
         assertEquals("Verified reads", chainStatus(BuiltInChains.ETHEREUM, a))
         assertEquals("Reads are cross-checked across 3 providers.", readAssuranceLine(a))
         // A direct tier that isn't wired in this build isn't a fallback either.
         val proofThenDirect = ChainAccessPolicy(listOf(ChainSource.MYOTIS, ChainSource.DIRECT), listOf(ChainSource.DIRECT))
         assertEquals(
-            ReadAssurance.Proof(ChainSource.MYOTIS, fallback = false),
+            ReadAssurance.Proof(ChainSource.MYOTIS, fallbackTo = null),
             readAssurance(BuiltInChains.ETHEREUM, proofThenDirect) { it == ChainSource.MYOTIS },
         )
     }
@@ -199,7 +222,7 @@ class ChainDetailPageTest {
         assertEquals("Verified reads when available", chainStatus(BuiltInChains.ETHEREUM, assurance(BuiltInChains.ETHEREUM)))
         assertEquals(
             "Verified reads when available",
-            chainStatus(BuiltInChains.ETHEREUM, ReadAssurance.Proof(ChainSource.MYOTIS, fallback = true)),
+            chainStatus(BuiltInChains.ETHEREUM, ReadAssurance.Proof(ChainSource.MYOTIS, fallbackTo = ReadAssurance.Fallback.PUBLIC)),
         )
         assertEquals("Custom · Reads not cross-checked", chainStatus(lonely, assurance(lonely)))
         val mine = lonely.copy(userRpcUrls = listOf("https://mine.example"))
@@ -236,16 +259,16 @@ class ChainDetailPageTest {
         )
         assertEquals(
             "Reads are cross-checked across 2 providers.$fallback",
-            readAssuranceLine(ReadAssurance.CrossChecked(2, 2, 1, fallback = true)),
+            readAssuranceLine(ReadAssurance.CrossChecked(2, 2, 1, fallbackTo = ReadAssurance.Fallback.PUBLIC)),
         )
         assertEquals(
             "Reads are cross-checked across your 3 RPCs.$fallback",
-            readAssuranceLine(ReadAssurance.CrossChecked(3, 2, 3, fallback = true)),
+            readAssuranceLine(ReadAssurance.CrossChecked(3, 2, 3, fallbackTo = ReadAssurance.Fallback.PUBLIC)),
         )
         assertEquals(
             "Reads are proven on this device by the P2P light client, " +
                 "and cross-checked across providers when it can't answer.$fallback",
-            readAssuranceLine(ReadAssurance.Proof(ChainSource.MYOTIS, fallback = true)),
+            readAssuranceLine(ReadAssurance.Proof(ChainSource.MYOTIS, fallbackTo = ReadAssurance.Fallback.PUBLIC)),
         )
         assertEquals(
             "Reads come from one provider and can't be cross-checked. To trust them, use your own RPC.",
@@ -256,6 +279,20 @@ class ChainDetailPageTest {
             readAssuranceLine(ReadAssurance.Single(yours = true, fallback = true)),
         )
         assertEquals("Reads come from your own RPC.", readAssuranceLine(ReadAssurance.Single(yours = true, fallback = false)))
+        // R2-M1: the direct tier asks the user's RPCs first and labels their
+        // answers as theirs — the line says so instead of "unverified" alone.
+        assertEquals(
+            "Reads are cross-checked across 2 providers. If those checks can't answer, a read comes from a " +
+                "single RPC instead: your own first, then a public one, unverified.",
+            readAssuranceLine(assurance(lonely.copy(userRpcUrls = listOf("https://mine.example")))),
+        )
+        assertEquals(
+            "Reads are cross-checked across your 2 RPCs. If those checks can't answer, " +
+                "a read comes from one of your own RPCs instead.",
+            readAssuranceLine(
+                assurance(Chain(id = 6, name = "Y", symbol = "Y", rpcUrls = emptyList(), userRpcUrls = listOf("https://m1.example", "https://m2.example"))),
+            ),
+        )
     }
 
     @Test

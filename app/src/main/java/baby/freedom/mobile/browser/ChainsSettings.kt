@@ -129,8 +129,26 @@ internal sealed interface ReadAssurance {
      */
     val fallback: Boolean
 
-    /** A proof checked on this device ([source]: the light client or the prover). */
-    data class Proof(val source: ChainSource, override val fallback: Boolean) : ReadAssurance
+    /**
+     * Whose RPC answers once the checked tiers fail: the direct tier walks
+     * the pool with the user's RPCs first ([ChainDataRouter.endpoints]),
+     * and labels their answers [ChainTrust.Level.USER_CONFIGURED].
+     */
+    enum class Fallback {
+        /** Only public RPCs: unverified. */
+        PUBLIC,
+
+        /** The user's own first, a public one (unverified) when theirs don't answer. */
+        YOURS_FIRST,
+
+        /** Only the user's own RPCs. */
+        YOURS,
+    }
+
+    /** A proof checked on this device ([source]: the light client or the prover); [fallbackTo] null when no single-RPC read follows. */
+    data class Proof(val source: ChainSource, val fallbackTo: Fallback?) : ReadAssurance {
+        override val fallback get() = fallbackTo != null
+    }
 
     /**
      * The RPC quorum: [providers] RPCs, each from a different provider, are
@@ -140,8 +158,10 @@ internal sealed interface ReadAssurance {
         val providers: Int,
         val needed: Int,
         val yours: Int,
-        override val fallback: Boolean,
-    ) : ReadAssurance
+        val fallbackTo: Fallback?,
+    ) : ReadAssurance {
+        override val fallback get() = fallbackTo != null
+    }
 
     /**
      * No quorum can form: the first RPC that answers, [yours] if the user
@@ -158,11 +178,20 @@ internal sealed interface ReadAssurance {
  * read does.
  */
 internal fun readAssurance(chain: Chain, policy: ChainAccessPolicy, wired: (ChainSource) -> Boolean): ReadAssurance {
-    val pool = (chain.userRpcUrls + chain.rpcUrls).distinct()
+    // The router's own pool: a user RPC that's a public one under another
+    // spelling (`:443`, a trailing `/`) is one entry, the user's.
+    val pool = ChainDataRouter.endpoints(chain)
+    val hasYours = pool.any { it in chain.userRpcUrls }
+    val hasPublic = pool.any { it !in chain.userRpcUrls }
     val order = policy.readOrder.filter(wired)
-    // Whether a later tier is the unverified single-RPC read the router
-    // falls back to once the checked ones fail.
-    fun fallsBackAfter(index: Int) = ChainSource.DIRECT in order.drop(index + 1)
+    // The unverified single-RPC read the router falls back to once the
+    // checked tiers fail, if a later tier is one — and whose RPC answers it.
+    fun fallsBackAfter(index: Int): ReadAssurance.Fallback? = when {
+        ChainSource.DIRECT !in order.drop(index + 1) || pool.isEmpty() -> null
+        !hasYours -> ReadAssurance.Fallback.PUBLIC
+        hasPublic -> ReadAssurance.Fallback.YOURS_FIRST
+        else -> ReadAssurance.Fallback.YOURS
+    }
     for ((index, source) in order.withIndex()) {
         when (source) {
             ChainSource.MYOTIS, ChainSource.COLIBRI -> return ReadAssurance.Proof(source, fallsBackAfter(index))
@@ -172,14 +201,13 @@ internal fun readAssurance(chain: Chain, policy: ChainAccessPolicy, wired: (Chai
                     providers = members.size,
                     needed = policy.quorumM,
                     yours = members.count { it in chain.userRpcUrls },
-                    fallback = fallsBackAfter(index),
+                    fallbackTo = fallsBackAfter(index),
                 )
             }
             ChainSource.DIRECT -> break
         }
     }
-    val yours = chain.userRpcUrls.isNotEmpty()
-    return ReadAssurance.Single(yours = yours, fallback = yours && pool.any { it !in chain.userRpcUrls })
+    return ReadAssurance.Single(yours = hasYours, fallback = hasYours && hasPublic)
 }
 
 /** [readAssurance] as [router] reads [chain] right now. */
@@ -221,9 +249,17 @@ internal fun readAssuranceLine(assurance: ReadAssurance): String = when (assuran
 }.let { line ->
     // A checked tier's promise holds only while it answers: say what
     // happens when it doesn't (the Single-yours wording already does).
-    if (assurance.fallback && assurance !is ReadAssurance.Single) {
-        line + " " + Strings.get(R.string.names_assurance_fallback)
-    } else line
+    val to = when (assurance) {
+        is ReadAssurance.Proof -> assurance.fallbackTo
+        is ReadAssurance.CrossChecked -> assurance.fallbackTo
+        is ReadAssurance.Single -> null
+    }
+    when (to) {
+        null -> line
+        ReadAssurance.Fallback.PUBLIC -> line + " " + Strings.get(R.string.names_assurance_fallback)
+        ReadAssurance.Fallback.YOURS_FIRST -> line + " " + Strings.get(R.string.names_assurance_fallback_yours_first)
+        ReadAssurance.Fallback.YOURS -> line + " " + Strings.get(R.string.names_assurance_fallback_yours)
+    }
 }
 
 /**
@@ -318,7 +354,7 @@ internal fun userRpcAddError(result: ChainStore.RpcAddResult, url: String = ""):
  * chain page lists them — only the tiers [wired] in this build.
  */
 internal fun readSteps(chain: Chain, policy: ChainAccessPolicy, wired: (ChainSource) -> Boolean): List<String> {
-    val pool = (chain.userRpcUrls + chain.rpcUrls).distinct()
+    val pool = ChainDataRouter.endpoints(chain)
     val providers = ChainDataRouter.quorumMembers(pool).size
     val members = ChainDataRouter.quorumMembers(pool, policy.quorumK)
     val mine = members.count { it in chain.userRpcUrls }
