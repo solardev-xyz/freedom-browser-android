@@ -1368,10 +1368,14 @@ fun BrowserWebViewHost(
             // tab: every tab whose document predates the fetch counts as
             // having them.
             val anyTab = UnverifiedOrigins.takeWorkerDocuments(swept)
-            for (wv in webViews.values) {
+            for ((id, wv) in webViews) {
                 val stale = sweptDocuments(wv, swept, anyTab)
                 if (stale.isEmpty()) continue
-                UnverifiedOrigins.hold(wv, stale)
+                // On the tab's own profile's storage (#351) — read off
+                // the WebView's own record, not the tab list: a private
+                // tab closed this frame is gone from [tabs.tabs] while
+                // its WebView still waits for teardown.
+                UnverifiedOrigins.hold(wv, stale, private = id in privateIds)
                 if (wv is PageWebView) wv.sweptReload.swept(wv.url) else wv.reload()
             }
         }
