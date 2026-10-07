@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.NodeIdentitySync
+import baby.freedom.mobile.wallet.Vault
 
 /**
  * The notice for a node identity switch (#77, #328; maintainer decision
@@ -12,6 +13,14 @@ import baby.freedom.mobile.wallet.NodeIdentitySync
  * so it's mentioned too — [radicleRestarting] if it's running now. A
  * Radicle node that's off isn't mentioned; it starts as the wallet's
  * identity whenever it's turned on.
+ *
+ * A wallet that has just been set up (W8, [NodeIdentitySync.Change.Adopted.setUp])
+ * is told as only that: "Wallet created" (a new phrase) or "Wallet ready"
+ * (imported, or restored from Google backup). That the nodes now use its
+ * identity is jargon at that moment; the node page says it (Identity:
+ * From your wallet). A wallet that was already here and adopts the
+ * identities on an unlock (made before #77, or keys that couldn't be
+ * read) still gets the node notice, since nothing about the wallet is new.
  */
 internal fun nodeIdentityNotice(
     change: NodeIdentitySync.Change,
@@ -22,7 +31,13 @@ internal fun nodeIdentityNotice(
     val parts = when (change) {
         // The same identities, sealed again: nothing to tell.
         NodeIdentitySync.Change.Resealed, NodeIdentitySync.Change.Unchanged -> emptyList()
-        is NodeIdentitySync.Change.Adopted -> listOfNotNull(
+        is NodeIdentitySync.Change.Adopted -> if (change.swarmChanged && change.setUp != null) {
+            listOf(
+                Strings.get(
+                    if (change.setUp == Vault.SetUp.CREATED) R.string.wallet_created_notice else R.string.wallet_ready_notice,
+                ),
+            )
+        } else listOfNotNull(
             if (!change.swarmChanged) {
                 null
             } else if (restarting) {

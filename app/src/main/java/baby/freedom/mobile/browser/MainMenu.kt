@@ -166,14 +166,20 @@ internal fun mainMenuIconsFor(
 
 /**
  * The Wallet row's sub-line: only what needs saying and is already known
- * without unlocking anything — that there is no wallet yet, or that the
- * one on the device can't be read. Locked/unlocked isn't news.
+ * without unlocking anything — that there is no wallet yet, that the
+ * one on the device can't be read, or that it isn't backed up yet (W10:
+ * the three-word check hasn't passed, as the wallet home's banner).
+ * Locked/unlocked isn't news.
  */
 internal fun walletMenuNote(state: Vault.State): String? = when (state) {
     Vault.State.Empty -> Strings.get(R.string.browser_menu_wallet_not_set_up)
     Vault.State.Unreadable -> Strings.get(R.string.wallet_summary_unreadable)
-    is Vault.State.Locked, is Vault.State.Unlocked -> null
+    is Vault.State.Locked -> backUpNote(state.info)
+    is Vault.State.Unlocked -> backUpNote(state.info)
 }
+
+private fun backUpNote(info: Vault.Info): String? =
+    if (info.backedUp) null else Strings.get(R.string.wallet_banner_title)
 
 /**
  * The address a Home-screen shortcut to the page on screen opens, or null

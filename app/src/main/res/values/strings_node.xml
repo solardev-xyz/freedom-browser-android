@@ -161,9 +161,12 @@
     <string name="node_log_source_tor" translatable="false">Tor</string>
     <string name="node_log_source_light_client">Light client</string>
 
-    <!-- browser/NodeIdentityNotice.kt; %1$s is the wallet's Swarm address, shortened (0x6Fac…b9C0). -->
+    <!-- browser/NodeIdentityNotice.kt; %1$s is the wallet's Swarm address, shortened (0x6Fac…b9C0). For a wallet that was already here (made before #77). -->
     <string name="node_identity_adopted_restarting">Your Swarm node now uses your wallet\'s identity (%1$s). Restarting it…</string>
     <string name="node_identity_adopted_next_start">Your Swarm node will use your wallet\'s identity (%1$s) when it next starts.</string>
+    <!-- The snackbar when a wallet has just been set up (W8); the node page shows the node identity it gave. -->
+    <string name="wallet_created_notice">Wallet created</string>
+    <string name="wallet_ready_notice">Wallet ready</string>
     <string name="node_identity_dropped_restarting">Wallet removed. Your Swarm node is restarting with this device\'s own identity.</string>
     <string name="node_identity_dropped_next_start">Wallet removed. Your Swarm node will use this device\'s own identity.</string>
     <string name="node_identity_radicle_adopted_restarting">Your Radicle node is restarting as your wallet\'s identity (%1$s). Repositories it seeds stay seeded; what you published before stays signed by this device\'s own identity.</string>

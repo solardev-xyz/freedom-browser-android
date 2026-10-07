@@ -73,8 +73,16 @@ class NodeIdentitySync internal constructor(
          * Swarm account, [radicleDid] the Radicle one. [swarmChanged] is
          * false when only the Radicle identity is new (keys stored before
          * #328 for this same wallet), so the Swarm node stays as it is.
+         * [setUp] is how the wallet was just set up ([Vault.justSetUp]), or
+         * null when an unlock adopted them (a wallet made before #77, or
+         * keys that couldn't be read): the notice tells the two apart.
          */
-        data class Adopted(val swarmAddress: String, val radicleDid: String, val swarmChanged: Boolean = true) : Change
+        data class Adopted(
+            val swarmAddress: String,
+            val radicleDid: String,
+            val swarmChanged: Boolean = true,
+            val setUp: Vault.SetUp? = null,
+        ) : Change
 
         /**
          * This vault's keys were on disk but couldn't be opened, and are
@@ -206,7 +214,12 @@ class NodeIdentitySync internal constructor(
         return try {
             if (!sameRadicle) takeBackRadicleGrants()
             store.write(tag, identity)
-            if (sameRadicle) Change.Resealed else Change.Adopted(identity.swarmAddress, identity.radicleDid.orEmpty(), swarmChanged = !hadSwarm)
+            if (sameRadicle) Change.Resealed else Change.Adopted(
+                identity.swarmAddress,
+                identity.radicleDid.orEmpty(),
+                swarmChanged = !hadSwarm,
+                setUp = vault.justSetUp(),
+            )
         } finally {
             identity.wipe()
         }
