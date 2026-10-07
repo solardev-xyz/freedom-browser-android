@@ -158,7 +158,9 @@ internal object FiatMath {
      * Chainlink `latestRoundData()`'s answer as a number, or null when it
      * isn't one to show: not five words, not above zero, or updated more
      * than [maxAgeSeconds] before [nowSeconds] — or, beyond a few minutes'
-     * clock slack, after it (a clock that's wrong reads as no price).
+     * slack, after it. [nowSeconds] is the pinned block's own time when
+     * that could be read (the phone's clock plays no part then), the
+     * phone's clock otherwise.
      */
     fun chainlinkPrice(hex: String, decimals: Int, nowSeconds: Long, maxAgeSeconds: Long = MAX_FEED_AGE_SECONDS): BigDecimal? {
         val words = words(hex) ?: return null
@@ -410,6 +412,9 @@ class FiatPrices internal constructor(
         val rpc = rpc()
         val chains = PriceFeeds.byToken.values.map { chainOf(it) }.toSet()
         val blocks = chains.map { id -> async { id to pinnedBlock(rpc, id) } }.awaitAll().toMap()
+        // The age of a feed is judged against its block's time, not the phone's clock.
+        val times = blocks.mapNotNull { (id, b) -> b?.let { async { id to blockTime(rpc, id, it) } } }
+            .awaitAll().toMap()
         val feeds = buildSet {
             PriceFeeds.byToken.values.forEach {
                 when (it) {
@@ -420,8 +425,8 @@ class FiatPrices internal constructor(
             if (currency == FiatCurrency.EUR) add(PriceFeeds.EUR_USD)
         }
         val twaps = PriceFeeds.byToken.values.filterIsInstance<PriceFeeds.Twap>().toSet()
-        val usd = feeds.map { f -> async { f to chainlink(rpc, f, blocks[f.chainId]) } }
-        val ticks = twaps.map { t -> async { t to twap(rpc, t, blocks[t.chainId]) } }
+        val usd = feeds.map { f -> async { f to chainlink(rpc, f, blocks[f.chainId], times[f.chainId]) } }
+        val ticks = twaps.map { t -> async { t to twap(rpc, t, blocks[t.chainId], times[t.chainId]) } }
         val feedPrices = usd.awaitAll().toMap()
         val twapPrices = ticks.awaitAll().toMap()
         val eurUsd = feedPrices[PriceFeeds.EUR_USD]
@@ -451,11 +456,22 @@ class FiatPrices internal constructor(
         "0x" + maxOf(0L, head - PINNED_BEHIND).toString(16)
     }
 
-    private suspend fun chainlink(rpc: WalletRpc, feed: PriceFeeds.Chainlink, block: String?): BigDecimal? = guarded {
+    /** [block]'s own timestamp (Multicall3 `getCurrentBlockTimestamp()` at it), or null unless trusted. */
+    private suspend fun blockTime(rpc: WalletRpc, chainId: Long, block: String): Long? = guarded {
+        val r = rpc.call(chainId, JSONObject().put("to", PriceFeeds.MULTICALL3).put("data", PriceFeeds.BLOCK_TIMESTAMP), block)
+        if (trusted(r.trust)) FiatMath.uint(r.value) else null
+    }
+
+    /**
+     * [feed]'s price at [block], its age judged against [blockTime] — a
+     * phone clock minutes slow (or days fast) doesn't drop a fresh feed —
+     * or, when the block's time couldn't be read, against the phone's.
+     */
+    private suspend fun chainlink(rpc: WalletRpc, feed: PriceFeeds.Chainlink, block: String?, blockTime: Long?): BigDecimal? = guarded {
         if (block == null) return@guarded null
         val r = rpc.call(feed.chainId, JSONObject().put("to", feed.address).put("data", PriceFeeds.LATEST_ROUND_DATA), block)
         if (!trusted(r.trust)) return@guarded null
-        FiatMath.chainlinkPrice(r.value, feed.decimals, wallClockSeconds())
+        FiatMath.chainlinkPrice(r.value, feed.decimals, blockTime ?: wallClockSeconds())
     }
 
     /**
@@ -463,35 +479,37 @@ class FiatPrices internal constructor(
      * that far back — a pool keeping only a couple of observations (BZZ /
      * WETH keeps two) reverts `OLD` while its last two trades are less
      * than that apart — the average over as far back as it does reach,
-     * down to [PriceFeeds.MIN_TWAP_SECONDS].
+     * down to [PriceFeeds.MIN_TWAP_SECONDS]. Only a revert takes that
+     * second path: a full-window answer that came back unverified is no
+     * price, not a reason to ask three more questions.
      */
-    private suspend fun twap(rpc: WalletRpc, t: PriceFeeds.Twap, block: String?): BigDecimal? = guarded {
+    private suspend fun twap(rpc: WalletRpc, t: PriceFeeds.Twap, block: String?, blockTime: Long?): BigDecimal? = guarded {
         if (block == null) return@guarded null
         val full = try {
-            poolCall(rpc, t, t.pool, PriceFeeds.OBSERVE, block)
+            rpc.call(t.chainId, JSONObject().put("to", t.pool).put("data", PriceFeeds.OBSERVE), block)
         } catch (e: ChainRpcException.Rpc) {
             if (!e.deterministic) throw e
             null
         }
         val tick = if (full != null) {
-            FiatMath.twapTick(full, PriceFeeds.TWAP_SECONDS)
+            if (!trusted(full.trust)) return@guarded null
+            FiatMath.twapTick(full.value, PriceFeeds.TWAP_SECONDS)
         } else {
-            val window = fallbackWindow(rpc, t, block) ?: return@guarded null
+            val time = blockTime ?: return@guarded null
+            val window = fallbackWindow(rpc, t, block, time) ?: return@guarded null
             poolCall(rpc, t, t.pool, PriceFeeds.observe(window), block)?.let { FiatMath.twapTick(it, window) }
         }
         tick?.let { FiatMath.tickPrice(it, t.baseDecimals, t.quoteDecimals) }
     }
 
     /** How far back [t]'s pool can average at [block], or null for too short a reach. */
-    private suspend fun fallbackWindow(rpc: WalletRpc, t: PriceFeeds.Twap, block: String): Int? = coroutineScope {
-        val now = async { poolCall(rpc, t, PriceFeeds.MULTICALL3, PriceFeeds.BLOCK_TIMESTAMP, block)?.let(FiatMath::uint) }
+    private suspend fun fallbackWindow(rpc: WalletRpc, t: PriceFeeds.Twap, block: String, time: Long): Int? = coroutineScope {
         val slot0 = poolCall(rpc, t, t.pool, PriceFeeds.SLOT0, block) ?: return@coroutineScope null
         val oldest = FiatMath.oldestObservationIndex(slot0) ?: return@coroutineScope null
         // Not filled yet (the ring was grown and hasn't wrapped): slot 0 is the oldest.
         val at = poolCall(rpc, t, t.pool, PriceFeeds.observations(oldest), block)?.let(FiatMath::observationTimestamp)
             ?: if (oldest == 0) null else poolCall(rpc, t, t.pool, PriceFeeds.observations(0), block)?.let(FiatMath::observationTimestamp)
-        val time = now.await()
-        if (at == null || time == null) return@coroutineScope null
+        if (at == null) return@coroutineScope null
         FiatMath.fallbackWindow(time, at, PriceFeeds.TWAP_SECONDS, PriceFeeds.MIN_TWAP_SECONDS)
     }
 

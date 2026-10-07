@@ -31,6 +31,9 @@ class FiatPricesTest {
         BuiltInChains.GNOSIS.copy(rpcUrls = gnoUrls),
     )
     private val now = 1_800_000_000L
+
+    /** The phone's clock (seconds); right unless a test sets it wrong. */
+    private var wallClock = now
     private val sent = mutableListOf<Pair<String, JSONObject>>()
     private var clock = 10_000_000L
 
@@ -131,7 +134,7 @@ class FiatPricesTest {
             )
         },
         elapsed = { clock },
-        wallClockSeconds = { now },
+        wallClockSeconds = { wallClock },
     )
 
     private val eth = TokenRegistry.native(BuiltInChains.ETHEREUM)
@@ -227,12 +230,36 @@ class FiatPricesTest {
         assertNull(q.perToken[token("BZZ").key])
         // Gnosis' own feed was agreed on: xDAI still has its value.
         assertEquals(0, BigDecimal("0.999").compareTo(q.perToken[xdai.key]))
+        // An unverified observe([1800, 0]) is no price, not a revert: no fallback reads follow it.
+        val poolReads = sent.mapNotNull { it.second.optJSONArray("params")?.optJSONObject(0)?.optString("data") }
+        assertTrue(poolReads.none { it == PriceFeeds.SLOT0 || it.startsWith("0x252c09d7") })
+        assertTrue(poolReads.none { it.startsWith("0x883bdbfd") && it != PriceFeeds.OBSERVE })
+    }
+
+    @Test
+    fun `a feed's age is judged by its block's time, not the phone's clock`() = runBlocking {
+        setting = FiatCurrency.EUR
+        // Updated a minute before the pinned block; the phone's clock is a quarter of an hour slow.
+        feeds.keys.toList().forEach { feeds[it] = feeds[it]!!.first to blockTime - 60 }
+        wallClock = now - 900
+        val p = prices()
+        p.refresh()
+        assertEquals(0, BigDecimal("2000").compareTo(p.quotes.value!!.perToken[eth.key]))
+        // Three days fast: still priced.
+        wallClock = now + 3 * 86_400
+        clock += FiatPrices.TTL_MS
+        p.refresh()
+        assertEquals(0, BigDecimal("2000").compareTo(p.quotes.value!!.perToken[eth.key]))
+        // Every block-time read pinned to the same block as the rest.
+        val stamps = sent.filter { it.second.optJSONArray("params")?.optJSONObject(0)?.optString("data") == PriceFeeds.BLOCK_TIMESTAMP }
+        assertTrue(stamps.isNotEmpty())
+        assertTrue(stamps.all { it.second.getJSONArray("params").getString(1) == "0xfe" })
     }
 
     @Test
     fun `a stale feed prices nothing, and a failed read is tried again after a minute`() = runBlocking {
         setting = FiatCurrency.USD
-        feeds.keys.toList().forEach { feeds[it] = feeds[it]!!.first to now - FiatMath.MAX_FEED_AGE_SECONDS - 1 }
+        feeds.keys.toList().forEach { feeds[it] = feeds[it]!!.first to blockTime - FiatMath.MAX_FEED_AGE_SECONDS - 1 }
         val p = prices()
         p.refresh()
         assertTrue(p.quotes.value!!.perToken.isEmpty())
