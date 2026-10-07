@@ -152,7 +152,7 @@ fun NodeScreen(
     }
     showStamps?.let { start ->
         // Back from the stamps lands on whichever page opened them.
-        StampsScreen(nodeInfo = nodeInfo, startWithBuy = start == "buy", onDismiss = { showStamps = null })
+        StampsScreen(nodeInfo = nodeInfo, startWithBuy = start == "buy", onAddFunds = { showFund = true }, onDismiss = { showStamps = null })
         return
     }
     if (showPublishSetup) {

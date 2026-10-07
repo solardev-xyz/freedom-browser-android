@@ -37,6 +37,41 @@ internal val DEPOSIT_PRESETS_PLUR: List<BigInteger> =
     listOf("0.001", "0.01", "0.1", "0.5", "1").map { BigDecimal(it).movePointRight(16).toBigIntegerExact() }
 
 /**
+ * The preset picked until the user picks one (#425, W44): 0.1 xBZZ (about
+ * 40 minutes of HD video), or, when the node's account holds less
+ * ([walletPlur]), the largest preset it can pay; with none it can pay, 0.1
+ * still, and the page says how much the node holds.
+ */
+internal fun defaultDepositPreset(walletPlur: BigInteger?): BigInteger {
+    val preferred = DEPOSIT_PRESETS_PLUR[2]
+    if (walletPlur == null || walletPlur >= preferred) return preferred
+    return DEPOSIT_PRESETS_PLUR.lastOrNull { it <= walletPlur } ?: preferred
+}
+
+/**
+ * What the credit pays for, as the cost note measures it: about 0.16 xBZZ
+ * per hour of HD video when the free tier carries most of it.
+ */
+internal val HD_VIDEO_HOUR_PLUR: BigInteger = BigDecimal("0.16").movePointRight(16).toBigIntegerExact()
+
+/**
+ * A deposit preset named by what it buys (#425, W44): "About 40 minutes
+ * of HD video", "About 3 hours of HD video"; the amount is its sub-line.
+ */
+internal fun depositPresetLabel(plur: BigInteger): String {
+    val minutes = BigDecimal(plur).multiply(BigDecimal(60)).divide(BigDecimal(HD_VIDEO_HOUR_PLUR), 0, RoundingMode.HALF_UP).toLong()
+    val time = when {
+        minutes < 1 -> return Strings.get(R.string.stamps_deposit_preset_under_a_minute)
+        minutes < 90 -> Strings.plural(R.plurals.stamps_minutes, minutes.toInt(), minutes)
+        else -> {
+            val hours = (minutes + 30) / 60
+            Strings.plural(R.plurals.stamps_hours, hours.toInt(), hours)
+        }
+    }
+    return Strings.get(R.string.stamps_deposit_preset_video, time)
+}
+
+/**
  * PLUR as xBZZ, to at most 6 decimals, rounded down so a balance never
  * reads as more than it is; a dust amount shows as `< 0.000001`.
  */

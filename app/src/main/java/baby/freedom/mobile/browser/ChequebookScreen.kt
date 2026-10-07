@@ -137,8 +137,9 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
     // The lost-ledger confirmation: open, and how the last one went.
     var confirmingLiability by remember { mutableStateOf<String?>(null) }
     var liabilityOutcome by remember { mutableStateOf<String?>(null) }
+    // The user's pick; until there is one, the preset that suits what the node holds (#425, W44).
     var amount by rememberSaveable { mutableStateOf<String?>(null) }
-    val amountPlur = amount?.let(::BigInteger)
+    val amountPlur = amount?.let(::BigInteger) ?: defaultDepositPreset(state.walletPlur)
     // What the confirmation shows, captured when it opens: that's what's sent.
     var confirming by remember { mutableStateOf<Pair<String, BigInteger>?>(null) }
 
@@ -169,8 +170,10 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
             }
             item("deposit") {
                 SectionCard(title = stringResource(R.string.stamps_deposit)) {
+                    MutedText(stringResource(R.string.stamps_deposit_intro))
+                    Spacer(Modifier.height(4.dp))
                     DEPOSIT_PRESETS_PLUR.forEach { preset ->
-                        ChoiceRow(selected = preset == amountPlur, label = formatBzzExact(preset)) {
+                        ChoiceRow(selected = preset == amountPlur, label = depositPresetLabel(preset), sub = formatBzzExact(preset)) {
                             amount = preset.toString()
                         }
                     }
@@ -221,7 +224,7 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
     confirmingLiability?.let { chequebook ->
         SpendConfirmDialog(
             title = stringResource(R.string.stamps_credit_lost_dialog_title),
-            body = stringResource(R.string.stamps_credit_lost_dialog_body, chequebook),
+            body = stringResource(R.string.stamps_credit_lost_dialog_body),
             confirmLabel = stringResource(R.string.stamps_credit_lost_dialog_confirm),
             onConfirm = {
                 confirmingLiability = null
@@ -267,63 +270,64 @@ internal fun ChequebookCreditCards(
 ) {
     val credit = creditStatus(swap, state)
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionCard(title = stringResource(R.string.stamps_chequebook_title)) {
-            MutedText(stringResource(R.string.stamps_chequebook_intro))
-            Spacer(Modifier.height(6.dp))
-            DetailRow(
-                stringResource(R.string.stamps_chequebook_address),
-                when (state.address) {
-                    null -> stringResource(R.string.stamps_checking)
-                    "" -> stringResource(R.string.stamps_chequebook_none_yet)
-                    else -> state.address
-                },
-                mono = !state.address.isNullOrEmpty(),
-                singleLine = false,
-            )
-            if (state.address != "") {
-                // Spendable first: uncashed cheques make the on-chain
-                // figure read as more than is left.
-                DetailRow(
-                    stringResource(R.string.stamps_credit_spendable),
-                    state.availablePlur?.let { plur ->
-                        if (state.availableUpperBound) stringResource(R.string.stamps_credit_at_most, formatBzz(plur)) else formatBzz(plur)
-                    } ?: stringResource(R.string.stamps_checking),
-                    singleLine = false,
-                )
-                SubLine(
-                    stringResource(
-                        when {
-                            state.ledgerConfirmed -> R.string.stamps_credit_spendable_confirmed_note
-                            state.availableUpperBound -> R.string.stamps_credit_spendable_upper_note
-                            else -> R.string.stamps_credit_spendable_note
-                        },
-                    ),
-                )
-                DetailRow(
-                    stringResource(R.string.stamps_credit_on_chain),
-                    state.balancePlur?.let(::formatBzz) ?: stringResource(R.string.stamps_checking),
-                    singleLine = false,
-                )
-                SubLine(stringResource(R.string.stamps_credit_on_chain_note))
-            }
-            DetailRow(
-                stringResource(R.string.stamps_node_xbzz),
-                state.walletPlur?.let(::formatBzz) ?: stringResource(R.string.stamps_checking),
-                singleLine = false,
-            )
-            SubLine(stringResource(R.string.stamps_chequebook_wallet_note))
-        }
-        SectionCard(title = stringResource(R.string.stamps_credit_downloads_title)) {
-            DetailRow(stringResource(R.string.stamps_credit_downloads), creditStatusText(credit), singleLine = false)
+        // One headline figure (#425, W44): what the chequebook can still pay, and whether it pays now.
+        SectionCard(title = stringResource(R.string.stamps_credit_title)) {
+            TotalFigure(creditHeadline(state))
+            Text(creditStatusText(credit), style = MaterialTheme.typography.bodyMedium)
             if (credit is CreditStatus.Paying && credit.low) {
                 SubLine(stringResource(R.string.stamps_credit_low))
             } else if (credit is CreditStatus.Paying && credit.uncertain) {
                 SubLine(stringResource(R.string.stamps_credit_maybe_low))
             }
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(4.dp))
+            MutedText(stringResource(R.string.stamps_chequebook_intro))
+            DetailsExpander {
+                DetailRow(
+                    stringResource(R.string.stamps_chequebook_address),
+                    when (state.address) {
+                        null -> stringResource(R.string.stamps_checking)
+                        "" -> stringResource(R.string.stamps_chequebook_none_yet)
+                        else -> state.address
+                    },
+                    mono = !state.address.isNullOrEmpty(),
+                    singleLine = false,
+                )
+                if (state.address != "") {
+                    // Spendable first: uncashed cheques make the on-chain
+                    // figure read as more than is left.
+                    DetailRow(
+                        stringResource(R.string.stamps_credit_spendable),
+                        spendableText(state),
+                        singleLine = false,
+                    )
+                    SubLine(
+                        stringResource(
+                            when {
+                                state.ledgerConfirmed -> R.string.stamps_credit_spendable_confirmed_note
+                                state.availableUpperBound -> R.string.stamps_credit_spendable_upper_note
+                                else -> R.string.stamps_credit_spendable_note
+                            },
+                        ),
+                    )
+                    DetailRow(
+                        stringResource(R.string.stamps_credit_on_chain),
+                        state.balancePlur?.let(::formatBzz) ?: stringResource(R.string.stamps_checking),
+                        singleLine = false,
+                    )
+                    SubLine(stringResource(R.string.stamps_credit_on_chain_note))
+                }
+                DetailRow(
+                    stringResource(R.string.stamps_node_xbzz),
+                    state.walletPlur?.let(::formatBzz) ?: stringResource(R.string.stamps_checking),
+                    singleLine = false,
+                )
+                SubLine(stringResource(R.string.stamps_chequebook_wallet_note))
+                Spacer(Modifier.height(4.dp))
+                SubLine(stringResource(R.string.stamps_credit_cost_note))
+            }
+        }
+        SectionCard(title = stringResource(R.string.stamps_credit_downloads_title)) {
             PayPeersSwitch(wanted = swapWanted, running = swap?.swapEnabled, onChange = onSwapChange)
-            Spacer(Modifier.height(6.dp))
-            SubLine(stringResource(R.string.stamps_credit_cost_note))
         }
         val lostChequebook = state.address
         if (state.ledgerLost && !lostChequebook.isNullOrEmpty()) {
@@ -374,6 +378,18 @@ private fun PayPeersSwitch(wanted: Boolean?, running: Boolean?, onChange: (Boole
         Spacer(Modifier.width(12.dp))
         Switch(checked = wanted == true, onCheckedChange = null, enabled = wanted != null)
     }
+}
+
+/** The spendable credit, "At most …" when it's only an upper bound; "Checking…" until read. */
+internal fun spendableText(state: ChequebookState): String =
+    state.availablePlur?.let { plur ->
+        if (state.availableUpperBound) Strings.get(R.string.stamps_credit_at_most, formatBzz(plur)) else formatBzz(plur)
+    } ?: Strings.get(R.string.stamps_checking)
+
+/** The chequebook page's headline (#425, W44): the spendable credit, or why there's none to show. */
+internal fun creditHeadline(state: ChequebookState): String = when (state.address) {
+    "" -> Strings.get(R.string.stamps_chequebook_none_yet_headline)
+    else -> spendableText(state)
 }
 
 /** How a lost-ledger confirmation went, as the page says it. */

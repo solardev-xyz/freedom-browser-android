@@ -1,15 +1,18 @@
 package baby.freedom.mobile.browser
 
 import androidx.activity.compose.BackHandler
+import androidx.annotation.StringRes
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,6 +25,8 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -42,8 +47,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -128,16 +137,96 @@ internal fun spendStatusText(spend: StampClient.Spend): String? = when (spend) {
     )
 }
 
+/** A size and duration of storage: a batch depth, and days. */
+internal data class StorageChoice(val depth: Int, val days: Long)
+
+/**
+ * What Buy and Fund open on (#425, W41): the same size and duration on
+ * both — the "about 600 MB" preset for 30 days — never the smallest stamp.
+ */
+internal val DEFAULT_STORAGE_CHOICE = StorageChoice(DEFAULT_STAMP_DEPTH, DEFAULT_STAMP_DAYS)
+
+/** A size offered on the surface: its depth, and a line on what it holds. */
+internal data class StoragePreset(val depth: Int, @StringRes val use: Int)
+
+/**
+ * The three sizes the surface offers (#425, W42): about 600 MB, 7 GB and
+ * 43 GB (depths 20, 22, 24). Every other depth is under Advanced.
+ */
+internal val STORAGE_PRESETS = listOf(
+    StoragePreset(20, R.string.stamps_preset_small_use),
+    StoragePreset(22, R.string.stamps_preset_medium_use),
+    StoragePreset(24, R.string.stamps_preset_large_use),
+)
+
+/**
+ * A preset's size, rounded the way people say it: "About 600 MB",
+ * "About 7 GB" — to the hundred megabytes below a gigabyte, the whole
+ * gigabyte above.
+ */
+internal fun storagePresetLabel(depth: Int): String {
+    val bytes = effectiveStampBytes(depth)
+    val rounded = when {
+        bytes >= 1_000_000_000L -> Math.round(bytes / 1e9) * 1_000_000_000L
+        bytes >= 100_000_000L -> Math.round(bytes / 1e8) * 100_000_000L
+        else -> bytes
+    }
+    return Strings.get(R.string.stamps_about_size, formatStampBytes(rounded))
+}
+
+/** A batch's card title: its size and the time it has left ("629 MB · 29 days left"); the hash is under Details. */
+internal fun batchTitle(batch: PostageBatch): String {
+    val size = formatStampBytes(batch.capacityBytes)
+    val ttl = batch.ttlSeconds ?: return size
+    return if (ttl <= 0) Strings.get(R.string.stamps_card_title_expired, size)
+    else Strings.get(R.string.stamps_card_title, size, formatStampTtl(ttl))
+}
+
+/** Whether a batch's page offers Extend. */
+internal enum class ExtendAvailability {
+    /** Shown: the batch the node uploads with, on a node that can spend. */
+    Offered,
+    /** Hidden, with a line saying why: another batch is the one the node uploads with. */
+    OtherActive,
+    /** Hidden: the node can't spend now, or which batch it uploads with isn't known yet. */
+    Hidden,
+}
+
+/** Extend only where it can apply (#425, W45): [connected] is the batch the node uploads with, if known. */
+internal fun extendAvailability(cantSpend: String?, connected: String?, batchId: String): ExtendAvailability = when {
+    cantSpend != null || connected == null -> ExtendAvailability.Hidden
+    connected != batchId -> ExtendAvailability.OtherActive
+    else -> ExtendAvailability.Offered
+}
+
+/** The Buy page's primary action. */
+internal enum class BuyAction { Buy, AddFunds }
+
+/**
+ * Add funds once the quote shows the node holds too little ([sufficientFunds]
+ * false), on a node that could otherwise buy (#425, W43); else Buy (disabled
+ * while there's no quote).
+ */
+internal fun buyAction(cantSpend: String?, sufficientFunds: Boolean?): BuyAction =
+    if (cantSpend == null && sufficientFunds == false) BuyAction.AddFunds else BuyAction.Buy
+
 /** Why Buy and Find stamps wait: the gateway they may restart is carrying a publish. */
 internal val PUBLISH_RUNNING_NOTE: String get() = Strings.get(R.string.stamps_publish_running_note)
 
 /**
- * The postage stamps pages (#116), over the node page: the node's
- * batches, one batch's detail, buying one, extending one.
+ * The postage stamps pages (#116), called "Storage" on the surface (#425):
+ * the node's batches, one batch's detail, buying one, extending one.
  * [startWithBuy] opens straight on the buy page (publish setup's step).
+ * [onAddFunds] opens Fund ([FundNodeScreen]): the way out when the node
+ * holds too little xDAI to buy (null: there's none, only Copy node address).
  */
 @Composable
-internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onDismiss: () -> Unit) {
+internal fun StampsScreen(
+    nodeInfo: NodeInfo,
+    startWithBuy: Boolean = false,
+    onAddFunds: (() -> Unit)? = null,
+    onDismiss: () -> Unit,
+) {
     // "list", "buy", "detail:<id>" or "extend:<id>".
     var route by rememberSaveable { mutableStateOf(if (startWithBuy) "buy" else "list") }
     val spend by StampClient.spend.collectAsState()
@@ -211,7 +300,7 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
             }
             when {
                 route == "buy" -> item("buy") {
-                    BuyPage(nodeInfo, canRestartNow, publishingNote) { quote ->
+                    BuyPage(nodeInfo, canRestartNow, publishingNote, onAddFunds) { quote ->
                         if (StampClient.buy(quote)) route = "list"
                     }
                 }
@@ -259,16 +348,27 @@ private fun androidx.compose.foundation.lazy.LazyListScope.listPage(
                 Spacer(Modifier.height(6.dp))
                 MutedText(publishingNote)
             }
-            Spacer(Modifier.height(8.dp))
-            Button(onClick = onBuy, enabled = cantSpend == null && canBuyNow) {
-                Text(stringResource(R.string.stamps_buy_a_stamp))
+            // With none yet, the empty card's Get storage is the one primary action.
+            if (batches?.isEmpty() != true) {
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = onBuy, enabled = cantSpend == null && canBuyNow) {
+                    Text(stringResource(R.string.stamps_buy_a_stamp))
+                }
             }
             FindOwnedStamps(nodeInfo.accountAddress, discovery, canStart = canBuyNow)
         }
     }
     when {
         batches == null -> item("loading") { MutedText(stringResource(R.string.stamps_reading)) }
-        batches.isEmpty() -> item("empty") { MutedText(stringResource(R.string.stamps_none_yet)) }
+        batches.isEmpty() -> item("empty") {
+            SectionCard(title = stringResource(R.string.stamps_none_yet_title)) {
+                MutedText(stringResource(R.string.stamps_none_yet))
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = onBuy, enabled = stampSpendBlockedReason(nodeInfo) == null && canBuyNow) {
+                    Text(stringResource(R.string.stamps_get_storage))
+                }
+            }
+        }
         else -> items(batches, key = { it.id }) { batch -> BatchCard(batch) { onOpen(batch) } }
     }
 }
@@ -291,11 +391,9 @@ private fun FindOwnedStamps(account: String, discovery: StampClient.Discovery, c
 @Composable
 private fun BatchCard(batch: PostageBatch, onClick: () -> Unit) {
     Column(modifier = Modifier.clickable(onClickLabel = stringResource(R.string.stamps_open_stamp), onClick = onClick)) {
-        SectionCard(title = shortBatchId(batch.id)) {
+        SectionCard(title = batchTitle(batch)) {
             UsableBadge(batch.usable)
-            DetailRow(stringResource(R.string.stamps_capacity), formatStampBytes(batch.capacityBytes))
             DetailRow(stringResource(R.string.stamps_used), usedText(batch))
-            DetailRow(stringResource(R.string.stamps_time_left), batch.ttlSeconds?.let(::formatStampTtl) ?: stringResource(R.string.stamps_unknown))
             batch.ttlSeconds?.let { ttl ->
                 SubLine(stringResource(R.string.stamps_until, expiryText(ttl)))
             }
@@ -311,73 +409,109 @@ private fun DetailPage(
     canSpendNow: Boolean,
     onExtend: () -> Unit,
 ) {
+    val cantSpend = stampSpendBlockedReason(nodeInfo)
+    val extend = extendAvailability(cantSpend, connected, batch.id)
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionCard(title = stringResource(R.string.stamps_stamp)) {
+        SectionCard(title = batchTitle(batch)) {
             UsableBadge(batch.usable)
             Spacer(Modifier.height(4.dp))
-            Text(
-                stringResource(R.string.stamps_batch_id),
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-            )
-            SelectionContainer {
-                Text(batch.id, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-            }
-            Spacer(Modifier.height(6.dp))
             DetailRow(stringResource(R.string.stamps_capacity), formatStampBytes(batch.capacityBytes))
-            SubLine(stringResource(R.string.stamps_up_to_if_even, formatStampBytes(batch.theoreticalBytes)))
             DetailRow(stringResource(R.string.stamps_used), usedText(batch))
             DetailRow(stringResource(R.string.stamps_time_left), batch.ttlSeconds?.let(::formatStampTtl) ?: stringResource(R.string.stamps_unknown))
             batch.ttlSeconds?.let { SubLine(stringResource(R.string.stamps_until, expiryText(it))) }
-            DetailRow(stringResource(R.string.stamps_depth), batch.depth.toString())
-            DetailRow(stringResource(R.string.stamps_immutable), stringResource(if (batch.immutable) R.string.stamps_yes else R.string.stamps_no))
+            if (extend == ExtendAvailability.OtherActive) {
+                Spacer(Modifier.height(4.dp))
+                SubLine(stringResource(R.string.stamps_extend_other_active))
+            }
+            DetailsExpander {
+                Text(
+                    stringResource(R.string.stamps_batch_id),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                SelectionContainer {
+                    Text(batch.id, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                }
+                Spacer(Modifier.height(6.dp))
+                SubLine(stringResource(R.string.stamps_up_to_if_even, formatStampBytes(batch.theoreticalBytes)))
+                DetailRow(stringResource(R.string.stamps_depth), batch.depth.toString())
+                DetailRow(stringResource(R.string.stamps_immutable), stringResource(if (batch.immutable) R.string.stamps_yes else R.string.stamps_no))
+            }
         }
-        val cantSpend = stampSpendBlockedReason(nodeInfo)
-        val active = connected == batch.id
-        SectionCard(title = stringResource(R.string.stamps_extend)) {
-            MutedText(
-                when {
-                    cantSpend != null -> cantSpend
-                    connected == null -> stringResource(R.string.stamps_checking_connected)
-                    !active -> stringResource(R.string.stamps_extend_other_active)
-                    else -> stringResource(R.string.stamps_extend_intro)
-                },
-            )
-            Spacer(Modifier.height(8.dp))
-            Button(onClick = onExtend, enabled = cantSpend == null && active && canSpendNow) {
-                Text(stringResource(R.string.stamps_extend))
+        // Only where Extend can apply: the batch the node uploads with, on a node that can spend.
+        if (extend == ExtendAvailability.Offered) {
+            SectionCard(title = stringResource(R.string.stamps_extend_title)) {
+                MutedText(stringResource(R.string.stamps_extend_intro))
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = onExtend, enabled = canSpendNow) {
+                    Text(stringResource(R.string.stamps_extend))
+                }
             }
         }
     }
 }
 
 @Composable
-private fun BuyPage(nodeInfo: NodeInfo, canBuyNow: Boolean, publishingNote: String?, onConfirmed: (StampQuote) -> Unit) {
-    var depth by rememberSaveable { mutableIntStateOf(DEFAULT_STAMP_DEPTH) }
-    var days by rememberSaveable { mutableLongStateOf(DEFAULT_STAMP_DAYS) }
+private fun BuyPage(
+    nodeInfo: NodeInfo,
+    canBuyNow: Boolean,
+    publishingNote: String?,
+    onAddFunds: (() -> Unit)?,
+    onConfirmed: (StampQuote) -> Unit,
+) {
+    var depth by rememberSaveable { mutableIntStateOf(DEFAULT_STORAGE_CHOICE.depth) }
+    var days by rememberSaveable { mutableLongStateOf(DEFAULT_STORAGE_CHOICE.days) }
     val quote = rememberQuote(depth, days) { JSONObject().put("depth", depth).put("days", days).let { "quote" to it } }
     var confirming by remember { mutableStateOf<StampQuote?>(null) }
     val cantSpend = stampSpendBlockedReason(nodeInfo)
+    val context = LocalContext.current
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionCard(title = stringResource(R.string.stamps_size)) {
-            STAMP_DEPTHS.forEach { d ->
-                ChoiceRow(
-                    selected = d == depth,
-                    label = formatStampBytes(effectiveStampBytes(d)),
-                    sub = stringResource(R.string.stamps_depth_n, d),
-                ) { depth = d }
+        StoragePicker(depth = depth, onDepth = { depth = it }, days = days, onDays = { days = it })
+        val q = (quote as? QuoteState.Ready)?.quote
+        SectionCard(title = stringResource(R.string.stamps_total)) {
+            when (quote) {
+                QuoteState.Loading -> MutedText(stringResource(R.string.stamps_asking_price))
+                is QuoteState.Failed -> MutedText(stringResource(R.string.stamps_no_price_reason, quote.message))
+                is QuoteState.Ready -> {
+                    TotalFigure(stringResource(R.string.stamps_total_about, withUnit(quote.quote.xdaiRequiredDisplay, "xDAI")))
+                    SubLine(stringResource(R.string.stamps_total_buy_note))
+                    if (!quote.quote.sufficientFunds) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            stringResource(R.string.stamps_short_of_xdai, withUnit(quote.quote.xdaiToSend, "xDAI")),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
             }
         }
-        SectionCard(title = stringResource(R.string.stamps_duration)) {
-            STAMP_BUY_DAYS.forEach { n -> ChoiceRow(selected = n == days, label = daysLabel(n)) { days = n } }
-        }
-        QuoteCard(quote, deposit = true)
         (cantSpend ?: publishingNote)?.let { MutedText(it) }
-        val q = (quote as? QuoteState.Ready)?.quote
-        Button(
-            onClick = { confirming = q },
-            enabled = cantSpend == null && q != null && q.sufficientFunds && canBuyNow,
-        ) { Text(stringResource(R.string.stamps_buy)) }
+        val fundTo = fundingAddress(nodeInfo)
+        when (buyAction(cantSpend, q?.sufficientFunds)) {
+            BuyAction.AddFunds -> {
+                // The way out when the node holds too little (#425, W43): pay from the wallet, or send it xDAI.
+                if (onAddFunds != null) {
+                    Button(onClick = onAddFunds, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.stamps_add_funds)) }
+                }
+                if (fundTo != null) {
+                    OutlinedButton(onClick = { copyNodeAddress(context, fundTo) }, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.stamps_copy_node_address))
+                    }
+                }
+            }
+            BuyAction.Buy -> Button(
+                onClick = { confirming = q },
+                enabled = q != null && canBuyNow,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.stamps_buy)) }
+        }
+        DetailsExpander(title = stringResource(R.string.stamps_advanced)) {
+            AdvancedDepths(depth) { depth = it }
+            Spacer(Modifier.height(8.dp))
+            QuoteBreakdown(quote, deposit = true)
+        }
     }
     confirming?.let { q ->
         SpendConfirmDialog(
@@ -403,6 +537,68 @@ private fun BuyPage(nodeInfo: NodeInfo, canBuyNow: Boolean, publishingNote: Stri
     }
 }
 
+/**
+ * The surface of a storage buy (#425, W42), shared by Buy and Fund: three
+ * sizes named by what they hold ([STORAGE_PRESETS]) and how long. A size
+ * picked under Advanced that isn't a preset shows as a line of its own.
+ */
+@Composable
+internal fun StoragePicker(depth: Int, onDepth: (Int) -> Unit, days: Long, onDays: (Long) -> Unit) {
+    SectionCard(title = stringResource(R.string.stamps_how_much)) {
+        STORAGE_PRESETS.forEach { preset ->
+            ChoiceRow(
+                selected = preset.depth == depth,
+                label = storagePresetLabel(preset.depth),
+                sub = stringResource(preset.use),
+            ) { onDepth(preset.depth) }
+        }
+        if (STORAGE_PRESETS.none { it.depth == depth }) {
+            SubLine(stringResource(R.string.stamps_custom_size, formatStampBytes(effectiveStampBytes(depth))))
+        }
+    }
+    SectionCard(title = stringResource(R.string.stamps_how_long)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            STAMP_BUY_DAYS.forEach { n ->
+                FilterChip(
+                    selected = n == days,
+                    onClick = { onDays(n) },
+                    label = { Text(daysLabel(n)) },
+                    modifier = Modifier.semantics { role = Role.RadioButton },
+                )
+            }
+        }
+    }
+}
+
+/** Every size the node takes, by depth: Advanced, for who knows what a depth is. */
+@Composable
+internal fun AdvancedDepths(depth: Int, onDepth: (Int) -> Unit) {
+    Text(
+        stringResource(R.string.stamps_size),
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(vertical = 4.dp),
+    )
+    STAMP_DEPTHS.forEach { d ->
+        ChoiceRow(
+            selected = d == depth,
+            label = formatStampBytes(effectiveStampBytes(d)),
+            sub = stringResource(R.string.stamps_depth_n, d),
+        ) { onDepth(d) }
+    }
+}
+
+/** A page's one headline figure. */
+@Composable
+internal fun TotalFigure(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.headlineSmall,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.semantics { heading() },
+    )
+}
+
 @Composable
 private fun ExtendPage(
     nodeInfo: NodeInfo,
@@ -420,14 +616,14 @@ private fun ExtendPage(
         ?: if (connected != batch.id) stringResource(R.string.stamps_extend_only_active) else null
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionCard(title = shortBatchId(batch.id)) {
+        SectionCard(title = batchTitle(batch)) {
             DetailRow(stringResource(R.string.stamps_capacity), formatStampBytes(batch.capacityBytes))
             DetailRow(stringResource(R.string.stamps_time_left), batch.ttlSeconds?.let(::formatStampTtl) ?: stringResource(R.string.stamps_unknown))
         }
         SectionCard(title = stringResource(R.string.stamps_add)) {
             STAMP_EXTEND_DAYS.forEach { n -> ChoiceRow(selected = n == days, label = daysLabel(n)) { days = n } }
         }
-        QuoteCard(quote, deposit = false)
+        SectionCard(title = stringResource(R.string.stamps_estimated_cost)) { QuoteBreakdown(quote, deposit = false) }
         cantSpend?.let { MutedText(it) }
         val q = (quote as? QuoteState.Ready)?.quote
         Button(
@@ -479,9 +675,10 @@ private fun rememberQuote(key1: Any, key2: Any, request: () -> Pair<String, JSON
     return state
 }
 
+/** The price in full: what the stamp costs in xBZZ, and where the xDAI for it comes from. */
 @Composable
-private fun QuoteCard(state: QuoteState, deposit: Boolean) {
-    SectionCard(title = stringResource(R.string.stamps_estimated_cost)) {
+private fun QuoteBreakdown(state: QuoteState, deposit: Boolean) {
+    Column {
         when (state) {
             QuoteState.Loading -> MutedText(stringResource(R.string.stamps_asking_price))
             is QuoteState.Failed -> MutedText(stringResource(R.string.stamps_no_price_reason, state.message))
@@ -589,6 +786,7 @@ internal fun ChoiceRow(selected: Boolean, label: String, sub: String? = null, on
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(min = if (sub == null) 48.dp else 56.dp)
             .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
             .padding(vertical = 2.dp),
     ) {
