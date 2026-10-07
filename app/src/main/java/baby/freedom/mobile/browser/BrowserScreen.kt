@@ -3335,8 +3335,29 @@ fun BrowserScreen(
                     val tab = state
                     pageInfoSheet = null
                     scope.launch {
-                        SiteData.delete(tab.id, dataOrigin, dataUrl, tab.private)
-                        // What the page holds in memory goes with a reload.
+                        SiteData.delete(context, dataOrigin, dataUrl, tab.private)
+                        // What the page holds in memory goes with a reload,
+                        // whose document is the cleanup page first: it
+                        // reaches the tab's own sessionStorage, and what
+                        // the old page wrote on its way out.
+                        if (tabs.active !== tab) return@launch
+                        if (tab.rendererGone != null) {
+                            reloadPage()
+                            return@launch
+                        }
+                        SiteData.markCleanup(tab.id, dataOrigin)
+                        // The site's service workers are only reachable
+                        // from a document of its own: the page's, which
+                        // unregisters them and then reloads itself — so a
+                        // worker doesn't answer the reload. If it hasn't
+                        // started a load within a few seconds (a page that
+                        // stops it), the tab is reloaded from here.
+                        if (tabs.cleanSiteInPage?.invoke(tab, dataOrigin) == true) {
+                            val started = withTimeoutOrNull(IN_PAGE_CLEANUP_WAIT_MS) {
+                                while (SiteData.cleanupPending(tab.id)) delay(100)
+                            }
+                            if (started != null) return@launch
+                        }
                         if (tabs.active === tab) reloadPage()
                     }
                 }
@@ -3438,4 +3459,7 @@ private fun IpfsStatusLine(text: String, modifier: Modifier = Modifier) {
 }
 
 /** The tab and document a page's Site permissions sheet (#266) was opened over. */
+/** How long Page info's Delete waits for the page to reload itself ([TabsState.cleanSiteInPage]). */
+private const val IN_PAGE_CLEANUP_WAIT_MS = 3_000L
+
 private data class PageSheetTarget(val tabId: Long, val origin: String?, val doc: Int?)

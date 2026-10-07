@@ -250,6 +250,18 @@ class TabsState(
     internal var pageCertificate: ((BrowserState) -> CertFacts?)? = null
 
     /**
+     * Hook installed by the [BrowserWebViewHost]: have the given tab's
+     * document, if it is on the given origin, clear that origin's data
+     * and unregister its service workers itself, then reload
+     * ([siteDataInPageJs]) — Page info's Delete data (#442). Whether it
+     * was asked to; `false` when the tab has no WebView or its committed
+     * document is on another origin. `null` before the host has
+     * composed, or after it disposes.
+     */
+    @Volatile
+    internal var cleanSiteInPage: ((BrowserState, String) -> Boolean)? = null
+
+    /**
      * Hook installed by the [BrowserWebViewHost]: mute or unmute the
      * given tab's WebView (#91, `WebViewCompat.setAudioMuted`) — only the
      * host knows which WebView backs a tab. `null` before the host has

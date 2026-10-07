@@ -1,7 +1,15 @@
 package baby.freedom.mobile.browser
 
+import android.content.Context
 import android.webkit.CookieManager
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
 import android.webkit.WebStorage
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.annotation.MainThread
 import androidx.annotation.StringRes
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,6 +32,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NoEncryption
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.AlertDialog
@@ -67,8 +76,10 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.ByteArrayInputStream
 import java.text.DateFormat
 import java.util.Date
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
 
@@ -82,8 +93,14 @@ internal enum class PageConnection(
 ) {
     /** `https://`: Chromium refuses every certificate error (#259), so a page that loaded has a valid one. */
     Secure(R.string.page_info_secure_title, R.string.page_info_secure_body),
-    /** `http://`. */
+    /** `http://` to anywhere but this device. */
     NotSecure(R.string.page_info_not_secure_title, R.string.page_info_not_secure_body),
+    /**
+     * `http://` to a loopback host ([isLoopbackHost]: `localhost`, `::1`,
+     * 127.0.0.0/8) — never on the network, and what Chromium itself
+     * treats as potentially trustworthy, so not "Not secure".
+     */
+    Local(R.string.page_info_local_title, R.string.page_info_local_body),
     Swarm(R.string.page_info_dweb_swarm_title, R.string.page_info_dweb_body),
     Ipfs(R.string.page_info_dweb_ipfs_title, R.string.page_info_dweb_body),
     /** A dweb page whose network isn't known from its address (a raw virtual origin). */
@@ -113,9 +130,18 @@ internal fun pageConnectionFor(url: String, errorPage: Boolean, protocol: Protoc
     if (VirtualOrigin.isVirtualUrl(u)) return PageConnection.Dweb
     return when {
         u.startsWith("https://", ignoreCase = true) -> PageConnection.Secure
-        u.startsWith("http://", ignoreCase = true) -> PageConnection.NotSecure
+        u.startsWith("http://", ignoreCase = true) ->
+            if (loopbackHostOf(u)) PageConnection.Local else PageConnection.NotSecure
         else -> null
     }
+}
+
+/** Whether [url]'s host is a loopback one ([isLoopbackHost]), as WHATWG parses it. */
+private fun loopbackHostOf(url: String): Boolean {
+    val host = runCatching { java.net.URI(url).host }.getOrNull()
+        ?.lowercase()?.trimEnd('.')?.removePrefix("[")?.removeSuffix("]")
+        ?.takeIf { it.isNotEmpty() } ?: return false
+    return isLoopbackHost(host)
 }
 
 /**
@@ -145,6 +171,7 @@ private val AddressBadge.Connection.icon: ImageVector
     get() = when (connection) {
         PageConnection.Secure -> Icons.Filled.Lock
         PageConnection.NotSecure -> Icons.Filled.NoEncryption
+        PageConnection.Local -> Icons.Filled.PhoneAndroid
         PageConnection.ErrorPage -> Icons.Outlined.Info
         PageConnection.Swarm, PageConnection.Ipfs, PageConnection.Dweb -> Icons.Filled.Hub
     }
@@ -153,6 +180,7 @@ private val AddressBadge.Connection.icon: ImageVector
 private fun badgeDescriptionRes(connection: PageConnection): Int = when (connection) {
     PageConnection.Secure -> R.string.page_info_badge_secure
     PageConnection.NotSecure -> R.string.page_info_badge_not_secure
+    PageConnection.Local -> R.string.page_info_badge_local
     PageConnection.ErrorPage -> R.string.page_info_badge_error
     else -> connection.titleRes
 }
@@ -307,6 +335,20 @@ internal object SiteData {
     private val cleanups = ConcurrentHashMap<Long, String>()
 
     /**
+     * Mark tab [tabId]'s next document load — the reload [delete] is
+     * followed by — to be answered with the site-data cleanup page
+     * ([takeCleanup]) if it is on [origin]. That page, run in the tab
+     * itself, is what reaches the tab's own sessionStorage, and whatever
+     * the old document wrote on its way out. The mark lasts that one
+     * navigation: the tab's next main-frame request takes it, and its
+     * next commit ([committed]) drops it if no request did — a load a
+     * service worker answered never reaches the interceptor.
+     */
+    fun markCleanup(tabId: Long, origin: String) {
+        cleanups[tabId] = origin
+    }
+
+    /**
      * Should tab [tabId]'s main-frame request for [url] be answered with
      * the site-data cleanup page ([SITE_DATA_CLEANUP_HTML])? Once: the
      * tab's next main-frame request takes the mark whatever it is for,
@@ -319,33 +361,120 @@ internal object SiteData {
         return permissionOriginKey(url) == origin
     }
 
+    /** Tab id → the origin ([permissionOriginKey]) of the document it last committed. */
+    private val committedOrigins = ConcurrentHashMap<Long, String>()
+
     /**
-     * Delete [origin]'s data for tab [tabId]: its cookies [pageUrl] is
-     * sent (see [siteCookieExpiries]) and its storage, here, and on the
-     * tab's next load — the reload that follows — whatever else only a
-     * document on the origin can reach (localStorage, sessionStorage,
-     * IndexedDB, Cache Storage, service workers), through the cleanup
-     * page ([takeCleanup]). Runs to the end once started, whatever
-     * cancels the caller. Call on the main thread.
+     * Tab [tabId] committed a document at [url] (`onPageStarted`): a
+     * mark its load didn't take — one a service worker answered — goes,
+     * so it can't turn up on a later load the user didn't ask to clean.
      */
-    suspend fun delete(tabId: Long, origin: String, pageUrl: String, private: Boolean) = withContext(NonCancellable) {
-        val cm = jar(private)
-        if (cm != null) {
-            withContext(Dispatchers.IO) {
-                val host = hostOfUrl(pageUrl).orEmpty()
-                val domains = cookieDomains(host, PublicSuffixList.registrableDomain(host))
-                val entries = (
-                    cookieEntries(runCatching { cm.getCookie(pageUrl) }.getOrNull()) +
-                        cookieEntries(runCatching { cm.getCookie("$origin/") }.getOrNull())
-                    ).distinct()
-                for (expiry in siteCookieExpiries(origin, CookieHygiene.pathOf(pageUrl), entries, domains)) {
-                    runCatching { cm.setCookie(pageUrl, expiry) }
+    fun committed(tabId: Long, url: String?) {
+        cleanups.remove(tabId)
+        val origin = url?.let(::permissionOriginKey)
+        if (origin == null) committedOrigins.remove(tabId) else committedOrigins[tabId] = origin
+    }
+
+    /** Is a [markCleanup] for tab [tabId] still waiting for a load to take it? */
+    fun cleanupPending(tabId: Long): Boolean = cleanups.containsKey(tabId)
+
+    /** The origin of tab [tabId]'s committed document, as [committed] last heard. */
+    fun committedOrigin(tabId: Long): String? = committedOrigins[tabId]
+
+    /** Tab [tabId] closed: nothing of it is kept. */
+    fun tabClosed(tabId: Long) {
+        cleanups.remove(tabId)
+        committedOrigins.remove(tabId)
+    }
+
+    /** How long [wipeOnOrigin]'s document gets to finish. */
+    private const val WIPE_TIMEOUT_MS = 10_000L
+
+    /**
+     * Delete [origin]'s data: its cookies [pageUrl] is sent (see
+     * [siteCookieExpiries]) and its storage (`WebStorage.deleteOrigin`),
+     * then — through a document of the cleanup page's own run on the
+     * origin in a throwaway WebView ([wipeOnOrigin]) — what only a
+     * document there can reach: localStorage, IndexedDB and Cache
+     * Storage. That doesn't depend on the tab's next load reaching the
+     * interceptor, which a service worker's answer never does. Service
+     * workers themselves are out of that document's reach (Chromium
+     * refuses `getRegistrations()` in a `loadDataWithBaseURL` document:
+     * "the document is in an invalid state"); the caller has the tab's
+     * own document unregister them ([siteDataInPageJs]) before its
+     * reload. Runs to the end once started, whatever cancels the caller.
+     * Returns whether the wipe document ran to its end. Call on the
+     * main thread.
+     */
+    suspend fun delete(context: Context, origin: String, pageUrl: String, private: Boolean): Boolean =
+        withContext(NonCancellable) {
+            val cm = jar(private)
+            if (cm != null) {
+                withContext(Dispatchers.IO) {
+                    val host = hostOfUrl(pageUrl).orEmpty()
+                    val domains = cookieDomains(host, PublicSuffixList.registrableDomain(host))
+                    val entries = (
+                        cookieEntries(runCatching { cm.getCookie(pageUrl) }.getOrNull()) +
+                            cookieEntries(runCatching { cm.getCookie("$origin/") }.getOrNull())
+                        ).distinct()
+                    for (expiry in siteCookieExpiries(origin, CookieHygiene.pathOf(pageUrl), entries, domains)) {
+                        runCatching { cm.setCookie(pageUrl, expiry) }
+                    }
+                    runCatching { cm.flush() }
                 }
-                runCatching { cm.flush() }
+            }
+            runCatching { storage(private)?.deleteOrigin(origin) }
+            wipeOnOrigin(context, origin, private)
+        }
+
+    /**
+     * Run [siteDataWipeHtml] as a document on [origin], in a WebView of
+     * its own on the tab's profile (a private tab's on the private
+     * session's, [PrivateProfile]): `loadDataWithBaseURL` commits it with
+     * the origin's identity without fetching anything, so no service
+     * worker answers it and no page script runs beside it. The WebView
+     * loads nothing from the network ([WebSettings.setBlockNetworkLoads],
+     * every request refused) and is destroyed after. Whether the
+     * document said it was done within [WIPE_TIMEOUT_MS]. Main thread.
+     */
+    @MainThread
+    private suspend fun wipeOnOrigin(context: Context, origin: String, private: Boolean): Boolean {
+        val wv = runCatching { WebView(context.applicationContext) }.getOrNull() ?: return false
+        try {
+            // Before anything else touches it: Chromium refuses a profile
+            // change once a WebView is used. A private tab's storage is
+            // never wiped through the default profile instead.
+            if (private && runCatching { PrivateProfile.attach(wv) }.isFailure) return false
+            wv.settings.javaScriptEnabled = true
+            wv.settings.domStorageEnabled = true
+            wv.settings.blockNetworkLoads = true
+            val done = "wiped-" + UUID.randomUUID()
+            return withTimeoutOrNull(WIPE_TIMEOUT_MS) {
+                suspendCancellableCoroutine { cont ->
+                    wv.webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?) = true
+
+                        override fun shouldInterceptRequest(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                        ): WebResourceResponse = WebResourceResponse(
+                            "text/plain", "utf-8", 403, "Forbidden", emptyMap(), ByteArrayInputStream(ByteArray(0)),
+                        )
+                    }
+                    wv.webChromeClient = object : WebChromeClient() {
+                        override fun onReceivedTitle(view: WebView?, title: String?) {
+                            if (title == done && cont.isActive) cont.resume(true)
+                        }
+                    }
+                    wv.loadDataWithBaseURL("$origin/", siteDataWipeHtml(done), "text/html", "utf-8", null)
+                }
+            } ?: false
+        } finally {
+            runCatching {
+                wv.stopLoading()
+                wv.destroy()
             }
         }
-        runCatching { storage(private)?.deleteOrigin(origin) }
-        cleanups[tabId] = origin
     }
 }
 

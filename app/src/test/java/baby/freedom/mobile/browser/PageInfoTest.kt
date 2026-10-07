@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -140,17 +141,69 @@ class PageInfoTest {
 
     @Test
     fun `the cleanup page is served once, to the marked tab, on the marked origin only`() {
-        val f = SiteData::class.java.getDeclaredField("cleanups").apply { isAccessible = true }
-        @Suppress("UNCHECKED_CAST")
-        val marks = f.get(SiteData) as MutableMap<Long, String>
-        marks[7L] = "https://example.org"
+        SiteData.markCleanup(7L, "https://example.org")
         assertEquals(false, SiteData.takeCleanup(8L, "https://example.org/"))
         assertEquals(true, SiteData.takeCleanup(7L, "https://example.org/a?b"))
         // Taken: the next load is served normally.
         assertEquals(false, SiteData.takeCleanup(7L, "https://example.org/"))
         // A tab that went elsewhere loses the mark rather than keep it for a later visit.
-        marks[7L] = "https://example.org"
+        SiteData.markCleanup(7L, "https://example.org")
         assertEquals(false, SiteData.takeCleanup(7L, "https://other.example/"))
         assertEquals(false, SiteData.takeCleanup(7L, "https://example.org/"))
+    }
+
+    @Test
+    fun `a load a service worker answered drops the cleanup mark at its commit`() {
+        // The reload never reached the interceptor; its commit ends the mark,
+        // so a later same-origin load isn't served the cleanup page.
+        SiteData.markCleanup(9L, "https://example.org")
+        assertTrue(SiteData.cleanupPending(9L))
+        SiteData.committed(9L, "https://example.org/")
+        assertFalse(SiteData.cleanupPending(9L))
+        assertEquals("https://example.org", SiteData.committedOrigin(9L))
+        assertEquals(false, SiteData.takeCleanup(9L, "https://example.org/"))
+        // Another tab's commit leaves this one's mark alone.
+        SiteData.markCleanup(9L, "https://example.org")
+        SiteData.committed(10L, "https://other.example/")
+        assertEquals(true, SiteData.takeCleanup(9L, "https://example.org/"))
+        SiteData.tabClosed(9L)
+        assertNull(SiteData.committedOrigin(9L))
+    }
+
+    @Test
+    fun `the in-page cleanup acts only on its own origin, then reloads`() {
+        val js = siteDataInPageJs("http://localhost:8720")
+        assertTrue("if (location.origin !== \"http://localhost:8720\") return;" in js)
+        assertTrue("r.unregister()" in js)
+        assertTrue(js.indexOf("r.unregister()") < js.indexOf("location.replace(location.href)"))
+        // An origin can't break out of the string it's compared with.
+        assertTrue("\"a\\\"b\"" in siteDataInPageJs("a\"b"))
+    }
+
+    @Test
+    fun `loopback http is on this device, not Not secure`() {
+        for (u in listOf(
+            "http://localhost:8720/", "http://127.0.0.1/", "http://127.9.8.7:80/x",
+            "http://[::1]:8720/", "http://app.localhost/", "HTTP://LOCALHOST./",
+        )) assertEquals(u, PageConnection.Local, pageConnectionFor(u, errorPage = false, protocol = null))
+        for (u in listOf(
+            "http://127.tracker.example/", "http://127.0.0.1.evil.example/", "http://10.0.2.2:8720/",
+            "http://example.org/", "http://localhost.example/",
+        )) assertEquals(u, PageConnection.NotSecure, pageConnectionFor(u, errorPage = false, protocol = null))
+        assertEquals(PageConnection.Secure, pageConnectionFor("https://localhost/", errorPage = false, protocol = null))
+        assertEquals(PageConnection.ErrorPage, pageConnectionFor("http://localhost/", errorPage = true, protocol = null))
+    }
+
+    @Test
+    fun `the wipe document clears what the cleanup page does and says when it is done`() {
+        val html = siteDataWipeHtml("wiped-1")
+        for (step in listOf("localStorage.clear()", "sessionStorage.clear()", "indexedDB.deleteDatabase",
+            "caches.delete", "r.unregister()")) {
+            assertTrue(step, step in html)
+            assertTrue(step, step in SITE_DATA_CLEANUP_HTML)
+        }
+        assertTrue("document.title = 'wiped-1'" in html)
+        assertFalse("location.replace" in html)
+        assertTrue("location.replace(location.href)" in SITE_DATA_CLEANUP_HTML)
     }
 }

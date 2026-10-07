@@ -6,6 +6,7 @@
     <!-- The badge's content description, for a page that has no protocol badge. -->
     <string name="page_info_badge_secure">Secure connection</string>
     <string name="page_info_badge_not_secure">Not secure</string>
+    <string name="page_info_badge_local">Connection on this device</string>
     <string name="page_info_badge_error">Page didn\'t load</string>
 
     <string name="page_info_section_name">Name</string>
@@ -16,6 +17,8 @@
     <string name="page_info_secure_body">What you send to this site, and what it sends back, can\'t be read or changed on the way.</string>
     <string name="page_info_not_secure_title">Connection is not secure</string>
     <string name="page_info_not_secure_body">Others on the network can see or change this page. Don\'t enter passwords or payment details here.</string>
+    <string name="page_info_local_title">Connection stays on this device</string>
+    <string name="page_info_local_body">This page comes from a server running on this phone, so it doesn\'t cross the network on its way here.</string>
     <string name="page_info_dweb_swarm_title">Loaded from Swarm</string>
     <string name="page_info_dweb_ipfs_title">Loaded from IPFS</string>
     <string name="page_info_dweb_title">Loaded from a peer-to-peer network</string>

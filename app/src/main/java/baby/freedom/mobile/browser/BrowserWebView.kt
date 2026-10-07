@@ -1179,6 +1179,7 @@ fun BrowserWebViewHost(
             ClientCertificates.onTabClosed(id)
             RadicleProviders.onTabClosed(id)
             EthereumProviders.onTabClosed(id)
+            SiteData.tabClosed(id)
             SwarmProviders.onTabClosed(id)
             X402Payments.onTabClosed(id)
             if (wv == null) continue
@@ -1413,6 +1414,11 @@ fun BrowserWebViewHost(
                 )
             }
         }
+        tabs.cleanSiteInPage = cleanSiteInPage@{ tab, origin ->
+            val wv = webViews[tab.id] ?: return@cleanSiteInPage false
+            if (SiteData.committedOrigin(tab.id) != origin) return@cleanSiteInPage false
+            runCatching { wv.evaluateJavascript(siteDataInPageJs(origin), null) }.isSuccess
+        }
         tabs.clearWebViewData = { siteData, cache ->
             if (siteData) {
                 // Globally-scoped stores: cookies and DOM storage / IndexedDB /
@@ -1478,6 +1484,7 @@ fun BrowserWebViewHost(
             tabs.printPage = null
             tabs.dropMemoryCache = null
             tabs.pageCertificate = null
+            tabs.cleanSiteInPage = null
             UnverifiedOrigins.onSweep = null
             tabs.setAudioMuted = null
         }
@@ -2996,6 +3003,8 @@ private fun buildRefreshableWebView(
                 failedLoad = null
                 pendingCertErrors.clear()
                 certRefusal.committed(url)
+                // Page info's cleanup mark (#442) lasts this one load.
+                SiteData.committed(state.id, url)
                 // The page that held a blob: download's file is gone, and
                 // its file with it: such a download fails now, not after
                 // a chunk times out.
@@ -6056,8 +6065,13 @@ internal fun siteDataCleanupResponse(): WebResourceResponse =
         ByteArrayInputStream(SITE_DATA_CLEANUP_HTML.toByteArray(Charsets.UTF_8)),
     )
 
-internal const val SITE_DATA_CLEANUP_HTML = """<!doctype html><meta charset="utf-8"><script>
-(async () => {
+/**
+ * The steps of [SITE_DATA_CLEANUP_HTML] that clear the origin the
+ * document runs on, as the body of an async function: localStorage,
+ * sessionStorage, IndexedDB, Cache Storage, service workers, script-
+ * visible cookies.
+ */
+private const val SITE_DATA_WIPE_JS = """
   const quietly = async (f) => { try { await f(); } catch (e) {} };
   await quietly(() => localStorage.clear());
   await quietly(() => sessionStorage.clear());
@@ -6079,7 +6093,38 @@ internal const val SITE_DATA_CLEANUP_HTML = """<!doctype html><meta charset="utf
       if (name) document.cookie = name + '=; Max-Age=0; path=/';
     }
   });
+"""
+
+internal const val SITE_DATA_CLEANUP_HTML = """<!doctype html><meta charset="utf-8"><script>
+(async () => {$SITE_DATA_WIPE_JS
   location.replace(location.href);
+})();
+</script>"""
+
+/**
+ * Page info's Delete data for this site (#442), run in the tab's own
+ * document on [origin] — the one place its service workers can be
+ * unregistered from (a `loadDataWithBaseURL` document is refused them):
+ * the same clearing as [SITE_DATA_CLEANUP_HTML], then the page reloads
+ * itself, once the workers are gone, so the reload isn't one of theirs.
+ * Does nothing at all in a document on any other origin — one that
+ * committed after the caller last looked.
+ */
+internal fun siteDataInPageJs(origin: String): String =
+    """(async () => {
+  if (location.origin !== ${org.json.JSONObject.quote(origin)}) return;$SITE_DATA_WIPE_JS
+  location.replace(location.href);
+})();"""
+
+/**
+ * The same clearing as [SITE_DATA_CLEANUP_HTML], ending by setting the
+ * title to [doneTitle] instead of reloading — for Page info's throwaway
+ * WebView ([SiteData.delete]), which waits for that title.
+ */
+internal fun siteDataWipeHtml(doneTitle: String): String =
+    """<!doctype html><meta charset="utf-8"><script>
+(async () => {$SITE_DATA_WIPE_JS
+  document.title = '$doneTitle';
 })();
 </script>"""
 
