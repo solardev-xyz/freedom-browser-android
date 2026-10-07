@@ -222,4 +222,47 @@ class DownloadOffersTest {
         assertEquals("Size unknown", downloadOfferSizeLine(0))
         assertEquals(formatBytes(2048), downloadOfferSizeLine(2048))
     }
+
+    @Test
+    fun anOfferThatGoesUnstartedIsDiscardedOnce() {
+        // A blob: offer's file is held by its page until the offer goes.
+        val offers = DownloadOffers()
+        val discarded = mutableListOf<String>()
+        fun offer(tab: Long, name: String) =
+            offers.offer(tab, PAGE, name, "x", -1, discard = { discarded += name }) {}
+        offer(1, "declined")
+        offer(1, "declined-with-all")
+        offer(2, "closed-tab")
+        offer(3, "accepted")
+        offers.decline(offers.pending.value.first { it.fileName == "declined" }.key)
+        // The no blocked tab 1: its other offer went with it.
+        assertEquals(listOf("declined", "declined-with-all"), discarded)
+        offers.retainTabs(setOf(3))
+        assertEquals(listOf("declined", "declined-with-all", "closed-tab"), discarded)
+        offers.accept(offers.pending.value.single().key)
+        offers.declineAll(3)
+        assertEquals(3, discarded.size)
+        // A blocked tab's offer is refused at once (its caller lets go of
+        // it, DownloadManager.start); there's nothing queued to discard.
+        offer(4, "declined-on-4")
+        offers.decline(offers.pending.value.single().key)
+        assertFalse(offer(4, "while-blocked"))
+        assertEquals(listOf("declined", "declined-with-all", "closed-tab", "declined-on-4"), discarded)
+    }
+
+    @Test
+    fun aLateOfferFromAClosedTabIsRefused() {
+        // A blob: offer comes once its page answers, a big data: one once
+        // its size is told: either can land after its tab closed (#408 R1-M5).
+        val offers = DownloadOffers()
+        offers.retainTabs(setOf(1, 2))
+        offers.retainTabs(setOf(2))
+        assertFalse(offers.offer(1, PAGE, "late.json", "x", -1) {})
+        assertFalse(offers.offer(1, null, "late-own.json", "x", -1) {})
+        assertTrue(offers.pending.value.isEmpty())
+        // Open tabs, and tabs never seen yet (just opened), still offer.
+        assertTrue(offers.offer(2, PAGE, "open.json", "x", -1) {})
+        assertTrue(offers.offer(5, PAGE, "new-tab.json", "x", -1) {})
+        assertEquals(listOf("open.json", "new-tab.json"), offers.pending.value.map { it.fileName })
+    }
 }

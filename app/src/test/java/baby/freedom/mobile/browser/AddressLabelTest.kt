@@ -150,4 +150,15 @@ class AddressLabelTest {
         assertEquals("about:blank", AddressLabel.resting("about:blank"))
         assertEquals("data:text/html,hi", AddressLabel.resting("data:text/html,hi"))
     }
+
+    @Test
+    fun `bidi controls can't reorder the label`() {
+        // A name ENSIP-15 refuses is put in the bar as given; an RLO in
+        // it made the capsule read `hte.paypal.com`.
+        assertEquals("\uFFFDmoc.lapyap.eth", AddressLabel.resting("\u202Emoc.lapyap.eth"))
+        assertEquals("ens://\uFFFDmoc.l….eth", AddressLabel.resting("ens://\u202Emoc.lapyap.eth"))
+        assertEquals("a\uFFFDb\uFFFDc\uFFFD.eth/x", AddressLabel.resting("a\u2067b\u200Fc\u061C.eth/x"))
+        // Joiners aren't bidi controls: an emoji name keeps them.
+        assertEquals("\uD83D\uDC68\u200D\uD83D\uDCBB.eth", AddressLabel.resting("\uD83D\uDC68\u200D\uD83D\uDCBB.eth"))
+    }
 }

@@ -336,7 +336,7 @@ class ChainStore internal constructor(
             .put("addedAt", addedAt)
             .toString()
 
-        /** `(chain, addedAt)`, or `null` for anything [ChainInput.build] wouldn't accept. */
+        /** `(chain, addedAt)`, or `null` for anything [ChainInput.build] wouldn't accept as a stored chain. */
         internal fun decode(json: String): Pair<Chain, Long>? = try {
             val o = JSONObject(json)
             val rpcs = o.optJSONArray("rpcUrls")
@@ -351,6 +351,7 @@ class ChainStore internal constructor(
                 rpcUrls = rpcs,
                 currencyName = o.optString("currencyName").takeIf { it.isNotBlank() },
                 isTestnet = o.optBoolean("isTestnet", false),
+                stored = true,
             )?.let { it to o.optLong("addedAt", 0) }
         } catch (_: Exception) {
             null

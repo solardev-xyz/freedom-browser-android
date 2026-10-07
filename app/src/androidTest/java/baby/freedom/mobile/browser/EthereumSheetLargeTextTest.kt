@@ -5,7 +5,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import baby.freedom.mobile.chains.ChainInput
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.wallet.WalletAccount
 import org.junit.Assert.assertTrue
@@ -45,10 +49,35 @@ class EthereumSheetLargeTextTest {
         )
         var request by androidx.compose.runtime.mutableStateOf(EthereumPromptRequest(ask(false), setUpWallet = {}))
         rule.setContent { FreedomTheme { EthereumApprovalSheet(request) } }
+        // The summary says it (#423), and Details names it as before.
+        rule.onNodeWithText("From Account 1 · on any network").assertExists()
+        rule.onNodeWithTag("ethereum-details").performScrollTo().performClick()
         rule.onNodeWithText("Any — the signature names no chain").assertExists()
-        rule.onNodeWithText("Gnosis Chain (chain 100)").assertDoesNotExist()
+        rule.onNodeWithText("Chain ID 100").assertDoesNotExist()
         request = EthereumPromptRequest(ask(true), setUpWallet = {})
-        rule.onNodeWithText("Gnosis Chain (chain 100)").assertExists()
+        rule.onNodeWithText("Gnosis Chain").assertExists()
+        rule.onNodeWithText("Chain ID 100").assertExists()
+    }
+
+    /**
+     * #370 R3-F1: a site's chain named "Ethereum (chain 1) Neeee…t" wraps on
+     * the Switch sheet. The real ID is never part of the name's text: it's
+     * its own line, right under the whole name.
+     */
+    @Test
+    fun theSwitchSheetShowsTheChainIdOnItsOwnLineUnderTheName() {
+        val name = "Ethereum (chain 1) N" + "e".repeat(40) + "t"
+        val spoof = ChainInput.build("666", name, "ETH", "18", "", listOf("https://rpc.example.org"))!!
+        val request = EthereumPromptRequest(
+            EthAsk.SwitchChain("https://example.com", baby.freedom.mobile.chains.BuiltInChains.GNOSIS, spoof), setUpWallet = {},
+        )
+        rule.setContent { FreedomTheme { EthereumApprovalSheet(request) } }
+        val shown = rule.onNodeWithText(name).fetchSemanticsNode().boundsInRoot
+        val id = rule.onNodeWithText("Chain ID 666").fetchSemanticsNode().boundsInRoot
+        assertTrue("ID $id not right under the name $shown", id.top >= shown.bottom && id.top - shown.bottom < 24)
+        // The chain it leaves, with its ID, under Details (#423).
+        rule.onNodeWithTag("ethereum-details").performScrollTo().performClick()
+        rule.onNodeWithText("Chain ID 100").assertExists()
     }
 
     /** #239: typed data a Ledger can only sign by its hashes says so, with the hashes, before the user approves. */

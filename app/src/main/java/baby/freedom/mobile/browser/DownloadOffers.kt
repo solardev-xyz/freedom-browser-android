@@ -13,6 +13,9 @@ import java.util.concurrent.atomic.AtomicLong
  */
 internal const val MAX_PENDING_OFFERS = 10
 
+/** Closed tabs [DownloadOffers] remembers, to refuse a late offer from one (most recent kept). */
+private const val MAX_CLOSED_TABS = 1024
+
 /**
  * A download a page asked for that nothing has fetched yet: it waits
  * for the user's Download / Cancel (#79). `DownloadListener` fires for
@@ -40,7 +43,19 @@ class DownloadOffer internal constructor(
      * accepting it is no occasion to ask for that permission (#265).
      */
     val private: Boolean = false,
-    internal val start: () -> Unit,
+    /**
+     * The type the file is expected to have, for the *Save as* picker
+     * (#322); `application/octet-stream` when nothing said.
+     */
+    val mimeType: String = "application/octet-stream",
+    /** Starts the download; with the document the user picked to save it as, if any (#322). */
+    internal val start: (saveTo: PickedDocument?) -> Unit,
+    /**
+     * The offer went without starting (declined, its tab blocked or
+     * closed): let go of what it held — a `blob:` file its page keeps
+     * for it ([BlobDownloads]).
+     */
+    internal val discard: () -> Unit = {},
 )
 
 /**
@@ -68,6 +83,16 @@ internal class DownloadOffers {
     private val _pending = MutableStateFlow<List<DownloadOffer>>(emptyList())
     val pending: StateFlow<List<DownloadOffer>> = _pending.asStateFlow()
     private val blockedTabs = mutableSetOf<Long>()
+
+    /**
+     * Tabs seen open by [retainTabs] and since closed (tab ids are never
+     * reused). An offer can arrive after its tab closed — a `blob:`
+     * download is offered once its page answers, up to seconds later; a
+     * big `data:` one once its size is told — and nothing would take it
+     * down again until the open tabs next change.
+     */
+    private val openTabs = mutableSetOf<Long>()
+    private val closedTabs = LinkedHashSet<Long>()
     private val _dropped = MutableStateFlow<Map<Long, Int>>(emptyMap())
     /**
      * Per tab, how many page-initiated offers were refused because that
@@ -78,7 +103,7 @@ internal class DownloadOffers {
 
     /**
      * Queue an offer from [tabId]'s page [requestedBy]. False when it was
-     * dropped: the tab is blocked, or it already has
+     * dropped: the tab has closed, or is blocked, or it already has
      * [MAX_PENDING_OFFERS] page offers waiting (counted in [dropped]).
      * An offer with no [requestedBy] — the user's own request — is
      * always queued.
@@ -90,10 +115,15 @@ internal class DownloadOffers {
         source: String,
         totalBytes: Long,
         private: Boolean = false,
-        start: () -> Unit,
+        mimeType: String = "application/octet-stream",
+        discard: () -> Unit = {},
+        start: (saveTo: PickedDocument?) -> Unit,
     ): Boolean {
-        val offer = DownloadOffer(nextKey.getAndIncrement(), tabId, requestedBy, fileName, source, totalBytes, private, start)
+        val offer = DownloadOffer(
+            nextKey.getAndIncrement(), tabId, requestedBy, fileName, source, totalBytes, private, mimeType, start, discard,
+        )
         synchronized(this) {
+            if (tabId in closedTabs) return false
             if (requestedBy != null && tabId in blockedTabs) return false
             if (requestedBy != null &&
                 _pending.value.count { it.tabId == tabId && it.requestedBy != null } >= MAX_PENDING_OFFERS
@@ -112,10 +142,14 @@ internal class DownloadOffers {
     /**
      * The user said yes to [key]: it leaves the queue and starts. Only
      * once, however often it's accepted — a double tap on Download
-     * mustn't fetch the file twice.
+     * mustn't fetch the file twice. [saveTo]: the document the user
+     * picked to save it as (#322). False when [key] was no longer
+     * waiting (answered, or its tab closed) — nothing was started.
      */
-    fun accept(key: Long) {
-        take(key)?.start?.invoke()
+    fun accept(key: Long, saveTo: PickedDocument? = null): Boolean {
+        val offer = take(key) ?: return false
+        offer.start(saveTo)
+        return true
     }
 
     /**
@@ -125,6 +159,7 @@ internal class DownloadOffers {
      */
     fun decline(key: Long) = synchronized(this) {
         val offer = take(key) ?: return@synchronized
+        offer.discard()
         if (offer.requestedBy != null) block(offer.tabId)
         pruneDropped()
     }
@@ -133,6 +168,7 @@ internal class DownloadOffers {
     fun declineAll(tabId: Long) = synchronized(this) {
         val mine = _pending.value.filter { it.tabId == tabId }
         _pending.value = _pending.value - mine.toSet()
+        mine.forEach { it.discard() }
         if (mine.any { it.requestedBy != null }) block(tabId)
         pruneDropped()
     }
@@ -148,13 +184,19 @@ internal class DownloadOffers {
      * closed tab, or a screen that's been rebuilt with new tabs).
      */
     fun retainTabs(tabIds: Set<Long>) = synchronized(this) {
+        closedTabs += openTabs - tabIds
+        while (closedTabs.size > MAX_CLOSED_TABS) closedTabs.remove(closedTabs.first())
+        openTabs.clear()
+        openTabs += tabIds
         blockedTabs.retainAll(tabIds)
+        _pending.value.filter { it.tabId !in tabIds }.forEach { it.discard() }
         _pending.value = _pending.value.filter { it.tabId in tabIds }
         pruneDropped()
     }
 
     private fun block(tabId: Long) {
         blockedTabs += tabId
+        _pending.value.filter { it.tabId == tabId && it.requestedBy != null }.forEach { it.discard() }
         _pending.value = _pending.value.filterNot { it.tabId == tabId && it.requestedBy != null }
     }
 

@@ -45,7 +45,7 @@
     <string name="safe_action_sign">sign</string>
     <string name="safe_action_add_signature">add the signature</string>
     <string name="safe_action_discard">discard it</string>
-    <string name="safe_gnosis_not_set_up">Gnosis isn’t set up in Settings → Chains.</string>
+    <string name="safe_gnosis_not_set_up">Gnosis isn’t set up in Settings → Wallet &amp; chains.</string>
     <string name="safe_fee_stale_notice">The fee estimate was over a minute old, so it’s been priced again. Check it and confirm.</string>
     <string name="safe_keep_it">Keep it</string>
     <string name="safe_scan">Scan</string>
@@ -79,18 +79,19 @@
         <item quantity="other">%1$d of %2$d owners</item>
     </plurals>
     <string name="safe_create_preset_1of2_detail">Either owner can move funds alone; the other is a backup if one key is lost.</string>
-    <string name="safe_create_preset_2of3_detail">Any two must sign. One lost key, or one stolen, can’t lose the funds.</string>
     <string name="safe_create_no_2of2">2 of 2 isn’t offered: losing either key would lock the funds for good.</string>
+    <string name="safe_create_preset_2of3_detail">Any two must sign. One lost key, or one stolen, can’t lose the funds.</string>
     <string name="safe_create_local_owners">Owners from this wallet</string>
-    <string name="safe_create_local_hint">At least one is needed: it signs here, and pays the network fee to activate the Safe and to execute its transactions.</string>
     <string name="safe_create_other_owners">Owners on other devices</string>
     <string name="safe_create_other_placeholder">0x… address of the other device’s account</string>
-    <string name="safe_create_other_hint">An account on desktop Freedom or another phone: they co-sign the Safe’s transactions by signing the request this phone shares.</string>
     <string name="safe_create_name">Name</string>
     <!-- The name a Safe gets when none is given. -->
     <string name="safe_default_name">Safe %1$d</string>
-    <string name="safe_create_footnote">Creating it is free and needs no network: its address is worked out now from these owners, and can take funds at once. It’s activated on Gnosis when you’re ready, for a small network fee.</string>
+    <string name="safe_create_footnote">Creating it is free, and its address can take funds right away. It’s turned on later, for a small network fee paid by the owner from this wallet.</string>
     <string name="safe_create_button">Create</string>
+    <!-- Create's label while no owner from this wallet is picked. -->
+    <string name="safe_create_need_local">Choose an owner from this wallet</string>
+    <string name="safe_creating">Creating…</string>
     <plurals name="safe_create_choose_more">
         <item quantity="one">Choose %d more owner</item>
         <item quantity="other">Choose %d more owners</item>
@@ -99,33 +100,42 @@
     <!-- browser/SafeScreen.kt: a Safe's page -->
     <string name="safe_account_section">Safe account</string>
     <!-- %1$s is safe_policy, %2$s the Safe version, %3$s the network. -->
-    <string name="safe_account_summary">%1$s · Safe v%2$s on %3$s</string>
+    <string name="safe_account_summary">Safe version %1$s on %2$s</string>
     <string name="safe_chain_fallback">chain %1$s</string>
+    <string name="safe_about_title">About this Safe</string>
+    <string name="safe_owner_label">Owner</string>
+    <string name="safe_address_label">Safe address</string>
+    <string name="safe_balance_label">Balance</string>
+    <string name="safe_send">Send</string>
+    <string name="safe_receive">Receive</string>
+    <string name="safe_share">Share</string>
+    <!-- %1$s the network. -->
+    <string name="safe_receive_hint">Send only on %1$s: this Safe exists there and nowhere else.</string>
+    <string name="safe_send_once_active">Send works once the Safe is active.</string>
+    <string name="safe_needs_your_signature">Needs your signature</string>
+    <string name="safe_waiting_others_title">Waiting for others</string>
+    <string name="safe_nothing_else_waiting">Nothing else is waiting.</string>
+    <!-- %1$s the Safe's name, %2$s the network. -->
+    <string name="safe_activation_headline">Activate %1$s on %2$s</string>
     <string name="safe_qr_address_description">QR code of the Safe’s address</string>
-    <string name="safe_hide_qr">Hide QR code</string>
-    <string name="safe_show_qr">Show QR code</string>
-    <string name="safe_owners_label">Owners</string>
-    <string name="safe_activation_what">Activates this Safe: deploys it through the canonical Safe factory with its owners and threshold.</string>
-    <string name="safe_holds">Holds</string>
+    <string name="safe_activation_what">Puts this Safe on the network with the owners and policy it was created with. Until then its address can take funds, but nothing can be sent from it.</string>
     <string name="safe_reading">Reading…</string>
     <string name="safe_refresh">Refresh</string>
     <string name="safe_waiting_title">Waiting for signatures</string>
     <string name="safe_nothing_waiting">Nothing is waiting.</string>
     <string name="safe_pending_to">to %1$s</string>
-    <string name="safe_start">Start</string>
     <string name="safe_propose_tx">Propose a transaction</string>
     <string name="safe_propose_once_active">Once the Safe is active</string>
     <string name="safe_propose_tx_one_at_a_time">One at a time: execute or discard the one waiting first</string>
-    <string name="safe_propose_tx_subtitle">Send xDAI or a token from the Safe, once enough owners sign</string>
     <string name="safe_propose_message">Propose a message</string>
-    <string name="safe_propose_message_subtitle">A text the Safe signs (EIP-1271), once enough owners sign</string>
+    <string name="safe_propose_message_subtitle">Words the Safe signs, once enough owners sign</string>
     <string name="safe_remove_button">Remove from this phone…</string>
     <string name="safe_remove_title">Remove %1$s from this phone?</string>
     <string name="safe_remove_body">The Safe and its funds stay on chain, and its owners can still use it elsewhere. This phone forgets it, and anything waiting for signatures here. It can’t be added back from its address alone: its owners and salt are only kept here.</string>
 
     <!-- browser/SafeScreen.kt: activation -->
     <string name="safe_not_active_title">Not active yet</string>
-    <string name="safe_activation_no_chain">Gnosis isn’t set up in Settings → Chains, so this Safe can’t be activated.</string>
+    <string name="safe_activation_no_chain">Gnosis isn’t set up in Settings → Wallet &amp; chains, so this Safe can’t be activated.</string>
     <string name="safe_activation_no_executor">None of its owners is an account in this wallet, so nothing here can pay to activate it.</string>
     <string name="safe_activation_pricing">Pricing the activation…</string>
     <string name="safe_activation_needs_funds_title">Needs funds</string>
@@ -147,6 +157,8 @@
     <string name="safe_review_network_fee">Network fee</string>
     <string name="safe_review_fee_up_to">up to %1$s</string>
     <string name="safe_review_nonce">Nonce</string>
+    <string name="safe_review_gas">Gas</string>
+    <string name="safe_sending">Sending…</string>
     <string name="safe_confirm_and_send">Confirm and send</string>
     <string name="safe_send_busy">Another send is still going out, or may have. Settle it (or stop tracking it) on the Send page first.</string>
 
@@ -156,12 +168,22 @@
     <string name="safe_propose_asset">Asset</string>
     <string name="safe_recipient_is_safe">That’s the Safe itself.</string>
     <string name="safe_amount_invalid">Not an amount of %1$s: at most %2$s digits after the point.</string>
-    <string name="safe_message_hint">Signed as personal_sign text by the Safe (EIP-1271): an app checks it with the Safe’s isValidSignature.</string>
+    <string name="safe_message_hint">Once enough owners sign, the Safe has signed these words: an app can check that with the Safe itself.</string>
     <!-- Joins account names: "Account 1 and Account 2". -->
     <string name="safe_names_and">%1$s and %2$s</string>
     <string name="safe_propose_signs_here">Proposing it signs it here with %1$s.</string>
     <string name="safe_propose_signs_here_then_waits">Proposing it signs it here with %1$s, then it waits for other owners’ signatures.</string>
     <string name="safe_propose_and_sign">Propose and sign</string>
+    <string name="safe_proposing">Proposing…</string>
+    <!-- %1$s the exact amount, %2$s the token symbol. -->
+    <string name="safe_available">Available: %1$s %2$s</string>
+    <string name="safe_available_unknown">Couldn’t read what the Safe holds.</string>
+    <string name="safe_max">Max</string>
+    <string name="safe_amount_zero">Enter more than 0.</string>
+    <!-- %1$s the exact amount held, %2$s the token symbol. -->
+    <string name="safe_amount_too_much">More than the Safe holds (%1$s %2$s).</string>
+    <string name="safe_scan_not_address">That isn’t an address.</string>
+    <string name="safe_paste_payment_request">That’s a payment request: it names a network, token or amount of its own, which a Safe proposal here doesn’t take from it. Paste or scan just the address, and check it can take this Safe’s network and token.</string>
 
     <!-- browser/SafeScreen.kt: a pending transaction or message -->
     <string name="safe_moved_on_unconfirmed">The Safe has moved on; this transaction’s execution isn’t confirmed yet. Try again in a moment.</string>
@@ -175,7 +197,7 @@
     <string name="safe_owner_not_needed">Not needed: enough owners have signed</string>
     <string name="safe_owner_signs_on_ledger">Signs on its Ledger</string>
     <string name="safe_owner_signs_here">Signs on this phone</string>
-    <string name="safe_owner_waiting">Waiting: share the request below</string>
+    <string name="safe_owner_waiting">Waiting: share the request above</string>
     <string name="safe_sign">Sign</string>
     <!-- %1$d signatures, %2$s what the transaction is (safe_pending_title_*). -->
     <plurals name="safe_execute_what">
@@ -186,12 +208,24 @@
     <string name="safe_execute_paid_by">Paid by %1$s: the network fee comes from that account, the payment from the Safe.</string>
     <string name="safe_execute_paid_by_any">Paid by an owner account in this wallet: the network fee comes from that account, the payment from the Safe.</string>
     <string name="safe_signature_title">The Safe’s signature</string>
-    <string name="safe_signature_hint">The owners’ signatures, sorted and joined (EIP-1271). An app verifies it by calling isValidSignature on the Safe with the message’s hash.</string>
+    <string name="safe_signature_hint">The owners’ signatures, combined into the Safe’s. Give it to the app that asked: it checks it with the Safe.</string>
     <string name="safe_share_title">Ask another owner to sign</string>
     <string name="safe_qr_request_description">QR code of the signing request</string>
-    <string name="safe_share_hint">On another phone with Freedom: Wallet → Scan QR code, then sign with its owner account. It’s the typed data desktop Freedom signs for its Safes (eth_signTypedData_v4), so any wallet that signs typed data can sign it.</string>
-    <string name="safe_share_hint_too_long">On another phone with Freedom: Wallet → Scan QR code, then sign with its owner account. It’s the typed data desktop Freedom signs for its Safes (eth_signTypedData_v4), so any wallet that signs typed data can sign it. It’s too long for a QR code: copy it instead.</string>
+    <string name="safe_share_hint">On another phone with Freedom, the other owner scans this code from Wallet → Scan QR code. Or send the request to them with Share request.</string>
+    <string name="safe_share_hint_too_long">This request is too long for a QR code: send it to the other owner with Share request, or copy it.</string>
     <string name="safe_copy_request">Copy request</string>
+    <string name="safe_share_request">Share request</string>
+    <!-- Under Details on a pending request: what the shared request is, for someone checking it with another wallet. -->
+    <string name="safe_request_format_note">The shared request is the Safe’s EIP-712 typed data (eth_signTypedData_v4), so any wallet that signs typed data can sign it.</string>
+    <!-- A pending item's hero line: %1$s the exact amount, %2$s the token symbol, %3$s the shortened recipient, %4$s the Safe's name or shortened address. -->
+    <string name="safe_headline_send">Send %1$s %2$s to %3$s from %4$s</string>
+    <!-- %1$s the Safe's name. -->
+    <string name="safe_headline_tx">A transaction from %1$s</string>
+    <!-- %1$s the Safe's name, %2$s the message's words. -->
+    <string name="safe_headline_message">%1$s signs “%2$s”</string>
+    <string name="safe_execute_sub">Enough owners have signed. Sending it carries out the payment from the Safe; the network fee comes from the account below.</string>
+    <string name="safe_label_token_contract">%1$s contract</string>
+    <string name="safe_pricing">Pricing…</string>
     <string name="safe_add_signature_title">Add a signature</string>
     <string name="safe_signature_placeholder">0x… signature from another owner</string>
     <string name="safe_signature_checked_hint">It’s checked before it counts: it must be an owner’s signature of exactly this request.</string>
@@ -228,9 +262,23 @@
     <string name="safe_cosign_no_chain">Freedom co-signs Safes on your networks only.</string>
     <string name="safe_cosign_checking">Checking the Safe’s owners…</string>
     <string name="safe_cosign_not_owner">None of this wallet’s accounts owns this Safe, so it can’t sign for it.</string>
+    <string name="safe_sign_as">Sign as</string>
+    <!-- %1$s the account that signs. -->
+    <string name="safe_signs_as">Signs as %1$s</string>
+    <string name="safe_sign_on_ledger">Sign on Ledger</string>
+    <string name="safe_signing">Signing…</string>
+    <!-- %1$s the network. -->
+    <string name="safe_cosign_on_network">On %1$s</string>
+    <!-- Co-sign hero lines: %1$s the Safe's shortened address (and for a call, %1$s the contract, %2$s the Safe). -->
+    <string name="safe_cosign_headline_message">Safe %1$s signs a message</string>
+    <string name="safe_cosign_headline_cancel">Cancel a waiting transaction of Safe %1$s</string>
+    <string name="safe_cosign_headline_self">Change the settings of Safe %1$s</string>
+    <!-- %1$s is what the call does, as a site's sheet says it ("Allow 0x1111…0582 to spend UNLIMITED USDC"); %2$s the Safe's short address. -->
+    <string name="safe_cosign_headline_decoded">%1$s, from Safe %2$s</string>
+    <string name="safe_cosign_headline_call">Call contract %1$s from Safe %2$s</string>
+    <string name="safe_base_units_unit">base units</string>
     <string name="safe_cosign_outdated">This transaction can no longer execute, so there’s nothing to sign.</string>
     <string name="safe_self_call_acknowledge">I understand this changes the Safe itself, and I trust it</string>
-    <string name="safe_sign_with">Sign with %1$s</string>
 
     <!-- browser/SafeScreen.kt: a call from the Safe to itself -->
     <string name="safe_self_call_warning_title">This changes the Safe itself</string>

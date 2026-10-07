@@ -38,6 +38,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import baby.freedom.mobile.browser.BrowserScreen
+import baby.freedom.mobile.browser.NODE_READY_TIMEOUT_MS
 import baby.freedom.mobile.browser.IncomingLinks
 import baby.freedom.mobile.browser.KeyboardShortcutRouter
 import baby.freedom.mobile.browser.PageKeyEvents
@@ -73,6 +74,7 @@ import baby.freedom.mobile.node.IMyotisCallback
 import baby.freedom.mobile.node.IMyotisService
 import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
+import baby.freedom.mobile.node.IpfsStartRequest
 import baby.freedom.mobile.node.NodeLogSource
 import baby.freedom.mobile.node.MyotisChains
 import baby.freedom.mobile.node.MyotisLink
@@ -131,10 +133,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  * tears that process down so no native state (ant's tokio runtime,
  * the freedom-ipfs block store) survives, letting a future toggle-on boot clean.
  *
- * IPFS state is hidden from the default UI — see `SettingsScreen`'s
- * "Other" section for the reveal gate — but the flow is plumbed all
- * the way through so `ipfs://` / `ens→ipfs` navigation works even
- * when the user has never opened the advanced settings panel.
+ * IPFS state is plumbed all the way through, so `ipfs://` / `ens→ipfs`
+ * navigation works whether or not the user ever opens Settings →
+ * Nodes & networks, where the IPFS node's controls live.
  */
 class MainActivity : ComponentActivity(), PageKeyEvents {
 
@@ -214,6 +215,10 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     private var binder: INodeService? = null
     private var bound = false
 
+    // An IPFS start asked for before the binder connected (#373), sent
+    // on the next connect while the asking tab still waits for it.
+    private val ipfsStart = IpfsStartRequest(windowMs = NODE_READY_TIMEOUT_MS)
+
     /**
      * The Swarm node's mode (#114) from the light-mode setting and the
      * Gnosis RPCs, with the Gnosis chain its reads go through (#273),
@@ -228,6 +233,28 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
      * bind and change; null until first read. Main thread only.
      */
     private var colibriReads: Boolean? = null
+
+    /**
+     * "Pay peers from the chequebook", relayed to `:node` on every bind and
+     * every change; null until first read. Main thread only.
+     */
+    private var swapEnabled: Boolean? = null
+
+    private fun relaySwapEnabled(b: INodeService?, enabled: Boolean?) {
+        enabled ?: return
+        runCatching { b?.setSwapEnabled(enabled) }
+    }
+
+    /**
+     * The Swarm chunk cache's cap in bytes, relayed to `:node` on every
+     * bind and every change; null until first read. Main thread only.
+     */
+    private var swarmCacheBytes: Long? = null
+
+    private fun relaySwarmCacheBytes(b: INodeService?, bytes: Long?) {
+        bytes ?: return
+        runCatching { b?.setSwarmCacheCapacity(bytes) }
+    }
 
     private fun relaySwarmMode(b: INodeService?, relay: SwarmRelay?) {
         relay ?: return
@@ -363,10 +390,18 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                 }
             }
             runCatching { b.radicleState?.let { radicleInfoFlow.value = it } }
+            // An `ipfs://` link that cold-started the app asked for IPFS
+            // before this bind connected (#373).
+            ipfsStart.onConnected { runCatching { b.ensureIpfsStarted() } }
             // The mode (#114) first, so the identity check below already
             // compares against it rather than restarting the node twice.
             relaySwarmMode(b, swarmMode)
             colibriReads?.let { on -> runCatching { b.setColibriReads(on) } }
+            // ant forgets the pay-peers switch at every init: `:node`
+            // applies the latest relayed value after each one.
+            relaySwapEnabled(b, swapEnabled)
+            // Nor does it keep the cache's cap: the same, for every init.
+            relaySwarmCacheBytes(b, swarmCacheBytes)
             // A wallet change made while unbound (#77).
             runCatching { b.reloadIdentity() }
             // The Radicle on/off setting lives here, in the UI process's
@@ -393,7 +428,11 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         }
     }
 
-    /** Restarts a bound `:node`'s Swarm node on an identity change (#77); see onCreate. */
+    /**
+     * Has a bound `:node` reload the node identities on any [NodeIdentitySync.Change]
+     * (#77, #328): its Swarm and Radicle nodes restart only if they're up as
+     * another identity, or their boot failed (Radicle; Swarm on an unreadable read, #357); see onCreate.
+     */
     private val identityChanged: (NodeIdentitySync.Change) -> Unit = {
         runCatching { binder?.reloadIdentity() }
     }
@@ -422,8 +461,9 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         lifecycleScope.launch(Dispatchers.IO) { Publisher.sweepStaging(this@MainActivity) }
 
         // The nodes follow the wallet's identity (#77): a wallet created,
-        // imported or removed changes what the Swarm node boots as, and a
-        // bound `:node` restarts it. (Unbound, it reads it at its next start.)
+        // imported or removed changes what the Swarm and Radicle nodes boot
+        // as, and a bound `:node` restarts them. (Unbound, it reads it at its
+        // next start.)
         // The sync outlives this activity, so the listener is taken back
         // in onDestroy rather than left holding it.
         NodeIdentitySync.get(this).apply {
@@ -486,8 +526,15 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         // the node enabled, start + bind right away; otherwise leave
         // the :node process dormant so we don't hold the state store
         // open unnecessarily.
+        // Until this read resumes `bound` is false whatever the setting, so
+        // an IPFS ask made before it is kept for the bind it may start,
+        // and dropped here if it doesn't (#373, #384 R1-F1).
         lifecycleScope.launch {
-            if (settings.runNodeEnabled.first()) startAndBindService()
+            try {
+                if (settings.runNodeEnabled.first()) startAndBindService()
+            } finally {
+                ipfsStart.settled(bound)
+            }
         }
 
         // The Swarm node's mode (#114) follows its setting and the Gnosis
@@ -513,6 +560,25 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                     colibriReads = on
                     runCatching { binder?.setColibriReads(on) }
                 }
+        }
+
+        // "Pay peers from the chequebook" follows its setting live: `:node`
+        // flips the running node at once and re-applies it after every init.
+        lifecycleScope.launch {
+            settings.swarmSwapEnabled.distinctUntilChanged().collect { enabled ->
+                swapEnabled = enabled
+                relaySwapEnabled(binder, enabled)
+            }
+        }
+
+        // The Swarm cache size, likewise: `:node` caps the running node's
+        // cache at once (a smaller size evicts straight away) and hands
+        // the size to every later init.
+        lifecycleScope.launch {
+            settings.swarmCacheCapacityBytes.distinctUntilChanged().collect { bytes ->
+                swarmCacheBytes = bytes
+                relaySwarmCacheBytes(binder, bytes)
+            }
         }
 
         // The Myotis light client (#72, off by default) follows its
@@ -803,6 +869,18 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                 isAppearanceLightNavigationBars = lightScheme
             }
         }
+        LaunchedEffect(Unit) {
+            // The window's *theme* nav-bar colour (light on the light theme)
+            // makes Android force light navigation-bar appearance — dark
+            // icons on its light contrast scrim — for as long as the window
+            // lives, whatever the insets controller says. Started on the
+            // light scheme, the band stayed light grey under the dark one
+            // after a live switch (#419); cold-started dark it was right.
+            // Transparent lets [isAppearanceLightNavigationBars] above pick
+            // the scrim, so it follows the scheme like the icons do.
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        }
         LaunchedEffect(panelShown) {
             window.isNavigationBarContrastEnforced = !panelShown
         }
@@ -956,10 +1034,11 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
      * visits `ipfs://` / `ipns://` / an IPFS-resolved `ens://`.
      *
      * The AIDL stub in `:node` dedups repeat calls, so this is safe to
-     * invoke on every such navigation.
+     * invoke on every such navigation. On a cold start the binder isn't
+     * connected yet, so [ipfsStart] keeps the ask for the connect (#373).
      */
     private fun onEnsureIpfsStarted() {
-        runCatching { binder?.ensureIpfsStarted() }
+        ipfsStart.ask(bound) { runCatching { binder?.ensureIpfsStarted() } }
     }
 
     /**
@@ -993,7 +1072,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     }.getOrNull()
 
     /**
-     * Part of *Clear cookies & site data* (#276): every node process that's
+     * Part of *Delete browsing data*'s *Cookies and site data* (#276): every node process that's
      * running forgets the log lines it kept. One-way calls — nothing waits.
      * A process that isn't bound isn't running, and keeps no lines.
      */
@@ -1014,8 +1093,12 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
      * state is derived from the live [IpfsInfo.status] broadcast.
      */
     private fun onIpfsToggle(enabled: Boolean) {
-        if (enabled) runCatching { binder?.ensureIpfsStarted() }
-        else runCatching { binder?.stopIpfs() }
+        if (enabled) {
+            ipfsStart.ask(bound) { runCatching { binder?.ensureIpfsStarted() } }
+        } else {
+            ipfsStart.forget()
+            runCatching { binder?.stopIpfs() }
+        }
     }
 
     /** Tell `:myotis` which chains to run ([MyotisChains]); it starts and stops them one by one. */
@@ -1407,7 +1490,8 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
 
     /** Seed-by-RID from the Radicle page; progress comes back on the callback. */
     private fun onRadicleSeed(rid: String) {
-        runCatching { binder?.seedRadicleRepo(rid) }
+        val node = binder ?: return
+        RadicleProviders.userSeeding(rid) { runCatching { node.seedRadicleRepo(rid) }.isSuccess }
     }
 
     private fun startAndBindService() {
@@ -1438,6 +1522,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     }
 
     private fun unbindFromService() {
+        ipfsStart.forget()
         if (!bound) return
         runCatching { binder?.unregisterCallback(callback) }
         runCatching { unbindService(connection) }

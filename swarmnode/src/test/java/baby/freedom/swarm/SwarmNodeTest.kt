@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.json.JSONObject
 import org.junit.Test
 import java.io.File
 import java.util.Collections
@@ -29,7 +30,10 @@ class SwarmNodeTest {
             seedEntered.countDown()
             releaseSeed.await(5, TimeUnit.SECONDS)
         }
-        override fun init(dataDir: String): Long {
+        /** Each init's cache cap, in order. */
+        val initCaches: MutableList<Long> = Collections.synchronizedList(mutableListOf())
+        override fun init(dataDir: String, cacheCapacityBytes: Long): Long {
+            initCaches += cacheCapacityBytes
             val h = nextHandle++
             calls += "init:$h"
             initEntered.countDown()
@@ -39,7 +43,8 @@ class SwarmNodeTest {
         /** What [initWithIdentity] was handed, copied before the node zeroes it; and the array itself. */
         val identities: MutableList<String> = Collections.synchronizedList(mutableListOf())
         val identityArrays: MutableList<ByteArray> = Collections.synchronizedList(mutableListOf())
-        override fun initWithIdentity(dataDir: String, identity: ByteArray): Long {
+        override fun initWithIdentity(dataDir: String, identity: ByteArray, cacheCapacityBytes: Long): Long {
+            initCaches += cacheCapacityBytes
             identities += String(identity)
             identityArrays += identity
             val h = nextHandle++
@@ -60,12 +65,33 @@ class SwarmNodeTest {
         val gatewayCors: MutableList<List<String>> = Collections.synchronizedList(mutableListOf())
         override fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String, corsOrigins: List<String>) {
             calls += "gateway:$handle"
+            gatewayStarted += handle
             gatewayCors += corsOrigins
             if (gatewayStartsLeft-- <= 0) throw RuntimeException("bind failed")
             gatewayModes += if (lightMode) "light:$gnosisRpc" else "ultra-light:$gnosisRpc"
         }
         override fun agentString(handle: Long) = "ant-test"
-        override fun peerCount(handle: Long) = 0
+        /** What [peerCount] does before answering 0; nothing by default. */
+        @Volatile var onPeerCount: () -> Unit = {}
+        override fun peerCount(handle: Long): Int {
+            onPeerCount()
+            return 0
+        }
+        val resumeEntered = CountDownLatch(1)
+        /** [resume] blocks until this opens; open by default. */
+        @Volatile var releaseResume = CountDownLatch(0)
+        override fun resume(handle: Long) {
+            calls += "resume:$handle"
+            resumeEntered.countDown()
+            releaseResume.await(5, TimeUnit.SECONDS)
+            calls += "resumed:$handle"
+        }
+        override fun wake(handle: Long) {
+            calls += "wake:$handle"
+        }
+        override fun suspend(handle: Long) {
+            calls += "suspend:$handle"
+        }
         /** What a chain read got from [AntChainTransport] while [stopGateway]/[shutdown] ran. */
         val readsWhileStopping: MutableList<String> = Collections.synchronizedList(mutableListOf())
         private fun probeChainRead() {
@@ -88,9 +114,6 @@ class SwarmNodeTest {
         /** Run inside each spend, in place of ant's transactions. */
         @Volatile var onSpend: (String) -> String = { it }
         override fun storageStatus(handle: Long) = storageStatusJson
-        /** What [settlementStatus] answers: whether ant has set up a chequebook. */
-        @Volatile var settlementJson = """{"enabled":true,"chequebook":"0x${"cb".repeat(20)}"}"""
-        override fun settlementStatus(handle: Long) = settlementJson
         override fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String {
             calls += "quote:$handle:$gnosisRpc:$depth:$days"
             return """{"depth":$depth}"""
@@ -115,6 +138,44 @@ class SwarmNodeTest {
             calls += "discover:$handle:$gnosisRpc"
             onDiscover()
             return """{"registered":[]}"""
+        }
+
+        /** Handles whose gateway has started. */
+        val gatewayStarted: MutableSet<Long> = Collections.synchronizedSet(mutableSetOf())
+        /**
+         * Each [setSwapEnabled], as `handle:enabled`, with `+gw` when that
+         * handle's gateway had already started. Apart from [calls], whose
+         * exact sequence other tests pin.
+         */
+        val swapCalls: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        /** Whether [setSwapEnabled] throws, as ant's -2 does. */
+        @Volatile var swapFails = false
+        @Volatile var swapStatusJson = """{"supported":true,"swap_switch":true,"swap_enabled":true,"paying":false,"chequebook":null,"persisted":false}"""
+        /** What [confirmChequeLiability] returns; each call recorded as `handle:chequebook`. */
+        @Volatile var confirmResult = 0
+        val confirms: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        override fun setSwapEnabled(handle: Long, enabled: Boolean) {
+            swapCalls += "$handle:$enabled" + if (handle in gatewayStarted) "+gw" else ""
+            if (swapFails) throw RuntimeException("node loop gone")
+        }
+        override fun swapStatus(handle: Long) = swapStatusJson
+        /** Each [cacheSetCapacity], as `handle:bytes`; [cacheStatus] / [cacheClear] go to [calls]. */
+        val capacityCalls: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        @Volatile var cacheStatusJson = """{"disk_enabled":true,"used_bytes":1}"""
+        override fun cacheStatus(handle: Long): String {
+            calls += "cacheStatus:$handle"
+            return cacheStatusJson
+        }
+        override fun cacheClear(handle: Long): String {
+            calls += "cacheClear:$handle"
+            return """{"freed_bytes":1}"""
+        }
+        override fun cacheSetCapacity(handle: Long, bytes: Long) {
+            capacityCalls += "$handle:$bytes"
+        }
+        override fun confirmChequeLiability(handle: Long, chequebook: String): Int {
+            confirms += "$handle:$chequebook"
+            return confirmResult
         }
 
         /** The gateway's chequebook, 40 hex (all zeros for none), and the account's xBZZ in PLUR. */
@@ -160,6 +221,73 @@ class SwarmNodeTest {
     }
 
     @Test
+    fun aStopWaitsForAResumeStillInsideAntBeforeShuttingItDown() {
+        // ant_resume re-dials the bootnodes: a stop landing meanwhile must
+        // not shut the node down (free its handle) under it.
+        val ops = FakeOps().apply {
+            releaseSeed.countDown()
+            releaseInit.countDown()
+            releaseResume = CountDownLatch(1)
+        }
+        val node = SwarmNode(config, ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        node.resume()
+        assertTrue(ops.resumeEntered.await(5, TimeUnit.SECONDS))
+        node.stop()
+        Thread.sleep(300)
+        assertTrue(ops.calls.toString(), ops.calls.none { it.startsWith("stopGateway:") || it.startsWith("shutdown:") })
+        ops.releaseResume.countDown()
+        assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
+        val calls = ops.calls.toList()
+        assertTrue(calls.toString(), calls.indexOf("resumed:1") < calls.indexOf("stopGateway:1"))
+        node.dispose()
+    }
+
+    @Test
+    fun aStopWaitsForAPeerCountStillInsideAnt() {
+        val counting = CountDownLatch(1)
+        val releaseCount = CountDownLatch(1)
+        val ops = FakeOps().apply {
+            releaseSeed.countDown()
+            releaseInit.countDown()
+        }
+        val node = SwarmNode(config, ops)
+        ops.onPeerCount = {
+            ops.calls += "peerCount"
+            counting.countDown()
+            releaseCount.await(5, TimeUnit.SECONDS)
+            ops.calls += "counted"
+        }
+        node.start()
+        assertTrue(counting.await(5, TimeUnit.SECONDS))
+        node.stop()
+        Thread.sleep(300)
+        assertTrue(ops.calls.toString(), ops.calls.none { it.startsWith("shutdown:") })
+        releaseCount.countDown()
+        assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
+        val calls = ops.calls.toList()
+        assertTrue(calls.toString(), calls.indexOf("counted") < calls.indexOf("stopGateway:1"))
+        node.dispose()
+    }
+
+    @Test
+    fun aLifecycleCallAfterStopNeverReachesAnt() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        node.stop()
+        node.resume()
+        node.suspend()
+        node.onNetworkChanged()
+        assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
+        Thread.sleep(200)
+        assertTrue(ops.calls.toString(), ops.calls.none { it.startsWith("resume") || it.startsWith("suspend") || it.startsWith("wake") })
+        node.dispose()
+    }
+
+    @Test
     fun stopDuringSeedingNeverInitsAndStaysStopped() {
         val ops = FakeOps().apply { releaseInit.countDown() }
         val node = SwarmNode(config, ops)
@@ -174,17 +302,13 @@ class SwarmNodeTest {
     }
 
     @Test
-    fun aStopRefusesChainReadsWhileTheGatewayStopsAndShutsDownAndAReloadDoesnt() {
+    fun aStopRefusesChainReadsWhileTheGatewayStopsAndShutsDown() {
         // #300 R2-M1: a read coming in during the stop would hold ant's
         // stopGateway/shutdown for the reader's whole deadline.
         AntChainTransport.install({ """{"result":"0x1"}""" })
         try {
             val ops = FakeOps()
             val node = lightNode(ops)
-            // A reload after a buy: other storage calls may be reading, so reads are served.
-            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
-            assertEquals(listOf("""{"result":"0x1"}"""), ops.readsWhileStopping.toList())
-            ops.readsWhileStopping.clear()
             node.stop()
             assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
             assertEquals(2, ops.readsWhileStopping.size)
@@ -457,27 +581,16 @@ class SwarmNodeTest {
     }
 
     @Test
-    fun findingOwnedStampsThatAdoptsAChequebookReloadsTheGatewayAndOtherwiseLeavesItAlone() {
+    fun findingOwnedStampsThatAdoptsAChequebookLeavesTheGatewayRunningAndItSeesTheChequebook() {
         val ops = FakeOps()
         val node = lightNode(ops)
-        fun reloads() = ops.calls.count { it.startsWith("stopGateway:") }
-        // ant had no chequebook and the discover set none up: no reload.
-        ops.settlementJson = """{"enabled":false}"""
+        // The discover adopted the account's own chequebook and (ant 0.5.52+)
+        // pointed the running gateway at it: no restart, and the chequebook
+        // page's read — and a deposit — find it on the same gateway.
+        ops.onDiscover = { ops.chequebookHex = chequebook }
         node.discoverStamps()
-        assertEquals(0, reloads())
-        // The discover adopted the account's own chequebook, which the
-        // gateway reads only when it starts: reload it, in the same mode.
-        ops.onDiscover = { ops.settlementJson = """{"enabled":true,"chequebook":"0x${"cb".repeat(20)}"}""" }
-        node.discoverStamps()
-        assertEquals(1, reloads())
-        assertEquals(listOf("light:https://rpc.example/key123", "light:https://rpc.example/key123"), ops.gatewayModes)
-        // The reload keeps the gateway's CORS allow-list empty, as the first start set it (#284).
-        assertEquals(listOf(emptyList<String>(), emptyList()), ops.gatewayCors.toList())
-        assertEquals(NodeStatus.Running, node.state.value.status)
-        // The gateway already reports it: no further reload.
-        ops.chequebookHex = chequebook
-        node.discoverStamps()
-        assertEquals(1, reloads())
+        assertNoGatewayRestart(ops)
+        assertGatewaySeesChequebook(ops, node)
         node.dispose()
     }
 
@@ -642,7 +755,7 @@ class SwarmNodeTest {
     }
 
     @Test
-    fun connectingABatchLetsOutOnlyTheChequebookSetupAndReloadsTheGatewayForIt() {
+    fun connectingABatchLetsOutOnlyTheChequebookSetupAndLeavesTheGatewayRunning() {
         // #115: the wallet bought the batch; ant connects it, and a first connect
         // sets up the chequebook — nothing else may get out meanwhile.
         val ops = FakeOps()
@@ -654,6 +767,8 @@ class SwarmNodeTest {
             verdicts += SpendGuard.admit(TestTx.request(TestTx.swap(java.math.BigInteger.ONE)))
             verdicts += SpendGuard.admit(TestTx.request(TestTx.deployChequebook()))
             verdicts += SpendGuard.admit(TestTx.request(TestTx.transfer("cc".repeat(20), milliBzz)))
+            // ant (0.5.52+) points the running gateway at the chequebook it set up.
+            ops.chequebookHex = chequebook
             """{"enabled":true}"""
         }
         assertThrows(IllegalArgumentException::class.java) { node.connectBatch("0x1234") }
@@ -661,33 +776,47 @@ class SwarmNodeTest {
         assertEquals(listOf(false, false, true, true), verdicts)
         assertTrue("connect:1:0x$id" in ops.calls)
         assertFalse(SpendGuard.admit(TestTx.request(TestTx.deployChequebook())))
-        // ant set up a chequebook the gateway didn't load at start: reload it.
-        val after = ops.calls.dropWhile { !it.startsWith("connect:") }
-        assertEquals(listOf("stopGateway:1", "gateway:1"), after.filter { it.startsWith("stopGateway:") || it.startsWith("gateway:") && !it.startsWith("gateway:GET") })
+        // The chequebook it set up is on the running gateway: no restart.
+        assertNoGatewayRestart(ops)
+        assertGatewaySeesChequebook(ops, node)
         node.dispose()
     }
 
     @Test
-    fun aBuyThatLeavesTheGatewayWithoutAChequebookReloadsItAndOneWithAChequebookDoesnt() {
+    fun aBuyThatSetsUpTheChequebookLeavesTheGatewayRunningAndItSeesTheChequebook() {
         val ops = FakeOps()
         val node = lightNode(ops)
-        // The gateway loaded no chequebook at start, and still reports none
-        // after the buy set one up (it reads it only when it starts): reload
-        // it, in the same mode, on the same node.
+        // The first buy deploys the chequebook and (ant 0.5.52+) points the
+        // running gateway at it: no stop and start of the gateway, and
+        // settlement's reads — the chequebook page's, a deposit's — see it.
+        ops.onSpend = { ops.chequebookHex = chequebook; it }
         node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
-        val afterBuy = ops.calls.dropWhile { !it.startsWith("buy:") }
-        assertEquals(
-            listOf("stopGateway:1", "gateway:1"),
-            afterBuy.filter { it.startsWith("stopGateway:") || it.startsWith("gateway:") && !it.startsWith("gateway:GET") },
-        )
-        assertEquals(listOf("light:https://rpc.example/key123", "light:https://rpc.example/key123"), ops.gatewayModes)
-        assertEquals(NodeStatus.Running, node.state.value.status)
+        assertNoGatewayRestart(ops)
+        assertGatewaySeesChequebook(ops, node)
 
-        // Already reporting one: no reload.
-        ops.chequebookHex = chequebook
+        // A buy that sets up none (or one the gateway doesn't report)
+        // doesn't restart the gateway either: nothing reads ant's
+        // settlement to second-guess it any more.
+        ops.chequebookHex = "0".repeat(40)
+        ops.onSpend = { it }
         node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
-        assertEquals(2, ops.gatewayModes.size)
+        assertNoGatewayRestart(ops)
         node.dispose()
+    }
+
+    /** The node's gateway was started once, at boot, and never stopped or started again. */
+    private fun assertNoGatewayRestart(ops: FakeOps) {
+        assertEquals(ops.calls.toString(), 0, ops.calls.count { it.startsWith("stopGateway:") })
+        assertEquals(ops.calls.toString(), listOf("gateway:1"), ops.calls.filter { it.startsWith("gateway:") && !it.startsWith("gateway:GET") && !it.startsWith("gateway:POST") })
+        assertEquals(1, ops.gatewayModes.size)
+    }
+
+    /** A deposit into [chequebook] — which reads the gateway's chequebook — goes ahead on the running node. */
+    private fun assertGatewaySeesChequebook(ops: FakeOps, node: SwarmNode) {
+        assertEquals(NodeStatus.Running, node.state.value.status)
+        ops.walletPlur = milliBzz.toString()
+        assertTrue(node.depositChequebook(chequebook, milliBzz).contains("transactionHash"))
+        assertTrue(ops.calls.contains("gateway:POST /chequebook/deposit?amount=$milliBzz"))
     }
 
     @Test
@@ -868,8 +997,7 @@ class SwarmNodeTest {
     fun aBuyThatFailsBeforeAntSetUpAChequebookLeavesTheGatewayAlone() {
         val ops = FakeOps()
         val node = lightNode(ops)
-        // Refused before anything went on-chain (no xDAI): ant has no chequebook.
-        ops.settlementJson = """{"enabled":false,"chequebook":null}"""
+        // Refused before anything went on-chain (no xDAI).
         ops.onSpend = { throw RuntimeException("insufficient xDAI") }
         assertThrows(RuntimeException::class.java) {
             node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
@@ -935,50 +1063,290 @@ class SwarmNodeTest {
     }
 
     @Test
-    fun aBuyThatFailsAfterSettingUpTheChequebookStillReloadsTheGateway() {
+    fun aBuyWhoseBatchRevertsSetsUpNoChequebookAndLeavesTheGatewayRunning() {
         val ops = FakeOps()
         val node = lightNode(ops)
+        // ant (v0.5.56) sets up the chequebook only after createBatch and
+        // register_batch succeed, so a reverted batch leaves none behind.
+        val before = ops.chequebookHex
         ops.onSpend = { throw RuntimeException("createBatch reverted") }
         assertThrows(RuntimeException::class.java) {
             node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
         }
-        assertEquals(listOf("light:https://rpc.example/key123", "light:https://rpc.example/key123"), ops.gatewayModes)
+        assertEquals(before, ops.chequebookHex)
+        assertNoGatewayRestart(ops)
         assertEquals(NodeStatus.Running, node.state.value.status)
         node.dispose()
     }
 
+    private fun awaitSwapCalls(ops: FakeOps, n: Int) {
+        val until = System.currentTimeMillis() + 5_000
+        while (ops.swapCalls.size < n && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertEquals(ops.swapCalls.toString(), n, ops.swapCalls.size)
+    }
+
     @Test
-    fun aSearchWhoseGatewayReloadFailsSaysSoWithoutClaimingAPurchase() {
-        val ops = FakeOps()
-        ops.gatewayStartsLeft = 1 // the boot's start succeeds, the reload's fails
-        val node = lightNode(ops)
-        ops.onDiscover = { ops.settlementJson = """{"enabled":true,"chequebook":"0x${"cb".repeat(20)}"}""" }
-        node.discoverStamps()
-        assertEquals(NodeStatus.Error, node.state.value.status)
-        assertEquals(SwarmNode.GATEWAY_RELOAD_FAILED, node.state.value.errorMessage)
+    fun theSavedPayPeersSettingIsAppliedAtEveryInitBeforeTheGatewayStarts() {
+        // ant doesn't persist swap-enable: a node the user switched off
+        // must be set off again after each init, before the gateway's
+        // chain init lets it start paying.
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config.copy(swapEnabled = { false }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        awaitSwapCalls(ops, 2)
+        assertEquals(listOf("1:false", "1:false+gw"), ops.swapCalls.toList())
+        ops.nextHandle = 2
+        node.restart()
+        awaitStatus(node, NodeStatus.Running)
+        awaitSwapCalls(ops, 4)
+        assertEquals(listOf("2:false", "2:false+gw"), ops.swapCalls.drop(2))
         node.dispose()
     }
 
     @Test
-    fun aGatewayThatDoesntComeBackTakesTheNodeDownIntoError() {
-        val ops = FakeOps()
-        ops.gatewayStartsLeft = 1 // the boot's start succeeds, the reload's fails
-        val node = lightNode(ops)
-        node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
-        assertEquals(NodeStatus.Error, node.state.value.status)
-        assertEquals(SwarmNode.GATEWAY_RELOAD_FAILED, node.state.value.errorMessage)
-        assertFalse(SwarmNode.GATEWAY_RELOAD_FAILED.contains("purchase"))
-        // The handle is shut down (once the buy let go of it), not left live.
-        assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
-        assertTrue(ops.calls.contains("shutdown:1"))
-        assertThrows(IllegalStateException::class.java) { node.storageStatus() }
-        // A start from Error brings up a fresh node after that shutdown.
-        ops.gatewayStartsLeft = Int.MAX_VALUE
+    fun theSwitchFlipsTheRunningNodeLiveAndOutlivesARestart() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config.copy(swapEnabled = { true }), ops)
         node.start()
         awaitStatus(node, NodeStatus.Running)
-        val shutdownAt = ops.calls.indexOf("shutdown:1")
-        val initAt = ops.calls.indexOfFirst { it.startsWith("init") && it != "init:1" && it != "initWithIdentity:1" }
-        assertTrue(ops.calls.toString(), initAt > shutdownAt)
+        awaitSwapCalls(ops, 2)
+        node.setSwapEnabled(false)
+        awaitSwapCalls(ops, 3)
+        assertEquals("1:false+gw", ops.swapCalls[2])
+        // The setting store (still on here) isn't re-read over the user's
+        // latest choice, which the app also saved.
+        ops.nextHandle = 2
+        node.restart()
+        awaitStatus(node, NodeStatus.Running)
+        awaitSwapCalls(ops, 5)
+        assertEquals(listOf("2:false", "2:false+gw"), ops.swapCalls.drop(3))
+        node.dispose()
+    }
+
+    @Test
+    fun aSwitchFlippedWhileStoppedReachesNoNodeUntilTheNextStart() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        node.setSwapEnabled(false)
+        Thread.sleep(200)
+        assertTrue(ops.swapCalls.toString(), ops.swapCalls.isEmpty())
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        awaitSwapCalls(ops, 2)
+        assertTrue(ops.swapCalls.toString(), ops.swapCalls.all { it.contains(":false") })
+        node.dispose()
+    }
+
+    @Test
+    fun aSwitchFlippedDuringStartupIsAppliedOnceTheNodeIsUp() {
+        // The first apply (before the gateway) read the old value; the
+        // toggle found no published handle; the apply after publishing
+        // must catch it up.
+        val ops = FakeOps()
+        val node = SwarmNode(config.copy(swapEnabled = { true }), ops)
+        node.start()
+        ops.releaseSeed.countDown()
+        assertTrue(ops.initEntered.await(5, TimeUnit.SECONDS))
+        node.setSwapEnabled(false)
+        ops.releaseInit.countDown()
+        awaitStatus(node, NodeStatus.Running)
+        val until = System.currentTimeMillis() + 5_000
+        while (ops.swapCalls.lastOrNull() != "1:false+gw" && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertEquals(ops.swapCalls.toString(), "1:false+gw", ops.swapCalls.last())
+        node.dispose()
+    }
+
+    @Test
+    fun aFailedSwitchDoesNotFailTheStart() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown(); swapFails = true }
+        val node = SwarmNode(config.copy(swapEnabled = { false }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        node.dispose()
+    }
+
+    private fun awaitCapacityCalls(ops: FakeOps, n: Int) {
+        val until = System.currentTimeMillis() + 5_000
+        while (ops.capacityCalls.size < n && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertEquals(ops.capacityCalls.toString(), n, ops.capacityCalls.size)
+    }
+
+    @Test
+    fun theSavedCacheSizeIsHandedToEveryInit() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config.copy(cacheCapacityBytes = { 1L shl 30 }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf(1L shl 30), ops.initCaches.toList())
+        // Applied at init, so not again live.
+        Thread.sleep(100)
+        assertTrue(ops.capacityCalls.toString(), ops.capacityCalls.isEmpty())
+        node.dispose()
+    }
+
+    @Test
+    fun aNewCacheSizeAppliesLiveAndAtTheNextInit() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config.copy(cacheCapacityBytes = { 512L shl 20 }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        node.setCacheCapacity(256L shl 20)
+        awaitCapacityCalls(ops, 1)
+        assertEquals("1:${256L shl 20}", ops.capacityCalls[0])
+        // The setting store isn't re-read over the user's latest choice.
+        ops.nextHandle = 2
+        node.restart()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf(512L shl 20, 256L shl 20), ops.initCaches.toList())
+        node.dispose()
+    }
+
+    @Test
+    fun aCacheSizeSetWhileStoppedReachesTheNextInitOnly() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        node.setCacheCapacity(2L shl 30)
+        Thread.sleep(100)
+        assertTrue(ops.capacityCalls.isEmpty())
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf(2L shl 30), ops.initCaches.toList())
+        node.dispose()
+    }
+
+    @Test
+    fun aCacheSizeSetDuringStartupIsAppliedOnceTheNodeIsUp() {
+        val ops = FakeOps()
+        val node = SwarmNode(config.copy(cacheCapacityBytes = { 512L shl 20 }), ops)
+        node.start()
+        ops.releaseSeed.countDown()
+        assertTrue(ops.initEntered.await(5, TimeUnit.SECONDS))
+        node.setCacheCapacity(4L shl 30)
+        ops.releaseInit.countDown()
+        awaitStatus(node, NodeStatus.Running)
+        awaitCapacityCalls(ops, 1)
+        assertEquals("1:${4L shl 30}", ops.capacityCalls.last())
+        node.dispose()
+    }
+
+    @Test
+    fun aRelayOfTheCapTheNodeAlreadyHasIsNotAppliedAgain() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config.copy(cacheCapacityBytes = { 512L shl 20 }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        // The UI relays the saved size on every bind: the same cap the init got.
+        node.setCacheCapacity(512L shl 20)
+        node.setCacheCapacity(1L shl 30)
+        awaitCapacityCalls(ops, 1)
+        node.setCacheCapacity(1L shl 30)
+        Thread.sleep(100)
+        assertEquals(listOf("1:${1L shl 30}"), ops.capacityCalls.toList())
+        node.dispose()
+    }
+
+    @Test
+    fun noSavedCacheSizeKeepsAntsDefault() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf(0L), ops.initCaches.toList())
+        node.dispose()
+    }
+
+    @Test
+    fun cacheStatusAndClearNeedARunningNode() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        assertThrows(IllegalStateException::class.java) { node.cacheStatus() }
+        assertThrows(IllegalStateException::class.java) { node.clearCache() }
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals("""{"disk_enabled":true,"used_bytes":1}""", node.cacheStatus())
+        assertEquals("""{"freed_bytes":1}""", node.clearCache())
+        assertTrue(ops.calls.containsAll(listOf("cacheStatus:1", "cacheClear:1")))
+        node.dispose()
+    }
+
+    @Test
+    fun cacheStatusMarksAntsPostInitCountOnALargeCache() {
+        val mb = 1L shl 20
+        fun zeros(file: Long, disk: Boolean = true) =
+            """{"disk_enabled":$disk,"used_bytes":0,"capacity_bytes":${2048 * mb},"chunks":0,""" +
+                """"pinned_bytes":0,"pinned_chunks":0,"file_bytes":$file}"""
+        fun counting(json: String, since: Long) =
+            JSONObject(SwarmNode.markCacheCounting(json, since)).optBoolean("counting", false)
+        // Right after init, all 0 over a 2 GB file: ant hasn't counted yet.
+        assertTrue(counting(zeros(2000 * mb), 2_000))
+        // Past the window, the 0s are taken as they are.
+        assertFalse(counting(zeros(2000 * mb), SwarmNode.CACHE_COUNT_WINDOW_MS))
+        // A clock reading before init (shouldn't happen) proves nothing.
+        assertFalse(counting(zeros(2000 * mb), -1))
+        // A small file is an empty cache, not an uncounted one.
+        assertFalse(counting(zeros(64 * 1024), 2_000))
+        // No disk cache, or something counted: unchanged, byte for byte.
+        assertEquals(zeros(2000 * mb, disk = false), SwarmNode.markCacheCounting(zeros(2000 * mb, disk = false), 2_000))
+        val counted = """{"disk_enabled":true,"used_bytes":0,"pinned_bytes":${5 * mb},"file_bytes":${2000 * mb}}"""
+        assertEquals(counted, SwarmNode.markCacheCounting(counted, 2_000))
+        assertEquals("not json", SwarmNode.markCacheCounting("not json", 2_000))
+        // After a clear, all 0 over a big file is the clear's own answer (an
+        // older build's database kept its size): never "counting".
+        assertFalse(JSONObject(SwarmNode.markCacheCounting(zeros(512 * mb), 2_000, clearedSinceBoot = true)).optBoolean("counting", false))
+    }
+
+    @Test
+    fun cacheStatusStopsMarkingCountingOnceThisBootCleared() {
+        val mb = 1L shl 20
+        val ops = FakeOps().apply {
+            releaseSeed.countDown(); releaseInit.countDown()
+            cacheStatusJson = """{"disk_enabled":true,"used_bytes":0,"chunks":0,"pinned_bytes":0,""" +
+                """"pinned_chunks":0,"file_bytes":${512 * mb}}"""
+        }
+        val now = 1_000_000L
+        val node = SwarmNode(config, ops, { now })
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        fun counting() = JSONObject(node.cacheStatus()).optBoolean("counting", false)
+        // Seconds after init, all 0 over a 512 MB file: ant still counting.
+        assertTrue(counting())
+        node.clearCache()
+        // Same reading after a clear on this boot: the clear's answer.
+        assertFalse(counting())
+        node.stop()
+        awaitStatus(node, NodeStatus.Stopped)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        // A new boot counts afresh: the earlier boot's clear doesn't carry over.
+        assertTrue(counting())
+        node.dispose()
+    }
+
+    @Test
+    fun swapStatusIsAntsAnswerAndNeedsARunningNode() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        assertThrows(IllegalStateException::class.java) { node.swapStatus() }
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(ops.swapStatusJson, node.swapStatus())
+        node.dispose()
+    }
+
+    @Test
+    fun confirmingALostLedgerIsOnlyForTheChequebookTheNodeRuns() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown(); chequebookHex = "ab".repeat(20) }
+        val node = SwarmNode(config.copy(mode = { SwarmNode.Mode.light("https://rpc.example") }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertThrows(IllegalArgumentException::class.java) { node.confirmChequeLiability("0x1234") }
+        assertThrows(IllegalStateException::class.java) { node.confirmChequeLiability("0x" + "cd".repeat(20)) }
+        assertTrue(ops.confirms.isEmpty())
+        assertTrue(node.confirmChequeLiability("0x" + "AB".repeat(20)))
+        assertEquals(listOf("1:0x" + "ab".repeat(20)), ops.confirms.toList())
+        ops.confirmResult = 1
+        assertFalse(node.confirmChequeLiability("0x" + "ab".repeat(20)))
         node.dispose()
     }
 }

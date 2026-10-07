@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -71,9 +72,18 @@ internal fun publisherSiteSummary(site: SitePublisher): String {
     return Strings.plural(R.plurals.publish_identities_site_summary, count, site.active.label, count)
 }
 
-/** What an identity's row says under its name: its kind and key path. */
-internal fun publisherIdentityDetail(identity: PublisherIdentity): String =
-    Strings.get(R.string.publish_identities_detail, identity.kind, identity.derivationPath)
+/**
+ * What an identity's row says under its name: its kind ("App-scoped",
+ * "Ant wallet"). The key path is an expert's detail, so not on the row (#425, W46).
+ */
+internal fun publisherIdentityDetail(identity: PublisherIdentity): String = identity.kind
+
+/**
+ * Whether a site row opens: always but mid-action. Locked, the site's page
+ * is still readable — which identity it publishes as, and its others —
+ * only switching and creating wait for the unlock (#425, W46).
+ */
+internal fun publisherSiteRowEnabled(busy: Boolean): Boolean = !busy
 
 /**
  * Publisher identities (#119), from Wallet: which key each site signs its
@@ -92,8 +102,8 @@ internal fun PublisherIdentitiesPage(currentSite: String?, onBack: () -> Unit) {
     val state by vault.state.collectAsState()
     val unlocked = state is Vault.State.Unlocked
     val phraseBackedUp = when (val s = state) {
-        is Vault.State.Locked -> s.info.backedUp
-        is Vault.State.Unlocked -> s.info.backedUp
+        is Vault.State.Locked -> s.info.phraseKnown
+        is Vault.State.Unlocked -> s.info.phraseKnown
         else -> true
     }
     val scope = rememberCoroutineScope()
@@ -164,32 +174,17 @@ internal fun PublisherIdentitiesPage(currentSite: String?, onBack: () -> Unit) {
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
+            // One line (#425, W46): the feature works (window.swarm feeds sign with these keys), so the entry stays.
             item("intro") {
-                SectionCard(title = stringResource(R.string.publish_identities_intro_title)) {
-                    Text(
-                        stringResource(R.string.publish_identities_intro),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        stringResource(R.string.publish_identities_intro_not_yet),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                Text(
+                    stringResource(R.string.publish_identities_intro),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
             }
-            if (!unlocked) item("locked") {
-                SectionCard(title = stringResource(R.string.publish_identities_locked_title)) {
-                    Text(
-                        stringResource(R.string.publish_identities_locked_body),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Button(onClick = unlock, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                        Text(stringResource(if (busy) R.string.publish_identities_unlocking else R.string.publish_identities_unlock))
-                    }
-                }
-            }
+            // Only a wallet that exists can be locked; with none yet there's nothing to unlock.
+            if (state is Vault.State.Locked) item("locked") { LockedNote(stringResource(R.string.publish_identities_locked_body), busy, unlock) }
             val known = sites
             if (currentSite != null && known != null && known.none { it.origin == currentSite }) item("current") {
                 SectionCard(title = stringResource(R.string.publish_identities_this_site)) {
@@ -229,7 +224,7 @@ internal fun PublisherIdentitiesPage(currentSite: String?, onBack: () -> Unit) {
                             subtitle = publisherSiteSummary(site),
                             style = PageRowStyle.Inset,
                             leadingIcon = Icons.Filled.Badge,
-                            enabled = unlocked && !busy,
+                            enabled = publisherSiteRowEnabled(busy),
                             onClick = {
                                 error = null
                                 open = site.origin
@@ -289,18 +284,7 @@ private fun SitePublisherPage(
                     )
                 }
             }
-            if (!unlocked) item("locked") {
-                SectionCard(title = stringResource(R.string.publish_identities_locked_title)) {
-                    Text(
-                        stringResource(R.string.publish_identities_site_locked_body),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Button(onClick = onUnlock, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                        Text(stringResource(if (busy) R.string.publish_identities_unlocking else R.string.publish_identities_unlock))
-                    }
-                }
-            }
+            if (!unlocked) item("locked") { LockedNote(stringResource(R.string.publish_identities_site_locked_body), busy, onUnlock) }
             item("choices") {
                 SectionCard(title = stringResource(R.string.publish_identities_publishes_as)) {
                     choices.forEach { identity ->
@@ -344,11 +328,11 @@ private fun IdentityChoice(
     enabled: Boolean,
     onSelect: () -> Unit,
 ) {
-    val alpha = if (enabled || selected) 1f else 0.6f
     Row(
         verticalAlignment = Alignment.Top,
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(min = 56.dp)
             .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onSelect)
             .padding(vertical = 6.dp),
     ) {
@@ -358,7 +342,8 @@ private fun IdentityChoice(
             Text(
                 if (selected) stringResource(R.string.publish_identities_label_active, identity.label) else identity.label,
                 fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
+                // Full contrast while locked too: the row is read, only the choice waits (#425, W46).
+                color = MaterialTheme.colorScheme.onSurface,
             )
             Text(
                 publisherIdentityDetail(identity),
@@ -419,6 +404,17 @@ private fun CreateIdentityDialog(busy: Boolean, error: String?, onCreate: (Strin
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
+}
+
+/** The wallet is locked: a line saying what waits for it, and a quiet way to unlock — not the page's main action. */
+@Composable
+private fun LockedNote(text: String, busy: Boolean, onUnlock: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+        Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        TextButton(onClick = onUnlock, enabled = !busy) {
+            Text(stringResource(if (busy) R.string.publish_identities_unlocking else R.string.publish_identities_unlock))
+        }
+    }
 }
 
 @Composable

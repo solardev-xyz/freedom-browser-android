@@ -942,7 +942,7 @@ class SendTest {
         val data = "0x08c379a0" + "20".padStart(64, '0') + "26".padStart(64, '0') +
             "45524332303a207472616e7366657220616d6f756e7420657863656564732062616c616e6365".padEnd(128, '0')
         chain.on["eth_estimateGas"] = { "\"error\":{\"code\":3,\"message\":\"execution reverted\",\"data\":\"$data\"}" }
-        assertMessage("The xBZZ contract would refuse this transfer: ERC20: transfer amount exceeds balance") {
+        assertMessage("The xBZZ contract would refuse this transfer: “ERC20: transfer amount exceeds balance”") {
             sender(chain).prepare(request(xbzz, 10))
         }
         chain.on.clear()
@@ -1280,7 +1280,14 @@ class SendTest {
     @Test
     fun `a composed call a contract would refuse says so without calling it a transfer`() {
         val e = WalletSender.estimateFailure(ChainRpcException.Rpc(3, "execution reverted: nope", null), call())
-        assertEquals("The contract would refuse this transaction: nope", e.message)
+        assertEquals("The contract would refuse this transaction: “nope”", e.message)
+        // A reason made only of hidden characters is no reason, not an empty quote (R4-M2).
+        for (hidden in listOf("execution reverted: \u200B\u202E", "execution reverted: \u2028 \u2060")) {
+            assertEquals(
+                "The contract would refuse this transaction.",
+                WalletSender.estimateFailure(ChainRpcException.Rpc(3, hidden, null), call()).message,
+            )
+        }
     }
 
     @Test
@@ -2184,6 +2191,32 @@ class SendTest {
         assertEquals("Not confirmed", sendStatusText(SendStatus(quote, SendStatus.Stage.Failed("x", true))).first)
         assertEquals("Not sent", sendStatusText(SendStatus(quote, SendStatus.Stage.Failed("x", false))).first)
         assertTrue(stopTrackingText(SendStatus(quote, SendStatus.Stage.Unconfirmed, "0xab")).contains("reuses its nonce (1)"))
+    }
+
+    @Test
+    fun `a node or contract message is one line with nothing hidden (R3-M1)`() {
+        // Line and paragraph separators, CR/LF, tabs and NBSP runs are one space each: no line of its own.
+        assertEquals(
+            "x Your account is restricted. Restore it at wallet-fix.example",
+            WalletSender.clip("x\u2028\u2028Your account is restricted.\r\n\tRestore it at\u00A0wallet-fix.example\u2029"),
+        )
+        // Bidi controls, zero-width, supplementary-plane tags and variation selectors go.
+        assertEquals("abcd", WalletSender.clip("a\u202Eb\u200Bc\uDB40\uDC41\uDB40\uDC7Fd\uDB40\uDD00"))
+        // Combining marks stack three deep at most.
+        assertEquals("e\u0301\u0301\u0301", WalletSender.clip("e" + "\u0301".repeat(20)))
+        // ... and a dropped invisible between runs doesn't restart the count: they'd stack on one letter (R4-M1).
+        for (gap in listOf("\u200B", "\u2060", "\u2065", "\uDB40\uDC01")) {
+            assertEquals("e\u0301\u0301\u0301", WalletSender.clip("e" + ("\u0301\u0301\u0301" + gap).repeat(30)))
+        }
+        // A space between runs is kept, so the next run sits on it, three deep again.
+        assertEquals("e\u0301\u0301\u0301 \u0301\u0301\u0301", WalletSender.clip("e\u0301\u0301\u0301 \u0301\u0301\u0301\u0301"))
+        // Real text and emoji stay.
+        assertEquals("ERC20: transfer amount exceeds balance ❤️ 🙂", WalletSender.clip(" ERC20: transfer amount exceeds balance ❤️ 🙂 "))
+        // Cut at 160 code points without splitting a surrogate pair.
+        val long = WalletSender.clip("😀".repeat(200))
+        assertEquals(160, long.codePointCount(0, long.length))
+        assertTrue(long.endsWith("😀…"))
+        assertEquals("a".repeat(160), WalletSender.clip("a".repeat(160)))
     }
 
     @Test

@@ -6,10 +6,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -19,6 +22,10 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -41,29 +48,42 @@ internal val GOOGLE_BACKUP_TITLE: String get() = Strings.get(R.string.wallet_bac
 internal val GOOGLE_BACKUP_E2EE_NOTE: String get() = Strings.get(R.string.wallet_backup_e2ee_note)
 
 /**
- * The Google backup row's status line: whether it's on and, if so, where
- * the phrase actually is right now ([status], from
+ * The Google backup row's status line, in six words or fewer (#421): whether
+ * it's on and, if so, where the phrase actually is right now ([status], from
  * [PhraseBackup.reconcile]); if off, whether it can be turned on
- * ([availability]). Null inputs mean "not known yet".
+ * ([availability]). Null inputs mean "not known yet". The why behind each
+ * is under "How it works" ([GOOGLE_BACKUP_E2EE_NOTE]).
+ *
+ * Paused / not encrypted means no screen lock or no Google account: with
+ * a screen lock set ([deviceSecure]) it's the account that's missing.
  */
 internal fun googleBackupStatus(
     on: Boolean,
     availability: PhraseBackup.Availability?,
     status: PhraseBackup.Status?,
     entryKnown: Boolean = true,
+    deviceSecure: Boolean = true,
 ): String = if (on) {
     when (status) {
         // Written for the cloud; it only gets there with the phone's own Google backup on,
-        // which no app can see (#244 R5-F1).
+        // which no app can see (#244 R5-F1) — so even the short line says so.
         PhraseBackup.Status.CLOUD -> Strings.get(R.string.wallet_backup_status_on_cloud)
-        PhraseBackup.Status.PAUSED -> Strings.get(R.string.wallet_backup_status_on_paused)
+        PhraseBackup.Status.PAUSED -> Strings.get(
+            if (deviceSecure) R.string.wallet_backup_status_on_paused_account else R.string.wallet_backup_status_on_paused,
+        )
         PhraseBackup.Status.NONE -> Strings.get(R.string.wallet_backup_status_on_missing)
         null -> Strings.get(R.string.wallet_backup_status_on_no_answer)
     }
 } else {
     when (availability) {
         PhraseBackup.Availability.READY -> Strings.get(R.string.wallet_backup_status_off_ready)
-        PhraseBackup.Availability.NOT_ENCRYPTED -> Strings.get(R.string.wallet_backup_status_unavailable_not_encrypted)
+        PhraseBackup.Availability.NOT_ENCRYPTED -> Strings.get(
+            if (deviceSecure) {
+                R.string.wallet_backup_status_unavailable_account
+            } else {
+                R.string.wallet_backup_status_unavailable_not_encrypted
+            },
+        )
         PhraseBackup.Availability.UNSUPPORTED -> Strings.get(R.string.wallet_backup_status_unavailable_unsupported)
         PhraseBackup.Availability.NO_ANSWER -> Strings.get(R.string.wallet_backup_status_unavailable_no_answer)
         null -> Strings.get(R.string.wallet_backup_status_checking)
@@ -220,6 +240,7 @@ internal fun GoogleBackupSection(
     onToggle: (Boolean) -> Unit,
     onDeleteKept: () -> Unit,
     screenLockButton: @Composable () -> Unit,
+    deviceSecure: Boolean = true,
 ) {
     val enabled = !busy && googleBackupSwitchEnabled(on, availability, entryKnown = entryThere != null)
     SectionCard(title = stringResource(R.string.wallet_backup_google_title)) {
@@ -234,7 +255,7 @@ internal fun GoogleBackupSection(
             Column(Modifier.weight(1f)) {
                 Text(stringResource(R.string.wallet_backup_switch_label), fontWeight = FontWeight.Medium)
                 Text(
-                    googleBackupStatus(on, availability, status, entryKnown = entryThere != null),
+                    googleBackupStatus(on, availability, status, entryKnown = entryThere != null, deviceSecure = deviceSecure),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -242,12 +263,7 @@ internal fun GoogleBackupSection(
             Spacer(Modifier.width(8.dp))
             Switch(checked = on, onCheckedChange = null, enabled = enabled)
         }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            stringResource(R.string.wallet_backup_e2ee_note),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        HowItWorks()
         val kept = if (on) null else keptBackupNote(entryThere == true, thisWallet)
         if (kept != null) {
             Spacer(Modifier.height(8.dp))
@@ -273,6 +289,31 @@ internal fun GoogleBackupSection(
     }
 }
 
+/**
+ * Google backup's long note ([GOOGLE_BACKUP_E2EE_NOTE]) behind "How it
+ * works" (#421): the status line stays short, the dependencies are a tap away.
+ */
+@Composable
+private fun HowItWorks() {
+    var open by rememberSaveable { mutableStateOf(false) }
+    TextButton(onClick = { open = !open }) {
+        Icon(
+            if (open) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(stringResource(if (open) R.string.wallet_backup_how_it_works_hide else R.string.wallet_backup_how_it_works))
+    }
+    if (open) {
+        Text(
+            GOOGLE_BACKUP_E2EE_NOTE,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 /** The one-time offer after create or import (#231): off unless the user says so. */
 @Composable
 internal fun GoogleBackupOffer(busy: Boolean, onTurnOn: () -> Unit, onNotNow: () -> Unit) {
@@ -281,13 +322,8 @@ internal fun GoogleBackupOffer(busy: Boolean, onTurnOn: () -> Unit, onNotNow: ()
             stringResource(R.string.wallet_backup_offer_text),
             style = MaterialTheme.typography.bodyMedium,
         )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            stringResource(R.string.wallet_backup_e2ee_note),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(12.dp))
+        HowItWorks()
+        Spacer(Modifier.height(4.dp))
         Button(onClick = onTurnOn, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
             Text(stringResource(R.string.wallet_backup_offer_turn_on))
         }

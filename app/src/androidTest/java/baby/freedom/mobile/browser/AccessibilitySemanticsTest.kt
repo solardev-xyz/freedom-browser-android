@@ -171,12 +171,17 @@ class AccessibilitySemanticsTest {
     }
 
     @Test
-    fun theNodesMenuRowReadsItsCountOnce() {
-        rule.setContent { MaterialTheme { NodesMenuItem("101 peers") {} } }
-        val row = rule.onNode(hasClickAction()).fetchSemanticsNode().config
-        assertEquals(listOf("Nodes, 101 peers"), row.getOrNull(SemanticsProperties.ContentDescription))
-        // The drawn "101 peers" is not handed over a second time as text.
-        assertTrue(row.getOrNull(SemanticsProperties.Text).isNullOrEmpty())
+    fun theNodesMenuRowSaysWhereItGoesWithNoCount() {
+        var note by mutableStateOf<String?>(null)
+        rule.setContent { MaterialTheme { NodesMenuItem(note) {} } }
+        fun texts() = rule.onNode(hasClickAction(), useUnmergedTree = false).fetchSemanticsNode().config
+            .getOrNull(SemanticsProperties.Text).orEmpty().map { it.text }
+        // Its label is what TalkBack reads; no peer count (#416).
+        assertEquals(listOf("Nodes & networks"), texts())
+        // A failed node adds its line, read after the label.
+        note = "Swarm has a problem"
+        rule.waitForIdle()
+        assertEquals(listOf("Nodes & networks", "Swarm has a problem"), texts())
     }
 
     @Test

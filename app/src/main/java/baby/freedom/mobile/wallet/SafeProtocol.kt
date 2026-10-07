@@ -264,7 +264,19 @@ object SafeProtocol {
             val text: String,
             override val typedData: JSONObject,
             override val hash: ByteArray,
-        ) : Request()
+        ) : Request() {
+            /**
+             * [text] as the co-sign page shows it: every character that could
+             * hide or rearrange the words — a bidi override, a zero-width or
+             * tag character, a variation selector, a stack of combining marks —
+             * written as a visible escape ([Eip712.visible]), as `personal_sign`
+             * and typed data are shown. The digest matching [text] proves only
+             * that these are the signed bytes, not that the page draws them all:
+             * a peer could otherwise smuggle words past the owner that the
+             * Safe's EIP-1271 signature then vouches for.
+             */
+            val shownText: String get() = Eip712.visible(text)
+        }
     }
 
     /** A shared request larger than this is no SafeTx this wallet would sign. */

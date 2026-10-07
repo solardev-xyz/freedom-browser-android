@@ -214,6 +214,30 @@ class TxHistoryTest {
     }
 
     @Test
+    fun `only a send from the Send page records a payee, a composed call's contract never does, and the file keeps which (#422)`() = runBlocking<Unit> {
+        val chain = FakeChain(gnosis)
+        val h = history(chain)
+        val s = sender(chain, h)
+        s.submit(s.prepare(request()), signer())
+        val paid = h.awaitRecord(s.awaitStage { it == SendStatus.Stage.Pending }.hash!!)
+        assertTrue(paid.payee)
+        chain.receipts[paid.hash.lowercase()] = ok()
+        s.awaitStage { it is SendStatus.Stage.Confirmed }
+        s.acknowledge()
+        // A dApp's call: `to` is the contract it calls, not someone paid.
+        val call = request().copy(amount = BigInteger.ZERO, dapp = DappCall("https://dex.example", "a9059cbb".hexToBytes(), BigInteger.valueOf(60_000)))
+        s.submit(s.prepare(call), signer())
+        val called = h.awaitRecord(s.awaitStage { it == SendStatus.Stage.Pending }.hash!!)
+        assertFalse(called.payee)
+        val both = h.records.value
+        assertEquals(both, TxHistoryCodec.decode(TxHistoryCodec.encode(both)))
+        // A record kept before this was noted: not known to be a payee.
+        val old = TxHistoryCodec.encode(listOf(record().copy(payee = true)))
+        old.getJSONArray("records").getJSONObject(0).remove("payee")
+        assertFalse(TxHistoryCodec.decode(old).single().payee)
+    }
+
+    @Test
     fun `a send that may have gone out is recorded pending, one certainly not sent never is`() = runBlocking<Unit> {
         val chain = FakeChain(gnosis)
         val h = history(chain)

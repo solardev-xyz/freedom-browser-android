@@ -66,6 +66,15 @@ enum class LedgerScheme(@StringRes private val labelRes: Int) {
         LIVE -> "44'/60'/$i'/0/0"
         LEGACY -> "44'/60'/0'/$i"
     }
+
+    /** The account index [path] is at in this layout ([path]'s inverse), or null when it isn't one of its paths. */
+    fun index(path: String): Int? {
+        val i = when (this) {
+            LIVE -> Regex("44'/60'/(\\d{1,9})'/0/0").matchEntire(path)?.groupValues?.get(1)
+            LEGACY -> Regex("44'/60'/0'/(\\d{1,9})").matchEntire(path)?.groupValues?.get(1)
+        }?.toIntOrNull() ?: return null
+        return i.takeIf { this.path(it) == path }
+    }
 }
 
 /**

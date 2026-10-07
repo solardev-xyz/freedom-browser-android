@@ -28,6 +28,9 @@ class FixtureGateway {
         const val REF_A = "aaaa385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432aaaa"
         const val REF_B = "bbbb385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432bbbb"
 
+        /** Size of the `slow-segment` fixture, served in two halves 15 s apart. */
+        const val SLOW_SEGMENT_BYTES = 64 * 1024
+
         /** 64-hex root no fixture serves — the "misspelled hash" case. */
         const val REF_MISSING =
             "cccc385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432cccc"
@@ -46,12 +49,16 @@ class FixtureGateway {
     @Volatile
     var failAll: Boolean = false
 
+    /** Requests seen, by path — to tell a passed-through answer from a retried one. */
+    val requests = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
+
     fun start() {
         val s = MockWebServer()
         s.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 if (failAll) return MockResponse().setResponseCode(500)
                 val path = request.path ?: return MockResponse().setResponseCode(400)
+                requests.getOrPut(path) { java.util.concurrent.atomic.AtomicInteger() }.incrementAndGet()
                 val version = when {
                     path.startsWith("/bzz/$REF_A/") -> "VERSION_A"
                     path.startsWith("/bzz/$REF_B/") -> "VERSION_B"
@@ -81,6 +88,14 @@ class FixtureGateway {
                 Base64.decode(PIXEL_PNG_B64, Base64.DEFAULT), "image/png",
             )
             "clip.wav" -> return binaryResponse(silenceWav(), "audio/wav")
+            // An extension-less media segment from a node short on peer
+            // credit: half the body, then 15 s of silence, then the rest.
+            "slow-segment" -> return binaryResponse(ByteArray(SLOW_SEGMENT_BYTES) { 7 }, "application/octet-stream")
+                .throttleBody(SLOW_SEGMENT_BYTES / 2L, 15, java.util.concurrent.TimeUnit.SECONDS)
+            // A node that hangs mid-body: 32 KB, then a minute of silence
+            // (PR #409 R1-F1, many of these must not freeze the browser).
+            "stalled-segment" -> return binaryResponse(ByteArray(64 * 1024) { 7 }, "application/octet-stream")
+                .throttleBody(32 * 1024L, 60, java.util.concurrent.TimeUnit.SECONDS)
             // A link that downloads instead of navigating (#99 R1-F1).
             "file.bin" -> return binaryResponse(ByteArray(64), "application/octet-stream")
         }

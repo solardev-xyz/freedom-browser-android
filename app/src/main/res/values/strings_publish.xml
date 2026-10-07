@@ -34,7 +34,7 @@
     <string name="publish_error_file_unreadable">The file couldn\'t be read</string>
     <string name="publish_error_upload_failed">The upload failed</string>
     <!-- %1$s: the stamp's shortened batch ID; %2$s: the room needed, e.g. "12 MB". -->
-    <string name="publish_error_stamp_too_small">It turned out bigger than the stamp %1$s has room for (%2$s, with a margin). Buy a bigger one under Postage stamps.</string>
+    <string name="publish_error_stamp_too_small">It turned out bigger than the stamp %1$s has room for (%2$s, with a margin). Buy a bigger one under Storage.</string>
     <string name="publish_error_permission_lost">Freedom may no longer read what you picked; pick it again</string>
     <string name="publish_error_source_unreadable">What you picked couldn\'t be read</string>
     <string name="publish_error_node_not_running">The Swarm node isn\'t running</string>
@@ -43,10 +43,10 @@
     <string name="publish_blocked_node_starting">The Swarm node is starting…</string>
     <string name="publish_blocked_node_off">Turn on the Swarm node to publish.</string>
     <string name="publish_blocked_needs_light_mode">Publishing needs light mode, which connects the node to Gnosis Chain. Switch it on under Publishing on the node page.</string>
-    <string name="publish_no_stamp_none">Publishing needs a usable postage stamp, and the node has none yet. Buy one, or find the ones this account already owns, under Postage stamps.</string>
-    <string name="publish_no_stamp_full">The node\'s usable postage stamps are full or expired. Buy another one under Postage stamps.</string>
+    <string name="publish_no_stamp_none">Publishing needs a usable postage stamp, and the node has none yet. Buy one, or find the ones this account already owns, under Storage.</string>
+    <string name="publish_no_stamp_full">The node\'s usable postage stamps are full or expired. Buy another one under Storage.</string>
     <!-- %1$s: the room needed, e.g. "100 kB". -->
-    <string name="publish_no_stamp_room">None of the node\'s usable stamps has room for %1$s (with a margin). Buy a bigger one under Postage stamps.</string>
+    <string name="publish_no_stamp_room">None of the node\'s usable stamps has room for %1$s (with a margin). Buy a bigger one under Storage.</string>
     <string name="publish_status_uploading">Uploading…</string>
     <string name="publish_status_published">Published</string>
     <!-- %1$s: why the upload failed. -->
@@ -57,7 +57,7 @@
     <string name="publish_intro">Upload a file, a folder or some text to the Swarm network. Anyone with its bzz:// link can open it, for as long as its postage stamp is paid for; it can\'t be taken back. A folder with an index.html opens as a website.</string>
     <string name="publish_set_up">Set up publishing</string>
     <string name="publish_reading_stamps">Reading the node\'s postage stamps…</string>
-    <string name="publish_postage_stamps">Postage stamps</string>
+    <string name="publish_postage_stamps">Storage</string>
     <string name="publish_pick_file">File</string>
     <string name="publish_pick_folder">Folder</string>
     <string name="publish_pick_text">Text</string>
@@ -158,21 +158,16 @@
         <item quantity="one">Publishes as %1$s · %2$d identity</item>
         <item quantity="other">Publishes as %1$s · %2$d identities</item>
     </plurals>
-    <!-- %1$s: the kind of key ("App-scoped"); %2$s: its derivation path. -->
-    <string name="publish_identities_detail">%1$s · %2$s</string>
     <string name="publish_identities_error_locked">The wallet locked. Unlock it and try again.</string>
     <!-- What failed, filling "Couldn’t %s: …" (see walletErrorMessage). -->
     <string name="publish_identities_action_unlock">unlock the wallet</string>
     <string name="publish_identities_action_switch">switch identity</string>
     <string name="publish_identities_action_create">create the identity</string>
     <string name="publish_identities_action_set_up_site">set up the site</string>
-    <string name="publish_identities_intro_title">Publishing on Swarm</string>
-    <string name="publish_identities_intro">A site signs its Swarm feeds with a key from your wallet. Each site gets an app-scoped identity of its own, so its feeds can’t be tied to your other sites or accounts. You can give a site more identities and switch between them, or have it publish as your Ant wallet identity — your Swarm node’s account, which every site using it shares.</string>
-    <string name="publish_identities_intro_not_yet">Sites can’t publish feeds from this browser yet; when they can, they’ll use the identity chosen here.</string>
-    <string name="publish_identities_locked_title">Wallet locked</string>
-    <string name="publish_identities_locked_body">Unlock the wallet to see each identity’s owner address, create identities or switch between them.</string>
+    <string name="publish_identities_intro">Sites sign their Swarm feeds with a key from your wallet, a different one for each site, so their feeds can’t be linked to each other.</string>
+    <string name="publish_identities_locked_body">The wallet is locked: you can look, but creating or switching identities needs it unlocked.</string>
     <string name="publish_identities_unlocking">Unlocking…</string>
-    <string name="publish_identities_unlock">Unlock</string>
+    <string name="publish_identities_unlock">Unlock to make changes</string>
     <string name="publish_identities_this_site">This site</string>
     <string name="publish_identities_this_site_none">Has no publisher identity yet. Setting one up gives it a new app-scoped identity.</string>
     <string name="publish_identities_set_up">Set up a publisher identity</string>
@@ -180,7 +175,7 @@
     <string name="publish_identities_sites_empty">No site has a publisher identity yet. Open a site, then come back here to set one up for it.</string>
     <string name="publish_identities_site">Site</string>
     <string name="publish_identities_site_body">Its Swarm feeds are signed by the identity chosen below. Feeds belong to the key that signs them, so after a switch the site publishes under another owner address; what it published before stays with the old one.</string>
-    <string name="publish_identities_site_locked_body">Unlock the wallet to see owner addresses and switch identities.</string>
+    <string name="publish_identities_site_locked_body">The wallet is locked: unlock it to see owner addresses or switch identities.</string>
     <string name="publish_identities_publishes_as">Publishes as</string>
     <string name="publish_identities_create_new">Create new identity</string>
     <!-- %1$s: the identity's name. -->

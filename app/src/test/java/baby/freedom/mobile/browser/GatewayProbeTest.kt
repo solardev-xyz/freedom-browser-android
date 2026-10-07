@@ -79,6 +79,38 @@ class GatewayProbeTest {
     }
 
     @Test
+    fun `keeps polling through ant's cold-start 503 and other transient 5xx`() = runBlocking {
+        // Ant v0.5.56 (freedom-hq/ant#124) answers 503 when its peers
+        // can't serve a chunk yet; a 502 or 504 also means "not yet".
+        // None of them may end the navigation with an error page.
+        for (status in listOf(502, 503, 504)) {
+            val hits = AtomicInteger(0)
+            server.respondWith { _ ->
+                val n = hits.incrementAndGet()
+                if (n < 3) Response(status) else Response(200)
+            }
+            val outcome = GatewayProbe().probe(
+                "${server.baseUrl}/bzz/abc",
+                delaysMs = longArrayOf(0L, 50L, 50L),
+            )
+            assertEquals("status $status", GatewayProbe.Outcome.Ok, outcome)
+            assertEquals("status $status", 3, hits.get())
+        }
+    }
+
+    @Test
+    fun `returns NotFound when a 503 lasts the whole budget`() = runBlocking {
+        server.respondWith { _ -> Response(503) }
+        val outcome = GatewayProbe().probe(
+            headUrl = "${server.baseUrl}/bzz/abc",
+            delaysMs = longArrayOf(0L, 50L),
+            attemptTimeoutMs = 500L,
+            overallTimeoutMs = 300L,
+        )
+        assertEquals(GatewayProbe.Outcome.NotFound, outcome)
+    }
+
+    @Test
     fun `returns Other for unexpected status`() = runBlocking {
         server.respondWith { _ -> Response(418) }
         val outcome = GatewayProbe().probe("${server.baseUrl}/bzz/abc")
@@ -325,6 +357,9 @@ private class StubHttpServer(private val requestedPort: Int = 0) {
         404 -> "Not Found"
         418 -> "I'm a teapot"
         500 -> "Internal Server Error"
+        502 -> "Bad Gateway"
+        503 -> "Service Unavailable"
+        504 -> "Gateway Timeout"
         else -> "Unknown"
     }
 }

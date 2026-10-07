@@ -52,7 +52,7 @@
     <!-- BlockedPopupNotice.kt -->
     <string name="browser_popup_close_notice">Close the pop-up notice</string>
     <string name="browser_popup_and_more">and %1$d more</string>
-    <string name="browser_popup_allowed">Pop-ups from this site will open from now on. Settings → Site permissions can undo it.</string>
+    <string name="browser_popup_allowed">Pop-ups from this site will open from now on. Settings → Privacy &amp; security can undo it.</string>
     <string name="browser_popup_allowed_private">Pop-ups from this site will open from now on, until you close your private tabs.</string>
     <string name="browser_popup_always_allow">Always allow pop-ups on this site</string>
     <string name="browser_popup_scroll_through">Scroll through the whole of a long address to use its button.</string>
@@ -67,7 +67,7 @@
     <!-- PopupBlocker.kt -->
     <string name="browser_popup_reading_address">Reading its address…</string>
     <string name="browser_popup_form_sent_to_long">A form sent to %1$s (its data can\'t be sent again from here)</string>
-    <string name="browser_popup_address_unread">Its address wasn\'t read (too many pop-ups at once)</string>
+    <string name="browser_popup_address_unread">Its address wasn\'t read (too many pop-ups at once, or the page closed first)</string>
     <string name="browser_popup_blank_window">A blank window (no address to open)</string>
 
     <!-- PrivateJsDialogs.kt: a private tab's alert/confirm/prompt/beforeunload -->
@@ -95,6 +95,8 @@
     <string name="browser_download_started">Downloading %1$s</string>
     <string name="browser_download_completed">Downloaded %1$s</string>
     <string name="browser_download_failed">Download failed: %1$s</string>
+    <!-- #322: a location picked in Save as that Freedom couldn't keep access to past the app being closed. -->
+    <string name="browser_download_save_to_no_access">Freedom can\'t keep access to that location. Choose another folder.</string>
     <string name="browser_download_details">Details</string>
     <string name="browser_download_background_dropped">A background tab is asking for more downloads than can wait; extras are dropped</string>
     <string name="browser_download_show">Show</string>
@@ -132,18 +134,19 @@
     <string name="browser_menu_hard_reload">Hard reload</string>
     <string name="browser_menu_desktop_site">Desktop site</string>
     <string name="browser_menu_print">Print</string>
-    <string name="browser_menu_block_ads">Block ads on this site</string>
+    <string name="browser_menu_block_ads">Block ads here</string>
     <string name="browser_menu_site_permissions">Site permissions</string>
     <string name="browser_menu_history">History</string>
     <string name="browser_menu_bookmarks">Bookmarks</string>
     <string name="browser_menu_downloads">Downloads</string>
     <string name="browser_menu_settings">Settings</string>
-    <plurals name="browser_menu_peers">
-        <item quantity="one">%d peer</item>
-        <item quantity="other">%d peers</item>
-    </plurals>
-    <!-- TalkBack's name for the menu's Nodes row: %1$s is the peer count, e.g. "12 peers". -->
-    <string name="browser_menu_nodes_description">Nodes, %1$s</string>
+    <string name="browser_menu_wallet">Wallet</string>
+    <!-- The menu's Wallet row's sub-line when there is no wallet on the device yet. -->
+    <string name="browser_menu_wallet_not_set_up">Not set up</string>
+    <string name="browser_menu_add_to_home_screen">Add to Home screen</string>
+    <string name="browser_add_to_home_screen_failed">Couldn\'t add to Home screen</string>
+    <!-- The menu's last row: opens the Nodes & networks overview. -->
+    <string name="browser_menu_nodes">Nodes &amp; networks</string>
     <string name="browser_menu_zoom">Zoom</string>
     <string name="browser_zoom_out">Zoom out</string>
     <string name="browser_zoom_in">Zoom in</string>
@@ -168,8 +171,8 @@
     <string name="browser_explore_swarmit_subtitle">Decentralized social feed on Swarm</string>
     <string name="browser_intro_title">Welcome to Freedom</string>
     <string name="browser_intro_body_web">Freedom opens the web you know and the decentralized web: sites stored on Swarm (bzz://) and IPFS (ipfs://), and ENS names such as app.swarmit.eth.</string>
-    <string name="browser_intro_body_nodes">It reaches them through its own nodes, running on this phone and talking straight to peers. The nodes use data and battery while they run; the peers row in the menu shows them and can switch them off.</string>
-    <string name="browser_intro_body_wallet">You don\'t need a wallet to browse. If you want one later, it\'s in Settings.</string>
+    <string name="browser_intro_body_nodes">It reaches them through its own nodes, running on this phone and talking straight to peers. The nodes use data and battery while they run; Nodes &amp; networks in the menu shows how they\'re doing and can switch them off.</string>
+    <string name="browser_intro_body_wallet">You don\'t need a wallet to browse. If you want one later, open Wallet from the menu.</string>
     <string name="browser_intro_got_it">Got it</string>
     <!-- %1$s is the name of a curated site, e.g. "Swarmit". -->
     <string name="browser_intro_try">Try %1$s</string>
@@ -194,13 +197,23 @@
 
     <!-- TabSwitcher.kt -->
     <string name="browser_tabs_new_tab">New tab</string>
-    <!-- The switcher's button that opens a new private tab. -->
-    <string name="browser_tabs_new_private">Private</string>
+    <!-- The switcher's button that opens a new private tab, on its Private pane. -->
+    <string name="browser_tabs_new_private_tab">New private tab</string>
+    <!-- The switcher's Tabs | Private toggle (#418): the pane of normal tabs. -->
+    <string name="browser_tabs_pane_tabs">Tabs</string>
+    <!-- The switcher's Tabs | Private toggle (#418): the pane of private tabs. -->
+    <string name="browser_tabs_pane_private">Private</string>
+    <string name="browser_tabs_empty_title">No open tabs</string>
+    <string name="browser_tabs_empty_hint">Tap New tab to open one.</string>
+    <string name="browser_tabs_private_empty_title">No private tabs</string>
+    <string name="browser_tabs_private_empty_hint">Pages you open in private tabs aren\'t kept in your history, and their cookies and site data are deleted when you close your last private tab.</string>
     <string name="browser_tabs_reopen">Reopen</string>
     <string name="browser_tabs_close_switcher">Close tab switcher</string>
     <!-- TalkBack's name for the switcher's ⋮ menu button. -->
     <string name="browser_tabs_menu">More tab options</string>
     <string name="browser_tabs_close_all">Close all tabs</string>
+    <!-- The Tabs pane's menu while private tabs are open: closes the normal tabs, the private ones stay. -->
+    <string name="browser_tabs_close_normal">Close normal tabs</string>
     <string name="browser_tabs_close_private">Close private tabs</string>
     <!-- A tab card's menu (long-press) and accessibility action: close every tab but this one. -->
     <string name="browser_tabs_close_others">Close other tabs</string>
@@ -209,7 +222,19 @@
         <item quantity="one">%d tab closed</item>
         <item quantity="other">%d tabs closed</item>
     </plurals>
+    <!-- Snackbar after closing one tab in the tab switcher (#418), with Undo. -->
+    <string name="browser_tab_closed">Tab closed</string>
     <string name="browser_tabs_undo">Undo</string>
+    <!-- Snackbar on launch when the tabs restored last time crashed the app (#400): they weren't loaded, and its action brings them back. -->
+    <plurals name="browser_tabs_not_restored">
+        <item quantity="one">Freedom closed unexpectedly, so %d tab wasn\'t reopened</item>
+        <item quantity="other">Freedom closed unexpectedly, so %d tabs weren\'t reopened</item>
+    </plurals>
+    <plurals name="browser_tabs_not_reopened">
+        <item quantity="one">%d tab from last time wasn\'t reopened</item>
+        <item quantity="other">%d tabs from last time weren\'t reopened</item>
+    </plurals>
+    <string name="browser_tabs_restore">Restore</string>
     <string name="browser_tabs_move_earlier">Move tab earlier</string>
     <string name="browser_tabs_move_to_start">Move tab to start</string>
     <string name="browser_tabs_move_later">Move tab later</string>

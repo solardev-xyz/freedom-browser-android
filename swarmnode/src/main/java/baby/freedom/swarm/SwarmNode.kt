@@ -71,17 +71,21 @@ class SwarmNode internal constructor(
     /** The native calls [SwarmNode] makes; swapped for a fake in tests. */
     internal interface NodeOps {
         fun seed(antDir: File)
-        fun init(dataDir: String): Long
-        fun initWithIdentity(dataDir: String, identity: ByteArray): Long
+        /** Boots as the data dir's own identity, the disk cache capped at [cacheCapacityBytes] (≤ 0: ant's default). */
+        fun init(dataDir: String, cacheCapacityBytes: Long): Long
+        /** Boots as the account in [identity] (#77), likewise capped. */
+        fun initWithIdentity(dataDir: String, identity: ByteArray, cacheCapacityBytes: Long): Long
         fun accountInfo(handle: Long): String?
         /** Starts the gateway allowing CORS reads from [corsOrigins] only. */
         fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String, corsOrigins: List<String>)
         fun agentString(handle: Long): String?
         fun peerCount(handle: Long): Int
+        fun resume(handle: Long)
+        fun wake(handle: Long)
+        fun suspend(handle: Long)
         fun stopGateway(handle: Long)
         fun shutdown(handle: Long)
         fun storageStatus(handle: Long): String
-        fun settlementStatus(handle: Long): String
         fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String
         fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long): String
         fun storageValidity(handle: Long, gnosisRpc: String): String
@@ -89,6 +93,12 @@ class SwarmNode internal constructor(
         fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String): String
         fun storageConnectBatch(handle: Long, gnosisRpc: String, batchId: String): String
         fun storageDiscover(handle: Long, gnosisRpc: String): String
+        fun setSwapEnabled(handle: Long, enabled: Boolean)
+        fun swapStatus(handle: Long): String
+        fun confirmChequeLiability(handle: Long, chequebook: String): Int
+        fun cacheStatus(handle: Long): String
+        fun cacheClear(handle: Long): String
+        fun cacheSetCapacity(handle: Long, bytes: Long)
 
         /**
          * One request to the node's own gateway ([GATEWAY_URL] + [path]),
@@ -99,9 +109,10 @@ class SwarmNode internal constructor(
 
         object Native : NodeOps {
             override fun seed(antDir: File) = BootnodeSeeder.seedIfEmpty(antDir)
-            override fun init(dataDir: String) = AntNative.init(dataDir)
-            override fun initWithIdentity(dataDir: String, identity: ByteArray) =
-                AntNative.initWithIdentity(dataDir, identity)
+            override fun init(dataDir: String, cacheCapacityBytes: Long) =
+                AntNative.initWithConfig(dataDir, null, cacheCapacityBytes)
+            override fun initWithIdentity(dataDir: String, identity: ByteArray, cacheCapacityBytes: Long) =
+                AntNative.initWithConfig(dataDir, identity, cacheCapacityBytes)
             override fun accountInfo(handle: Long) = AntNative.accountInfo(handle)
             override fun startGateway(
                 handle: Long,
@@ -112,10 +123,12 @@ class SwarmNode internal constructor(
             ) = AntNative.startGateway(handle, apiAddr, lightMode, gnosisRpc, corsOrigins.toTypedArray())
             override fun agentString(handle: Long) = AntNative.agentString(handle)
             override fun peerCount(handle: Long) = AntNative.peerCount(handle)
+            override fun resume(handle: Long) { AntNative.resume(handle) }
+            override fun wake(handle: Long) { AntNative.wake(handle) }
+            override fun suspend(handle: Long) { AntNative.suspend(handle) }
             override fun stopGateway(handle: Long) = AntNative.stopGateway(handle)
             override fun shutdown(handle: Long) = AntNative.shutdown(handle)
             override fun storageStatus(handle: Long) = AntNative.storageStatus(handle)
-            override fun settlementStatus(handle: Long) = AntNative.settlementStatus(handle)
             override fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long) =
                 AntNative.storageQuote(handle, gnosisRpc, depth, days)
             override fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long) =
@@ -128,6 +141,13 @@ class SwarmNode internal constructor(
             override fun storageConnectBatch(handle: Long, gnosisRpc: String, batchId: String) =
                 AntNative.storageConnectBatch(handle, gnosisRpc, batchId)
             override fun storageDiscover(handle: Long, gnosisRpc: String) = AntNative.storageDiscover(handle, gnosisRpc)
+            override fun setSwapEnabled(handle: Long, enabled: Boolean) = AntNative.setSwapEnabled(handle, enabled)
+            override fun swapStatus(handle: Long) = AntNative.swapStatus(handle)
+            override fun confirmChequeLiability(handle: Long, chequebook: String) =
+                AntNative.confirmChequeLiability(handle, chequebook)
+            override fun cacheStatus(handle: Long) = AntNative.cacheStatus(handle)
+            override fun cacheClear(handle: Long) = AntNative.cacheClear(handle)
+            override fun cacheSetCapacity(handle: Long, bytes: Long) = AntNative.cacheSetCapacity(handle, bytes)
             override fun gateway(method: String, path: String, timeoutMs: Int): GatewayAnswer? = try {
                 val conn = java.net.URL(GATEWAY_URL + path).openConnection() as java.net.HttpURLConnection
                 try {
@@ -171,6 +191,21 @@ class SwarmNode internal constructor(
          * the pair it read together.
          */
         val mode: () -> Mode = { Mode.ULTRA_LIGHT },
+        /**
+         * Whether the node pays peers from its chequebook (bee's
+         * swap-enable, for downloads and uploads), read at every start
+         * until [setSwapEnabled] has said otherwise. ant doesn't persist
+         * it, so the node applies it after every init. On by default, as
+         * in bee and ant.
+         */
+        val swapEnabled: () -> Boolean = { true },
+        /**
+         * The disk chunk cache's cap in bytes, read at every start until
+         * [setCacheCapacity] has said otherwise, and handed to ant's init
+         * so it applies from start-up (ant doesn't persist it). 0 or less:
+         * ant's default, 512 MiB.
+         */
+        val cacheCapacityBytes: () -> Long = { 0L },
     )
 
     /**
@@ -198,7 +233,7 @@ class SwarmNode internal constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
-     * `*mut AntHandle` from [AntNative.init]; `0` when not running.
+     * `*mut AntHandle` from [AntNative.initWithConfig]; `0` when not running.
      * `@Volatile` so the peer poller observes the reset in [stop]
      * without locking.
      */
@@ -207,6 +242,21 @@ class SwarmNode internal constructor(
 
     /** The mode [handle] booted in; its RPC is the one the storage calls use. Guarded by [lock]. */
     private var handleMode: Mode = Mode.ULTRA_LIGHT
+
+    /** [clock] when [handle] was published: how long ant has had to count its chunk cache. */
+    @Volatile
+    private var handleBootedAt: Long = 0L
+
+    /**
+     * A fresh token each time a [handle] is published, and the one a
+     * [clearCache] last succeeded on: after a clear on this boot, an
+     * all-zero cache reading is the clear's own answer, not ant's post-init
+     * count (an older build's database can keep its size through a clear).
+     */
+    @Volatile
+    private var handleBoot: Any = Any()
+    @Volatile
+    private var cacheClearedBoot: Any? = null
 
     /**
      * Held (read) by every storage call for as long as it uses [handle],
@@ -282,11 +332,16 @@ class SwarmNode internal constructor(
                 identity?.fill(0)
                 throw t
             }
+            val cache = cacheValue()
             val h = try {
-                if (identity != null) ops.initWithIdentity(antDir, identity) else ops.init(antDir)
+                if (identity != null) ops.initWithIdentity(antDir, identity, cache) else ops.init(antDir, cache)
             } finally {
                 identity?.fill(0)
             }
+            // ant's switch resets at every init (it isn't persisted): set
+            // it before the gateway's chain init, which is when payments
+            // can start, so a node the user switched off never pays.
+            applySwap(h)
             try {
                 ops.startGateway(
                     handle = h,
@@ -312,6 +367,8 @@ class SwarmNode internal constructor(
                 if (generation != gen) return@synchronized false
                 handle = h
                 handleMode = mode
+                handleBootedAt = clock()
+                handleBoot = Any()
                 _state.update {
                     it.copy(
                         status = NodeStatus.Running,
@@ -326,7 +383,13 @@ class SwarmNode internal constructor(
                 startPeerPolling()
                 true
             }
-            if (!published) {
+            if (published) {
+                // Again on the published handle: a [setSwapEnabled] that
+                // landed since the first apply found no handle to set.
+                applySwap()
+                // Likewise a [setCacheCapacity] since the init read its cap.
+                applyCache(bootedWith = h to cache)
+            } else {
                 Log.i(TAG, "stopped while starting; shutting the new node down")
                 runCatching {
                     AntChainTransport.whileStopping {
@@ -408,25 +471,217 @@ class SwarmNode internal constructor(
      * the node is toggled off and on" wedge — see freedom-hq/ant#12.
      */
     fun resume() = lifecycle("resume") { h ->
-        AntNative.resume(h)
-        AntNative.wake(h)
+        ops.resume(h)
+        ops.wake(h)
     }
 
     /** App went to the background: let uploads checkpoint and quiesce. */
-    fun suspend() = lifecycle("suspend") { h -> AntNative.suspend(h) }
+    fun suspend() = lifecycle("suspend") { h -> ops.suspend(h) }
 
     /** Network changed (Wi-Fi ↔ cellular, airplane mode off): redial. */
-    fun onNetworkChanged() = lifecycle("network-change") { h -> AntNative.resume(h) }
+    fun onNetworkChanged() = lifecycle("network-change") { h -> ops.resume(h) }
 
+    /**
+     * [block] on the running node, off the caller's thread. The handle is
+     * read, and used, under [handleUse] (read) like a storage call's, so
+     * [stop]'s shutdown waits for a call still inside ant rather than
+     * freeing the node under it.
+     */
     private fun lifecycle(what: String, block: (Long) -> Unit) {
-        val h = handle
-        if (h == 0L || _state.value.status != NodeStatus.Running) return
+        if (handle == 0L || _state.value.status != NodeStatus.Running) return
         scope.launch {
             withContext(Dispatchers.IO) {
-                runCatching { block(h) }
-                    .onSuccess { Log.i(TAG, "$what ok  peers=${_state.value.connectedPeers}") }
-                    .onFailure { Log.w(TAG, "$what failed", it) }
+                handleUse.read {
+                    val h = synchronized(lock) { handle }
+                    if (h == 0L || _state.value.status != NodeStatus.Running) return@read
+                    runCatching { block(h) }
+                        .onSuccess { Log.i(TAG, "$what ok  peers=${_state.value.connectedPeers}") }
+                        .onFailure { Log.w(TAG, "$what failed", it) }
+                }
             }
+        }
+    }
+
+    /**
+     * What [setSwapEnabled] last asked for; null until it has, when the
+     * node applies [Config.swapEnabled]. Guarded by [swapLock].
+     */
+    private var swapWanted: Boolean? = null
+
+    /** Orders every apply of the switch, so the last one to run sets the latest wish. */
+    private val swapLock = Any()
+
+    /**
+     * Pay peers from the chequebook, or not (bee's swap-enable): for
+     * downloads and uploads alike, live on a running node and at every
+     * later start (ant resets it at init). Returns at once; the native
+     * call runs off the caller's thread.
+     */
+    fun setSwapEnabled(enabled: Boolean) {
+        synchronized(swapLock) { swapWanted = enabled }
+        scope.launch { applySwap() }
+    }
+
+    /** The switch's value for the next apply. Under [swapLock]. */
+    private fun swapValue(): Boolean = swapWanted ?: runCatching { config.swapEnabled() }.getOrElse {
+        Log.w(TAG, "reading the pay-peers setting failed (${it.javaClass.simpleName}); on, ant's default")
+        true
+    }
+
+    /**
+     * Sets the switch on [h], a handle not published yet; or, with no
+     * argument, on the running node's, under [handleUse] like a storage
+     * call. A failure is logged: the node then runs ant's default, which
+     * [swapStatus] reports.
+     */
+    private fun applySwap(h: Long? = null) {
+        if (h != null) {
+            synchronized(swapLock) {
+                val on = swapValue()
+                runCatching { ops.setSwapEnabled(h, on) }
+                    .onSuccess { Log.i(TAG, "pay peers from the chequebook: $on") }
+                    .onFailure { Log.w(TAG, "setting pay-peers failed", it) }
+            }
+            return
+        }
+        handleUse.read {
+            synchronized(swapLock) {
+                val running = synchronized(lock) { handle }
+                if (running == 0L || _state.value.status != NodeStatus.Running) return@read
+                val on = swapValue()
+                runCatching { ops.setSwapEnabled(running, on) }
+                    .onSuccess { Log.i(TAG, "pay peers from the chequebook: $on") }
+                    .onFailure { Log.w(TAG, "setting pay-peers failed", it) }
+            }
+        }
+    }
+
+    /**
+     * The node's SWAP state, ant's `ant_swap_status` JSON: whether it can
+     * pay peers, whether the switch is on, and whether it pays now. In
+     * either mode (an ultra-light node reports it doesn't pay). Throws
+     * [IllegalStateException] while the node isn't running.
+     */
+    fun swapStatus(): String = handleUse.read {
+        val h = synchronized(lock) { handle }
+        check(h != 0L && _state.value.status == NodeStatus.Running) { SwarmStrings.get(R.string.swarmnode_not_running) }
+        ops.swapStatus(h)
+    }
+
+    /**
+     * What [setCacheCapacity] last asked for; null until it has, when the
+     * node boots with [Config.cacheCapacityBytes]. Guarded by [cacheLock].
+     */
+    private var cacheWanted: Long? = null
+
+    /** Guards [cacheWanted]; never held across a native call. */
+    private val cacheLock = Any()
+
+    /**
+     * Orders every live apply of the cache cap, so the last one to run
+     * sets the latest wish. Held across the native call (a shrink evicts
+     * before it returns), so it isn't [cacheLock], which a binder thread
+     * takes to record a new wish.
+     */
+    private val cacheApplyLock = Any()
+
+    /** The cache cap for the next init or apply. */
+    private fun cacheValue(): Long = synchronized(cacheLock) { cacheWanted } ?: runCatching { config.cacheCapacityBytes() }
+        .getOrElse {
+            Log.w(TAG, "reading the cache size setting failed (${it.javaClass.simpleName}); ant's default")
+            0L
+        }
+
+    /**
+     * The disk chunk cache's cap: live on a running node (ant evicts down
+     * to it at once when it shrinks) and at every later start. Returns at
+     * once; the native call runs off the caller's thread. A failed
+     * eviction is logged and not undone: ant keeps the new cap applied and
+     * evicts down to it on its next write.
+     */
+    fun setCacheCapacity(bytes: Long) {
+        synchronized(cacheLock) { cacheWanted = bytes }
+        scope.launch { applyCache() }
+    }
+
+    /**
+     * The handle and cap last set on it (by its init, or a live apply).
+     * Guarded by [cacheApplyLock].
+     */
+    private var cacheApplied: Pair<Long, Long>? = null
+
+    /**
+     * Sets the latest [setCacheCapacity] on the running node, under
+     * [handleUse] like a storage call; nothing when none was asked for, or
+     * the running node already has it. [bootedWith]: the handle just
+     * published and the cap its init was given.
+     */
+    private fun applyCache(bootedWith: Pair<Long, Long>? = null) {
+        handleUse.read {
+            synchronized(cacheApplyLock) {
+                if (bootedWith != null) cacheApplied = bootedWith
+                val running = synchronized(lock) { handle }
+                if (running == 0L || _state.value.status != NodeStatus.Running) return@read
+                val want = synchronized(cacheLock) { cacheWanted } ?: return@read
+                if (want <= 0L || cacheApplied == (running to want)) return@read
+                // Recorded either way: on a failed eviction ant keeps the cap
+                // applied, and evicts down to it on its next write.
+                cacheApplied = running to want
+                runCatching { ops.cacheSetCapacity(running, want) }
+                    .onSuccess { Log.i(TAG, "chunk cache capped at $want bytes") }
+                    .onFailure { Log.w(TAG, "setting the chunk cache's cap to $want failed", it) }
+            }
+        }
+    }
+
+    /**
+     * The chunk cache's figures, ant's `ant_cache_status` JSON, with
+     * `"counting":true` added while ant is probably still counting a
+     * large cache after init (see [markCacheCounting]). Cheap.
+     * Throws [IllegalStateException] while the node isn't running.
+     */
+    fun cacheStatus(): String = withRunningNode { h ->
+        val boot = handleBoot
+        markCacheCounting(ops.cacheStatus(h), clock() - handleBootedAt, clearedSinceBoot = cacheClearedBoot === boot)
+    }
+
+    /**
+     * Drops every unpinned chunk from the cache (pinned ones stay), ant's
+     * `ant_cache_clear` JSON. Blocks for as long as the clear takes: off
+     * the main thread. Throws [IllegalStateException] while the node
+     * isn't running, and [RuntimeException] with ant's message on failure.
+     */
+    fun clearCache(): String = withRunningNode { h ->
+        val boot = handleBoot
+        ops.cacheClear(h).also {
+            cacheClearedBoot = boot
+            Log.i(TAG, "chunk cache cleared")
+        }
+    }
+
+    /** [block] on the running node's handle, under [handleUse] like a storage call. */
+    private fun <T> withRunningNode(block: (Long) -> T): T = handleUse.read {
+        val h = synchronized(lock) { handle }
+        check(h != 0L && _state.value.status == NodeStatus.Running) { SwarmStrings.get(R.string.swarmnode_not_running) }
+        block(h)
+    }
+
+    /**
+     * Accepts the outstanding cheques of [chequebook] after the node's
+     * cheque ledger was lost, as the user confirmed: the node then pays
+     * peers from it again. Only for the chequebook the gateway runs.
+     * Returns true when a loss was confirmed, false when there was none.
+     */
+    fun confirmChequeLiability(chequebook: String): Boolean {
+        val want = normalizeAddress(chequebook) ?: throw IllegalArgumentException("not a chequebook address")
+        return withLightNode { h, _ ->
+            when (gatewayChequebook()) {
+                null -> throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_chequebook_unknown))
+                "" -> throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_chequebook_none))
+                want -> Unit
+                else -> throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_chequebook_other))
+            }
+            ops.confirmChequeLiability(h, "0x$want") == 0
         }
     }
 
@@ -454,40 +709,31 @@ class SwarmNode internal constructor(
      * outside any [SpendGuard] permit, so nothing ant might try to send
      * meanwhile gets out. Returns `{"registered":[ids],"status":{…}}`.
      * ant's discover also sets up settlement, which adopts a chequebook
-     * this account already owns (no transaction); the gateway is reloaded
-     * then, as after a buy, so the chequebook page (#117) sees it now.
+     * this account already owns (a read, no transaction) and points the
+     * running gateway at it (ant 0.5.52+), so the chequebook page (#117)
+     * sees it with no gateway restart. Settlement may also try to deploy
+     * a chequebook or (ant 0.5.51+) top up an adopted one's deposit: with
+     * no permit open, [SpendGuard] refuses that broadcast, which is the
+     * "refused a broadcast" log line a discover can leave behind.
      */
-    fun discoverStamps(): String = withLightNode { h, rpc ->
-        try {
-            ops.storageDiscover(h, rpc)
-        } finally {
-            reloadGatewayForNewChequebook(h)
-        }
-    }
+    fun discoverStamps(): String = withLightNode { h, rpc -> ops.storageDiscover(h, rpc) }
 
     /**
      * Buys a batch as the user confirmed it: [depth], [amountPerChunk] from
      * the quote they saw, swapping at most [maxSwapWei] of xDAI for the
      * xBZZ it needs. SPENDS: only these transactions get out ([SpendGuard]).
+     * Once the batch is bought and registered, the first buy also sets up
+     * the chequebook (deploys one, or adopts the one this account already
+     * owns), and since ant 0.5.52 points the running gateway at it itself —
+     * settlement and the chequebook page (#117) see it with no gateway
+     * restart. A buy that fails on the batch never gets that far (ant
+     * v0.5.56's activate_bought_batch runs ensure_settlement only after
+     * createBatch and register_batch succeed), so it sets up no chequebook.
      */
     fun buyStamp(depth: Int, amountPerChunk: BigInteger, immutable: Boolean, maxSwapWei: BigInteger): String =
         withLightNode { h, rpc ->
             val plan = SpendPlan.BuyStamp(owner(), depth, amountPerChunk, immutable, maxSwapWei)
-            try {
-                SpendGuard.during(plan) { ops.storageBuyXdai(h, rpc, depth, amountPerChunk.toString(), immutable) }
-            } finally {
-                // The first buy sets up the chequebook (deploys one, or adopts
-                // the one this account already owns), but the gateway only
-                // loads it when it starts — ant's contract is to restart the
-                // gateway then, or the chequebook (and a deposit into it,
-                // #117) waits for the next node restart. Also when the buy
-                // fails: it can set up the chequebook and then fail on the
-                // batch itself. Only then, though: a buy that failed before
-                // (no xDAI, another payment running) leaves ant with no
-                // chequebook, and restarting the gateway for it would only
-                // interrupt browsing.
-                reloadGatewayForNewChequebook(h)
-            }
+            SpendGuard.during(plan) { ops.storageBuyXdai(h, rpc, depth, amountPerChunk.toString(), immutable) }
         }
 
     /**
@@ -515,19 +761,14 @@ class SwarmNode internal constructor(
      * bought for this node through SwarmNodeFunder (#115): ant checks on
      * chain that the node's account owns it and registers it, so the node
      * stamps with it. A first connect also sets up the chequebook, as a
-     * first buy does — the only transactions the permit lets out — and
-     * the gateway is reloaded to pick it up. Returns ant's storage status.
+     * first buy does — the only transactions the permit lets out — which
+     * (ant 0.5.52+) the running gateway picks up at once, with no
+     * restart. Returns ant's storage status.
      */
     fun connectBatch(batchId: String): String {
         val id = normalizeBatchId(batchId) ?: throw IllegalArgumentException("not a batch id")
         return withLightNode { h, rpc ->
-            try {
-                SpendGuard.during(SpendPlan.ConnectBatch(owner())) { ops.storageConnectBatch(h, rpc, "0x$id") }
-            } finally {
-                if (antHasChequebook(h) && gatewayChequebook() == "") {
-                    reloadGateway(h, mode = synchronized(lock) { handleMode })
-                }
-            }
+            SpendGuard.during(SpendPlan.ConnectBatch(owner())) { ops.storageConnectBatch(h, rpc, "0x$id") }
         }
     }
 
@@ -663,26 +904,6 @@ class SwarmNode internal constructor(
         }.onFailure { Log.w(TAG, "couldn't persist the deposit hold: ${it.javaClass.simpleName}") }
     }
 
-    /**
-     * Whether ant has a chequebook set up for this account on this device
-     * (its persisted association, which the gateway reads only when it
-     * starts). If ant can't say, assume it may: a needless reload only
-     * interrupts browsing, a missing one strands the chequebook.
-     */
-    private fun antHasChequebook(h: Long): Boolean =
-        runCatching { JSONObject(ops.settlementStatus(h)).getBoolean("enabled") }.getOrDefault(true)
-
-    /**
-     * Reloads the gateway of [h] when ant has a chequebook set up that the
-     * gateway, which reads it only when it starts, doesn't report yet —
-     * after a buy or a discover may have set one up.
-     */
-    private fun reloadGatewayForNewChequebook(h: Long) {
-        if (antHasChequebook(h) && gatewayChequebook() == "") {
-            reloadGateway(h, mode = synchronized(lock) { handleMode })
-        }
-    }
-
     /** What the gateway's chequebook holds, in PLUR; null when it couldn't say. */
     private fun chequebookBalance(): BigInteger? =
         ops.gateway("GET", "/chequebook/balance", GATEWAY_READ_TIMEOUT_MS)?.takeIf { it.code == 200 }
@@ -699,46 +920,6 @@ class SwarmNode internal constructor(
         val address = runCatching { JSONObject(answer.body).getString("chequebookAddress") }.getOrNull() ?: return null
         val hex = normalizeAddress(address) ?: return null
         return if (hex.all { it == '0' }) "" else hex
-    }
-
-    /**
-     * Stops and starts the gateway of [h] in [mode], so it loads what ant
-     * persisted meanwhile (a chequebook). Only while [h] is still the
-     * node's handle; a failure takes the node down into Error rather than
-     * leaving it Running with no gateway.
-     */
-    private fun reloadGateway(h: Long, mode: Mode) {
-        synchronized(lock) { if (handle != h) return }
-        try {
-            // Not under [AntChainTransport.whileStopping], unlike [stop]:
-            // other storage calls may be running (a spend reading its
-            // receipt), and failing their reads could turn a sent
-            // transaction into a reported failure. So this stop can wait
-            // behind a gateway handler's read, up to the reader's deadline
-            // (#300 R2-M1).
-            ops.stopGateway(h)
-            ops.startGateway(
-                handle = h,
-                apiAddr = GATEWAY_ADDR,
-                lightMode = mode.light,
-                gnosisRpc = mode.gnosisRpc,
-                corsOrigins = GATEWAY_CORS_ORIGINS,
-            )
-            Log.i(TAG, "reloaded the gateway so it reports the node's chequebook")
-        } catch (t: Throwable) {
-            Log.w(TAG, "reloading the gateway failed: ${t.javaClass.simpleName}")
-            synchronized(lock) {
-                if (handle == h) {
-                    // Take the node down as [stop] does (the peer poller, and
-                    // the handle once no call uses it), so a start from Error
-                    // doesn't init a second node on the same data dir.
-                    stop()
-                    _state.update {
-                        it.copy(status = NodeStatus.Error, errorMessage = GATEWAY_RELOAD_FAILED)
-                    }
-                }
-            }
-        }
     }
 
     /** The node's account, as [SpendPlan.owner]. */
@@ -771,9 +952,12 @@ class SwarmNode internal constructor(
         peerPoller?.cancel()
         peerPoller = scope.launch {
             while (isActive) {
-                val h = handle
-                if (h == 0L) break
-                val peers = runCatching { ops.peerCount(h) }.getOrDefault(-1)
+                // Under [handleUse], like [lifecycle]: [stop]'s shutdown
+                // can't free the node during the count.
+                val peers = handleUse.read {
+                    val h = synchronized(lock) { handle }
+                    if (h == 0L) null else runCatching { ops.peerCount(h) }.getOrDefault(-1)
+                } ?: break
                 _state.update { it.copy(connectedPeers = peers.coerceAtLeast(0).toLong()) }
                 delay(if (peers > 100) 5_000L else 1_000L)
             }
@@ -781,13 +965,6 @@ class SwarmNode internal constructor(
     }
 
     companion object {
-        /**
-         * The node's error when its gateway doesn't come back from a reload
-         * for a new chequebook — after a buy or a search for owned stamps
-         * alike, so it names neither.
-         */
-        val GATEWAY_RELOAD_FAILED: String get() = SwarmStrings.get(R.string.swarmnode_gateway_reload_failed)
-
         /**
          * Listen address handed to `ant_start_gateway`. ant defaults to
          * the same bee-conventional `127.0.0.1:1633`, but we pass it
@@ -827,6 +1004,44 @@ class SwarmNode internal constructor(
         val GATEWAY_CORS_ORIGINS: List<String> = emptyList()
 
         private const val TAG = "SwarmNode"
+
+        /**
+         * How long after init an all-zero cache reading over a large file
+         * is taken for ant's background count rather than an empty cache.
+         * ant documents "a few seconds"; this leaves a slow phone room.
+         */
+        internal const val CACHE_COUNT_WINDOW_MS = 60_000L
+
+        /**
+         * A `chunks.sqlite` (+ -wal/-shm) at least this big isn't an empty
+         * cache: a fresh database is a few KB, and a clear gives the
+         * space back (incremental vacuum).
+         */
+        internal const val CACHE_COUNT_MIN_FILE_BYTES = 1L shl 20
+
+        /**
+         * [json] (ant's `ant_cache_status`) with `"counting":true` when it
+         * is most likely ant's post-init count still running: right after
+         * init on a large cache, ant reads 0 for every disk counter until a
+         * background count finishes, which would read as "0 B of 2 GB".
+         * So: within [CACHE_COUNT_WINDOW_MS] of init ([sinceBootMs]), disk
+         * cache open, nothing counted (used, chunks, pinned all 0), yet
+         * the file holds at least [CACHE_COUNT_MIN_FILE_BYTES]. Otherwise
+         * (and for anything unreadable) [json] unchanged. Never after a
+         * clear on this boot ([clearedSinceBoot]): ant rebuilds a database
+         * from an older build on a clear only when its pinned chunks fit
+         * in 64 MiB and the disk has room, so a cleared cache can keep a
+         * large file with nothing in it, and that is the true reading.
+         */
+        internal fun markCacheCounting(json: String, sinceBootMs: Long, clearedSinceBoot: Boolean = false): String {
+            if (clearedSinceBoot) return json
+            if (sinceBootMs !in 0 until CACHE_COUNT_WINDOW_MS) return json
+            val o = runCatching { JSONObject(json) }.getOrNull() ?: return json
+            if (!o.optBoolean("disk_enabled", false)) return json
+            if (listOf("used_bytes", "chunks", "pinned_bytes", "pinned_chunks").any { o.optLong(it, 0L) != 0L }) return json
+            if (o.optLong("file_bytes", 0L) < CACHE_COUNT_MIN_FILE_BYTES) return json
+            return o.put("counting", true).toString()
+        }
 
         private const val GATEWAY_CONNECT_TIMEOUT_MS = 5_000
         private const val GATEWAY_READ_TIMEOUT_MS = 15_000

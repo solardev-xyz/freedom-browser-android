@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import android.content.Context
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.runtime.LaunchedEffect
@@ -11,6 +12,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -39,20 +41,26 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Contrast
-import androidx.compose.material.icons.filled.Cookie
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Update
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.material.icons.filled.VpnLock
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -84,10 +92,12 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.DappGrantStore
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.data.SwarmCacheSize
 import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.Appearance
@@ -99,85 +109,147 @@ import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import java.text.NumberFormat
 
 /**
- * Full-screen settings page. A search field pinned under the title
- * filters every section below by label and description (#93, see
- * [visibleSettingsRows]); Back clears a query before it closes the
- * page. Top to bottom:
+ * Full-screen settings page, in two levels like Chrome's and Safari's
+ * (#400): a short top-level list whose rows each name a page and sum up
+ * its current state, grouped General / Privacy / Web3 / About
+ * ([settingsTopLevel]); a row opens its sub-page in place of the list,
+ * and Back (the system's, or the ← at the top) goes one level up. Search
+ * engine opens its dialog straight from the top level, and Default
+ * browser is a top-level row only while Freedom isn't the default
+ * browser. Which card lives on which page is [SettingsSection.page]:
  *
- *  −. **Wallet** — the one wallet on this device (#75, #76): its state
- *     and, until the phrase has been seen, the backup reminder. Opens
- *     [WalletScreen].
- *  0. **Search** — the address bar's search engine: the desktop set
- *     ([SearchEngines.BUILT_IN]) or a custom template (#87).
- *  0. **Appearance** — the theme: System default, Light or Dark
- *     ([baby.freedom.mobile.ui.Appearance], #269).
- *  0a. **Ad blocking** — the filter-list categories and the sites ad
- *     blocking is off for (#126, [Adblock]).
- *  0b. **Name resolution** and **RPC providers** — the resolution
- *     order, CCIP-Read, and the endpoints names resolve through: your
- *     own, keyed providers, the public ones (#102; see
- *     [NameResolutionSection]).
- *  1. **Browsing data** — wipe history, bookmarks, and WebView cookies /
- *     site storage / per-tab caches. Each action is guarded by a
- *     confirmation dialog.
- *  2. **Site permissions** — every camera / microphone / location
- *     decision (remembered, or this run's), each revocable (#81), and
- *     every "open <scheme>: links in another app" one (#85).
- *  3. **Nodes** — where `bzz://` and `ipfs://` content comes from: the
- *     embedded nodes, or an external Swarm endpoint / IPFS gateway the
- *     user runs (#125, [ExternalEndpoints]); and the embedded Radicle
- *     node's row, which opens its own page ([RadicleScreen], #73). The IPFS row shows only
- *     while advanced options are on, or once an external gateway is
- *     set — its unverified warning must stay in view while it's in use.
- *  4. **Chains** — Ethereum, Gnosis and Base, plus the user's custom
- *     chains, added from a chainlist.org search or by hand (#107, see
- *     [ChainsSection]). Its Add chain pages and each chain's page (its own
- *     RPCs and how reads are checked, #108) replace the list while open.
- *  5. **About** — app name, version, package, and a short blurb; and
- *     **Check for updates** / **Check now**, with a newer release's
- *     page one tap away (#272, [AppUpdates]).
- *  6. **Other** — a single "Show advanced options" row. Tapping it
- *     flips [NodeSettings.showIpfsUi] on, which reveals an "IPFS node
- *     (experimental)" card below (status, peers, gateway URL, and
- *     routing preferences). This gate exists so IPFS support stays a
- *     demo surprise — `ipfs://` and `ens→ipfs` already work silently,
- *     but nothing in the UI hints at it until the user explicitly
- *     opts in.
+ *  - **Appearance** — the theme ([Appearance], #269) and language (#280).
+ *  - **Downloads** — *Ask where to save each file* (#322).
+ *  - **Privacy & security** — Browsing data: one row to Delete browsing
+ *    data ([DeleteBrowsingDataPage], #400); Site permissions: every camera / microphone /
+ *    location decision (#81), "open in another app" (#85), and the sites
+ *    connected to the wallet (#110, #111); Tor (#143, #275).
+ *  - **Ad blocking** — filter-list categories, updates and the sites
+ *    ad blocking is off for (#126, [Adblock]).
+ *  - **Wallet & chains** — the wallet's row (#75, #76), which opens
+ *    [WalletScreen]; then Chains (#107, [ChainsSection]), whose Add chain
+ *    and per-chain pages replace the screen while open.
+ *  - **Name resolution** — the resolution order, Colibri, CCIP-Read and
+ *    the RPC providers names resolve through (#102,
+ *    [NameResolutionSection]).
+ *  - **Nodes & networks** — a row to the Nodes page ([NodeScreen]); where
+ *    `bzz://` and `ipfs://` content comes from: the embedded nodes or an
+ *    external endpoint (#125, [ExternalEndpoints]); the Radicle node's
+ *    row ([RadicleScreen], #73); and the embedded IPFS node's switch,
+ *    details and routing mode.
+ *  - **About Freedom** — version, update checks (#272, [AppUpdates]),
+ *    open-source licences (#325); and, once Freedom is the default
+ *    browser, a muted line saying so.
  *
- * The Swarm node has its own dedicated page ([NodeScreen]) reachable
- * from the top-bar menu; it isn't duplicated here.
+ * Every card keeps its own rows and search index ([visibleSettingsRows],
+ * #93). A query in the field above the top level lists the matching
+ * rows of every page in one list, each page's cards under its name in
+ * top-level order ([settingsResultGroups]); the rows work in place, and
+ * the name opens the page at the first matching card. Back clears a
+ * query before it closes the screen.
  */
 @Composable
-fun SettingsScreen(
+internal fun SettingsScreen(
     repo: BrowsingRepository,
     ipfsInfo: IpfsInfo,
     onIpfsToggle: (Boolean) -> Unit,
-    onClearHistory: () -> Unit,
-    onClearWebViewData: () -> Unit,
+    /**
+     * Delete browsing data (#400): history in the range is deleted here;
+     * the host deletes the rest [DeleteChoice] names — closed tabs,
+     * WebView state, node logs.
+     */
+    onDeleteBrowsingData: (DeleteChoice) -> Unit,
     onDismiss: () -> Unit,
     radicle: RadicleControls = RadicleControls(),
     onOpenRadicle: () -> Unit = {},
     onOpenWallet: () -> Unit = {},
+    /** The Nodes page, from Settings → Nodes & networks. */
+    onOpenNodes: () -> Unit = {},
     /** Open the node logs page (#276) at the IPFS node's. */
     onOpenIpfsLogs: () -> Unit = {},
     /** A newer release's page (#272), in a new tab in front of Settings. */
     onOpenUrl: (String) -> Unit = {},
+    /**
+     * The Bookmarks page, from the search-only hint that Delete all
+     * bookmarks moved there (#400).
+     */
+    onOpenBookmarks: () -> Unit = {},
+    /**
+     * Opened straight at one card's page, scrolled to that card, from the
+     * Nodes & networks overview (#416): its RPC providers or gateways
+     * row, or the Tor page's "Turn on in Settings". Back from that page
+     * leaves Settings, back to where it came from, rather than stopping
+     * at the top level.
+     */
+    initialSection: SettingsSection? = null,
+    /**
+     * A card to go to while already open (the overview was opened from
+     * this Settings' Node status row, over it); [onSectionRequestTaken]
+     * says it's been taken, with its depth among the requests still
+     * open (0 for the first; a request made from the page an earlier
+     * one moved to stacks on it). Back from its page goes back to the
+     * page Settings was on and calls [onRequestedPageLeft] with that
+     * depth, so what asked (the overview, a node page) can come back
+     * over it.
+     */
+    sectionRequest: SettingsSection? = null,
+    onSectionRequestTaken: (depth: Int) -> Unit = {},
+    onRequestedPageLeft: (depth: Int) -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     // Settings search (#93). Registered after the dismiss handler so it
     // wins while there's a query: Back clears the filter first and puts
-    // the whole page back, like Esc in the desktop browser's field.
+    // the top level back, like Esc in the desktop browser's field.
     var query by rememberSaveable { mutableStateOf("") }
-    BackHandler(enabled = query.isNotEmpty()) { query = "" }
-
-    val history by remember { repo.history }.collectAsState(initial = emptyList())
-    val bookmarks by remember { repo.bookmarks }.collectAsState(initial = emptyList())
+    // The sub-page open in place of the top level (#400), if any; its
+    // handler, registered last, wins: Back goes one level up, to the
+    // search results when the page was opened from one.
+    // None of the cards opened from outside is Default browser, the one
+    // card whose page depends on whether Freedom is the default browser.
+    val initialPage = initialSection?.page(isDefaultBrowser = false)
+    var page by rememberSaveable { mutableStateOf(initialPage) }
+    // The card a page opened from a search result (or from outside) starts scrolled to.
+    // Saveable, and cleared once scrolled to, so a recreated Activity
+    // keeps the page where it was instead of jumping back to the card.
+    var scrollTo by rememberSaveable { mutableStateOf(initialSection) }
+    // The pages [sectionRequest]s moved to, each with the page (or top
+    // level) it moved from, which Back from it goes back to; a stack, so
+    // a request made from an earlier one's page keeps that one's way back.
+    var requested by rememberSaveable { mutableStateOf(emptyList<SettingsRequestedPage>()) }
+    // Up from a sub-page: back to where a request moved it from, out of
+    // Settings when it was opened straight at that page, else the top level.
+    val pageUp = {
+        val (rest, left) = requestedPageUp(requested, page)
+        requested = rest
+        when {
+            left != null -> {
+                page = left.from
+                onRequestedPageLeft(rest.size)
+            }
+            initialPage != null && page == initialPage -> onDismiss()
+            else -> page = null
+        }
+    }
+    BackHandler(enabled = query.isNotEmpty() && page == null) { query = "" }
+    BackHandler(enabled = page != null, onBack = pageUp)
+    LaunchedEffect(sectionRequest) {
+        if (sectionRequest != null) {
+            val target = sectionRequest.page(isDefaultBrowser = false)
+            query = ""
+            // Requests whose page was since left another way are done with.
+            val live = requested.dropLastWhile { it.page != page }
+            requested = live + SettingsRequestedPage(target, from = page)
+            page = target
+            scrollTo = sectionRequest
+            onSectionRequestTaken(live.size)
+        }
+    }
 
     val context = LocalContext.current
     val settings = remember(context) { NodeSettings.get(context) }
-    val showIpfsUi by settings.showIpfsUi.collectAsState(initial = false)
     val searchEngine by settings.searchEngine
         .collectAsState(initial = SearchEngines.DEFAULT_ID)
     val customSearchTemplate by settings.customSearchTemplate.collectAsState(initial = "")
@@ -187,6 +259,9 @@ fun SettingsScreen(
     val ensRpcConfig by settings.ensRpcConfig.collectAsState(initial = EnsRpcConfig())
     val externalSwarm by settings.externalSwarmEndpoint.collectAsState(initial = "")
     val externalIpfs by settings.externalIpfsGateway.collectAsState(initial = "")
+    // The Swarm node's cache size; null until read, so the row doesn't flash the default.
+    val swarmCacheSize by settings.swarmCacheSize.collectAsState(initial = null)
+    var pickSwarmCacheSize by remember { mutableStateOf(false) }
     var editEndpoint by remember { mutableStateOf<NodeEndpoint?>(null) }
     val adblockCategories by settings.adblockCategories
         .collectAsState(initial = AdblockCategory.entries.filterTo(LinkedHashSet()) { it.enabledByDefault })
@@ -200,9 +275,8 @@ fun SettingsScreen(
     val torExternalProxy by settings.torExternalProxy.collectAsState(initial = "")
     var editTorClient by remember { mutableStateOf(false) }
 
-    var confirmClearHistory by remember { mutableStateOf(false) }
-    var confirmClearBookmarks by remember { mutableStateOf(false) }
-    var confirmClearSiteData by remember { mutableStateOf(false) }
+    // Delete browsing data (#400), a page standing in for the list like Licences.
+    var deleteDataOpen by rememberSaveable { mutableStateOf(false) }
 
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     val permissionEntries by remember(sitePermissions) { sitePermissions.entries }
@@ -216,11 +290,16 @@ fun SettingsScreen(
     var openSite by remember { mutableStateOf<String?>(null) }
     // The connected site whose × couldn't be saved: its row says so, as the site's page does.
     var disconnectFailed by remember { mutableStateOf<String?>(null) }
+    // Undo for a site's Disconnect and its rules' Remove (#423), here and on its page.
+    val undoNotices = rememberUndoNotices()
 
     val chainStore = remember(context) { ChainStore.get(context) }
     val chains by remember(chainStore) { chainStore.chains }
         .collectAsState(initial = BuiltInChains.ALL)
+    val chainRouter = remember(context) { ChainDataRouter.get(context) }
     var chainPage by remember { mutableStateOf<ChainPage?>(null) }
+    // Open-source licences (#325), a page standing in for the list like the others.
+    var licencesOpen by rememberSaveable { mutableStateOf(false) }
     var chainQuery by rememberSaveable { mutableStateOf("") }
     var confirmRemoveChain by remember { mutableStateOf<Chain?>(null) }
     var removeChainFailed by remember { mutableStateOf<Chain?>(null) }
@@ -234,53 +313,39 @@ fun SettingsScreen(
     val rpcRemoveFailed = stringResource(R.string.settings_rpc_remove_failed)
     val appUpdate by AppUpdates.state.collectAsState()
     val checkForUpdates by settings.checkForUpdates.collectAsState(initial = true)
-
-    // Each section's rows for the current query; an empty set hides the
-    // section. The index is what the page shows right now (see
-    // [SettingsRow]) — IPFS only while advanced options reveal it.
-    val walletRows = visibleSettingsRows(query, SECTION_WALLET, walletSettingsRows(walletState))
-    val searchRows = visibleSettingsRows(
-        query, SECTION_SEARCH, searchSectionRows(searchEngine, customSearchTemplate),
-    )
+    val askWhereToSave by settings.askWhereToSave.collectAsState(initial = false)
     // Language (#280): only on Android 13+ and once there is more than one.
     val appLanguage = rememberAppLanguage()
-    val appearanceRows = visibleSettingsRows(
-        query, SECTION_APPEARANCE, appearanceSectionRows(appearance, appLanguage),
-    )
     val defaultBrowser = rememberDefaultBrowserState()
-    val defaultBrowserRows = visibleSettingsRows(
-        query, DefaultBrowser.SECTION, defaultBrowserRows(defaultBrowser.isDefault),
+    val isDefaultBrowser = defaultBrowser.isDefault
+
+    // Each card's rows, as the page shows them right now (see [SettingsRow]).
+    val sectionRows: Map<SettingsSection, List<SettingsRow>> = mapOf(
+        SettingsSection.Search to searchSectionRows(searchEngine, customSearchTemplate),
+        SettingsSection.DefaultBrowser to defaultBrowserRows(isDefaultBrowser),
+        SettingsSection.Appearance to appearanceSectionRows(appearance, appLanguage),
+        SettingsSection.Downloads to downloadSettingsRows(askWhereToSave),
+        SettingsSection.Browsing to browsingDataRows(),
+        SettingsSection.Permissions to sitePermissionRows(permissionEntries, dappGrants, walletAccounts, chains),
+        SettingsSection.Tor to torRows(torEnabled, torStartOnLaunch, torExternalProxy),
+        SettingsSection.Adblock to
+            adblockSectionRows(adblockCategories, adblockAllowlist, adblockStatus, adblockUpdate),
+        SettingsSection.Wallet to walletSettingsRows(walletState),
+        SettingsSection.Chains to chainSettingsRows(chains) { readAssurance(it, chainRouter) },
+        SettingsSection.Ens to ensSectionRows(ensRpcConfig),
+        SettingsSection.Rpc to rpcSectionRows(ensRpcConfig),
+        SettingsSection.Nodes to
+            nodeRows(externalSwarm, externalIpfs) + swarmCacheSizeRow(swarmCacheSize) + radicleSettingsRow(radicle),
+        SettingsSection.Ipfs to ipfsRows(ipfsInfo),
+        SettingsSection.About to aboutRows(appVersion, context.packageName, appUpdate, checkForUpdates),
     )
-    val adblockRows = visibleSettingsRows(
-        query, SECTION_ADBLOCK,
-        adblockSectionRows(adblockCategories, adblockAllowlist, adblockStatus, adblockUpdate),
-    )
-    val ensRows = visibleSettingsRows(query, SECTION_ENS, ensSectionRows(ensRpcConfig))
-    val rpcRows = visibleSettingsRows(query, SECTION_RPC, rpcSectionRows(ensRpcConfig))
-    val browsingRows = visibleSettingsRows(
-        query, SECTION_BROWSING, browsingDataRows(history.size, bookmarks.size),
-    )
-    val permissionRows = visibleSettingsRows(
-        query, SECTION_PERMISSIONS, sitePermissionRows(permissionEntries, dappGrants, walletAccounts, chains),
-    )
-    val nodeRows = visibleSettingsRows(
-        query, SECTION_NODES,
-        nodeRows(externalSwarm, externalIpfs, showIpfsUi) + radicleSettingsRow(radicle),
-    )
-    val torRows = visibleSettingsRows(query, SECTION_TOR, torRows(torEnabled, torStartOnLaunch, torExternalProxy))
-    val chainRows = visibleSettingsRows(query, SECTION_CHAINS, chainSettingsRows(chains))
-    val aboutRows = visibleSettingsRows(
-        query, SECTION_ABOUT, aboutRows(appVersion, context.packageName, appUpdate, checkForUpdates),
-    )
-    val otherRows = visibleSettingsRows(query, SECTION_OTHER, otherRows())
-    val ipfsRows = if (showIpfsUi) {
-        visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
-    } else emptySet()
-    val nothingMatches = listOf(
-        walletRows, searchRows, appearanceRows, defaultBrowserRows, adblockRows, ensRows, rpcRows, browsingRows, permissionRows, nodeRows,
-        torRows,
-        chainRows, aboutRows, otherRows, ipfsRows,
-    ).all { it.isEmpty() }
+    // For the query: each card's matching rows; a query naming the card
+    // or its page shows the whole card. An empty set hides the card.
+    val matches = sectionRows.mapValues { (section, rows) ->
+        visibleSettingsRows(query, sectionTitle(section), rows, section.page(isDefaultBrowser).title)
+    }
+    val searching = query.isNotBlank()
+    val resultGroups = settingsResultGroups(matches, isDefaultBrowser)
 
     // A new query starts the results from the top, so the first match
     // isn't left scrolled off above the viewport.
@@ -289,9 +354,11 @@ fun SettingsScreen(
         snapshotFlow { query }.drop(1).collect { listState.scrollToItem(0) }
     }
 
-    // The Chains sub-pages stand in for the list while open; everything
-    // above stays composed, so Back lands on the list as it was left.
-    when (val page = chainPage) {
+    // The Chains sub-pages stand in for the list while open. The scaffold
+    // below leaves composition meanwhile, so its scroll positions are
+    // hoisted here (listState above, pageState below) and Back lands on
+    // the list or sub-page as it was left.
+    when (val chainSubPage = chainPage) {
         ChainPage.Search -> ChainlistPage(
             query = chainQuery,
             onQueryChange = { chainQuery = it },
@@ -301,16 +368,16 @@ fun SettingsScreen(
             onBack = { chainPage = null },
         )
         is ChainPage.Form -> AddChainPage(
-            prefill = page.prefill,
+            prefill = chainSubPage.prefill,
             onAdd = chainStore::add,
             onAdded = {
                 chainPage = null
                 chainQuery = ""
             },
-            onBack = { chainPage = if (page.prefill != null) ChainPage.Search else null },
+            onBack = { chainPage = if (chainSubPage.prefill != null) ChainPage.Search else null },
         )
         is ChainPage.Detail -> {
-            val chain = chains.firstOrNull { it.id == page.chainId }
+            val chain = chains.firstOrNull { it.id == chainSubPage.chainId }
             if (chain != null) {
                 ChainDetailPage(
                     chain = chain,
@@ -336,7 +403,7 @@ fun SettingsScreen(
                 )
             } else {
                 // Removed (from this page's Remove): back to the list.
-                LaunchedEffect(page) { chainPage = null }
+                LaunchedEffect(chainSubPage) { chainPage = null }
             }
         }
         null -> Unit
@@ -350,15 +417,188 @@ fun SettingsScreen(
             grant = site,
             accounts = walletAccounts,
             chains = chains,
-            onDisconnect = { EthereumProviders.disconnect(context, it) },
+            notices = undoNotices,
+            onDisconnect = { disconnectWithUndo(context, it, undoNotices) },
             onBack = { openSite = null },
         )
     }
-    if (chainPage == null && site == null) FullScreenScaffold(
-        title = stringResource(R.string.settings_title),
-        onDismiss = onDismiss,
+    if (licencesOpen && chainPage == null && site == null) {
+        OpenSourceLicencesPage(onBack = { licencesOpen = false })
+    }
+    if (deleteDataOpen && chainPage == null && site == null && !licencesOpen) {
+        DeleteBrowsingDataPage(
+            repo = repo,
+            onDelete = { choice ->
+                afterDeleteBrowsingData(context, choice, onDeleteBrowsingData) { deleteDataOpen = false }
+            },
+            onBack = { deleteDataOpen = false },
+        )
+    }
+
+    /** One card, showing the rows in [visible] — the same composables on a sub-page and in search results. */
+    @Composable
+    fun Section(section: SettingsSection, visible: Set<Any>) = when (section) {
+        SettingsSection.Wallet -> WalletSection(state = walletState, onOpen = onOpenWallet)
+        SettingsSection.Search -> SearchSection(
+            engineId = searchEngine,
+            customTemplate = customSearchTemplate,
+            onClick = { pickSearchEngine = true },
+        )
+        SettingsSection.Appearance -> AppearanceSection(
+            visible = visible,
+            appearance = appearance,
+            onClick = { pickAppearance = true },
+            language = appLanguage,
+            onLanguageClick = {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                    AppLanguage.openSettings(context)
+                }
+            },
+        )
+        SettingsSection.DefaultBrowser ->
+            if (isDefaultBrowser) DefaultBrowserLine(onClick = defaultBrowser.onClick) else DefaultBrowserSection(defaultBrowser)
+        SettingsSection.Adblock -> AdblockSection(
+            visible = visible,
+            enabled = adblockCategories,
+            allowlist = adblockAllowlist,
+            status = adblockStatus,
+            update = adblockUpdate,
+            autoUpdate = adblockAutoUpdate,
+            onToggle = { category, on ->
+                scope.launch { settings.setAdblockCategory(category, on) }
+            },
+            onAutoUpdate = { on -> scope.launch { settings.setAdblockAutoUpdate(on) } },
+            onCheckUpdates = { Adblock.checkForUpdates() },
+            onRemoveSite = { allowed -> Adblock.removeAllowlisted(allowed) },
+            onAddSite = { addAllowlistSite = true },
+        )
+        SettingsSection.Ens -> NameResolutionSection(
+            visible = visible,
+            config = ensRpcConfig,
+            settings = settings,
+        )
+        SettingsSection.Rpc -> RpcProvidersSection(
+            visible = visible,
+            config = ensRpcConfig,
+            settings = settings,
+        )
+        SettingsSection.Browsing -> BrowsingDataSection(
+            visible = visible,
+            // Only among search results, not on the Privacy page itself.
+            searching = searching && page == null,
+            onOpen = { deleteDataOpen = true },
+            onOpenBookmarks = onOpenBookmarks,
+        )
+        SettingsSection.Downloads -> DownloadSettingsSection(
+            askWhereToSave = askWhereToSave,
+            onAskWhereToSave = { on -> scope.launch { settings.setAskWhereToSave(on) } },
+        )
+        SettingsSection.Permissions -> SitePermissionsSection(
+            visible = visible,
+            entries = permissionEntries,
+            onRevoke = sitePermissions::revoke,
+            grants = dappGrants,
+            accounts = walletAccounts,
+            chains = chains,
+            onOpenSite = { openSite = it },
+            disconnectFailed = disconnectFailed,
+            onDisconnect = { grant ->
+                disconnectFailed = null
+                scope.launch {
+                    if (!disconnectWithUndo(context, grant, undoNotices)) disconnectFailed = grant.origin
+                }
+            },
+        )
+        SettingsSection.Nodes -> NodesSection(
+            visible = visible,
+            externalSwarm = externalSwarm,
+            externalIpfs = externalIpfs,
+            onEdit = { editEndpoint = it },
+            cacheSize = swarmCacheSize,
+            onPickCacheSize = { pickSwarmCacheSize = true },
+            radicle = radicle,
+            onOpenRadicle = onOpenRadicle,
+            onOpenNodes = onOpenNodes,
+        )
+        SettingsSection.Tor -> TorSettingsSection(
+            visible = visible,
+            enabled = torEnabled,
+            startOnLaunch = torStartOnLaunch,
+            externalProxy = torExternalProxy,
+            onEditClient = { editTorClient = true },
+            onEnabled = { on -> scope.launch { settings.setTorEnabled(on) } },
+            onStartOnLaunch = { on -> scope.launch { settings.setTorStartOnLaunch(on) } },
+        )
+        SettingsSection.Chains -> ChainsSection(
+            visible = visible,
+            chains = chains,
+            onOpen = { chainPage = ChainPage.Detail(it.id) },
+            onRemove = { confirmRemoveChain = it },
+            onAdd = { chainPage = ChainPage.Search },
+        )
+        SettingsSection.About -> AboutSection(
+            visible = visible,
+            version = appVersion,
+            update = appUpdate,
+            checkForUpdates = checkForUpdates,
+            onCheckForUpdates = { on -> scope.launch { settings.setCheckForUpdates(on) } },
+            onCheckNow = { AppUpdates.checkForUpdates() },
+            onOpenRelease = { onOpenUrl(it.url) },
+            onOpenLicences = { licencesOpen = true },
+        )
+        SettingsSection.Ipfs -> IpfsSection(
+            visible = visible,
+            settings = settings,
+            ipfsInfo = ipfsInfo,
+            onIpfsToggle = onIpfsToggle,
+            onOpenLogs = onOpenIpfsLogs,
+        )
+    }
+
+    /** The one-line state under a top-level row. */
+    fun summary(p: SettingsPage): String = when (p) {
+        SettingsPage.SearchEngine -> SearchEngines.labelFor(searchEngine, customSearchTemplate)
+        SettingsPage.Appearance -> appearancePageSummary(appearance.label, appLanguage)
+        SettingsPage.Downloads -> downloadsPageSummary(askWhereToSave)
+        SettingsPage.DefaultBrowser -> DefaultBrowser.ROW_SET_SUBTITLE
+        SettingsPage.Privacy -> privacyPageSummary(permissionEntries.size + dappGrants.size, torEnabled)
+        SettingsPage.Adblock ->
+            adblockPageSummary(adblockCategories.size, AdblockCategory.entries.size, adblockAllowlist.size)
+        SettingsPage.Wallet -> walletPageSummary(walletSummary(walletState), chains.size)
+        SettingsPage.Names -> namesPageSummary(ensRpcConfig.colibri, ensRpcConfig.sources.size)
+        SettingsPage.Nodes ->
+            nodesPageSummary(externalSwarm, externalIpfs, radicleSummary(radicle.info, radicle.enabled))
+        SettingsPage.About -> appVersion
+    }
+
+    // A line that must stay in view from the top level too: the wallet's
+    // backup reminder, Default browser's "not changed".
+    fun attention(p: SettingsPage): String? = when (p) {
+        SettingsPage.Wallet -> walletAttentionLine(walletState)
+        SettingsPage.DefaultBrowser -> if (defaultBrowser.declined) DefaultBrowser.DECLINED_LINE else null
+        else -> null
+    }
+
+    fun open(p: SettingsPage) = when (p) {
+        SettingsPage.SearchEngine -> pickSearchEngine = true
+        SettingsPage.DefaultBrowser -> defaultBrowser.onClick()
+        else -> page = p
+    }
+
+    val openPage = page
+    // Held out here, not inside the scaffold: a Chains, Connected-site or
+    // Licences page replaces the whole scaffold while open, and Back must
+    // land on the sub-page scrolled where it was left. A new page (or the
+    // same one opened again from the top level) starts at the top. Saveable,
+    // so a recreated Activity keeps the position too.
+    val pageState = rememberSaveable(openPage, saver = LazyListState.Saver) { LazyListState() }
+    if (chainPage == null && site == null && !licencesOpen && !deleteDataOpen) FullScreenScaffold(
+        title = openPage?.title ?: stringResource(R.string.settings_title),
+        // On a sub-page the ← goes up to the top level, as Back does.
+        onDismiss = { if (page != null) pageUp() else onDismiss() },
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
+      Box(Modifier.fillMaxSize()) {
+        if (openPage == null) Column(modifier = Modifier.fillMaxSize()) {
             SettingsSearchField(
                 query = query,
                 onQueryChange = { query = it },
@@ -369,163 +609,72 @@ fun SettingsScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                if (walletRows.isNotEmpty()) item("wallet") {
-                    WalletSection(state = walletState, onOpen = onOpenWallet)
-                }
-                if (searchRows.isNotEmpty()) item("search") {
-                    SearchSection(
-                        engineId = searchEngine,
-                        customTemplate = customSearchTemplate,
-                        onClick = { pickSearchEngine = true },
-                    )
-                }
-                if (appearanceRows.isNotEmpty()) item("appearance") {
-                    AppearanceSection(
-                        visible = appearanceRows,
-                        appearance = appearance,
-                        onClick = { pickAppearance = true },
-                        language = appLanguage,
-                        onLanguageClick = {
-                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                                AppLanguage.openSettings(context)
+                if (!searching) {
+                    for ((group, pages) in settingsTopLevel(isDefaultBrowser)) item(group.name) {
+                        SectionCard(title = stringResource(group.titleRes)) {
+                            for (p in pages) PageRow(
+                                title = p.title,
+                                subtitle = summary(p),
+                                style = PageRowStyle.Inset,
+                                leadingIcon = p.icon,
+                                thirdLine = attention(p),
+                                onClick = { open(p) },
+                            )
+                        }
+                    }
+                } else {
+                    for ((p, sections) in resultGroups) {
+                        // A page's name over its matches, which opens it
+                        // at the first; a row with no page of its own
+                        // (Search engine, Default browser) needs none, and
+                        // comes first so it never sits under another page's.
+                        if (p.hasSubPage) item("page:${p.name}") {
+                            SettingsResultHeading(p.title) {
+                                scrollTo = sections.first()
+                                page = p
                             }
-                        },
-                    )
+                        }
+                        for (section in sections) item(section.name) {
+                            Section(section, matches.getValue(section))
+                        }
+                    }
+                    if (resultGroups.isEmpty()) item("no-match") {
+                        Text(
+                            stringResource(R.string.settings_no_match, query.trim()),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 24.dp),
+                        )
+                    }
                 }
-                if (defaultBrowserRows.isNotEmpty()) item("default-browser") {
-                    DefaultBrowserSection(defaultBrowser)
-                }
-                if (adblockRows.isNotEmpty()) item("adblock") {
-                    AdblockSection(
-                        visible = adblockRows,
-                        enabled = adblockCategories,
-                        allowlist = adblockAllowlist,
-                        status = adblockStatus,
-                        update = adblockUpdate,
-                        autoUpdate = adblockAutoUpdate,
-                        onToggle = { category, on ->
-                            scope.launch { settings.setAdblockCategory(category, on) }
-                        },
-                        onAutoUpdate = { on -> scope.launch { settings.setAdblockAutoUpdate(on) } },
-                        onCheckUpdates = { Adblock.checkForUpdates() },
-                        onRemoveSite = { site ->
-                            Adblock.removeAllowlisted(site)
-                        },
-                        onAddSite = { addAllowlistSite = true },
-                    )
-                }
-                if (ensRows.isNotEmpty()) item("ens") {
-                    NameResolutionSection(
-                        visible = ensRows,
-                        config = ensRpcConfig,
-                        settings = settings,
-                    )
-                }
-                if (rpcRows.isNotEmpty()) item("rpc") {
-                    RpcProvidersSection(
-                        visible = rpcRows,
-                        config = ensRpcConfig,
-                        settings = settings,
-                    )
-                }
-                if (browsingRows.isNotEmpty()) item("browsing") {
-                    BrowsingDataSection(
-                        visible = browsingRows,
-                        historyCount = history.size,
-                        bookmarkCount = bookmarks.size,
-                        onClearHistoryRequested = { confirmClearHistory = true },
-                        onClearBookmarksRequested = { confirmClearBookmarks = true },
-                        onClearSiteDataRequested = { confirmClearSiteData = true },
-                    )
-                }
-                if (permissionRows.isNotEmpty()) item("permissions") {
-                    SitePermissionsSection(
-                        visible = permissionRows,
-                        entries = permissionEntries,
-                        onRevoke = sitePermissions::revoke,
-                        grants = dappGrants,
-                        accounts = walletAccounts,
-                        chains = chains,
-                        onOpenSite = { openSite = it },
-                        disconnectFailed = disconnectFailed,
-                        onDisconnect = { origin ->
-                            disconnectFailed = null
-                            scope.launch {
-                                if (!EthereumProviders.disconnect(context, origin)) disconnectFailed = origin
-                            }
-                        },
-                    )
-                }
-                if (nodeRows.isNotEmpty()) item("nodes") {
-                    NodesSection(
-                        visible = nodeRows,
-                        externalSwarm = externalSwarm,
-                        externalIpfs = externalIpfs,
-                        onEdit = { editEndpoint = it },
-                        radicle = radicle,
-                        onOpenRadicle = onOpenRadicle,
-                    )
-                }
-                if (torRows.isNotEmpty()) item("tor") {
-                    TorSettingsSection(
-                        visible = torRows,
-                        enabled = torEnabled,
-                        startOnLaunch = torStartOnLaunch,
-                        externalProxy = torExternalProxy,
-                        onEditClient = { editTorClient = true },
-                        onEnabled = { on -> scope.launch { settings.setTorEnabled(on) } },
-                        onStartOnLaunch = { on -> scope.launch { settings.setTorStartOnLaunch(on) } },
-                    )
-                }
-                if (chainRows.isNotEmpty()) item("chains") {
-                    ChainsSection(
-                        visible = chainRows,
-                        chains = chains,
-                        onOpen = { chainPage = ChainPage.Detail(it.id) },
-                        onRemove = { confirmRemoveChain = it },
-                        onAdd = { chainPage = ChainPage.Search },
-                    )
-                }
-                if (aboutRows.isNotEmpty()) item("about") {
-                    AboutSection(
-                        visible = aboutRows,
-                        version = appVersion,
-                        update = appUpdate,
-                        checkForUpdates = checkForUpdates,
-                        onCheckForUpdates = { on -> scope.launch { settings.setCheckForUpdates(on) } },
-                        onCheckNow = { AppUpdates.checkForUpdates() },
-                        onOpenRelease = { onOpenUrl(it.url) },
-                    )
-                }
-                if (otherRows.isNotEmpty()) item("other") {
-                    OtherSection(
-                        showIpfsUi = showIpfsUi,
-                        onToggleShowIpfsUi = { enabled ->
-                            scope.launch { settings.setShowIpfsUi(enabled) }
-                        },
-                    )
-                }
-                if (ipfsRows.isNotEmpty()) item("ipfs") {
-                    IpfsSection(
-                        visible = ipfsRows,
-                        settings = settings,
-                        ipfsInfo = ipfsInfo,
-                        onIpfsToggle = onIpfsToggle,
-                        onOpenLogs = onOpenIpfsLogs,
-                    )
-                }
-                if (nothingMatches) item("no-match") {
-                    Text(
-                        stringResource(R.string.settings_no_match, query.trim()),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 24.dp),
-                    )
+            }
+        } else androidx.compose.runtime.key(openPage) {
+            val sections = settingsSections(openPage, isDefaultBrowser)
+            // Re-runs after a Chains/site/Licences page closes, by which
+            // time scrollTo is null, so it leaves the kept position alone.
+            // Keyed on scrollTo too: a request for a card on the page
+            // already open scrolls to it without re-opening the page.
+            LaunchedEffect(scrollTo) {
+                val target = scrollTo ?: return@LaunchedEffect
+                scrollTo = null
+                val index = sections.indexOf(target)
+                if (index >= 0) pageState.scrollToItem(index)
+            }
+            LazyColumn(
+                state = pageState,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                for (section in sections) item(section.name) {
+                    Section(section, sectionRows.getValue(section).mapTo(LinkedHashSet()) { it.key })
                 }
             }
         }
+        UndoSnackbarHost(undoNotices)
+      }
     }
 
     if (pickSearchEngine) {
@@ -561,6 +710,17 @@ fun SettingsScreen(
                 editTorClient = false
             },
             onDismiss = { editTorClient = false },
+        )
+    }
+    val cacheSizeFrom = swarmCacheSize
+    if (pickSwarmCacheSize && cacheSizeFrom != null) {
+        SwarmCacheSizeDialog(
+            current = cacheSizeFrom,
+            onPick = { size ->
+                pickSwarmCacheSize = false
+                pickSwarmCacheSize(context, scope, settings, cacheSizeFrom, size)
+            },
+            onDismiss = { pickSwarmCacheSize = false },
         )
     }
     editEndpoint?.let { endpoint ->
@@ -612,43 +772,6 @@ fun SettingsScreen(
             onDismiss = { addAllowlistSite = false },
         )
     }
-    if (confirmClearHistory) {
-        ConfirmDialog(
-            title = stringResource(R.string.settings_clear_history_title),
-            message = stringResource(R.string.settings_clear_history_message),
-            confirmLabel = stringResource(R.string.settings_clear_history),
-            onConfirm = {
-                repo.clearHistory()
-                onClearHistory()
-                confirmClearHistory = false
-            },
-            onDismiss = { confirmClearHistory = false },
-        )
-    }
-    if (confirmClearBookmarks) {
-        ConfirmDialog(
-            title = stringResource(R.string.settings_clear_bookmarks_title),
-            message = stringResource(R.string.settings_clear_bookmarks_message),
-            confirmLabel = stringResource(R.string.settings_clear_bookmarks),
-            onConfirm = {
-                repo.clearBookmarks()
-                confirmClearBookmarks = false
-            },
-            onDismiss = { confirmClearBookmarks = false },
-        )
-    }
-    if (confirmClearSiteData) {
-        ConfirmDialog(
-            title = stringResource(R.string.settings_clear_site_data_title),
-            message = stringResource(R.string.settings_clear_site_data_message),
-            confirmLabel = stringResource(R.string.settings_clear_site_data_confirm),
-            onConfirm = {
-                onClearWebViewData()
-                confirmClearSiteData = false
-            },
-            onDismiss = { confirmClearSiteData = false },
-        )
-    }
 }
 
 // Section titles: each card's heading, and searched too (a query naming
@@ -659,11 +782,63 @@ private val SECTION_APPEARANCE: String get() = Strings.get(R.string.settings_sec
 private val SECTION_ADBLOCK: String get() = Strings.get(R.string.settings_section_adblock)
 private val SECTION_BROWSING: String get() = Strings.get(R.string.settings_section_browsing)
 private val SECTION_PERMISSIONS: String get() = Strings.get(R.string.settings_section_permissions)
+private val SECTION_DOWNLOADS: String get() = Strings.get(R.string.settings_section_downloads)
 private val SECTION_NODES: String get() = Strings.get(R.string.settings_section_nodes)
 private val SECTION_TOR: String get() = Strings.get(R.string.settings_section_tor)
 private val SECTION_ABOUT: String get() = Strings.get(R.string.settings_section_about)
-private val SECTION_OTHER: String get() = Strings.get(R.string.settings_section_other)
 private val SECTION_IPFS: String get() = Strings.get(R.string.settings_section_ipfs)
+
+/** Each card's title, as its [SectionCard] heads it and search matches it. */
+private fun sectionTitle(section: SettingsSection): String = when (section) {
+    SettingsSection.Search -> SECTION_SEARCH
+    SettingsSection.DefaultBrowser -> DefaultBrowser.SECTION
+    SettingsSection.Appearance -> SECTION_APPEARANCE
+    SettingsSection.Downloads -> SECTION_DOWNLOADS
+    SettingsSection.Browsing -> SECTION_BROWSING
+    SettingsSection.Permissions -> SECTION_PERMISSIONS
+    SettingsSection.Tor -> SECTION_TOR
+    SettingsSection.Adblock -> SECTION_ADBLOCK
+    SettingsSection.Wallet -> SECTION_WALLET
+    SettingsSection.Chains -> SECTION_CHAINS
+    SettingsSection.Ens -> SECTION_ENS
+    SettingsSection.Rpc -> SECTION_RPC
+    SettingsSection.Nodes -> SECTION_NODES
+    SettingsSection.Ipfs -> SECTION_IPFS
+    SettingsSection.About -> SECTION_ABOUT
+}
+
+/**
+ * A sub-page's name over its cards in the search results (#400): a
+ * heading for TalkBack's heading navigation, and a full-width 48 dp
+ * target that opens the page at its first matching card.
+ */
+@Composable
+private fun SettingsResultHeading(title: String, onOpen: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .clip(MaterialTheme.shapes.small)
+            .clickable(onClickLabel = stringResource(R.string.settings_page_open, title), onClick = onOpen)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .weight(1f)
+                .semantics { heading() },
+        )
+        Icon(
+            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+        )
+    }
+}
 
 /**
  * The filter field above the sections (#93). Pinned under the title
@@ -946,7 +1121,7 @@ private fun templateHint(rejection: SearchEngines.Rejection): String = when (rej
 }
 
 @Composable
-private fun EngineRadioRow(
+internal fun EngineRadioRow(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
@@ -1006,13 +1181,31 @@ private val EXTERNAL_LABEL: String get() = Strings.get(R.string.settings_externa
 private fun endpointSubtitle(endpoint: NodeEndpoint, external: String) =
     if (external.isEmpty()) endpoint.embeddedLabel else EXTERNAL_LABEL
 
+private val NODES_PAGE: String get() = Strings.get(R.string.settings_nodes_page)
+private val NODES_PAGE_SUBTITLE: String get() = Strings.get(R.string.settings_nodes_page_subtitle)
+private const val NODES_PAGE_KEY = "nodes-page"
+
+private const val SWARM_CACHE_SIZE_KEY = "swarm-cache-size"
+
 /**
- * The Swarm row always; the IPFS row while advanced options reveal
- * IPFS, or whenever an external gateway is in use — so its unverified
- * warning can't be hidden away with the rest of the IPFS settings.
+ * The Swarm node's cache size, found by "cache", "storage", "disk space"
+ * and the like as well as by its title and the size in use.
  */
-internal fun nodeRows(externalSwarm: String, externalIpfs: String, showIpfsUi: Boolean) =
-    listOfNotNull(
+internal fun swarmCacheSizeRow(size: SwarmCacheSize?) = settingsRow(
+    SWARM_CACHE_SIZE_KEY,
+    Strings.get(R.string.node_cache_size_title),
+    size?.let(::swarmCacheSizeLabel),
+    *searchKeywords(R.string.node_cache_size_keywords),
+)
+
+/**
+ * The row to the Nodes page, then where `bzz://` and `ipfs://` content
+ * comes from (#125) — both always listed, IPFS no longer behind an
+ * advanced-options switch (#400 item 8).
+ */
+internal fun nodeRows(externalSwarm: String, externalIpfs: String) =
+    listOf(
+        settingsRow(NODES_PAGE_KEY, NODES_PAGE, NODES_PAGE_SUBTITLE, Strings.get(R.string.node_screen_title)),
         settingsRow(
             NodeEndpoint.Swarm.key,
             NodeEndpoint.Swarm.title,
@@ -1020,14 +1213,14 @@ internal fun nodeRows(externalSwarm: String, externalIpfs: String, showIpfsUi: B
             externalSwarm,
             *searchKeywords(NodeEndpoint.Swarm.keywordsRes),
         ),
-        if (showIpfsUi || externalIpfs.isNotEmpty()) settingsRow(
+        settingsRow(
             NodeEndpoint.Ipfs.key,
             NodeEndpoint.Ipfs.title,
             endpointSubtitle(NodeEndpoint.Ipfs, externalIpfs),
             externalIpfs,
             externalIpfs.takeIf { it.isNotEmpty() }?.let { NodeEndpoint.Ipfs.warning },
             *searchKeywords(NodeEndpoint.Ipfs.keywordsRes),
-        ) else null,
+        ),
     )
 
 private val TOR_ENABLED: String get() = Strings.get(R.string.settings_tor_enabled)
@@ -1044,6 +1237,45 @@ private fun onOff(on: Boolean): String = Strings.get(if (on) R.string.settings_o
 
 private fun torClientSubtitle(externalProxy: String) =
     if (externalProxy.isEmpty()) TOR_CLIENT_EMBEDDED else TOR_CLIENT_EXTERNAL
+
+private val ASK_WHERE_TO_SAVE: String get() = Strings.get(R.string.settings_downloads_ask_where)
+private val ASK_WHERE_TO_SAVE_PRIVATE: String get() = Strings.get(R.string.settings_downloads_ask_where_private)
+
+private fun askWhereToSaveSubtitle(on: Boolean): String = Strings.get(
+    if (on) R.string.settings_downloads_ask_where_subtitle_on else R.string.settings_downloads_ask_where_subtitle_off,
+)
+
+/** Settings → Downloads (#322), for settings search. */
+internal fun downloadSettingsRows(askWhereToSave: Boolean) = listOf(
+    settingsRow(
+        "ask-where", ASK_WHERE_TO_SAVE, askWhereToSaveSubtitle(askWhereToSave), ASK_WHERE_TO_SAVE_PRIVATE,
+        onOff(askWhereToSave), *searchKeywords(R.string.settings_downloads_ask_where_keywords),
+    ),
+)
+
+/**
+ * Settings → Downloads (#322): *Ask where to save each file*, off by
+ * default. On, confirming a download opens the system's *Save as*
+ * picker; private tabs' downloads keep saving to Download/Freedom.
+ */
+@Composable
+private fun DownloadSettingsSection(
+    askWhereToSave: Boolean,
+    onAskWhereToSave: (Boolean) -> Unit,
+) {
+    SectionCard(title = SECTION_DOWNLOADS) {
+        PageRow(
+            title = ASK_WHERE_TO_SAVE,
+            subtitle = askWhereToSaveSubtitle(askWhereToSave),
+            thirdLine = ASK_WHERE_TO_SAVE_PRIVATE,
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Folder,
+            onClick = { onAskWhereToSave(!askWhereToSave) },
+            checked = askWhereToSave,
+            trailing = { Switch(checked = askWhereToSave, onCheckedChange = null) },
+        )
+    }
+}
 
 /** Settings → Tor (#143, #275), for settings search. */
 internal fun torRows(enabled: Boolean, startOnLaunch: Boolean, externalProxy: String = "") = listOf(
@@ -1112,16 +1344,39 @@ private fun NodesSection(
     externalSwarm: String,
     externalIpfs: String,
     onEdit: (NodeEndpoint) -> Unit,
+    cacheSize: SwarmCacheSize?,
+    onPickCacheSize: () -> Unit,
     radicle: RadicleControls,
     onOpenRadicle: () -> Unit,
+    onOpenNodes: () -> Unit,
 ) {
     SectionCard(title = stringResource(R.string.settings_section_nodes)) {
+        if (NODES_PAGE_KEY in visible) {
+            PageRow(
+                title = NODES_PAGE,
+                subtitle = NODES_PAGE_SUBTITLE,
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.Hub,
+                onClick = onOpenNodes,
+            )
+        }
         if (NodeEndpoint.Swarm.key in visible) {
             EndpointRow(
                 endpoint = NodeEndpoint.Swarm,
                 external = externalSwarm,
                 icon = ImageVector.vectorResource(R.drawable.ic_swarm),
                 onClick = { onEdit(NodeEndpoint.Swarm) },
+            )
+        }
+        if (SWARM_CACHE_SIZE_KEY in visible) {
+            PageRow(
+                title = stringResource(R.string.node_cache_size_title),
+                subtitle = cacheSize?.let(::swarmCacheSizeLabel).orEmpty(),
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.Storage,
+                enabled = cacheSize != null,
+                onClick = onPickCacheSize,
+                trailing = { Icon(Icons.Filled.ArrowDropDown, contentDescription = null) },
             )
         }
         if (NodeEndpoint.Ipfs.key in visible) {
@@ -1524,9 +1779,32 @@ internal fun adblockUpdateLine(update: AdblockUpdateState): String? {
     }
 }
 
-/** The line under a category: its list, and while it's on, how the engine is doing. */
-internal fun adblockCategorySubtitle(category: AdblockCategory, on: Boolean, status: AdblockStatus): String =
-    if (on && status.loading) Strings.get(R.string.settings_adblock_category_loading, category.listName) else category.listName
+/** The line under a category: its lists, and while it's on, how the engine is doing. */
+internal fun adblockCategorySubtitle(category: AdblockCategory, on: Boolean, status: AdblockStatus): String {
+    val lists = category.listNames.joinNames()
+    return if (on && status.loading) Strings.get(R.string.settings_adblock_category_loading, lists) else lists
+}
+
+/**
+ * The wrapping line under an enabled category (#318): how many of its
+ * lists' rules run, how many of those are scriptlets, and how many
+ * can't run here — procedural and HTML filters, options and scriptlets
+ * this browser doesn't support, generic scriptlets. `null` while it's
+ * off or has no engine yet.
+ */
+internal fun adblockCategoryCounts(category: AdblockCategory, on: Boolean, status: AdblockStatus): String? {
+    if (!on) return null
+    val counts = status.counts[category] ?: return null
+    val n = NumberFormat.getIntegerInstance()
+    return if (counts.scriptlets == 0) {
+        Strings.get(R.string.settings_adblock_category_counts_no_scriptlets, n.format(counts.used), n.format(counts.skipped))
+    } else {
+        Strings.get(
+            R.string.settings_adblock_category_counts,
+            n.format(counts.used), n.format(counts.scriptletsUsed), n.format(counts.skipped),
+        )
+    }
+}
 
 private fun adblockSectionRows(
     enabled: Set<AdblockCategory>,
@@ -1535,7 +1813,12 @@ private fun adblockSectionRows(
     update: AdblockUpdateState,
 ) = buildList {
     for (category in AdblockCategory.entries) {
-        add(settingsRow(category, category.title, category.listName, onOff(category in enabled)))
+        add(
+            settingsRow(
+                category, category.title, category.listNames.joinNames(), onOff(category in enabled),
+                adblockCategoryCounts(category, category in enabled, status),
+            ),
+        )
     }
     val updateWords = searchKeywords(R.string.settings_adblock_updates_keywords)
     add(settingsRow("auto-update", ADBLOCK_AUTO_UPDATE, ADBLOCK_AUTO_UPDATE_SUBTITLE, adblockListsLine(status), *updateWords))
@@ -1602,6 +1885,7 @@ private fun AdblockSection(
             PageRow(
                 title = category.title,
                 subtitle = adblockCategorySubtitle(category, on, status),
+                thirdLine = adblockCategoryCounts(category, on, status),
                 style = PageRowStyle.Inset,
                 leadingIcon = Icons.Filled.Shield,
                 onClick = { onToggle(category, !on) },
@@ -1730,62 +2014,77 @@ private fun AllowlistSiteDialog(onAdd: (String) -> Unit, onDismiss: () -> Unit) 
     )
 }
 
-private val ROW_CLEAR_HISTORY: String get() = Strings.get(R.string.settings_clear_history)
-private val ROW_CLEAR_BOOKMARKS: String get() = Strings.get(R.string.settings_clear_bookmarks)
-private val ROW_CLEAR_SITE_DATA: String get() = Strings.get(R.string.settings_clear_site_data)
-private val ROW_CLEAR_SITE_DATA_SUBTITLE: String get() = Strings.get(R.string.settings_clear_site_data_subtitle)
+private val ROW_DELETE_DATA: String get() = Strings.get(R.string.settings_delete_browsing_data)
+private val ROW_DELETE_DATA_SUBTITLE: String get() = Strings.get(R.string.settings_delete_browsing_data_subtitle)
+private val ROW_BOOKMARKS_MOVED: String get() = Strings.get(R.string.settings_bookmarks_moved)
+private val ROW_BOOKMARKS_MOVED_SUBTITLE: String get() = Strings.get(R.string.settings_bookmarks_moved_subtitle)
 
-private fun historySubtitle(count: Int) =
-    if (count == 0) {
-        Strings.get(R.string.settings_nothing_to_clear)
-    } else {
-        Strings.plural(R.plurals.settings_history_visits, count, count)
-    }
-
-private fun bookmarksSubtitle(count: Int) =
-    if (count == 0) {
-        Strings.get(R.string.settings_nothing_to_clear)
-    } else {
-        Strings.plural(R.plurals.settings_bookmarks_count, count, count)
-    }
-
-internal fun browsingDataRows(historyCount: Int, bookmarkCount: Int) = listOf(
-    settingsRow("history", ROW_CLEAR_HISTORY, historySubtitle(historyCount)),
-    settingsRow("bookmarks", ROW_CLEAR_BOOKMARKS, bookmarksSubtitle(bookmarkCount)),
-    settingsRow("site-data", ROW_CLEAR_SITE_DATA, ROW_CLEAR_SITE_DATA_SUBTITLE),
+/**
+ * Privacy & security → Browsing data (#400): the one row that opens
+ * [DeleteBrowsingDataPage], found by what it deletes ("history",
+ * "cookies", "cache", "desktop site" …) and by "clear" and "delete".
+ * Plus a hint shown only in search results: Delete all bookmarks used to
+ * sit here and moved to the Bookmarks page, so a search for "bookmarks"
+ * points there (and opens it) instead of finding nothing.
+ */
+internal fun browsingDataRows() = listOf(
+    settingsRow(
+        "delete-data",
+        ROW_DELETE_DATA,
+        ROW_DELETE_DATA_SUBTITLE,
+        *searchKeywords(R.string.settings_delete_browsing_data_keywords),
+    ),
+    settingsRow(
+        BOOKMARKS_MOVED,
+        ROW_BOOKMARKS_MOVED,
+        ROW_BOOKMARKS_MOVED_SUBTITLE,
+        *searchKeywords(R.string.settings_bookmarks_moved_keywords),
+    ),
 )
+
+/** Key of the search-only "Delete all bookmarks is on the Bookmarks page" hint. */
+internal const val BOOKMARKS_MOVED = "bookmarks-moved"
 
 @Composable
 private fun BrowsingDataSection(
     visible: Set<Any>,
-    historyCount: Int,
-    bookmarkCount: Int,
-    onClearHistoryRequested: () -> Unit,
-    onClearBookmarksRequested: () -> Unit,
-    onClearSiteDataRequested: () -> Unit,
+    searching: Boolean,
+    onOpen: () -> Unit,
+    onOpenBookmarks: () -> Unit,
 ) {
     SectionCard(title = stringResource(R.string.settings_section_browsing)) {
-        if ("history" in visible) ActionRow(
-            icon = Icons.Filled.History,
-            title = ROW_CLEAR_HISTORY,
-            subtitle = historySubtitle(historyCount),
-            enabled = historyCount > 0,
-            onClick = onClearHistoryRequested,
-        )
-        if ("bookmarks" in visible) ActionRow(
-            icon = Icons.Filled.Star,
-            title = ROW_CLEAR_BOOKMARKS,
-            subtitle = bookmarksSubtitle(bookmarkCount),
-            enabled = bookmarkCount > 0,
-            onClick = onClearBookmarksRequested,
-        )
-        if ("site-data" in visible) ActionRow(
-            icon = Icons.Filled.Cookie,
-            title = ROW_CLEAR_SITE_DATA,
-            subtitle = ROW_CLEAR_SITE_DATA_SUBTITLE,
-            enabled = true,
-            onClick = onClearSiteDataRequested,
-        )
+        if ("delete-data" in visible) {
+            PageRow(
+                title = ROW_DELETE_DATA,
+                subtitle = ROW_DELETE_DATA_SUBTITLE,
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.DeleteForever,
+                onClick = onOpen,
+                trailing = {
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+            )
+        }
+        if (searching && BOOKMARKS_MOVED in visible) {
+            PageRow(
+                title = ROW_BOOKMARKS_MOVED,
+                subtitle = ROW_BOOKMARKS_MOVED_SUBTITLE,
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.Bookmark,
+                onClick = onOpenBookmarks,
+                trailing = {
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+            )
+        }
     }
 }
 
@@ -1848,7 +2147,7 @@ private fun SitePermissionsSection(
     chains: List<Chain>,
     onOpenSite: (String) -> Unit,
     disconnectFailed: String?,
-    onDisconnect: (String) -> Unit,
+    onDisconnect: (DappGrantStore.Grant) -> Unit,
 ) {
     SectionCard(title = stringResource(R.string.settings_section_permissions)) {
         if (entries.isEmpty() && grants.isEmpty() && "empty" in visible) {
@@ -1859,44 +2158,31 @@ private fun SitePermissionsSection(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             )
         }
-        // Wallet connections first: they're what a site can do the most with.
+        // Wallet connections first: they're what a site can do the most with. The same
+        // row and labelled Disconnect as the wallet page's list (#423, audit W31).
         for (grant in grants) {
             if (DappConnectionRow(grant.origin) !in visible) continue
             val site = permissionOriginDisplay(grant.origin)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(MaterialTheme.shapes.small)
-                    .clickable(onClickLabel = stringResource(R.string.common_open)) { onOpenSite(grant.origin) }
-                    .padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            PermissionRow(
+                title = site,
+                actionLabel = stringResource(R.string.common_disconnect),
+                actionDescription = stringResource(R.string.settings_dapp_disconnect, site),
+                onAction = { onDisconnect(grant) },
+                onOpen = { onOpenSite(grant.origin) },
+                leading = Icons.Filled.AccountBalanceWallet,
+                actionTag = "dapp-disconnect",
+                modifier = Modifier.padding(start = 12.dp),
             ) {
-                Icon(
-                    Icons.Filled.AccountBalanceWallet,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurface,
+                Text(
+                    dappConnectionDetail(grant, accounts, chains),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Spacer(Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(site, fontWeight = FontWeight.Medium)
+                if (disconnectFailed == grant.origin) {
                     Text(
-                        dappConnectionDetail(grant, accounts, chains),
+                        DISCONNECT_FAILED,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    if (disconnectFailed == grant.origin) {
-                        Text(
-                            DISCONNECT_FAILED,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                }
-                IconButton(onClick = { onDisconnect(grant.origin) }) {
-                    Icon(
-                        Icons.Filled.Close,
-                        contentDescription = stringResource(R.string.settings_dapp_disconnect, site),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = MaterialTheme.colorScheme.error,
                     )
                 }
             }
@@ -1961,6 +2247,8 @@ private val ABOUT_TAGLINE: String get() = Strings.get(R.string.settings_about_ta
 private val ABOUT_BLURB: String get() = Strings.get(R.string.settings_about_blurb)
 
 private val UPDATES_CHECK: String get() = Strings.get(R.string.settings_updates_check)
+private val LICENCES: String get() = Strings.get(R.string.settings_licences)
+private val LICENCES_SUBTITLE: String get() = Strings.get(R.string.settings_licences_subtitle)
 private val UPDATES_CHECK_SUBTITLE: String get() = Strings.get(R.string.settings_updates_check_subtitle)
 private val UPDATES_CHECK_NOW: String get() = Strings.get(R.string.settings_updates_check_now)
 private val UPDATES_CHECK_NOW_SUBTITLE: String get() = Strings.get(R.string.settings_updates_check_now_subtitle)
@@ -2024,6 +2312,7 @@ private fun aboutRows(version: String, packageName: String, update: AppUpdateSta
             ),
         )
     }
+    add(settingsRow("licences", LICENCES, LICENCES_SUBTITLE, *searchKeywords(R.string.settings_licences_keywords)))
     add(settingsRow("blurb", ABOUT_BLURB))
 }
 
@@ -2036,6 +2325,7 @@ private fun AboutSection(
     onCheckForUpdates: (Boolean) -> Unit,
     onCheckNow: () -> Unit,
     onOpenRelease: (LatestRelease) -> Unit,
+    onOpenLicences: () -> Unit,
 ) {
     val context = LocalContext.current
     SectionCard(title = stringResource(R.string.settings_section_about)) {
@@ -2101,6 +2391,13 @@ private fun AboutSection(
             enabled = !fromStore && !update.checking,
             onClick = onCheckNow,
         )
+        if ("licences" in visible) PageRow(
+            title = LICENCES,
+            subtitle = LICENCES_SUBTITLE,
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Description,
+            onClick = onOpenLicences,
+        )
         if ("blurb" in visible) {
             // Spaced off only when something sits above it.
             if (visible.size > 1) Spacer(Modifier.height(8.dp))
@@ -2113,49 +2410,8 @@ private fun AboutSection(
     }
 }
 
-private val ROW_ADVANCED: String get() = Strings.get(R.string.settings_advanced)
-private val ROW_ADVANCED_SUBTITLE: String get() = Strings.get(R.string.settings_advanced_subtitle)
-
-private fun otherRows() = listOf(settingsRow("advanced", ROW_ADVANCED, ROW_ADVANCED_SUBTITLE))
-
-@Composable
-private fun OtherSection(
-    showIpfsUi: Boolean,
-    onToggleShowIpfsUi: (Boolean) -> Unit,
-) {
-    SectionCard(title = stringResource(R.string.settings_section_other)) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .switchRow(checked = showIpfsUi, onCheckedChange = onToggleShowIpfsUi)
-                .padding(vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                Icons.Filled.Tune,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(ROW_ADVANCED, fontWeight = FontWeight.Medium)
-                Text(
-                    ROW_ADVANCED_SUBTITLE,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(
-                checked = showIpfsUi,
-                onCheckedChange = null,
-            )
-        }
-    }
-}
-
-// Intentionally not part of the default UI surface. Controls here are
-// revealed by [OtherSection]'s toggle so that IPFS support stays a
-// demo surprise until the user flips it on explicitly.
+// Settings → Nodes & networks → IPFS (#400 item 8: no longer behind a
+// "Show advanced options" switch).
 //
 // The "IPFS" master toggle is purely derived from the live
 // [IpfsInfo.status]: we never persist a "run IPFS" preference, so the
@@ -2197,7 +2453,7 @@ internal fun ipfsRows(info: IpfsInfo) = listOf(
 )
 
 @Composable
-private fun IpfsSection(
+internal fun IpfsSection(
     visible: Set<Any>,
     settings: NodeSettings,
     ipfsInfo: IpfsInfo,
@@ -2317,35 +2573,9 @@ private fun RoutingModePicker(
     }
 }
 
+/** A yes/no question whose yes is destructive (shown in the error colour). */
 @Composable
-private fun ActionRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    enabled: Boolean,
-    onClick: () -> Unit,
-) {
-    PageRow(
-        title = title,
-        subtitle = subtitle,
-        style = PageRowStyle.Inset,
-        leadingIcon = icon,
-        enabled = enabled,
-        onClick = onClick,
-        trailing = if (enabled) {
-            {
-                Icon(
-                    Icons.Filled.DeleteForever,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        } else null,
-    )
-}
-
-@Composable
-private fun ConfirmDialog(
+internal fun ConfirmDialog(
     title: String,
     message: String,
     confirmLabel: String,
@@ -2370,7 +2600,7 @@ private fun ConfirmDialog(
     )
 }
 
-private data class IpfsStatusTriple(
+internal data class IpfsStatusTriple(
     val color: Color,
     val icon: ImageVector,
     val label: String,
@@ -2380,22 +2610,24 @@ private data class IpfsStatusTriple(
  * Translate the live IPFS [IpfsInfo] into an icon + color + user-
  * facing label for the master IPFS toggle. Visible to the user:
  *
- *  - `Disconnected` — node not running (toggle off)
- *  - `Connecting…`  — node starting, or running but still peer-less
- *  - `Connected`    — node running with at least one peer
+ *  - `Off`          — node not running (toggle off; not "Disconnected", #416)
+ *  - `Connecting…`  — node starting
+ *  - `Running`      — the gateway is up, as the other nodes say it
  *  - `Error`        — last start attempt threw
+ *
+ * The Nodes & networks overview's IPFS row reads the same label.
  */
-private fun ipfsStatusTriple(info: IpfsInfo): IpfsStatusTriple = when (info.status) {
+internal fun ipfsStatusTriple(info: IpfsInfo): IpfsStatusTriple = when (info.status) {
     // freedom-ipfs is an on-demand reader: the gateway being up means
     // the node is usable — there is no peer set to wait for.
     IpfsStatus.Running -> IpfsStatusTriple(
-        Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.settings_ipfs_connected),
+        Color(0xFF22C55E), Icons.Filled.CheckCircle, Strings.get(R.string.node_status_running),
     )
     IpfsStatus.Starting -> IpfsStatusTriple(
         Color(0xFFF59E0B), Icons.Filled.HourglassTop, Strings.get(R.string.settings_ipfs_connecting),
     )
     IpfsStatus.Stopped -> IpfsStatusTriple(
-        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.settings_ipfs_disconnected),
+        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, Strings.get(R.string.node_off),
     )
     IpfsStatus.Error -> IpfsStatusTriple(
         Color(0xFFEF4444), Icons.Filled.ErrorOutline, Strings.get(R.string.settings_ipfs_error),

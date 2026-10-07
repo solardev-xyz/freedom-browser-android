@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
+import baby.freedom.mobile.wallet.MessageSigning
 import baby.freedom.mobile.wallet.Vault
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -130,26 +131,35 @@ private fun swarmMessagingCopy(ask: SwarmAsk.Message): SwarmPromptCopy = when {
         Strings.get(
             if (ask.send == SwarmAsk.Message.Kind.Pss) R.string.swarm_message_request_pss else R.string.swarm_message_request_gsoc,
         ),
-        Strings.get(R.string.swarm_message_warning),
+        // Only a private message is encrypted (to its recipient's key); a room's is in the clear.
+        Strings.get(
+            if (ask.send == SwarmAsk.Message.Kind.Pss) R.string.swarm_message_warning_pss else R.string.swarm_message_warning_gsoc,
+        ),
         Strings.get(R.string.swarm_message_approve),
         Strings.get(R.string.swarm_message_always),
     )
 }
 
 /**
- * A messaging topic as the sheet shows it: the page's string, with every
- * control and format character (bidi overrides and isolates, zero-width
- * joiners, line separators) written out as `<U+XXXX>`, so it can't
- * reorder or hide part of the row. The topic itself goes to the node as is.
+ * A page's string as the sheet shows it — a messaging topic, a feed
+ * name, a publish's name, content type or paths — with every code point
+ * that can hide or rearrange text written out as `<U+XXXX>`, so it can't
+ * reorder or hide part of its row, break it into rows of its own that
+ * pass for the sheet's, or paint over the rows around it. That's the
+ * signing sheets' own list ([MessageSigning.hides]): control and format
+ * characters (bidi overrides and isolates, zero-width joiners, tags),
+ * line and paragraph separators, variation selectors past an emoji's
+ * own, blank fillers, Default_Ignorable_Code_Point blocks, and a
+ * combining mark past the third stacked on one letter, whose ink would
+ * otherwise reach far above and below its line. The string itself goes
+ * to the node as is.
  */
 internal fun swarmShownTopic(topic: String): String = buildString {
+    val scan = MessageSigning.Scan()
     var i = 0
     while (i < topic.length) {
         val cp = topic.codePointAt(i)
-        val type = Character.getType(cp)
-        val hidden = Character.isISOControl(cp) || type == Character.FORMAT.toInt() ||
-            type == Character.LINE_SEPARATOR.toInt() || type == Character.PARAGRAPH_SEPARATOR.toInt()
-        if (hidden) append("<U+%04X>".format(cp)) else appendCodePoint(cp)
+        if (scan.hides(cp)) append("<U+%04X>".format(cp)) else appendCodePoint(cp)
         i += Character.charCount(cp)
     }
 }
@@ -158,19 +168,20 @@ internal fun swarmShownTopic(topic: String): String = buildString {
 internal fun swarmPublishWhat(ask: SwarmAsk.Publish): String = when (ask.kind) {
     SwarmAsk.Publish.Kind.Files -> Strings.plural(R.plurals.swarm_publish_files, ask.paths.size, ask.paths.size)
     SwarmAsk.Publish.Kind.Chunk -> Strings.get(R.string.swarm_publish_chunk)
-    SwarmAsk.Publish.Kind.Data -> ask.contentType ?: Strings.get(R.string.swarm_publish_data)
+    SwarmAsk.Publish.Kind.Data -> ask.contentType?.let(::swarmShownTopic) ?: Strings.get(R.string.swarm_publish_data)
 }
 
 /** The first few paths of a files publish, and how many more: desktop's preview. */
 internal fun swarmPathsPreview(paths: List<String>): String {
-    val shown = paths.take(3).joinToString(", ")
+    val shown = paths.take(3).joinToString(", ", transform = ::swarmShownTopic)
     if (paths.size <= 3) return shown
     val more = paths.size - 3
     return Strings.plural(R.plurals.swarm_paths_preview_more, more, shown, more)
 }
 
 /** What a signing sheet's request row says: the method's own detail, or the feed it's on. */
-internal fun swarmSignRequest(ask: SwarmAsk.Sign): String = ask.detail ?: ask.feedName ?: Strings.get(R.string.swarm_sign_request_feed_operation)
+internal fun swarmSignRequest(ask: SwarmAsk.Sign): String =
+    ask.detail ?: ask.feedName?.let(::swarmShownTopic) ?: Strings.get(R.string.swarm_sign_request_feed_operation)
 
 /** The note on a signing sheet with no wallet on the device yet. */
 internal fun swarmNeedsWalletNote(copy: SwarmPromptCopy): String =
@@ -309,12 +320,19 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                     .weight(1f, fill = false)
                     .verticalScroll(rememberScrollState()),
             ) {
+                // What it means first (#425, W47), then the request's details.
+                Text(
+                    copy.warning,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp).testTag("swarm-warning"),
+                )
                 when (ask) {
                     is SwarmAsk.Connect, is SwarmAsk.Manifest -> Unit
                     is SwarmAsk.Publish -> {
                         DetailRow(stringResource(R.string.swarm_detail_what), swarmPublishWhat(ask))
                         DetailRow(stringResource(R.string.swarm_detail_size), formatStampBytes(ask.size))
-                        ask.name?.let { DetailRow(stringResource(R.string.swarm_detail_name), it) }
+                        ask.name?.let { DetailRow(stringResource(R.string.swarm_detail_name), swarmShownTopic(it)) }
                         if (ask.kind == SwarmAsk.Publish.Kind.Files) DetailRow(stringResource(R.string.swarm_detail_files), swarmPathsPreview(ask.paths), mono = true)
                     }
                     is SwarmAsk.Sign -> {
@@ -335,12 +353,6 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                         if (ask.send != null) DetailRow(stringResource(R.string.swarm_detail_size), formatStampBytes(ask.size.toLong()))
                     }
                 }
-                Text(
-                    copy.warning,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(vertical = 8.dp),
-                )
                 if (needsWallet) {
                     Text(
                         swarmNeedsWalletNote(copy),

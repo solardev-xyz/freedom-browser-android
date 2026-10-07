@@ -341,3 +341,21 @@ private fun PopupAddressLabel(shown: String, posted: Boolean, modifier: Modifier
 internal fun blockedPopupsTitle(count: Int): String =
     if (count <= 1) Strings.get(R.string.browser_popup_blocked_single)
     else Strings.plural(R.plurals.browser_popups_blocked, count, count)
+
+/**
+ * Whether the active tab's blocked-pop-up notice is composed: it has
+ * something to show, and the page is what's on screen — not while the
+ * address bar is open, a panel covers the page, or a page is in HTML5
+ * fullscreen. The notice's own Allow guard starts on its first drawn
+ * frame ([rememberArmedTapGuard]), and the fullscreen view is drawn
+ * over it, so one composed under fullscreen would arm unseen and be
+ * revealed already armed the moment the page leaves fullscreen
+ * (`document.exitFullscreen()` needs no gesture) — under a tap meant
+ * for the page.
+ */
+internal fun blockedPopupNoticeShown(
+    hasEntries: Boolean,
+    addressFocused: Boolean,
+    overlayShown: Boolean,
+    fullscreen: Boolean,
+): Boolean = hasEntries && !addressFocused && !overlayShown && !fullscreen

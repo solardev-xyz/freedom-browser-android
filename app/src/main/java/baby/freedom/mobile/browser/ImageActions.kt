@@ -26,6 +26,7 @@ import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import kotlin.concurrent.thread
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -63,7 +64,7 @@ internal suspend fun fetchImage(
 ): FetchedImage? =
     withHardDeadline(IMAGE_FETCH_DEADLINE_MS) { guard ->
         if (url.startsWith("data:", ignoreCase = true)) return@withHardDeadline decodeDataUrl(url)
-        interceptVirtualRequest(GetRequest(url))?.let { response ->
+        interceptVirtualRequest(GetRequest(url), private = private)?.let { response ->
             val data = response.data ?: return@withHardDeadline null
             if (!guard.register(data)) return@withHardDeadline null
             data.use {
@@ -425,28 +426,89 @@ internal suspend fun saveImage(context: Context, image: FetchedImage, url: Strin
  * returning its `content://` URI. Files there older than a day are
  * pruned on the way in: a copy or share needs its file only while the
  * receiving app reads it, and the cache would otherwise grow per image.
+ *
+ * A private tab's (#86) image goes in a directory of its own
+ * ([PRIVATE_SHARED_DIR]), which [discardPrivateImageShares] empties when
+ * the private session ends and at the next start: a picture from a
+ * private page must not sit in the app's storage after it. [session] is
+ * the [privateImageSession] taken when the user picked Copy/Share,
+ * before the (up to [IMAGE_FETCH_DEADLINE_MS]) fetch: if the private
+ * session has ended since, nothing is written — the image would
+ * otherwise land after the discard that was meant to take it, and stay.
  */
-private suspend fun shareableUri(context: Context, image: FetchedImage, url: String): Uri? =
+private suspend fun shareableUri(context: Context, image: FetchedImage, url: String, private: Boolean, session: Long): Uri? =
     withContext(Dispatchers.IO) {
-        runCatching {
-            val root = File(context.cacheDir, SHARED_DIR)
-            val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
-            root.listFiles()?.forEach { dir -> if (dir.lastModified() < cutoff) dir.deleteRecursively() }
-            // A directory per image keeps the natural file name (which the
-            // receiving app shows) without two images colliding on it.
-            val dir = File(root, System.nanoTime().toString()).apply { mkdirs() }
-            val file = File(dir, imageFileName(url, image.mime, ::extensionFor))
-            file.writeBytes(image.bytes)
-            FileProvider.getUriForFile(context, FileChooser.authority(context), file)
-        }.getOrNull()
+        if (private) {
+            // Under the lock the discard deletes under, so the write lands
+            // either before that delete (and goes with it) or not at all.
+            synchronized(privateSharesLock) {
+                if (session != privateSharesSession) return@withContext null
+                writeShareable(context, privateSharesDir(context), image, url)
+            }
+        } else {
+            writeShareable(context, File(context.cacheDir, SHARED_DIR), image, url)
+        }
     }
+
+private fun writeShareable(context: Context, root: File, image: FetchedImage, url: String): Uri? =
+    runCatching {
+        val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
+        root.listFiles()?.forEach { dir -> if (dir.lastModified() < cutoff) dir.deleteRecursively() }
+        // A directory per image keeps the natural file name (which the
+        // receiving app shows) without two images colliding on it.
+        val dir = File(root, System.nanoTime().toString()).apply { mkdirs() }
+        val file = File(dir, imageFileName(url, image.mime, ::extensionFor))
+        file.writeBytes(image.bytes)
+        FileProvider.getUriForFile(context, FileChooser.authority(context), file)
+    }.getOrNull()
 
 /** Subdirectory of `cacheDir`; must match `res/xml/file_paths.xml`. */
 private const val SHARED_DIR = "shared"
 
+/** Private tabs' shared images (#86), inside [SHARED_DIR] so the FileProvider serves them. */
+private const val PRIVATE_SHARED_DIR = "private"
+
+private fun privateSharesDir(context: Context) = File(File(context.cacheDir, SHARED_DIR), PRIVATE_SHARED_DIR)
+
+/**
+ * Delete every image a private tab copied or shared (#86): the private
+ * session has ended, or an earlier process died with one open. On a
+ * thread of its own, so the caller (the main thread) does no file I/O.
+ * An app still reading one it was handed loses it, as in Chrome when
+ * the incognito tabs close.
+ */
+internal fun discardPrivateImageShares(context: Context) {
+    val dir = privateSharesDir(context.applicationContext)
+    // A Copy/Share still fetching for the session that just ended must
+    // not write its image after the delete ([shareableUri]).
+    synchronized(privateSharesLock) { privateSharesSession++ }
+    thread(name = "private-shares") {
+        synchronized(privateSharesLock) { runCatching { dir.deleteRecursively() } }
+    }
+}
+
+private val privateSharesLock = Any()
+
+/** Bumped by each [discardPrivateImageShares]; under [privateSharesLock]. */
+private var privateSharesSession = 0L
+
+/**
+ * The private session a Copy/Share image is for, taken when the user
+ * picks it (before the fetch) and handed to [copyImageToClipboard] /
+ * [shareImage]: a private image is dropped if the session has ended by
+ * the time it's fetched.
+ */
+internal fun privateImageSession(): Long = synchronized(privateSharesLock) { privateSharesSession }
+
 /** Put [image] on the clipboard as a `content://` image clip. */
-internal suspend fun copyImageToClipboard(context: Context, image: FetchedImage, url: String): Boolean {
-    val uri = shareableUri(context, image, url) ?: return false
+internal suspend fun copyImageToClipboard(
+    context: Context,
+    image: FetchedImage,
+    url: String,
+    private: Boolean,
+    session: Long = privateImageSession(),
+): Boolean {
+    val uri = shareableUri(context, image, url, private, session) ?: return false
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return false
     clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "Image", uri))
     // Same rule as [copyUrlToClipboard]: Android 13+ confirms copies itself.
@@ -457,8 +519,14 @@ internal suspend fun copyImageToClipboard(context: Context, image: FetchedImage,
 }
 
 /** Hand [image] to the system share sheet as a file. */
-internal suspend fun shareImage(context: Context, image: FetchedImage, url: String): Boolean {
-    val uri = shareableUri(context, image, url) ?: return false
+internal suspend fun shareImage(
+    context: Context,
+    image: FetchedImage,
+    url: String,
+    private: Boolean,
+    session: Long = privateImageSession(),
+): Boolean {
+    val uri = shareableUri(context, image, url, private, session) ?: return false
     val send = Intent(Intent.ACTION_SEND).apply {
         type = image.mime
         putExtra(Intent.EXTRA_STREAM, uri)

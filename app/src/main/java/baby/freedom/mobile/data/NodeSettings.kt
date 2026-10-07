@@ -4,12 +4,16 @@ import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import baby.freedom.mobile.browser.AdblockCategory
+import baby.freedom.mobile.browser.AdblockLocaleDefaults
 import androidx.datastore.preferences.preferencesDataStore
 import baby.freedom.mobile.browser.ExternalEndpoints
 import baby.freedom.mobile.browser.SearchEngines
@@ -32,17 +36,13 @@ import org.json.JSONObject
 
 /**
  * Persistent toggles the user controls from the node details panel and
- * the settings screen (search engine, and the hidden "Other" section).
+ * the settings screen.
  *
  * Backed by a single [DataStore] under `freedom_node_settings` living
  * in the app's files directory. Flows surface the current value; the
  * corresponding suspend setter writes-through to disk.
  *
  * ## IPFS keys
- *
- * `show_ipfs_ui` gates visibility of every IPFS-related control in the
- * UI. The Settings screen "Other" section reveals a single row the
- * user can tap to flip this on before a demo.
  *
  * `ipfs_low_power` and `ipfs_routing_mode` are read at `:node` process
  * startup and re-applied on the next restart — there is no live
@@ -148,6 +148,64 @@ class NodeSettings private constructor(
     }
 
     /**
+     * Whether the Swarm node pays peers from its chequebook ("Pay peers
+     * from the chequebook" on the Chequebook page): bee's swap-enable,
+     * for faster downloads and uploads than the free tier. On by default,
+     * as in bee, ant and desktop (`antSwapEnable`). ant doesn't persist
+     * it, so this is the record: `MainActivity` relays it to the `:node`
+     * process on every bind and every change
+     * ([baby.freedom.mobile.node.INodeService.setSwapEnabled]), and the
+     * node applies it after every init.
+     */
+    val swarmSwapEnabled: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.SWARM_SWAP_ENABLED] ?: true
+    }
+
+    suspend fun setSwarmSwapEnabled(enabled: Boolean) {
+        store.edit { it[Keys.SWARM_SWAP_ENABLED] = enabled }
+    }
+
+    /**
+     * The Swarm node's disk chunk cache size ([SwarmCacheSize]), 512 MB —
+     * ant's own default — until the user picks another. ant doesn't
+     * persist its cap, so this is the record: `MainActivity` relays it to
+     * the `:node` process on every bind and every change
+     * ([baby.freedom.mobile.node.INodeService.setSwarmCacheCapacity]),
+     * which applies it live and hands it to every init; the `:node`
+     * process reads it here itself before it has heard from the UI.
+     */
+    val swarmCacheSize: Flow<SwarmCacheSize> = store.data.map { prefs ->
+        SwarmCacheSize.fromBytes(prefs[Keys.SWARM_CACHE_CAPACITY_BYTES])
+    }
+
+    /** [swarmCacheSize]'s cap in bytes. */
+    val swarmCacheCapacityBytes: Flow<Long> = swarmCacheSize.map { it.bytes }
+
+    suspend fun setSwarmCacheSize(size: SwarmCacheSize) {
+        store.edit { it[Keys.SWARM_CACHE_CAPACITY_BYTES] = size.bytes }
+    }
+
+    /**
+     * Chequebooks (lowercase `0x` addresses) whose lost cheque ledger the
+     * user confirmed on the Chequebook page. Once confirmed, ant stops
+     * reporting the loss and counts only the cheques written since, so its
+     * `availableBalance` reads higher than what is really left; ant keeps
+     * no sign of that the page can read, so this is the record the page
+     * uses to keep calling the credit an upper bound. Written *before* the
+     * node is asked to confirm ([baby.freedom.mobile.browser.confirmLostLedger]),
+     * so a confirmation that lands late or unseen is still on record; an
+     * entry for one that never landed is ignored while the loss is reported.
+     */
+    val swarmConfirmedLedgers: Flow<Set<String>> = store.data.map { prefs ->
+        prefs[Keys.SWARM_CONFIRMED_LEDGERS].orEmpty()
+    }
+
+    suspend fun addSwarmConfirmedLedger(chequebook: String) {
+        val key = chequebook.lowercase()
+        store.edit { it[Keys.SWARM_CONFIRMED_LEDGERS] = it[Keys.SWARM_CONFIRMED_LEDGERS].orEmpty() + key }
+    }
+
+    /**
      * Whether the embedded Radicle node should run (#73). Off by default,
      * as on iOS: it's a publish-capable node that creates an identity key
      * and dials Radicle seeds, so it starts only once the user asks. The UI
@@ -224,19 +282,6 @@ class NodeSettings private constructor(
 
     suspend fun setTorExternalProxy(value: String) {
         store.edit { it[Keys.TOR_EXTERNAL_PROXY] = value }
-    }
-
-    /**
-     * Whether any IPFS UI is rendered. Off by default — IPFS support
-     * is a hidden capability surfaced only from Settings → Other. The
-     * IPFS node still runs regardless of this flag.
-     */
-    val showIpfsUi: Flow<Boolean> = store.data.map { prefs ->
-        prefs[Keys.SHOW_IPFS_UI] ?: false
-    }
-
-    suspend fun setShowIpfsUi(enabled: Boolean) {
-        store.edit { it[Keys.SHOW_IPFS_UI] = enabled }
     }
 
     /**
@@ -337,7 +382,7 @@ class NodeSettings private constructor(
      *
      * [settleIntro] decides it once, at the app's first start with this
      * build; Got it ([dismissIntro]) sets it to `true`. Nothing but clearing
-     * the app's data removes the key — Clear cookies & site data leaves it.
+     * the app's data removes the key — Delete browsing data leaves it.
      *
      * A read error doesn't end the flow (same reasoning and back-off as
      * [appearance]); the home page shows the card only once a read has said
@@ -676,8 +721,11 @@ class NodeSettings private constructor(
         return true
     }
 
-    /** The ad-blocking categories switched on (#126). */
-    val adblockCategories: Flow<Set<AdblockCategory>> = store.data.map { prefs ->
+    /**
+     * The ad-blocking categories switched on (#126). Re-emits when a
+     * locale-dependent default changes ([AdblockLocaleDefaults], #405).
+     */
+    val adblockCategories: Flow<Set<AdblockCategory>> = combine(store.data, AdblockLocaleDefaults.german) { prefs, _ ->
         AdblockCategory.entries.filterTo(LinkedHashSet()) { category ->
             prefs[Keys.adblock(category)] ?: category.enabledByDefault
         }
@@ -727,9 +775,26 @@ class NodeSettings private constructor(
         store.edit { it[Keys.CHECK_FOR_UPDATES] = enabled }
     }
 
+    /**
+     * *Ask where to save each file* (#322): confirming a download opens
+     * the system's *Save as* picker instead of saving to Download/Freedom.
+     * Off by default, like desktop's.
+     */
+    val askWhereToSave: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.ASK_WHERE_TO_SAVE] ?: false
+    }
+
+    suspend fun setAskWhereToSave(enabled: Boolean) {
+        store.edit { it[Keys.ASK_WHERE_TO_SAVE] = enabled }
+    }
+
     private object Keys {
+        val ASK_WHERE_TO_SAVE = booleanPreferencesKey("ask_where_to_save")
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SWARM_NODE_MODE = stringPreferencesKey("swarm_node_mode")
+        val SWARM_SWAP_ENABLED = booleanPreferencesKey("swarm_swap_enabled")
+        val SWARM_CACHE_CAPACITY_BYTES = longPreferencesKey("swarm_cache_capacity_bytes")
+        val SWARM_CONFIRMED_LEDGERS = stringSetPreferencesKey("swarm_confirmed_ledgers")
         /** Both chains' start at launch before #274; see [myotisStartOnLaunch]. */
         val LEGACY_MYOTIS_ENABLED = booleanPreferencesKey("myotis_enabled")
         private val MYOTIS_START_ON_LAUNCH = MyotisNetwork.entries.associateWith {
@@ -739,7 +804,6 @@ class NodeSettings private constructor(
         val TOR_ENABLED = booleanPreferencesKey("tor_enabled")
         val TOR_START_ON_LAUNCH = booleanPreferencesKey("tor_start_on_launch")
         val TOR_EXTERNAL_PROXY = stringPreferencesKey("tor_external_proxy")
-        val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
         val RADICLE_ENABLED = booleanPreferencesKey("radicle_enabled")
         val IPFS_LOW_POWER = booleanPreferencesKey("ipfs_low_power")
         val IPFS_ROUTING_MODE = stringPreferencesKey("ipfs_routing_mode")
@@ -780,8 +844,31 @@ class NodeSettings private constructor(
             "offline",
         )
 
+        /**
+         * A settings file that no longer parses (a write torn by a power
+         * loss, a bad sector) reads as empty — every setting at its
+         * default — and is replaced on the next write, as every other
+         * store here does. Without it the read throws
+         * [androidx.datastore.core.CorruptionException] into collectors
+         * nobody catches (ad blocking's, at startup), and the app dies on
+         * every launch until its data is cleared — wallet and all.
+         *
+         * The defaults aren't all the most private choice, so a reset can
+         * quietly undo some of what the user had turned off: public
+         * mainnet RPCs switched off for name lookups are used again
+         * ([Keys.ENS_RPC_DISABLED_PUBLIC] empties), CCIP-Read and the
+         * daily GitHub release check come back on, the search engine goes
+         * back to DuckDuckGo, and the external Swarm/IPFS endpoints, Tor
+         * and the ad-block allowlist and categories go back to theirs.
+         * Clearing app data — the only way out before this handler —
+         * lands on the same defaults; nothing tells the user a reset
+         * happened yet (#372).
+         */
+        internal val corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() }
+
         private val Context.nodeSettingsStore by preferencesDataStore(
             name = "freedom_node_settings",
+            corruptionHandler = corruptionHandler,
         )
 
         @Volatile

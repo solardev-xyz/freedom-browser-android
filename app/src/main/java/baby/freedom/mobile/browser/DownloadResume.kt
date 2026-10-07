@@ -167,11 +167,17 @@ internal object DownloadNote {
         "ens_unresolved" to R.string.library_download_ens_unresolved,
         "node_not_running" to R.string.library_download_node_not_running,
         "scheme_unsupported" to R.string.library_download_scheme_unsupported,
+        "blob_unreachable" to R.string.library_download_blob_unreachable,
+        "blob_gone" to R.string.library_download_blob_gone,
+        "blob_page_closed" to R.string.library_download_blob_page_closed,
+        "blob_refused" to R.string.library_download_blob_refused,
+        "blob_too_big" to R.string.library_download_blob_too_big,
         "gateway_no_answer" to R.string.library_download_gateway_no_answer,
         "content_not_found" to R.string.library_download_content_not_found,
         "gateway_error" to R.string.library_download_gateway_error,
         "server_error" to R.string.library_download_server_error,
         "too_many_redirects" to R.string.library_download_too_many_redirects,
+        "redirect_refused" to R.string.library_download_redirect_refused,
         "write_to_downloads_failed" to R.string.library_download_write_to_downloads_failed,
     )
     private val NAMES: Map<Int, String> = KEYS.entries.associate { (k, v) -> v to k }

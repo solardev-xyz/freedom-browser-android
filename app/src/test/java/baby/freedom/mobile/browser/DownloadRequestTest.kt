@@ -57,8 +57,60 @@ class DownloadRequestTest {
             },
         )
         assertTrue(classifyDownloadUrl("data:text/plain,hi") is DownloadTarget.Data)
-        val blob = classifyDownloadUrl("blob:https://example.com/uuid")
-        assertEquals("blob", (blob as DownloadTarget.Unsupported).scheme)
+        val blob = classifyDownloadUrl("blob:https://example.com/uuid") as DownloadTarget.Blob
+        assertEquals("blob:https://example.com/uuid", blob.displayUrl)
+        assertNull(blob.source)
+        assertTrue(classifyDownloadUrl("BLOB:https://example.com/uuid") is DownloadTarget.Blob)
+        assertTrue(classifyDownloadUrl("file:///sdcard/a.txt") is DownloadTarget.Unsupported)
+    }
+
+    @Test
+    fun `a blob's origin is the url inside it, default port dropped`() {
+        assertEquals("https://example.com", blobUrlOrigin("blob:https://example.com/9f0c"))
+        assertEquals("http://localhost:8700", blobUrlOrigin("blob:http://localhost:8700/9f0c"))
+        assertEquals("https://example.com", blobUrlOrigin("blob:https://EXAMPLE.com:443/9f0c"))
+        assertEquals(
+            "https://3zlpn20abc.bzz.freedom.baby",
+            blobUrlOrigin("blob:https://3zlpn20abc.bzz.freedom.baby/1b2c-uuid"),
+        )
+        // Opaque (a sandboxed frame's, a data: document's): no frame can be told apart.
+        assertNull(blobUrlOrigin("blob:null/9f0c"))
+        assertNull(blobUrlOrigin("https://example.com/9f0c"))
+        assertNull(blobUrlOrigin("blob:file:///x"))
+    }
+
+    @Test
+    fun `a blob is named by its download attribute, else download plus its type's extension`() {
+        val url = "blob:https://example.com/3f2a1b6c-0d1e-4f00-9a7b-1c2d3e4f5a6b"
+        assertEquals("download.txt", downloadFileName(null, url, "text/plain", ext::get))
+        assertEquals("export.json", downloadFileName(blobContentDisposition("export.json"), url, "application/json", ext::get))
+        // Any character the page used survives the header round trip — and is then sanitized.
+        assertEquals("a+b c;ü.txt", downloadFileName(blobContentDisposition("a+b c;ü.txt"), url, null))
+        assertEquals("passwd", downloadFileName(blobContentDisposition("../../etc/passwd"), url, null))
+        assertNull(blobContentDisposition(""))
+        assertNull(blobContentDisposition(null))
+    }
+
+    @Test
+    fun `an untyped blob is saved by its name's type, never DownloadListener's text plain`() {
+        val types = mapOf("zip" to "application/zip", "json" to "application/json")
+        // The blob's own type wins.
+        assertEquals("image/png", blobMimeType("image/png", "export.zip", types::get))
+        assertEquals("text/csv", blobMimeType("Text/CSV; charset=utf-8", null, types::get))
+        // An untyped blob (new Blob([bytes])): its download name's extension.
+        assertEquals("application/zip", blobMimeType(null, "export.zip", types::get))
+        assertEquals("application/zip", blobMimeType("", "EXPORT.ZIP", types::get))
+        // Nothing to go by: octet-stream, which MediaStore adds no extension to.
+        assertEquals("application/octet-stream", blobMimeType(null, "big100.bin", types::get))
+        assertEquals("application/octet-stream", blobMimeType(null, null, types::get))
+        assertEquals("application/octet-stream", blobMimeType(null, "README", types::get))
+        assertEquals("application/octet-stream", blobMimeType("garbage", "x.", types::get))
+        // The name an untyped blob's prompt shows is the one saved.
+        val url = "blob:https://example.com/0f2b8c2e-1111-2222-3333-444455556666"
+        assertEquals(
+            "export.zip",
+            downloadFileName(blobContentDisposition("export.zip"), url, blobMimeType(null, "export.zip", types::get)) { null },
+        )
     }
 
     @Test
@@ -94,6 +146,47 @@ class DownloadRequestTest {
 
         // Percent-encoded base64 ('=' as %3D) still decodes.
         assertEquals("hi", String(parseDataUri("data:;base64,aGk%3D")!!.bytes))
+    }
+
+    @Test
+    fun `a data uri streams to the same bytes it decodes to whole`() {
+        val bytes = ByteArray(300_000) { (it * 31 + (it shr 10)).toByte() }
+        val b64 = java.util.Base64.getEncoder().encodeToString(bytes)
+        for (uri in listOf(
+            "data:application/octet-stream;base64,$b64",
+            "data:application/octet-stream;base64," + b64.trimEnd('='),
+            "data:application/octet-stream;base64," + b64.chunked(76).joinToString("\r\n"),
+            "data:application/octet-stream;base64," + b64.replace('+', '-').replace('/', '_'),
+            "data:application/octet-stream;base64," + b64.replace("+", "%2B").replace("/", "%2F").replace("=", "%3D"),
+        )) {
+            val body = openDataUri(uri)!!
+            assertArrayEquals(bytes, body.stream.use { it.readBytes() })
+        }
+    }
+
+    @Test
+    fun `a data uri's decoded length is told up front when its payload is plain`() {
+        val b64 = java.util.Base64.getEncoder()
+        for (n in 0..7) {
+            val enc = b64.encodeToString(ByteArray(n))
+            assertEquals(n.toLong(), openDataUri("data:;base64,$enc")!!.length)
+            assertEquals(n.toLong(), openDataUri("data:;base64," + enc.trimEnd('='))!!.length)
+        }
+        assertEquals(-1L, openDataUri("data:;base64,aGk%3D")!!.length)
+        assertEquals(-1L, openDataUri("data:;base64,aG k=")!!.length)
+        assertEquals(5L, openDataUri("data:text/plain,héllo".replace("é", "e"))!!.length)
+        assertEquals(6L, openDataUri("data:text/plain,héllo")!!.length)
+        assertEquals(-1L, openDataUri("data:text/plain,a%2Cb")!!.length)
+    }
+
+    @Test
+    fun `a malformed data body fails as it is read`() {
+        val body = openDataUri("data:;base64,aGk@@@@")!!
+        try {
+            body.stream.readBytes()
+            org.junit.Assert.fail("bad base64 read without an error")
+        } catch (_: java.io.IOException) {
+        }
     }
 
     @Test
@@ -146,6 +239,130 @@ class DownloadRequestTest {
         assertEquals("evil.sh", downloadFileName("attachment; filename=\"..\\\\evil.sh\"", "https://x.com/", null))
         assertEquals("a_b_.txt", downloadFileName("attachment; filename=\"a:b?.txt\"", "https://x.com/", null))
         assertEquals("hidden", sanitizeFileName(".hidden"))
+    }
+
+    @Test
+    fun `a bidi override can't disguise the file's extension`() {
+        // "invoice<RLO>fdp.apk" draws as "invoicekpa.pdf": an APK posing as a PDF.
+        assertEquals(
+            "invoice_fdp.apk",
+            downloadFileName("attachment; filename*=UTF-8''invoice%E2%80%AEfdp.apk", "https://x.com/", null),
+        )
+        assertEquals("invoice_fdp.apk", downloadFileName(null, "https://x.com/invoice%E2%80%AEfdp.apk", null))
+        // Every other bidi control too: embeddings, isolates, marks.
+        for (c in listOf('\u202A', '\u202B', '\u202C', '\u202D', '\u2066', '\u2067', '\u2068', '\u2069', '\u200E', '\u200F', '\u061C')) {
+            assertEquals("a_b.txt", sanitizeFileName("a${c}b.txt"))
+        }
+    }
+
+    @Test
+    fun `invisible format characters, separators and C1 controls are replaced`() {
+        // Zero-width space, BOM, soft hyphen, word joiner, line / paragraph separators, a C1 control.
+        for (c in listOf('\u200B', '\uFEFF', '\u00AD', '\u2060', '\u2028', '\u2029', '\u0085', '\u009B')) {
+            assertEquals("a_b.txt", sanitizeFileName("a${c}b.txt"))
+        }
+        // A supplementary-plane format character, judged by code point (not as two surrogates).
+        assertEquals("a_b.txt", sanitizeFileName("a\uDB40\uDC01b.txt"))
+        // A lone surrogate can't be encoded into a file name.
+        assertEquals("a_b.txt", sanitizeFileName("a\uD83Db.txt"))
+    }
+
+    @Test
+    fun `names that need joiners and tags keep them`() {
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67" // 👨‍👩‍👧
+        assertEquals("$family.png", sanitizeFileName("$family.png"))
+        val persian = "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645.pdf" // می‌خواهم (ZWNJ)
+        assertEquals(persian, sanitizeFileName(persian))
+        val scotland = "\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74\uDB40\uDC7F"
+        assertEquals("$scotland.jpg", sanitizeFileName("$scotland.jpg"))
+        assertEquals("na\u00EFve caf\u00E9 \u65E5\u672C.txt", sanitizeFileName("na\u00EFve caf\u00E9 \u65E5\u672C.txt"))
+    }
+
+    @Test
+    fun `clamping never splits an emoji in half`() {
+        val emoji = "\uD83D\uDE00" // 😀, two chars
+        // 116 chars kept before ".txt": the 116th would be the first half of an emoji.
+        val name = downloadFileName(null, "https://x.com/" + "a".repeat(115) + emoji.repeat(10) + ".txt", null)
+        assertTrue(name.endsWith(".txt"))
+        assertTrue(name.length <= 120)
+        assertTrue(name.indices.none { i ->
+            name[i].isHighSurrogate() && (i + 1 >= name.length || !name[i + 1].isLowSurrogate()) ||
+                name[i].isLowSurrogate() && (i == 0 || !name[i - 1].isHighSurrogate())
+        })
+        assertEquals("a".repeat(115) + ".txt", name)
+    }
+
+    @Test
+    fun `clamping never splits a grapheme cluster`() {
+        // 116 chars are kept before ".txt"; each case puts the cut inside a cluster.
+        fun clamp(prefix: Int, cluster: String) =
+            downloadFileName(null, "https://x.com/" + "a".repeat(prefix) + cluster + "b".repeat(200) + ".txt", null)
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67" // 👨‍👩‍👧, 8 chars
+        for (prefix in 109..115) assertEquals("a".repeat(prefix) + ".txt", clamp(prefix, family))
+        assertEquals("a".repeat(108) + family + ".txt", clamp(108, family))
+        val scotland = "\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74\uDB40\uDC7F"
+        for (prefix in 103..115) assertEquals("a".repeat(prefix) + ".txt", clamp(prefix, scotland))
+        val thumbs = "\uD83D\uDC4D\uD83C\uDFFD" // 👍🏽
+        assertEquals("a".repeat(114) + ".txt", clamp(114, thumbs))
+        // Two flags back to back: the cut lands between the halves of the second.
+        val flags = "\uD83C\uDDE9\uD83C\uDDEA\uD83C\uDDEB\uD83C\uDDF7" // 🇩🇪🇫🇷
+        assertEquals("a".repeat(110) + "\uD83C\uDDE9\uD83C\uDDEA.txt", clamp(110, flags))
+        val accented = "e\u0301\u0301" // é with two marks
+        assertEquals("a".repeat(114) + ".txt", clamp(114, accented))
+    }
+
+    @Test
+    fun `a name that is one long cluster is still cut, never emptied`() {
+        // A real name can't get here any more (marks are capped at three a
+        // letter), but a cut inside one cluster still keeps the surrogate rule
+        // only rather than cutting to nothing.
+        val oneCluster = "e" + "\u0301".repeat(300)
+        assertEquals(116, clusterSafeCut(oneCluster, 116))
+        val flag = "\uD83C\uDFF4" + "\uDB40\uDC67".repeat(100) // 🏴 with 100 tags
+        assertEquals(116, clusterSafeCut(flag, 117)) // mid-surrogate: back one
+    }
+
+    @Test
+    fun `a stack of combining marks is capped at three on one letter`() {
+        // ~100 marks on one letter (in the 120-char clamp) paint ink over the prompt's other rows.
+        val zalgo = "a" + "\u0301\u0300\u0302\u0303".repeat(25) + "b.pdf"
+        assertEquals("a\u0301\u0300\u0302b.pdf", sanitizeFileName(zalgo))
+        assertEquals("a\u0301\u0300\u0302b.pdf", downloadFileName(null, "https://x.com/" + java.net.URLEncoder.encode(zalgo, "UTF-8"), null))
+        // An enclosing mark counts too.
+        assertEquals("x\u20DD\u20DD\u20DD.txt", sanitizeFileName("x" + "\u20DD".repeat(50) + ".txt"))
+        // A kept joiner or tag draws nothing, so it doesn't start a new stack…
+        assertEquals("a\u0301\u0301\u200D\u0301.txt", sanitizeFileName("a\u0301\u0301\u200D\u0301\u0301\u0301.txt"))
+        // …but a replaced character does: it is a visible `_` now.
+        assertEquals("a\u0301\u0301\u0301_\u0301\u0301\u0301.txt", sanitizeFileName("a" + "\u0301".repeat(5) + "\u2065" + "\u0301".repeat(5) + ".txt"))
+        // Real text keeps every mark: Vietnamese, Hebrew points, a keycap emoji.
+        for (real in listOf("Ti\u00EA\u0301ng Vi\u00EA\u0323t.txt", "\u05E9\u05C1\u05B8\u05DC\u05D5\u05B9\u05DD.txt", "1\uFE0F\u20E3.png")) {
+            assertEquals(real, sanitizeFileName(real))
+        }
+        // Stored names are capped the same way, and cleaning is idempotent.
+        val once = cleanStoredFileName(zalgo)
+        assertEquals("a\u0301\u0300\u0302b.pdf", once)
+        assertEquals(once, cleanStoredFileName(once))
+    }
+
+    @Test
+    fun `unassigned default-ignorable code points are replaced`() {
+        // They draw nothing: "report<U+2065>.pdf" would look just like "report.pdf".
+        assertEquals("report_.pdf", sanitizeFileName("report\u2065.pdf"))
+        for (cp in listOf(0xFFF0, 0xFFF8, 0xE0000, 0xE0002, 0xE001F, 0xE0080, 0xE01F0, 0xE0FFF)) {
+            assertEquals("a_b.txt", sanitizeFileName("a" + String(Character.toChars(cp)) + "b.txt"))
+        }
+        // The supplementary variation selectors in the same block stay (ideographic variants).
+        val ivs = "\u845B" + String(Character.toChars(0xE0100)) + ".txt" // 葛 + VS17
+        assertEquals(ivs, sanitizeFileName(ivs))
+    }
+
+    @Test
+    fun `a stored name is cleaned of hidden characters and nothing else`() {
+        assertEquals("invoice_fdp.apk", cleanStoredFileName("invoice\u202Efdp.apk"))
+        // What a picker named stays as it was otherwise: leading dot, spaces.
+        assertEquals(".notes _x .txt", cleanStoredFileName(".notes \u200Bx .txt"))
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67.png"
+        assertEquals(family, cleanStoredFileName(family))
     }
 
     @Test

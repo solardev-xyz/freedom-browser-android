@@ -153,7 +153,7 @@ fun RadicleScreen(
                 }
             }
             if (radicle.enabled && radicle.grants.isNotEmpty()) {
-                item("sites") { RadicleSitesSection(radicle.grants, radicle.onRevoke) }
+                item("sites") { RadicleSitesSection(radicle.grants, info.did, radicle.onRevoke) }
             }
         }
     }
@@ -223,6 +223,12 @@ private fun RadicleStatusSection(
 @Composable
 private fun RadicleIdentitySection(info: RadicleInfo) {
     SectionCard(title = stringResource(R.string.radicle_section_identity)) {
+        // Where the identity comes from (#328): the wallet's recovery
+        // phrase — the same DID as on desktop — or the node's own key.
+        DetailRow(
+            stringResource(R.string.node_identity),
+            stringResource(if (info.walletIdentity) R.string.node_identity_wallet else R.string.node_identity_own),
+        )
         DetailRow(stringResource(R.string.radicle_identity_alias), info.alias)
         DetailRow(stringResource(R.string.radicle_identity_peers), info.connectedPeers.toString())
         StackedValue(stringResource(R.string.radicle_identity_did), info.did)
@@ -344,19 +350,27 @@ private fun RadicleReposSection(
 }
 
 /**
+ * Whether [grant] reads as "can sign" while the node runs as [did] (`""`
+ * while it isn't up): a grant only covers the identity it was given for
+ * (#328), so one for the other identity shows as connected only.
+ */
+internal fun canSign(grant: RadicleGrantStore.Grant, did: String): Boolean =
+    grant.signing && (did.isEmpty() || grant.signsAs(did))
+
+/**
  * Sites connected to `window.radicle` (#124), and what they may do. A
  * site can drop its own grant (`radicle_disconnect`); this is the user's
  * way to drop it for them.
  */
 @Composable
-private fun RadicleSitesSection(grants: List<RadicleGrantStore.Grant>, onRevoke: (String) -> Unit) {
+private fun RadicleSitesSection(grants: List<RadicleGrantStore.Grant>, did: String, onRevoke: (String) -> Unit) {
     SectionCard(title = stringResource(R.string.radicle_section_sites)) {
         grants.forEach { grant ->
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f).padding(vertical = 4.dp)) {
                     Text(permissionOriginDisplay(grant.origin), fontWeight = FontWeight.Medium)
                     Text(
-                        stringResource(if (grant.signing) R.string.radicle_site_can_sign else R.string.radicle_site_can_connect),
+                        stringResource(if (canSign(grant, did)) R.string.radicle_site_can_sign else R.string.radicle_site_can_connect),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

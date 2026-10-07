@@ -182,8 +182,8 @@ class PageZoom internal constructor(
     }
 
     /**
-     * Forget every remembered level (part of "Clear cookies & site
-     * data"): the file lists sites the user visited, so it goes with the
+     * Forget every remembered level (part of *Delete browsing data*'s
+     * *Cookies and site data*): the file lists sites the user visited, so it goes with the
      * rest of the browsing trail. Open tabs drop back to the default.
      */
     fun clearAll() {

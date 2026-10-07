@@ -19,6 +19,7 @@ import baby.freedom.swarm.SwarmNode
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.MalformedURLException
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.WeakHashMap
@@ -36,6 +37,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
@@ -139,6 +141,9 @@ object SwarmProviders {
     @Volatile
     private var subscriptions: SwarmSubscriptions? = null
 
+    /** The provider's post-sheet grant writes and [disconnect]'s revoke, one at a time (#349 R1-M3). */
+    private val grantGate = Mutex()
+
     /** Tab → the document its manifest checks ran for, and each origin's shared check (#122). */
     private val manifestChecks = HashMap<Long, Pair<Int, HashMap<String, ManifestCheck>>>()
 
@@ -212,6 +217,7 @@ object SwarmProviders {
             subscriptions = SwarmSubscriptions({ kind, key, onMessage ->
                 NodeSubscriptionSocket.open(SwarmNode.GATEWAY_URL, kind, key, onMessage)
             }).also { subscriptions = it },
+            grantGate = grantGate,
         )
         setUpWallet = { reason -> vault.requireUnlocked(reason) }
         manifests = SwarmManifests(
@@ -233,17 +239,22 @@ object SwarmProviders {
      */
     suspend fun disconnect(context: Context, origin: String): Boolean {
         val app = context.applicationContext
-        val feedsDropped = withContext(Dispatchers.IO) {
-            try {
-                SwarmFeedStore.get(app).revoke(origin)
-                true
-            } catch (e: IOException) {
-                false
-            } catch (e: IllegalStateException) {
-                false
+        // Under the gate: an Allow tapped on a sheet meanwhile either wrote
+        // its grants before this takes them, or finds the site disconnected.
+        val revoked = grantGate.withLock {
+            val feedsDropped = withContext(Dispatchers.IO) {
+                try {
+                    SwarmFeedStore.get(app).revoke(origin)
+                    true
+                } catch (e: IOException) {
+                    false
+                } catch (e: IllegalStateException) {
+                    false
+                }
             }
+            SwarmGrantStore.get(app).revoke(origin) && feedsDropped
         }
-        if (!SwarmGrantStore.get(app).revoke(origin) || !feedsDropped) return false
+        if (!revoked) return false
         // Live subscriptions don't outlive the grant.
         subscriptions?.cancelByOrigin(origin)
         // Manifest tracking goes with it: nothing the manifest granted is left to take back.
@@ -298,7 +309,7 @@ object SwarmProviders {
                     if (!grantStore.connect(origin)) throw IOException("couldn't save the connection")
                     emit(origin, "connect", JSONObject().put("origin", swarmOriginKey(origin)))
                 } else {
-                    if (!grantStore.revoke(origin)) throw IOException("couldn't save the disconnection")
+                    if (!grantGate.withLock { grantStore.revoke(origin) }) throw IOException("couldn't save the disconnection")
                     subscriptions?.cancelByOrigin(origin)
                     emit(origin, "disconnect", JSONObject().put("origin", swarmOriginKey(origin)))
                 }
@@ -386,7 +397,11 @@ object SwarmProviders {
             if (isMainFrame && origin != null) subscriptions?.confirm(origin, id)
             return
         }
-        val request = parseSwarmRequest(message.data) ?: return
+        val request = parseSwarmRequest(message.data) ?: run {
+            // Readable enough to answer: the page learns now, not after five minutes.
+            unparsedRequestId(message.data)?.let { answer(reply, it, unparsedSwarmRequestError(message.data)) }
+            return
+        }
         if (!isMainFrame || origin == null) {
             val why = if (!isMainFrame) "window.swarm is only available to the top-level page" else "Origin not permitted"
             answer(reply, request.id, SwarmProvider.Reply.Err(SwarmProvider.UNAUTHORIZED, why))
@@ -831,7 +846,15 @@ internal object GatewayHttp : SwarmProvider.Http {
         timeoutMs: Int,
     ): SwarmProvider.Http.Answer = requestAt(SwarmNode.GATEWAY_URL, method, path, headers, body, timeoutMs)
 
-    /** [request] against [base] (tests point it at a local server). */
+    /**
+     * [request] against [base] (tests point it at a local server), which
+     * manifest discovery also uses for the external Swarm endpoint — an
+     * onion one included. The connection is opened through
+     * [TorRouting.openConnection], so an onion [base] goes to the routed
+     * Tor proxy, or is refused with [TorRouting.RefusedException] before
+     * anything is dialed — its name is never looked up in DNS (#356).
+     * Redirects aren't followed, so no hop can bypass that.
+     */
     internal fun requestAt(
         base: String,
         method: String,
@@ -844,7 +867,8 @@ internal object GatewayHttp : SwarmProvider.Http {
         /** The most of the answer's body that is read: past it the call fails with [AnswerTooLarge]. */
         maxBytes: Int = MAX_ANSWER_BYTES,
     ): SwarmProvider.Http.Answer {
-        val conn = URL(base + path).openConnection() as HttpURLConnection
+        val conn = TorRouting.openConnection(URL(base + path)) as? HttpURLConnection
+            ?: throw IOException("not an http URL: $base")
         // RUNNING until either the answer is read to its end (DONE) or
         // the deadline passes first (EXPIRED) — whichever gets there
         // first decides, so an answer complete in time is never turned
@@ -964,8 +988,21 @@ internal suspend fun withinDeadline(timeoutMs: Long, work: (remainingMs: () -> L
  * reading — within [timeoutMs] for the whole call.
  */
 internal fun fetchManifest(url: String, timeoutMs: Int = MANIFEST_TIMEOUT_MS): ManifestDiscovery {
+    // An onion endpoint while an external Tor proxy is being re-checked
+    // waits for that verdict, within this call's deadline, as the
+    // interceptor holds a page's onion request — rather than being
+    // refused at once (#376 R1-F1).
+    val started = System.nanoTime()
+    val onion = try {
+        fetchMayReachOnion(URL(url))
+    } catch (e: MalformedURLException) {
+        return ManifestDiscovery.Unresolved(e.javaClass.simpleName)
+    }
+    if (onion) TorRouting.awaitOnionRoute(timeoutMs.toLong())
+    val left = timeoutMs - ((System.nanoTime() - started) / 1_000_000).toInt()
+    if (left <= 0) return ManifestDiscovery.Unresolved("timed out")
     val answer = try {
-        GatewayHttp.requestAt(url, "GET", "", emptyMap(), null, timeoutMs, maxBytes = SwarmManifestFormat.MAX_BYTES)
+        GatewayHttp.requestAt(url, "GET", "", emptyMap(), null, left, maxBytes = SwarmManifestFormat.MAX_BYTES)
     } catch (e: GatewayHttp.AnswerTooLarge) {
         return ManifestDiscovery.Invalid("manifest exceeds 8 KiB")
     } catch (e: IOException) {
@@ -1001,6 +1038,10 @@ internal data class SwarmRequest(val id: Long, val method: String, val params: J
 /** Parse `{"id": n, "method": "swarm_…", "params": {…}}`, or null if it isn't one. */
 internal fun parseSwarmRequest(data: String?): SwarmRequest? {
     if (data == null || data.length > MAX_SWARM_REQUEST_CHARS) return null
+    // Parsed on the main thread, before any origin or grant check: JSON
+    // whose parse costs far more memory than its length (a huge array of
+    // numbers, nested empty arrays) would take the whole browser down.
+    if (!jsonShapeWithin(data, MAX_SWARM_REQUEST_VALUES, MAX_SWARM_REQUEST_CONTAINERS)) return null
     val json = try {
         JSONObject(data)
     } catch (e: Exception) {
@@ -1038,6 +1079,108 @@ private val SUBSCRIPTION_ID = Regex("[0-9a-f]{32}")
 
 /** Bigger than any valid request: 50 MB of files, base64-encoded, and their paths. */
 private const val MAX_SWARM_REQUEST_CHARS = 72 * 1024 * 1024
+
+/**
+ * Values in one request, at most. A value parsed from a couple of
+ * characters costs a boxed object and a list slot, so a 72M-character
+ * array of numbers runs the app out of memory; bytes go as base64
+ * strings (the page script's encoding), and this still lets a
+ * `{"type":"Buffer"}` array carry a megabyte.
+ */
+internal const val MAX_SWARM_REQUEST_VALUES = 1_100_000
+
+/** Arrays and objects in one request, at most: a hundred files' worth, many times over. */
+internal const val MAX_SWARM_REQUEST_CONTAINERS = 10_000
+
+/**
+ * The answer to a request [parseSwarmRequest] refused: why, when it's
+ * the size of its parse (with the caps, so a page can tell it from a
+ * malformed one), or a plain "Invalid request".
+ */
+internal fun unparsedSwarmRequestError(data: String?): SwarmProvider.Reply.Err {
+    // Only a strict-JSON request over the counts is "too complex": one
+    // refused for lenient syntax, or that parses but isn't a request, is
+    // just malformed.
+    val tooComplex = data != null && data.length <= MAX_SWARM_REQUEST_CHARS &&
+        jsonShape(data, MAX_SWARM_REQUEST_VALUES, MAX_SWARM_REQUEST_CONTAINERS) == JsonShape.TOO_COMPLEX
+    if (!tooComplex) return SwarmProvider.Reply.Err(SwarmProvider.INVALID_PARAMS, "Invalid request")
+    return SwarmProvider.Reply.Err(
+        SwarmProvider.INVALID_PARAMS,
+        "Request has more than $MAX_SWARM_REQUEST_VALUES values or $MAX_SWARM_REQUEST_CONTAINERS arrays and objects; " +
+            "send bytes as a Uint8Array or ArrayBuffer",
+        JSONObject().put("reason", "request_too_complex")
+            .put("maxValues", MAX_SWARM_REQUEST_VALUES)
+            .put("maxContainers", MAX_SWARM_REQUEST_CONTAINERS),
+    )
+}
+
+/**
+ * Whether [data], read as JSON, has at most [maxValues] values (its
+ * commas outside strings, plus one) and [maxContainers] arrays and
+ * objects — counted in one pass, without building anything, so a
+ * request can be refused before its parse allocates.
+ *
+ * The page script's saved `JSON.stringify` is the only sender today, but
+ * the count mustn't depend on that: Android's org.json is lenient, and
+ * takes `;` as a separator, `'…'` strings, slash-star, `//` and `#`
+ * comments, and unquoted literals that may contain `"`. Each of those
+ * could hide separators from a count that only knows strict JSON, so
+ * anything outside strict JSON's string syntax is refused here: a `'`,
+ * `/`, `#` or `;` outside a string, and a `"` that doesn't open a string
+ * where one can begin (after `[`, `{`, `,`, `:` or at the start).
+ */
+internal fun jsonShapeWithin(data: String, maxValues: Int, maxContainers: Int): Boolean =
+    jsonShape(data, maxValues, maxContainers) == JsonShape.WITHIN
+
+/** What [jsonShape] found: within the counts, over them, or not strict JSON's syntax. */
+internal enum class JsonShape { WITHIN, TOO_COMPLEX, NOT_STRICT }
+
+/** [jsonShapeWithin]'s scan, telling a request over the counts from one in lenient syntax. */
+internal fun jsonShape(data: String, maxValues: Int, maxContainers: Int): JsonShape {
+    var values = 1
+    var containers = 0
+    var inString = false
+    var escaped = false
+    // The last character outside a string that wasn't whitespace.
+    var last = ' '
+    for (c in data) {
+        if (inString) {
+            when {
+                escaped -> escaped = false
+                c == '\\' -> escaped = true
+                c == '"' -> {
+                    inString = false
+                    last = '"'
+                }
+            }
+            continue
+        }
+        when (c) {
+            '"' -> {
+                if (last != ' ' && last != '[' && last != '{' && last != ',' && last != ':') return JsonShape.NOT_STRICT
+                inString = true
+            }
+            ',' -> if (++values > maxValues) return JsonShape.TOO_COMPLEX
+            '[', '{' -> if (++containers > maxContainers) return JsonShape.TOO_COMPLEX
+            '\'', '/', '#', ';' -> return JsonShape.NOT_STRICT
+        }
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') last = c
+    }
+    return JsonShape.WITHIN
+}
+
+/**
+ * The id of a request [parseSwarmRequest] (or [parseRadicleRequest])
+ * refused — the page script writes it first, `{"id":n,…` — so it can be
+ * answered with an error instead of leaving the page waiting for its
+ * own timeout. Null if there's no id to answer.
+ */
+internal fun unparsedRequestId(data: String?): Long? {
+    if (data == null) return null
+    return UNPARSED_ID.find(data.take(40))?.groupValues?.get(1)?.toLongOrNull()
+}
+
+private val UNPARSED_ID = Regex("""^\{"id":(\d{1,15})[,}]""")
 
 /**
  * The page side of [SwarmProviders]: `window.swarm` with `request()`, one
@@ -1080,12 +1223,27 @@ internal fun swarmProviderJs(channel: String): String {
     }
     return btoa(parts.join(''));
   }
+  // A Node Buffer's JSON form ({type:'Buffer', data:[bytes]}) goes as
+  // base64 too: as an array, a byte costs the app a parsed value, and a
+  // request's values are capped well below the publish limits.
+  function bufferBytes(v) {
+    if (v.type !== 'Buffer' || !isArray(v.data)) return null;
+    var d = v.data, n = d.length, out = new U8(n);
+    for (var i = 0; i < n; i++) {
+      var x = d[i];
+      if (typeof x !== 'number' || x !== (x | 0) || x < 0 || x > 255) return null;
+      out[i] = x;
+    }
+    return out;
+  }
   function encode(v, depth) {
     if (depth > 32) return null;
     if (typeof v === 'bigint') return { '${'$'}bigint': String(v) };
     if (v === null || typeof v !== 'object') return v;
     if (v instanceof AB) return { '${'$'}b64': b64(new U8(v)) };
     if (isView(v)) return { '${'$'}b64': b64(new U8(v.buffer, v.byteOffset, v.byteLength)) };
+    var buf = bufferBytes(v);
+    if (buf) return { '${'$'}b64': b64(buf) };
     if (isArray(v)) {
       var a = [];
       for (var i = 0; i < v.length; i++) a.push(encode(v[i], depth + 1));

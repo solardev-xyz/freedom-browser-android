@@ -45,8 +45,14 @@ import org.json.JSONObject
  * in the app language) and what to tell a site or a peer that asked for
  * it ([english]: developer-facing, never the user's language, #280).
  */
-class SendException private constructor(message: String, cause: Throwable?, val english: String) : Exception(message, cause) {
-    constructor(said: Said, cause: Throwable? = null) : this(said.text, cause, said.english)
+class SendException private constructor(
+    message: String,
+    cause: Throwable?,
+    val english: String,
+    /** The currency the account hasn't enough of (its symbol), when that's the reason; a site's sheet then offers Receive (#423). */
+    val shortOf: String? = null,
+) : Exception(message, cause) {
+    constructor(said: Said, cause: Throwable? = null, shortOf: String? = null) : this(said.text, cause, said.english, shortOf)
 
     companion object {
         /**
@@ -1188,10 +1194,11 @@ class WalletSender internal constructor(
             val fees = async { gas.fees(chainId) }
             val held = tokenBalance.await() ?: native.await()
             // A site's call may carry no value: the fee check below says what's missing then.
-            if (held.signum() == 0 && request.dapp == null) throw SendException(Strings.said(R.string.send_no_token, token.symbol))
+            if (held.signum() == 0 && request.dapp == null) throw SendException(Strings.said(R.string.send_no_token, token.symbol), shortOf = token.symbol)
             if (!all && request.amount > held) {
                 throw SendException(
                     Strings.said(R.string.send_not_enough_token, token.symbol, SendAmounts.exact(held, token.decimals)),
+                    shortOf = token.symbol,
                 )
             }
             // Max: all of a token; all of the native currency is priced first, then less the fee.
@@ -1224,13 +1231,13 @@ class WalletSender internal constructor(
             val has = SendAmounts.exact(nativeBalance, request.chain.decimals)
             if (all && token.isNative) {
                 val rest = nativeBalance - maxFee
-                if (rest.signum() <= 0) throw SendException(Strings.said(R.string.send_not_enough_for_fee_all, symbol, fee, has))
+                if (rest.signum() <= 0) throw SendException(Strings.said(R.string.send_not_enough_for_fee_all, symbol, fee, has), shortOf = symbol)
                 sending = sending.copy(amount = rest)
                 tx = tx.copy(value = rest)
             }
             if (maxFee + tx.value > nativeBalance) {
                 val what = if (token.isNative && tx.value.signum() > 0) R.string.send_not_enough_for_amount_and_fee else R.string.send_not_enough_for_fee
-                throw SendException(Strings.said(what, symbol, fee, has))
+                throw SendException(Strings.said(what, symbol, fee, has), shortOf = symbol)
             }
             SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash, sendsBefore, all, l1Fee)
         }
@@ -1831,7 +1838,8 @@ class WalletSender internal constructor(
                 e.insufficientFunds -> Strings.said(R.string.send_estimate_insufficient, symbol)
                 e.data != null || e.code == ChainRpcException.EXECUTION_REVERTED || REVERTED.containsMatchIn(e.rpcMessage) -> {
                     val reason = e.data?.let(::revertReason) ?: REVERTED.find(e.rpcMessage)?.let { e.rpcMessage.substring(it.range.last + 1).trim(' ', ':') }
-                    val why = reason?.takeIf { it.isNotBlank() }?.let(::clip)
+                    // Judged after clipping: a reason made only of hidden characters is no reason (#431 R4-M2).
+                    val why = reason?.let(::clip)?.takeIf { it.isNotBlank() }
                     when {
                         request.dapp != null -> why?.let { Strings.said(R.string.send_estimate_contract_refuses_reason, it) }
                             ?: Strings.said(R.string.send_estimate_contract_refuses)
@@ -1914,10 +1922,35 @@ class WalletSender internal constructor(
             }.getOrNull()
         }
 
-        /** A node's or contract's words, for one line of the page: no control or bidi characters, at most 160 characters. */
+        /**
+         * A node's or contract's words — untrusted, and quoted on the
+         * wallet's own can't-send sheet as well as to the page — as one
+         * line: every line break, line/paragraph separator (U+2028/U+2029)
+         * or other space run becomes a single space, so the text can't
+         * start a line of its own that reads like the wallet's copy; every
+         * code point [MessageSigning.hides] (controls, bidi and other
+         * format characters, blank and supplementary-plane invisibles,
+         * stacked marks) is dropped. Judged per code point, never per
+         * UTF-16 `Char`, and cut at 160 code points without splitting a
+         * surrogate pair (#431 R3-M1).
+         */
         internal fun clip(text: String): String {
-            val clean = text.filter { !it.isISOControl() && Character.getType(it) != Character.FORMAT.toInt() }.trim()
-            return if (clean.length > 160) clean.take(159) + "…" else clean
+            val out = StringBuilder()
+            // Judged on what's kept: a dropped code point doesn't end a mark run (#431 R4-M1).
+            val scan = MessageSigning.Scan(dropsHidden = true)
+            var space = false
+            text.codePoints().forEach { cp ->
+                if (Character.isWhitespace(cp) || Character.isSpaceChar(cp) || cp == 0x85) {
+                    scan.hides(' '.code)
+                    space = out.isNotEmpty()
+                } else if (!scan.hides(cp)) {
+                    if (space) out.append(' ')
+                    space = false
+                    out.appendCodePoint(cp)
+                }
+            }
+            if (out.codePointCount(0, out.length) <= 160) return out.toString()
+            return out.substring(0, out.offsetByCodePoints(0, 159)) + "…"
         }
 
         private val REVERTED = Regex("execution reverted", RegexOption.IGNORE_CASE)

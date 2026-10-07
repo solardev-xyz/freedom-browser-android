@@ -78,6 +78,13 @@ class SwarmProvider(
     private val clock: () -> Long = System::currentTimeMillis,
     private val io: CoroutineDispatcher = Dispatchers.IO,
     private val subscriptions: SwarmSubscriptions = SwarmSubscriptions({ _, _, _ -> NO_SOCKET }),
+    /**
+     * Held by every grant write that follows a sheet, and by the app's
+     * disconnect ([SwarmProviders.disconnect]) while it revokes: a
+     * disconnect can't land between [stillConnected]'s check and the
+     * feed access or "always allow" it lets through.
+     */
+    private val grantGate: Mutex = Mutex(),
 ) {
     /** Connection and auto-approve grants: [baby.freedom.mobile.data.SwarmGrantStore] in the app. */
     interface Grants {
@@ -342,9 +349,22 @@ class SwarmProvider(
         if (data == null || data == JSONObject.NULL) fail("data is required")
         val contentType = params.opt("contentType") as? String
         if (contentType.isNullOrEmpty()) fail("contentType is required", "missing_content_type")
+        // It goes to the node as a header: one the HTTP stack would refuse
+        // (a line break, a non-ASCII character) fails here, before the
+        // user is asked, not after they allowed it.
+        if (contentType.length > MAX_CONTENT_TYPE_CHARS || contentType.any { it !in ' '..'~' }) {
+            fail("contentType must be at most $MAX_CONTENT_TYPE_CHARS printable ASCII characters", "invalid_content_type")
+        }
         val payload = payloadOf(data) ?: fail("data must be a string, Uint8Array, or ArrayBuffer")
         if (payload.size > MAX_DATA_BYTES) tooLarge("Payload exceeds maximum size of $MAX_DATA_BYTES bytes", MAX_DATA_BYTES, payload.size)
         val name = (params.opt("name") as? String)?.takeIf { it.isNotEmpty() }
+        // The sheet shows it in one row, every hiding code point written
+        // out as `<U+XXXX>`: an uncapped name (a request may carry
+        // millions of characters) would be laid out on the main thread
+        // when the sheet comes up. A file name needs no more than this.
+        if (name != null && name.toByteArray(Charsets.UTF_8).size > MAX_NAME_BYTES) {
+            fail("name exceeds $MAX_NAME_BYTES UTF-8 bytes", "invalid_name")
+        }
         preflightOrFail()
         approvePublish(origin, calls, SwarmAsk.Publish(origin, SwarmAsk.Publish.Kind.Data, payload.size.toLong(), contentType, name, emptyList()))
         val batch = batchFor(payload.size.toLong())
@@ -444,7 +464,9 @@ class SwarmProvider(
         if (!grants.autoApprove(origin, AutoApprove.Publish)) {
             val answer = calls.ask(what)
             if (!answer.allowed) throw Invalid(rejected())
-            if (answer.always) grants.setAutoApprove(origin, AutoApprove.Publish)
+            whileConnected(origin) {
+                if (answer.always) grants.setAutoApprove(origin, AutoApprove.Publish)
+            }
         }
         calls.committed()
     }
@@ -492,8 +514,11 @@ class SwarmProvider(
             if (answer.ownerGone) return feedOwnerGone(signed.feed?.name ?: signed.feedName.orEmpty())
             if (!answer.allowed) return rejected()
             if (needsWallet && !publishers.walletExists()) return rejected()
-            if (!feeds.granted(origin)) saving("the site's feed access") { feeds.grant(origin) }
-            if (answer.always) grants.setAutoApprove(origin, kind)
+            // Before feed access is given back to a site the user has disconnected since.
+            whileConnected(origin) {
+                if (!feeds.granted(origin)) saving("the site's feed access") { feeds.grant(origin) }
+                if (answer.always) grants.setAutoApprove(origin, kind)
+            }
             // The user's own yes counts as wallet activity (#236).
             publishers.noteActivity()
         }
@@ -794,7 +819,9 @@ class SwarmProvider(
         } else if (what.send != null && !grants.autoApprove(origin, AutoApprove.Messaging)) {
             val answer = calls.ask(what)
             if (!answer.allowed) throw Invalid(rejected())
-            if (answer.always) grants.setAutoApprove(origin, AutoApprove.Messaging)
+            whileConnected(origin) {
+                if (answer.always) grants.setAutoApprove(origin, AutoApprove.Messaging)
+            }
         }
         calls.committed()
     }
@@ -1270,6 +1297,26 @@ class SwarmProvider(
 
     private fun notConnected() = notAuthorized("not_connected")
 
+    /**
+     * After a sheet: [origin] is still connected. The user may have
+     * disconnected it (the wallet page) while its sheet was up; an Allow
+     * tapped after that neither carries the request out nor gives the
+     * site back the feed access or "always allow" the disconnect took.
+     */
+    private suspend fun stillConnected(origin: String) {
+        if (!grants.connected(origin)) throw Invalid(notConnected())
+    }
+
+    /**
+     * [stillConnected], and [write] (the grants the Allow gives) with no
+     * disconnect able to land in between: both run under [grantGate],
+     * which the disconnect holds while it revokes.
+     */
+    private suspend fun whileConnected(origin: String, write: suspend () -> Unit) = grantGate.withLock {
+        stillConnected(origin)
+        write()
+    }
+
     private fun notAuthorized(reason: String) =
         Reply.Err(UNAUTHORIZED, "The origin is not authorized for this operation", reason(reason))
 
@@ -1291,6 +1338,10 @@ class SwarmProvider(
         const val INTERNAL = -32603
 
         const val MAX_DATA_BYTES = 10 * 1024 * 1024
+        const val MAX_CONTENT_TYPE_CHARS = 256
+
+        /** A publishData `name`: a file name's usual 255-byte limit. */
+        const val MAX_NAME_BYTES = 255
         const val MAX_FILES_BYTES = 50 * 1024 * 1024
         const val MAX_FILE_COUNT = 100
         const val MAX_PATH_BYTES = 100

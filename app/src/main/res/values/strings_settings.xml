@@ -24,15 +24,15 @@
     <string name="settings_section_adblock">Ad blocking</string>
     <string name="settings_section_browsing">Browsing data</string>
     <string name="settings_section_permissions">Site permissions</string>
+    <string name="settings_section_downloads">Downloads</string>
     <string name="settings_section_nodes">Nodes</string>
     <string name="settings_section_tor">Tor</string>
     <string name="settings_section_about">About</string>
-    <string name="settings_section_other">Other</string>
     <string name="settings_section_ipfs">IPFS</string>
 
     <!-- SettingsScreen.kt: Chains (removing a chain or one of its RPCs) -->
-    <string name="settings_rpc_not_removed_last">Not removed: it\'s the last RPC names resolve through (Settings → RPC providers)</string>
-    <string name="settings_rpc_remove_failed">Couldn\'t remove the RPC. Try again.</string>
+    <string name="settings_rpc_not_removed_last">Add another RPC in Settings → Name resolution → RPC providers first: this is the last one names resolve through.</string>
+    <string name="settings_rpc_remove_failed">Try again: the RPC couldn\'t be removed.</string>
     <string name="settings_remove_chain_title">Remove %1$s?</string>
     <string name="settings_remove_chain_message">Removes chain %1$s and its RPC endpoints from this device. You can add it again later.</string>
     <string name="settings_remove_chain_failed_title">Couldn\'t remove %1$s</string>
@@ -81,7 +81,7 @@
     <string name="settings_tor_enabled">Tor for .onion sites</string>
     <string name="settings_tor_enabled_detail">Only .onion sites use Tor; every other site connects directly. While off, onion sites are refused.</string>
     <string name="settings_tor_on_launch">Start Tor at launch</string>
-    <string name="settings_tor_on_launch_subtitle">Otherwise start it on the Nodes page</string>
+    <string name="settings_tor_on_launch_subtitle">Otherwise start it on the Tor page, under Nodes &amp; networks in the menu</string>
     <string name="settings_tor_client">Tor client</string>
     <string name="settings_tor_client_embedded">Embedded (Arti)</string>
     <string name="settings_tor_client_external">External SOCKS proxy</string>
@@ -99,7 +99,11 @@
     <string name="settings_adblock_allowlist_empty">Sites you allow ads on — from the page menu, or with Add site — appear here. Blocking is off for them and their subdomains.</string>
     <string name="settings_adblock_add_site">Add site</string>
     <string name="settings_adblock_add_site_subtitle">Turn ad blocking off for a site</string>
-    <string name="settings_adblock_credits">Filter lists: EasyList, EasyPrivacy and Fanboy\'s lists (easylist.to), © their authors, used under CC BY-SA 3.0. Changes apply to pages as they next load.</string>
+    <string name="settings_adblock_credits">Filter lists: EasyList, EasyList Germany, EasyPrivacy and Fanboy\'s lists (easylist.to), © their authors, used under CC BY-SA 3.0; uBlock Origin\'s filters and scriptlets (github.com/uBlockOrigin), © Raymond Hill and contributors, used under GPL-3.0. Changes apply to pages as they next load.</string>
+    <!-- Under an enabled ad-blocking category: its lists' rules the engine runs (%1$s), of those scriptlets (%2$s), and the rules it can't run (%3$s). Numbers are formatted. -->
+    <string name="settings_adblock_category_counts">%1$s rules in use, %2$s of them scriptlets · %3$s can\'t run here</string>
+    <!-- The same, for lists with no scriptlet rules. -->
+    <string name="settings_adblock_category_counts_no_scriptlets">%1$s rules in use · %2$s can\'t run here</string>
     <string name="settings_adblock_auto_update">Keep filter lists up to date</string>
     <string name="settings_adblock_auto_update_subtitle">Signed updates over Swarm</string>
     <string name="settings_adblock_check_updates">Check for list updates</string>
@@ -157,27 +161,56 @@
     <string name="settings_adblock_allow_site_invalid">Not a site: e.g. example.com</string>
     <string name="settings_adblock_allow_site_helper">Its subdomains are included.</string>
 
-    <!-- SettingsScreen.kt: Browsing data -->
-    <string name="settings_clear_history">Clear history</string>
-    <string name="settings_clear_history_title">Clear history?</string>
-    <string name="settings_clear_history_message">Removes every entry from the browsing history on this device.</string>
-    <string name="settings_clear_bookmarks">Clear bookmarks</string>
-    <string name="settings_clear_bookmarks_title">Clear bookmarks?</string>
-    <string name="settings_clear_bookmarks_message">Removes every saved bookmark on this device.</string>
-    <string name="settings_clear_site_data">Clear cookies &amp; site data</string>
-    <string name="settings_clear_site_data_subtitle">Cookies, DOM storage, cache, form data, zoom levels, and desktop sites</string>
-    <string name="settings_clear_site_data_title">Clear cookies and site data?</string>
-    <string name="settings_clear_site_data_message">Signs you out of most sites and wipes cached page data, cookies, form autofill, remembered page zoom levels and desktop-site choices from every open tab, and the nodes\' recent logs. Unfinished downloads are cancelled.</string>
-    <string name="settings_clear_site_data_confirm">Clear site data</string>
-    <string name="settings_nothing_to_clear">Nothing to clear</string>
-    <plurals name="settings_history_visits">
-        <item quantity="one">%d visit</item>
-        <item quantity="other">%d visits</item>
+    <!-- SettingsScreen.kt: Browsing data (#400) -->
+    <string name="settings_delete_browsing_data">Delete browsing data</string>
+    <string name="settings_delete_browsing_data_subtitle">History, cookies and site data, cached images and files</string>
+    <!-- Comma-separated, not shown: more words Settings search finds the Delete browsing data row by. -->
+    <string name="settings_delete_browsing_data_keywords">clear, delete, wipe, erase, history, cookies, cache, cached, site data, DOM storage, local storage, form data, autofill, zoom levels, desktop sites, sign out</string>
+    <!-- Shown only in Settings search results: Delete all bookmarks moved out of Settings (#400). Tapping it opens the Bookmarks page. -->
+    <string name="settings_bookmarks_moved">Delete all bookmarks</string>
+    <string name="settings_bookmarks_moved_subtitle">Now on the Bookmarks page: open it and tap ⋮ at the top</string>
+    <!-- Comma-separated, not shown: more words Settings search finds the hint above by. -->
+    <string name="settings_bookmarks_moved_keywords">bookmarks, bookmark, saved pages, favorites, favourites</string>
+
+    <!-- DeleteBrowsingData.kt: the Delete browsing data page -->
+    <string name="delete_data_title">Delete browsing data</string>
+    <string name="delete_data_range">Time range</string>
+    <string name="delete_data_range_hour">Last hour</string>
+    <string name="delete_data_range_day">Last 24 hours</string>
+    <string name="delete_data_range_week">Last 7 days</string>
+    <string name="delete_data_range_four_weeks">Last 4 weeks</string>
+    <string name="delete_data_range_all">All time</string>
+    <string name="delete_data_history">Browsing history</string>
+    <plurals name="delete_data_history_count">
+        <item quantity="one">%d visit, plus closed tabs and tabs waiting to be restored</item>
+        <item quantity="other">%d visits, plus closed tabs and tabs waiting to be restored</item>
     </plurals>
-    <plurals name="settings_bookmarks_count">
-        <item quantity="one">%d bookmark</item>
-        <item quantity="other">%d bookmarks</item>
-    </plurals>
+    <string name="delete_data_history_none">No visits in this range, plus closed tabs and tabs waiting to be restored</string>
+    <string name="delete_data_cookies">Cookies and site data</string>
+    <string name="delete_data_cookies_subtitle">Signs you out of every site</string>
+    <string name="delete_data_cookies_detail">Also site storage, form autofill, remembered zoom levels, desktop-site choices, open tabs\' back and forward pages and the nodes\' recent logs. Unfinished downloads are cancelled.</string>
+    <string name="delete_data_cache">Cached images and files</string>
+    <string name="delete_data_cache_subtitle">Pages may load more slowly on your next visit</string>
+    <string name="delete_data_cache_detail">Also photos taken with the camera for a site\'s upload.</string>
+    <string name="delete_data_swarm_cache">Swarm node cache</string>
+    <string name="delete_data_swarm_cache_subtitle">Deleted for all time, whatever the range: the node can\'t delete it by date. Pinned and published content is kept.</string>
+    <string name="delete_data_swarm_cache_failed">Couldn\'t clear the Swarm node cache: %1$s</string>
+    <string name="delete_data_swarm_cache_off">Only while the Swarm node is running.</string>
+    <!-- Shown when a time range other than All time is picked with cookies and/or cache checked -->
+    <string name="delete_data_all_time_cookies">Cookies and site data are deleted for all time: Android\'s WebView can\'t delete them by date.</string>
+    <string name="delete_data_all_time_cache">Cached images and files are deleted for all time: Android\'s WebView can\'t delete them by date.</string>
+    <!-- Appended to the all-time note only when Browsing history is checked. -->
+    <string name="delete_data_all_time_history_range">Browsing history keeps to the range.</string>
+    <string name="delete_data_all_time_both">Cookies, site data and cached files are deleted for all time: Android\'s WebView can\'t delete them by date.</string>
+    <string name="delete_data_button">Delete data</string>
+    <string name="delete_data_confirm_title">Delete cookies and site data?</string>
+    <string name="delete_data_confirm_ranged">This signs you out of every site and deletes every site\'s stored data for all time, not only for the %1$s. It can\'t be undone.</string>
+    <string name="delete_data_confirm_all_time">This signs you out of every site and deletes every site\'s stored data. It can\'t be undone.</string>
+    <string name="delete_data_confirm_button">Delete</string>
+    <string name="delete_data_nothing_selected">Pick at least one kind of data to delete.</string>
+    <!-- Toast after Delete data: short, as Android cuts a toast at two lines -->
+    <string name="delete_data_done">Browsing data deleted</string>
+    <string name="delete_data_done_history">Browsing history deleted</string>
 
     <!-- SettingsScreen.kt: Site permissions -->
     <string name="settings_permissions_empty">Sites you allow or block from using your camera, microphone or location, from sending system-exclusive messages to your MIDI devices, or from opening links in other apps, and sites you connect your wallet to, appear here.</string>
@@ -194,6 +227,25 @@
     <string name="settings_about_blurb">Loads regular https:// sites plus decentralised content via bzz:// hashes and ENS names (vitalik.eth), served through embedded nodes.</string>
     <string name="settings_version">Version</string>
     <string name="settings_package">Package</string>
+    <!-- SettingsScreen.kt, LicencesPage.kt: Open-source licences (#325) -->
+    <string name="settings_licences">Open-source licences</string>
+    <string name="settings_licences_subtitle">The software and data Freedom is built from, and their licences</string>
+    <!-- Comma-separated words that also find the Open-source licences row in Settings search. -->
+    <string name="settings_licences_keywords">licenses, license, open source, third-party, notices, copyright, credits</string>
+    <string name="licences_title">Open-source licences</string>
+    <string name="licences_search_placeholder">Search components</string>
+    <string name="licences_search_clear">Clear search</string>
+    <string name="licences_intro">Everything below ships inside Freedom. Tap one to read its licence. Web pages are drawn by Android System WebView, which is part of the phone, not of Freedom.</string>
+    <string name="licences_section_android">Android libraries</string>
+    <string name="licences_section_native">Native libraries</string>
+    <string name="licences_section_data">Scripts and filter lists</string>
+    <!-- A section heading with how many components it lists: "Android libraries (119)". -->
+    <string name="licences_section_count">%1$s (%2$d)</string>
+    <string name="licences_no_match">No components match “%1$s”</string>
+    <string name="licences_failed">The licence list couldn’t be read from this build.</string>
+    <string name="licences_detail_id">Package</string>
+    <string name="licences_detail_licence">Licence</string>
+    <string name="licences_detail_source">Source</string>
     <string name="settings_updates_check">Check for updates</string>
     <string name="settings_updates_check_subtitle">Once a day, from GitHub Releases</string>
     <string name="settings_updates_check_now">Check now</string>
@@ -217,9 +269,7 @@
     <string name="settings_updates_last_checked_alone">Last checked %1$s</string>
     <string name="settings_updates_not_checked">Not checked yet</string>
 
-    <!-- SettingsScreen.kt: Other and IPFS -->
-    <string name="settings_advanced">Show advanced options</string>
-    <string name="settings_advanced_subtitle">Experimental protocol settings</string>
+    <!-- SettingsScreen.kt: IPFS (Settings → Nodes & networks) -->
     <string name="settings_routing_mode">Routing mode</string>
     <string name="settings_routing_mode_subtitle">Content discovery strategy</string>
     <string name="settings_routing_mode_helper">Routing mode applies the next time IPFS starts — toggle IPFS off and on to re-init.</string>
@@ -227,9 +277,7 @@
     <string name="settings_ipfs_gateway_label">Gateway</string>
     <string name="settings_ipfs_client">Client</string>
     <string name="settings_ipfs_error">Error</string>
-    <string name="settings_ipfs_connected">Connected</string>
     <string name="settings_ipfs_connecting">Connecting…</string>
-    <string name="settings_ipfs_disconnected">Disconnected</string>
 
     <!-- SearchEngines.kt -->
     <string name="settings_search_engine_custom">Custom</string>
@@ -263,6 +311,7 @@
 
     <!-- Adblock.kt: filter-list categories -->
     <string name="settings_adblock_block_ads">Block ads</string>
+    <string name="settings_adblock_block_german">Block ads on German-language sites</string>
     <string name="settings_adblock_block_trackers">Block trackers</string>
     <string name="settings_adblock_block_cookie_notices">Block cookie notices</string>
     <string name="settings_adblock_block_annoyances">Block other annoyances</string>
@@ -302,4 +351,54 @@
 
     <!-- PageZoom.kt. %1$s: the level, already formatted as a number. -->
     <string name="settings_zoom_level">%1$s%%</string>
+
+    <!-- Settings → Downloads (#322) -->
+    <string name="settings_downloads_ask_where">Ask where to save each file</string>
+    <string name="settings_downloads_ask_where_subtitle_off">Downloads are saved to Download/Freedom</string>
+    <string name="settings_downloads_ask_where_subtitle_on">Choose a name and folder for each download when you confirm it</string>
+    <string name="settings_downloads_ask_where_private">Private tabs always save to Download/Freedom.</string>
+    <string name="settings_downloads_ask_where_keywords">save as, folder, location, download folder</string>
+
+    <!-- SettingsPages.kt: the top level of Settings and its sub-pages (#400). Group titles over the top-level rows. -->
+    <string name="settings_group_general">General</string>
+    <string name="settings_group_privacy">Privacy</string>
+    <string name="settings_group_web3">Web3</string>
+    <string name="settings_group_about">About</string>
+    <!-- Sub-page titles, also the headings search results are grouped under. -->
+    <string name="settings_page_privacy">Privacy &amp; security</string>
+    <string name="settings_page_wallet">Wallet &amp; chains</string>
+    <string name="settings_page_nodes">Nodes &amp; networks</string>
+    <string name="settings_page_about">About Freedom</string>
+    <!-- TalkBack's action on a search-results heading that opens its sub-page. -->
+    <string name="settings_page_open">Open %1$s</string>
+    <!-- One-line summaries under the top-level rows. -->
+    <string name="settings_page_downloads_off">Saved to Download/Freedom</string>
+    <string name="settings_page_downloads_on">Asks where to save each file</string>
+    <string name="settings_page_privacy_no_permissions">No site permissions</string>
+    <plurals name="settings_page_privacy_permissions">
+        <item quantity="one">%d site permission</item>
+        <item quantity="other">%d site permissions</item>
+    </plurals>
+    <string name="settings_page_privacy_tor_on">Tor on</string>
+    <string name="settings_page_privacy_tor_off">Tor off</string>
+    <string name="settings_page_adblock_off">Off</string>
+    <!-- %1$d of %2$d filter-list categories (Block ads, Block trackers, …) are on. -->
+    <string name="settings_page_adblock_on">%1$d of %2$d blocklists on</string>
+    <plurals name="settings_page_adblock_allowed">
+        <item quantity="one">%d site allowed</item>
+        <item quantity="other">%d sites allowed</item>
+    </plurals>
+    <plurals name="settings_page_wallet_chains">
+        <item quantity="one">%d chain</item>
+        <item quantity="other">%d chains</item>
+    </plurals>
+    <string name="settings_page_names_colibri_on">Colibri proofs on</string>
+    <string name="settings_page_names_colibri_off">Colibri proofs off</string>
+    <!-- %1$s and %2$s: settings_page_nodes_embedded or settings_external; %3$s: the Radicle node's state. -->
+    <string name="settings_page_nodes_summary">Swarm: %1$s · IPFS: %2$s · Radicle: %3$s</string>
+    <string name="settings_page_nodes_embedded">embedded</string>
+    <string name="settings_page_nodes_external">external</string>
+    <!-- Settings → Nodes & networks: the row that opens the Nodes &amp; networks overview. -->
+    <string name="settings_nodes_page">Node status</string>
+    <string name="settings_nodes_page_subtitle">Start and stop the nodes and see how they\'re doing</string>
 </resources>

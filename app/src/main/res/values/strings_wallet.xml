@@ -59,6 +59,7 @@
     <string name="wallet_account_default_name">Account %1$d</string>
     <!-- %1$d: the Ledger account's number, from 1 -->
     <string name="wallet_account_default_ledger_name">Ledger %1$d</string>
+    <string name="wallet_account_name_control_chars">A name can’t have line breaks or invisible formatting characters.</string>
     <string name="wallet_account_too_many">this wallet has as many accounts as it can hold</string>
 
     <!-- WalletScreen.kt -->
@@ -142,6 +143,7 @@
     <!-- What was being done, for "Couldn’t …" (wallet_error_couldnt_*). -->
     <string name="wallet_action_show_phrase">show the recovery phrase</string>
     <string name="wallet_action_show_key">show the private key</string>
+    <string name="wallet_action_save_backup_check">save your backup check</string>
     <string name="wallet_action_import">import the wallet</string>
     <string name="wallet_action_restore">restore the wallet</string>
     <string name="wallet_action_create">create the wallet</string>
@@ -153,18 +155,16 @@
     <string name="wallet_action_find_accounts">find your accounts</string>
     <string name="wallet_action_switch_account">switch account</string>
     <string name="wallet_action_add_account">add an account</string>
+    <string name="wallet_action_rename_account">rename the account</string>
     <string name="wallet_action_remove_ledger_account">remove the Ledger account</string>
     <string name="wallet_action_remove">remove the wallet</string>
     <string name="wallet_error_remove_ledger_sites">Couldn’t remove the Ledger account: the sites connected to it couldn’t be disconnected. Try again.</string>
     <!-- The wallet page. -->
     <string name="wallet_needed_title">Wallet needed</string>
     <string name="wallet_restore_no_screen_lock">Restoring asks for your fingerprint, face or screen lock, and this phone has none. Set a PIN, pattern or password first.</string>
-    <string name="wallet_scan_section">Scan</string>
-    <string name="wallet_scan_subtitle">An address, a payment request, a pairing code or a Safe request</string>
     <string name="wallet_phrase_section">Recovery phrase</string>
     <string name="wallet_phrase_asks">Asks for your fingerprint, face or PIN each time</string>
     <string name="wallet_phrase_opens_without_asking">Opens without asking: no screen lock</string>
-    <string name="wallet_no_screen_lock_section">No screen lock</string>
     <string name="wallet_no_screen_lock_detail">This wallet was made when the phone had no screen lock, so nothing asks who you are before it opens: anyone holding the phone can use it. To protect it, write down its recovery phrase and set a screen lock, then remove the wallet and import the phrase again.</string>
     <string name="wallet_publishing_section">Publishing</string>
     <string name="wallet_remove_section">Remove</string>
@@ -174,14 +174,8 @@
     <string name="wallet_removed_backup_not_deleted">The wallet is removed, but its Google backup couldn’t be deleted (%s). Delete it below once Google Play services answers.</string>
     <string name="wallet_removed_kept_other_wallets">The wallet is removed. The Google backup on this phone is another wallet’s, so it was kept: restore or delete it below.</string>
     <string name="wallet_removed_kept_unknown">The wallet is removed. Freedom couldn’t tell whether the Google backup on this phone is this wallet’s, so it was kept: restore or delete it below.</string>
-    <string name="wallet_setup_title">Set up your wallet</string>
-    <string name="wallet_setup_intro">Your wallet is your identity for dApps, publishing and payments: a 24-word recovery phrase, encrypted on this phone. You don’t need one to browse.</string>
-    <!-- %s: the name of the button that shows the phrase (wallet_show_phrase). -->
-    <string name="wallet_setup_write_down">It stays on this phone only unless you turn on Google backup. Once it’s made, write down its recovery phrase (%s): without it, the wallet can’t be restored if the phone is lost, broken or reset.</string>
     <string name="wallet_setup_no_screen_lock">This phone has no screen lock. You can still make a wallet, but nothing will ask who you are before it opens: anyone holding the phone can use it. Set a PIN, pattern or password first to protect it with your fingerprint, face or screen lock.</string>
     <string name="wallet_creating">Creating…</string>
-    <string name="wallet_create">Create wallet</string>
-    <string name="wallet_import_phrase_button">Import recovery phrase</string>
     <string name="wallet_locked_detail">Unlock with your fingerprint, face or screen lock</string>
     <string name="wallet_locked_detail_no_screen_lock">Unlocks without asking — this phone has no screen lock</string>
     <string name="wallet_unlocked_detail">Locks after 15 minutes without wallet activity, 1 minute after you leave the app, and whenever the app restarts</string>
@@ -191,11 +185,8 @@
     <string name="wallet_detail_key_kept_in">Key kept in</string>
     <string name="wallet_detail_key_strongbox">StrongBox secure chip</string>
     <string name="wallet_detail_key_keystore">Android Keystore</string>
-    <string name="wallet_detail_backup">Backup</string>
     <string name="wallet_unlocking">Unlocking…</string>
     <string name="wallet_unlock">Unlock</string>
-    <string name="wallet_lock_now">Lock now</string>
-    <string name="wallet_back_up_now">Back up now</string>
     <string name="wallet_screen_lock_settings">Screen lock settings</string>
     <string name="wallet_import_title">Import wallet</string>
     <string name="wallet_import_intro">Type or paste the words, separated by spaces. They’re encrypted on this phone only and never sent anywhere. A phrase pasted in, or copied out of this field, is taken off the clipboard when you tap Import wallet or leave this page.</string>
@@ -268,30 +259,98 @@
     <string name="wallet_accounts_balance_read_failed">Couldn’t read: %1$s</string>
     <string name="wallet_accounts_account_title">Account</string>
     <string name="wallet_accounts_show_qr">Show QR code</string>
-    <string name="wallet_accounts_switch">Switch account</string>
     <string name="wallet_accounts_working">Working…</string>
-    <string name="wallet_accounts_unlock_to_add">Unlock to add an account</string>
     <string name="wallet_accounts_add">Add account</string>
     <string name="wallet_accounts_connect_ledger">Connect a Ledger</string>
     <string name="wallet_accounts_locked_unlock">Unlock the wallet to see its accounts and their balances.</string>
     <string name="wallet_accounts_locked_failed">Couldn’t set up this wallet’s accounts. The phone may be out of storage.</string>
     <string name="wallet_accounts_locked_finding">Finding your accounts…</string>
-    <string name="wallet_accounts_balances_title">Balances</string>
     <string name="wallet_accounts_balances_reading">Reading from the chains…</string>
-    <string name="wallet_accounts_balances_source">Read through each chain’s light client, Colibri proofs or RPCs; each amount says which</string>
-    <string name="wallet_accounts_refresh">Refresh</string>
+
+    <!-- WalletAccountsUi.kt: the wallet home (W1, W6, W7) -->
+    <string name="wallet_home_send">Send</string>
+    <string name="wallet_home_receive">Receive</string>
+    <string name="wallet_home_scan">Scan</string>
+    <!-- TalkBack's "double-tap to …" for the account chip -->
+    <string name="wallet_home_chip_action">switch or manage accounts</string>
+    <!-- %1$s: a network's name, e.g. Gnosis -->
+    <string name="wallet_home_on_chain">on %1$s</string>
+    <plurals name="wallet_home_more_assets">
+        <item quantity="one">%d more asset</item>
+        <item quantity="other">%d more assets</item>
+    </plurals>
+    <string name="wallet_home_not_updated">not updated</string>
+    <string name="wallet_home_unverified">unverified · one RPC’s word</string>
+    <string name="wallet_home_no_funds">No funds yet</string>
+    <string name="wallet_home_no_funds_detail">Share your address to receive money or tokens on Ethereum or Gnosis.</string>
+    <string name="wallet_home_some_unread">Couldn’t read every balance</string>
+    <string name="wallet_home_activity">Activity</string>
+    <string name="wallet_assets_title">Assets</string>
+    <plurals name="wallet_assets_no_balance">
+        <item quantity="one">%d token with no balance</item>
+        <item quantity="other">%d tokens with no balance</item>
+    </plurals>
+    <!-- %1$s: the token's name, %2$s: its network, e.g. "Swarm Token · Gnosis" -->
+    <string name="wallet_assets_token_on_chain">%1$s · %2$s</string>
+    <string name="wallet_assets_refresh">Refresh balances</string>
+    <!-- TalkBack's "double-tap to …" for a balance row -->
+    <string name="wallet_assets_trust_action">see how it was checked</string>
+    <!-- %1$s: a token symbol, %2$s: its network -->
+    <string name="wallet_assets_trust_title">%1$s on %2$s</string>
+    <string name="wallet_assets_trust_explain">Freedom reads each balance with a proof checked on this device, from the chain’s P2P light client or the Colibri prover, when one can answer; otherwise through several RPC servers, comparing their answers. Verified means the answer was proven, or the servers agreed; Unverified means only one server answered, so the figure is that server’s word. Pull down to read again.</string>
+    <string name="wallet_lock_now_cd">Wallet unlocked. Lock it now</string>
+    <string name="wallet_unlock_cd">Wallet locked. Unlock it</string>
+    <string name="wallet_settings_title">Wallet settings</string>
+    <string name="wallet_settings_security">Security</string>
+    <string name="wallet_settings_lock_icon_hint">The lock at the top of the wallet locks it now</string>
+    <string name="wallet_settings_auto_lock">Locks by itself</string>
+    <string name="wallet_settings_backup">Backup</string>
+    <string name="wallet_settings_kept_on">Kept on</string>
+    <string name="wallet_settings_backup_row">Recovery phrase and Google backup</string>
+    <string name="wallet_settings_backup_checked">Recovery phrase written down and checked</string>
+    <!-- %1$s: Google backup's short status, e.g. "Off" -->
+    <string name="wallet_settings_google_line">Google backup: %1$s</string>
+    <string name="wallet_settings_sites">Connected sites</string>
+    <string name="wallet_settings_no_sites">No sites are connected to this wallet.</string>
+    <string name="wallet_accounts_sheet_title">Accounts</string>
+    <string name="wallet_accounts_add_subtitle">The next account from your recovery phrase</string>
+    <string name="wallet_accounts_add_subtitle_locked">The next account from your recovery phrase · asks to unlock</string>
+    <string name="wallet_accounts_connect_ledger_subtitle">Use an account whose key stays on a Ledger</string>
+    <string name="wallet_accounts_balance_not_read_yet">Balance not read yet</string>
+    <!-- %1$s: the account's name -->
+    <string name="wallet_accounts_details_of">Details of %1$s</string>
+    <!-- %1$s: the account's name, after it was added -->
+    <string name="wallet_accounts_added">%1$s added</string>
+    <string name="wallet_accounts_details_title">Account details</string>
+    <string name="wallet_accounts_name_section">Name</string>
+    <string name="wallet_accounts_in_use">The account the wallet uses now</string>
+    <string name="wallet_accounts_use">Use this account</string>
+    <string name="wallet_accounts_rename">Rename</string>
+    <string name="wallet_accounts_rename_title">Rename account</string>
+    <string name="wallet_accounts_name_label">Name</string>
+    <string name="wallet_accounts_name_hint">Only on this phone. Leave it empty for the default name.</string>
+    <!-- Under the rename field once a longer paste was cut; %1$d is the most a name can hold (64). -->
+    <string name="wallet_accounts_name_cut">A name holds at most %1$d characters, so the rest was left out.</string>
+    <string name="wallet_accounts_address_section">Address</string>
+    <string name="wallet_accounts_advanced">Advanced</string>
+    <string name="wallet_accounts_remove_ledger">Remove from wallet</string>
+    <string name="wallet_accounts_remove_ledger_subtitle">The key stays on the Ledger; you can add it again</string>
+    <string name="wallet_key_export">Export private key…</string>
+    <string name="wallet_key_export_warning">Anyone with it can take this account’s funds</string>
 
     <!-- WalletBackupUi.kt -->
     <string name="wallet_backup_google_title">Google backup</string>
-    <string name="wallet_backup_e2ee_note">Google encrypts the backup on this phone with a key protected by your screen lock, so Google can’t read it. Restoring it on a new phone asks for this phone’s PIN, pattern or password while you set that phone up. Without a screen lock (or a Google account) there’s no encryption, so no backup. It goes to your Google account with this phone’s own Google backup, so that must be on in Android settings; Freedom can’t check it, so write your recovery phrase down too.</string>
-    <string name="wallet_backup_status_on_cloud">On · end-to-end encrypted, for your Google account backup (if this phone’s Google backup is on)</string>
-    <string name="wallet_backup_status_on_paused">On, paused · this phone can’t end-to-end encrypt it now (no screen lock or no Google account), so it’s kept on this phone only until it can</string>
-    <string name="wallet_backup_status_on_missing">On, but the backup is missing from Google Play services · turn it off and on again to back up</string>
-    <string name="wallet_backup_status_on_no_answer">On · Google Play services isn’t answering right now</string>
-    <string name="wallet_backup_status_off_ready">Off · back up the recovery phrase to your Google account, end-to-end encrypted</string>
-    <string name="wallet_backup_status_unavailable_not_encrypted">Unavailable · needs a screen lock and a Google account on this phone</string>
-    <string name="wallet_backup_status_unavailable_unsupported">Unavailable · needs Google Play services, which this phone doesn’t have</string>
-    <string name="wallet_backup_status_unavailable_no_answer">Unavailable · Google Play services isn’t answering right now</string>
+    <string name="wallet_backup_e2ee_note">Google encrypts the backup on this phone with a key protected by your screen lock, so Google can’t read it. Restoring it on a new phone asks for this phone’s PIN, pattern or password while you set that phone up. Without a screen lock (or a Google account) there’s no encryption, so the backup pauses and stays on this phone only until it can be encrypted again. It goes to your Google account with this phone’s own Google backup, so that must be on in Android settings; Freedom can’t check it, so write your recovery phrase down too.</string>
+    <string name="wallet_backup_status_on_cloud">On, if Android’s backup is on</string>
+    <string name="wallet_backup_status_on_paused">Paused – set a screen lock</string>
+    <string name="wallet_backup_status_on_missing">Missing – turn it off and on</string>
+    <string name="wallet_backup_status_on_no_answer">On – Play services not answering</string>
+    <string name="wallet_backup_status_off_ready">Off</string>
+    <string name="wallet_backup_status_unavailable_not_encrypted">Unavailable – set a screen lock</string>
+    <string name="wallet_backup_status_unavailable_unsupported">Unavailable – no Google Play services</string>
+    <string name="wallet_backup_status_unavailable_no_answer">Unavailable – Play services not answering</string>
+    <string name="wallet_backup_status_on_paused_account">Paused – add a Google account</string>
+    <string name="wallet_backup_status_unavailable_account">Unavailable – add a Google account</string>
     <string name="wallet_backup_status_checking">Checking…</string>
     <string name="wallet_backup_kept_this_wallet">Google Play services still holds a backup of this wallet from before. Turn backup on to keep it up to date here, or delete it.</string>
     <string name="wallet_backup_kept_other_wallet">Google Play services already holds a backup of a different wallet from before. Turning backup on replaces it.</string>
@@ -299,7 +358,7 @@
     <string name="wallet_backup_switch_label">Back up recovery phrase</string>
     <string name="wallet_backup_delete_kept">Delete that backup</string>
     <string name="wallet_backup_offer_title">Back up with Google?</string>
-    <string name="wallet_backup_offer_text">Keep an end-to-end encrypted copy of this wallet’s recovery phrase in your Google account backup, so a new phone can restore the wallet. It stays off unless you turn it on, and you can turn it off at any time here. It’s no substitute for writing the phrase down.</string>
+    <string name="wallet_backup_offer_text">Keep an encrypted copy of the recovery phrase in your Google account, so a new phone can restore this wallet. Write the words down too.</string>
     <string name="wallet_backup_offer_turn_on">Turn on Google backup</string>
     <string name="wallet_backup_restore_title">Restore from Google backup</string>
     <string name="wallet_backup_restore_text">Google Play services holds a wallet backed up from Freedom — on this phone before, or on the phone this one was set up from. Restore it to use that wallet here.</string>
@@ -334,7 +393,7 @@
     <string name="wallet_history_subtitle">%1$s · %2$s · %3$s</string>
     <string name="wallet_history_row_to_named">To %1$s · %2$s</string>
     <string name="wallet_history_row_to">To %1$s</string>
-    <string name="wallet_history_empty">Nothing sent from this account yet.</string>
+    <string name="wallet_history_empty">Nothing sent from this account yet. Sends made here show up here; money you receive shows on the block explorer.</string>
     <string name="wallet_history_all">All transactions</string>
     <plurals name="wallet_history_all_count">
         <item quantity="one">%d sent from this account</item>
@@ -357,7 +416,7 @@
     <string name="wallet_qr_scan_title">Scan QR code</string>
     <string name="wallet_qr_receive_title">Receive</string>
     <string name="wallet_qr_receive_code_description">QR code of %1$s’s address</string>
-    <string name="wallet_qr_receive_note">Send ETH, xDAI or tokens to this address on Ethereum, Gnosis or any other EVM chain: it’s the same address on all of them. Ask the sender which network they’re sending on, so you know where to look for it.</string>
+    <string name="wallet_qr_receive_note">Same address on Ethereum, Gnosis and every other EVM network</string>
     <string name="wallet_qr_own_account">This is your %1$s</string>
     <string name="wallet_qr_line_address">Address</string>
     <string name="wallet_qr_line_network">Network</string>
@@ -379,14 +438,12 @@
     <string name="wallet_qr_camera_title">Camera</string>
     <string name="wallet_qr_camera_note">Point the camera at an address, a payment request, a pairing code or a Safe request. Codes are read on this phone; nothing the camera sees is saved or sent.</string>
     <string name="wallet_qr_paste_title">Or paste it</string>
-    <string name="wallet_qr_paste_placeholder">0x…, ethereum:… or openlv://…</string>
+    <string name="wallet_qr_paste_placeholder">Paste an address or request</string>
     <string name="wallet_qr_read">Read</string>
     <string name="wallet_qr_kind_payment">Payment request</string>
     <string name="wallet_qr_kind_pairing">Pairing code</string>
     <string name="wallet_qr_kind_safe_request">Safe request</string>
     <string name="wallet_qr_kind_unrecognized">Can’t use this code</string>
-    <string name="wallet_qr_payment_note">Sending from this wallet isn’t available yet. To pay from another wallet, copy the address and check the network and amount there.</string>
-    <string name="wallet_qr_copy_address_to_pay">Copy address to pay</string>
     <string name="wallet_qr_camera_blocked">Freedom isn’t allowed to use the camera. Turn it on in Android settings to scan, or paste the code below.</string>
     <string name="wallet_qr_camera_needed">Scanning needs the camera. You can also paste the code below.</string>
     <string name="wallet_qr_allow_camera">Allow camera</string>
@@ -396,4 +453,11 @@
     <string name="wallet_qr_address_copied">Address copied</string>
 
     <!-- PhraseClipboard.kt: nothing moved (CLIP_LABEL identifies our own clip, so it stays fixed) -->
+    <!-- Receive, Scan and History actions (#422). -->
+    <string name="wallet_qr_share_address">Share</string>
+    <string name="wallet_qr_send_to_address">Send to this address</string>
+    <string name="wallet_qr_pay">Pay</string>
+    <!-- %1$s: the block explorer's host name, like etherscan.io. -->
+    <string name="wallet_history_explorer_activity">See full activity on %1$s</string>
+    <string name="wallet_history_receive">Receive</string>
 </resources>

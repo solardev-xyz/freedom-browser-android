@@ -11,6 +11,7 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.ChainlistService
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.RoutingContext
 import baby.freedom.mobile.data.AutoApproveStore
@@ -32,10 +33,12 @@ import java.util.WeakHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -96,6 +99,9 @@ object EthereumProviders {
     private val promptLocks = HashMap<Long, Mutex>()
     private val pending = HashMap<Long, MutableSet<EthereumPromptRequest>>()
     private val blockedTabs = HashSet<Long>()
+
+    /** Tabs whose can't-send sheet the user closed: further ones are skipped (the page still gets the error) until they navigate it. */
+    private val cantSendClosed = HashSet<Long>()
 
     private class Bridge(val tab: BrowserState) {
         /** The origin and channel of the top-level document that last spoke. */
@@ -182,6 +188,11 @@ object EthereumProviders {
                 override suspend fun revokeOrigin(origin: String) = ruleStore.revokeOrigin(origin)
                 override suspend fun clear() = ruleStore.clear()
             },
+            // The catalog Settings → Chains → Add chain uses, bounded: an Add network sheet doesn't
+            // wait on a multi-MB download, it just offers the site's RPCs alone (#423).
+            catalog = { id ->
+                withTimeoutOrNull(CATALOG_WAIT_MS) { ChainlistService.get(app).entries().firstOrNull { it.id == id } }?.toChain()
+            },
         )
         p.events = EthereumProvider.Events { origin, event, data -> scope.launch { emit(origin, event, data) } }
         provider = p
@@ -236,6 +247,49 @@ object EthereumProviders {
     suspend fun disconnect(context: Context, origin: String): Boolean =
         provider?.disconnect(origin)
             ?: (AutoApproveStore.get(context).revokeOrigin(origin) && DappGrantStore.get(context).revoke(origin))
+
+    /**
+     * Undo the user's Disconnect of [origin] (#423): connected again with
+     * [account] on [chainId], with its auto-approve [rules] back
+     * ([EthereumProvider.reconnect]: only if nothing changed meanwhile).
+     * Before the provider exists there are no pages to tell, and only the
+     * stores are written, under the same conditions. False if it wasn't.
+     */
+    suspend fun reconnect(context: Context, origin: String, account: String, chainId: Long, rules: List<AutoApproveRule>): Boolean =
+        provider?.reconnect(origin, account, chainId, rules)
+            // Not cancellable, as the provider's (R6-M1): Undo runs on a job a second notice or
+            // leaving the page cancels, and a cancel between the grant and its rules would
+            // leave the site connected without them.
+            ?: withContext(NonCancellable) { reconnectStores(context, origin, account, chainId, rules) }
+
+    private suspend fun reconnectStores(context: Context, origin: String, account: String, chainId: Long, rules: List<AutoApproveRule>): Boolean {
+        val grants = DappGrantStore.get(context)
+        val now = grants.allOrUnreadable.first() ?: return false
+        if (now.any { it.origin == origin }) return false
+        val known = WalletAccounts.get(context).accounts.value?.accounts ?: return false
+        if (known.none { it.address.equals(account, ignoreCase = true) }) return false
+        // Not on a chain removed in Settings meanwhile, as the provider's own check (R1-M3).
+        val chains = ChainStore.get(context).chainsOrUnreadable.first() ?: return false
+        if (chains.none { it.id == chainId }) return false
+        if (!grants.grant(origin, account, chainId)) return false
+        val ruleStore = AutoApproveStore.get(context)
+        // All the rules back, or none and no connection either (R5-M1), as the provider's.
+        if (rules.filter { it.origin == origin }.all { ruleStore.grant(it) }) return true
+        ruleStore.revokeOrigin(origin)
+        grants.revoke(origin)
+        return false
+    }
+
+    /**
+     * Undo removing [rule] (#423): back on only while its site is still
+     * connected with [account] ([EthereumProvider.restoreRule]). False if
+     * it isn't.
+     */
+    suspend fun restoreRule(context: Context, account: String, rule: AutoApproveRule): Boolean =
+        provider?.restoreRule(account, rule) ?: run {
+            val grant = DappGrantStore.get(context).allOrUnreadable.first()?.firstOrNull { it.origin == rule.origin } ?: return false
+            grant.account.equals(account, ignoreCase = true) && AutoApproveStore.get(context).grant(rule)
+        }
 
     /**
      * The Ledger account [address] is being removed: the sites connected
@@ -356,9 +410,12 @@ object EthereumProviders {
         fun live() = (documents[tab.id] ?: 0) == doc && tab.id !in blockedTabs
         if (tab.id in blockedTabs && (documents[tab.id] ?: 0) == doc) return EthAnswer.Paused
         if (!live()) return EthAnswer.Rejected
+        if (ask is EthAsk.CantSend && tab.id in cantSendClosed) return EthAnswer.Unseen
         val lock = promptLocks.getOrPut(tab.id) { Mutex() }
         return lock.withLock {
             if (!live()) return@withLock EthAnswer.Rejected
+            // Checked again here: asks that queued behind the one the user closed must not each come up in turn.
+            if (ask is EthAsk.CantSend && tab.id in cantSendClosed) return@withLock EthAnswer.Unseen
             val reason = Strings.get(
                 if (ask is EthAsk.Payment || ask is EthAsk.SendLink) R.string.send_eth_setup_reason_pay else R.string.send_eth_setup_reason_connect,
                 permissionOriginDisplay(ask.origin),
@@ -372,7 +429,11 @@ object EthereumProviders {
                 pending[tab.id]?.remove(request)
                 if (tab.ethereumPrompt === request) tab.ethereumPrompt = null
             }
-            if (answer !is EthAnswer.Approved && answer != EthAnswer.Unseen && live()) blockedTabs += tab.id
+            when {
+                !live() -> Unit
+                answer == EthAnswer.Closed -> cantSendClosed += tab.id
+                answer !is EthAnswer.Approved && answer != EthAnswer.Unseen -> blockedTabs += tab.id
+            }
             if (live()) answer else EthAnswer.Rejected
         }
     }
@@ -403,11 +464,13 @@ object EthereumProviders {
         promptLocks.remove(tabId)
         pending.remove(tabId)
         blockedTabs.remove(tabId)
+        cantSendClosed.remove(tabId)
     }
 
     /** The user navigated [tabId] themselves: its pages may ask again. */
     fun allowPrompts(tabId: Long) {
         blockedTabs.remove(tabId)
+        cantSendClosed.remove(tabId)
     }
 
     private fun withdraw(tabId: Long) {
@@ -419,6 +482,9 @@ object EthereumProviders {
 
     /** How long a request waits for the account list to be read back after a launch. */
     private const val ACCOUNTS_WAIT_MS = 3_000L
+
+    /** The longest an Add network sheet waits for the chain catalog. */
+    private const val CATALOG_WAIT_MS = 4_000L
 }
 
 /** One `window.ethereum` request off the channel. */

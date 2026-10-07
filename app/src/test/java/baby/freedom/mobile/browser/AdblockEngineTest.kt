@@ -121,12 +121,13 @@ class AdblockEngineTest {
     fun `unsupported options drop the whole filter, popup- and document-only too`() {
         val e = engine(
             "||csp.example^\$csp=script-src 'none'",
-            "||redirect.example^\$redirect=noopjs",
+            "||redirect-rule.example^\$redirect-rule=noopjs",
             "||popup.example^\$popup",
             "||page.example^\$document",
         )
         assertFalse(e.blocks("https://csp.example/a.js"))
-        assertFalse(e.blocks("https://redirect.example/a.js"))
+        // `$redirect-rule` only names a stand-in; it blocks nothing itself (#405).
+        assertFalse(e.blocks("https://redirect-rule.example/a.js"))
         assertFalse(e.blocks("https://popup.example/a.js"))
         assertFalse(e.blocks("https://page.example/a.js"))
     }
@@ -203,12 +204,105 @@ class AdblockEngineTest {
         val e = engine(
             "news.example##div:has-text(Sponsored)",
             "news.example##+js(set-constant, x, 1)",
-            "news.example#?#div:-abp-has(.ad)",
+            "news.example#?#div:-abp-contains(Sponsored)",
+            "news.example##div:upward(2)",
             "news.example#\$#body { overflow: auto !important; }",
             "news.example##^script:has-text(ad)",
+            "news.example##.x:remove-attr(href)",
             "news.example##.ok",
         )
         assertEquals(".ok{display:none!important}\n", css(e, "news.example"))
+    }
+
+    /**
+     * #405: the extended selectors CSS can take run as CSS — `#?#` with
+     * `:-abp-has()` is `:has()`, `:style()` styles, `:remove()` hides —
+     * and `#@#` exceptions name them as written.
+     */
+    @Test
+    fun `extended selectors CSS can express are translated`() {
+        val e = engine(
+            "news.example#?#div:-abp-has(> .ad)",
+            "news.example##.sticky:style(position: static !important)",
+            "news.example##.gone:remove()",
+            "news.example##div:has(> a[href*=\"track\"])",
+            "news.example##.lifted:style(top: 0)",
+            "news.example#@#.lifted:style(top: 0)",
+        )
+        assertEquals(
+            "div:has(> .ad){display:none!important}\n" +
+                ".sticky{position: static !important}\n" +
+                ".gone{display:none!important}\n" +
+                "div:has(> a[href*=\"track\"]){display:none!important}\n",
+            css(e, "news.example"),
+        )
+        // Generic `:style()` rules are keyed like any other.
+        val g = engine("##.banner:style(height: 0 !important)")
+        assertEquals(".banner{height: 0 !important}\n", g.cosmeticsForTokens(listOf(".banner"), "https://a.example/", "a.example", null, null))
+    }
+
+    /** #405: a `:style()` that could load something or escape its rule is dropped whole. */
+    @Test
+    fun `unsafe style declarations are dropped`() {
+        val e = engine(
+            "news.example##.a:style(background: url(https://t.example/p.gif))",
+            "news.example##.b:style(background-image: image-set(\"x.png\" 1x))",
+            "news.example##.c:style(color: red} body{display:none)",
+            "news.example##.d:style(content: \"\\41\")",
+            "news.example##.e:style(color: red /* x */)",
+            "news.example##.f:style()",
+            "news.example##.ok:style(color: red)",
+        )
+        assertEquals(".ok{color: red}\n", css(e, "news.example"))
+    }
+
+    /**
+     * #405 R1-M1: every rule goes into one sheet, where an unclosed `(`,
+     * `[` or string reads on past its `}` and swallows the rules after it —
+     * so a rule that leaves one open is dropped, and the rest still apply.
+     */
+    @Test
+    fun `a rule with an unclosed bracket or string is dropped, not the rest`() {
+        val e = engine(
+            "news.example##.a:style(width: calc(1px)",
+            "news.example##.b:style(content: \"a)",
+            "news.example##.c:style(width: calc(1px)))",
+            "news.example##.d[href=\"x\"",
+            "news.example##.e:has(> .f",
+            "news.example##.g:style(content: \"a)\")",
+            "news.example##.h[title=\"(\"]",
+            "news.example##.i\\(x",
+            "news.example##.ok",
+        )
+        assertEquals(
+            ".g{content: \"a)\"}\n.h[title=\"(\"]{display:none!important}\n.i\\(x{display:none!important}\n.ok{display:none!important}\n",
+            css(e, "news.example"),
+        )
+        assertTrue(isBalanced("a[b='c]']"))
+        assertFalse(isBalanced("a\\"))
+        assertFalse(isBalanced("a(]"))
+    }
+
+    /** #405: cosmetic rules scoped to uBlock entities (`example.*`) apply under any public suffix, `~` entities excepted. */
+    @Test
+    fun `cosmetic rules scoped to entities apply under any suffix`() {
+        val e = engine(
+            "spiegel.*##.ad-slot",
+            "shop.*,~shop.co.uk##.promo",
+            "news.example,~www.news.*##.banner",
+            "spiegel.*#@#.ad-slot",
+            "spiegel.de##.ad-slot",
+            "other.*##.x",
+        )
+        // The exception for the entity lifts the host's own rule too, as in uBlock.
+        assertEquals("", css(e, "www.spiegel.de"))
+        assertTrue(css(e, "shop.de").contains(".promo"))
+        assertTrue(css(e, "www.shop.com.au").contains(".promo"))
+        assertFalse(css(e, "shop.co.uk").contains(".promo"))
+        assertTrue(css(e, "news.example").contains(".banner"))
+        assertFalse(css(e, "www.news.example").contains(".banner"))
+        assertFalse(css(e, "news.example").contains(".x"))
+        assertFalse(css(e, "notshop.de").contains(".promo"))
     }
 
     @Test
@@ -217,6 +311,44 @@ class AdblockEngineTest {
         assertEquals("#top_ad", cosmeticKey("#top_ad:not(.x)"))
         assertEquals(null, cosmeticKey("div.ad"))
         assertEquals(null, cosmeticKey(".\\[weird\\]"))
+    }
+
+    /**
+     * #318 R6-F1: a rule whose only positive domains are `example.*`
+     * entities (which this can't match) is dropped — it must not fall
+     * back to every site but its `~` ones.
+     */
+    @Test
+    fun `a rule scoped only to entities never applies everywhere else`() {
+        val e = AdblockEngine.build(listOf(
+            """
+            ~vipbox.pl,vipbox.*,vipboxtv.*##.position-absolute
+            oxy.*,~oxy.edu##[href*=".info"]
+            vipbox.*,~vipbox.pl,shop.example##.promo
+            ||ads.example^${'$'}domain=google.*|~www.google.com
+            ||track.example^
+            @@||track.example^${'$'}domain=google.*|~www.google.com
+            """.trimIndent(),
+        ))
+        assertEquals("", css(e, "news.example"))
+        assertEquals("", e.cosmeticsForTokens(listOf(".position-absolute", ".promo"), "https://news.example/", "news.example", null, null))
+        // A plain host next to the entity keeps the rule, for that host only.
+        assertTrue(css(e, "shop.example").contains(".promo"))
+        val page = "https://news.example/"
+        assertFalse(e.blocks("https://ads.example/x.js", page, RequestType.SCRIPT))
+        assertTrue(e.blocks("https://track.example/t.js", page, RequestType.SCRIPT))
+    }
+
+    /** The same over the lists the app ships, uBlock filters included (#318 R6-F1). */
+    @Test
+    fun `bundled uBlock filters add no entity rule to unrelated sites`() {
+        val dir = File("src/main/assets/adblock")
+        val texts = (AdblockCategory.entries.map { it.file } + BundledList.entries.map { it.file })
+            .map { File(dir, it).readText() }
+        val e = AdblockEngine.build(texts)
+        val host = "getbootstrap.com"
+        assertFalse(css(e, host).contains("[href*=\".info\"]"))
+        assertFalse(e.cosmeticsForTokens(listOf(".position-absolute"), "https://$host/", host, null, null).contains(".position-absolute"))
     }
 
     private fun css(e: AdblockEngine, host: String) =

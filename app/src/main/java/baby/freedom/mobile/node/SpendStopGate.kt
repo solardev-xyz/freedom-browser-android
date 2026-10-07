@@ -219,10 +219,14 @@ internal class ProcessExitLatch {
  * reports instead of its idle node's Stopped: the node is on its way up —
  * it starts once the process restarts — and why it isn't yet. Without it
  * the node page shows the switch on beside "Stopped" with no reason.
+ * [reloadOwed] marks a restart that's waiting on an unreadable identity
+ * (#357 R4-M1, [NodeInfo.reloadOwed]).
  */
-internal fun reportedNodeInfo(info: NodeInfo, doomed: Boolean): NodeInfo =
+internal fun reportedNodeInfo(info: NodeInfo, doomed: Boolean, reloadOwed: Boolean = false): NodeInfo =
     if (doomed && info.status == NodeStatus.Stopped) {
         NodeInfo(status = NodeStatus.Starting, errorMessage = WAITING_FOR_SPEND_NOTE)
+    } else if (info.reloadOwed != reloadOwed) {
+        info.copy(reloadOwed = reloadOwed)
     } else {
         info
     }

@@ -362,9 +362,15 @@ internal object PublishGrants {
         Unit
     }
 
-    /** Gives back every persisted grant no publish in this process holds. Freedom keeps none otherwise. */
+    /**
+     * Gives back every persisted read grant no publish in this process
+     * holds. The only other grants Freedom keeps are downloads' saved-to
+     * documents (#322), always with write access: those are
+     * [DownloadSaveTo]'s to sweep, and left alone here.
+     */
     fun sweep(context: Context) = synchronized(this) {
         val persisted = runCatching { context.contentResolver.persistedUriPermissions }.getOrDefault(emptyList())
+            .filterNot { it.isWritePermission }
         val stale = staleGrants(persisted.map { it.uri.toString() }, held.keys)
         persisted.filter { it.uri.toString() in stale }.forEach { p ->
             val flags = (if (p.isReadPermission) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0) or

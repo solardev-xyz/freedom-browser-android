@@ -1,0 +1,12 @@
+{
+  "generic": {
+    "Apache-2.0": "texts/Apache-2.0.txt",
+    "LGPL-2.1-or-later": "texts/LGPL-2.1.txt",
+    "ASDKL": "texts/ASDKL.txt"
+  },
+  "notices": {
+    "androidx.camera:camera-core": "gradle/androidx.camera_camera-core.txt",
+    "androidx.datastore:datastore-preferences-external-protobuf": "gradle/androidx.datastore_datastore-preferences-external-protobuf.txt",
+    "io.github.adraffy:ens-normalize": "gradle/io.github.adraffy_ens-normalize.txt"
+  }
+}

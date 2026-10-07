@@ -9,8 +9,10 @@
     <!-- browser/ChainsSettings.kt -->
     <string name="names_section_chains">Chains</string>
     <string name="names_add_chain">Add chain</string>
-    <!-- %1$s: chain ID (digits as typed), %2$s: currency symbol -->
+    <!-- A chainlist.org catalog row. %1$s: chain ID (digits as typed), %2$s: currency symbol -->
     <string name="names_chain_subtitle">Chain ID %1$s · %2$s</string>
+    <!-- A chain's currency on its Settings row. %1$s: currency name, %2$s: symbol -->
+    <string name="names_currency_short">%1$s (%2$s)</string>
     <plurals name="names_rpc_endpoints">
         <item quantity="one">%d RPC endpoint</item>
         <item quantity="other">%d RPC endpoints</item>
@@ -18,21 +20,48 @@
     <string name="names_chain_testnet">Testnet</string>
     <string name="names_chain_built_in">Built in</string>
     <string name="names_chain_custom">Custom</string>
+    <!-- A chain row's status: how its reads are checked. -->
+    <string name="names_chain_status_verified">Verified reads</string>
+    <string name="names_chain_status_verified_fallback">Verified reads when available</string>
+    <string name="names_chain_status_yours">Reads from your RPC</string>
+    <string name="names_chain_status_yours_fallback">Reads from your RPC first</string>
+    <string name="names_chain_status_unchecked">Reads not cross-checked</string>
+    <!-- The chain page's opening line. %1$s: the tier's name (P2P light client, Colibri prover) -->
+    <string name="names_assurance_proof">Reads are proven on this device by the %1$s, and cross-checked across providers when it can\'t answer.</string>
+    <plurals name="names_assurance_cross_checked">
+        <item quantity="one">Reads are cross-checked across %d provider.</item>
+        <item quantity="other">Reads are cross-checked across %d providers.</item>
+    </plurals>
+    <plurals name="names_assurance_cross_checked_yours">
+        <item quantity="one">Reads are cross-checked across your %d RPC.</item>
+        <item quantity="other">Reads are cross-checked across your %d RPCs.</item>
+    </plurals>
+    <string name="names_assurance_single">Reads come from one provider and can\'t be cross-checked. To trust them, use your own RPC.</string>
+    <string name="names_assurance_single_yours">Reads come from your own RPC.</string>
+    <string name="names_assurance_single_yours_fallback">Reads come from your own RPC. If it doesn\'t answer, a public RPC answers instead, unverified.</string>
+    <!-- Appended to a verified line when the router falls back to one RPC once the checked tiers fail. -->
+    <string name="names_assurance_fallback">If those checks can\'t answer, a read comes from a single RPC instead, unverified.</string>
+    <string name="names_assurance_fallback_either">If those checks can\'t answer, a read comes from a single RPC instead, yours or a public one: unverified.</string>
+    <string name="names_assurance_fallback_yours">If those checks can\'t answer, a read comes from one of your own RPCs instead.</string>
+    <string name="names_use_my_own_rpc">Use my own RPC</string>
+    <string name="names_advanced">Advanced</string>
+    <string name="names_show_details">Show details</string>
+    <string name="names_hide_details">Hide details</string>
     <!-- Settings search keywords for the Add chain row. -->
     <string name="names_search_custom_chain">Custom chain</string>
     <string name="names_search_network">Network</string>
     <!-- Content description of a remove button; %1$s: what it removes (a chain name, a URL). -->
     <string name="names_remove_item">Remove %1$s</string>
     <string name="names_add_chain_subtitle">Search chainlist.org or enter one yourself</string>
-    <string name="names_rpc_add_invalid">Not a usable RPC URL.</string>
-    <string name="names_rpc_add_duplicate">That RPC is already in your list.</string>
-    <string name="names_rpc_add_public">That\'s already one of this chain\'s public RPCs.</string>
+    <string name="names_rpc_add_invalid">Enter a full RPC URL, like https://rpc.example.org.</string>
+    <string name="names_rpc_add_duplicate">Enter a different RPC: that one is already in your list.</string>
+    <string name="names_rpc_add_public">Enter a different RPC: that one is already one of this chain\'s public RPCs.</string>
     <!-- %1$s: host name -->
-    <string name="names_rpc_add_name_resolution_public_host">Already provided by %1$s, one of name resolution\'s public RPCs, asked under its own switch there — it can\'t be one of yours.</string>
-    <string name="names_rpc_add_name_resolution_public">That server is already provided, one of name resolution\'s public RPCs, asked under its own switch there — it can\'t be one of yours.</string>
-    <string name="names_rpc_add_full">At most %1$d of your own RPCs per chain.</string>
-    <string name="names_rpc_add_no_chain">This chain was removed.</string>
-    <string name="names_rpc_add_failed">Couldn\'t save the RPC. Try again.</string>
+    <string name="names_rpc_add_name_resolution_public_host">Enter a different RPC: %1$s is already one of name resolution\'s public RPCs, asked under its own switch there, so it can\'t be one of yours.</string>
+    <string name="names_rpc_add_name_resolution_public">Enter a different RPC: that server is already one of name resolution\'s public RPCs, asked under its own switch there, so it can\'t be one of yours.</string>
+    <string name="names_rpc_add_full">Remove one of your RPCs first: a chain takes at most %1$d of your own.</string>
+    <string name="names_rpc_add_no_chain">Go back to the chain list: this chain was removed.</string>
+    <string name="names_rpc_add_failed">Try again: the RPC couldn\'t be saved.</string>
     <!-- Read steps: %1$s is the tier's name (P2P light client, RPC quorum, …). -->
     <string name="names_read_step_proof">%1$s: a proof checked on this device</string>
     <!-- %2$d: answers that must match, %3$d: RPCs asked (the plural's count) -->
@@ -113,7 +142,7 @@
     <string name="names_public_rpcs">Public RPCs</string>
     <string name="names_how_reads_are_checked">How reads are checked</string>
     <!-- %1$s: chain name -->
-    <string name="names_proof_tiers_missing">The P2P light client isn\'t verifying %1$s reads right now: it\'s off for this chain, still syncing, or waiting on a fresh checkpoint. Turn it on and follow its sync on the node page.</string>
+    <string name="names_proof_tiers_missing">The P2P light client isn\'t verifying %1$s reads right now: it\'s off for this chain, still syncing, or waiting on a fresh checkpoint. Turn it on and follow its sync under Nodes &amp; networks → Ethereum light client.</string>
     <!-- %1$s: chain name -->
     <string name="names_light_client_tier_not_in_build">The P2P light client, which verifies %1$s reads with a proof, isn\'t available in this build.</string>
     <!-- %1$s: chain name -->
@@ -122,7 +151,12 @@
     <string name="names_colibri_tier_unreachable">The Colibri prover isn\'t checking %1$s reads right now: it couldn\'t be reached, so reads skip it for a while and try it again after.</string>
     <!-- %1$s: chain name -->
     <string name="names_colibri_tier_not_in_build">The Colibri prover, which verifies %1$s reads with a proof, isn\'t available in this build.</string>
-    <string name="names_check_no_answer">No answer</string>
+    <!-- Check failed: what to do first. The raw reason (names_check_unknown_chain, …) is behind Show details. -->
+    <string name="names_check_failed_unknown_chain">Go back to the chain list: this chain isn\'t set up any more.</string>
+    <string name="names_check_failed_refused">Try again in a moment: an RPC refused the read. If it keeps happening, use your own RPC.</string>
+    <string name="names_check_failed_no_answer">Try again in a moment: no RPC for this chain answered. If it keeps happening, check your connection or use your own RPC.</string>
+    <string name="names_check_failed_odd_answer">Try again: an RPC gave an answer that doesn\'t make sense. If it keeps happening, use your own RPC.</string>
+    <string name="names_check_failed_other">Try again: the read didn\'t work.</string>
     <string name="names_check_latest_block">Check latest block</string>
     <!-- %1$s: block number, already formatted -->
     <string name="names_check_block">Block %1$s</string>
@@ -140,7 +174,7 @@
     <string name="names_enter_manually_subtitle">Chain ID, currency and RPC endpoints</string>
     <string name="names_chainlist_note">From chainlist.org, refreshed daily. Only RPC endpoints that need no API key and aren\'t marked as tracking are kept.</string>
     <string name="names_chainlist_loading">Loading chainlist.org…</string>
-    <string name="names_chainlist_failed">Couldn\'t load chainlist.org. Check your connection and try again, or enter the chain manually.</string>
+    <string name="names_chainlist_failed">Check your connection and try again, or enter the chain manually: chainlist.org didn\'t load.</string>
     <string name="names_chainlist_no_match">No chains match “%1$s”</string>
     <string name="names_catalog_already_added">Already added</string>
     <string name="names_catalog_no_key_free_rpc">No key-free RPC endpoint — you\'d add your own</string>
@@ -156,14 +190,14 @@
     <string name="names_rpc_hint_placeholder">Replace the {API_KEY} placeholder: only key-free RPCs are supported</string>
     <string name="names_rpc_hint_internal_host">Needs a public host name, not a local network address</string>
     <!-- %1$s: chain ID -->
-    <string name="names_add_chain_built_in">Chain ID %1$s is built in already.</string>
-    <string name="names_add_chain_duplicate">A chain with ID %1$s is already added. Remove it first to replace it.</string>
-    <string name="names_add_chain_failed">Couldn\'t save the chain. Try again.</string>
+    <string name="names_add_chain_built_in">Open it from the chain list instead: chain ID %1$s is built in.</string>
+    <string name="names_add_chain_duplicate">Remove the chain with ID %1$s first to replace it: it\'s already added.</string>
+    <string name="names_add_chain_failed">Try again: the chain couldn\'t be saved.</string>
     <string name="names_chain_id_hint">A whole number from 1 to %1$s (or 0x hex)</string>
     <string name="names_chain_name">Name</string>
-    <string name="names_chain_name_hint">1 to %1$d characters</string>
+    <string name="names_chain_name_hint">1 to %1$d characters, one space between words, no line breaks or invisible characters</string>
     <string name="names_currency_symbol">Symbol</string>
-    <string name="names_currency_symbol_hint">1 to %1$d characters, no spaces</string>
+    <string name="names_currency_symbol_hint">1 to %1$d characters, no spaces or invisible characters</string>
     <string name="names_currency_decimals">Decimals</string>
     <string name="names_currency_decimals_hint">0 to 36</string>
     <string name="names_block_explorer_url">URL (optional)</string>
@@ -176,13 +210,13 @@
     <string name="names_section_rpc">RPC providers</string>
     <string name="names_ens_about">How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. With Colibri proofs on, an answer is proven first: checked on this device against Ethereum\'s own consensus. An answer that can\'t be proven is cross-checked: it\'s only trusted when at least two RPC endpoints return exactly the same one. An answer only one endpoint gave is shown to you before anything loads.</string>
     <string name="names_colibri_title">Colibri proofs</string>
-    <string name="names_colibri_help">Each name\'s record is proven by corpus.core\'s Colibri prover (colibri-proof.tech) and the proof checked on this device against Ethereum\'s sync committee, so no server can make up the answer. The prover learns which contract storage a lookup reads; the reads themselves go to the endpoints in the resolution order. If no proof comes back within a few seconds, the endpoints are cross-checked instead. The wallet\'s and the Swarm node\'s Ethereum and Gnosis reads (balances, token balances, nonces, receipts), and the reads sites make through window.ethereum and web3:// (every contract call and balance a dapp asks for), are proven the same way when the P2P light client isn\'t answering them, so the prover also learns the addresses and contracts they read. Off: nothing goes to the prover; every name and read is cross-checked on the RPCs.</string>
+    <string name="names_colibri_help">Each name\'s record is proven by corpus.core\'s Colibri prover (colibri-proof.tech) and the proof checked on this device against Ethereum\'s sync committee, so no server can make up the answer. The prover learns which contract storage a lookup reads; the reads themselves go to the endpoints in the resolution order. If no proof comes back within a few seconds, the endpoints are cross-checked instead. The wallet\'s and the Swarm node\'s Ethereum and Gnosis reads (balances, token balances, nonces, receipts), and the reads sites make through window.ethereum and web3:// (every contract call and balance a dapp asks for), are proven the same way, each against its own chain\'s sync committee, when the P2P light client isn\'t answering them, so the prover also learns the addresses and contracts they read. Off: nothing goes to the prover; every name and read is cross-checked on the RPCs.</string>
     <string name="names_order_title">Resolution order</string>
     <string name="names_order_help">The first three providers in this order that are reachable read each name, so the order decides who answers; the rest are asked, in order, when those can\'t agree or don\'t answer. Two endpoints of one provider count once: the first that answers. Change it under RPC providers.</string>
     <string name="names_ccip_title">Off-chain lookups (CCIP-Read)</string>
     <string name="names_ccip_help">Some names (base.eth and cb.id subnames, NameStone names) are answered by a gateway their resolver names. The gateway sees the name you look up. Off: those names don\'t resolve.</string>
     <string name="names_custom_title">Your endpoints</string>
-    <string name="names_custom_help">First in the resolution order, as listed here. These are Ethereum\'s own RPCs (Settings → Chains → Ethereum), so every mainnet read uses them too.</string>
+    <string name="names_custom_help">First in the resolution order, as listed here. These are Ethereum\'s own RPCs (Settings → Wallet &amp; chains → Ethereum), so every mainnet read uses them too.</string>
     <string name="names_add_endpoint">Add endpoint</string>
     <string name="names_keyed_title">Keyed providers</string>
     <string name="names_keyed_help">Next in the resolution order, with your own API key.</string>
@@ -333,7 +367,7 @@
     <string name="names_gate_block">Block: %1$s</string>
     <string name="names_gate_block_latest">latest</string>
     <!-- %1$d: endpoints needed -->
-    <string name="names_gate_too_few">Fewer than %1$d RPC endpoints are enabled in Settings → RPC providers, so no answer can be cross-checked.</string>
+    <string name="names_gate_too_few">Fewer than %1$d RPC endpoints are enabled in Settings → Name resolution → RPC providers, so no answer can be cross-checked.</string>
     <!-- %1$s: hosts or names_trust_one_rpc_server, %2$s: #block or names_gate_block_latest -->
     <string name="names_gate_not_cross_checked">Not cross-checked: only %1$s answered (block %2$s)</string>
     <!-- %1$s: #block, or names_conflict_anchor_block -->

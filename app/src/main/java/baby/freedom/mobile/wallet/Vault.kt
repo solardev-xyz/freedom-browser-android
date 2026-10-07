@@ -2,6 +2,7 @@ package baby.freedom.mobile.wallet
 
 import android.content.Context
 import android.os.SystemClock
+import kotlinx.coroutines.CancellationException
 import java.security.GeneralSecurityException
 import javax.crypto.Cipher
 import kotlinx.coroutines.CompletableDeferred
@@ -91,8 +92,9 @@ internal class AutoLockPolicy(
  *  - [withSeed] — the seed for deriving keys (node identities, #77; the
  *    wallet's accounts), which also counts as activity for the idle lock;
  *  - [revealMnemonic] and [markBackedUp] — "Show recovery phrase" (#78),
- *    which always costs a fresh authentication, and clears the backup
- *    reminder once the phrase has been seen;
+ *    which always costs a fresh authentication, and the guided backup
+ *    (#421): a reveal only records that the phrase has been shown; the
+ *    backup reminder clears once the three-word check has passed;
  *  - [requireUnlocked] — the lazy entry point: whatever first needs an
  *    identity (a wallet action, publishing, a dApp) calls it, and the
  *    browser opens the wallet page to create, import or unlock one. The
@@ -104,18 +106,33 @@ class Vault internal constructor(
     private val clock: () -> Long = SystemClock::elapsedRealtime,
     private val io: CoroutineDispatcher = Dispatchers.IO,
     private val compute: CoroutineDispatcher = Dispatchers.Default,
+    /** The BIP-39 seed of a phrase ([Mnemonic.seed]); tests watch what becomes of each one. */
+    private val seedOf: (Mnemonic) -> ByteArray = { it.seed() },
 ) {
     /** Non-secret facts about the stored vault, for the wallet page. */
     data class Info(
         val protection: VaultProtection,
         val strongBox: Boolean,
-        /** False until the user has seen the phrase (#78): the backup reminder shows till then. */
+        /** False until the backup check has passed (#78, #421): the backup reminder shows till then. */
         val backedUp: Boolean,
         /** Google backup (#231) is on: the phrase is this wallet's entry in Block Store. */
         val cloudBackup: Boolean = false,
         /** The one-time Google backup offer after create or import has been answered. */
         val cloudBackupOffered: Boolean = false,
-    )
+        /** The phrase has been shown (or was imported), check passed or not ([VaultRecord.phraseShown]). */
+        val phraseShown: Boolean = backedUp,
+    ) {
+        /**
+         * Whether the user can have the recovery phrase at all: false only
+         * for a created wallet whose phrase was never on screen. What the
+         * lost-wallet advice goes by — not [backedUp], which a reveal
+         * without the check leaves false (#421 R1-F1).
+         */
+        val phraseKnown: Boolean get() = backedUp || phraseShown
+    }
+
+    /** How the wallet on the device came to be, as far as this process saw it ([justSetUp]). */
+    enum class SetUp { CREATED, IMPORTED, RESTORED }
 
     sealed interface State {
         data object Empty : State
@@ -154,6 +171,20 @@ class Vault internal constructor(
      * on disk must have been derived from (#77).
      */
     fun identityTag(): String? = store.read()?.identityTag()
+
+    /**
+     * Set by [create] — a new phrase, an import or a Google-backup
+     * restore — and cleared by [unlock] and [remove]: whether the wallet
+     * now open was set up in this process just now, and how (W8). The
+     * node-identity notice reads it, so a restored wallet says "Wallet
+     * ready", and a plain unlock that adopts the node identities (a
+     * pre-#77 wallet) isn't announced as a wallet set up at all.
+     */
+    @Volatile
+    private var setUp: SetUp? = null
+
+    /** See [setUp]. */
+    fun justSetUp(): SetUp? = setUp
 
     /** Whether Google backup (#231) is on for the wallet on the device. */
     fun cloudBackupOn(): Boolean = when (val s = _state.value) {
@@ -211,10 +242,16 @@ class Vault internal constructor(
                 cloudBackup = restored,
                 cloudBackupOffered = restored,
             )
-            val derived = withContext(compute) { mnemonic.seed() }
             withContext(io) { store.write(record) }
-            open(derived, record)
+            // Before the state turns Unlocked: the node-identity sync reads it then.
+            setUp = when {
+                restored -> SetUp.RESTORED
+                imported -> SetUp.IMPORTED
+                else -> SetUp.CREATED
+            }
+            deriveAndOpen(mnemonic, record)
         } catch (t: Throwable) {
+            setUp = null
             // Nothing half-made stays behind: no key without a file, no file without a key.
             withContext(NonCancellable + io) { store.wipe() }
             throw t
@@ -224,10 +261,10 @@ class Vault internal constructor(
     /** Asks the user (unless the vault is [VaultProtection.DEVICE_ONLY]) and opens the vault. */
     suspend fun unlock(auth: VaultAuthenticator) = ops.withLock {
         if (_state.value is State.Unlocked) return@withLock
+        setUp = null
         val record = storedRecord()
         val mnemonic = openMnemonic(record, auth, VaultAuthPurpose.UNLOCK)
-        val derived = withContext(compute) { mnemonic.seed() }
-        open(derived, record)
+        deriveAndOpen(mnemonic, record)
     }
 
     /**
@@ -236,7 +273,29 @@ class Vault internal constructor(
      * Show it only on a `FLAG_SECURE` screen ([baby.freedom.mobile.browser.SecureWindow]).
      */
     suspend fun revealMnemonic(auth: VaultAuthenticator): Mnemonic = ops.withLock {
-        openMnemonic(storedRecord(), auth, VaultAuthPurpose.REVEAL)
+        val record = storedRecord()
+        val mnemonic = openMnemonic(record, auth, VaultAuthPurpose.REVEAL)
+        // The words are about to be on screen: from now on the user may have them on paper,
+        // so the lost-wallet advice must offer import (#421 R1-F1). Not the backup reminder:
+        // only a passed check ends that. A failed write mustn't cost the reveal.
+        // Write and publish run as one non-cancellable step, as in [markBackedUp]: Back/Home
+        // cancelling mid-write would otherwise leave disk saying shown and memory not, and
+        // a record already marked on disk is republished so any such gap closes (#429 R4-M1).
+        if (record.phraseShown) {
+            publish(record)
+        } else {
+            withContext(NonCancellable) {
+                try {
+                    rewrite(record.copy(phraseShown = true))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // An IOException, or writeDurably's IllegalStateException on a failed
+                    // rename: left unrecorded, and the next reveal tries again.
+                }
+            }
+        }
+        mnemonic
     }
 
     /**
@@ -270,11 +329,22 @@ class Vault internal constructor(
         }
     }
 
-    /** The user has seen the phrase (#78): the backup reminder goes. */
+    /**
+     * The backup check has passed (#78, #421): the backup reminder goes.
+     *
+     * The write and its state publish run as one non-cancellable step: the
+     * check page's scope is cancelled by Back/Home, and a cancel between the
+     * two would leave "checked" on disk but the banner up in memory (#429
+     * R3-M1). A record already marked on disk is republished rather than
+     * skipped, so a check redone after any such gap still clears the banner.
+     */
     suspend fun markBackedUp() = ops.withLock {
         val record = storedRecord()
-        if (record.backedUp) return@withLock
-        rewrite(record.withBackedUp(true))
+        if (record.backedUp) {
+            publish(record)
+            return@withLock
+        }
+        withContext(NonCancellable) { rewrite(record.withBackedUp(true)) }
     }
 
     /**
@@ -336,10 +406,14 @@ class Vault internal constructor(
     /** Writes [updated] (same sealed phrase, new flags) and publishes it. Call under [ops]. */
     private suspend fun rewrite(updated: VaultRecord) {
         withContext(io) { store.write(updated) }
+        publish(updated)
+    }
+
+    private fun publish(record: VaultRecord) {
         // Under the seed lock, and keyed on the seed rather than the state
         // read before it: an auto-lock landing meanwhile must not be undone.
         synchronized(lock) {
-            _state.value = if (seed != null) State.Unlocked(updated.info()) else State.Locked(updated.info())
+            _state.value = if (seed != null) State.Unlocked(record.info()) else State.Locked(record.info())
         }
     }
 
@@ -370,6 +444,7 @@ class Vault internal constructor(
         // key are gone the state must say so, even if the caller's scope
         // (the Wallet page) was cancelled meanwhile and the resume throws.
         withContext(NonCancellable + io) {
+            setUp = null
             store.wipe()
             _state.value = State.Empty
             alsoWipe()
@@ -462,6 +537,24 @@ class Vault internal constructor(
             synchronized(lock) {
                 if (policy.expired(clock())) lock() else reschedule()
             }
+        }
+    }
+
+    /**
+     * Derives [mnemonic]'s seed off the main thread and opens the vault
+     * with it. The seed is either handed to [open] or zeroed: a caller
+     * cancelled while it was being derived (the wallet page closed
+     * mid-unlock) makes `withContext` throw on its way back and drop the
+     * finished seed, which would otherwise stay on the heap unzeroed.
+     */
+    private suspend fun deriveAndOpen(mnemonic: Mnemonic, record: VaultRecord) {
+        var derived: ByteArray? = null
+        try {
+            withContext(compute) { derived = seedOf(mnemonic) }
+            open(checkNotNull(derived), record)
+            derived = null
+        } finally {
+            derived?.fill(0)
         }
     }
 
@@ -582,4 +675,4 @@ class Vault internal constructor(
     }
 }
 
-private fun VaultRecord.info() = Vault.Info(protection, strongBox, backedUp, cloudBackup, cloudBackupOffered)
+private fun VaultRecord.info() = Vault.Info(protection, strongBox, backedUp, cloudBackup, cloudBackupOffered, phraseShown)

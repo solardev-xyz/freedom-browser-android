@@ -217,16 +217,28 @@ class OnchainDocument(
     /** Who answered, for the warning. */
     val source: String get() = trust.agreed.firstOrNull() ?: trust.queried.firstOrNull() ?: trust.source.key
 
+    /**
+     * The chain ID, then the chain's name, each on a line of its own. The ID
+     * comes first and is never part of the name's text: a site can add a chain
+     * named "Ethereum (chain 1) Neee…t", which would otherwise read as
+     * Ethereum ahead of the real ID (the same reason the Switch sheet keeps
+     * them apart).
+     */
+    internal fun networkLines(): Array<String> = arrayOf(
+        Strings.get(R.string.radicle_onchain_detail_chain_id, app.chainId.toString()),
+        Strings.get(R.string.radicle_onchain_detail_network, network),
+    )
+
     /** The warning's details: what the user is being asked to run, whole. */
     fun unverifiedDetail(): String = listOf(
-        Strings.get(R.string.radicle_onchain_detail_network, network, app.chainId.toString()),
+        *networkLines(),
         Strings.get(R.string.radicle_onchain_detail_contract, app.checksumAddress),
         Strings.get(R.string.radicle_onchain_detail_html_hash, hash),
         Strings.get(R.string.radicle_onchain_detail_from, source),
     ).joinToString("\n")
 
     fun conflictDetail(): String = listOf(
-        Strings.get(R.string.radicle_onchain_detail_network, network, app.chainId.toString()),
+        *networkLines(),
         Strings.get(R.string.radicle_onchain_detail_contract, app.checksumAddress),
         Strings.get(R.string.radicle_onchain_detail_answered, trust.agreed.joinToString(", ").ifEmpty { "?" }),
         Strings.get(R.string.radicle_onchain_detail_disagreed, trust.dissented.joinToString(", ")),

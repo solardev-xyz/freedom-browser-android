@@ -94,6 +94,7 @@ object ErrorPage {
         "page_default_description" to R.string.errorpage_page_default_description,
         "page_continue_once" to R.string.errorpage_page_continue_once,
         "page_try_again" to R.string.errorpage_page_try_again,
+        "page_details" to R.string.errorpage_page_details,
         "ens_not_found_title" to R.string.errorpage_ens_not_found_title,
         "page_ens_not_found_tezos" to R.string.errorpage_page_ens_not_found_tezos,
         "page_ens_not_found_no_resolver" to R.string.errorpage_page_ens_not_found_no_resolver,
