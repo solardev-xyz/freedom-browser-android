@@ -203,6 +203,17 @@ internal object IncomingScan {
 
     fun margin(chainId: Long): Long = MARGIN[chainId] ?: 12L
 
+    /** How long under the head a block must be before an undisputed "no receipt" for it counts as absence. */
+    const val ABSENCE_MS = 10L * 60_000
+
+    /**
+     * Blocks a candidate must lie under the proven head before RPCs agreeing
+     * its transaction has no receipt is taken as proof it doesn't exist:
+     * nearer the head, a quorum of RPCs a few blocks behind would say the
+     * same of a real transfer, whose block then counts as read for good.
+     */
+    fun absenceDepth(chainId: Long): Long = ABSENCE_MS / (SLOT_MS[chainId] ?: 12_000L)
+
     /** A first scan's state for [account] on [chainId], the head at [head]. */
     fun start(account: String, chainId: Long, head: Long): ScanState =
         ScanState(account, chainId, floor = maxOf(0L, head - windowBlocks(chainId) + 1))
@@ -598,24 +609,31 @@ class IncomingTransfers internal constructor(
             }
             // At the smallest chunk only the blocks whose candidates fit count as read; the rest
             // are asked again once receipts have made room. The list never passes the cap, so a
-            // lying RPC's flood of fake logs can't pause reading for more than a few scans.
+            // lying RPC's flood of fake logs can't pause reading for long: past the absence
+            // depth, each scan drains its receipts' worth.
             val (part, kept) = IncomingScan.fitting(s, range, fresh, room, MAX_CANDIDATES) ?: break
             s = IncomingScan.read(s, part).copy(candidates = s.candidates + kept)
             if (!commit(key, s, mine)) return
             chunks++
+            // A part read means the rest's next block didn't fit, and the room has only shrunk
+            // since: asking again before receipts drain the list would find the same and stop.
+            if (part != range) break
             if (IncomingScan.nextRange(s, safeHead) != null) delay(pauseMs)
         }
         val readToHead = (s.to ?: -1) >= safeHead
         synchronized(this) { if (readToHead && generation == mine) lastScan[key] = uptime() }
-        verify(chain, s, key, mine)
+        verify(chain, s, key, mine, head)
     }
 
     /**
      * Checks [s]'s candidates against their receipts, the longest-unasked
      * first, so ones that stay unproven can't hold the rest back for good;
-     * null when a wipe came meanwhile.
+     * null when a wipe came meanwhile. A receipt that doesn't show the log
+     * drops it; no receipt at all drops it only once its block is
+     * [IncomingScan.absenceDepth] under [head] — before that, RPCs a little
+     * behind would answer the same for a real transfer.
      */
-    private suspend fun verify(chain: Chain, start: ScanState, key: Pair<String, Long>, mine: Int): ScanState? {
+    private suspend fun verify(chain: Chain, start: ScanState, key: Pair<String, Long>, mine: Int, head: Long): ScanState? {
         var s = start
         val batch = synchronized(this) {
             if (generation != mine) return null
@@ -634,7 +652,9 @@ class IncomingTransfers internal constructor(
                     keep = true
                 } else {
                     val receipt = r.value
-                    if (receipt == null || !IncomingLogs.confirms(c, receipt)) {
+                    if (receipt == null) {
+                        keep = head - c.block < IncomingScan.absenceDepth(chain.id)
+                    } else if (!IncomingLogs.confirms(c, receipt)) {
                         keep = false
                     } else {
                         // The date orders it against sends: one RPC's word for it isn't enough either.
@@ -753,8 +773,9 @@ class IncomingTransfers internal constructor(
 
         /**
          * Unproven candidates kept per account and chain, never more. A full
-         * list pauses reading until receipts drain it (at most a few scans,
-         * [MAX_VERIFY_PER_RUN] each); a chunk at [IncomingScan.MIN_SPAN] that
+         * list pauses reading until receipts drain it ([MAX_VERIFY_PER_RUN] a
+         * scan; one with no receipt drains once its block is
+         * [IncomingScan.absenceDepth] under the head, ~10 minutes); a chunk at [IncomingScan.MIN_SPAN] that
          * finds more than fits counts only its blocks that fit as read. A
          * found transfer is dropped for space only when one block alone holds
          * more than this many for the account.

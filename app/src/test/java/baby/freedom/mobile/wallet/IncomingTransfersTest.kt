@@ -550,12 +550,87 @@ class IncomingTransfersTest {
             inc.scan(account, listOf(gnosis))
             inc.persistNow()
             now += IncomingTransfers.MIN_SCAN_INTERVAL_MS
+            // The chain goes on meanwhile: fakes near the head drain once they're deep enough.
+            reads.head += IncomingTransfers.MIN_SCAN_INTERVAL_MS / 5_000
             scansNeeded++
         }
         assertEquals(listOf(hash(1)), inc.transfers.value.map { t -> t.hash })
         assertTrue("candidates peaked at ${sizes.max()}", sizes.max() <= IncomingTransfers.MAX_CANDIDATES)
-        // 3,000 fakes drained 20 receipts a scan: no stall beyond what draining them takes.
-        assertTrue("took $scansNeeded scans", scansNeeded <= 3_000 / IncomingTransfers.MAX_VERIFY_PER_RUN + 5)
+        // 3,000 fakes drained 20 receipts a scan, plus the wait for those nearest the head to sink
+        // past the absence depth: no stall beyond that.
+        val sinking = (IncomingScan.ABSENCE_MS / IncomingTransfers.MIN_SCAN_INTERVAL_MS).toInt()
+        assertTrue("took $scansNeeded scans", scansNeeded <= 3_000 / IncomingTransfers.MAX_VERIFY_PER_RUN + sinking + 5)
+    }
+
+    @Test
+    fun `a transfer near the head that RPCs a little behind say has no receipt yet is kept, and listed once it shows`() = runBlocking {
+        val head = 1_000_000L
+        val near = log(block = head - 25, tx = hash(1))
+        val deep = log(block = head - 5_000, tx = hash(2))
+        val reads = fake(head, near, deep)
+        reads.receipts[hash(1)] = null
+        reads.receipts[hash(2)] = null
+        var now = 0L
+        val inc = incoming(reads, uptime = { now })
+        inc.scan(account, listOf(gnosis))
+        assertTrue(inc.transfers.value.isEmpty())
+        // The quorum catches up: the near one's receipt is there now, the deep one's never will be.
+        reads.receipts.remove(hash(1))
+        reads.receipts.remove(hash(2))
+        repeat(3) {
+            now += IncomingTransfers.MIN_SCAN_INTERVAL_MS
+            reads.head += 6
+            inc.scan(account, listOf(gnosis))
+        }
+        // The deep one, with no receipt that deep under the head, was taken as made up.
+        assertEquals(listOf(hash(1)), inc.transfers.value.map { t -> t.hash })
+        // And one still without a receipt is dropped once its block is that deep.
+        val late = log(block = reads.head - 25, tx = hash(3))
+        reads.logs += late
+        reads.receipts[hash(3)] = null
+        now += IncomingTransfers.MIN_SCAN_INTERVAL_MS
+        reads.head += 6
+        inc.scan(account, listOf(gnosis))
+        reads.head += IncomingScan.absenceDepth(gnosis.id)
+        now += IncomingTransfers.MIN_SCAN_INTERVAL_MS
+        inc.scan(account, listOf(gnosis))
+        reads.receipts.remove(hash(3))
+        reads.head += 6
+        now += IncomingTransfers.MIN_SCAN_INTERVAL_MS
+        inc.scan(account, listOf(gnosis))
+        assertEquals(listOf(hash(1)), inc.transfers.value.map { t -> t.hash })
+    }
+
+    @Test
+    fun `a chunk read only in part stops reading until receipts make room`() = runBlocking {
+        val head = 1_000_000L
+        val safe = head - IncomingScan.margin(gnosis.id)
+        val to = safe - IncomingScan.MIN_SPAN
+        // 45 waiting candidates, read up to `to` in the smallest chunks.
+        val waiting = (0 until 45).map { i ->
+            LogCandidate(requireNotNull(xbzz.address), sender, BigInteger.ONE, hash(100 + i), 0, to - 1_000 - i, emptyList(), "0x")
+        }
+        val saved = ScanState(account, gnosis.id, from = 0, to = to, floor = 0, span = IncomingScan.MIN_SPAN, candidates = waiting)
+        val a = (0L until 3).map { i -> log(block = to + 10, tx = hash(1), logIndex = i) }
+        val b = (0L until 4).map { i -> log(block = to + 20, tx = hash(2), logIndex = i) }
+        val reads = fake(head, *(a + b).toTypedArray())
+        reads.receiptTrust = lone
+        var last: ScanState? = null
+        val store = object : IncomingStore {
+            override fun save(scans: List<ScanState>): Boolean {
+                last = scans.single()
+                return true
+            }
+            override fun load() = listOf(saved)
+        }
+        val inc = incoming(reads, store)
+        inc.awaitLoaded()
+        inc.scan(account, listOf(gnosis))
+        inc.persistNow()
+        // One request: block A fits and counts read, B doesn't; the rest isn't asked again just to find that out.
+        assertEquals(listOf((to + 1)..safe), reads.asked.toList())
+        assertEquals(to + 19, last!!.to)
+        assertEquals(48, last!!.candidates.size)
     }
 
     @Test
