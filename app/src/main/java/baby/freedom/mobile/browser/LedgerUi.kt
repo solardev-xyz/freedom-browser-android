@@ -116,7 +116,10 @@ internal fun LedgerConnectPage(accounts: List<WalletAccount>, onAdded: () -> Uni
     FullScreenScaffold(title = stringResource(R.string.signing_ledger_connect_title), onDismiss = back) {
         val d = device
         if (d == null) {
-            LedgerDevicesStep(ledger, onPick = { device = it })
+            LedgerDevicesStep(ledger, onPick = {
+                ledger.picked(it)
+                device = it
+            })
         } else {
             LedgerAccountsStep(
                 ledger = ledger,

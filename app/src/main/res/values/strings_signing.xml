@@ -31,6 +31,8 @@
     <string name="signing_ledger_usb_not_plugged_in">Plug your Ledger into the phone with a USB cable, unlock it and try again.</string>
     <string name="signing_ledger_usb_or_bluetooth_not_found">Plug your Ledger into the phone with a USB cable, or pair it over Bluetooth on Connect a Ledger, then unlock it and try again.</string>
     <string name="signing_ledger_usb_unplugged">The Ledger was unplugged. Plug it back in, unlock it and try again.</string>
+    <string name="signing_ledger_usb_not_the_tapped_one">The Ledger plugged in isn’t the one whose accounts are shown. Plug that Ledger back in and try again, or go back and pick this one.</string>
+    <string name="signing_ledger_usb_replug_cannot_tell">The Ledger was plugged back in next to another Ledger of the same model, so Freedom couldn’t tell which one it is. Go back and pick it again.</string>
     <string name="signing_ledger_usb_cannot_tell">The Ledger reconnected while another Ledger of the same model was unplugged or reconnecting too, so Freedom couldn’t tell which one it was. Leave only this Ledger plugged in, unlock it, open the Ethereum app and try again.</string>
     <string name="signing_ledger_usb_permission_refused">Freedom wasn’t given access to the Ledger over USB. Try again and allow it when Android asks.</string>
     <string name="signing_ledger_usb_cannot_talk">Couldn’t talk to the Ledger over USB. Unplug it, plug it back in and try again.</string>

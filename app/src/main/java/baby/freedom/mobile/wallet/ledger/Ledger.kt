@@ -150,14 +150,35 @@ class Ledger internal constructor(private val context: Context) {
     private val usbHeld = HashMap<String, Int>()
 
     /**
-     * Where a USB Ledger was followed to ([followUsb]): old path → new
-     * path. The follow proved the new path is the same Ledger, so a
-     * Ledger tapped on Connect a Ledger under a path it has since left is
-     * still found there ([followed]): Show more, a layout switch and
-     * Retry keep reading it, and an account is saved under the path it's
-     * at (#350 R6-F1).
+     * Where a USB Ledger tapped on Connect a Ledger is now: tapped path →
+     * the path its accounts were last read from, when that's another one
+     * (it re-enumerated and was followed there — [followUsb] — or was
+     * replugged between reads). Written only once an accounts read there
+     * has succeeded and, if an address was read from the tapped Ledger
+     * before ([usbSeen]), the Ledger there was checked to give that same
+     * address ([bindUsb]) — never on the follow's own guess. So Show
+     * more, a layout switch and Retry keep reading it ([followed]), and an
+     * account is saved under the path it's at (#350 R6-F1, R1-F1, R1-M1).
      */
     private val usbMoves = HashMap<String, String>()
+
+    /**
+     * The first (derivation path, address) read from a USB Ledger tapped
+     * on Connect a Ledger, by its tapped id: what a Ledger at another
+     * path must give to be taken for it ([bindUsb], #350 R1-F1).
+     */
+    private val usbSeen = HashMap<String, Pair<String, String>>()
+
+    /**
+     * [device] was just picked on Connect a Ledger: what was learnt of a
+     * Ledger tapped earlier under its id (where it went, what it read) is
+     * forgotten, so a path reused by another Ledger starts afresh.
+     */
+    fun picked(device: LedgerDevice) {
+        if (!device.usb) return
+        synchronized(usbMoves) { usbMoves.remove(device.id.removePrefix(USB_PREFIX)) }
+        synchronized(usbSeen) { usbSeen.remove(device.id) }
+    }
 
     /**
      * [device] where it is now: a USB Ledger whose path is no longer
@@ -296,7 +317,17 @@ class Ledger internal constructor(private val context: Context) {
     suspend fun accounts(device: LedgerDevice, scheme: LedgerScheme, start: Int, count: Int): List<Pair<String, String>> =
         session({ deviceRoutes(device) }, Strings.get(R.string.signing_ledger_purpose_read_accounts)) { app, turn ->
             val first = scheme.path(start)
-            awaitReady(turn::stage, follow = { turn.follow() }, alive = { turn.alive() }, stuck = { turn.stuck }) { app.address(first) }
+            // NotThisLedger: with the tapped Ledger replugged next to another of its
+            // model, each is tried, and only the one that gives what it gave before is read.
+            val got = try {
+                awaitReady(turn::stage, follow = { turn.follow() }, alive = { turn.alive() }, stuck = { turn.stuck }) {
+                    turn.apdu { app.address(first) }
+                }
+            } catch (e: LedgerException) {
+                throw NotThisLedger(e)
+            }
+            if (device.usb) bindUsb(device, turn, first, got) { turn.apdu { app.address(it) } }
+            turn.claim()
             turn.stage(Stage.READING)
             (start until start + count).map { i -> scheme.path(i).let { it to app.address(it) } }
         }
@@ -372,25 +403,47 @@ class Ledger internal constructor(private val context: Context) {
     }
 
     /**
-     * The one Ledger reading accounts from [device] talks to: the device
+     * The Ledger reading accounts from [device] talks to: the device
      * tapped, over the link it was listed under — never a Ledger plugged
      * in meanwhile, whose accounts would be saved under [device]'s name.
+     * A USB Ledger is read where it was last read from ([followed]); one
+     * no longer there was replugged, or quit or opened an app, between
+     * reads — under a new path each time — so the Ledgers of its model
+     * plugged in now are tried ([replugRoutes]), each checked to be it
+     * ([bindUsb]) before anything is read from it (#350 R1-F1).
      */
     private fun deviceRoutes(device: LedgerDevice): List<Route> {
         val route = Route(device.id, device.name)
         return when {
             LedgerDevLinks.handles(device.id) -> listOf(route)
             device.usb -> {
-                // Where the tapped Ledger was followed to, if it re-enumerated since (#350 R6-F1).
-                val at = followed(device).id
-                if (usbRoutes().none { it.id == at }) throw LedgerUsbLink.unplugged()
-                listOf(Route(at, device.name))
+                val known = synchronized(usbSeen) { device.id in usbSeen }
+                replugRoutes(followed(device).id, device.name, usbRoutes(), known)
             }
             else -> {
                 bluetoothProblem()?.let { throw it }
                 listOf(route)
             }
         }
+    }
+
+    /**
+     * Binds the USB Ledger an accounts read for [device] reached (now at
+     * [turn]'s [Turn.usbPath]) to it, having read [got] at [first]: if an
+     * address was read from the tapped Ledger before ([usbSeen]), the one
+     * here must give it ([read] at that path) — else it's another Ledger
+     * ([NotThisLedger], so a same-model one next to it can still be
+     * tried); the first read is remembered; and a Ledger at another path
+     * than the tapped one is recorded as moved there ([usbMoves]) only
+     * now, once it has been read (#350 R1-F1, R1-M1).
+     */
+    private suspend fun bindUsb(device: LedgerDevice, turn: Turn, first: String, got: String, read: suspend (String) -> String) {
+        val at = turn.usbPath() ?: return
+        val known = synchronized(usbSeen) { usbSeen[device.id] }
+        checkSeen(known, first, got, read)
+        if (known == null) synchronized(usbSeen) { usbSeen[device.id] = first to got }
+        val from = device.id.removePrefix(USB_PREFIX)
+        synchronized(usbMoves) { if (at == from) usbMoves.remove(from) else usbMoves[from] = at }
     }
 
     /** The Ledgers the account at [key] may be on, in the order they're tried ([accountRoutes]). */
@@ -495,14 +548,14 @@ class Ledger internal constructor(private val context: Context) {
                         val trail = LedgerUsbTrail(usb.deviceName, listed.filter { LedgerUsbLink.name(it) == model }.map { it.deviceName })
                         turn.alive = { trail.answered(ofModel()) }
                         turn.follow = {
+                            // Not recorded as a move here: that's left to a read that's
+                            // checked the Ledger there ([bindUsb], #350 R1-M1).
                             followUsb(manager, link, model, trail, turn) { path ->
-                                held?.let { old ->
-                                    release(old)
-                                    synchronized(usbMoves) { usbMoves[old] = path }
-                                }
+                                held?.let(::release)
                                 held = path
                             }
                         }
+                        turn.usbPath = { held }
                     }
                 } else {
                     open(route.id, onPairing = { turn.stage(Stage.PAIRING) }, onPaired = { turn.stage(Stage.CONNECTING) })
@@ -713,6 +766,10 @@ class Ledger internal constructor(private val context: Context) {
              */
             @Volatile
             var stuck: LedgerException? = null
+
+            /** The USB path this route's link has open now (where it was followed to, if it was), or null if it isn't a USB link. */
+            @Volatile
+            var usbPath: () -> String? = { null }
 
             /**
              * [block], an exchange with this route's Ledger, finished
@@ -1028,7 +1085,6 @@ class Ledger internal constructor(private val context: Context) {
 
         private fun model(usbName: String): String = usbName.removePrefix("Ledger").trim()
 
-        /** Whether the Ledger a USB account was added from ([usbName]: "Ledger Nano S Plus") has no Bluetooth. */
         /**
          * [id] followed through [moves] (old id → new id) while it isn't
          * [listed]: where a Ledger that re-enumerated went. An id that's
@@ -1043,6 +1099,48 @@ class Ledger internal constructor(private val context: Context) {
             return at
         }
 
+        /**
+         * Where an accounts read for a USB Ledger named [name], last read
+         * at [at], goes among the Ledgers [plugged] in: [at], while it's
+         * listed. Gone, it was replugged (or quit or opened an app) since,
+         * under a new path, so every one of its model is tried — each is
+         * checked against what it read before ([known]) — unless nothing
+         * was read from it yet: then only a lone one of its model is,
+         * since two couldn't be told apart (#350 R1-F1). None of its
+         * model plugged in, it's unplugged: plugging it back in is what
+         * works now.
+         */
+        internal fun replugRoutes(at: String, name: String, plugged: List<Route>, known: Boolean): List<Route> {
+            if (plugged.any { it.id == at }) return listOf(Route(at, name))
+            val same = plugged.filter { it.name == name }
+            return when {
+                same.isEmpty() -> throw LedgerUsbLink.unplugged()
+                !known && same.size > 1 -> throw replugCannotTell()
+                else -> same.map { Route(it.id, name) }
+            }
+        }
+
+        /**
+         * Checks a Ledger that gave [got] at [first] is the one [known]
+         * was read from ((derivation path, address), null if nothing was):
+         * it gives the same address at that path ([read] there, unless
+         * it's [first]). Not, or unreadable: [NotThisLedger] (#350 R1-F1).
+         */
+        internal suspend fun checkSeen(known: Pair<String, String>?, first: String, got: String, read: suspend (String) -> String) {
+            val (path, address) = known ?: return
+            val there = if (path == first) {
+                got
+            } else {
+                try {
+                    read(path)
+                } catch (e: LedgerException) {
+                    throw NotThisLedger(e)
+                }
+            }
+            if (!there.equals(address, ignoreCase = true)) throw NotThisLedger(notTheTappedOne())
+        }
+
+        /** Whether the Ledger a USB account was added from ([usbName]: "Ledger Nano S Plus") has no Bluetooth. */
         internal fun usbOnlyModel(usbName: String): Boolean = model(usbName) in USB_ONLY_MODELS
 
         /** Whether a paired Bluetooth Ledger named [bleName] ("Nano X 1A2B") can be the one [usbName] names. */
@@ -1071,6 +1169,10 @@ class Ledger internal constructor(private val context: Context) {
          * another same-model Ledger's, so it wasn't followed there
          * (#350 R4-M1): not "unplugged", which it wasn't.
          */
+        internal fun replugCannotTell() = LedgerException(LedgerException.Kind.DISCONNECTED, Strings.said(R.string.signing_ledger_usb_replug_cannot_tell))
+
+        internal fun notTheTappedOne() = LedgerException(LedgerException.Kind.WRONG_DEVICE, Strings.said(R.string.signing_ledger_usb_not_the_tapped_one))
+
         internal fun cannotTell() = LedgerException(LedgerException.Kind.DISCONNECTED, Strings.said(R.string.signing_ledger_usb_cannot_tell))
 
         @Volatile

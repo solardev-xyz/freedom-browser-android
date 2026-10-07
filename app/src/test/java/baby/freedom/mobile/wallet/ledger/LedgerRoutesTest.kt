@@ -724,4 +724,59 @@ class LedgerRoutesTest {
         val loop = mapOf("usb:a" to "usb:b", "usb:b" to "usb:a")
         assertTrue(Ledger.movedTo("usb:a", emptySet(), loop) in setOf("usb:a", "usb:b"))
     }
+
+    @Test
+    fun `a tapped Ledger replugged between reads is looked for among the Ledgers of its model (R1-F1)`() {
+        val tapped = "usb:/dev/bus/usb/001/005"
+        val back = Route("usb:/dev/bus/usb/001/009", "Ledger Nano S Plus")
+        val other = Route("usb:/dev/bus/usb/001/010", "Ledger Nano S Plus")
+        val nanoX = Route("usb:/dev/bus/usb/001/011", "Ledger Nano X")
+        // Still where it was read: only there.
+        assertEquals(listOf(Route(tapped, "Ledger Nano S Plus")), Ledger.replugRoutes(tapped, "Ledger Nano S Plus", listOf(Route(tapped, "Ledger Nano S Plus"), other), known = true))
+        // Replugged under a new path: that one, never a Ledger of another model.
+        assertEquals(listOf(back), Ledger.replugRoutes(tapped, "Ledger Nano S Plus", listOf(back, nanoX), known = false))
+        // Two of its model, and it was read before: both, each checked against that read.
+        assertEquals(listOf(back, other), Ledger.replugRoutes(tapped, "Ledger Nano S Plus", listOf(back, other, nanoX), known = true))
+        // Two, and nothing to check them against: neither is taken.
+        try {
+            Ledger.replugRoutes(tapped, "Ledger Nano S Plus", listOf(back, other), known = false)
+            fail("expected replugCannotTell")
+        } catch (e: LedgerException) {
+            assertEquals(Ledger.replugCannotTell().message, e.message)
+        }
+        // None of its model: unplugged — plugging it back in is what works now.
+        try {
+            Ledger.replugRoutes(tapped, "Ledger Nano S Plus", listOf(nanoX), known = true)
+            fail("expected unplugged")
+        } catch (e: LedgerException) {
+            assertEquals(LedgerException.Kind.DISCONNECTED, e.kind)
+        }
+    }
+
+    @Test
+    fun `a replugged Ledger is read only if it gives what the tapped one gave (R1-F1)`() = runBlocking {
+        val seen = "m/44'/60'/0'/0/0" to "0xAAA"
+        // Same address at the same path: it.
+        Ledger.checkSeen(seen, "m/44'/60'/0'/0/0", "0xaaa") { fail("no second read"); "" }
+        // A read at another path (Show more): the remembered one is read again and matches.
+        Ledger.checkSeen(seen, "m/44'/60'/5'/0/0", "0xBBB") { p -> if (p == seen.first) "0xAAA" else "0x0" }
+        // Nothing read before: taken as is.
+        Ledger.checkSeen(null, "m/44'/60'/0'/0/0", "0xCCC") { fail("no second read"); "" }
+        // Another Ledger: passed over.
+        try {
+            Ledger.checkSeen(seen, "m/44'/60'/0'/0/0", "0xDDD") { "" }
+            fail("expected NotThisLedger")
+        } catch (e: NotThisLedger) {
+            assertEquals(LedgerException.Kind.WRONG_DEVICE, e.reason.kind)
+        }
+        // Two of its model plugged in: only the one that is it is read.
+        val addresses = mapOf("usb:a" to "0xDDD", "usb:b" to "0xAAA")
+        val got = Ledger.inTurn(listOf(Route("usb:a", "Ledger Nano S Plus"), Route("usb:b", "Ledger Nano S Plus"))) { route, turn ->
+            val a = addresses.getValue(route.id)
+            Ledger.checkSeen(seen, seen.first, a) { a }
+            turn.claim()
+            route.id
+        }
+        assertEquals("usb:b", got)
+    }
 }
