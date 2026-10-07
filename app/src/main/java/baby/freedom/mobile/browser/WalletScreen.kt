@@ -126,6 +126,7 @@ import baby.freedom.mobile.wallet.VaultLockedException
 import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.WalletSender
 import baby.freedom.mobile.wallet.TxHistory
+import baby.freedom.mobile.wallet.IncomingTransfers
 import baby.freedom.mobile.data.X402Store
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.TooManyAccountsException
@@ -692,6 +693,11 @@ fun WalletScreen(
     val txRecords by history.records.collectAsState()
     var historyOpen by remember { mutableStateOf(false) }
     var openTx by remember { mutableStateOf<String?>(null) }
+    // Built-in tokens received (#441), merged into the history; one open by its key.
+    val incoming = remember(context) { IncomingTransfers.get(context) }
+    val incomingTransfers by incoming.transfers.collectAsState()
+    val incomingCatchingUp by incoming.catchingUp.collectAsState()
+    var openReceived by remember { mutableStateOf<String?>(null) }
     // Safe accounts (#141): one open by address, the create page, and a request scanned to co-sign.
     val safeAccounts = remember(context) { SafeAccounts.get(context) }
     val safeState by safeAccounts.state.collectAsState()
@@ -800,6 +806,14 @@ fun WalletScreen(
         }
     }
     LaunchedEffect(refreshing) { if (!refreshing) pulled = false }
+    // Tokens received (#441): looked for on the same occasions, one chunk at a time,
+    // apart from the balances' spinner. Leaving the page (or the account) stops it;
+    // the next scan carries on from where it got to.
+    LaunchedEffect(activeAddress, walletChains, refreshTick) {
+        val address = activeAddress ?: return@LaunchedEffect
+        val chains = walletChains ?: return@LaunchedEffect
+        incoming.scan(address, chains)
+    }
 
     // Pending sends the sender isn't following (stopped tracking, no receipt in time, an
     // earlier run's) are settled from the chain: on opening, on Refresh, on a new pending
@@ -913,6 +927,7 @@ fun WalletScreen(
             connectingLedger = false
             historyOpen = false
             openTx = null
+            openReceived = null
             openSafe = null
             creatingSafe = false
             coSigning = null
@@ -924,6 +939,7 @@ fun WalletScreen(
         if (state == Vault.State.Empty) {
             sender.discard()
             history.wipe()
+            incoming.wipe()
         }
     }
 
@@ -971,6 +987,17 @@ fun WalletScreen(
     }
     val historyAccount = accountList?.active
     val accountTx = txRecordsFrom(txRecords, historyAccount?.address)
+    val accountReceived = transfersTo(incomingTransfers, historyAccount?.address)
+    val accountHistory = historyItems(accountTx, accountReceived)
+    val historyExplorers = historyAccount?.let { accountExplorerLinks(walletChains.orEmpty(), it.address) }.orEmpty()
+    val historyCatchingUp = historyAccount?.address?.lowercase()?.let { it in incomingCatchingUp } == true
+    fun openHistoryItem(item: HistoryItem) {
+        error = null
+        when (item) {
+            is HistoryItem.Sent -> openTx = item.record.hash
+            is HistoryItem.Received -> openReceived = item.transfer.key
+        }
+    }
     if (historyAccount != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
         // Looked up again on every change, so an open send moves from Pending to Confirmed in place.
         val tx = openTx?.let { hash -> accountTx.firstOrNull { it.hash == hash } }
@@ -978,8 +1005,21 @@ fun WalletScreen(
             TxDetailPage(tx, onOpenUrl = onOpenUrl, onBack = { openTx = null })
             return
         }
+        val received = openReceived?.let { key -> accountReceived.firstOrNull { it.key == key } }
+        if (received != null) {
+            ReceivedDetailPage(received, onOpenUrl = onOpenUrl, onBack = { openReceived = null })
+            return
+        }
         if (historyOpen) {
-            TxHistoryPage(historyAccount.name, accountTx, onOpen = { openTx = it.hash }, onBack = { historyOpen = false })
+            TxHistoryPage(
+                historyAccount.name,
+                accountHistory,
+                onOpen = ::openHistoryItem,
+                onBack = { historyOpen = false },
+                explorers = historyExplorers,
+                onOpenUrl = onOpenUrl,
+                catchingUp = historyCatchingUp,
+            )
             return
         }
     }
@@ -1503,17 +1543,15 @@ fun WalletScreen(
                 }
                 item("activity") {
                     TxHistorySection(
-                        records = accountTx,
+                        records = accountHistory,
                         title = stringResource(R.string.wallet_home_activity),
                         preview = WALLET_HOME_ACTIVITY,
                         // Receive is the header's; the empty list only points at the explorers.
                         onReceive = null,
-                        explorers = historyAccount?.let { accountExplorerLinks(walletChains.orEmpty(), it.address) }.orEmpty(),
+                        explorers = historyExplorers,
                         onOpenUrl = onOpenUrl,
-                        onOpen = {
-                            error = null
-                            openTx = it.hash
-                        },
+                        onOpen = ::openHistoryItem,
+                        catchingUp = historyCatchingUp,
                         onShowAll = {
                             error = null
                             historyOpen = true
@@ -1670,6 +1708,7 @@ fun WalletScreen(
                             // The sites' feed access and records (#120): they name identities of this wallet.
                             SwarmFeedStore.get(context).wipe()
                             history.wipeNow()
+                            incoming.wipeNow()
                             EthereumProviders.walletRemoved(context)
                             // Its site allowances and payment history (#140).
                             x402.clear()
