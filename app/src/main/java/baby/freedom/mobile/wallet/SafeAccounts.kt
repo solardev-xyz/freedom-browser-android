@@ -515,8 +515,11 @@ class SafeAccounts internal constructor(
      * owners it never ran under. Returns what changed, or null if nothing
      * did. Throws [SafeException] if [policy] isn't confirmed, isn't a
      * Safe's policy, or was read at an earlier block than the last reading
-     * applied ([SafeAccount.checkedBlock]) — the record never goes back to
-     * owners or a threshold the Safe had before.
+     * applied ([SafeAccount.checkedBlock]) and names other owners or another
+     * threshold than the record — the record never goes back to owners or a
+     * threshold the Safe had before. An earlier reading that matches the
+     * record (honest head spread between RPCs) is accepted as a no-op: null,
+     * nothing written, the floor unchanged.
      */
     suspend fun applyOnChain(address: String, policy: SafeChain.Policy): SafePolicyChange? {
         val threshold = policy.threshold
@@ -524,7 +527,13 @@ class SafeAccounts internal constructor(
         val checked = policy.owners.map { SafeProtocol.eip55(it) }
         return update { s ->
             val current = s.safe(address) ?: throw SafeException(Strings.get(R.string.safe_error_gone))
-            if (current.checkedBlock != null && policy.block < current.checkedBlock) throw SafeException(Strings.get(R.string.safe_policy_older_reading))
+            if (current.checkedBlock != null && policy.block < current.checkedBlock) {
+                // RPC heads a block or two apart are normal: an older reading that says what the record already
+                // says confirms it, changes nothing, and leaves the floor where it is. Only one that would take the
+                // record back to other owners or another threshold is refused.
+                if (threshold == current.thresholdNow && SafeAccount.sameOwners(current.ownersNow, checked)) return@update s to null
+                throw SafeException(Strings.get(R.string.safe_policy_older_reading))
+            }
             val ownersChanged = !SafeAccount.sameOwners(current.ownersNow, checked)
             val thresholdBefore = current.thresholdNow
             val safe = current.withOnChain(checked, threshold, policy.block)

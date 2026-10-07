@@ -814,6 +814,14 @@ class SafeAccountsTest {
         assertTrue(expectSafeError { s.applyOnChain(safe.address, reading(listOf(account1.address, other), 1, block = 40)) }.contains("older block"))
         assertEquals(2, s.state.value!!.safe(safe.address)!!.thresholdNow)
         assertEquals(2, s.state.value!!.pending.single().threshold)
+        // A reading from block 49 that says what the record says (an RPC one block behind) confirms it: no change,
+        // nothing refused, and the floor stays at 50.
+        val stateBefore = s.state.value
+        assertNull(s.applyOnChain(safe.address, reading(listOf(other.lowercase(), account1.address), 2, block = 49)))
+        assertEquals(stateBefore, s.state.value)
+        assertEquals(50L, s.state.value!!.safe(safe.address)!!.checkedBlock)
+        // But an older reading with the same threshold and other owners is still refused.
+        assertTrue(expectSafeError { s.applyOnChain(safe.address, reading(listOf(stranger, other), 2, block = 49)) }.contains("older block"))
         // The floor survives a restart.
         assertEquals(50L, safes().also { it.reconcile(vault.state.value) }.state.value!!.safe(safe.address)!!.checkedBlock)
         // Another device executed the transaction (nonce 0) with a swapOwner after it; the Safe's nonce is 2 now.
