@@ -58,11 +58,12 @@ class TxDecodeTest {
     }
 
     @Test
-    fun `an unlisted token's amount is in its smallest units, with a caution`() {
-        val data = bytes("a9059cbb" + word(recipient) + word(BigInteger.valueOf(42)))
-        val call = TxDecode.call(unlisted, data, 1) as DecodedCall.Transfer
-        assertEquals("Send 42 units of token 0x1234…5678 to 0xd8dA…6045", callHeadline(call))
-        assertEquals(WarningLevel.Caution, callWarning(call)!!.level)
+    fun `transfer on an unlisted contract isn't read as an amount, since a pre-ERC-721 NFT's shares the selector`() {
+        // CryptoKitties' transfer(to, kittyId=1234567): not "Send 1234567 units of token …".
+        val data = bytes("a9059cbb" + word(recipient) + word(BigInteger.valueOf(1_234_567)))
+        assertNull(TxDecode.call(unlisted, data, 1))
+        // The generic sheet names the contract and the function, with no amount.
+        assertEquals("Run token transfers on 0x1234…5678", sendTxHeadline(sendAsk(unlisted, data)))
     }
 
     @Test
@@ -91,8 +92,8 @@ class TxDecodeTest {
         assertNull(TxDecode.call(unlisted, bytes("23b872dd" + word(owner) + word(recipient) + word(BigInteger.valueOf(7))), 1))
         // USDC's Ethereum address on Gnosis isn't a token the wallet lists there either.
         assertNull(TxDecode.call(usdc, bytes("095ea7b3" + word(spender) + word(BigInteger.TEN)), 100))
-        // ERC-721 has no transfer(to, amount): that one is still read.
-        assertTrue(TxDecode.call(unlisted, bytes("a9059cbb" + word(recipient) + word(BigInteger.TEN)), 1) is DecodedCall.Transfer)
+        // Nor is transfer, which pre-ERC-721 NFTs share (R5-M2).
+        assertNull(TxDecode.call(unlisted, bytes("a9059cbb" + word(recipient) + word(BigInteger.TEN)), 1))
         // And the generic sheet names the contract.
         assertEquals(
             "Call contract 0x1234…5678 on Ethereum",
@@ -128,9 +129,8 @@ class TxDecodeTest {
     fun `a token is named only from the wallet's own list, on its own chain`() {
         val data = bytes("a9059cbb" + word(recipient) + word(BigInteger.valueOf(20_000_000)))
         // USDC's Ethereum address on Gnosis is no USDC the wallet knows.
-        val onGnosis = TxDecode.call(usdc, data, 100) as DecodedCall.Transfer
-        assertFalse(onGnosis.token.listed)
-        assertEquals("Send 20000000 units of token 0xA0b8…eB48 to 0xd8dA…6045", callHeadline(onGnosis))
+        assertNull(TxDecode.call(usdc, data, 100))
+        assertEquals("Send 20 USDC to 0xd8dA…6045", callHeadline(TxDecode.call(usdc, data, 1) as DecodedCall.Transfer))
     }
 
     // ---- Permits ----

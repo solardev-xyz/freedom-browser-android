@@ -265,8 +265,11 @@ object EthereumProviders {
             if (chains.none { it.id == chainId }) return false
             if (!grants.grant(origin, account, chainId)) return false
             val ruleStore = AutoApproveStore.get(context)
-            rules.filter { it.origin == origin }.forEach { ruleStore.grant(it) }
-            true
+            // All the rules back, or none and no connection either (R5-M1), as the provider's.
+            if (rules.filter { it.origin == origin }.all { ruleStore.grant(it) }) return true
+            ruleStore.revokeOrigin(origin)
+            grants.revoke(origin)
+            false
         }
 
     /**

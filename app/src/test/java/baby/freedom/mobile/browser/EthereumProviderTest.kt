@@ -67,9 +67,12 @@ class EthereumProviderTest {
         /** When set, a revoke waits here before it commits: a write still in flight. */
         var revokeGate: CompletableDeferred<Unit>? = null
         val revokeStarted = CompletableDeferred<Unit>()
+        /** A revoke isn't written. */
+        var failRevoke = false
         override suspend fun revoke(origin: String): Boolean {
             revokeStarted.complete(Unit)
             revokeGate?.await()
+            if (failRevoke) return false
             return grants.remove(origin).let { true }
         }
         override suspend fun all(): Map<String, EthereumProvider.Grant> {
@@ -1675,6 +1678,39 @@ class EthereumProviderTest {
         assertEquals(setOf(rule.key), rules.rules)
         assertEquals(listOf(Triple(site, "accountsChanged", JSONArray().put(main.address).toString())), events)
         assertEquals("[\"${main.address}\"]", ok(call("eth_accounts")).toString())
+    }
+
+    @Test
+    fun `undo whose rules can't be written takes the connection back off and says it didn't undo`() {
+        grantTransferRule()
+        val rule = AutoApproveRule(site, token.lowercase(), "0xa9059cbb", 100)
+        val before = grants.grants.getValue(site)
+        assertTrue(runBlocking { provider.disconnect(site) })
+        events.clear()
+        rules.failWrites = true
+        assertFalse(runBlocking { provider.reconnect(site, before.account, before.chainId, listOf(rule)) })
+        assertNull(grants.grants[site])
+        assertTrue(rules.rules.isEmpty())
+        assertTrue(events.isEmpty())
+        // Nothing left half-done: a later Undo can still bring it all back.
+        rules.failWrites = false
+        assertTrue(runBlocking { provider.reconnect(site, before.account, before.chainId, listOf(rule)) })
+        assertEquals(setOf(rule.key), rules.rules)
+    }
+
+    @Test
+    fun `undo whose rules can't be written, nor the connection taken back, still says it didn't undo`() {
+        grantTransferRule()
+        val rule = AutoApproveRule(site, token.lowercase(), "0xa9059cbb", 100)
+        val before = grants.grants.getValue(site)
+        assertTrue(runBlocking { provider.disconnect(site) })
+        events.clear()
+        rules.failWrites = true
+        grants.failRevoke = true
+        assertFalse(runBlocking { provider.reconnect(site, before.account, before.chainId, listOf(rule)) })
+        // Connected after all: its pages are told so, but no rule came back.
+        assertEquals(before, grants.grants[site])
+        assertEquals(listOf(Triple(site, "accountsChanged", JSONArray().put(main.address).toString())), events)
     }
 
     @Test

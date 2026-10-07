@@ -115,8 +115,9 @@ internal object TxDecode {
      * it isn't one of the calls above in exactly its standard encoding: the
      * selector, then one 32-byte word per argument and nothing more, each
      * address word with its upper 12 bytes zero and each bool 0 or 1.
-     * `approve` and `transferFrom` are decoded only for a listed token:
-     * on any other contract they may be an NFT's (ERC-721), whose last
+     * `transfer`, `approve` and `transferFrom` are decoded only for a
+     * listed token: on any other contract they may be an NFT's (ERC-721,
+     * or a pre-ERC-721 one like CryptoKitties for `transfer`), whose last
      * argument is a token ID, not an amount.
      */
     fun call(to: String, data: ByteArray, chainId: Long): DecodedCall? {
@@ -131,12 +132,15 @@ internal object TxDecode {
         }
         fun uint(i: Int) = BigInteger(1, word(i))
         return when (hexOf(data, 4)) {
-            TRANSFER -> if (words != 2) null else {
-                DecodedCall.Transfer(TokenRef.of(chainId, to), address(0) ?: return null, uint(1))
-            }
             // ERC-721's transferFrom and approve have these same selectors and
-            // encodings, the last word a token ID rather than an amount (R1-M1):
-            // read as ERC-20 only for a token on the wallet's own list.
+            // encodings, the last word a token ID rather than an amount (R1-M1),
+            // and so has pre-ERC-721 NFTs' transfer(address,uint256) — CryptoKitties'
+            // hands over kitty #id (R5-M2): each read as ERC-20 only for a token on
+            // the wallet's own list.
+            TRANSFER -> if (words != 2) null else {
+                val token = TokenRef.of(chainId, to).takeIf { it.listed } ?: return null
+                DecodedCall.Transfer(token, address(0) ?: return null, uint(1))
+            }
             TRANSFER_FROM -> if (words != 3) null else {
                 val token = TokenRef.of(chainId, to).takeIf { it.listed } ?: return null
                 DecodedCall.Transfer(token, address(1) ?: return null, uint(2), from = address(0) ?: return null)
@@ -305,9 +309,8 @@ internal fun callHeadline(call: DecodedCall): String = when (call) {
 
 /** The warning a decoded call carries, if any: a token approval is a standing permission. */
 internal fun callWarning(call: DecodedCall): SheetWarning? = when (call) {
-    is DecodedCall.Transfer -> if (call.token.listed) null else {
-        SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_decode_unlisted_note, call.token.address), "unlisted-token")
-    }
+    // Only ever a listed token's (an unlisted contract's transfer may be an NFT's, R5-M2).
+    is DecodedCall.Transfer -> null
     is DecodedCall.Approve -> when {
         call.amount.signum() == 0 -> null
         call.unlimited -> SheetWarning(

@@ -492,7 +492,6 @@
     <string name="send_decode_approve_all">Allow %1$s to move all your tokens from collection %2$s</string>
     <string name="send_decode_approve_all_revoke">Stop %1$s from moving your tokens from collection %2$s</string>
     <!-- %1$s: the token contract, in full. -->
-    <string name="send_decode_unlisted_note">The wallet doesn\'t list this token, so the amount is in its smallest units. Token contract: %1$s</string>
     <!-- %1$s: the spender, shortened; %2$s: the token. The first line is shown in bold. -->
     <string name="send_decode_approve_unlimited_danger">No limit: %1$s could take all your %2$s, now or later, without asking again.\nOnly approve if you trust the site and expected this. You can take it back later by approving 0.</string>
     <!-- %1$s: the spender, shortened; %2$s: the amount and token. -->

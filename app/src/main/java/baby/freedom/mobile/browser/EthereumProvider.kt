@@ -446,7 +446,8 @@ class EthereumProvider(
      * account. Its pages are told as on a connection: `accountsChanged`,
      * and `chainChanged` when [chainId] isn't the chain they were left on.
      * False if it wasn't restored. Not cancellable, and holds [siteLinks],
-     * as [disconnect].
+     * as [disconnect]. A rule that can't be written takes the connection
+     * back off again (R5-M1): false, as nothing was restored.
      */
     suspend fun reconnect(origin: String, account: String, chainId: Long, rules: List<AutoApproveRule>): Boolean =
         withContext(NonCancellable) {
@@ -462,12 +463,21 @@ class EthereumProvider(
                 if (list.none { it.id == chainId }) return@withLock false
                 val before = synchronized(sessionChains) { sessionChains[origin] } ?: DEFAULT_CHAIN_ID
                 if (!grants.grant(origin, kept.address, chainId)) return@withLock false
+                // Only this site's own rules, each as it was — all of them, or the Undo
+                // didn't happen: a connection back without its rules would show a sheet
+                // the user thinks they turned off, with no "Couldn't undo" (R5-M1).
+                val restored = rules.filter { it.origin == origin }.all { autoApprove.grant(it) }
+                if (!restored) {
+                    // Back to disconnected, rules first, as [disconnect]. If the connection
+                    // can't be taken back it stays, and its pages are told — but the Undo
+                    // still says it couldn't be done.
+                    autoApprove.revokeOrigin(origin)
+                    if (grants.revoke(origin)) return@withLock false
+                }
                 synchronized(sessionChains) { sessionChains.remove(origin) }
-                // Only this site's own rules, each as it was.
-                rules.filter { it.origin == origin }.forEach { autoApprove.grant(it) }
                 events.emit(origin, "accountsChanged", JSONArray().put(kept.address))
                 if (before != chainId) events.emit(origin, "chainChanged", hex(chainId))
-                true
+                restored
             }
         }
 
