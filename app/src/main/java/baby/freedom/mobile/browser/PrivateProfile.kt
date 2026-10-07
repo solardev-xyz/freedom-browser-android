@@ -78,10 +78,13 @@ object PrivateProfile {
      */
     @MainThread
     fun attachToLive(webView: WebView): Boolean {
-        val profile = current ?: return false
-        WebViewCompat.setProfile(webView, profile.name)
+        val name = liveProfileName() ?: return false
+        WebViewCompat.setProfile(webView, name)
         return true
     }
+
+    /** The live private session's profile name, or null; never starts one. */
+    internal fun liveProfileName(): String? = current?.name
 
     private fun startSession(): Profile {
         val profile = ProfileStore.getInstance().getOrCreateProfile(PREFIX + UUID.randomUUID())

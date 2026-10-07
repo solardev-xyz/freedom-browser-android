@@ -452,6 +452,15 @@ class PageInfoTest {
     }
 
     @Test
+    fun `the wipe private attach never starts a session once the last private tab closed`() {
+        // R1-M1: no live session (the last private tab closed while the
+        // delete ran) — there is nothing to attach to, and asking starts nothing.
+        assertFalse(PrivateProfile.isLive())
+        assertNull(PrivateProfile.liveProfileName())
+        assertFalse(PrivateProfile.isLive())
+    }
+
+    @Test
     fun `a blob document is on the origin that minted it`() {
         SiteData.committed(31L, "blob:https://example.org/0d6e-41")
         assertEquals("https://example.org", SiteData.committedOrigin(31L))
