@@ -31,8 +31,8 @@
     <string name="settings_section_ipfs">IPFS</string>
 
     <!-- SettingsScreen.kt: Chains (removing a chain or one of its RPCs) -->
-    <string name="settings_rpc_not_removed_last">Not removed: it\'s the last RPC names resolve through (Settings → Name resolution → RPC providers)</string>
-    <string name="settings_rpc_remove_failed">Couldn\'t remove the RPC. Try again.</string>
+    <string name="settings_rpc_not_removed_last">Add another RPC in Settings → Name resolution → RPC providers first: this is the last one names resolve through.</string>
+    <string name="settings_rpc_remove_failed">Try again: the RPC couldn\'t be removed.</string>
     <string name="settings_remove_chain_title">Remove %1$s?</string>
     <string name="settings_remove_chain_message">Removes chain %1$s and its RPC endpoints from this device. You can add it again later.</string>
     <string name="settings_remove_chain_failed_title">Couldn\'t remove %1$s</string>
