@@ -149,6 +149,29 @@ class Ledger internal constructor(private val context: Context) {
      */
     private val usbHeld = HashMap<String, Int>()
 
+    /**
+     * Where a USB Ledger was followed to ([followUsb]): old path → new
+     * path. The follow proved the new path is the same Ledger, so a
+     * Ledger tapped on Connect a Ledger under a path it has since left is
+     * still found there ([followed]): Show more, a layout switch and
+     * Retry keep reading it, and an account is saved under the path it's
+     * at (#350 R6-F1).
+     */
+    private val usbMoves = HashMap<String, String>()
+
+    /**
+     * [device] where it is now: a USB Ledger whose path is no longer
+     * listed, at the path it was followed to ([usbMoves]), if that's
+     * listed; anything else as it is.
+     */
+    fun followed(device: LedgerDevice): LedgerDevice {
+        if (!device.usb) return device
+        val listed = usbRoutes().map { it.id }.toSet()
+        val moves = synchronized(usbMoves) { usbMoves.toMap() }
+        val id = movedTo(device.id, listed, moves.entries.associate { (from, to) -> USB_PREFIX + from to USB_PREFIX + to })
+        return if (id == device.id) device else device.copy(id = id)
+    }
+
     private val adapter: BluetoothAdapter?
         get() = context.getSystemService(BluetoothManager::class.java)?.adapter
 
@@ -358,8 +381,10 @@ class Ledger internal constructor(private val context: Context) {
         return when {
             LedgerDevLinks.handles(device.id) -> listOf(route)
             device.usb -> {
-                if (usbRoutes().none { it.id == device.id }) throw LedgerUsbLink.unplugged()
-                listOf(route)
+                // Where the tapped Ledger was followed to, if it re-enumerated since (#350 R6-F1).
+                val at = followed(device).id
+                if (usbRoutes().none { it.id == at }) throw LedgerUsbLink.unplugged()
+                listOf(Route(at, device.name))
             }
             else -> {
                 bluetoothProblem()?.let { throw it }
@@ -471,7 +496,10 @@ class Ledger internal constructor(private val context: Context) {
                         turn.alive = { trail.answered(ofModel()) }
                         turn.follow = {
                             followUsb(manager, link, model, trail, turn) { path ->
-                                held?.let(::release)
+                                held?.let { old ->
+                                    release(old)
+                                    synchronized(usbMoves) { usbMoves[old] = path }
+                                }
                                 held = path
                             }
                         }
@@ -581,7 +609,7 @@ class Ledger internal constructor(private val context: Context) {
         /** A USB Ledger's id: this and its USB device path, which only tells two plugged in at once apart. */
         private const val USB_PREFIX = "usb:"
 
-        /** The activity-alias [openOnPlugIn] turns on: MainActivity, started by a Ledger's plug-in. */
+        /** The activity-alias [openOnPlugIn] turns on: the incoming-link gate (IncomingLinkActivity), started by a Ledger's plug-in, which brings MainActivity forward. */
         private const val PLUG_IN_LAUNCHER = "baby.freedom.mobile.LedgerPlugIn"
 
         fun isUsbId(id: String): Boolean = id.startsWith(USB_PREFIX)
@@ -1001,6 +1029,20 @@ class Ledger internal constructor(private val context: Context) {
         private fun model(usbName: String): String = usbName.removePrefix("Ledger").trim()
 
         /** Whether the Ledger a USB account was added from ([usbName]: "Ledger Nano S Plus") has no Bluetooth. */
+        /**
+         * [id] followed through [moves] (old id → new id) while it isn't
+         * [listed]: where a Ledger that re-enumerated went. An id that's
+         * listed is the Ledger at that path now and is never moved on, so
+         * a path reused later doesn't send it elsewhere; a loop ends where
+         * it started over.
+         */
+        internal fun movedTo(id: String, listed: Set<String>, moves: Map<String, String>): String {
+            var at = id
+            val seen = HashSet<String>()
+            while (at !in listed && seen.add(at)) at = moves[at] ?: break
+            return at
+        }
+
         internal fun usbOnlyModel(usbName: String): Boolean = model(usbName) in USB_ONLY_MODELS
 
         /** Whether a paired Bluetooth Ledger named [bleName] ("Nano X 1A2B") can be the one [usbName] names. */

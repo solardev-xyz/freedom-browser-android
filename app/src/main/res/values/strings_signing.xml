@@ -52,6 +52,7 @@
     <string name="signing_ledger_usb">USB</string>
     <string name="signing_ledger_usb_none">No Ledger plugged in. Plug it into the phone with a USB cable (USB-C, or an OTG adapter).</string>
     <string name="signing_ledger_device_usb">Plugged in over USB</string>
+    <string name="signing_ledger_device_usb_numbered">Plugged in over USB · bus %1$d, device %2$d</string>
     <string name="signing_ledger_open_on_plug_in">Open Freedom when a Ledger is plugged in</string>
     <string name="signing_ledger_open_on_plug_in_detail">Android then offers to open Freedom when you plug in a Ledger, and can remember that Freedom may use it. Off, plugging in does nothing and Freedom asks for access when it first talks to the Ledger.</string>
     <string name="signing_ledger_nearby_devices">Nearby devices</string>

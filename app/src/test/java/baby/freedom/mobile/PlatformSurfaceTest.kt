@@ -14,7 +14,9 @@ import org.w3c.dom.Element
  *
  * - Only the two activities are exported: [MainActivity] for the launcher,
  *   and [IncomingLinkActivity], the one gate every link, share and search
- *   from another app comes through (#268). Every service, receiver and
+ *   from another app comes through (#268) — plus `.LedgerPlugIn`, an alias
+ *   of that gate for a Ledger's USB plug-in, off unless the user turns it
+ *   on (#319). Every service, receiver and
  *   provider is private to the app.
  * - No backup of the app's data, and a release build is never debuggable.
  * - Every PendingIntent handed to the system is immutable, so the app
@@ -45,7 +47,12 @@ class PlatformSurfaceTest {
             components("receiver") + components("provider"))
             .filter { it.android("exported") != "false" }
             .map { it.android("name") }
-        assertEquals(listOf(".MainActivity", ".IncomingLinkActivity"), exported)
+        assertEquals(listOf(".MainActivity", ".IncomingLinkActivity", ".LedgerPlugIn"), exported)
+        // The Ledger plug-in alias (#319) is off until the user turns it on, and lands
+        // on the incoming-link gate, not on MainActivity.
+        val plugIn = components("activity-alias").single { it.android("name") == ".LedgerPlugIn" }
+        assertEquals("false", plugIn.android("enabled"))
+        assertEquals(".IncomingLinkActivity", plugIn.android("targetActivity"))
         // Every component states it, rather than leaving it to the intent-filter default.
         for (c in components("service") + components("receiver") + components("provider")) {
             assertEquals(c.android("name"), "false", c.android("exported"))

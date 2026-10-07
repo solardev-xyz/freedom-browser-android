@@ -123,12 +123,27 @@ internal fun LedgerConnectPage(accounts: List<WalletAccount>, onAdded: () -> Uni
                 device = d,
                 inWallet = accounts.map { it.address.lowercase() }.toSet(),
                 add = { path, address, name ->
-                    walletAccounts.addLedger(LedgerKey(path, d.id, d.name), address, name)
+                    // Saved under the path the Ledger is at now, if it re-enumerated since it was tapped (#350 R6-F1).
+                    walletAccounts.addLedger(LedgerKey(path, ledger.followed(d).id, d.name), address, name)
                     onAdded()
                 },
             )
         }
     }
+}
+
+/**
+ * [d]'s USB bus and device number (from `/dev/bus/usb/<bus>/<device>`),
+ * when another Ledger in [all] shows the same name: two Nano S Plus
+ * plugged in would otherwise read the same (#350 R6-M1). Null for one
+ * that's alone under its name, or a path that isn't numbered so.
+ */
+internal fun usbDeviceNumber(d: LedgerDevice, all: List<LedgerDevice>): Pair<Int, Int>? {
+    if (all.count { it.name == d.name } < 2) return null
+    val parts = d.id.substringAfter(':').trimEnd('/').split('/')
+    val bus = parts.getOrNull(parts.size - 2)?.toIntOrNull() ?: return null
+    val n = parts.lastOrNull()?.toIntOrNull() ?: return null
+    return bus to n
 }
 
 /** Ledgers plugged in over USB; Bluetooth, its permission, and the Ledgers in reach. */
@@ -194,7 +209,9 @@ private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
                 usbDevices.forEach { d ->
                     PageRow(
                         title = d.name,
-                        subtitle = stringResource(R.string.signing_ledger_device_usb),
+                        subtitle = usbDeviceNumber(d, usbDevices)?.let { (bus, n) ->
+                            stringResource(R.string.signing_ledger_device_usb_numbered, bus, n)
+                        } ?: stringResource(R.string.signing_ledger_device_usb),
                         style = PageRowStyle.Inset,
                         leadingIcon = Icons.Filled.Usb,
                         onClick = { onPick(d) },

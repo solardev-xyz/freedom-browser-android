@@ -708,4 +708,20 @@ class LedgerRoutesTest {
         link.replace(third)
         assertTrue(third.closed)
     }
+
+    @Test
+    fun `a tapped Ledger that re-enumerated is found where it was followed to (R6-F1)`() {
+        val moves = mapOf("usb:/dev/bus/usb/001/005" to "usb:/dev/bus/usb/001/006", "usb:/dev/bus/usb/001/006" to "usb:/dev/bus/usb/001/007")
+        // Followed twice (opened the Ethereum app, then quit it): the chain is walked to where it is now.
+        assertEquals("usb:/dev/bus/usb/001/007", Ledger.movedTo("usb:/dev/bus/usb/001/005", setOf("usb:/dev/bus/usb/001/007"), moves))
+        // Still at its path: never moved on, even with a move recorded from it.
+        assertEquals("usb:/dev/bus/usb/001/005", Ledger.movedTo("usb:/dev/bus/usb/001/005", setOf("usb:/dev/bus/usb/001/005", "usb:/dev/bus/usb/001/007"), moves))
+        // Followed, then unplugged: ends at a path that isn't listed, so it reads as unplugged.
+        assertEquals("usb:/dev/bus/usb/001/007", Ledger.movedTo("usb:/dev/bus/usb/001/005", emptySet(), moves))
+        // Never followed: as it is.
+        assertEquals("usb:/dev/bus/usb/001/002", Ledger.movedTo("usb:/dev/bus/usb/001/002", emptySet(), moves))
+        // A loop ends.
+        val loop = mapOf("usb:a" to "usb:b", "usb:b" to "usb:a")
+        assertTrue(Ledger.movedTo("usb:a", emptySet(), loop) in setOf("usb:a", "usb:b"))
+    }
 }

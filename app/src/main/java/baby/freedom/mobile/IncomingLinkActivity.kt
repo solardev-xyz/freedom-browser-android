@@ -2,6 +2,7 @@ package baby.freedom.mobile
 
 import android.app.Activity
 import android.content.Intent
+import android.hardware.usb.UsbManager
 import android.os.Bundle
 import baby.freedom.mobile.browser.IncomingLinks
 
@@ -17,14 +18,22 @@ import baby.freedom.mobile.browser.IncomingLinks
  * activity reads the intent ([IncomingLinks.from]), hands only the link
  * or query on to [MainActivity] in the browser's own task (its
  * `onNewIntent` when it's running, a cold start when it isn't), and
- * finishes.
+ * finishes. A Ledger plugged in (#319, the `.LedgerPlugIn` alias, when
+ * the user turned it on) only brings the browser forward.
  */
 class IncomingLinkActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val incoming = IncomingLinks.from(intent)
-        if (incoming != null) {
-            val forward = IncomingLinks.toIntent(incoming)
+        val forward = when {
+            incoming != null -> IncomingLinks.toIntent(incoming)
+            // A Ledger plugged in, with "Open Freedom when a Ledger is plugged in"
+            // on (#319, the .LedgerPlugIn alias): the browser, with nothing to open.
+            intent?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED -> Intent(Intent.ACTION_MAIN)
+            else -> null
+        }
+        if (forward != null) {
+            forward
                 .setClass(this, MainActivity::class.java)
                 .addFlags(
                     Intent.FLAG_ACTIVITY_NEW_TASK or
