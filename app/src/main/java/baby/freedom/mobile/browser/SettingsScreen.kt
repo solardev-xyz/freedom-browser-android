@@ -93,6 +93,7 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.DappGrantStore
@@ -296,6 +297,7 @@ internal fun SettingsScreen(
     val chainStore = remember(context) { ChainStore.get(context) }
     val chains by remember(chainStore) { chainStore.chains }
         .collectAsState(initial = BuiltInChains.ALL)
+    val chainRouter = remember(context) { ChainDataRouter.get(context) }
     var chainPage by remember { mutableStateOf<ChainPage?>(null) }
     // Open-source licences (#325), a page standing in for the list like the others.
     var licencesOpen by rememberSaveable { mutableStateOf(false) }
@@ -330,7 +332,7 @@ internal fun SettingsScreen(
         SettingsSection.Adblock to
             adblockSectionRows(adblockCategories, adblockAllowlist, adblockStatus, adblockUpdate),
         SettingsSection.Wallet to walletSettingsRows(walletState),
-        SettingsSection.Chains to chainSettingsRows(chains),
+        SettingsSection.Chains to chainSettingsRows(chains) { readAssurance(it, chainRouter) },
         SettingsSection.Ens to ensSectionRows(ensRpcConfig),
         SettingsSection.Rpc to rpcSectionRows(ensRpcConfig),
         SettingsSection.Nodes to

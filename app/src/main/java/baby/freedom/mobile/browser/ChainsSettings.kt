@@ -13,11 +13,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -26,7 +28,10 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -44,6 +49,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
@@ -98,23 +105,96 @@ internal sealed interface ChainPage {
     data class Detail(val chainId: Long) : ChainPage
 }
 
-// The chain ID is an identifier (typed, searched, pasted), so its digits stay as they are.
-internal fun chainSubtitle(chain: Chain) = Strings.get(R.string.names_chain_subtitle, chain.id.toString(), chain.symbol)
+/** A chain's currency as its list row says it: "Ether (ETH)", or just the symbol when that's its name too. */
+internal fun chainCurrency(chain: Chain): String =
+    if (chain.currencyName == chain.symbol) chain.symbol
+    else Strings.get(R.string.names_currency_short, chain.currencyName, chain.symbol)
 
 internal fun rpcCountLabel(count: Int) = Strings.plural(R.plurals.names_rpc_endpoints, count, count)
 
 private fun builtInLabel(chain: Chain) =
     Strings.get(if (chain.builtIn) R.string.names_chain_built_in else R.string.names_chain_custom)
 
-private fun chainThirdLine(chain: Chain) = listOfNotNull(
-    rpcCountLabel(chain.rpcUrls.size),
+/**
+ * How [ChainDataRouter] can check a read on a chain, from the first tier
+ * of its read order that can answer: the one fact both the list's status
+ * and the chain page's reassurance line are worded from ([readAssurance]).
+ */
+internal sealed interface ReadAssurance {
+    /** A proof checked on this device ([source]: the light client or the prover). */
+    data class Proof(val source: ChainSource) : ReadAssurance
+
+    /**
+     * The RPC quorum: [providers] RPCs, each from a different provider, are
+     * asked and [needed] must agree; [yours] of those seats are the user's own.
+     */
+    data class CrossChecked(val providers: Int, val needed: Int, val yours: Int) : ReadAssurance
+
+    /** No quorum can form: the first RPC that answers, [yours] if the user has one of their own. */
+    data class Single(val yours: Boolean) : ReadAssurance
+}
+
+/**
+ * [ReadAssurance] for [chain] under [policy], counting only the tiers
+ * [wired] in this build — the same seat assignment the router uses
+ * ([ChainDataRouter.quorumMembers]), so what the page claims is what a
+ * read does.
+ */
+internal fun readAssurance(chain: Chain, policy: ChainAccessPolicy, wired: (ChainSource) -> Boolean): ReadAssurance {
+    val pool = (chain.userRpcUrls + chain.rpcUrls).distinct()
+    for (source in policy.readOrder.filter(wired)) {
+        when (source) {
+            ChainSource.MYOTIS, ChainSource.COLIBRI -> return ReadAssurance.Proof(source)
+            ChainSource.QUORUM -> if (ChainDataRouter.quorumMembers(pool).size >= policy.quorumM) {
+                val members = ChainDataRouter.quorumMembers(pool, policy.quorumK)
+                return ReadAssurance.CrossChecked(
+                    providers = members.size,
+                    needed = policy.quorumM,
+                    yours = members.count { it in chain.userRpcUrls },
+                )
+            }
+            ChainSource.DIRECT -> break
+        }
+    }
+    return ReadAssurance.Single(yours = chain.userRpcUrls.isNotEmpty())
+}
+
+/** [readAssurance] as [router] reads [chain] right now. */
+internal fun readAssurance(chain: Chain, router: ChainDataRouter): ReadAssurance =
+    readAssurance(chain, router.policy(chain)) { router.isWired(it, chain.id) }
+
+/** The list row's status: "Verified reads", "Custom · Not cross-checked", "Verified reads · Testnet", … */
+internal fun chainStatus(chain: Chain, assurance: ReadAssurance): String = listOfNotNull(
+    Strings.get(R.string.names_chain_custom).takeIf { !chain.builtIn },
+    Strings.get(
+        when (assurance) {
+            is ReadAssurance.Proof, is ReadAssurance.CrossChecked -> R.string.names_chain_status_verified
+            is ReadAssurance.Single ->
+                if (assurance.yours) R.string.names_chain_status_yours else R.string.names_chain_status_unchecked
+        },
+    ),
     Strings.get(R.string.names_chain_testnet).takeIf { chain.isTestnet },
-    builtInLabel(chain),
 ).joinToString(" · ")
 
-/** Settings search index: each chain by name, ID and currency, and the Add row. */
-internal fun chainSettingsRows(chains: List<Chain>) = chains.map { chain ->
-    settingsRow(chain.id, chain.name, chainSubtitle(chain), chainThirdLine(chain), chain.hexId)
+/** The chain page's opening line: how much a read on this chain can be trusted, in plain words. */
+internal fun readAssuranceLine(assurance: ReadAssurance): String = when (assurance) {
+    is ReadAssurance.Proof -> Strings.get(R.string.names_assurance_proof, assurance.source.label)
+    is ReadAssurance.CrossChecked -> if (assurance.yours == assurance.providers) {
+        Strings.plural(R.plurals.names_assurance_cross_checked_yours, assurance.providers, assurance.providers)
+    } else {
+        Strings.plural(R.plurals.names_assurance_cross_checked, assurance.providers, assurance.providers)
+    }
+    is ReadAssurance.Single -> Strings.get(
+        if (assurance.yours) R.string.names_assurance_single_yours else R.string.names_assurance_single,
+    )
+}
+
+/**
+ * Settings search index: each chain by name, currency and status, and by
+ * its ID (decimal and hex) though the row no longer shows it; and the Add row.
+ */
+internal fun chainSettingsRows(chains: List<Chain>, assurance: (Chain) -> ReadAssurance) = chains.map { chain ->
+    settingsRow(chain.id, chain.name, chainCurrency(chain), chainStatus(chain, assurance(chain)), chain.id.toString(), chain.hexId)
 } + settingsRow(
     ADD_CHAIN_KEY,
     ROW_ADD_CHAIN,
@@ -131,15 +211,17 @@ internal fun ChainsSection(
     onRemove: (Chain) -> Unit,
     onAdd: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val router = remember(context) { ChainDataRouter.get(context) }
     SectionCard(title = SECTION_CHAINS) {
         for (chain in chains) {
             if (chain.id !in visible) continue
             PageRow(
                 title = chain.name,
-                subtitle = chainSubtitle(chain),
+                subtitle = chainCurrency(chain),
                 style = PageRowStyle.Inset,
                 leadingIcon = Icons.Filled.Hub,
-                thirdLine = chainThirdLine(chain),
+                thirdLine = chainStatus(chain, readAssurance(chain, router)),
                 onClick = { onOpen(chain) },
                 trailing = if (chain.builtIn) null else {
                     {
@@ -171,7 +253,7 @@ private sealed interface ReadCheck {
     data object Idle : ReadCheck
     data object Running : ReadCheck
     data class Done(val block: Long, val trust: ChainTrust) : ReadCheck
-    data class Failed(val message: String) : ReadCheck
+    data class Failed(val error: ChainError) : ReadCheck
 }
 
 /** Why [ChainStore.addUserRpc] didn't add a URL, as the chain page says it; `null` once added. */
@@ -262,8 +344,8 @@ internal fun trustSummary(trust: ChainTrust): String {
  * one) or past the first K takes no seat and is only asked if the quorum
  * falls short.
  */
-internal fun userRpcsNote(chain: Chain, policy: ChainAccessPolicy): String {
-    val lead = Strings.get(R.string.names_user_rpcs_note_lead)
+internal fun userRpcsNote(chain: Chain, policy: ChainAccessPolicy, withLead: Boolean = true): String {
+    val lead = Strings.get(R.string.names_user_rpcs_note_lead).takeIf { withLead }
     val tail = Strings.get(R.string.names_user_rpcs_note_tail)
     val k = policy.quorumK
     val pool = (chain.userRpcUrls + chain.rpcUrls).distinct()
@@ -276,7 +358,7 @@ internal fun userRpcsNote(chain: Chain, policy: ChainAccessPolicy): String {
                 else -> R.string.names_user_rpcs_note_order_many
             },
         )
-        return listOf(lead, order, tail).joinToString(" ")
+        return listOfNotNull(lead, order, tail).joinToString(" ")
     }
     val members = ChainDataRouter.quorumMembers(pool, k)
     val seats = members.count { it in chain.userRpcUrls }
@@ -294,13 +376,16 @@ internal fun userRpcsNote(chain: Chain, policy: ChainAccessPolicy): String {
 }
 
 /**
- * A chain's page (#107, #108): what it is, the user's own RPCs ("Your
- * RPCs", added and removed here, given quorum seats ahead of public
- * ones), its public RPCs, and how a
- * read is checked — with a Check button that reads the latest block
- * through [ChainDataRouter] and says how that answer was verified. Every
- * URL is shown in full (wrapped, never cut). A custom chain also offers
- * Remove.
+ * A chain's page (#107, #108; laid out by #426): it opens with how far
+ * its reads can be trusted ([readAssuranceLine]) and "Use my own RPC",
+ * then the currency and explorer. The user's own RPCs ("Your RPCs",
+ * added and removed here, given quorum seats ahead of public ones) show
+ * once there are any or the button was tapped. Everything technical —
+ * the chain ID, the public RPCs, how a read is checked and a Check
+ * button that reads the latest block through [ChainDataRouter] and says
+ * how that answer was verified — waits in a collapsed Advanced section.
+ * Every URL is shown in full (wrapped, never cut). A custom chain also
+ * offers Remove.
  */
 @Composable
 internal fun ChainDetailPage(
@@ -318,11 +403,18 @@ internal fun ChainDetailPage(
     var newRpc by rememberSaveable(chain.id) { mutableStateOf("") }
     var rpcError by remember(chain.id) { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
+    // "Use my own RPC" tapped: the Your RPCs card shows (and takes focus)
+    // before there's an RPC in it.
+    var addingRpc by rememberSaveable(chain.id) { mutableStateOf(false) }
+    val rpcField = remember { FocusRequester() }
     // Keyed to the RPC lists too: a result naming an RPC the user has
     // since removed (or read before they added one) no longer describes
     // this chain, and a check still running writes only to the old state.
     var check by remember(chain.id, chain.userRpcUrls, chain.rpcUrls) { mutableStateOf<ReadCheck>(ReadCheck.Idle) }
     val newRpcCheck = RpcUrls.validate(newRpc)
+    val policy = router.policy(chain)
+    val assurance = readAssurance(chain, policy) { router.isWired(it, chain.id) }
+    val showYourRpcs = chain.userRpcUrls.isNotEmpty() || addingRpc || rpcError != null || newRpc.isNotBlank()
 
     fun addRpc() {
         if (saving || newRpcCheck.url == null) return
@@ -353,8 +445,90 @@ internal fun ChainDetailPage(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
+            Row(
+                verticalAlignment = Alignment.Top,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+            ) {
+                val verified = assurance !is ReadAssurance.Single || assurance.yours
+                Icon(
+                    if (verified) Icons.Filled.VerifiedUser else Icons.Outlined.Info,
+                    contentDescription = null,
+                    tint = if (verified) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp).size(20.dp),
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(readAssuranceLine(assurance), style = MaterialTheme.typography.bodyLarge)
+            }
+            if (!showYourRpcs) {
+                FilledTonalButton(onClick = { addingRpc = true }) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.names_use_my_own_rpc))
+                }
+            }
+            if (showYourRpcs) {
+                // Tapping "Use my own RPC" puts the cursor in the field.
+                LaunchedEffect(addingRpc) {
+                    if (addingRpc && chain.userRpcUrls.isEmpty()) {
+                        runCatching { rpcField.requestFocus() }
+                    }
+                }
+                SectionCard(title = stringResource(R.string.names_your_rpcs)) {
+                    Text(
+                        stringResource(R.string.names_user_rpcs_note_lead),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    for (url in chain.userRpcUrls) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                url,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.weight(1f),
+                            )
+                            IconButton(onClick = {
+                                scope.launch {
+                                    rpcError = onRemoveRpc(url)
+                                }
+                            }) {
+                                Icon(
+                                    Icons.Filled.Close,
+                                    contentDescription = stringResource(R.string.names_remove_item, url),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                    if (chain.userRpcUrls.size < Chain.MAX_USER_RPC_URLS) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(modifier = Modifier.weight(1f)) {
+                                FormField(
+                                    value = newRpc,
+                                    onValueChange = { newRpc = it; rpcError = null },
+                                    label = stringResource(R.string.names_rpc_url),
+                                    placeholder = "https://rpc.example.org",
+                                    hint = rpcError ?: newRpcCheck.rejection
+                                        ?.takeIf { newRpc.isNotBlank() }
+                                        ?.let(::rpcUrlHint),
+                                    url = true,
+                                    imeAction = ImeAction.Done,
+                                    onImeAction = { addRpc() },
+                                    modifier = Modifier.focusRequester(rpcField),
+                                )
+                            }
+                            IconButton(onClick = { addRpc() }, enabled = newRpcCheck.url != null && !saving) {
+                                Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.names_add_your_rpc))
+                            }
+                        }
+                    } else rpcError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
             SectionCard(title = stringResource(R.string.names_chain_section)) {
-                DetailLine(stringResource(R.string.names_chain_id), "${chain.id} (${chain.hexId})")
                 DetailLine(
                     stringResource(R.string.names_currency),
                     pluralText(
@@ -374,128 +548,91 @@ internal fun ChainDetailPage(
                     stringResource(R.string.names_chain_testnet).takeIf { chain.isTestnet },
                 ).joinToString(", "))
             }
-            SectionCard(title = stringResource(R.string.names_your_rpcs)) {
-                Text(
-                    userRpcsNote(chain, router.policy(chain)),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                for (url in chain.userRpcUrls) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+            DetailsExpander(title = stringResource(R.string.names_advanced)) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    SectionCard(title = stringResource(R.string.names_chain_id)) {
+                        SelectionContainer {
+                            Text("${chain.id} (${chain.hexId})", style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                    SectionCard(title = stringResource(R.string.names_public_rpcs)) {
                         Text(
-                            url,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.weight(1f),
+                            rpcCountLabel(chain.publicRpcUrls.size),
+                            style = MaterialTheme.typography.labelLarge,
                         )
-                        IconButton(onClick = {
-                            scope.launch {
-                                rpcError = onRemoveRpc(url)
-                            }
-                        }) {
-                            Icon(
-                                Icons.Filled.Close,
-                                contentDescription = stringResource(R.string.names_remove_item, url),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        for (url in chain.publicRpcUrls) {
+                            Text(
+                                url,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.padding(top = 4.dp),
                             )
                         }
                     }
-                }
-                if (chain.userRpcUrls.size < Chain.MAX_USER_RPC_URLS) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(modifier = Modifier.weight(1f)) {
-                            FormField(
-                                value = newRpc,
-                                onValueChange = { newRpc = it; rpcError = null },
-                                label = stringResource(R.string.names_rpc_url),
-                                placeholder = "https://rpc.example.org",
-                                hint = rpcError ?: newRpcCheck.rejection
-                                    ?.takeIf { newRpc.isNotBlank() }
-                                    ?.let(::rpcUrlHint),
-                                url = true,
-                                imeAction = ImeAction.Done,
-                                onImeAction = { addRpc() },
+                    SectionCard(title = stringResource(R.string.names_how_reads_are_checked)) {
+                        val steps = readSteps(chain, policy) { router.isWired(it, chain.id) }
+                        steps.forEachIndexed { i, step ->
+                            Text(
+                                stringResource(R.string.names_read_step_numbered, i + 1, step),
+                                style = MaterialTheme.typography.bodyMedium,
                             )
                         }
-                        IconButton(onClick = { addRpc() }, enabled = newRpcCheck.url != null && !saving) {
-                            Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.names_add_your_rpc))
+                        if (chain.id in ChainAccessPolicy.LIGHT_CLIENT_CHAIN_IDS &&
+                            !router.isWired(ChainSource.MYOTIS, chain.id)
+                        ) {
+                            Text(
+                                stringResource(R.string.names_proof_tiers_missing, chain.name),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Text(
+                            userRpcsNote(chain, policy, withLead = false),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                enabled = check != ReadCheck.Running,
+                                onClick = {
+                                    check = ReadCheck.Running
+                                    scope.launch {
+                                        check = try {
+                                            val r = WalletRpc(router).blockNumber(chain.id)
+                                            ReadCheck.Done(r.value, r.trust)
+                                        } catch (e: ChainRpcException) {
+                                            ReadCheck.Failed(readCheckFailure(e))
+                                        }
+                                    }
+                                },
+                            ) { Text(stringResource(R.string.names_check_latest_block)) }
+                            if (check == ReadCheck.Running) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            }
+                        }
+                        when (val c = check) {
+                            is ReadCheck.Done -> {
+                                Text(
+                                    stringResource(
+                                        R.string.names_check_block,
+                                        NumberFormat.getIntegerInstance().format(c.block),
+                                    ),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                                Text(
+                                    trustSummary(c.trust),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (c.trust.level == ChainTrust.Level.UNVERIFIED) {
+                                        MaterialTheme.colorScheme.error
+                                    } else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            is ReadCheck.Failed -> ChainErrorText(c.error)
+                            else -> Unit
                         }
                     }
-                } else rpcError?.let {
-                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                }
-            }
-            SectionCard(title = stringResource(R.string.names_public_rpcs)) {
-                Text(
-                    rpcCountLabel(chain.publicRpcUrls.size),
-                    style = MaterialTheme.typography.labelLarge,
-                )
-                for (url in chain.publicRpcUrls) {
-                    Text(
-                        url,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.padding(top = 4.dp),
-                    )
-                }
-            }
-            SectionCard(title = stringResource(R.string.names_how_reads_are_checked)) {
-                val steps = readSteps(chain, router.policy(chain)) { router.isWired(it, chain.id) }
-                steps.forEachIndexed { i, step ->
-                    Text(stringResource(R.string.names_read_step_numbered, i + 1, step), style = MaterialTheme.typography.bodyMedium)
-                }
-                if (chain.id in ChainAccessPolicy.LIGHT_CLIENT_CHAIN_IDS &&
-                    !router.isWired(ChainSource.MYOTIS, chain.id)
-                ) {
-                    Text(
-                        stringResource(R.string.names_proof_tiers_missing, chain.name),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(
-                        enabled = check != ReadCheck.Running,
-                        onClick = {
-                            check = ReadCheck.Running
-                            scope.launch {
-                                check = try {
-                                    val r = WalletRpc(router).blockNumber(chain.id)
-                                    ReadCheck.Done(r.value, r.trust)
-                                } catch (e: ChainRpcException) {
-                                    ReadCheck.Failed(readCheckFailure(e) ?: Strings.get(R.string.names_check_no_answer))
-                                }
-                            }
-                        },
-                    ) { Text(stringResource(R.string.names_check_latest_block)) }
-                    if (check == ReadCheck.Running) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    }
-                }
-                when (val c = check) {
-                    is ReadCheck.Done -> {
-                        Text(
-                            stringResource(
-                                R.string.names_check_block,
-                                NumberFormat.getIntegerInstance().format(c.block),
-                            ),
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                        )
-                        Text(
-                            trustSummary(c.trust),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (c.trust.level == ChainTrust.Level.UNVERIFIED) {
-                                MaterialTheme.colorScheme.error
-                            } else MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    is ReadCheck.Failed -> Text(
-                        c.message,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                    else -> Unit
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -504,21 +641,75 @@ internal fun ChainDetailPage(
 }
 
 /**
- * What Check says when the read failed: the router's own diagnosis, its
- * frame in the user's language (the per-source details stay as the
- * router wrote them). `null` when the exception has no message.
+ * An error as the chain pages show it (#426): [message] leads with what
+ * to do, in plain words; [detail] is the raw diagnosis (an RPC's own error
+ * code and text, which source failed how), behind "Show details".
  */
-private fun readCheckFailure(e: ChainRpcException): String? = when (e) {
+internal data class ChainError(val message: String, val detail: String? = null)
+
+/**
+ * What Check says when the read failed: what to try first, and the
+ * router's own diagnosis as the detail — its frame in the user's
+ * language, the per-source details as the router wrote them.
+ */
+internal fun readCheckFailure(e: ChainRpcException): ChainError = when (e) {
+    is ChainRpcException.UnknownChain -> ChainError(
+        Strings.get(R.string.names_check_failed_unknown_chain),
+        readCheckDetail(e),
+    )
+    is ChainRpcException.Rpc -> ChainError(Strings.get(R.string.names_check_failed_refused), readCheckDetail(e))
+    is ChainRpcException.AllSourcesFailed -> ChainError(
+        Strings.get(
+            if (e.nodeError != null) R.string.names_check_failed_refused else R.string.names_check_failed_no_answer,
+        ),
+        readCheckDetail(e),
+    )
+    is ChainRpcException.InvalidResponse -> ChainError(Strings.get(R.string.names_check_failed_odd_answer), readCheckDetail(e))
+    else -> ChainError(Strings.get(R.string.names_check_failed_other), readCheckDetail(e))
+}
+
+/** The raw side of [readCheckFailure]: `null` when the exception has nothing to say. */
+private fun readCheckDetail(e: ChainRpcException): String? = when (e) {
     is ChainRpcException.UnknownChain -> Strings.get(R.string.names_check_unknown_chain, e.chainId.toString())
     is ChainRpcException.Rpc -> Strings.get(R.string.names_check_rpc_error, e.code, e.rpcMessage)
     is ChainRpcException.AllSourcesFailed -> e.nodeError?.let { node ->
         Strings.get(
             R.string.names_check_no_source_node_error,
             e.failures.joinToString("; "),
-            readCheckFailure(node) ?: node.message.orEmpty(),
+            readCheckDetail(node) ?: node.message.orEmpty(),
         )
     } ?: Strings.get(R.string.names_check_no_source, e.failures.joinToString("; "))
-    else -> e.message
+    else -> e.message?.takeIf { it.isNotBlank() }
+}
+
+/**
+ * [error]'s message in the error colour, then — when it has a raw
+ * detail — a "Show details" toggle that reveals it. Every value stays in
+ * the text (wrapped, never cut).
+ */
+@Composable
+internal fun ChainErrorText(error: ChainError, modifier: Modifier = Modifier) {
+    var open by rememberSaveable(error) { mutableStateOf(false) }
+    Column(modifier) {
+        Text(error.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+        val detail = error.detail ?: return@Column
+        TextButton(
+            onClick = { open = !open },
+            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 8.dp),
+        ) {
+            Text(stringResource(if (open) R.string.names_hide_details else R.string.names_show_details))
+        }
+        if (open) {
+            SelectionContainer {
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -536,7 +727,8 @@ private fun DetailLine(label: String, value: String) {
 private sealed interface CatalogState {
     data object Loading : CatalogState
     data class Loaded(val entries: List<Chainlist.Entry>) : CatalogState
-    data object Failed : CatalogState
+    /** [detail]: what the download hit, behind "Show details". */
+    data class Failed(val detail: String?) : CatalogState
 }
 
 /**
@@ -569,7 +761,7 @@ internal fun ChainlistPage(
             // Not only IOException: the download re-raises whatever its
             // worker thread hit, and that must show Retry, not crash.
             if (e !is IOException) Log.w("ChainsSettings", "chainlist load failed", e)
-            CatalogState.Failed
+            CatalogState.Failed(e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName)
         }
     }
     val results = (state as? CatalogState.Loaded)?.let { loaded ->
@@ -620,7 +812,7 @@ internal fun ChainlistPage(
                         modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
                     )
                 }
-                when (state) {
+                when (val st = state) {
                     CatalogState.Loading -> item("loading") {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -631,12 +823,9 @@ internal fun ChainlistPage(
                             Text(stringResource(R.string.names_chainlist_loading), style = MaterialTheme.typography.bodyMedium)
                         }
                     }
-                    CatalogState.Failed -> item("failed") {
+                    is CatalogState.Failed -> item("failed") {
                         Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 16.dp)) {
-                            Text(
-                                stringResource(R.string.names_chainlist_failed),
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
+                            ChainErrorText(ChainError(stringResource(R.string.names_chainlist_failed), st.detail))
                             TextButton(onClick = { attempt++ }) { Text(stringResource(R.string.common_retry)) }
                         }
                     }
@@ -920,6 +1109,7 @@ private fun FormField(
     literal: Boolean = url,
     imeAction: ImeAction = ImeAction.Next,
     onImeAction: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
 ) {
     val field = @Composable {
         OutlinedTextField(
@@ -943,7 +1133,7 @@ private fun FormField(
             keyboardActions = if (onImeAction != null) {
                 KeyboardActions(onDone = { onImeAction() })
             } else KeyboardActions.Default,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = modifier.fillMaxWidth(),
         )
     }
     if (literal) NoSuggestionsTextInput(field) else field()
