@@ -106,7 +106,8 @@
     <string name="signing_ledger_add_rejected">Rejected on the Ledger, so the account wasn’t added.</string>
     <string name="signing_ledger_add_timeout">The Ledger didn’t confirm the address in time, so the account wasn’t added.</string>
     <string name="signing_ledger_add_cancelled">Cancelled. The account wasn’t added.</string>
-    <string name="signing_ledger_add_wrong_device">This Ledger didn’t show that address, so the account wasn’t added.</string>
+    <string name="signing_ledger_add_shown_different">This Ledger showed a different address, so the account wasn’t added.</string>
+    <string name="signing_ledger_add_wrong_device">This Ledger doesn’t hold that address any more, so the account wasn’t added. If you changed its passphrase or seed since the accounts were listed, go back and list them again.</string>
     <string name="signing_ledger_add_not_attested">You didn’t confirm that your Ledger showed this address, so the account wasn’t added.</string>
     <string name="signing_ledger_add_not_checked">The Ledger couldn’t show the address, so the account wasn’t added.</string>
     <!-- %1$s: why the Ledger couldn't be reached, a full sentence (e.g. "Your Ledger is locked. Unlock it with your PIN."). -->

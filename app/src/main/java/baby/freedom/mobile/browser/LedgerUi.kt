@@ -210,6 +210,10 @@ internal fun ledgerAddFailure(e: Exception): String = when (e) {
         e.kind == LedgerException.Kind.REJECTED -> Strings.get(R.string.signing_ledger_add_rejected)
         e.kind == LedgerException.Kind.TIMEOUT -> Strings.get(R.string.signing_ledger_add_timeout)
         e.kind == LedgerException.Kind.CANCELLED -> Strings.get(R.string.signing_ledger_add_cancelled)
+        // It approved some other address on its screen (shownMatches).
+        e.shownDifferent -> Strings.get(R.string.signing_ledger_add_shown_different)
+        // The silent read before anything is shown no longer gave the listed address
+        // (claimHolding): nothing was shown on the device (#452 R3-F1).
         e.kind == LedgerException.Kind.WRONG_DEVICE -> Strings.get(R.string.signing_ledger_add_wrong_device)
         // Its own line ends "Nothing was signed.", which isn't what's at stake here.
         e.kind.saysNothingSent -> Strings.get(R.string.signing_ledger_add_not_checked)

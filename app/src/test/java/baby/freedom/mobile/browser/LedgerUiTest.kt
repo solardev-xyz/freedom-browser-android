@@ -156,7 +156,20 @@ class LedgerUiTest {
         assertEquals("Rejected on the Ledger, so the account wasn’t added.", said(LedgerException(LedgerException.Kind.REJECTED)))
         assertEquals("The Ledger didn’t confirm the address in time, so the account wasn’t added.", said(LedgerException(LedgerException.Kind.TIMEOUT)))
         assertEquals("Cancelled. The account wasn’t added.", said(LedgerException(LedgerException.Kind.CANCELLED)))
-        assertEquals("This Ledger didn’t show that address, so the account wasn’t added.", said(LedgerException(LedgerException.Kind.WRONG_DEVICE)))
+        // The silent pre-check found another address: nothing was shown on the device (R3-F1).
+        assertEquals(
+            "This Ledger doesn’t hold that address any more, so the account wasn’t added. " +
+                "If you changed its passphrase or seed since the accounts were listed, go back and list them again.",
+            said(LedgerException(LedgerException.Kind.WRONG_DEVICE)),
+        )
+        // It approved a different address on its own screen.
+        val shownDifferent = try {
+            Ledger.shownMatches("0x" + "11".repeat(20), "0x" + "ab".repeat(20))
+            null
+        } catch (e: LedgerException) {
+            e
+        }
+        assertEquals("This Ledger showed a different address, so the account wasn’t added.", said(shownDifferent!!))
         assertEquals(
             "Your Ledger is locked. Unlock it with your PIN. The account wasn’t added.",
             said(LedgerException(LedgerException.Kind.LOCKED)),
