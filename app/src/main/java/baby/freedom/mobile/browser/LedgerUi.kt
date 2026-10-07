@@ -237,6 +237,21 @@ internal fun ledgerVerifyFailure(e: Exception): String? = when {
 }
 
 /**
+ * What Receive's Verify card shows (#365): the last attempt that taught
+ * something about the address. [after] folds in one attempt's ending:
+ * null for confirmed, else what ended it. A Cancel learned nothing, so it
+ * keeps whatever stood before, an earlier success or an earlier warning
+ * alike; any other ending replaces it.
+ */
+internal data class LedgerVerifyState(val verified: Boolean = false, val error: String? = null) {
+    fun after(failure: Exception?): LedgerVerifyState {
+        if (failure == null) return LedgerVerifyState(verified = true)
+        val said = ledgerVerifyFailure(failure) ?: return this
+        return LedgerVerifyState(error = said)
+    }
+}
+
+/**
  * The phone-side half of an address check (#365): [ask] puts the
  * question up ([LedgerAddressAskDialog]) and waits for the user's answer.
  * Held by the page that shows the dialog, so it lives as long as the

@@ -202,6 +202,27 @@ class LedgerUiTest {
     }
 
     @Test
+    fun `a cancelled Verify keeps what the card said before (#365 R2-F1)`() {
+        val cancel = LedgerException(LedgerException.Kind.CANCELLED)
+        val rejected = LedgerException(LedgerException.Kind.REJECTED)
+        val warning = LedgerVerifyState().after(rejected)
+        assertEquals(LedgerVerifyState(error = ledgerVerifyFailure(rejected)), warning)
+        // Verify, No on the phone, then Verify and Cancel: the warning stays.
+        val notAttested = LedgerVerifyState().after(AddressNotAttestedException())
+        assertEquals(notAttested, notAttested.after(cancel))
+        assertEquals(warning, warning.after(cancel))
+        // An earlier success stands through a Cancel too (R1-F4).
+        val ok = LedgerVerifyState().after(null)
+        assertEquals(LedgerVerifyState(verified = true), ok)
+        assertEquals(ok, ok.after(cancel))
+        // Nothing yet, then Cancel: still nothing.
+        assertEquals(LedgerVerifyState(), LedgerVerifyState().after(cancel))
+        // Anything else replaces it, either way.
+        assertEquals(LedgerVerifyState(verified = true), warning.after(null))
+        assertEquals(warning, ok.after(rejected))
+    }
+
+    @Test
     fun `a found account is numbered from its path, not its row`() {
         // Ledger Live numbering: Account N is index N-1 of the layout, wherever the list starts.
         assertEquals(1, ledgerAccountNumber(LedgerScheme.LIVE, LedgerScheme.LIVE.path(0), row = 0))

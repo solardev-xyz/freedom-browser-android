@@ -251,8 +251,7 @@ internal fun ReceivePage(account: WalletAccount, onBack: () -> Unit) {
     val ledger = remember(context) { Ledger.get(context) }
     val scope = rememberCoroutineScope()
     var verifying by remember(account.address) { mutableStateOf(false) }
-    var verified by remember(account.address) { mutableStateOf(false) }
-    var verifyError by remember(account.address) { mutableStateOf<String?>(null) }
+    var verify by remember(account.address) { mutableStateOf(LedgerVerifyState()) }
     val ask = remember { LedgerAddressAsk() }
     FullScreenScaffold(title = stringResource(R.string.wallet_qr_receive_title), onDismiss = onBack) {
         LazyColumn(
@@ -304,24 +303,21 @@ internal fun ReceivePage(account: WalletAccount, onBack: () -> Unit) {
             if (account.ledger != null) item("verify") {
                 LedgerVerifyCard(
                     verifying = verifying,
-                    verified = verified,
-                    error = verifyError,
+                    verified = verify.verified,
+                    error = verify.error,
                     onVerify = {
+                        // The card keeps what it said until this attempt ends: a Cancel
+                        // says nothing about the address, so an earlier success or
+                        // warning stands; any other ending replaces it.
                         verifying = true
-                        verifyError = null
                         scope.launch {
                             try {
                                 verifyConfirmed(account.address, verify = { ledger.verifyAddress(account) }, attest = ask::ask)
-                                verified = true
+                                verify = verify.after(null)
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Exception) {
-                                // A Cancel says nothing about the address, so an earlier
-                                // verification stands; any other ending replaces it.
-                                ledgerVerifyFailure(e)?.let {
-                                    verified = false
-                                    verifyError = it
-                                }
+                                verify = verify.after(e)
                             } finally {
                                 verifying = false
                             }
