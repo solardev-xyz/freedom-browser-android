@@ -64,9 +64,12 @@ class EthereumProviderTest {
         /** When set, a chain write waits here before it commits; [setChainStarted] says one got there. */
         var setChainGate: CompletableDeferred<Unit>? = null
         var setChainStarted = CompletableDeferred<Unit>()
+        /** A chain write isn't written. */
+        var failSetChain = false
         override suspend fun setChain(origin: String, chainId: Long): Boolean {
             setChainStarted.complete(Unit)
             setChainGate?.await()
+            if (failSetChain) return false
             val g = grants[origin] ?: return false
             grants[origin] = g.copy(chainId = chainId)
             return true
@@ -543,7 +546,7 @@ class EthereumProviderTest {
             grants.setChainGate = null
             gate.complete(Unit)
             page.join()
-            assertFalse(undo.await())
+            assertEquals(EthereumProvider.UndoResult.MOVED, undo.await())
         }
         // The page's last switch, which it was told succeeded, stands.
         assertEquals(8453L, grants.grants[site]?.chainId)
@@ -558,7 +561,7 @@ class EthereumProviderTest {
         ok(switchTo("0x1"))
         assertEquals(EthereumProvider.ChainSwitched(site, BuiltInChains.BASE, BuiltInChains.ETHEREUM), switched.single())
         // Undo goes back to Base, the chain it actually left.
-        assertTrue(runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(EthereumProvider.UndoResult.UNDONE, runBlocking { provider.undoSwitch(switched.single()) })
         assertEquals(8453L, grants.grants[site]?.chainId)
         // Already on the chain by the time it writes: nothing is written, told or noticed.
         switched.clear()
@@ -1141,12 +1144,12 @@ class EthereumProviderTest {
         connect()
         ok(switchTo("0x1"))
         events.clear()
-        assertTrue(runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(EthereumProvider.UndoResult.UNDONE, runBlocking { provider.undoSwitch(switched.single()) })
         assertEquals(100L, grants.grants[site]?.chainId)
         assertEquals(listOf(Triple(site, "chainChanged", "0x64")), events)
         assertEquals("0x64", ok(call("eth_chainId")))
         // Already undone: nothing more to do, and no second event.
-        assertFalse(runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(EthereumProvider.UndoResult.MOVED, runBlocking { provider.undoSwitch(switched.single()) })
         assertEquals(1, events.size)
     }
 
@@ -1159,7 +1162,7 @@ class EthereumProviderTest {
         val switch = switched.single()
         assertEquals(sepolia, switch.from)
         events.clear()
-        assertTrue(runBlocking { provider.undoSwitch(switch) })
+        assertEquals(EthereumProvider.UndoResult.UNDONE, runBlocking { provider.undoSwitch(switch) })
         assertEquals(11155111L, grants.grants[site]?.chainId)
         assertEquals(listOf(Triple(site, "chainChanged", "0xaa36a7")), events)
     }
@@ -1171,10 +1174,10 @@ class EthereumProviderTest {
         // Switched again since: that switch stands; its own notice has the newer Undo.
         ok(switchTo("0x2105"))
         events.clear()
-        assertFalse(runBlocking { provider.undoSwitch(switched.first()) })
+        assertEquals(EthereumProvider.UndoResult.MOVED, runBlocking { provider.undoSwitch(switched.first()) })
         assertEquals(8453L, grants.grants[site]?.chainId)
         assertTrue(events.isEmpty())
-        assertTrue(runBlocking { provider.undoSwitch(switched.last()) })
+        assertEquals(EthereumProvider.UndoResult.UNDONE, runBlocking { provider.undoSwitch(switched.last()) })
         assertEquals(1L, grants.grants[site]?.chainId)
 
         // Left a custom chain that has since been removed in Settings: nothing to go back to.
@@ -1184,7 +1187,7 @@ class EthereumProviderTest {
         ok(switchTo("0x64"))
         chainList = BuiltInChains.ALL
         events.clear()
-        assertFalse(runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(EthereumProvider.UndoResult.MOVED, runBlocking { provider.undoSwitch(switched.single()) })
         assertEquals(100L, grants.grants[site]?.chainId)
         assertTrue(events.isEmpty())
 
@@ -1193,7 +1196,22 @@ class EthereumProviderTest {
         switched.clear()
         ok(switchTo("0x1"))
         grants.unreadable = true
-        assertFalse(runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(EthereumProvider.UndoResult.FAILED, runBlocking { provider.undoSwitch(switched.single()) })
+    }
+
+    @Test
+    fun `an Undo the store couldn't write says so, not that the site moved on (#446 R4-M3)`() {
+        connect()
+        ok(switchTo("0x1"))
+        events.clear()
+        grants.failSetChain = true
+        assertEquals(EthereumProvider.UndoResult.FAILED, runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(1L, grants.grants[site]?.chainId)
+        assertTrue(events.isEmpty())
+        // Written next time: undone.
+        grants.failSetChain = false
+        assertEquals(EthereumProvider.UndoResult.UNDONE, runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(100L, grants.grants[site]?.chainId)
     }
 
     @Test
@@ -1202,7 +1220,7 @@ class EthereumProviderTest {
         ok(switchTo("0x1"))
         assertTrue(runBlocking { provider.disconnect(site) })
         events.clear()
-        assertTrue(runBlocking { provider.undoSwitch(switched.single()) })
+        assertEquals(EthereumProvider.UndoResult.UNDONE, runBlocking { provider.undoSwitch(switched.single()) })
         assertEquals("0x64", ok(call("eth_chainId")))
         assertEquals(listOf(Triple(site, "chainChanged", "0x64")), events)
         assertTrue(grants.grants.isEmpty())

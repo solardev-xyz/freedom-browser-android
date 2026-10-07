@@ -54,6 +54,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.SnackbarVisuals
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -749,33 +750,48 @@ fun BrowserScreen(
     // A connected site switched itself to a built-in network, no sheet
     // (#440), while its tab had the turn on screen: say so, with Undo. One
     // at a time — a newer notice replaces this one — and closed when it's
-    // down, which lets that tab's next ask through (#446 R1-F1); taken
-    // down too if the user leaves the tab, so it never sits over another
-    // one. On the screen's scope, so the next notice arriving can't cancel
-    // an Undo already running. Closed by the bridge instead (the page
-    // started a new document, or the notice ran past its longest hold), it
-    // comes down too: no Undo is left for a page or turn that's gone (#446
-    // R2-M1, R2-M2).
-    var chainSwitchNotice by remember { mutableStateOf<Pair<EthereumProviders.SwitchNotice, Job>?>(null) }
+    // down, which lets that tab's next switch through (#446 R1-F1); taken
+    // down too if the user leaves the tab once it's up, so it never sits
+    // over another one. On the screen's scope, so the next notice arriving
+    // can't cancel an Undo already running. Closed by the bridge instead
+    // (a sheet asked, the page started a new document, or the notice ran
+    // past its longest hold), it comes down too: no Undo is left for a turn
+    // that's gone (#446 R2-M1, R2-M2, R4-F1).
+    //
+    // A switch it reports is already made, so it isn't dropped (#446
+    // R4-M2): one that arrives just as the user leaves its tab waits for
+    // them to come back to it. It goes ahead of any snackbar already up
+    // (R4-M1), and tells the bridge once it's actually on screen, which is
+    // when its hold starts.
+    var chainSwitchNotice by remember { mutableStateOf<ChainSwitchNoticeUi?>(null) }
     LaunchedEffect(Unit) {
         EthereumProviders.chainSwitches.collect { notice ->
-            chainSwitchNotice?.second?.cancel()
-            val job = scope.launch {
+            chainSwitchNotice?.job?.cancel()
+            val ui = ChainSwitchNoticeUi(notice)
+            ui.job = scope.launch {
                 try {
-                    if (tabs.active.id != notice.tabId) return@launch
+                    snapshotFlow { tabs.active.id }.first { it == notice.tabId }
+                    ui.onTab = true
                     val switch = notice.switch
-                    val result = snackbarHostState.showSnackbar(
+                    val visuals = ChainSwitchVisuals(
                         Strings.get(R.string.send_eth_switched, permissionOriginDisplay(switch.origin), switch.to.name),
-                        actionLabel = Strings.get(R.string.send_undo),
-                        withDismissAction = true,
-                        duration = SnackbarDuration.Long,
+                        Strings.get(R.string.send_undo),
                     )
+                    launch {
+                        snapshotFlow { snackbarHostState.currentSnackbarData?.visuals }.first { it === visuals }
+                        notice.shown()
+                    }
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                    val result = snackbarHostState.showSnackbar(visuals)
                     if (result == SnackbarResult.ActionPerformed) {
                         notice.close(undo = true)
                         scope.launch {
-                            if (!EthereumProviders.undoSwitch(notice)) {
-                                snackbarHostState.showSnackbar(Strings.get(R.string.send_undo_failed), duration = SnackbarDuration.Long)
+                            val failed = when (EthereumProviders.undoSwitch(notice)) {
+                                EthereumProvider.UndoResult.UNDONE -> null
+                                EthereumProvider.UndoResult.MOVED -> R.string.send_undo_failed
+                                EthereumProvider.UndoResult.FAILED -> R.string.send_undo_save_failed
                             }
+                            if (failed != null) snackbarHostState.showSnackbar(Strings.get(failed), duration = SnackbarDuration.Long)
                         }
                     }
                 } finally {
@@ -784,13 +800,13 @@ fun BrowserScreen(
             }
             scope.launch {
                 notice.awaitClosed()
-                job.cancel()
+                ui.job?.cancel()
             }
-            chainSwitchNotice = notice to job
+            chainSwitchNotice = ui
         }
     }
     LaunchedEffect(tabs.active.id) {
-        chainSwitchNotice?.let { (notice, job) -> if (notice.tabId != tabs.active.id) job.cancel() }
+        chainSwitchNotice?.let { ui -> if (ui.onTab && ui.notice.tabId != tabs.active.id) ui.job?.cancel() }
     }
 
     // The node identity switched with the wallet (#77, decision 10: the
@@ -3435,3 +3451,17 @@ private fun IpfsStatusLine(text: String, modifier: Modifier = Modifier) {
 
 /** The tab and document a page's Site permissions sheet (#266) was opened over. */
 private data class PageSheetTarget(val tabId: Long, val origin: String?, val doc: Int?)
+
+/** The "<site> switched to <chain>" notice's job on screen (#440, #446). */
+private class ChainSwitchNoticeUi(val notice: EthereumProviders.SwitchNotice) {
+    var job: Job? = null
+
+    /** Its tab has been the active one: leaving it now takes the notice down. */
+    var onTab = false
+}
+
+/** Its own instance per notice, so the screen can tell when that one is the snackbar up. */
+private class ChainSwitchVisuals(override val message: String, override val actionLabel: String) : SnackbarVisuals {
+    override val withDismissAction = true
+    override val duration = SnackbarDuration.Long
+}

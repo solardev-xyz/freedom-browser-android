@@ -764,26 +764,44 @@ class EthereumProvider(
      * Undo a [ChainSwitched] (#440): [switch]'s site back on the chain it
      * left, and its pages told with `chainChanged` again — only while it's
      * still on the chain it switched to (it hasn't switched again, been
-     * moved, …) and the chain it left is still on the wallet's list. False
-     * if it wasn't put back. Not cancellable, as [disconnect]: the Undo runs
-     * on a notice's job, and a write that commits must also tell the pages.
+     * moved, …) and the chain it left is still on the wallet's list.
+     * [UndoResult.MOVED] if it wasn't put back for one of those, and
+     * [UndoResult.FAILED] if the store couldn't be read or written — a
+     * different thing to tell the user (#446 R4-M3). Not cancellable, as
+     * [disconnect]: the Undo runs on a notice's job, and a write that
+     * commits must also tell the pages.
      */
-    suspend fun undoSwitch(switch: ChainSwitched): Boolean = withContext(NonCancellable) {
-        chainMoves.withLock {
+    suspend fun undoSwitch(switch: ChainSwitched): UndoResult = withContext(NonCancellable) {
+        // [siteLinks] too (first, as [switchWithNotice]): a disconnect can't land between the
+        // read and the write, so a write that fails is the store's failure, not the site
+        // having moved on (#446 R4-M3).
+        siteLinks.withLock { chainMoves.withLock {
             val origin = switch.origin
-            if (pinnedChain(origin) != null) return@withLock false
-            val now = try {
-                storedChain(origin) ?: DEFAULT_CHAIN_ID
+            if (pinnedChain(origin) != null) return@withLock UndoResult.MOVED
+            try {
+                val now = storedChain(origin) ?: DEFAULT_CHAIN_ID
+                if (now != switch.to.id) return@withLock UndoResult.MOVED
+                val list = runCatching { chains() }.getOrNull()
+                val back = (list ?: BuiltInChains.ALL).firstOrNull { it.id == switch.from.id } ?: return@withLock UndoResult.MOVED
+                if (!setChainFor(origin, back.id)) return@withLock UndoResult.FAILED
+                events.emit(origin, "chainChanged", back.hexId)
+                UndoResult.UNDONE
             } catch (e: GrantsUnreadable) {
-                return@withLock false
+                UndoResult.FAILED
             }
-            if (now != switch.to.id) return@withLock false
-            val list = runCatching { chains() }.getOrNull()
-            val back = (list ?: BuiltInChains.ALL).firstOrNull { it.id == switch.from.id } ?: return@withLock false
-            if (!setChainFor(origin, back.id)) return@withLock false
-            events.emit(origin, "chainChanged", back.hexId)
-            true
-        }
+        } }
+    }
+
+    /** What [undoSwitch] did. */
+    enum class UndoResult {
+        /** The site is back on the chain it left. */
+        UNDONE,
+
+        /** Not put back: the site isn't where the switch left it any more (or the chain it left is gone). */
+        MOVED,
+
+        /** Not put back: the site's chain couldn't be read or saved. */
+        FAILED,
     }
 
     private suspend fun addChain(origin: String, connected: Boolean, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
