@@ -50,6 +50,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
@@ -66,6 +67,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -75,8 +77,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -99,6 +104,7 @@ import baby.freedom.mobile.wallet.ScannedCode
 import baby.freedom.mobile.wallet.TokenAmounts
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.WalletAccount
+import baby.freedom.mobile.wallet.ledger.Ledger
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
@@ -111,6 +117,8 @@ import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import java.math.BigInteger
 import java.util.concurrent.Executors
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 
 internal val SCAN_TITLE: String get() = Strings.get(R.string.wallet_qr_scan_title)
 
@@ -239,6 +247,12 @@ internal fun shareAddress(context: Context, address: String) {
 internal fun ReceivePage(account: WalletAccount, onBack: () -> Unit) {
     val context = LocalContext.current
     BackHandler(onBack = onBack)
+    // A Ledger account's Verify on Ledger (#365): held here, above the list, so scrolling never resets it.
+    val ledger = remember(context) { Ledger.get(context) }
+    val scope = rememberCoroutineScope()
+    var verifying by remember(account.address) { mutableStateOf(false) }
+    var verify by remember(account.address) { mutableStateOf(LedgerVerifyState()) }
+    val ask = remember { LedgerAddressAsk() }
     FullScreenScaffold(title = stringResource(R.string.wallet_qr_receive_title), onDismiss = onBack) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -286,6 +300,70 @@ internal fun ReceivePage(account: WalletAccount, onBack: () -> Unit) {
                     }
                 }
             }
+            if (account.ledger != null) item("verify") {
+                LedgerVerifyCard(
+                    verifying = verifying,
+                    verified = verify.verified,
+                    error = verify.error,
+                    onVerify = {
+                        // The card keeps what it said until this attempt ends: a Cancel
+                        // says nothing about the address, so an earlier success or
+                        // warning stands; any other ending replaces it.
+                        verifying = true
+                        scope.launch {
+                            try {
+                                verifyConfirmed(account.address, verify = { ledger.verifyAddress(account) }, attest = ask::ask)
+                                verify = verify.after(null)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                verify = verify.after(e)
+                            } finally {
+                                verifying = false
+                            }
+                        }
+                    },
+                )
+            }
+        }
+    }
+    LedgerAddressAskDialog(ask)
+}
+
+/**
+ * Receive's Verify on Ledger (#365): asks the Ledger holding the account
+ * to show its address on its own screen, so what's shared was checked on
+ * the device rather than taken from the phone, and the user then says on
+ * the phone whether it did ([verifyConfirmed]); then says how that went.
+ */
+@Composable
+private fun LedgerVerifyCard(verifying: Boolean, verified: Boolean, error: String?, onVerify: () -> Unit) {
+    SectionCard(title = stringResource(R.string.signing_ledger_verify_on_ledger)) {
+        when {
+            error != null -> Text(
+                error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.testTag("ledger-verify-error").semantics { liveRegion = LiveRegionMode.Polite },
+            )
+            verified -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    stringResource(R.string.signing_ledger_verify_ok),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.testTag("ledger-verify-ok").semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
+            else -> Text(stringResource(R.string.signing_ledger_verify_hint), style = MaterialTheme.typography.bodyMedium)
+        }
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(
+            onClick = onVerify,
+            enabled = !verifying,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("ledger-verify"),
+        ) {
+            Text(stringResource(R.string.signing_ledger_verify_on_ledger))
         }
     }
 }

@@ -211,6 +211,69 @@ class LedgerProtocolTest {
         assertEquals(address, NodeIdentity.checksum(Keccak256.digest(pub.copyOfRange(1, 65)).copyOfRange(12, 32)))
     }
 
+    /** The device's GET ADDRESS answer for [key]: public key, then the address as hex text. */
+    private fun addressAnswer(): String {
+        val pub = byteArrayOf(4) + Secp256k1Keys.publicKeyUncompressed(key)
+        val text = address.removePrefix("0x").lowercase().toByteArray()
+        return (byteArrayOf(65) + pub + byteArrayOf(text.size.toByte()) + text).toHex() + "9000"
+    }
+
+    /** A Ledger that answers every APDU with [answer], keeping what it was sent and how long it was given. */
+    private class Recording(val answer: String) : LedgerLink {
+        val sent = ArrayList<Pair<String, Long>>()
+        override suspend fun exchange(apdu: ByteArray, timeoutMs: Long): ByteArray {
+            sent += apdu.toHex() to timeoutMs
+            return answer.hexToBytes()
+        }
+
+        override fun close() = Unit
+    }
+
+    @Test
+    fun `GET ADDRESS reads silently with P1 0, and asks the device to show it with P1 1`() {
+        // Length 21: the component count (5), then 44'/60'/0'/0/0.
+        val body = "15" + "05" + "8000002c" + "8000003c" + "80000000" + "00000000" + "00000000"
+        assertEquals("e0020000$body", LedgerApdus.address(path).toHex())
+        assertEquals("e0020100$body", LedgerApdus.address(path, show = true).toHex())
+    }
+
+    @Test
+    fun `showAddress sends P1 1, waits as long as a confirmation, and returns the checked address`() = runBlocking {
+        val link = Recording(addressAnswer())
+        assertEquals(address, LedgerEthApp(link).showAddress(path))
+        assertEquals(listOf(LedgerApdus.address(path, show = true).toHex() to LedgerEthApp.CONFIRM_MS), link.sent)
+        // The silent read is still P1 0, on the short timeout.
+        val quiet = Recording(addressAnswer())
+        LedgerEthApp(quiet).address(path)
+        assertEquals(listOf(LedgerApdus.address(path).toHex() to LedgerEthApp.QUICK_MS), quiet.sent)
+    }
+
+    @Test
+    fun `an address rejected on the device is REJECTED`() = runBlocking {
+        for (sw in listOf("6985", "5501")) {
+            try {
+                LedgerEthApp(Recording(sw)).showAddress(path)
+                fail("took a rejection for a confirmation")
+            } catch (e: LedgerException) {
+                assertEquals(LedgerException.Kind.REJECTED, e.kind)
+            }
+        }
+    }
+
+    @Test
+    fun `the address approved on the device must be the one being added`() {
+        Ledger.shownMatches(address, address.lowercase())
+        try {
+            Ledger.shownMatches("0x" + "11".repeat(20), address)
+            fail("added an address the device didn't show")
+        } catch (e: LedgerException) {
+            assertEquals(LedgerException.Kind.WRONG_DEVICE, e.kind)
+            // Told apart from "this Ledger doesn't hold the account", so Receive can warn (#365 R1-F3).
+            assertEquals(true, e.shownDifferent)
+        }
+        assertEquals(false, LedgerException(LedgerException.Kind.WRONG_DEVICE).shownDifferent)
+    }
+
     @Test
     fun `a signature is used only if it recovers to the account over this app's digest`() {
         val digest = Keccak256.digest("what the phone showed".toByteArray())

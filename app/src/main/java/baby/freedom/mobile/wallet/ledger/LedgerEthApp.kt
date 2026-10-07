@@ -68,8 +68,15 @@ internal object LedgerApdus {
         return out.toByteArray()
     }
 
-    /** GET ETH PUBLIC ADDRESS, not shown on the device, no chain code. */
-    fun address(path: String): ByteArray = apdu(INS_ADDRESS, 0x00, 0x00, path(path))
+    /**
+     * GET ETH PUBLIC ADDRESS, no chain code. P1 `0x00` reads it silently;
+     * with [show], P1 `0x01`: the device shows the address on its own
+     * screen and answers only once the user approves it there (`0x6985`
+     * if they reject it) — the one check of an address that doesn't take
+     * the phone's word for what answered over the link (#365).
+     */
+    fun address(path: String, show: Boolean = false): ByteArray =
+        apdu(INS_ADDRESS, if (show) 0x01 else 0x00, 0x00, path(path))
 
     /**
      * SIGN ETH TRANSACTION for [payload] (the bytes whose keccak256 is
@@ -445,6 +452,14 @@ internal class LedgerEthApp(private val link: LedgerLink) {
     /** The address at [path], read without showing it on the device. */
     suspend fun address(path: String): String =
         LedgerApdus.parseAddress(LedgerApdus.ok(link.exchange(LedgerApdus.address(path), QUICK_MS)))
+
+    /**
+     * The address at [path] once the user has seen it on the device's
+     * screen and approved it there (P1 `0x01`, #365). Waits as long as a
+     * signature may; a rejection is [LedgerException.Kind.REJECTED].
+     */
+    suspend fun showAddress(path: String): String =
+        LedgerApdus.parseAddress(LedgerApdus.ok(link.exchange(LedgerApdus.address(path, show = true), CONFIRM_MS)))
 
     suspend fun signTransaction(path: String, payload: ByteArray): LedgerSignature =
         LedgerApdus.parseSignature(sendAll(LedgerApdus.signTransaction(path, payload)))
