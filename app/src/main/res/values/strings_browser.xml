@@ -212,6 +212,8 @@
     <!-- TalkBack's name for the switcher's ⋮ menu button. -->
     <string name="browser_tabs_menu">More tab options</string>
     <string name="browser_tabs_close_all">Close all tabs</string>
+    <!-- The Tabs pane's menu while private tabs are open: closes the normal tabs, the private ones stay. -->
+    <string name="browser_tabs_close_normal">Close normal tabs</string>
     <string name="browser_tabs_close_private">Close private tabs</string>
     <!-- A tab card's menu (long-press) and accessibility action: close every tab but this one. -->
     <string name="browser_tabs_close_others">Close other tabs</string>

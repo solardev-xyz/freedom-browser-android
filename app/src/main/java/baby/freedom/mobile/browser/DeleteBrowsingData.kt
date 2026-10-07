@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import android.content.Context
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
@@ -162,6 +163,22 @@ internal fun deleteDoneMessage(choice: DeleteChoice): String =
     } else {
         Strings.get(R.string.delete_data_done)
     }
+
+/**
+ * What follows Delete data, wherever the page was opened from (Settings
+ * or History): the host's [onDeleteBrowsingData] deletes the rest,
+ * [close] shuts the page, and a toast says what went.
+ */
+internal fun afterDeleteBrowsingData(
+    context: Context,
+    choice: DeleteChoice,
+    onDeleteBrowsingData: (DeleteChoice) -> Unit,
+    close: () -> Unit,
+) {
+    onDeleteBrowsingData(choice)
+    close()
+    Toast.makeText(context, deleteDoneMessage(choice), Toast.LENGTH_LONG).show()
+}
 
 /**
  * Delete what [choice] names: history in its range from [repo] here, and

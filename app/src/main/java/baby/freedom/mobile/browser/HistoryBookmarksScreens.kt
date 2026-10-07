@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import androidx.activity.compose.BackHandler
-import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -206,9 +205,7 @@ fun HistoryScreen(
         DeleteBrowsingDataPage(
             repo = repo,
             onDelete = { choice ->
-                onDeleteBrowsingData(choice)
-                deleteDataOpen = false
-                Toast.makeText(context, deleteDoneMessage(choice), Toast.LENGTH_LONG).show()
+                afterDeleteBrowsingData(context, choice, onDeleteBrowsingData) { deleteDataOpen = false }
             },
             onBack = { deleteDataOpen = false },
         )

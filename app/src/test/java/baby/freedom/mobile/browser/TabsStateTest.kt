@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.R
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -753,6 +754,17 @@ class TabsStateTest {
         assertTrue(switcherHasPanes(privateTabsOffered = true, anyPrivate = false))
         assertTrue(switcherHasPanes(privateTabsOffered = false, anyPrivate = true))
         assertFalse(switcherHasPanes(privateTabsOffered = false, anyPrivate = false))
+    }
+
+    @Test
+    fun `the Tabs pane's close item says Close all only when it closes every tab`() {
+        val tabs = threeTabs()
+        assertEquals(R.string.browser_tabs_close_all, closeTabsPaneLabel(anyPrivate = tabs.hasPrivateTabs))
+        tabs.newTab(private = true).visit("p1")
+        assertEquals(R.string.browser_tabs_close_normal, closeTabsPaneLabel(anyPrivate = tabs.hasPrivateTabs))
+        tabs.closeRegularTabs()
+        // The item names what happened: the private tab is still open.
+        assertTrue(tabs.hasPrivateTabs)
     }
 
     @Test

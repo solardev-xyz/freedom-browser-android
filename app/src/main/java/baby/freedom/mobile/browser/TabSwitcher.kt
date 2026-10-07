@@ -222,7 +222,7 @@ fun TabSwitcherScreen(
                         )
                     } else {
                         DropdownMenuItem(
-                            text = { Text(stringResource(R.string.browser_tabs_close_all)) },
+                            text = { Text(stringResource(closeTabsPaneLabel(anyPrivate = tabs.hasPrivateTabs))) },
                             enabled = paneTabs.isNotEmpty(),
                             onClick = {
                                 menuOpen = false
@@ -338,6 +338,14 @@ fun TabSwitcherScreen(
  */
 internal fun switcherHasPanes(privateTabsOffered: Boolean, anyPrivate: Boolean): Boolean =
     privateTabsOffered || anyPrivate
+
+/**
+ * The *Tabs* pane's close-everything item (#418): *Close all tabs* when
+ * it really is all of them, *Close normal tabs* while private tabs are
+ * open, since [TabsState.closeRegularTabs] leaves those in their pane.
+ */
+internal fun closeTabsPaneLabel(anyPrivate: Boolean): Int =
+    if (anyPrivate) R.string.browser_tabs_close_normal else R.string.browser_tabs_close_all
 
 /** The tabs of the pane on screen, in their order: the private ones or the normal ones. */
 internal fun paneTabs(all: List<BrowserState>, privatePane: Boolean): List<BrowserState> =
