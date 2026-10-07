@@ -106,6 +106,11 @@ class ChainDetailPageTest {
         val loopbackTwice = eth.copy(userRpcUrls = listOf("http://localhost:8545", "http://127.0.0.1:8545"))
         val lb = userRpcsNote(loopbackTwice, policy)
         assert("public RPCs fill the other 2 seats" in lb && "1 RPC of yours isn't in the quorum" in lb) { lb }
+        // One endpoint spelt twice is one entry of the router's pool (ChainDataRouter.endpoints):
+        // asked once, so it isn't also counted as an RPC of yours left out of the quorum.
+        val spelledTwice = eth.copy(userRpcUrls = listOf("https://m1.example", "https://m1.example:443"))
+        val st = userRpcsNote(spelledTwice, policy)
+        assert("public RPCs fill the other 2 seats" in st && "isn't in the quorum" !in st) { st }
         val two = eth.copy(userRpcUrls = listOf("https://m1.example", "http://localhost:8545"))
         assert("public RPCs fill the other seat and see the same read" in userRpcsNote(two, policy)) { userRpcsNote(two, policy) }
 

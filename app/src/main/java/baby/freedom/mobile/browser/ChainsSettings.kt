@@ -134,9 +134,10 @@ internal sealed interface ReadAssurance {
      * labels the user's answers [ChainTrust.Level.USER_CONFIGURED]. No
      * order is promised when both kinds are in the pool: after a failed
      * quorum the direct tier reuses whichever member answered
-     * ([QuorumRun.directCandidate], the highest seat that has, without
-     * waiting for a pending one) and skips the RPCs the quorum already
-     * asked, so a public member's answer can win over the user's.
+     * ([QuorumRun.directCandidate], the first seat — lowest index — that
+     * has answered, without waiting for a pending one) and skips the RPCs
+     * the quorum already asked, so a public member's answer can win over
+     * the user's.
      */
     enum class Fallback {
         /** Only public RPCs: unverified. */
@@ -419,13 +420,14 @@ internal fun trustSummary(trust: ChainTrust): String {
  * user's providers fill every seat, no public RPC is in the quorum; an
  * RPC sharing a provider with an earlier one (every loopback spelling is
  * one) or past the first K takes no seat and is only asked if the quorum
- * falls short.
+ * falls short. The pool is [ChainDataRouter.endpoints], the router's own,
+ * so an RPC it asks once is counted once here too.
  */
 internal fun userRpcsNote(chain: Chain, policy: ChainAccessPolicy, withLead: Boolean = true): String {
     val lead = Strings.get(R.string.names_user_rpcs_note_lead).takeIf { withLead }
     val tail = Strings.get(R.string.names_user_rpcs_note_tail)
     val k = policy.quorumK
-    val pool = (chain.userRpcUrls + chain.rpcUrls).distinct()
+    val pool = ChainDataRouter.endpoints(chain)
     val providers = ChainDataRouter.quorumMembers(pool).size
     if (ChainSource.QUORUM !in policy.readOrder || providers < policy.quorumM) {
         val order = Strings.get(
@@ -447,7 +449,7 @@ internal fun userRpcsNote(chain: Chain, policy: ChainAccessPolicy, withLead: Boo
         seats == 1 -> Strings.plural(R.plurals.names_user_rpcs_note_one_seat, publicSeats, publicSeats)
         else -> Strings.plural(R.plurals.names_user_rpcs_note_seats, publicSeats, publicSeats)
     }
-    val spare = chain.userRpcUrls.size - seats
+    val spare = pool.count { it in chain.userRpcUrls } - seats
     val spareNote = if (spare <= 0) null else Strings.plural(R.plurals.names_user_rpcs_note_spare, spare, spare, k)
     return listOfNotNull(lead, howReadsGo, who, spareNote, tail).joinToString(" ")
 }
