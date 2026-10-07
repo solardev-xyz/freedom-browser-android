@@ -534,6 +534,10 @@ class IncomingTransfers internal constructor(
         var failures = 0
         var chunks = 0
         while (chunks < MAX_CHUNKS_PER_RUN) {
+            // A candidate is never dropped once its block counts as read, or it would be gone
+            // for good: with the list full, reading waits until receipts have drained it.
+            val room = MAX_CANDIDATES - s.candidates.size
+            if (room <= 0) break
             val range = IncomingScan.nextRange(s, safeHead) ?: break
             val logs = try {
                 reads.logs(chain.id, IncomingLogs.filter(account, tokens, range)).value
@@ -549,10 +553,17 @@ class IncomingTransfers internal constructor(
             failures = 0
             val found = (0 until logs.length()).mapNotNull { IncomingLogs.decode(logs.opt(it), account, tokens, range) }
             val have = s.transfers.map { "${it.hash.lowercase()}:${it.logIndex}" }.toSet()
-            val fresh = found.filter { it.key !in have }
-            s = IncomingScan.read(s, range).copy(
-                candidates = (s.candidates + fresh).distinctBy { it.key }.takeLast(MAX_CANDIDATES),
-            )
+            val known = s.candidates.map { it.key }.toSet()
+            val fresh = found.filter { it.key !in have && it.key !in known }.distinctBy { it.key }
+            if (fresh.size > room && s.span > IncomingScan.MIN_SPAN) {
+                // More than fits: the range stays unread and is asked again in smaller chunks.
+                s = IncomingScan.failed(s)
+                if (!commit(key, s, mine)) return
+                chunks++
+                continue
+            }
+            // At the smallest chunk everything found is kept, a little over the cap, never cut.
+            s = IncomingScan.read(s, range).copy(candidates = s.candidates + fresh)
             if (!commit(key, s, mine)) return
             chunks++
             if (IncomingScan.nextRange(s, safeHead) != null) delay(pauseMs)
@@ -703,6 +714,11 @@ class IncomingTransfers internal constructor(
         /** Receipts read per chain per scan, the longest-unasked candidates first. */
         const val MAX_VERIFY_PER_RUN = 20
 
+        /**
+         * Unproven candidates kept per account and chain. A full list pauses
+         * reading (nothing found is ever dropped for space); one chunk at
+         * [IncomingScan.MIN_SPAN] may still take it a little over.
+         */
         const val MAX_CANDIDATES = 50
 
         /** Per account and chain; the oldest go first. */

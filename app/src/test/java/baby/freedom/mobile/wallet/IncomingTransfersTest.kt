@@ -494,6 +494,40 @@ class IncomingTransfersTest {
     }
 
     @Test
+    fun `more transfers than the candidate list holds are all listed, the newest included`() = runBlocking {
+        val head = 2_000_000L
+        val count = IncomingTransfers.MAX_CANDIDATES + 10
+        val logs = (0 until count).map { log(block = head - 5_100 - 5_000L * it, tx = hash(it + 1)) }
+        val reads = fake(head, *logs.toTypedArray())
+        var now = 0L
+        val inc = incoming(reads, uptime = { now })
+        repeat(10) {
+            inc.scan(account, listOf(gnosis))
+            now += IncomingTransfers.MIN_SCAN_INTERVAL_MS
+        }
+        assertEquals(logs.map { it.getString("transactionHash") }.toSet(), inc.transfers.value.map { t -> t.hash }.toSet())
+        assertEquals(head - 5_100, inc.transfers.value.maxOf { t -> t.block })
+    }
+
+    @Test
+    fun `a chunk finding more than the candidate list has room for is read again in smaller chunks`() = runBlocking {
+        val head = 1_000_000L
+        val count = IncomingTransfers.MAX_CANDIDATES + 5
+        // All in the first 10,000-block chunk: it doesn't fit, so it's re-asked at 5,000 blocks.
+        val logs = (0 until count).map { log(block = head - 100 - 150L * it, tx = hash(it + 1)) }
+        val reads = fake(head, *logs.toTypedArray())
+        var now = 0L
+        val inc = incoming(reads, uptime = { now })
+        inc.scan(account, listOf(gnosis))
+        assertEquals(listOf(10_000L, 5_000L), reads.asked.take(2).map { r -> r.count().toLong() })
+        repeat(10) {
+            now += IncomingTransfers.MIN_SCAN_INTERVAL_MS
+            inc.scan(account, listOf(gnosis))
+        }
+        assertEquals(count, inc.transfers.value.size)
+    }
+
+    @Test
     fun `a first scan that read nothing starts over a window under a much later head`() = runBlocking {
         val head = 3_000_000L
         val reads = fake(head)
