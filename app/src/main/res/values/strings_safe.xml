@@ -79,6 +79,7 @@
         <item quantity="other">%1$d of %2$d owners</item>
     </plurals>
     <string name="safe_create_preset_1of2_detail">Either owner can move funds alone; the other is a backup if one key is lost.</string>
+    <string name="safe_create_no_2of2">2 of 2 isn’t offered: losing either key would lock the funds for good.</string>
     <string name="safe_create_preset_2of3_detail">Any two must sign. One lost key, or one stolen, can’t lose the funds.</string>
     <string name="safe_create_local_owners">Owners from this wallet</string>
     <string name="safe_create_other_owners">Owners on other devices</string>
@@ -271,6 +272,8 @@
     <string name="safe_cosign_headline_message">Safe %1$s signs a message</string>
     <string name="safe_cosign_headline_cancel">Cancel a waiting transaction of Safe %1$s</string>
     <string name="safe_cosign_headline_self">Change the settings of Safe %1$s</string>
+    <!-- %1$s is what the call does, as a site's sheet says it ("Allow 0x1111…0582 to spend UNLIMITED USDC"); %2$s the Safe's short address. -->
+    <string name="safe_cosign_headline_decoded">%1$s, from Safe %2$s</string>
     <string name="safe_cosign_headline_call">Call contract %1$s from Safe %2$s</string>
     <string name="safe_base_units_unit">base units</string>
     <string name="safe_cosign_outdated">This transaction can no longer execute, so there’s nothing to sign.</string>

@@ -60,6 +60,8 @@
     <string name="signing_ledger_already_added">Already in this wallet</string>
     <!-- %1$s: an amount with its symbol, %2$s: the network. -->
     <string name="signing_ledger_balance">%1$s on %2$s</string>
+    <!-- A button on each Ledger account row: reads that one address's balance only when tapped. %1$s is the network. -->
+    <string name="signing_ledger_balance_check">Check balance on %1$s</string>
     <string name="signing_ledger_balance_reading">Reading balance…</string>
     <!-- %1$s: the network. -->
     <string name="signing_ledger_balance_unknown">Couldn’t read its balance on %1$s</string>

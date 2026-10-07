@@ -123,6 +123,15 @@ class SafeLedgerUxTest {
             "Call contract 0xd8dA…6045 from Safe 0xaaaa…aaaa",
             safeCoSignHeadline(txRequest(recipient, BigInteger.ZERO, byteArrayOf(1, 2, 3, 4)), gnosis, null),
         )
+        // A call a site's sheet can read is read here too (R1-M1): an approval names its spender and amount.
+        val spender = "0x1111111254EEB25477B68fb85Ed929f73A960582"
+        val approve = byteArrayOf(0x09, 0x5e, 0xa7.toByte(), 0xb3.toByte()) +
+            ByteArray(12) + java.math.BigInteger(spender.removePrefix("0x"), 16).toByteArray().takeLast(20).toByteArray() +
+            TxDecode.MAX_UINT256.toByteArray().takeLast(32).toByteArray()
+        assertEquals(
+            "Allow 0x1111…0582 to spend UNLIMITED xBZZ, from Safe 0xaaaa…aaaa",
+            safeCoSignHeadline(txRequest(xbzz, BigInteger.ZERO, approve), gnosis, null),
+        )
         val self = txRequest(safe.address, BigInteger.ZERO, ByteArray(0))
         assertEquals("Cancel a waiting transaction of Safe 0xaaaa…aaaa", safeCoSignHeadline(self, gnosis, SafeSelfCall.Cancel))
         assertEquals("Change the settings of Safe 0xaaaa…aaaa", safeCoSignHeadline(self, gnosis, SafeSelfCall.Unknown))

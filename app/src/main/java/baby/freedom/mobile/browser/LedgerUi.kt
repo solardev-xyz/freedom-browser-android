@@ -309,8 +309,9 @@ private fun LedgerAccountsStep(
     var loadTick by remember { mutableIntStateOf(0) }
     // A page is read when asked for: the first on opening or switching layout, the next on Show more.
     var wanted by remember(scheme) { mutableIntStateOf(ACCOUNTS_PER_PAGE) }
-    // What each address holds on Ethereum (lower case → balance), read once it's listed.
+    // What each address holds on Ethereum (lower case → balance), read only on the row's Check balance.
     var balances by remember { mutableStateOf<Map<String, TokenBalance>>(emptyMap()) }
+    var checking by remember { mutableStateOf<Set<String>>(emptySet()) }
     val ethereum = BuiltInChains.ETHEREUM
     val fetcher = remember(context) { BalanceFetcher(WalletRpc(ChainDataRouter.get(context))) }
 
@@ -332,18 +333,26 @@ private fun LedgerAccountsStep(
     }
     LaunchedEffect(found) {
         if (picked == null) picked = ledgerFirstNew(found, inWallet)
-        val token = TokenRegistry.native(ethereum)
-        for ((_, address) in found) {
-            if (address.lowercase() in balances) continue
-            // A balance is a nicety here: no failure of its read may take the page down.
-            val read = try {
-                fetcher.fetch(address, listOf(token))[token.key]
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                null
-            } ?: TokenBalance.Failed("", null)
-            balances = balances + (address.lowercase() to read)
+    }
+    // Read only when the user asks for this one address (R1-M4): reading every listed account at
+    // once would tell the RPC providers that all of this Ledger's addresses belong to one client.
+    val checkBalance: (String) -> Unit = { address ->
+        val key = address.lowercase()
+        if (key !in balances && key !in checking) {
+            checking = checking + key
+            scope.launch {
+                val token = TokenRegistry.native(ethereum)
+                // A balance is a nicety here: no failure of its read may take the page down.
+                val read = try {
+                    fetcher.fetch(address, listOf(token))[token.key]
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                } ?: TokenBalance.Failed("", null)
+                balances = balances + (key to read)
+                checking = checking - key
+            }
         }
     }
 
@@ -380,15 +389,27 @@ private fun LedgerAccountsStep(
                             Column(Modifier.weight(1f)) {
                                 Text(stringResource(R.string.signing_ledger_account_n, i + 1), fontWeight = FontWeight.Medium)
                                 AddressText(address, MaterialTheme.typography.bodyMedium, MaterialTheme.colorScheme.onSurface)
-                                Text(
-                                    if (added) {
-                                        stringResource(R.string.signing_ledger_already_added)
-                                    } else {
-                                        ledgerBalanceLine(balances[address.lowercase()], ethereum)
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+                                val balance = balances[address.lowercase()]
+                                when {
+                                    added -> Text(
+                                        stringResource(R.string.signing_ledger_already_added),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    balance != null || address.lowercase() in checking -> Text(
+                                        ledgerBalanceLine(balance, ethereum),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    else -> TextButton(
+                                        onClick = { checkBalance(address) },
+                                        enabled = !adding,
+                                        contentPadding = PaddingValues(horizontal = 0.dp),
+                                        modifier = Modifier.heightIn(min = 48.dp).testTag("ledger-check-balance"),
+                                    ) {
+                                        Text(stringResource(R.string.signing_ledger_balance_check, ethereum.name))
+                                    }
+                                }
                             }
                         }
                     }

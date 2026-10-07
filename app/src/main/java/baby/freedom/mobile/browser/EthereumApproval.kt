@@ -196,6 +196,19 @@ internal fun sendTxHeadline(quote: SendQuote): String {
         ?: Strings.get(R.string.send_eth_call_headline, shortAddress(request.to), chain.name)
 }
 
+/**
+ * "Also sends 1.5 ETH": the native value a contract call carries on top of
+ * what its headline says, so it's named on the sheet's surface, not only
+ * under Details; null for a plain transfer (the headline already names it)
+ * or a call that sends no value. The site's sheet and desktop's over OpenLV
+ * both show it.
+ */
+internal fun alsoSendsLine(quote: SendQuote): String? {
+    val request = quote.request
+    if (quote.tx.data.isEmpty() || request.amount.signum() <= 0) return null
+    return Strings.get(R.string.send_eth_also_sends, SendAmounts.exact(request.amount, request.chain.decimals), request.chain.symbol)
+}
+
 /** The unlock error under a sheet (W20): what to do first, and the raw detail for "Show details"; null when there's nothing to say. */
 internal fun unlockError(e: Throwable): Pair<String, String?>? = when (e) {
     is CancellationException -> null
@@ -802,9 +815,7 @@ private fun SendBody(
         total = quote.nativeTotal?.takeIf { request.amount.signum() > 0 }?.let { stringResource(R.string.send_up_to, feeText(it, chain)) },
     ) {
         SummarySub(stringResource(R.string.send_eth_from_on, accountLabel(request.from), chain.name))
-        if (data.isNotEmpty() && request.amount.signum() > 0) {
-            SummarySub(stringResource(R.string.send_eth_also_sends, SendAmounts.exact(request.amount, chain.decimals), chain.symbol))
-        }
+        alsoSendsLine(quote)?.let { SummarySub(it) }
     }
     Warnings(warnings)
     ask.autoApprove?.let { rule ->

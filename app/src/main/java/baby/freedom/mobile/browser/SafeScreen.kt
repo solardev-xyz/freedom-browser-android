@@ -288,6 +288,8 @@ internal fun SafeCreatePage(accounts: List<WalletAccount>, onCreated: (SafeAccou
                             }
                         }
                     }
+                    // Why the option someone may look for is missing, so its absence doesn't read as an oversight.
+                    FieldText(stringResource(R.string.safe_create_no_2of2), error = false)
                 }
             }
             item("local") {
@@ -1523,6 +1525,7 @@ private fun SafeRequestPage(
                         FieldText(
                             stringResource(R.string.safe_superseded_note),
                             error = true,
+                            announce = false,
                         )
                     }
                     DetailsExpander {
@@ -1947,7 +1950,7 @@ internal fun SafeCoSignPage(
                     val networkName = chain?.name ?: stringResource(R.string.safe_chain_id_fallback, request.chainId.toString())
                     TxReviewSummary(headline = safeCoSignHeadline(request, chain, selfCall), fee = null) {
                         FieldText(stringResource(R.string.safe_cosign_on_network, networkName), error = false)
-                        if (chain == null) FieldText(stringResource(R.string.safe_cosign_not_your_network), error = true)
+                        if (chain == null) FieldText(stringResource(R.string.safe_cosign_not_your_network), error = true, announce = false)
                     }
                     Spacer(Modifier.height(8.dp))
                     HorizontalDivider()
@@ -1991,7 +1994,8 @@ internal fun SafeCoSignPage(
                                         chain?.let { "${SendAmounts.exact(tx.value, it.decimals)} ${it.symbol}" } ?: stringResource(R.string.safe_base_units, tx.value.toString()),
                                         mono = true,
                                     )
-                                    FieldText(stringResource(R.string.safe_contract_call_detail), error = true)
+                                    TxDecode.call(tx.to, tx.data, request.chainId)?.let(::callWarning)?.let { Warning(it, Modifier.padding(top = 4.dp)) }
+                                    FieldText(stringResource(R.string.safe_contract_call_detail), error = true, announce = false)
                                 }
                             }
                         }
@@ -2150,7 +2154,9 @@ internal fun safeCoSigner(mine: List<WalletAccount>, picked: String?): WalletAcc
 /**
  * A co-sign request's hero line (W35): what signing it lets the Safe do,
  * in a sentence — a payment with its amount and recipient, a change to
- * the Safe itself, a contract call, or a message.
+ * the Safe itself, a contract call ([TxDecode.call] read as a site's sheet
+ * reads it — an approval names its spender and amount — else just the
+ * contract), or a message.
  */
 internal fun safeCoSignHeadline(request: SafeProtocol.Request, chain: Chain?, selfCall: SafeSelfCall?): String {
     val safe = shortAddress(request.safe)
@@ -2169,7 +2175,9 @@ internal fun safeCoSignHeadline(request: SafeProtocol.Request, chain: Chain?, se
                     Strings.get(R.string.safe_headline_send, SendAmounts.exact(tx.value, chain.decimals), chain.symbol, shortAddress(tx.to), safe)
                 tx.data.isEmpty() ->
                     Strings.get(R.string.safe_headline_send, tx.value.toString(), Strings.get(R.string.safe_base_units_unit), shortAddress(tx.to), safe)
-                else -> Strings.get(R.string.safe_cosign_headline_call, shortAddress(tx.to), safe)
+                else -> TxDecode.call(tx.to, tx.data, request.chainId)
+                    ?.let { Strings.get(R.string.safe_cosign_headline_decoded, callHeadline(it), safe) }
+                    ?: Strings.get(R.string.safe_cosign_headline_call, shortAddress(tx.to), safe)
             }
         }
     }
@@ -2627,12 +2635,13 @@ internal val SAFE_SELECTORS: Map<String, String> = listOf(
 ).associate { it.substringBefore('(') to Keccak256.digest(it.toByteArray(Charsets.US_ASCII)).copyOfRange(0, 4).toHex() }
 
 @Composable
-private fun FieldText(text: String, error: Boolean) {
+private fun FieldText(text: String, error: Boolean, announce: Boolean = error) {
     Text(
         text,
         style = MaterialTheme.typography.bodySmall,
         color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-        // A problem is announced as it appears, not only found by exploring (W50).
-        modifier = Modifier.padding(top = 4.dp).then(if (error) Modifier.semantics { liveRegion = LiveRegionMode.Polite } else Modifier),
+        // A problem is announced as it appears, not only found by exploring (W50); a note in red that is
+        // part of the page from its first frame ([announce] false) is read in turn, not as news.
+        modifier = Modifier.padding(top = 4.dp).then(if (announce) Modifier.semantics { liveRegion = LiveRegionMode.Polite } else Modifier),
     )
 }

@@ -511,8 +511,9 @@ private fun CantSendBody(request: OpenLvSession.Request.CantSend) {
 
 /**
  * A transaction desktop asks this phone to send (W40): what it does in a
- * sentence ([sendTxHeadline], as a site's sheet says it), the most the fee
- * can be and the total, the accounts with Copy; network, value, call
+ * sentence ([sendTxHeadline], as a site's sheet says it), any native value
+ * a contract call also sends ([alsoSendsLine]), the most the fee can be
+ * and the total, the accounts with Copy; network, value, call
  * data, nonce and gas under Details.
  */
 @Composable
@@ -529,6 +530,9 @@ private fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) 
         fee = stringResource(R.string.signing_review_up_to, feeText(quote.maxFee, chain)),
         total = quote.nativeTotal?.takeIf { r.amount.signum() > 0 }?.let { stringResource(R.string.signing_review_up_to, feeText(it, chain)) },
     ) {
+        alsoSendsLine(quote)?.let {
+            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         if (r.to.equals(r.from.address, ignoreCase = true)) {
             Text(stringResource(R.string.signing_review_to_self), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }

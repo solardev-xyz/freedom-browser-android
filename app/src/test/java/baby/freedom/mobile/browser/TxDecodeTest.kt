@@ -315,20 +315,32 @@ class TxDecodeTest {
     private val site = "https://app.example"
     private val account = WalletAccount(0, "Account 1", owner)
 
-    private fun sendAsk(to: String, data: ByteArray, repriced: Boolean = false, replaces: String? = null): EthAsk.SendTransaction {
+    private fun sendAsk(to: String, data: ByteArray, repriced: Boolean = false, replaces: String? = null, value: BigInteger = BigInteger.ZERO): EthAsk.SendTransaction {
         val chain = BuiltInChains.ETHEREUM
-        val request = SendRequest(chain, TokenRegistry.native(chain), account, to, BigInteger.ZERO, DappCall(site, data, null))
+        val request = SendRequest(chain, TokenRegistry.native(chain), account, to, value, DappCall(site, data, null))
         val tx = EthTransaction(
             chainId = chain.id,
             nonce = BigInteger.valueOf(7),
             gasLimit = BigInteger.valueOf(50_000),
             to = to,
-            value = BigInteger.ZERO,
+            value = value,
             data = data,
             fees = EthTransaction.Fees.Eip1559(BigInteger.valueOf(2_000_000_000), BigInteger.ONE),
         )
         val trust = ChainTrust(ChainTrust.Level.VERIFIED, ChainSource.QUORUM, emptyList(), emptyList(), emptyList(), 3, 2, null)
         return EthAsk.SendTransaction(site, SendQuote(request, tx, BigInteger.TEN.pow(18), null, 0, trust, replaces), repriced)
+    }
+
+    @Test
+    fun `native value a contract call carries is named on the surface, on the site's sheet and desktop's alike`() {
+        // transfer(0xd8dA…, 20 USDC) to the USDC contract with 1.5 ETH attached (#434 R1-F1).
+        val transfer = bytes("a9059cbb" + word(recipient) + word(BigInteger.valueOf(20_000_000)))
+        val withValue = sendAsk(usdc, transfer, value = BigInteger.valueOf(15).multiply(BigInteger.TEN.pow(17)))
+        assertEquals("Send 20 USDC to 0xd8dA…6045", sendTxHeadline(withValue.quote))
+        assertEquals("Also sends 1.5 ETH", alsoSendsLine(withValue.quote))
+        // No value, nothing more to say; a plain transfer's amount is already its headline.
+        assertNull(alsoSendsLine(sendAsk(usdc, transfer).quote))
+        assertNull(alsoSendsLine(sendAsk(recipient, ByteArray(0), value = BigInteger.TEN.pow(18)).quote))
     }
 
     @Test
