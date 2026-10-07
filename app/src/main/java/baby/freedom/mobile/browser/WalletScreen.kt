@@ -635,7 +635,8 @@ private fun lostWalletAdvice(
  * The wallet page (#75, #76), from Settings → Wallet, or opened by a
  * feature that needs an identity ([Vault.requireUnlocked], carried in
  * as [request]). With no wallet it offers Create (one tap, then the
- * screen-lock prompt: 24 new words, no write-down quiz) and Import (12
+ * screen-lock prompt: 24 new words, then the guided backup with its
+ * three-word check, which "Later" skips — #421) and Import (12
  * to 24 words, checksum checked); with one, Unlock or Lock, how it's
  * protected, the backup reminder, Show recovery phrase (#78) and
  * Remove wallet.
@@ -1035,6 +1036,7 @@ fun WalletScreen(
             reveal = { vault.revealMnemonic(auth) },
             markBackedUp = { vault.markBackedUp() },
             errorMessage = { e -> walletErrorMessage(e, Strings.get(R.string.wallet_action_show_phrase), phraseBackedUp) },
+            saveErrorMessage = { e -> walletErrorMessage(e, Strings.get(R.string.wallet_action_save_backup_check), phraseBackedUp) },
             onClose = { phraseFlow = null },
         )
         return

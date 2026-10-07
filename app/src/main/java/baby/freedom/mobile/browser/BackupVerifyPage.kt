@@ -272,7 +272,10 @@ internal fun BackupFlow(
     reminder: String,
     reveal: suspend () -> Mnemonic,
     markBackedUp: suspend () -> Unit,
+    /** For a failed [reveal]: names showing the phrase. */
     errorMessage: (Throwable) -> String?,
+    /** For a failed [markBackedUp] on the check page: names saving the passed check. */
+    saveErrorMessage: (Throwable) -> String?,
     onClose: () -> Unit,
 ) {
     SecureWindow()
@@ -304,7 +307,7 @@ internal fun BackupFlow(
             revealNow = state.revealRequested,
             onRevealStarted = state::revealStarted,
         )
-        BackupStep.CHECK -> BackupCheckPage(state, markBackedUp, errorMessage, onBack = back, onLater = close)
+        BackupStep.CHECK -> BackupCheckPage(state, markBackedUp, saveErrorMessage, onBack = back, onLater = close)
         BackupStep.DONE -> BackupDonePage(onDone = close)
     }
 }

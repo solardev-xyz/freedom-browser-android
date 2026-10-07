@@ -450,6 +450,23 @@ class VaultTest {
     }
 
     @Test
+    fun `a reveal whose record rename fails still shows the phrase`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        // What writeDurably throws when tmp.renameTo returns false (#429 R2-M1); the file stays as it was.
+        val before = store.record
+        store.onWrite = {
+            store.record = before
+            error("couldn't write vault.json")
+        }
+        assertEquals(phrase, v.revealMnemonic(auth))
+        assertFalse((v.state.value as Vault.State.Unlocked).info.phraseKnown)
+        store.onWrite = {}
+        assertEquals(phrase, v.revealMnemonic(auth))
+        assertTrue((v.state.value as Vault.State.Unlocked).info.phraseKnown)
+    }
+
+    @Test
     fun `imported counts as known, restored and created-unseen don't`() = runBlocking {
         vault().create(phrase, auth, imported = true)
         assertTrue((vault().state.value as Vault.State.Locked).info.phraseKnown)

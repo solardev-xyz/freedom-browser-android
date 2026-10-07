@@ -2,7 +2,7 @@ package baby.freedom.mobile.wallet
 
 import android.content.Context
 import android.os.SystemClock
-import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import java.security.GeneralSecurityException
 import javax.crypto.Cipher
 import kotlinx.coroutines.CompletableDeferred
@@ -92,8 +92,9 @@ internal class AutoLockPolicy(
  *  - [withSeed] — the seed for deriving keys (node identities, #77; the
  *    wallet's accounts), which also counts as activity for the idle lock;
  *  - [revealMnemonic] and [markBackedUp] — "Show recovery phrase" (#78),
- *    which always costs a fresh authentication, and clears the backup
- *    reminder once the phrase has been seen;
+ *    which always costs a fresh authentication, and the guided backup
+ *    (#421): a reveal only records that the phrase has been shown; the
+ *    backup reminder clears once the three-word check has passed;
  *  - [requireUnlocked] — the lazy entry point: whatever first needs an
  *    identity (a wallet action, publishing, a dApp) calls it, and the
  *    browser opens the wallet page to create, import or unlock one. The
@@ -255,8 +256,11 @@ class Vault internal constructor(
         if (!record.phraseShown) {
             try {
                 rewrite(record.copy(phraseShown = true))
-            } catch (_: IOException) {
-                // Left unrecorded: the next reveal tries again.
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // An IOException, or writeDurably's IllegalStateException on a failed
+                // rename: left unrecorded, and the next reveal tries again.
             }
         }
         mnemonic

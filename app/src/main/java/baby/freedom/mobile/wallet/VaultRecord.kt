@@ -32,8 +32,9 @@ enum class VaultProtection(val wire: String) {
 /**
  * The vault as stored on disk: the recovery phrase sealed with AES-GCM
  * under the Keystore key, plus what isn't secret — how the key is
- * guarded, whether it sits in StrongBox, and whether the user has seen
- * the phrase since it was made (the backup reminder), and whether the
+ * guarded, whether it sits in StrongBox, whether the backup check has
+ * passed ([backedUp]: the backup reminder shows till then), whether the
+ * phrase has been on screen at all ([phraseShown]), and whether the
  * phrase is in the opt-in Google Block Store backup ([PhraseBackup],
  * #231) and that backup has been offered. There is no
  * plaintext copy of the phrase anywhere; [ciphertext] can only be opened

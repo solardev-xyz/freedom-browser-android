@@ -142,6 +142,7 @@
     <!-- What was being done, for "Couldn’t …" (wallet_error_couldnt_*). -->
     <string name="wallet_action_show_phrase">show the recovery phrase</string>
     <string name="wallet_action_show_key">show the private key</string>
+    <string name="wallet_action_save_backup_check">save your backup check</string>
     <string name="wallet_action_import">import the wallet</string>
     <string name="wallet_action_restore">restore the wallet</string>
     <string name="wallet_action_create">create the wallet</string>
