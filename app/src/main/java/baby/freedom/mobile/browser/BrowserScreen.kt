@@ -3359,7 +3359,14 @@ fun BrowserScreen(
                         SiteData.cleanAndReload(
                             tabId = tab.id,
                             origin = dataOrigin,
-                            clean = { key -> tabs.cleanSiteInPage?.invoke(tab, dataOrigin, key) == true },
+                            clean = { key ->
+                                val ask = tabs.cleanSiteInPage
+                                ask != null && withTimeoutOrNull(1_000) {
+                                    suspendCancellableCoroutine { cont ->
+                                        ask(tab, dataOrigin, key) { started -> if (cont.isActive) cont.resume(started) }
+                                    }
+                                } == true
+                            },
                             cleaned = { key ->
                                 val ask = tabs.siteCleanedInPage
                                 ask != null && withTimeoutOrNull(1_000) {
@@ -3368,8 +3375,10 @@ fun BrowserScreen(
                                     }
                                 } == true
                             },
+                            // Still on the site Delete was for (R3-F1).
+                            onOrigin = { tab in tabs.tabs && SiteData.committedOrigin(tab.id) == dataOrigin },
                             reload = {
-                                if (tab in tabs.tabs && tabs.reloadDocument?.invoke(tab) != true &&
+                                if (tab in tabs.tabs && tabs.reloadDocument?.invoke(tab, dataOrigin) != true &&
                                     tabs.active === tab
                                 ) {
                                     reloadPage()

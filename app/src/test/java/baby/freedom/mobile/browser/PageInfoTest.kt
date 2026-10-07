@@ -200,14 +200,14 @@ class PageInfoTest {
         var reloads = 0
         SiteData.cleanAndReload(
             tabId = 12L, origin = "http://localhost:8721",
-            clean = { true }, cleaned = { true }, reload = { reloads++ },
+            clean = { true }, cleaned = { true }, onOrigin = { true }, reload = { reloads++ },
         )
         assertEquals(1, reloads)
         assertEquals(false, SiteData.takeCleanup(12L, "http://localhost:8721/index.html?later", "GET"))
         // A page that couldn't be asked is reloaded from here at once, and again the mark goes.
         SiteData.cleanAndReload(
             tabId = 12L, origin = "http://localhost:8721",
-            clean = { false }, cleaned = { error("not asked") }, reload = { reloads++ },
+            clean = { false }, cleaned = { error("not asked") }, onOrigin = { true }, reload = { reloads++ },
         )
         assertEquals(2, reloads)
         assertEquals(false, SiteData.takeCleanup(12L, "http://localhost:8721/", "GET"))
@@ -224,7 +224,7 @@ class PageInfoTest {
         val job = launch {
             SiteData.cleanAndReload(
                 tabId = 13L, origin = "https://example.org",
-                clean = { true }, cleaned = { done }, reload = { reloadedAt = currentTime },
+                clean = { true }, cleaned = { done }, onOrigin = { true }, reload = { reloadedAt = currentTime },
             )
         }
         advanceTimeBy(10_000)
@@ -240,7 +240,7 @@ class PageInfoTest {
         val capped = launch {
             SiteData.cleanAndReload(
                 tabId = 14L, origin = "https://example.org",
-                clean = { true }, cleaned = { false }, reload = { reloadedAt = currentTime },
+                clean = { true }, cleaned = { false }, onOrigin = { true }, reload = { reloadedAt = currentTime },
             )
         }
         val start = currentTime
@@ -248,10 +248,123 @@ class PageInfoTest {
         assertTrue(reloadedAt - start >= SiteData.IN_PAGE_WIPE_MAX_MS)
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a tab that went to another site isn't reloaded for the Delete`() = runTest {
+        // R3-F1: the page couldn't be asked (its committed origin differs),
+        // and the fallback reload must not hit the unrelated site.
+        var reloads = 0
+        SiteData.cleanAndReload(
+            tabId = 15L, origin = "https://example.org",
+            clean = { false }, cleaned = { error("not asked") }, onOrigin = { false }, reload = { reloads++ },
+        )
+        assertEquals(0, reloads)
+        assertEquals(false, SiteData.takeCleanup(15L, "https://example.org/", "GET"))
+        // Nor one that leaves while the page is clearing: its commit ends the attempt.
+        SiteData.cleanAndReload(
+            tabId = 15L, origin = "https://example.org",
+            clean = { true },
+            cleaned = { SiteData.committed(15L, "https://other.example/"); false },
+            onOrigin = { SiteData.committedOrigin(15L) == "https://example.org" },
+            reload = { reloads++ },
+        )
+        assertEquals(0, reloads)
+        SiteData.tabClosed(15L)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a commit that cleaned nothing runs the clearing again on the new document`() = runTest {
+        // R3-F2: a client redirect a service worker answered commits while
+        // the page clears. The clearing died with the old document; the
+        // new one, still on the site, is asked again.
+        SiteData.committed(16L, "https://example.org/")
+        var asks = 0
+        var reloads = 0
+        SiteData.cleanAndReload(
+            tabId = 16L, origin = "https://example.org",
+            clean = { asks++; true },
+            cleaned = {
+                if (asks == 1) {
+                    SiteData.committed(16L, "https://example.org/next")
+                    false
+                } else {
+                    // The second time, the page's own reload takes the mark.
+                    SiteData.takeCleanup(16L, "https://example.org/next", "GET")
+                    true
+                }
+            },
+            onOrigin = { SiteData.committedOrigin(16L) == "https://example.org" },
+            reload = { reloads++ },
+        )
+        assertEquals(2, asks)
+        assertEquals(0, reloads)
+        // A commit that keeps cutting it short is tried only so often.
+        asks = 0
+        SiteData.cleanAndReload(
+            tabId = 16L, origin = "https://example.org",
+            clean = { asks++; true },
+            cleaned = { SiteData.committed(16L, "https://example.org/again"); false },
+            onOrigin = { SiteData.committedOrigin(16L) == "https://example.org" },
+            reload = { reloads++ },
+        )
+        assertEquals(SiteData.CLEANUP_ATTEMPTS, asks)
+        assertEquals(0, reloads)
+        // A load that took the mark for another origin isn't retried.
+        asks = 0
+        SiteData.cleanAndReload(
+            tabId = 16L, origin = "https://example.org",
+            clean = { asks++; true },
+            cleaned = { SiteData.takeCleanup(16L, "https://example.org/login", "POST"); false },
+            onOrigin = { true },
+            reload = { reloads++ },
+        )
+        assertEquals(1, asks)
+        assertEquals(0, reloads)
+        SiteData.tabClosed(16L)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a document that won't clear is reloaded at once, not waited on`() = runTest {
+        // R3-F4: an opaque (sandboxed) document answers that it didn't
+        // start; the reload comes without the 15 s + 3 s wait.
+        var reloadedAt = -1L
+        val start = currentTime
+        SiteData.cleanAndReload(
+            tabId = 17L, origin = "https://example.org",
+            clean = { false }, cleaned = { error("not asked") }, onOrigin = { true },
+            reload = { reloadedAt = currentTime },
+        )
+        assertEquals(start, reloadedAt)
+    }
+
+    @Test
+    fun `the marked reload is cleaned, any other outcome is told apart`() {
+        val taken = SiteData.markCleanup(18L, "https://example.org")
+        SiteData.takeCleanup(18L, "https://example.org/", "GET")
+        assertEquals(SiteData.Outcome.CLEANED, taken.outcome)
+        val post = SiteData.markCleanup(18L, "https://example.org")
+        SiteData.takeCleanup(18L, "https://example.org/", "POST")
+        assertEquals(SiteData.Outcome.ELSEWHERE, post.outcome)
+        val committed = SiteData.markCleanup(18L, "https://example.org")
+        SiteData.committed(18L, "https://example.org/")
+        assertEquals(SiteData.Outcome.COMMITTED, committed.outcome)
+        val dropped = SiteData.markCleanup(18L, "https://example.org")
+        SiteData.dropCleanup(18L, dropped)
+        assertEquals(SiteData.Outcome.DROPPED, dropped.outcome)
+        val replaced = SiteData.markCleanup(18L, "https://example.org")
+        SiteData.markCleanup(18L, "https://example.org")
+        assertEquals(SiteData.Outcome.PENDING, replaced.outcome)
+        SiteData.tabClosed(18L)
+    }
+
     @Test
     fun `the in-page cleanup acts only on its own origin, marks it done, then reloads`() {
         val js = siteDataInPageJs("http://localhost:8720", "_k1")
-        assertTrue("if (location.origin !== \"http://localhost:8720\") return;" in js)
+        assertTrue("if (location.origin !== \"http://localhost:8720\") return false;" in js)
+        // It answers whether it started, so an opaque document isn't waited on (R3-F4).
+        assertTrue(js.trimEnd().endsWith("return true;\n})()"))
         assertTrue("r.unregister()" in js)
         assertTrue(js.indexOf("r.unregister()") < js.indexOf("window[\"_k1\"] = true"))
         assertTrue(js.indexOf("window[\"_k1\"] = true") < js.indexOf("location.replace(location.href)"))

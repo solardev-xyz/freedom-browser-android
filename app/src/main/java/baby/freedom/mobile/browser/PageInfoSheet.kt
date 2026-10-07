@@ -333,7 +333,35 @@ internal object SiteData {
     }
 
     /** One Delete's mark on a tab: the origin its next document load clears first. */
-    class CleanupMark internal constructor(val origin: String)
+    class CleanupMark internal constructor(val origin: String) {
+        /** What became of the mark once it left the tab ([Outcome.PENDING] while it's on it). */
+        @Volatile
+        var outcome: Outcome = Outcome.PENDING
+            internal set
+    }
+
+    /** How a [CleanupMark] ended. */
+    enum class Outcome {
+        /** Still on the tab, or replaced there by a later Delete's mark. */
+        PENDING,
+
+        /** A load took it and was answered with the cleanup page ([takeCleanup]). */
+        CLEANED,
+
+        /** A load took it that isn't one to clean: another origin, a POST. */
+        ELSEWHERE,
+
+        /**
+         * A document committed with no request of it reaching the
+         * interceptor ([committed]): one a service worker answered — a
+         * client redirect or meta refresh that raced the page's clearing,
+         * say. Nothing was cleaned by it (R3-F2).
+         */
+        COMMITTED,
+
+        /** Its Delete dropped it, no load having taken it ([dropCleanup]). */
+        DROPPED,
+    }
 
     /** Tab id → the mark its next document load takes. */
     private val cleanups = ConcurrentHashMap<Long, CleanupMark>()
@@ -367,7 +395,9 @@ internal object SiteData {
      */
     fun takeCleanup(tabId: Long, url: String, method: String?): Boolean {
         val mark = cleanups.remove(tabId) ?: return false
-        return method.equals("GET", ignoreCase = true) && permissionOriginKey(url) == mark.origin
+        val clean = method.equals("GET", ignoreCase = true) && permissionOriginKey(url) == mark.origin
+        mark.outcome = if (clean) Outcome.CLEANED else Outcome.ELSEWHERE
+        return clean
     }
 
     /** Is [mark] still on tab [tabId], waiting for a load to take it? */
@@ -375,7 +405,7 @@ internal object SiteData {
 
     /** Drop [mark] from tab [tabId] if no load took it; a later Delete's mark is left alone. */
     fun dropCleanup(tabId: Long, mark: CleanupMark) {
-        cleanups.remove(tabId, mark)
+        if (cleanups.remove(tabId, mark)) mark.outcome = Outcome.DROPPED
     }
 
     /**
@@ -383,43 +413,67 @@ internal object SiteData {
      * a new document whose first load is the cleanup page ([markCleanup]),
      * its service workers unregistered first. [clean] asks the tab's own
      * document to clear and unregister, then reload itself
-     * ([siteDataInPageJs]) under a done-key; [cleaned] asks whether it has
-     * finished clearing. Only once it has — or after [IN_PAGE_WIPE_MAX_MS]
-     * at the most — does the wait for its reload start, so a slow clearing
-     * (big caches, many databases) isn't overtaken by a reload from here
-     * that the still-registered worker would answer (R2-F3). If no load
-     * takes the mark within [IN_PAGE_RELOAD_WAIT_MS] of that (a page that
-     * stops it), or the page couldn't be asked, [reload] reloads the tab
-     * from here. Whatever happens, the mark is dropped at the end, so it
-     * can't stay armed for a later load (R2-F1).
+     * ([siteDataInPageJs]) under a done-key, and answers whether the
+     * document took it on — not one on another origin, nor an opaque one
+     * (a `Content-Security-Policy: sandbox` page, whose `location.origin`
+     * is `"null"`), which is reloaded from here at once rather than
+     * waited on (R3-F4). [cleaned] asks whether it has finished clearing.
+     * Only once it has — or after [IN_PAGE_WIPE_MAX_MS] at the most —
+     * does the wait for its reload start, so a slow clearing (big caches,
+     * many databases) isn't overtaken by a reload from here that the
+     * still-registered worker would answer (R2-F3). If no load takes the
+     * mark within [IN_PAGE_RELOAD_WAIT_MS] of that (a page that stops
+     * it), or the page couldn't be asked, [reload] reloads the tab from
+     * here — but only while [onOrigin] says the tab is still on [origin]:
+     * a tab that has gone to another site meanwhile isn't reloaded, its
+     * draft lost, for this one's Delete (R3-F1).
+     *
+     * A document that committed without any request reaching the
+     * interceptor ([Outcome.COMMITTED]: a client redirect or meta refresh
+     * a service worker answered, landing while the page was clearing)
+     * cleaned nothing, and the clearing it cut short may not have reached
+     * the worker; if the tab is still on [origin], the whole of it runs
+     * again on the new document, up to [CLEANUP_ATTEMPTS] times (R3-F2).
+     * Whatever happens, each mark is dropped at the end of its attempt,
+     * so it can't stay armed for a later load (R2-F1).
      */
     suspend fun cleanAndReload(
         tabId: Long,
         origin: String,
-        clean: (doneKey: String) -> Boolean,
+        clean: suspend (doneKey: String) -> Boolean,
         cleaned: suspend (doneKey: String) -> Boolean,
+        onOrigin: () -> Boolean,
         reload: () -> Unit,
-        doneKey: String = "_" + UUID.randomUUID().toString().replace("-", ""),
+        newDoneKey: () -> String = { "_" + UUID.randomUUID().toString().replace("-", "") },
     ) {
-        val mark = markCleanup(tabId, origin)
-        try {
-            if (clean(doneKey)) {
-                withTimeoutOrNull(IN_PAGE_WIPE_MAX_MS) {
-                    while (cleanupPending(tabId, mark) && !cleaned(doneKey)) delay(CLEANUP_POLL_MS)
+        repeat(CLEANUP_ATTEMPTS) {
+            val mark = markCleanup(tabId, origin)
+            try {
+                val doneKey = newDoneKey()
+                if (clean(doneKey)) {
+                    withTimeoutOrNull(IN_PAGE_WIPE_MAX_MS) {
+                        while (cleanupPending(tabId, mark) && !cleaned(doneKey)) delay(CLEANUP_POLL_MS)
+                    }
+                    withTimeoutOrNull(IN_PAGE_RELOAD_WAIT_MS) {
+                        while (cleanupPending(tabId, mark)) delay(CLEANUP_POLL_MS)
+                    }
                 }
-                withTimeoutOrNull(IN_PAGE_RELOAD_WAIT_MS) {
-                    while (cleanupPending(tabId, mark)) delay(CLEANUP_POLL_MS)
+                if (cleanupPending(tabId, mark)) {
+                    if (!onOrigin()) return
+                    reload()
+                    withTimeoutOrNull(FALLBACK_RELOAD_WAIT_MS) {
+                        while (cleanupPending(tabId, mark)) delay(CLEANUP_POLL_MS)
+                    }
                 }
+            } finally {
+                dropCleanup(tabId, mark)
             }
-            if (!cleanupPending(tabId, mark)) return
-            reload()
-            withTimeoutOrNull(FALLBACK_RELOAD_WAIT_MS) {
-                while (cleanupPending(tabId, mark)) delay(CLEANUP_POLL_MS)
-            }
-        } finally {
-            dropCleanup(tabId, mark)
+            if (mark.outcome != Outcome.COMMITTED || !onOrigin()) return
         }
     }
+
+    /** How many times [cleanAndReload] runs when a commit it didn't clean cut it short. */
+    const val CLEANUP_ATTEMPTS = 2
 
     /** The longest [cleanAndReload] waits for the page's own clearing to end. */
     const val IN_PAGE_WIPE_MAX_MS = 15_000L
@@ -441,7 +495,7 @@ internal object SiteData {
      * so it can't turn up on a later load the user didn't ask to clean.
      */
     fun committed(tabId: Long, url: String?) {
-        cleanups.remove(tabId)
+        cleanups.remove(tabId)?.outcome = Outcome.COMMITTED
         val origin = url?.let(::permissionOriginKey)
         if (origin == null) committedOrigins.remove(tabId) else committedOrigins[tabId] = origin
     }

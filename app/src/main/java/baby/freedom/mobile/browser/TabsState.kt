@@ -254,12 +254,15 @@ class TabsState(
      * document, if it is on the given origin, clear that origin's data
      * and unregister its service workers itself, then reload
      * ([siteDataInPageJs], marking that it's done with the given key) —
-     * Page info's Delete data (#442). Whether it was asked to; `false`
-     * when the tab has no WebView or its committed document is on another
-     * origin. `null` before the host has composed, or after it disposes.
+     * Page info's Delete data (#442). Answers whether the document started
+     * the clearing; `false` when the tab has no WebView, its committed
+     * document is on another origin, or the document's own origin isn't
+     * the given one (an opaque, sandboxed document). Main thread; the
+     * answer comes on it too. `null` before the host has composed, or
+     * after it disposes.
      */
     @Volatile
-    internal var cleanSiteInPage: ((BrowserState, String, String) -> Boolean)? = null
+    internal var cleanSiteInPage: ((BrowserState, String, String, (Boolean) -> Unit) -> Unit)? = null
 
     /**
      * Hook installed by the [BrowserWebViewHost]: answer whether the given
@@ -272,12 +275,15 @@ class TabsState(
 
     /**
      * Hook installed by the [BrowserWebViewHost]: reload the given tab's
-     * document in its WebView (`WebView.reload()`) — a new document even
-     * where the address has a fragment, which a `loadUrl` of the same
-     * address isn't. Whether there was a WebView to reload.
+     * document in its WebView, if it is still on the given origin — a new
+     * document even where the address has a fragment, which a `loadUrl`
+     * of the same address isn't, and one that gets there even on a page a
+     * form POST answered, whose plain reload is refused ([SweptReload]).
+     * Whether there was a WebView to ask; a document on another origin is
+     * left as it is (R3-F1).
      */
     @Volatile
-    internal var reloadDocument: ((BrowserState) -> Boolean)? = null
+    internal var reloadDocument: ((BrowserState, String) -> Boolean)? = null
 
     /**
      * Hook installed by the [BrowserWebViewHost]: mute or unmute the

@@ -1414,10 +1414,14 @@ fun BrowserWebViewHost(
                 )
             }
         }
-        tabs.cleanSiteInPage = cleanSiteInPage@{ tab, origin, doneKey ->
-            val wv = webViews[tab.id] ?: return@cleanSiteInPage false
-            if (SiteData.committedOrigin(tab.id) != origin) return@cleanSiteInPage false
-            runCatching { wv.evaluateJavascript(siteDataInPageJs(origin, doneKey), null) }.isSuccess
+        tabs.cleanSiteInPage = cleanSiteInPage@{ tab, origin, doneKey, answer ->
+            val wv = webViews[tab.id]
+            if (wv == null || SiteData.committedOrigin(tab.id) != origin) {
+                answer(false)
+                return@cleanSiteInPage
+            }
+            runCatching { wv.evaluateJavascript(siteDataInPageJs(origin, doneKey)) { answer(it == "true") } }
+                .onFailure { answer(false) }
         }
         tabs.siteCleanedInPage = { tab, doneKey, answer ->
             val wv = webViews[tab.id]
@@ -1428,9 +1432,17 @@ fun BrowserWebViewHost(
                     .onFailure { answer(false) }
             }
         }
-        tabs.reloadDocument = reloadDocument@{ tab ->
+        tabs.reloadDocument = reloadDocument@{ tab, origin ->
             val wv = webViews[tab.id] ?: return@reloadDocument false
-            runCatching { wv.reload() }.isSuccess
+            // Only the document Delete was for: a tab that has since gone
+            // to another site keeps its page, and its draft (R3-F1).
+            if (SiteData.committedOrigin(tab.id) != origin) return@reloadDocument true
+            // A plain reload is refused on a page a form POST answered
+            // (`onFormResubmission`, "don't resend"), and nothing loads
+            // (R3-F3): [PageWebView.siteDataReload] moves on to a GET of
+            // the same address, which the cleanup mark answers.
+            runCatching { if (wv is PageWebView) wv.siteDataReload.swept(wv.url) else wv.reload() }
+            true
         }
         tabs.clearWebViewData = { siteData, cache ->
             if (siteData) {
@@ -2991,7 +3003,10 @@ private fun buildRefreshableWebView(
             override fun onFormResubmission(view: WebView?, dontResend: Message?, resend: Message?) {
                 dontResend?.sendToTarget()
                 if (view is PageWebView) {
-                    view.post { view.sweptReload.refused() }
+                    view.post {
+                        view.sweptReload.refused()
+                        view.siteDataReload.refused()
+                    }
                     // A Hard reload's own moves on to a GET; any other
                     // ends its bypass (#262, R4-F1).
                     view.cacheBypass.reloadRefused()
@@ -3058,6 +3073,7 @@ private fun buildRefreshableWebView(
                 // its frames (#125, [TabDocuments.committed]).
                 if (view is PageWebView) {
                     view.sweptReload.committed()
+                    view.siteDataReload.committed()
                     UnverifiedOrigins.release(view)
                     view.documents.committed(
                         url,
@@ -4972,6 +4988,26 @@ internal class PageWebView(context: Context) : WebView(context) {
         schedule = { delayMs, action -> mainHandler.postDelayed(action, delayMs) },
     )
 
+    /**
+     * Page info's Delete data reload (#442), when the page's own didn't
+     * come: a reload, and if WebView refuses it — a page a form POST
+     * answered, `onFormResubmission` answered "don't resend" — a GET of
+     * the same address, which the cleanup mark answers (R3-F3). No
+     * deadlines, unlike [sweptReload]: a reload that is merely slow is
+     * waited for, not replaced; only a refused one moves on, and never
+     * to `about:blank`.
+     */
+    val siteDataReload: SweptReload = SweptReload(
+        navigate = { step ->
+            when (step) {
+                SweptReload.Step.RELOAD -> reload()
+                SweptReload.Step.GET -> siteDataReload.address?.let { loadUrl(it) }
+                SweptReload.Step.BLANK -> Unit
+            }
+        },
+        schedule = { _, _ -> },
+    )
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
@@ -5177,6 +5213,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         // Any load but a sweep's own step supersedes its reload: a later
         // resubmission prompt is that load's, not the sweep's (R1-F1).
         sweptReload.navigationStarted()
+        siteDataReload.navigationStarted()
         // A Hard reload's load bypasses the cache; any other ends that
         // bypass — but not a `javascript:` URL, which loads nothing,
         // unless it's a history step (#262).
@@ -6136,13 +6173,19 @@ internal const val SITE_DATA_CLEANUP_HTML = """<!doctype html><meta charset="utf
  * the clearing to end rather than racing it (R2-F3). [doneKey] is a
  * fresh random name each time, nothing that names the app. Does nothing
  * at all in a document on any other origin — one that committed after
- * the caller last looked.
+ * the caller last looked, or an opaque one (`Content-Security-Policy:
+ * sandbox`, `location.origin` `"null"`). Evaluates to whether it started
+ * the clearing, so the app doesn't wait on a done-key that will never be
+ * set (R3-F4).
  */
 internal fun siteDataInPageJs(origin: String, doneKey: String): String =
-    """(async () => {
-  if (location.origin !== ${org.json.JSONObject.quote(origin)}) return;$SITE_DATA_WIPE_JS
+    """(() => {
+  if (location.origin !== ${org.json.JSONObject.quote(origin)}) return false;
+  (async () => {$SITE_DATA_WIPE_JS
   try { window[${org.json.JSONObject.quote(doneKey)}] = true; } catch (e) {}$SITE_DATA_RELOAD_JS
-})();"""
+  })();
+  return true;
+})()"""
 
 /** Has [siteDataInPageJs] with [doneKey] finished clearing in this document? Evaluates to `true` if so. */
 internal fun siteDataInPageDoneJs(doneKey: String): String =
