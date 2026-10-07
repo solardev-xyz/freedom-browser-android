@@ -44,7 +44,7 @@ class UnverifiedOriginsTest {
     @Test
     fun `an origin only a private tab was served is swept but never written to disk`() {
         val tab = Any()
-        UnverifiedOrigins.onSweep = { swept -> UnverifiedOrigins.hold(tab, swept) }
+        UnverifiedOrigins.onSweep = { swept -> UnverifiedOrigins.hold(tab, swept, private = false) }
         UnverifiedOrigins.record("https://gw.example", a, private = true)
         UnverifiedOrigins.record("https://gw.example", b)
         // Known to this process, so a switch still sweeps it…
@@ -92,7 +92,7 @@ class UnverifiedOriginsTest {
     @Test
     fun `a private tab served an origin a normal tab still holds keeps its release persisted`() {
         val tab = Any()
-        UnverifiedOrigins.onSweep = { swept -> UnverifiedOrigins.hold(tab, swept) }
+        UnverifiedOrigins.onSweep = { swept -> UnverifiedOrigins.hold(tab, swept, private = false) }
         UnverifiedOrigins.record("https://gw-a.example", a)
         UnverifiedOrigins.sweep("https://gw-b.example") {}
         assertTrue(UnverifiedOrigins.takeClearFor(a, tab))
@@ -233,7 +233,7 @@ class UnverifiedOriginsTest {
         assertEquals(emptySet<String>() to emptySet<String>(), UnverifiedOrigins.persistedSnapshot())
 
         // A normal tab's hold is the default profile's, the other way round.
-        UnverifiedOrigins.hold(normalTab, setOf(b))
+        UnverifiedOrigins.hold(normalTab, setOf(b), private = false)
         assertTrue(UnverifiedOrigins.takeClearFor(b, otherNormal))
         assertFalse(UnverifiedOrigins.takeClearFor(b, otherPrivate, private = true))
         UnverifiedOrigins.release(normalTab)
@@ -280,7 +280,7 @@ class UnverifiedOriginsTest {
     @Test
     fun `a sweep tells the tab host, which holds origins until the stale tab commits`() {
         val tab = Any()
-        UnverifiedOrigins.onSweep = { swept -> UnverifiedOrigins.hold(tab, swept) }
+        UnverifiedOrigins.onSweep = { swept -> UnverifiedOrigins.hold(tab, swept, private = false) }
         UnverifiedOrigins.sweep("https://gw.example") {}
         UnverifiedOrigins.record("https://gw.example", a)
         UnverifiedOrigins.sweep("") {}
@@ -301,7 +301,7 @@ class UnverifiedOriginsTest {
         // to go, its origin isn't handed back to the one-shot clear while
         // it may still write there (R6-F1) — the tab host makes sure it
         // goes ([SweptReload]).
-        UnverifiedOrigins.hold(tab, setOf(a))
+        UnverifiedOrigins.hold(tab, setOf(a), private = false)
         assertTrue(UnverifiedOrigins.takeClearFor(a, tab))
         assertTrue(UnverifiedOrigins.takeClearFor(a, tab))
         assertEquals(emptySet<String>(), UnverifiedOrigins.pendingClears())
@@ -313,8 +313,8 @@ class UnverifiedOriginsTest {
         val tabA = Any()
         val tabB = Any()
         UnverifiedOrigins.onSweep = { swept ->
-            UnverifiedOrigins.hold(tabA, swept)
-            UnverifiedOrigins.hold(tabB, swept)
+            UnverifiedOrigins.hold(tabA, swept, private = false)
+            UnverifiedOrigins.hold(tabB, swept, private = false)
         }
         UnverifiedOrigins.sweep("https://gw.example") {}
         UnverifiedOrigins.record("https://gw.example", a)
@@ -335,8 +335,8 @@ class UnverifiedOriginsTest {
         val tabA = Any()
         val tabB = Any()
         UnverifiedOrigins.onSweep = { swept ->
-            UnverifiedOrigins.hold(tabA, swept)
-            UnverifiedOrigins.hold(tabB, swept)
+            UnverifiedOrigins.hold(tabA, swept, private = false)
+            UnverifiedOrigins.hold(tabB, swept, private = false)
         }
         UnverifiedOrigins.sweep("https://gw.example") {}
         UnverifiedOrigins.record("https://gw.example", a)
@@ -430,7 +430,7 @@ class UnverifiedOriginsTest {
     fun `a second sweep before the tab commits adds to its hold`() {
         val tab = Any()
         var sweeps = 0
-        UnverifiedOrigins.onSweep = { swept -> sweeps++; UnverifiedOrigins.hold(tab, swept) }
+        UnverifiedOrigins.onSweep = { swept -> sweeps++; UnverifiedOrigins.hold(tab, swept, private = false) }
         // External A serves a, external B serves b, then embedded: the
         // tab never commits in between.
         UnverifiedOrigins.sweep("https://a.example") {}

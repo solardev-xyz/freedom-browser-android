@@ -250,9 +250,11 @@ object UnverifiedOrigins {
      * [private]: [holder] is a private tab (#351). Its stale document
      * writes to the private profile's storage only, so the hold serves
      * the cleanup page to that profile's requests, and [release] queues
-     * it there; a normal tab's hold, the default profile's.
+     * it there; a normal tab's hold, the default profile's. Required, no
+     * default: a caller that forgot it would file a private tab's hold
+     * on the default profile and lose its re-queued cleanup (R2-M1).
      */
-    fun hold(holder: Any, origins: Set<String>, private: Boolean = false) {
+    fun hold(holder: Any, origins: Set<String>, private: Boolean) {
         if (origins.isEmpty()) return
         synchronized(lock) {
             val had = holds[holder]
