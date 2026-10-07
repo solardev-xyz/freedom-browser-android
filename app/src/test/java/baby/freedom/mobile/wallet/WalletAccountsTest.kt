@@ -279,6 +279,10 @@ class WalletAccountsTest {
         assertEquals("a".repeat(WalletAccountStore.MAX_NAME - 1), cut)
         assertEquals("x".repeat(WalletAccountStore.MAX_NAME), WalletAccounts.cleanAccountName("x".repeat(80)))
         assertNull(WalletAccounts.cleanAccountName(" \t "))
+        // The rename field's own cut of a longer paste: untrimmed, same boundary rule (#432 R1-M3).
+        assertEquals("a".repeat(WalletAccountStore.MAX_NAME - 1), WalletAccounts.cutAccountName(name))
+        assertEquals(" x ", WalletAccounts.cutAccountName(" x "))
+        assertEquals(WalletAccountStore.MAX_NAME, WalletAccounts.cutAccountName("y".repeat(70)).length)
     }
 
     @Test
@@ -292,6 +296,31 @@ class WalletAccountsTest {
         assertEquals(ledgerKey, a.accounts.value!!.accounts.first { it.index == -1 }.ledger)
         a.rename(-1, "")
         assertEquals("Ledger 1", a.accounts.value!!.accounts.first { it.index == -1 }.name)
+    }
+
+    @Test
+    fun `a cleared Ledger name is the same after removals, and never another account's (W6)`() = runBlocking {
+        // #432 R1-M4: the default came from the Ledger's place in the list, which moves.
+        val a = accounts()
+        vault.create(abandon12, auth, imported = true)
+        a.reconcile(vault.state.value)
+        a.addLedger(ledgerKey, ledgerAddress, "")
+        a.addLedger(ledgerKey.copy(path = "44'/60'/1'/0/0"), legalAddresses[1], "")
+        fun name(index: Int) = a.accounts.value!!.accounts.first { it.index == index }.name
+        assertEquals(listOf("Ledger 1", "Ledger 2"), listOf(name(-1), name(-2)))
+        a.removeLedger(-1)
+        // The next one down: no second "Ledger 2".
+        a.addLedger(ledgerKey.copy(path = "44'/60'/2'/0/0"), legalAddresses[0], "")
+        assertEquals("Ledger 3", name(-3))
+        a.rename(-2, "Cold")
+        a.rename(-2, "")
+        assertEquals("Ledger 2", name(-2))
+        // A default another account already uses (here by hand) gives the lowest free one.
+        a.rename(0, "Ledger 3")
+        a.rename(-3, "Warm")
+        a.rename(-3, " ")
+        assertEquals("Ledger 1", name(-3))
+        assertEquals(a.accounts.value!!.accounts.size, a.accounts.value!!.accounts.map { it.name }.toSet().size)
     }
 
     @Test

@@ -771,6 +771,8 @@ internal fun AccountDetailsPage(
 @Composable
 private fun RenameAccountDialog(current: String, onSave: (String) -> Unit, onDismiss: () -> Unit) {
     var name by remember { mutableStateOf(TextFieldValue(current, TextRange(0, current.length))) }
+    // A paste longer than a name can hold was cut: say so, so the field doesn't look like it ignored it.
+    var cut by remember { mutableStateOf(false) }
     val problem = WalletAccounts.accountNameProblem(name.text)
     val focus = remember { FocusRequester() }
     AlertDialog(
@@ -781,14 +783,23 @@ private fun RenameAccountDialog(current: String, onSave: (String) -> Unit, onDis
                 OutlinedTextField(
                     value = name,
                     onValueChange = { v ->
-                        // Never more than a name can hold: what's typed past it is dropped, not saved cut.
-                        if (v.text.length <= WalletAccountStore.MAX_NAME) name = v
+                        // Never more than a name can hold: a longer paste is cut here, on a
+                        // character boundary, and the field says so (what Save keeps is what shows).
+                        val kept = WalletAccounts.cutAccountName(v.text)
+                        cut = kept.length < v.text.length
+                        name = if (cut) TextFieldValue(kept, TextRange(kept.length)) else v
                     },
                     label = { Text(stringResource(R.string.wallet_accounts_name_label)) },
                     singleLine = true,
                     isError = problem != null,
                     supportingText = {
-                        Text(problem ?: stringResource(R.string.wallet_accounts_name_hint))
+                        Text(
+                            problem ?: if (cut) {
+                                stringResource(R.string.wallet_accounts_name_cut, WalletAccountStore.MAX_NAME)
+                            } else {
+                                stringResource(R.string.wallet_accounts_name_hint)
+                            },
+                        )
                     },
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { if (problem == null) onSave(name.text) }),

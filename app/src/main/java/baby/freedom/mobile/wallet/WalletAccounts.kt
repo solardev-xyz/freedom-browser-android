@@ -310,7 +310,7 @@ class WalletAccounts internal constructor(
         if (current.accounts.size >= WalletAccountStore.MAX_ACCOUNTS) throw TooManyAccountsException()
         if (current.accounts.any { it.address.equals(address, ignoreCase = true) }) throw DuplicateAccountException()
         val index = minOf(0, current.accounts.minOf { it.index }) - 1
-        val shown = name.trim().take(WalletAccountStore.MAX_NAME).ifBlank { Strings.get(R.string.wallet_account_default_ledger_name, current.accounts.count { it.ledger != null } + 1) }
+        val shown = name.trim().take(WalletAccountStore.MAX_NAME).ifBlank { defaultLedgerName(current.accounts, index) }
         val added = WalletAccount(index, shown, address, key)
         val list = WalletAccountList(current.accounts + added, index)
         withContext(io) { store.write(tag, list) }
@@ -361,8 +361,7 @@ class WalletAccounts internal constructor(
         val current = _accounts.value ?: return@withLock
         val account = current.accounts.firstOrNull { it.index == index } ?: return@withLock
         val shown = cleanAccountName(name) ?: if (account.ledger != null) {
-            val place = current.accounts.filter { it.ledger != null }.indexOfFirst { it.index == index } + 1
-            Strings.get(R.string.wallet_account_default_ledger_name, place)
+            defaultLedgerName(current.accounts.filter { it.index != index }, index)
         } else {
             WalletAccount.defaultName(index)
         }
@@ -395,10 +394,37 @@ class WalletAccounts internal constructor(
         fun cleanAccountName(name: String): String? {
             val trimmed = name.trim()
             if (trimmed.isEmpty()) return null
-            if (trimmed.length <= WalletAccountStore.MAX_NAME) return trimmed
+            return cutAccountName(trimmed).trim()
+        }
+
+        /**
+         * [name] cut to [WalletAccountStore.MAX_NAME] chars, never between
+         * the two halves of a surrogate pair; [name] itself if it fits. What
+         * the rename field keeps of a longer paste (W6), and [cleanAccountName]'s cut.
+         */
+        fun cutAccountName(name: String): String {
+            if (name.length <= WalletAccountStore.MAX_NAME) return name
             var end = WalletAccountStore.MAX_NAME
-            if (Character.isLowSurrogate(trimmed[end]) && Character.isHighSurrogate(trimmed[end - 1])) end--
-            return trimmed.substring(0, end).trim()
+            if (Character.isLowSurrogate(name[end]) && Character.isHighSurrogate(name[end - 1])) end--
+            return name.substring(0, end)
+        }
+
+        /**
+         * The default name of the Ledger account [index] among [others] (the
+         * wallet's other accounts): "Ledger N" from its own index (-1 is
+         * "Ledger 1", -2 "Ledger 2"; each Ledger gets the next one down when
+         * added), so clearing a renamed one's name gives it the same name
+         * each time, however many were added or removed since. If another
+         * account already has that name, the lowest "Ledger N" no other has
+         * — never a second account with the same name.
+         */
+        internal fun defaultLedgerName(others: List<WalletAccount>, index: Int): String {
+            val taken = others.mapTo(HashSet()) { it.name }
+            val own = Strings.get(R.string.wallet_account_default_ledger_name, -index)
+            if (own !in taken) return own
+            return generateSequence(1) { it + 1 }
+                .map { Strings.get(R.string.wallet_account_default_ledger_name, it) }
+                .first { it !in taken }
         }
 
         @Volatile

@@ -161,7 +161,9 @@
     <string name="node_log_source_tor" translatable="false">Tor</string>
     <string name="node_log_source_light_client">Light client</string>
 
-    <!-- browser/NodeIdentityNotice.kt -->
+    <!-- browser/NodeIdentityNotice.kt; %1$s is the wallet's Swarm address, shortened (0x6Fac…b9C0). For a wallet that was already here (made before #77). -->
+    <string name="node_identity_adopted_restarting">Your Swarm node now uses your wallet\'s identity (%1$s). Restarting it…</string>
+    <string name="node_identity_adopted_next_start">Your Swarm node will use your wallet\'s identity (%1$s) when it next starts.</string>
     <!-- The snackbar when a wallet has just been set up (W8); the node page shows the node identity it gave. -->
     <string name="wallet_created_notice">Wallet created</string>
     <string name="wallet_ready_notice">Wallet ready</string>

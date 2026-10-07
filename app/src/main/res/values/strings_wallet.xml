@@ -328,6 +328,8 @@
     <string name="wallet_accounts_rename_title">Rename account</string>
     <string name="wallet_accounts_name_label">Name</string>
     <string name="wallet_accounts_name_hint">Only on this phone. Leave it empty for the default name.</string>
+    <!-- Under the rename field once a longer paste was cut; %1$d is the most a name can hold (64). -->
+    <string name="wallet_accounts_name_cut">A name holds at most %1$d characters, so the rest was left out.</string>
     <string name="wallet_accounts_address_section">Address</string>
     <string name="wallet_accounts_advanced">Advanced</string>
     <string name="wallet_accounts_remove_ledger">Remove from wallet</string>
