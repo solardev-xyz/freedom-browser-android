@@ -294,4 +294,43 @@ class EthereumSwitchTurnTest {
             assertEquals(EthAnswer.Paused, EthereumProviders.askOnDocument(tab, EthereumProviders.currentDocument(tab.id), sign))
         }
     }
+    @Test
+    fun `a notice covered by anything else isn't timed out behind it, and holds nothing meanwhile (#446 R1-M1)`() {
+        val main = UnconfinedTestDispatcher()
+        Dispatchers.setMain(main)
+        runTest(main) {
+            val tab = tab()
+            val (_, notice) = switched(tab)
+            notice.received()
+            notice.shown()
+            // Settings, or a Swarm sheet, covers the page; the browser takes the notice down.
+            notice.covered()
+            advanceTimeBy(300_000)
+            assertFalse(notice.closed.isCompleted)
+            // The page's next no-sheet switch isn't held behind a notice nobody can see.
+            val next = EthAsk.SwitchNotice(site, BuiltInChains.ETHEREUM, BuiltInChains.BASE)
+            val answer = async { EthereumProviders.askOnDocument(tab, EthereumProviders.currentDocument(tab.id), next) }
+            assertSame(next, answerNext(tab, EthAnswer.Approved()).ask)
+            assertTrue(answer.await() is EthAnswer.Approved)
+            next.switched.complete(null)
+            // Back up once the page is clear, its Undo still pauses the tab.
+            notice.close(undo = true)
+            advanceTimeBy(1_000)
+            assertEquals(EthAnswer.Paused, EthereumProviders.askOnDocument(tab, EthereumProviders.currentDocument(tab.id), sign))
+        }
+    }
+
+    @Test
+    fun `while shown and uncovered, the notice is still bounded by its hold (#446 R2-M1)`() {
+        val main = UnconfinedTestDispatcher()
+        Dispatchers.setMain(main)
+        runTest(main) {
+            val tab = tab()
+            val (_, notice) = switched(tab)
+            notice.received()
+            notice.shown()
+            advanceTimeBy(151_000)
+            assertTrue(notice.closed.isCompleted)
+        }
+    }
 }

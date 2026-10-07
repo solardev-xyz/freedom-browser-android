@@ -241,6 +241,18 @@ object EthereumProviders {
             onScreen.complete(Unit)
         }
 
+        /**
+         * Something covered the notice after it was on screen — a sheet or
+         * prompt of any kind, or a full-screen panel — and the browser took
+         * it down until its page is clear again. Like a sheet asking, that ends its hold: the next no-sheet
+         * switch can't come up while the page is covered anyway, and the
+         * notice is no longer bounded by [NOTICE_MAX_MS], so it isn't timed
+         * out unseen behind whatever covers it (#446 R1-M1, round 1007).
+         */
+        fun covered() {
+            hold.complete(Unit)
+        }
+
         /** The notice is down: [undo] if the user tapped Undo. Only the first call counts. */
         fun close(undo: Boolean) {
             closed.complete(undo)

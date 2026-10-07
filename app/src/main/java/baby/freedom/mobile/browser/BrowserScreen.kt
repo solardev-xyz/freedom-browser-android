@@ -770,16 +770,23 @@ fun BrowserScreen(
     //
     // A newer notice replaces only its own tab's, or one already seen: one
     // still waiting for another tab is kept, so that switch is still named
-    // when the user gets back to it (#446 R6-M2). A sheet the tab puts up
-    // over it (the sign or send that usually follows a switch) covers it:
-    // it comes down while the sheet is up and goes back up, with a fresh
-    // timer and its Undo, once the sheet is gone, so it doesn't run out
-    // unseen behind the sheet (#446 R6-M1).
+    // when the user gets back to it (#446 R6-M2). Anything over its page
+    // covers it ([switchNoticeUncovered]): a sheet the tab puts up (the
+    // sign or send that usually follows a switch, a Swarm or Radicle
+    // sheet), a permission prompt or download offer, a full-screen panel.
+    // It comes down while covered and goes back up, with a fresh timer and
+    // its Undo, once the page is clear, so it doesn't run out unseen behind
+    // it (#446 R6-M1, R1-M1 of round 1007) — and, covered, it stops holding
+    // the tab's next switch ([EthereumProviders.SwitchNotice.covered]).
     val chainSwitchNotices = remember { mutableMapOf<Long, ChainSwitchNoticeUi>() }
+    // The tab whose page nothing covers right now: set below, once the
+    // prompt turn and panels are known.
+    var switchNoticeClearTab by remember { mutableStateOf<Long?>(null) }
     LaunchedEffect(Unit) {
         EthereumProviders.chainSwitches.collect { notice ->
             notice.received()
-            chainSwitchNotices.values.filter { it.notice.tabId == notice.tabId || it.shown }.forEach { it.job?.cancel() }
+            switchNoticesReplaced(chainSwitchNotices.values, notice.tabId, { it.notice.tabId }, { it.shown })
+                .forEach { it.job?.cancel() }
             val ui = ChainSwitchNoticeUi(notice)
             ui.job = scope.launch {
                 try {
@@ -788,12 +795,8 @@ fun BrowserScreen(
                         Strings.get(R.string.send_eth_switched, permissionOriginDisplay(switch.origin), switch.to.name),
                         Strings.get(R.string.send_undo),
                     )
-                    // On its tab, with no sheet of that tab's covering it.
-                    fun visible(): Boolean {
-                        val active = tabs.active
-                        return active.id == notice.tabId &&
-                            active.ethereumPrompt.let { it == null || it.ask is EthAsk.SwitchNotice }
-                    }
+                    // On its tab, with nothing covering its page.
+                    fun visible(): Boolean = tabs.active.id == notice.tabId && switchNoticeClearTab == notice.tabId
                     var result: SnackbarResult? = null
                     while (result == null) {
                         // Covered after it was seen, then the user left the tab: down, as below.
@@ -817,8 +820,10 @@ fun BrowserScreen(
                             }
                         }
                         // Left the tab after it was seen: down for good, no Undo. Only
-                        // covered by a sheet, on its tab: back up once the sheet is gone.
+                        // covered, on its tab: back up once the page is clear, holding
+                        // nothing meanwhile.
                         if (result == null && ui.shown && tabs.active.id != notice.tabId) return@launch
+                        if (result == null && ui.shown) notice.covered()
                     }
                     if (result == SnackbarResult.ActionPerformed) {
                         notice.close(undo = true)
@@ -3442,6 +3447,14 @@ fun BrowserScreen(
         pageOnScreen && lifecycleState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
     }
     androidx.compose.runtime.SideEffect { sitePermissions.onScreenTab.value = onScreenTabId }
+    // Where a dApp's "switched to" notice may be up (#446 R1-M1, round 1007).
+    val switchNoticeClear = switchNoticeUncovered(
+        pageUncovered = pageUncovered,
+        promptTurn = promptTurn,
+        switchTurn = state.ethereumPrompt?.ask is EthAsk.SwitchNotice,
+        pageSheetUp = sheetShown != null,
+    )
+    androidx.compose.runtime.SideEffect { switchNoticeClearTab = state.id.takeIf { switchNoticeClear } }
     DisposableEffect(sitePermissions) {
         onDispose { sitePermissions.onScreenTab.value = null }
     }
@@ -3489,6 +3502,37 @@ private fun IpfsStatusLine(text: String, modifier: Modifier = Modifier) {
 
 /** The tab and document a page's Site permissions sheet (#266) was opened over. */
 private data class PageSheetTarget(val tabId: Long, val origin: String?, val doc: Int?)
+
+/**
+ * Whether a dApp's "switched to" notice (#440) may be up over the active
+ * tab: nothing covers its page — no full-screen panel ([pageUncovered]), no
+ * prompt or sheet of any kind having the tab's turn ([promptTurn]: the
+ * site-permission prompt, a download offer, a Radicle, Ethereum or Swarm
+ * sheet, a page's JS dialog, the long-press menu), and not the page's Site
+ * permissions sheet ([pageSheetUp]). The one turn that doesn't cover it is
+ * a no-sheet switch's own ([switchTurn]), which is answered at once and
+ * brings the next notice (#446 R1-M1, round 1007).
+ */
+internal fun switchNoticeUncovered(
+    pageUncovered: Boolean,
+    promptTurn: PromptTurn,
+    switchTurn: Boolean,
+    pageSheetUp: Boolean,
+): Boolean = pageUncovered && !pageSheetUp &&
+    (promptTurn == PromptTurn.None || (promptTurn == PromptTurn.Ethereum && switchTurn))
+
+/**
+ * Which of the "switched to" notices the screen has are replaced by a new
+ * one for [tabId] (#446 R6-M2): its own tab's, and any already seen. One
+ * still waiting for another tab, never shown, is kept, so that switch is
+ * still named when the user gets back to its tab.
+ */
+internal fun <T> switchNoticesReplaced(
+    notices: Collection<T>,
+    tabId: Long,
+    tabOf: (T) -> Long,
+    shown: (T) -> Boolean,
+): List<T> = notices.filter { tabOf(it) == tabId || shown(it) }
 
 /** The "<site> switched to <chain>" notice's job on screen (#440, #446). */
 private class ChainSwitchNoticeUi(val notice: EthereumProviders.SwitchNotice) {
