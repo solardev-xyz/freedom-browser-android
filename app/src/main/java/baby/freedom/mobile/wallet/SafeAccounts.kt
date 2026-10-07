@@ -61,6 +61,12 @@ data class SafeAccount(
     val currentOwners: List<String>? = null,
     /** The threshold the Safe's contract last reported; null while it is still [threshold]. */
     val currentThreshold: Int? = null,
+    /**
+     * The block of the last reading [SafeAccounts.applyOnChain] took (null:
+     * none yet). A reading from an earlier block is refused: the record
+     * never moves back to owners or a threshold the Safe had before.
+     */
+    val checkedBlock: Long? = null,
 ) {
     /** Who owns the Safe now, as far as this phone knows: the chain's last word, or the init params. */
     val ownersNow: List<String> get() = currentOwners ?: owners
@@ -76,9 +82,9 @@ data class SafeAccount(
      * it has now; the init params stay as they are. Back to the init params
      * (nulls) when the chain matches them again.
      */
-    fun withOnChain(owners: List<String>, threshold: Int): SafeAccount {
+    fun withOnChain(owners: List<String>, threshold: Int, block: Long): SafeAccount {
         val same = threshold == this.threshold && sameOwners(owners, this.owners)
-        return copy(currentOwners = owners.takeUnless { same }, currentThreshold = threshold.takeUnless { same })
+        return copy(currentOwners = owners.takeUnless { same }, currentThreshold = threshold.takeUnless { same }, checkedBlock = block)
     }
 
     companion object {
@@ -208,6 +214,7 @@ class SafeStore internal constructor(private val file: File) {
                 createdAt = s.getLong("createdAt"),
                 currentOwners = s.optJSONArray("currentOwners")?.let { a -> (0 until a.length()).map { SafeProtocol.eip55(a.getString(it)) } },
                 currentThreshold = if (s.has("currentThreshold") && !s.isNull("currentThreshold")) s.getInt("currentThreshold") else null,
+                checkedBlock = if (s.has("checkedBlock") && !s.isNull("checkedBlock")) s.getLong("checkedBlock") else null,
             ).also {
                 // Frozen params that no longer give the stored address mean the record was changed: never trust it.
                 require(SafeProtocol.predictAddress(it.owners, it.threshold, it.saltNonce) == it.address)
@@ -266,7 +273,8 @@ class SafeStore internal constructor(private val file: File) {
                                 .put("threshold", s.threshold).put("saltNonce", s.saltNonce).put("chainId", s.chainId)
                                 .put("deployed", s.deployed).put("createdAt", s.createdAt)
                                 .put("currentOwners", s.currentOwners?.let { JSONArray(it) } ?: JSONObject.NULL)
-                                .put("currentThreshold", s.currentThreshold ?: JSONObject.NULL),
+                                .put("currentThreshold", s.currentThreshold ?: JSONObject.NULL)
+                                .put("checkedBlock", s.checkedBlock ?: JSONObject.NULL),
                         )
                     }
                 },
@@ -494,28 +502,36 @@ class SafeAccounts internal constructor(
     }
 
     /**
-     * Brings [address]'s record in line with its contract: [owners] and
-     * [threshold] as just read from the chain ([SafeChain.policy], a
-     * confirmed read). The init params stay; [SafeAccount.currentOwners] /
+     * Brings [address]'s record in line with its contract: the owners and
+     * threshold of [policy], a confirmed [SafeChain.policy] reading. The
+     * init params stay; [SafeAccount.currentOwners] /
      * [SafeAccount.currentThreshold] take the new values. Every pending item
      * of the Safe takes the new threshold, and loses the signatures of
-     * signers who are no longer owners — they can't count on chain — unless
-     * an execution of it is going out, whose calldata (and how [noteSend]
-     * recognises it) is those signatures. Returns what changed, or null if
-     * nothing did. Throws [SafeException] if [owners] / [threshold] are no
-     * Safe's policy.
+     * signers who are no longer owners — they can't count on chain — except:
+     * an item whose execution is going out, whose calldata (and how
+     * [noteSend] recognises it) is those signatures; and a transaction whose
+     * nonce the Safe is already past ([policy]'s nonce), which can't execute
+     * any more and is settled by the nonce guard, not recounted against
+     * owners it never ran under. Returns what changed, or null if nothing
+     * did. Throws [SafeException] if [policy] isn't confirmed, isn't a
+     * Safe's policy, or was read at an earlier block than the last reading
+     * applied ([SafeAccount.checkedBlock]) — the record never goes back to
+     * owners or a threshold the Safe had before.
      */
-    suspend fun applyOnChain(address: String, owners: List<String>, threshold: Int): SafePolicyChange? {
-        if (!SafePolicy.valid(owners, threshold)) throw SafeException(Strings.get(R.string.safe_error_no_owner_list))
-        val checked = owners.map { SafeProtocol.eip55(it) }
+    suspend fun applyOnChain(address: String, policy: SafeChain.Policy): SafePolicyChange? {
+        val threshold = policy.threshold
+        if (!policy.confirmed || !SafePolicy.valid(policy.owners, threshold)) throw SafeException(Strings.get(R.string.safe_error_no_owner_list))
+        val checked = policy.owners.map { SafeProtocol.eip55(it) }
         return update { s ->
             val current = s.safe(address) ?: throw SafeException(Strings.get(R.string.safe_error_gone))
+            if (current.checkedBlock != null && policy.block < current.checkedBlock) throw SafeException(Strings.get(R.string.safe_policy_older_reading))
             val ownersChanged = !SafeAccount.sameOwners(current.ownersNow, checked)
             val thresholdBefore = current.thresholdNow
-            val safe = current.withOnChain(checked, threshold)
+            val safe = current.withOnChain(checked, threshold, policy.block)
             var dropped = 0
             val pending = s.pending.map { p ->
                 if (!p.safe.equals(current.address, ignoreCase = true)) return@map p
+                if (p.kind == SafePending.Kind.TX && runCatching { p.safeTx().nonce < policy.nonce }.getOrDefault(false)) return@map p
                 val kept = if (p.execHash != null) p.signatures else p.signatures.filter { sig -> checked.any { it.equals(sig.signer, ignoreCase = true) } }
                 dropped += p.signatures.size - kept.size
                 p.copy(threshold = threshold, signatures = kept)
@@ -808,6 +824,19 @@ class SafeChain(private val rpc: WalletRpc) {
      * added ([ChainTrust.undisputed]) — what Execute and a message's
      * signature are judged against, and the only reading the record is
      * refreshed from. Throws when a read fails or isn't a Safe's answer.
+     *
+     * The three calls agreeing isn't enough on its own: they name the block
+     * `eth_blockNumber` gave, and that is usually one RPC's word (a quorum
+     * on the head rarely forms, RPCs being a block apart). An RPC with a
+     * stale head would have every honest RPC confirm the owners and
+     * threshold the Safe had back then (#447 R1-F1). So unless the head
+     * itself is undisputed, the block must also be recent: the RPCs must
+     * agree, the same undisputed way, that the block [HEAD_WINDOW] past it
+     * doesn't exist yet. A lying head can then move the reading back by no
+     * more than that window; a head in the future names a block no honest
+     * RPC has, and the calls fail. [SafeAccounts.applyOnChain] also refuses
+     * a reading older than the last one it took, so a change already seen
+     * is never undone.
      */
     suspend fun policy(chainId: Long, safe: String): Policy {
         val block = rpc.blockNumber(chainId)
@@ -818,13 +847,23 @@ class SafeChain(private val rpc: WalletRpc) {
         val ownerList = SafeProtocol.decodeAddresses(owners.value) ?: throw SafeException(Strings.get(R.string.safe_error_no_owner_list))
         val needed = SafeProtocol.decodeUint(threshold.value)?.takeIf { it.bitLength() < 31 }?.toInt()
             ?.takeIf { SafePolicy.valid(ownerList, it) } ?: throw SafeException(Strings.get(R.string.safe_error_no_owner_list))
+        val nonceNow = SafeProtocol.decodeUint(nonce.value) ?: throw SafeException(Strings.get(R.string.safe_error_no_nonce))
+        val readsAgree = listOf(nonce.trust, owners.trust, threshold.trust).all { it.undisputed }
         return Policy(
             block = block.value,
-            nonce = SafeProtocol.decodeUint(nonce.value) ?: throw SafeException(Strings.get(R.string.safe_error_no_nonce)),
+            nonce = nonceNow,
             owners = ownerList,
             threshold = needed,
-            confirmed = listOf(nonce.trust, owners.trust, threshold.trust).all { it.undisputed },
+            confirmed = readsAgree && (block.trust.undisputed || recent(chainId, block.value)),
         )
+    }
+
+    /** Whether the RPCs agree, undisputed, that [block] + [HEAD_WINDOW] doesn't exist yet ([policy]). */
+    private suspend fun recent(chainId: Long, block: Long): Boolean = try {
+        val later = rpc.blockExists(chainId, block + HEAD_WINDOW)
+        !later.value && later.trust.undisputed
+    } catch (e: ChainRpcException) {
+        false
     }
 
     /** A Safe's owners, threshold and nonce at [block] ([policy]). */
@@ -892,6 +931,15 @@ class SafeChain(private val rpc: WalletRpc) {
         rpc.call(chainId, JSONObject().put("to", to).put("data", data), block).value
 
     companion object {
+        /**
+         * How many blocks past a [policy] reading's block must not exist
+         * yet for it to count as current when its head is one RPC's word:
+         * room for honest RPCs a few blocks apart, and little enough
+         * (about 40 s on Gnosis) that a stale head can't take the reading
+         * back past an owner change made more than moments ago.
+         */
+        const val HEAD_WINDOW = 8L
+
         fun get(context: Context) = SafeChain(WalletRpc(ChainDataRouter.get(context.applicationContext)))
 
         /**

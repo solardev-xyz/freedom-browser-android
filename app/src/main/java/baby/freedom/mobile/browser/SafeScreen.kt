@@ -1142,7 +1142,7 @@ private fun SafeProposePage(
                 // isn't signed by an owner that's gone. Best effort: the request page checks again before it counts.
                 chain?.let { c ->
                     try {
-                        chainReads.policy(c.id, safe.address).takeIf { it.confirmed }?.let { safes.applyOnChain(safe.address, it.owners, it.threshold) }
+                        chainReads.policy(c.id, safe.address).takeIf { it.confirmed }?.let { safes.applyOnChain(safe.address, it) }
                     } catch (e: CancellationException) {
                         throw e
                     } catch (_: Exception) {
@@ -1505,7 +1505,10 @@ private fun SafeRequestPage(
                 throw SafeException(Strings.get(if (tx) R.string.safe_policy_read_failed_tx else R.string.safe_policy_read_failed_message))
             }
             if (!policy.confirmed) throw SafeException(Strings.get(if (tx) R.string.safe_policy_unconfirmed_tx else R.string.safe_policy_unconfirmed_message))
-            safes.applyOnChain(safe.address, policy.owners, policy.threshold)?.let { policyNotice = safePolicyChangeNotice(it) }
+            val change = safes.applyOnChain(safe.address, policy)
+            // A transaction the Safe is already past isn't recounted (the nonce guard settles it): nothing to tell about it.
+            val passed = tx && runCatching { p.safeTx().nonce < policy.nonce }.getOrDefault(false)
+            if (change != null && !passed) policyNotice = safePolicyChangeNotice(change)
             policyCheck = SafePolicyCheck.Confirmed
             return policy
         } catch (e: SafeException) {

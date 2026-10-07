@@ -203,6 +203,7 @@
     <string name="safe_policy_unconfirmed_tx">Couldn’t confirm the Safe’s owners and how many signatures it needs: the servers asked didn’t agree, or too few answered. Execute is off for now. Try again in a moment.</string>
     <string name="safe_policy_read_failed_message">Couldn’t check the Safe’s owners and how many signatures it needs, so its signature isn’t shown yet: it might not be accepted. Check your connection and try again.</string>
     <string name="safe_policy_unconfirmed_message">Couldn’t confirm the Safe’s owners and how many signatures it needs: the servers asked didn’t agree, or too few answered. Its signature isn’t shown yet. Try again in a moment.</string>
+    <string name="safe_policy_older_reading">Couldn’t confirm the Safe’s owners and how many signatures it needs: a server answered for an older block than the one this phone last checked them at. Try again in a moment.</string>
     <string name="safe_policy_check_again">Check again</string>
     <string name="safe_no_executor_for_execution">None of the Safe’s owners is an account in this wallet to pay for the execution.</string>
     <string name="safe_request_title_tx">Safe transaction</string>

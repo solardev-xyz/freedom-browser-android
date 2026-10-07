@@ -606,7 +606,7 @@ class SafeAccountsTest {
         assertTrue(s.signWith(p.id, account1).ready)
         assertTrue(s.signWith(m.id, account1).ready)
 
-        val change = s.applyOnChain(safe.address, listOf(account1.address, other), 2)
+        val change = s.applyOnChain(safe.address, reading(listOf(account1.address, other), 2, block = 101))
         assertEquals(SafePolicyChange(thresholdBefore = 1, thresholdNow = 2, ownersChanged = false, droppedSignatures = 0), change)
         assertEquals("This Safe now needs 2 signatures.", safePolicyChangeNotice(change!!))
         val st = s.state.value!!
@@ -627,9 +627,9 @@ class SafeAccountsTest {
         val hash = SafeProtocol.hash(JSONObject(p.typedData))
         assertTrue(s.addSignature(p.id, MessageSigning.sign(otherKey, other, hash)).ready)
         // Read again with nothing new: nothing to tell.
-        assertNull(s.applyOnChain(safe.address, listOf(other, account1.address), 2))
+        assertNull(s.applyOnChain(safe.address, reading(listOf(other, account1.address), 2, block = 102)))
         // Lowered back to what it was created with: the record is the init params again.
-        assertEquals("This Safe now needs 1 signature.", safePolicyChangeNotice(s.applyOnChain(safe.address, listOf(account1.address, other), 1)!!))
+        assertEquals("This Safe now needs 1 signature.", safePolicyChangeNotice(s.applyOnChain(safe.address, reading(listOf(account1.address, other), 1, block = 103))!!))
         assertNull(s.state.value!!.safe(safe.address)!!.currentThreshold)
         assertNull(s.state.value!!.safe(safe.address)!!.currentOwners)
         assertTrue(s.state.value!!.pending.all { it.ready })
@@ -649,7 +649,7 @@ class SafeAccountsTest {
         assertTrue(expectSafeError { s.addSignature(p.id, MessageSigning.sign(strangerKey, stranger, hash)) }.contains("isn’t an owner"))
 
         val onChain = listOf(stranger, account2.address, other)
-        val change = s.applyOnChain(safe.address, onChain.map { it.lowercase() }, 2)!!
+        val change = s.applyOnChain(safe.address, reading(onChain.map { it.lowercase() }, 2, block = 104))!!
         assertEquals(SafePolicyChange(2, 2, ownersChanged = true, droppedSignatures = 1), change)
         assertEquals(
             "This Safe’s owners have changed. The list here now matches the Safe. " +
@@ -684,7 +684,7 @@ class SafeAccountsTest {
         val exec = SafeProtocol.execTransactionData(tx, ready.signatures)
         val sent = "0x" + "cd".repeat(32)
         s.noteSend(execStatus(safe, exec, activates = false, SendStatus.Stage.Pending, sent))
-        val change = s.applyOnChain(safe.address, listOf(stranger, account2.address, other), 3)!!
+        val change = s.applyOnChain(safe.address, reading(listOf(stranger, account2.address, other), 3, block = 105))!!
         assertEquals(0, change.droppedSignatures)
         assertEquals(ready.signatures, s.state.value!!.pending.single().signatures)
         assertEquals(3, s.state.value!!.pending.single().threshold)
@@ -697,12 +697,12 @@ class SafeAccountsTest {
         val s = opened()
         val safe = s.create("", listOf(account1.address, other), 1, local)
         s.markDeployed(safe.address)
-        assertTrue(expectSafeError { s.applyOnChain(safe.address, listOf(account1.address, other), 3) }.contains("owner"))
-        assertTrue(expectSafeError { s.applyOnChain(safe.address, listOf(account1.address, other), 0) }.contains("owner"))
-        assertTrue(expectSafeError { s.applyOnChain(safe.address, emptyList(), 1) }.contains("owner"))
-        assertTrue(expectSafeError { s.applyOnChain(safe.address, listOf(other, other.lowercase()), 1) }.contains("owner"))
+        assertTrue(expectSafeError { s.applyOnChain(safe.address, reading(listOf(account1.address, other), 3, block = 106)) }.contains("owner"))
+        assertTrue(expectSafeError { s.applyOnChain(safe.address, reading(listOf(account1.address, other), 0, block = 107)) }.contains("owner"))
+        assertTrue(expectSafeError { s.applyOnChain(safe.address, reading(emptyList(), 1, block = 108)) }.contains("owner"))
+        assertTrue(expectSafeError { s.applyOnChain(safe.address, reading(listOf(other, other.lowercase()), 1, block = 109)) }.contains("owner"))
         assertEquals(1, s.state.value!!.safe(safe.address)!!.thresholdNow)
-        s.applyOnChain(safe.address, listOf(account1.address, other), 2)
+        s.applyOnChain(safe.address, reading(listOf(account1.address, other), 2, block = 110))
         val raw = file.readText()
         // A threshold without its owner list, or one above it, means the file was changed: not trusted.
         file.writeText(raw.replace("\"currentOwners\":[\"${account1.address}\",\"$other\"]", "\"currentOwners\":null"))
@@ -750,6 +750,83 @@ class SafeAccountsTest {
     }
 
     @Test
+    fun `a reading pinned to one RPC's stale head isn't confirmed, however well the calls agree`() = runBlocking<Unit> {
+        // #447 R1-F1: RPC a answers eth_blockNumber 0x10, from before changeThreshold(2) at block 0x20; b and c are
+        // at the tip. Every RPC honestly answers the calls at 0x10 with threshold 1, so the three calls agree —
+        // but the head they were pinned to is a's word alone, and the Safe has needed 2 since 0x20.
+        val owners = listOf(account1.address, other)
+        val safe = SafeProtocol.predictAddress(owners, 1, "7")
+        val heads = mapOf("https://a.example" to 0x10L, "https://b.example" to 0x2aL, "https://c.example" to 0x2bL)
+        fun router(heads: Map<String, Long>) = WalletRpc(
+            ChainDataRouter(
+                chains = { listOf<Chain>(BuiltInChains.GNOSIS.copy(rpcUrls = heads.keys.toList())) },
+                transport = RpcTransport { url, body, _ ->
+                    val req = JSONObject(body)
+                    val params = req.getJSONArray("params")
+                    val head = heads.getValue(url)
+                    val result = when (req.getString("method")) {
+                        "eth_blockNumber" -> "\"0x" + head.toString(16) + "\""
+                        "eth_getBlockByNumber" ->
+                            if (params.getString(0).substring(2).toLong(16) <= head) """{"number":"${params.getString(0)}"}""" else "null"
+                        "eth_call" -> {
+                            val at = params.getString(1).substring(2).toLong(16)
+                            when (params.getJSONObject(0).getString("data")) {
+                                SafeProtocol.NONCE_CALL -> "\"0x" + (if (at < 0x20) "5" else "6").padStart(64, '0') + "\""
+                                SafeProtocol.OWNERS_CALL -> "\"0x" + listOf(32, 2).joinToString("") { it.toString(16).padStart(64, '0') } +
+                                    owners.joinToString("") { "0".repeat(24) + it.substring(2).lowercase() } + "\""
+                                SafeProtocol.THRESHOLD_CALL -> "\"0x" + (if (at < 0x20) 1 else 2).toString(16).padStart(64, '0') + "\""
+                                else -> "\"0x\""
+                            }
+                        }
+                        else -> "null"
+                    }
+                    """{"jsonrpc":"2.0","id":1,"result":$result}"""
+                },
+            ),
+        )
+        // The router pins to a's head; the calls at 0x10 agree everywhere, but the head is a's word and 0x18 exists.
+        val reading = SafeChain(router(heads)).policy(100, safe)
+        assertEquals(0x10L, reading.block)
+        assertEquals(1, reading.threshold)
+        assertFalse(reading.confirmed)
+        // Heads a block apart at the tip, as honest RPCs are: the block past the window doesn't exist yet, so it's current.
+        val tip = SafeChain(router(mapOf("https://a.example" to 0x2aL, "https://b.example" to 0x2bL, "https://c.example" to 0x2aL))).policy(100, safe)
+        assertTrue(tip.confirmed)
+        assertEquals(2, tip.threshold)
+        // Every RPC stuck at the old head is a stale head too, agreed on: the calls and the head agree, so it's what
+        // the chain says as far as anyone can tell — the record's own block floor is what refuses going back.
+        val allOld = SafeChain(router(heads.mapValues { 0x10L })).policy(100, safe)
+        assertEquals(1, allOld.threshold)
+    }
+
+    @Test
+    fun `the record never goes back to an older reading, and a transaction the Safe is past isn't recounted`() = runBlocking<Unit> {
+        val s = opened()
+        val safe = s.create("", listOf(account1.address, other), 1, local)
+        s.markDeployed(safe.address)
+        val p = s.proposeTx(safe, SafeProtocol.SafeTx(other, BigInteger.ONE, ByteArray(0), BigInteger.ZERO), SafePending.Payment(other, BigInteger.ONE, "xDAI", 18, null))
+        vault.unlock(auth)
+        assertTrue(s.signWith(p.id, account1).ready)
+        // changeThreshold(2) seen at block 50.
+        assertNotNull(s.applyOnChain(safe.address, reading(listOf(account1.address, other), 2, block = 50)))
+        assertEquals(50L, s.state.value!!.safe(safe.address)!!.checkedBlock)
+        // A reading from block 40 (a server behind, or a stale head that slipped past the window) is refused.
+        assertTrue(expectSafeError { s.applyOnChain(safe.address, reading(listOf(account1.address, other), 1, block = 40)) }.contains("older block"))
+        assertEquals(2, s.state.value!!.safe(safe.address)!!.thresholdNow)
+        assertEquals(2, s.state.value!!.pending.single().threshold)
+        // The floor survives a restart.
+        assertEquals(50L, safes().also { it.reconcile(vault.state.value) }.state.value!!.safe(safe.address)!!.checkedBlock)
+        // Another device executed the transaction (nonce 0) with a swapOwner after it; the Safe's nonce is 2 now.
+        // The item is the nonce guard's to settle: its signatures and threshold stay as they were.
+        val before = s.state.value!!.pending.single()
+        val change = s.applyOnChain(safe.address, reading(listOf(stranger, other), 1, block = 60, nonce = 2))!!
+        assertEquals(0, change.droppedSignatures)
+        assertEquals(before, s.state.value!!.pending.single())
+        // An unconfirmed reading is never applied.
+        assertTrue(expectSafeError { s.applyOnChain(safe.address, reading(listOf(account1.address, other), 1, block = 70).copy(confirmed = false)) }.contains("owner"))
+    }
+
+    @Test
     fun `a co-sign request is a scanned code of its own`() {
         val safe = SafeProtocol.predictAddress(listOf(account1.address, other), 1, "7")
         val td = SafeProtocol.safeTxTypedData(safe, 100, SafeProtocol.SafeTx(other, BigInteger.ONE, Erc20.transferData(other, BigInteger.TEN), BigInteger.ZERO))
@@ -761,6 +838,10 @@ class SafeAccountsTest {
         assertEquals(other to BigInteger.TEN, erc20Transfer(Erc20.transferData(other, BigInteger.TEN)))
         assertNull(erc20Transfer(ByteArray(4)))
     }
+
+    /** A confirmed [SafeChain.policy] reading of [owners] / [threshold] at [block], the Safe's nonce [nonce]. */
+    private fun reading(owners: List<String>, threshold: Int, block: Long, nonce: Long = 0) =
+        SafeChain.Policy(block, BigInteger.valueOf(nonce), owners, threshold, confirmed = true)
 
     private fun fakeRpc(urls: List<String> = listOf("https://a.example"), answer: (String, org.json.JSONArray) -> String) = WalletRpc(
         ChainDataRouter(
