@@ -248,6 +248,13 @@ object EthereumProviders {
          * switch can't come up while the page is covered anyway, and the
          * notice is no longer bounded by [NOTICE_MAX_MS], so it isn't timed
          * out unseen behind whatever covers it (#446 R1-M1, round 1007).
+         *
+         * That includes covers the page raises itself — an `alert()`, a
+         * download offer, a permission request — so a page can end the
+         * hold early that way. Each of those still needs the user's tap
+         * to clear before its next switch's notice can come up, so a page
+         * looping switch → `alert()` still gets one switch per user action,
+         * not a silent run of them (#446 R2-M2, round 1007).
          */
         fun covered() {
             hold.complete(Unit)

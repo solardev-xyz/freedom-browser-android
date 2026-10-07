@@ -91,6 +91,8 @@ import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.node.NodeLogSource
+import baby.freedom.mobile.wallet.OpenLvSession
+import baby.freedom.mobile.wallet.ledger.Ledger
 import baby.freedom.mobile.wallet.NodeIdentitySync
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.ens.EnsInput
@@ -773,7 +775,9 @@ fun BrowserScreen(
     // when the user gets back to it (#446 R6-M2). Anything over its page
     // covers it ([switchNoticeUncovered]): a sheet the tab puts up (the
     // sign or send that usually follows a switch, a Swarm or Radicle
-    // sheet), a permission prompt or download offer, a full-screen panel.
+    // sheet), a permission prompt or download offer, a full-screen panel,
+    // HTML5 fullscreen, or a window of its own (Android's permission
+    // dialog, a Ledger conversation, a remote-signing sheet).
     // It comes down while covered and goes back up, with a fresh timer and
     // its Undo, once the page is clear, so it doesn't run out unseen behind
     // it (#446 R6-M1, R1-M1 of round 1007) — and, covered, it stops holding
@@ -3448,11 +3452,19 @@ fun BrowserScreen(
     }
     androidx.compose.runtime.SideEffect { sitePermissions.onScreenTab.value = onScreenTabId }
     // Where a dApp's "switched to" notice may be up (#446 R1-M1, round 1007).
+    // Windows of their own over the page count too (#446 R2-M1, round
+    // 1007): HTML5 fullscreen (drawn over both snackbar hosts), Android's
+    // permission dialog (its turn reads as None), a Ledger conversation, a
+    // remote-signing sheet, or the app not in the foreground at all.
+    val ledgerActivity by remember(context) { Ledger.get(context) }.activity.collectAsState()
+    val remoteApproval by remember(context) { OpenLvSession.get(context) }.approval.collectAsState()
     val switchNoticeClear = switchNoticeUncovered(
         pageUncovered = pageUncovered,
         promptTurn = promptTurn,
         switchTurn = state.ethereumPrompt?.ask is EthAsk.SwitchNotice,
         pageSheetUp = sheetShown != null,
+        windowOver = tabs.fullscreen != null || androidDialogUp || ledgerActivity != null ||
+            remoteApproval != null || !lifecycleState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED),
     )
     androidx.compose.runtime.SideEffect { switchNoticeClearTab = state.id.takeIf { switchNoticeClear } }
     DisposableEffect(sitePermissions) {
@@ -3509,16 +3521,20 @@ private data class PageSheetTarget(val tabId: Long, val origin: String?, val doc
  * prompt or sheet of any kind having the tab's turn ([promptTurn]: the
  * site-permission prompt, a download offer, a Radicle, Ethereum or Swarm
  * sheet, a page's JS dialog, the long-press menu), and not the page's Site
- * permissions sheet ([pageSheetUp]). The one turn that doesn't cover it is
- * a no-sheet switch's own ([switchTurn]), which is answered at once and
- * brings the next notice (#446 R1-M1, round 1007).
+ * permissions sheet ([pageSheetUp]), and no window of its own over it
+ * ([windowOver]: HTML5 fullscreen, Android's permission dialog, a Ledger
+ * conversation, a remote-signing sheet, or the app not resumed). The one
+ * turn that doesn't cover it is a no-sheet switch's own ([switchTurn]),
+ * which is answered at once and brings the next notice (#446 R1-M1, R2-M1,
+ * round 1007).
  */
 internal fun switchNoticeUncovered(
     pageUncovered: Boolean,
     promptTurn: PromptTurn,
     switchTurn: Boolean,
     pageSheetUp: Boolean,
-): Boolean = pageUncovered && !pageSheetUp &&
+    windowOver: Boolean = false,
+): Boolean = pageUncovered && !pageSheetUp && !windowOver &&
     (promptTurn == PromptTurn.None || (promptTurn == PromptTurn.Ethereum && switchTurn))
 
 /**

@@ -54,4 +54,13 @@ class ChainSwitchNoticeScreenTest {
         assertFalse(switchNoticeUncovered(false, PromptTurn.None, false, false)) // Settings, the Wallet, the tab switcher
         assertFalse(switchNoticeUncovered(true, PromptTurn.None, false, true)) // Site permissions sheet
     }
+
+    @Test
+    fun `a window of its own over the page covers the notice too (#446 R2-M1)`() {
+        // Fullscreen video, Android's permission dialog (whose turn reads as None), a Ledger
+        // conversation, a remote-signing sheet, the app backgrounded: each covers it.
+        assertFalse(switchNoticeUncovered(true, PromptTurn.None, false, false, windowOver = true))
+        assertFalse(switchNoticeUncovered(true, PromptTurn.Ethereum, switchTurn = true, pageSheetUp = false, windowOver = true))
+        assertTrue(switchNoticeUncovered(true, PromptTurn.None, false, false, windowOver = false))
+    }
 }
