@@ -217,6 +217,10 @@ class NodeApiGuardTest {
             "https://me.example/bee", "https://me.example/bee/", "https://me.example/bee/bzz",
             "https://me.example/bee/pins/ab", "https://me.example/BEE/bytes", "https://me.example/%62ee/feeds/a/b",
             "https://me.example//bee/tags",
+            // A proxy that decodes `%2F` and resolves the `..` hands these to /bee (R2-F1).
+            "https://me.example/x%2F..%2Fbee/bzz", "https://me.example/x%2f..%2fbee/pins/ab",
+            "https://me.example/a/b%2F..%2F..%2Fbee/feeds/a/b", "https://me.example/x%5C..%5Cbee/bzz",
+            "https://me.example/%2E%2E%2Fbee/bzz", "https://me.example/x/%2e%2e/bee/tags",
         )) {
             assertTrue(url, refused("POST", url, externalSwarm = external))
         }
@@ -224,6 +228,7 @@ class NodeApiGuardTest {
         for (url in listOf(
             "https://me.example/login", "https://me.example/", "https://me.example/beehive/upload",
             "https://me.example/nextcloud/bee/x", "https://me.example/be",
+            "https://me.example/x%2F..%2Flogin",
         )) {
             assertFalse(url, refused("POST", url, externalSwarm = external))
         }

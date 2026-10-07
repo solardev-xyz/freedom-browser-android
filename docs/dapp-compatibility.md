@@ -71,8 +71,10 @@ No page writes through a Swarm node directly (#358, as on desktop's
 `ant-api-guard.js`). Every request a page makes to the gateway port
 with a method other than GET or HEAD — on any host: the embedded node,
 a Bee node on the LAN (`http://192.168.1.20:1633`), any name — and every
-such request to the external Swarm node set in Settings (on whatever
-port it uses) is answered `403` by the app and never reaches the node:
+such request to the external Swarm node set in Settings (on its own
+origin and port, under its path: a node at `https://me.example/bee` is
+only `/bee` and what's under it, the rest of `me.example` being some
+other site) is answered `403` by the app and never reaches the node:
 
 ```js
 await fetch('http://127.0.0.1:1633/bzz', { method: 'POST', body, headers }) // 403

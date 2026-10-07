@@ -70,8 +70,9 @@ import java.io.ByteArrayInputStream
  * through `ws://127.0.0.1:1633/chunks/stream`. It can't spend the
  * user's batches that way (a stamp is signed by the batch owner's key,
  * which only the node holds); closing it needs ant to refuse browser
- * upgrades there, as its `wallet_spend_guard` does for spending routes. What keeps the funds safe from all of them
- * is the node's own chain transport (`ant_jni.c`), which refuses every
+ * upgrades there, as its `wallet_spend_guard` does for spending routes.
+ *
+ * What keeps the funds safe from all of them is the node's own chain transport (`ant_jni.c`), which refuses every
  * broadcast but the transactions of a spend the user confirmed in the
  * app ([baby.freedom.swarm.SpendGuard]). What keeps the reads private
  * from them is the gateway's empty CORS allow-list (#284,
@@ -207,7 +208,7 @@ internal object NodeApiGuard {
      * Is a [method] request to [url] one a page may not make to a Swarm
      * node: any write ([isWrite]) to the gateway port on any host or to
      * the external node ([externalSwarm], [Gateways.externalSwarmBase];
-     * `""` for none) on its own port (#358), or a read outside the dapp
+     * `""` for none) under its path ([isExternalNode], #358), or a read outside the dapp
      * surface on a host that may be this device?
      */
     internal fun refuses(
@@ -231,9 +232,16 @@ internal object NodeApiGuard {
      * proxy at `https://me.example/bee` is only `/bee` and what's under
      * it; the rest of `me.example` (a login form, another app) is some
      * other site, whose writes are none of this guard's business (R1-F1).
-     * Segments are compared as [segments] reads them (decoded, lowercased,
-     * dot segments dropped), which can only match more, never less. Not
-     * for `""` (no external node).
+     *
+     * The proxy in front reads the path its own way, and an encoded slash
+     * next to a dot segment is where readings part: `/x%2F..%2Fbee/bzz` has
+     * one segment to Chromium, but nginx decodes `%2F` and resolves the
+     * `..` and hands the node `/bee/bzz` (R2-F1). So the path is under the
+     * node's when any of [pathReadings] puts it there — decoded with dot
+     * segments dropped, decoded with them resolved, or raw with them
+     * resolved. A reading the proxy doesn't share can only refuse a write
+     * to some other path on that origin, never let one through to the
+     * node. Not for `""` (no external node).
      */
     private fun isExternalNode(url: String, externalSwarm: String): Boolean {
         if (externalSwarm.isEmpty()) return false
@@ -242,9 +250,36 @@ internal object NodeApiGuard {
         if (!url.substringBefore("://").equals(externalSwarm.substringBefore("://"), ignoreCase = true)) return false
         val host = WhatwgHost.parse(url)?.hostname?.trimEnd('.') ?: return false
         if (host != WhatwgHost.parse(externalSwarm)?.hostname?.trimEnd('.')) return false
-        val base = segments(pathOf(externalSwarm))
-        val path = segments(pathOf(url))
-        return path.size >= base.size && path.subList(0, base.size) == base
+        val base = resolvedSegments(pathOf(externalSwarm), decode = true)
+        return pathReadings(pathOf(url)).any { path ->
+            path.size >= base.size && path.subList(0, base.size) == base
+        }
+    }
+
+    /**
+     * The segment lists a server in front of the node may read [path] as:
+     * [segments]' (decoded, dot segments dropped) and, with dot segments
+     * resolved the way RFC 3986 and nginx do (`..` pops, never past the
+     * root), decoded and not.
+     */
+    private fun pathReadings(path: String): List<List<String>> = listOf(
+        segments(path),
+        resolvedSegments(path, decode = true),
+        resolvedSegments(path, decode = false),
+    )
+
+    /** [path]'s segments, optionally percent-decoded, lowercased, empty ones dropped and dot segments resolved. */
+    private fun resolvedSegments(path: String, decode: Boolean): List<String> {
+        val out = ArrayList<String>()
+        val text = if (decode) percentDecode(path).replace('\\', '/') else path
+        for (segment in text.lowercase().split('/')) {
+            when (segment) {
+                "", "." -> Unit
+                ".." -> if (out.isNotEmpty()) out.removeAt(out.size - 1)
+                else -> out.add(segment)
+            }
+        }
+        return out
     }
 
     /**
