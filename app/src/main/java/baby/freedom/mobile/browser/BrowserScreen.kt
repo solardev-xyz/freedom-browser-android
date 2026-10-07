@@ -514,6 +514,9 @@ fun BrowserScreen(
     // search without re-creating [submit].
     val searchTemplate by remember(context) { NodeSettings.get(context).searchTemplate }
         .collectAsState(initial = SearchEngines.DEFAULT.template)
+    // Settings → Search → Search suggestions (#443): off by default.
+    val searchSuggestionsOn by remember(context) { NodeSettings.get(context).searchSuggestions }
+        .collectAsState(initial = false)
     val scope = rememberCoroutineScope()
     // Keep a stable reference to the latest nodeInfo for probe-gating
     // closures launched from submit(). Without rememberUpdatedState, a
@@ -591,6 +594,8 @@ fun BrowserScreen(
     // resting domain label, the home overlay, reload — reads it. Typed
     // text lives here until it is submitted.
     var addressQuery by remember { mutableStateOf("") }
+    // A suggestion row's arrow: text for the address field to take (#443).
+    var addressFill by remember { mutableStateOf<AddressFill?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
     // The Undo notice of the switcher's last bulk close (#320).
     var tabsClosedNotice by remember { mutableStateOf<Job?>(null) }
@@ -2313,7 +2318,22 @@ fun BrowserScreen(
                         repo = repo,
                         query = addressQuery,
                         searchTemplate = searchTemplate,
+                        tabs = tabs.tabs.map { t ->
+                            TabCandidate(t.id, t.addressBarText.ifBlank { t.url }, t.title, t.private)
+                        },
+                        currentTabId = state.id,
+                        private = state.private,
+                        searchSuggestionsOn = searchSuggestionsOn,
                         onPick = { submit(state, it) },
+                        onSwitchToTab = { id ->
+                            // End the edit first, as a submit does, then
+                            // bring the tab up.
+                            focusManager.clearFocus()
+                            keyboard?.hide()
+                            val index = tabs.tabs.indexOfFirst { it.id == id }
+                            if (index >= 0) tabs.switchTo(index)
+                        },
+                        onFill = { addressFill = AddressFill(it) },
                         bottomContentPadding = capsuleOverlap,
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -2613,6 +2633,8 @@ fun BrowserScreen(
                         .fillMaxWidth(),
                     addressFocusRequested = addressFocusRequested,
                     onAddressFocusRequestHandled = { addressFocusRequested = false },
+                    addressFill = addressFill,
+                    onAddressFillHandled = { addressFill = null },
                 )
                 }
                 }

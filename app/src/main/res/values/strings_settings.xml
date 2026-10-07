@@ -40,6 +40,10 @@
 
     <!-- SettingsScreen.kt: Search -->
     <string name="settings_search_engine">Search engine</string>
+    <string name="settings_search_suggestions">Search suggestions</string>
+    <string name="settings_search_suggestions_subtitle">Sends what you type in the address bar to %1$s to suggest searches. Never in private tabs.</string>
+    <string name="settings_search_suggestions_unavailable">Not available for a custom search engine.</string>
+    <string name="settings_search_suggestions_keywords">autocomplete, suggest, predictions, typing</string>
     <string name="settings_search_url">Search URL</string>
     <string name="settings_search_url_placeholder" translatable="false">https://example.com/search?q={searchTerms}</string>
     <string name="settings_search_url_helper" formatted="false">Your search replaces {searchTerms} (or %s)</string>
@@ -375,6 +379,7 @@
     <string name="settings_page_open">Open %1$s</string>
     <!-- One-line summaries under the top-level rows. -->
     <string name="settings_page_downloads_off">Saved to Download/Freedom</string>
+    <string name="settings_page_search_suggestions_on">%1$s · Suggestions on</string>
     <string name="settings_page_downloads_on">Asks where to save each file</string>
     <string name="settings_page_privacy_no_permissions">No site permissions</string>
     <plurals name="settings_page_privacy_permissions">

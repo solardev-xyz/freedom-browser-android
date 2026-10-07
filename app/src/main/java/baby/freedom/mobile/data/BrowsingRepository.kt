@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteException
 import android.util.Log
 import androidx.room.withTransaction
 import baby.freedom.mobile.browser.BookmarkUrls
+import baby.freedom.mobile.browser.typedForm
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
@@ -128,34 +129,34 @@ class BrowsingRepository internal constructor(
     }
 
     /**
-     * Address-bar auto-complete suggestions.
-     *
-     * Bookmarks come first (since the user asked the browser to remember
-     * them), followed by recent history with bookmarked URLs filtered
-     * out. History is deduped by URL in-memory: we oversample from Room
-     * (`limit * 3`) so that a site visited 20 times in a row doesn't
-     * crowd out other matches from the final list.
-     *
-     * [query] may be empty — in that case we fall back to the most-recent
-     * bookmarks and history, which gives the address bar a useful
-     * "top sites" list the moment it's focused.
+     * What the address bar's text matches (#443): bookmarks and history
+     * pages whose title or URL contains [query]. History comes one row
+     * per page with its visit count, so the browser can rank a page
+     * visited 20 times above one visited once (`rankSuggestions`), which
+     * also de-duplicates them against each other and the open tabs. Both
+     * queries keep their best [bookmarkLimit]/[pageLimit] candidates by
+     * match strength, then visits or age ([HistoryDao.suggest]), so an
+     * old but often-visited page the text is a prefix of isn't pushed out
+     * by a crowd of recent weaker matches. Re-emits when either table
+     * changes.
      */
-    fun suggestions(query: String, limit: Int = 8): Flow<List<UrlSuggestion>> {
-        val pattern = "%" + query.trim().escapeForLike() + "%"
+    fun suggestionMatches(
+        query: String,
+        bookmarkLimit: Int = 30,
+        pageLimit: Int = 60,
+    ): Flow<LocalMatches> {
+        val text = query.trim()
+        val pattern = "%" + text.escapeForLike() + "%"
+        val prefix = typedForm(text).escapeForLike() + "%"
+        val word = text.escapeForLike() + "%"
         return combine(
-            db.bookmarks().search(pattern, limit),
-            db.history().search(pattern, limit * 3),
-        ) { bookmarks, history ->
-            val bookmarkUrls = bookmarks.mapTo(HashSet()) { it.url }
-            val bookmarkItems = bookmarks.map {
-                UrlSuggestion(it.url, it.title, UrlSuggestion.Source.BOOKMARK)
-            }
-            val historyItems = history.asSequence()
-                .filter { it.url !in bookmarkUrls }
-                .distinctBy { it.url }
-                .map { UrlSuggestion(it.url, it.title, UrlSuggestion.Source.HISTORY) }
-                .toList()
-            (bookmarkItems + historyItems).take(limit)
+            db.bookmarks().suggest(pattern, prefix, word, bookmarkLimit),
+            db.history().suggest(pattern, prefix, word, pageLimit),
+        ) { bookmarks, pages ->
+            LocalMatches(
+                bookmarks = bookmarks.map { UrlSuggestion(it.url, it.title, UrlSuggestion.Source.BOOKMARK) },
+                pages = pages,
+            )
         }
     }
 

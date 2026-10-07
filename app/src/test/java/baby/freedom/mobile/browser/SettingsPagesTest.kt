@@ -86,9 +86,9 @@ class SettingsPagesTest {
     }
 
     @Test
-    fun `only search engine and default browser have no sub-page`() {
+    fun `only default browser has no sub-page`() {
         assertEquals(
-            setOf(SettingsPage.SearchEngine, SettingsPage.DefaultBrowser),
+            setOf(SettingsPage.DefaultBrowser),
             SettingsPage.entries.filterNot { it.hasSubPage }.toSet(),
         )
     }
@@ -144,8 +144,8 @@ class SettingsPagesTest {
         )
         assertEquals(
             listOf(
-                SettingsPage.SearchEngine to listOf(SettingsSection.Search),
                 SettingsPage.DefaultBrowser to listOf(SettingsSection.DefaultBrowser),
+                SettingsPage.SearchEngine to listOf(SettingsSection.Search),
                 SettingsPage.Appearance to listOf(SettingsSection.Appearance),
                 SettingsPage.Downloads to listOf(SettingsSection.Downloads),
             ),

@@ -50,6 +50,19 @@ interface BookmarkDao {
     )
     fun search(q: String, limit: Int): Flow<List<BookmarkEntry>>
 
+    /**
+     * The address bar's bookmark suggestions (#443): bookmarks whose
+     * title or URL contains [q], best match first ([SUGGEST_STRENGTH],
+     * see [HistoryDao.suggest] for [prefix] and [word]) and newest first
+     * among equals, so [limit] keeps the best matches, not just the
+     * newest bookmarks.
+     */
+    @Query(
+        "SELECT * FROM bookmarks WHERE url LIKE :q OR title LIKE :q " +
+            "ORDER BY " + SUGGEST_STRENGTH + " DESC, createdAt DESC LIMIT :limit",
+    )
+    fun suggest(q: String, prefix: String, word: String, limit: Int): Flow<List<BookmarkEntry>>
+
     @Query("DELETE FROM bookmarks")
     suspend fun clear()
 }

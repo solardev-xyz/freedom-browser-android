@@ -29,16 +29,16 @@ import baby.freedom.mobile.l10n.Strings
  */
 
 /**
- * A top-level row of Settings. Most open a sub-page; [SearchEngine]
- * opens the engine dialog straight away, and [DefaultBrowser] asks
- * Android for the browser role ([hasSubPage] false for both).
+ * A top-level row of Settings. Most open a sub-page; [DefaultBrowser]
+ * asks Android for the browser role ([hasSubPage] false). [SearchEngine]
+ * is the Search page: the engine and *Search suggestions* (#443).
  */
 internal enum class SettingsPage(
     @StringRes val titleRes: Int,
     val icon: ImageVector,
     val hasSubPage: Boolean = true,
 ) {
-    SearchEngine(R.string.settings_search_engine, Icons.Filled.Search, hasSubPage = false),
+    SearchEngine(R.string.settings_section_search, Icons.Filled.Search),
     Appearance(R.string.settings_section_appearance, Icons.Filled.Contrast),
     Downloads(R.string.settings_section_downloads, Icons.Filled.Download),
     DefaultBrowser(R.string.settings_default_browser, Icons.Filled.OpenInBrowser, hasSubPage = false),
@@ -130,7 +130,7 @@ internal fun settingsTopLevel(isDefaultBrowser: Boolean): List<Pair<SettingsGrou
  * lives on — pages in top-level order, cards in page order. A card with
  * no match, and a page with none left, is dropped.
  *
- * A page with no sub-page (Search engine, Default browser) gets no
+ * A page with no sub-page (Default browser) gets no
  * heading in the results, so its card comes first: placed in top-level
  * order it would sit straight under the previous page's heading (Default
  * browser under "Downloads ›") and read as part of that page.
@@ -150,6 +150,10 @@ internal fun settingsResultGroups(
 
 internal fun appearancePageSummary(theme: String, language: String?): String =
     listOfNotNull(theme, language).joinToString(" · ")
+
+/** "DuckDuckGo", or "DuckDuckGo · Suggestions on" while search suggestions are on (#443). */
+internal fun searchPageSummary(engine: String, suggestions: Boolean): String =
+    if (suggestions) Strings.get(R.string.settings_page_search_suggestions_on, engine) else engine
 
 internal fun downloadsPageSummary(askWhereToSave: Boolean): String = Strings.get(
     if (askWhereToSave) R.string.settings_page_downloads_on else R.string.settings_page_downloads_off,

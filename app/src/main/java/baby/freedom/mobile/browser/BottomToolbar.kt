@@ -1528,6 +1528,9 @@ internal fun BottomToolbar(
     addressFocusRequested: Boolean = false,
     onAddressFocusRequestHandled: () -> Unit = {},
     modifier: Modifier = Modifier,
+    /** Text a suggestion row's arrow put in the field (#443), until taken ([onAddressFillHandled]). */
+    addressFill: AddressFill? = null,
+    onAddressFillHandled: () -> Unit = {},
 ) {
     // Clamp rather than trust the caller: both fractions are driven by
     // springs, and the expressive spatial springs overshoot slightly at
@@ -1800,6 +1803,8 @@ internal fun BottomToolbar(
             onAddressEditedChanged = onAddressEditedChanged,
             onAddressQueryChanged = onAddressQueryChanged,
             onSubmit = onSubmit,
+            fill = addressFill,
+            onFillHandled = onAddressFillHandled,
             focusRequested = addressFocusRequested,
             onFocusRequestHandled = onAddressFocusRequestHandled,
             onReload = onReload,
@@ -2301,6 +2306,8 @@ private fun AddressField(
     modifier: Modifier = Modifier,
     focusRequested: Boolean = false,
     onFocusRequestHandled: () -> Unit = {},
+    fill: AddressFill? = null,
+    onFillHandled: () -> Unit = {},
 ) {
     val focusRequester = remember { FocusRequester() }
     val context = LocalContext.current
@@ -2422,6 +2429,20 @@ private fun AddressField(
         } else {
             TextFieldValue(text = shownAddress, selection = TextRange.Zero)
         }
+    }
+
+    // A suggestion row's arrow (#443): its text replaces the edit, the
+    // cursor at its end, and it is the query from then on — as if typed.
+    // Only into an edit still open: a fill landing after the edit ended
+    // is dropped, not put in the resting field.
+    LaunchedEffect(fill) {
+        val f = fill ?: return@LaunchedEffect
+        if (addressFocused) {
+            fieldValue = TextFieldValue(text = f.text, selection = TextRange(f.text.length))
+            onAddressQueryChanged(f.text)
+            onAddressEditedChanged(true)
+        }
+        onFillHandled()
     }
 
     val colors = MaterialTheme.colorScheme

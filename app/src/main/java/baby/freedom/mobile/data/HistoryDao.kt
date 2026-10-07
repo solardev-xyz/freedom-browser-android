@@ -26,6 +26,29 @@ interface HistoryDao {
     fun search(q: String, limit: Int): Flow<List<HistoryEntry>>
 
     /**
+     * The address bar's history suggestions (#443): one row per page
+     * (URL) whose title or URL contains [q], with its visit count and
+     * latest visit, and the title of that latest visit (SQLite takes a
+     * bare column from the `MAX()` row). Ordered the way the browser
+     * ranks them (`rankSuggestions`) — match strength first, then visits,
+     * then recency — so the [limit] it keeps are the best candidates from
+     * the whole history, not just the most recent visits: an old,
+     * often-visited page whose address starts with the text still makes
+     * it. The strength here is coarse (SQL `LIKE`); the browser
+     * re-ranks exactly. [prefix] is the typed text without scheme or
+     * `www.` followed by `%`, [word] the text as typed followed by `%`;
+     * all three carry no wildcards of their own (`escapeForLike`).
+     */
+    @Query(
+        "SELECT url, title, COUNT(*) AS visits, MAX(visitedAt) AS lastVisit FROM history " +
+            "WHERE url LIKE :q OR title LIKE :q " +
+            "GROUP BY url " +
+            "ORDER BY " + SUGGEST_STRENGTH + " DESC, visits DESC, lastVisit DESC " +
+            "LIMIT :limit",
+    )
+    fun suggest(q: String, prefix: String, word: String, limit: Int): Flow<List<HistoryPage>>
+
+    /**
      * The History page's search (#263): every visit whose title or
      * stored URL contains [pattern], newest first. [pattern] is a full
      * `LIKE` pattern built by [likeContains] — `%`, `_` and `\` in the
@@ -65,3 +88,25 @@ interface HistoryDao {
     @Query("DELETE FROM history WHERE visitedAt >= :since")
     suspend fun deleteSince(since: Long)
 }
+
+/** A page in history, for [HistoryDao.suggest]. */
+data class HistoryPage(
+    val url: String,
+    val title: String,
+    val visits: Int,
+    val lastVisit: Long,
+)
+
+/**
+ * SQL for the coarse match strength the address bar's suggestion queries
+ * sort by (#443), mirroring `MatchStrength` in the browser package:
+ * address prefix (past any scheme and `www.`) 4, a host label 3, a title
+ * word 2, anything else 1. Binds `:prefix` and `:word`.
+ */
+internal const val SUGGEST_STRENGTH =
+    "(CASE " +
+        "WHEN url LIKE :prefix OR url LIKE 'www.' || :prefix " +
+        "OR url LIKE '%://' || :prefix OR url LIKE '%://www.' || :prefix THEN 4 " +
+        "WHEN url LIKE '%.' || :word THEN 3 " +
+        "WHEN title LIKE :word OR title LIKE '% ' || :word THEN 2 " +
+        "ELSE 1 END)"
