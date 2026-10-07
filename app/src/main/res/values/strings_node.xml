@@ -128,10 +128,10 @@
     </plurals>
     <!-- One light-client chain's state: %1$s is the chain (Ethereum, Gnosis), %2$s its state (Synced, Off…). -->
     <string name="nodes_overview_chain_state">%1$s: %2$s</string>
-    <!-- %1$s and %2$s: nodes_overview_source_device or nodes_overview_source_own. -->
+    <!-- %1$s and %2$s: settings_page_nodes_embedded, settings_page_nodes_external or nodes_overview_source_off. -->
     <string name="nodes_overview_gateways_summary">Swarm: %1$s · IPFS: %2$s</string>
-    <string name="nodes_overview_source_device">this device</string>
-    <string name="nodes_overview_source_own">your own</string>
+    <!-- The embedded node serves the scheme but is switched off, so nothing does. -->
+    <string name="nodes_overview_source_off">off</string>
     <!-- The menu's Nodes & networks sub-line when one node has failed; %1$s is its name (Swarm, Tor…). -->
     <string name="nodes_menu_problem_one">%1$s has a problem</string>
     <!-- The same, when more than one has. -->
@@ -226,8 +226,8 @@
     <string name="node_tor_refusal_off_title">Tor is off</string>
     <string name="node_tor_refusal_off">This is an onion site, reachable only over Tor. Turn on Tor in Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor and start it, then try again. Only &lt;code>.onion&lt;/code> sites use Tor; every other site connects directly.</string>
     <string name="node_tor_refusal_not_running_title">Tor isn\'t running</string>
-    <string name="node_tor_refusal_failed">Tor couldn\'t start, so this onion site wasn\'t opened. Try starting it again on the Nodes page.</string>
-    <string name="node_tor_refusal_not_running">This is an onion site, reachable only over Tor, and Tor isn\'t running. Start it on the Nodes page (or turn on &lt;em>Start Tor at launch&lt;/em> in Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor), then try again. Freedom never opens onion sites without Tor.</string>
+    <string name="node_tor_refusal_failed">Tor couldn\'t start, so this onion site wasn\'t opened. Try starting it again on the Tor page (menu &amp;rarr; Nodes &amp;amp; networks &amp;rarr; Tor).</string>
+    <string name="node_tor_refusal_not_running">This is an onion site, reachable only over Tor, and Tor isn\'t running. Start it on the Tor page (menu &amp;rarr; Nodes &amp;amp; networks &amp;rarr; Tor), or turn on &lt;em>Start Tor at launch&lt;/em> in Settings &amp;rarr; Privacy &amp;amp; security &amp;rarr; Tor, then try again. Freedom never opens onion sites without Tor.</string>
 
     <!-- browser/TorProxy.kt: what the check of the external Tor proxy found; %1$s is the proxy (host:port). -->
     <string name="node_tor_probe_tor">Tor reached a .onion site through %1$s</string>
@@ -256,7 +256,7 @@
     <!-- %1$s is the node's own error message. -->
     <string name="node_notification_error">Error: %1$s</string>
     <string name="node_error_unknown">unknown</string>
-    <!-- The Swarm node's chunk cache, on the Nodes page and in Settings → Nodes & networks. -->
+    <!-- The Swarm node's chunk cache, on the Swarm page and in Settings → Nodes & networks. -->
     <string name="node_cache">Cache</string>
     <!-- %1$s is how much is cached ("312 MB"), %2$s the cache size ("512 MB"). -->
     <string name="node_cache_used">%1$s of %2$s</string>

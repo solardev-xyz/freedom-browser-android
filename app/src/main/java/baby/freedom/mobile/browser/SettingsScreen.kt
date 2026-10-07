@@ -177,19 +177,23 @@ internal fun SettingsScreen(
      */
     onOpenBookmarks: () -> Unit = {},
     /**
-     * Opened straight at one of its pages, from the Nodes & networks
-     * overview (#416): its RPC providers or gateways row, or the Tor
-     * page's "Turn on in Settings". Back from that page leaves Settings,
-     * back to where it came from, rather than stopping at the top level.
+     * Opened straight at one card's page, scrolled to that card, from the
+     * Nodes & networks overview (#416): its RPC providers or gateways
+     * row, or the Tor page's "Turn on in Settings". Back from that page
+     * leaves Settings, back to where it came from, rather than stopping
+     * at the top level.
      */
-    initialPage: SettingsPage? = null,
+    initialSection: SettingsSection? = null,
     /**
-     * A page to go to while already open (the overview was opened from
-     * this Settings' Node status row, over it); [onPageRequestTaken] says
-     * it's been taken. Back from it goes up to the top level as usual.
+     * A card to go to while already open (the overview was opened from
+     * this Settings' Node status row, over it); [onSectionRequestTaken]
+     * says it's been taken. Back from its page goes back to the page
+     * Settings was on and calls [onRequestedPageLeft], so what asked
+     * (the overview, a node page) can come back over it.
      */
-    pageRequest: SettingsPage? = null,
-    onPageRequestTaken: () -> Unit = {},
+    sectionRequest: SettingsSection? = null,
+    onSectionRequestTaken: () -> Unit = {},
+    onRequestedPageLeft: () -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     // Settings search (#93). Registered after the dismiss handler so it
@@ -199,19 +203,41 @@ internal fun SettingsScreen(
     // The sub-page open in place of the top level (#400), if any; its
     // handler, registered last, wins: Back goes one level up, to the
     // search results when the page was opened from one.
+    // None of the cards opened from outside is Default browser, the one
+    // card whose page depends on whether Freedom is the default browser.
+    val initialPage = initialSection?.page(isDefaultBrowser = false)
     var page by rememberSaveable { mutableStateOf(initialPage) }
-    // The card a page opened from a search result starts scrolled to.
-    var scrollTo by remember { mutableStateOf<SettingsSection?>(null) }
-    // Up from a sub-page: to the top level, or out of Settings when it
-    // was opened straight at that page.
-    val pageUp = { if (initialPage != null && page == initialPage) onDismiss() else page = null }
+    // The card a page opened from a search result (or from outside) starts scrolled to.
+    var scrollTo by remember { mutableStateOf(initialSection) }
+    // A page [sectionRequest] moved to, and the page (or top level) it
+    // moved from, which Back from it goes back to.
+    var requestedPage by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
+    var requestedFrom by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
+    // Up from a sub-page: back to where a request moved it from, out of
+    // Settings when it was opened straight at that page, else the top level.
+    val pageUp = {
+        when {
+            requestedPage != null && page == requestedPage -> {
+                page = requestedFrom
+                requestedPage = null
+                requestedFrom = null
+                onRequestedPageLeft()
+            }
+            initialPage != null && page == initialPage -> onDismiss()
+            else -> page = null
+        }
+    }
     BackHandler(enabled = query.isNotEmpty() && page == null) { query = "" }
     BackHandler(enabled = page != null, onBack = pageUp)
-    LaunchedEffect(pageRequest) {
-        if (pageRequest != null) {
+    LaunchedEffect(sectionRequest) {
+        if (sectionRequest != null) {
+            val target = sectionRequest.page(isDefaultBrowser = false)
             query = ""
-            page = pageRequest
-            onPageRequestTaken()
+            requestedFrom = page
+            requestedPage = target
+            page = target
+            scrollTo = sectionRequest
+            onSectionRequestTaken()
         }
     }
 
@@ -617,11 +643,13 @@ internal fun SettingsScreen(
             val sections = settingsSections(openPage, isDefaultBrowser)
             // Re-runs after a Chains/site/Licences page closes, by which
             // time scrollTo is null, so it leaves the kept position alone.
-            LaunchedEffect(Unit) {
-                val target = scrollTo
+            // Keyed on scrollTo too: a request for a card on the page
+            // already open scrolls to it without re-opening the page.
+            LaunchedEffect(scrollTo) {
+                val target = scrollTo ?: return@LaunchedEffect
                 scrollTo = null
                 val index = sections.indexOf(target)
-                if (index > 0) pageState.scrollToItem(index)
+                if (index >= 0) pageState.scrollToItem(index)
             }
             LazyColumn(
                 state = pageState,

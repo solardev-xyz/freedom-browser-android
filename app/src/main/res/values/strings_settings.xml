@@ -81,7 +81,7 @@
     <string name="settings_tor_enabled">Tor for .onion sites</string>
     <string name="settings_tor_enabled_detail">Only .onion sites use Tor; every other site connects directly. While off, onion sites are refused.</string>
     <string name="settings_tor_on_launch">Start Tor at launch</string>
-    <string name="settings_tor_on_launch_subtitle">Otherwise start it on the Nodes page</string>
+    <string name="settings_tor_on_launch_subtitle">Otherwise start it on the Tor page, under Nodes &amp; networks in the menu</string>
     <string name="settings_tor_client">Tor client</string>
     <string name="settings_tor_client_embedded">Embedded (Arti)</string>
     <string name="settings_tor_client_external">External SOCKS proxy</string>
@@ -398,7 +398,7 @@
     <string name="settings_page_nodes_summary">Swarm: %1$s · IPFS: %2$s · Radicle: %3$s</string>
     <string name="settings_page_nodes_embedded">embedded</string>
     <string name="settings_page_nodes_external">external</string>
-    <!-- Settings → Nodes & networks: the row that opens the Nodes page. -->
+    <!-- Settings → Nodes & networks: the row that opens the Nodes &amp; networks overview. -->
     <string name="settings_nodes_page">Node status</string>
     <string name="settings_nodes_page_subtitle">Start and stop the nodes and see how they\'re doing</string>
 </resources>

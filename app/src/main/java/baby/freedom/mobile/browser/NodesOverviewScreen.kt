@@ -45,6 +45,7 @@ import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisNetwork
+import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.RadicleInfo
@@ -97,13 +98,21 @@ internal data class NodeOverviewRow(
     val title: String,
     val status: String,
     val health: NodeHealth,
+    /**
+     * Something the user switched on has failed: the menu's note counts
+     * it. Usually a red dot; also a light client running with a chain
+     * that failed, whose dot stays the page's amber (#416).
+     */
+    val problem: Boolean = health == NodeHealth.Error,
 )
 
 /** Everything the overview reads; all of it is already live in [BrowserScreen]. */
 internal data class NodeOverviewInput(
     val nodeInfo: NodeInfo = NodeInfo(),
+    /** [Gateways.externalSwarmBaseFlow]: the endpoint bzz:// actually goes to, `""` for this device's node. */
     val externalSwarm: String = "",
     val ipfsInfo: IpfsInfo = IpfsInfo(),
+    /** [Gateways.externalIpfsBaseFlow], likewise. */
     val externalIpfs: String = "",
     val radicleInfo: RadicleInfo = RadicleInfo(),
     val radicleEnabled: Boolean = false,
@@ -136,15 +145,24 @@ internal fun nodeOverviewRows(input: NodeOverviewInput): List<NodeOverviewRow> =
         Strings.get(R.string.nodes_overview_gateways),
         Strings.get(
             R.string.nodes_overview_gateways_summary,
-            gatewaySource(input.externalSwarm),
-            gatewaySource(input.externalIpfs),
+            gatewaySource(input.externalSwarm, embeddedOff = input.nodeInfo.status == NodeStatus.Stopped),
+            gatewaySource(input.externalIpfs, embeddedOff = input.ipfsInfo.status == IpfsStatus.Stopped),
         ),
         NodeHealth.None,
     ),
 )
 
-private fun gatewaySource(external: String): String = Strings.get(
-    if (external.isEmpty()) R.string.nodes_overview_source_device else R.string.nodes_overview_source_own,
+/**
+ * Who serves a scheme, in Settings' own words (its Nodes & networks
+ * summary): "external", "embedded" — or "off" when it's the embedded
+ * node and that's switched off, so nothing serves it.
+ */
+private fun gatewaySource(external: String, embeddedOff: Boolean): String = Strings.get(
+    when {
+        external.isNotEmpty() -> R.string.settings_page_nodes_external
+        embeddedOff -> R.string.nodes_overview_source_off
+        else -> R.string.settings_page_nodes_embedded
+    },
 )
 
 private fun swarmRow(input: NodeOverviewInput): NodeOverviewRow {
@@ -224,6 +242,11 @@ private fun lightClientRow(info: MyotisInfo, running: Set<MyotisNetwork>): NodeO
         lightClientTitle(),
         status,
         triple.health,
+        // A chain switched on that failed ("Failed" on its row) is a
+        // problem even while `:myotis` runs the other one, and the dot
+        // stays the page's amber.
+        problem = triple.health == NodeHealth.Error ||
+            (shown.status == MyotisStatus.Running && shown.chains.any { it.error != null }),
     )
 }
 
@@ -233,7 +256,7 @@ private fun lightClientRow(info: MyotisInfo, running: Set<MyotisNetwork>): NodeO
  * quiet and doesn't change with every peer that comes and goes.
  */
 internal fun nodesMenuNote(rows: List<NodeOverviewRow>): String? {
-    val failing = rows.filter { it.health == NodeHealth.Error }
+    val failing = rows.filter { it.problem }
     return when (failing.size) {
         0 -> null
         1 -> Strings.get(R.string.nodes_menu_problem_one, failing.single().title)
@@ -294,12 +317,11 @@ internal fun NodesOverviewScreen(
     BackHandler(onBack = onDismiss)
     val context = LocalContext.current
     val settings = remember(context) { NodeSettings.get(context) }
-    val externalSwarm by remember(settings) { settings.externalSwarmEndpoint }.collectAsState(initial = "")
-    val externalIpfs by remember(settings) { settings.externalIpfsGateway }.collectAsState(initial = "")
+    // The external endpoints come in [input], from the same [Gateways]
+    // flows the menu note reads (already loaded at start, so no flash of
+    // the embedded node's state); the RPC config says "Checking…" until read.
     val rpcConfig by remember(settings) { settings.ensRpcConfig }.collectAsState(initial = null)
-    val rows = nodeOverviewRows(
-        input.copy(externalSwarm = externalSwarm, externalIpfs = externalIpfs, rpcConfig = rpcConfig),
-    )
+    val rows = nodeOverviewRows(input.copy(rpcConfig = rpcConfig))
     FullScreenScaffold(
         title = stringResource(R.string.settings_page_nodes),
         onDismiss = onDismiss,
@@ -377,7 +399,7 @@ private fun NodeOverviewRowItem(row: NodeOverviewRow, onClick: () -> Unit) {
             Text(
                 row.status,
                 style = MaterialTheme.typography.bodySmall,
-                color = if (row.health == NodeHealth.Error) {
+                color = if (row.problem) {
                     MaterialTheme.colorScheme.error
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant

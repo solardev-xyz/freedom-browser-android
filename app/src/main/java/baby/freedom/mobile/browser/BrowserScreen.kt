@@ -517,11 +517,11 @@ fun BrowserScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     var showSettings by rememberSaveable { mutableStateOf(false) }
-    // Settings opened straight at one of its pages (#416), from a node
-    // page; null from the menu. [settingsPageRequest] moves a Settings
-    // that's already open (under the overview) to a page.
-    var settingsInitialPage by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
-    var settingsPageRequest by remember { mutableStateOf<SettingsPage?>(null) }
+    // Settings opened straight at one of its cards (#416), from a node
+    // page; null from the menu. [settingsSectionRequest] moves a Settings
+    // that's already open (under the overview) to a card.
+    var settingsInitialSection by rememberSaveable { mutableStateOf<SettingsSection?>(null) }
+    var settingsSectionRequest by remember { mutableStateOf<SettingsSection?>(null) }
     // The Nodes & networks overview (#416), and the node page over it (or
     // over Settings, or straight from the home warm-up row).
     var showNodes by rememberSaveable { mutableStateOf(false) }
@@ -529,6 +529,10 @@ fun BrowserScreen(
     // What a Settings opened from a node page returns to on Back.
     var settingsBackToNodes by rememberSaveable { mutableStateOf(false) }
     var settingsBackToDetail by rememberSaveable { mutableStateOf<NodeDestination?>(null) }
+    // The same, for a Settings already open under the overview that a
+    // node page moved to a card: Back from that card's page comes here.
+    var settingsRequestBackToNodes by rememberSaveable { mutableStateOf(false) }
+    var settingsRequestBackToDetail by rememberSaveable { mutableStateOf<NodeDestination?>(null) }
     // The node logs page (#276), at this node's; over whichever node card opened it.
     var showLogs by rememberSaveable { mutableStateOf<NodeLogSource?>(null) }
     var showWallet by rememberSaveable { mutableStateOf(false) }
@@ -2393,7 +2397,7 @@ fun BrowserScreen(
                     // downward gesture.
                     onExpandCapsule = { state.capsuleCollapse.expand() },
                     onOpenSettings = {
-                        settingsInitialPage = null
+                        settingsInitialSection = null
                         showSettings = true
                     },
                     onOpenNode = { showNodes = true },
@@ -2657,7 +2661,7 @@ fun BrowserScreen(
             },
             onDismiss = {
                 showSettings = false
-                settingsInitialPage = null
+                settingsInitialSection = null
                 // Opened from a node page: Back goes back to it.
                 if (settingsBackToNodes || settingsBackToDetail != null) {
                     showNodes = settingsBackToNodes
@@ -2674,24 +2678,34 @@ fun BrowserScreen(
                 bookmarksPrivate = state.private
                 showBookmarks = true
             },
-            initialPage = settingsInitialPage,
-            pageRequest = settingsPageRequest,
-            onPageRequestTaken = { settingsPageRequest = null },
+            initialSection = settingsInitialSection,
+            sectionRequest = settingsSectionRequest,
+            onSectionRequestTaken = { settingsSectionRequest = null },
+            // Back from the card a node page moved this Settings to: the
+            // overview and node page come back over it.
+            onRequestedPageLeft = {
+                showNodes = settingsRequestBackToNodes
+                nodeDetail = settingsRequestBackToDetail
+                settingsRequestBackToNodes = false
+                settingsRequestBackToDetail = null
+            },
         )
     }
 
-    // Settings at one of its pages, from a node page (#416). Settings is
+    // Settings at one of its cards, from a node page (#416). Settings is
     // composed under the node pages, so they close while it's up and
-    // come back when it's dismissed — unless Settings is already open
-    // under them (the overview came from its Node status row): then they
-    // close and that Settings goes to the page.
-    val openSettingsAt: (SettingsPage) -> Unit = { target ->
+    // come back when it's dismissed — or, when Settings is already open
+    // under them (the overview came from its Node status row), that
+    // Settings goes to the card and they come back on Back from its page.
+    val openSettingsAt: (SettingsSection) -> Unit = { target ->
         if (showSettings) {
-            settingsPageRequest = target
+            settingsRequestBackToNodes = showNodes
+            settingsRequestBackToDetail = nodeDetail
+            settingsSectionRequest = target
         } else {
             settingsBackToNodes = showNodes
             settingsBackToDetail = nodeDetail
-            settingsInitialPage = target
+            settingsInitialSection = target
             showSettings = true
         }
         showNodes = false
@@ -2701,10 +2715,12 @@ fun BrowserScreen(
     // or the Bookmarks page), what it was opened at and from is done with.
     LaunchedEffect(showSettings) {
         if (!showSettings) {
-            settingsInitialPage = null
-            settingsPageRequest = null
+            settingsInitialSection = null
+            settingsSectionRequest = null
             settingsBackToNodes = false
             settingsBackToDetail = null
+            settingsRequestBackToNodes = false
+            settingsRequestBackToDetail = null
         }
     }
 
@@ -2715,7 +2731,9 @@ fun BrowserScreen(
         NodesOverviewScreen(
             input = NodeOverviewInput(
                 nodeInfo = nodeInfo,
+                externalSwarm = externalSwarmBase,
                 ipfsInfo = ipfsInfo,
+                externalIpfs = externalIpfsBase,
                 radicleInfo = radicle.info,
                 radicleEnabled = radicle.enabled,
                 tor = tor,
@@ -2724,8 +2742,8 @@ fun BrowserScreen(
             ),
             onOpen = { destination ->
                 when (destination) {
-                    NodeDestination.Rpc -> openSettingsAt(SettingsPage.Names)
-                    NodeDestination.Gateways -> openSettingsAt(SettingsPage.Nodes)
+                    NodeDestination.Rpc -> openSettingsAt(SettingsSection.Rpc)
+                    NodeDestination.Gateways -> openSettingsAt(SettingsSection.Nodes)
                     else -> nodeDetail = destination
                 }
             },
@@ -2761,7 +2779,8 @@ fun BrowserScreen(
             },
             onDismiss = { nodeDetail = null },
             onOpenLogs = { showLogs = it },
-            onOpenTorSettings = { openSettingsAt(SettingsPage.Privacy) },
+            // At the Tor card, its switch in view.
+            onOpenTorSettings = { openSettingsAt(SettingsSection.Tor) },
         )
     }
 

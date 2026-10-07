@@ -15,6 +15,7 @@ import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** The Nodes & networks overview's rows (#416) and the menu row's note. */
@@ -75,8 +76,41 @@ class NodesOverviewTest {
         assertEquals("Using your node at http://192.168.1.10:1633", swarm.status)
         assertEquals(NodeHealth.Ok, swarm.health)
         assertEquals("Using your gateway at http://192.168.1.10:8080", row(input, NodeDestination.Ipfs).status)
-        assertEquals("Swarm: your own · IPFS: your own", row(input, NodeDestination.Gateways).status)
-        assertEquals("Swarm: this device · IPFS: this device", row(NodeOverviewInput(), NodeDestination.Gateways).status)
+        // In Settings' own words for its Nodes & networks summary.
+        assertEquals("Swarm: external · IPFS: external", row(input, NodeDestination.Gateways).status)
+        val embedded = NodeOverviewInput(
+            nodeInfo = NodeInfo(status = NodeStatus.Running),
+            ipfsInfo = IpfsInfo(status = IpfsStatus.Running),
+        )
+        assertEquals("Swarm: embedded · IPFS: embedded", row(embedded, NodeDestination.Gateways).status)
+    }
+
+    @Test
+    fun `the gateways row says off for a scheme the embedded node would serve but is switched off`() {
+        // Nothing serves ipfs:// with IPFS off and no gateway of your own.
+        val ipfsOff = NodeOverviewInput(
+            nodeInfo = NodeInfo(status = NodeStatus.Running),
+            ipfsInfo = IpfsInfo(status = IpfsStatus.Stopped),
+        )
+        assertEquals("Off", row(ipfsOff, NodeDestination.Ipfs).status)
+        assertEquals("Swarm: embedded · IPFS: off", row(ipfsOff, NodeDestination.Gateways).status)
+        assertEquals("Swarm: off · IPFS: off", row(NodeOverviewInput(), NodeDestination.Gateways).status)
+        // Your own gateway serves it whatever the embedded node does.
+        assertEquals(
+            "Swarm: off · IPFS: external",
+            row(NodeOverviewInput(externalIpfs = "http://192.168.1.10:8080"), NodeDestination.Gateways).status,
+        )
+        // Starting or failed: still the embedded node's to serve; its own row says how it's doing.
+        assertEquals(
+            "Swarm: embedded · IPFS: embedded",
+            row(
+                NodeOverviewInput(
+                    nodeInfo = NodeInfo(status = NodeStatus.Error),
+                    ipfsInfo = IpfsInfo(status = IpfsStatus.Starting),
+                ),
+                NodeDestination.Gateways,
+            ).status,
+        )
     }
 
     @Test
@@ -168,6 +202,32 @@ class NodesOverviewTest {
         assertEquals("2 nodes have a problem", nodesMenuNote(rows(twoDown)))
         // A failed embedded node the user's own endpoint stands in for isn't a problem.
         assertNull(nodesMenuNote(rows(swarmDown.copy(externalSwarm = "http://192.168.1.10:1633"))))
+    }
+
+    @Test
+    fun `a chain that failed while the light client runs the other is a problem, though its dot is amber`() {
+        val synced = MyotisChainStatus(
+            chainId = MyotisNetwork.Mainnet.chainId,
+            beaconState = "SYNCED",
+            running = true,
+            snapServingPeers = 1,
+            elReaderAvailable = true,
+        )
+        val failed = MyotisChainStatus(chainId = MyotisNetwork.Gnosis.chainId, error = "boom")
+        val input = NodeOverviewInput(
+            myotisInfo = MyotisInfo(status = MyotisStatus.Running, chains = listOf(synced, failed)),
+            myotisRunning = MyotisNetwork.entries.toSet(),
+        )
+        val light = row(input, NodeDestination.LightClient)
+        assertEquals("Ethereum: Synced · Gnosis: Failed", light.status)
+        // The page's own status colour, not red...
+        assertEquals(lightClientStatusTriple(lightClientInfoFor(input.myotisInfo, input.myotisRunning!!)).health, light.health)
+        assertEquals(NodeHealth.Ok, light.health)
+        // ...but the menu says so.
+        assertTrue(light.problem)
+        assertEquals("Ethereum light client has a problem", nodesMenuNote(rows(input)))
+        // A failed chain that's switched off isn't shown, so isn't a problem.
+        assertNull(nodesMenuNote(rows(input.copy(myotisRunning = setOf(MyotisNetwork.Mainnet)))))
     }
 
     @Test

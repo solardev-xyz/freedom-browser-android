@@ -80,7 +80,7 @@ class TorRoutingTest {
         assertTrue(off.contains(onion))
         val stopped = TorRouting.refusalHtml(onion, TorRouting.CODE_NOT_RUNNING, TorInfo())
         assertTrue(stopped.contains("<h1>Tor isn't running</h1>"))
-        assertTrue(stopped.contains("Nodes page"))
+        assertTrue(stopped.contains("Tor page"))
         // A start failure is shown, escaped.
         val failed = TorRouting.refusalHtml(
             onion, TorRouting.CODE_NOT_RUNNING,
@@ -1446,7 +1446,7 @@ class TorRoutingTest {
 
     @Test
     fun `an external proxy's Tor switched off (or never started) is "not running", not "no Tor client answers"`() {
-        // R1-M1: stopping Tor on the Nodes page publishes the proxy with no
+        // R1-M1: stopping Tor on the Tor page publishes the proxy with no
         // check pending and none running; nothing asked the proxy, so the
         // page says what the embedded client's would.
         val context = android.content.ContextWrapper(null)
@@ -1462,14 +1462,14 @@ class TorRoutingTest {
             // Started, and the check found nothing there.
             TorRouting.setExternal(context, orbot, confirmed = false, running = true)
             assertEquals(TorRouting.CODE_PROXY_DOWN, TorRouting.documentRefusalCode())
-            // Stopped on the Nodes page (MainActivity.stopExternalTor).
+            // Stopped on the Tor page (MainActivity.stopExternalTor).
             TorRouting.setExternal(context, orbot, confirmed = false)
             assertEquals(TorRouting.CODE_NOT_RUNNING, TorRouting.documentRefusalCode())
             // A stale embedded error doesn't reach the external page.
             TorRouting.onState(context, TorInfo(status = TorStatus.Error, error = HeldText.raw("arti failed")))
             val page = TorRouting.documentRefusalHtml(onion)
             assertTrue(page.contains("<h1>Tor isn't running</h1>"))
-            assertTrue(page.contains("Nodes page"))
+            assertTrue(page.contains("Tor page"))
             assertFalse(page.contains("no Tor client"))
             assertFalse(page.contains("Orbot"))
             assertFalse(page.contains("arti failed"))
