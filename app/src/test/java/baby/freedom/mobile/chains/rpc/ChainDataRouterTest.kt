@@ -662,6 +662,28 @@ class ChainDataRouterTest {
     }
 
     @Test
+    fun aProofTiersAnswerTheCallerCantUseGoesOnToTheNextTier() = runTest {
+        val net = Net()
+        listOf(a, b, c).forEach { url -> net.handlers[url] = { ok("0x2a") } }
+        val colibri = FakeSource { ChainDataResult("0x00", proof.copy(source = ChainSource.COLIBRI)) }
+        val r = router(net, listOf(chain(id = 100)), sources = mapOf(ChainSource.COLIBRI to colibri))
+        // Without a judge, the proof tier's answer is the answer.
+        assertEquals("0x00", r.request(100, "eth_call").result)
+        // Refused: the quorum is asked, and its answer comes back.
+        val judged = r.request(100, "eth_call", accept = { it == "0x2a" })
+        assertEquals("0x2a", judged.result)
+        assertEquals(ChainSource.QUORUM, judged.trust.source)
+        assertEquals(2, colibri.calls)
+        // No tier's answer will do: every tier failed.
+        try {
+            r.request(100, "eth_call", accept = { false })
+            fail()
+        } catch (e: ChainRpcException.AllSourcesFailed) {
+            assertTrue(e.message, e.failures.any { it.startsWith("colibri: answer not usable") })
+        }
+    }
+
+    @Test
     fun aProofSourceIsGivenTheChainsPoolUsersRpcsFirst() = runTest {
         val net = Net()
         val colibri = FakeSource { ChainDataResult("0x1", proof.copy(source = ChainSource.COLIBRI)) }

@@ -137,6 +137,12 @@ class ChainDataRouter internal constructor(
      * doubles and is refused again, window after window, for many minutes.
      * Every other rank falls through
      * like any failure. Without [rankError] nothing is kept or ends early.
+     *
+     * [accept], when given, judges each tier's answer: one it refuses is
+     * that tier's miss and the walk asks the next tier, as for a failure.
+     * For an answer only some tiers can give right — an `eth_call` whose
+     * result depends on `block.timestamp`, which Colibri's proven EVM runs
+     * at 0 — so the walk reaches a tier whose EVM has the block's context.
      */
     suspend fun request(
         chainId: Long,
@@ -145,6 +151,7 @@ class ChainDataRouter internal constructor(
         context: RoutingContext = RoutingContext.WALLET,
         agreeOn: ((Any?) -> Any?)? = null,
         rankError: ((ChainFailure) -> Int)? = null,
+        accept: ((Any?) -> Boolean)? = null,
     ): ChainDataResult {
         if (method !in READ_METHODS) throw ChainRpcException.UnsupportedMethod(method)
         val chain = chain(chainId)
@@ -172,7 +179,7 @@ class ChainDataRouter internal constructor(
                     else -> policy.timeoutMs
                 }
                 val t0 = clock()
-                val outcome: Any? = when (source) {
+                val answered: Any? = when (source) {
                     ChainSource.MYOTIS, ChainSource.COLIBRI ->
                         verified(source, chain, pool, method, normalized, waitMs, keeper, context)
                             .let { o -> if (agreeOn != null && o is ChainDataResult) o.copy(result = agreeOn(o.result)) else o }
@@ -214,6 +221,14 @@ class ChainDataRouter internal constructor(
                         }
                     }
                     ChainSource.DIRECT -> direct(chain, pool, body, policy, quorum, agreeOn, keeper) { nodeError = it }
+                }
+                // An answer the caller can't use from this tier (a proven EVM
+                // that ran at another block.timestamp) is this tier's miss:
+                // the next one is asked.
+                val outcome: Any? = if (answered is ChainDataResult && accept != null && !accept(answered.result)) {
+                    "answer not usable by the caller"
+                } else {
+                    answered
                 }
                 if (outcome is ChainDataResult) {
                     Log.i(TAG, "[chain-data] $method chain=$chainId via ${source.key} ${clock() - t0}ms " +

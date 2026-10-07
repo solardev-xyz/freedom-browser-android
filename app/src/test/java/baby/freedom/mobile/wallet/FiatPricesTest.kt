@@ -2,7 +2,12 @@ package baby.freedom.mobile.wallet
 
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.rpc.ChainDataResult
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.chains.rpc.ChainSource
+import baby.freedom.mobile.chains.rpc.ChainTrust
+import baby.freedom.mobile.chains.rpc.RoutingContext
+import baby.freedom.mobile.chains.rpc.VerifiedChainSource
 import baby.freedom.mobile.chains.rpc.RpcTransport
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import java.io.IOException
@@ -15,6 +20,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -107,10 +113,10 @@ class FiatPricesTest {
         }
     }
 
-    private fun evm(url: String, to: String, data: String): String {
+    private fun evm(url: String, to: String, data: String, time: Long = evmTime): String {
         if (to.equals(MULTICALL3, true) && data.startsWith("0x252dba42")) {
             val results = subCalls(data).map { (t, d) ->
-                val r = evm(url, t, d)
+                val r = evm(url, t, d, time)
                 if (!r.startsWith("\"result\"")) {
                     return "\"error\":{\"code\":3,\"message\":\"execution reverted: Multicall3: call failed\",\"data\":\"0x08c379a0" +
                         word(32) + word(23) + "4d756c746963616c6c333a2063616c6c206661696c6564".padEnd(64, '0') + "\"}"
@@ -129,7 +135,7 @@ class FiatPricesTest {
             return "\"result\":\"0x" + word(7) + word(raw) + word(v.second) + word(v.second) + word(7) + "\""
         }
         if (to.equals(MULTICALL3, true) && data == GET_CURRENT_BLOCK_TIMESTAMP) {
-            return "\"result\":\"0x" + word(evmTime) + "\""
+            return "\"result\":\"0x" + word(time) + "\""
         }
         ticks.entries.firstOrNull { it.key.equals(to, true) }?.let { (pool, tick) ->
             val back = reach[pool] ?: 86_400L
@@ -145,7 +151,7 @@ class FiatPricesTest {
             val seconds = BigInteger(data.substring(data.length - 128, data.length - 64), 16).toLong()
             // At time 0 (Colibri), "seconds ago" wraps to the future: Uniswap's
             // oracle doesn't revert OLD but answers the spot tick (here: 40 off).
-            if (evmTime != blockTime) {
+            if (time != blockTime) {
                 val c1 = 1_000_000L + (tick + 40) * seconds
                 return "\"result\":\"0x" + word(64) + word(192) + word(2) + word(1_000_000L) + word(c1) + word(2) + word(1) + word(2) + "\""
             }
@@ -168,7 +174,7 @@ class FiatPricesTest {
 
     private var setting = FiatCurrency.OFF
 
-    private fun prices() = FiatPrices(
+    private fun prices(sources: Map<ChainSource, VerifiedChainSource> = emptyMap()) = FiatPrices(
         loadSetting = { setting },
         saveSetting = { setting = it },
         rpc = {
@@ -182,6 +188,7 @@ class FiatPricesTest {
                         if (down) throw IOException("down")
                         """{"jsonrpc":"2.0","id":1,${answer(url, req)}}"""
                     },
+                    verifiedSources = sources,
                 ),
             )
         },
@@ -446,6 +453,56 @@ class FiatPricesTest {
         clock += FiatPrices.TTL_MS
         p.refresh()
         assertEquals(0.04484, p.quotes.value!!.perToken[token("BZZ").key]!!.toDouble(), 0.0001)
+    }
+
+    /**
+     * Colibri, as it is: proofs of Ethereum's state, its EVM run with
+     * block.timestamp 0. It answers only eth_call; the rest goes on to the
+     * quorum.
+     */
+    private inner class Colibri : VerifiedChainSource {
+        val observes = mutableListOf<String>()
+        override fun isAvailable(chainId: Long) = chainId == 1L
+        override suspend fun request(
+            chainId: Long,
+            method: String,
+            params: JSONArray,
+            rpcs: List<String>,
+            context: RoutingContext,
+        ): ChainDataResult {
+            if (method != "eth_call") throw IOException("not proven here")
+            val call = params.getJSONObject(0)
+            val data = call.getString("data")
+            if (data.contains("883bdbfd")) synchronized(observes) { observes += data }
+            val r = evm("colibri", call.getString("to"), data, time = 0)
+            val result = r.substringAfter("\"result\":\"", "").substringBefore("\"")
+            if (result.isEmpty()) throw IOException("reverted")
+            return ChainDataResult(
+                result,
+                ChainTrust(ChainTrust.Level.VERIFIED, ChainSource.COLIBRI, listOf("colibri"), emptyList(), listOf("colibri"), 1, 1, 0),
+            )
+        }
+    }
+
+    @Test
+    fun `an observe colibri answers at time 0 is asked again of the quorum, the fallback's too`() = runBlocking {
+        setting = FiatCurrency.USD
+        // BZZ / WETH can't reach back half an hour: the quorum reverts OLD on
+        // the full window; Colibri, at time 0, would answer every window.
+        reach[PriceFeeds.BZZ_WETH.pool] = 1092
+        val colibri = Colibri()
+        val p = prices(mapOf(ChainSource.COLIBRI to colibri))
+        p.refresh()
+        val q = p.quotes.value!!
+        assertEquals(0.04484, q.perToken[token("BZZ").key]!!.toDouble(), 0.0001)
+        assertEquals(q.perToken[token("BZZ").key], q.perToken[token("xBZZ").key])
+        assertEquals(1.1192, q.perToken[token("EURC").key]!!.toDouble(), 0.0001)
+        // Colibri was asked every observe() first — full windows and the fallback's —
+        // and its answers, at time 0, went on to the quorum.
+        val windows = colibri.observes.map { d -> subCalls(d)[1].second }
+        assertTrue(PriceFeeds.observe(1092) in windows)
+        assertTrue(PriceFeeds.OBSERVE in windows)
+        assertEquals(setOf(1800L, 1092L), observeWindows(PriceFeeds.BZZ_WETH.pool))
     }
 
     @Test

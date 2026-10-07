@@ -539,13 +539,20 @@ class FiatPrices internal constructor(
      * if the EVM that ran it had [blockTime], the block header's time: a
      * proof covers the pool's storage, not the time an EVM is given, and
      * Colibri's runs at 0 — where `observe()` doesn't revert `OLD` but
-     * answers the spot tick as the average. That answer is no price.
+     * answers the spot tick as the average. Such an answer is that tier's
+     * miss: the router asks the next tier (the RPC quorum, whose EVM has
+     * the block's time) for both the full window and the fallback's, and
+     * only when no tier answers on time is there no price.
      * Without the header's time, nothing is asked.
      */
     private suspend fun twap(rpc: WalletRpc, t: PriceFeeds.Twap, block: String?, blockTime: Long?): BigDecimal? = guarded {
         if (block == null || blockTime == null) return@guarded null
+        val onTime = { r: String -> FiatMath.timedResult(r, blockTime) != null }
         val full = try {
-            rpc.call(t.chainId, JSONObject().put("to", PriceFeeds.MULTICALL3).put("data", PriceFeeds.timed(t.pool, PriceFeeds.OBSERVE)), block)
+            rpc.call(
+                t.chainId, JSONObject().put("to", PriceFeeds.MULTICALL3).put("data", PriceFeeds.timed(t.pool, PriceFeeds.OBSERVE)),
+                block, accept = onTime,
+            )
         } catch (e: ChainRpcException.Rpc) {
             if (!e.deterministic) throw e
             null
@@ -555,7 +562,7 @@ class FiatPrices internal constructor(
             FiatMath.timedResult(full.value, blockTime)?.let { FiatMath.twapTick(it, PriceFeeds.TWAP_SECONDS) }
         } else {
             val window = fallbackWindow(rpc, t, block, blockTime) ?: return@guarded null
-            poolCall(rpc, t, PriceFeeds.MULTICALL3, PriceFeeds.timed(t.pool, PriceFeeds.observe(window)), block)
+            poolCall(rpc, t, PriceFeeds.MULTICALL3, PriceFeeds.timed(t.pool, PriceFeeds.observe(window)), block, onTime)
                 ?.let { FiatMath.timedResult(it, blockTime) }
                 ?.let { FiatMath.twapTick(it, window) }
         }
@@ -574,8 +581,15 @@ class FiatPrices internal constructor(
     }
 
     /** An `eth_call` to [to] on [t]'s chain at [block]; null unless the answer is trusted. */
-    private suspend fun poolCall(rpc: WalletRpc, t: PriceFeeds.Twap, to: String, data: String, block: String): String? {
-        val r = rpc.call(t.chainId, JSONObject().put("to", to).put("data", data), block)
+    private suspend fun poolCall(
+        rpc: WalletRpc,
+        t: PriceFeeds.Twap,
+        to: String,
+        data: String,
+        block: String,
+        accept: ((String) -> Boolean)? = null,
+    ): String? {
+        val r = rpc.call(t.chainId, JSONObject().put("to", to).put("data", data), block, accept)
         return if (trusted(r.trust)) r.value else null
     }
 
