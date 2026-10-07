@@ -52,8 +52,12 @@ import kotlinx.coroutines.launch
  * by default, so a single tap on Allow was a permanent grant.
  */
 internal enum class PermissionChoice {
-    /** Allowed for this run only ([PermissionSession]): not stored, gone once Freedom is closed. */
-    ALLOW_WHILE_VISITING,
+    /**
+     * Allowed for this run only ([PermissionSession]): not stored, gone
+     * once Freedom is closed — but not when the user leaves the site, so
+     * it is labelled "this session", not "while visiting".
+     */
+    ALLOW_THIS_SESSION,
 
     /** Allowed and remembered: a standing grant, revocable from Settings. */
     ALLOW_EVERY_VISIT,
@@ -69,14 +73,14 @@ internal enum class PermissionChoice {
  */
 internal fun permissionChoices(private: Boolean): List<PermissionChoice> =
     if (private) {
-        listOf(PermissionChoice.ALLOW_WHILE_VISITING, PermissionChoice.DONT_ALLOW)
+        listOf(PermissionChoice.ALLOW_THIS_SESSION, PermissionChoice.DONT_ALLOW)
     } else {
-        listOf(PermissionChoice.ALLOW_WHILE_VISITING, PermissionChoice.ALLOW_EVERY_VISIT, PermissionChoice.DONT_ALLOW)
+        listOf(PermissionChoice.ALLOW_THIS_SESSION, PermissionChoice.ALLOW_EVERY_VISIT, PermissionChoice.DONT_ALLOW)
     }
 
 /** [choice] as the broker's answer; nothing is remembered from a private tab. */
 internal fun permissionAnswer(choice: PermissionChoice, private: Boolean): PromptAnswer = when (choice) {
-    PermissionChoice.ALLOW_WHILE_VISITING -> PromptAnswer.Allow(remember = false)
+    PermissionChoice.ALLOW_THIS_SESSION -> PromptAnswer.Allow(remember = false)
     PermissionChoice.ALLOW_EVERY_VISIT -> PromptAnswer.Allow(remember = !private)
     PermissionChoice.DONT_ALLOW -> PromptAnswer.Block(remember = !private)
 }
@@ -84,7 +88,9 @@ internal fun permissionAnswer(choice: PermissionChoice, private: Boolean): Promp
 /**
  * The site-permission prompt (#81): "<site> wants to use your camera and
  * microphone", then one button per [PermissionChoice] (#419) — "Allow
- * while visiting" (this run only, not remembered), "Allow every visit"
+ * this session" (this run only, not remembered: it lasts until Freedom
+ * is closed, on every page of the site, so it isn't called "while
+ * visiting"), "Allow every visit"
  * (remembered) and "Don't allow" (a remembered block); in a private tab
  * just "Allow" and "Don't allow", both lasting the private session. A
  * standing grant is always its own, explicit tap: no box decides it.
@@ -137,7 +143,7 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
                         if (prompt.private) {
                             R.string.library_permission_prompt_private
                         } else {
-                            R.string.library_permission_prompt_visiting_hint
+                            R.string.library_permission_prompt_session_hint
                         },
                     ),
                     style = MaterialTheme.typography.bodyMedium,
@@ -169,10 +175,10 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
 }
 
 private fun permissionChoiceLabel(choice: PermissionChoice, private: Boolean): Int = when (choice) {
-    // In a private tab this is the only Allow, and "while visiting" would
-    // undersell it: it lasts the private session (the note above says so).
-    PermissionChoice.ALLOW_WHILE_VISITING ->
-        if (private) R.string.common_allow else R.string.library_permission_prompt_allow_visiting
+    // In a private tab this is the only Allow, and "this session" would
+    // mislead: it lasts the private session (the note above says so).
+    PermissionChoice.ALLOW_THIS_SESSION ->
+        if (private) R.string.common_allow else R.string.library_permission_prompt_allow_session
     PermissionChoice.ALLOW_EVERY_VISIT -> R.string.library_permission_prompt_allow_always
     PermissionChoice.DONT_ALLOW -> R.string.library_permission_prompt_dont_allow
 }

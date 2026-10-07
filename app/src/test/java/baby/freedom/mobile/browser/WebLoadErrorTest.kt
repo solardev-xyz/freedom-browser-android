@@ -91,6 +91,22 @@ class WebLoadErrorTest {
     }
 
     @Test
+    fun `the typed address is dropped once another page commits in the tab`() {
+        val typed = TypedAddress("https://example.cmo", "example.cmo", "https://duckduckgo.com/?q=example.cmo")
+        // Its own load, its error page, a Reload or Try again: kept.
+        assertEquals(typed, typedAddressAfterCommit(typed, "https://example.cmo/"))
+        assertEquals(typed, typedAddressAfterCommit(typed, "https://example.cmo#top"))
+        // Browsing on by links (or the search link itself): dropped, so a
+        // later link back to the same dead host gets no offer.
+        var kept = typedAddressAfterCommit(typed, "https://other.example/")
+        assertEquals(null, kept)
+        kept = typedAddressAfterCommit(kept, "https://example.cmo/")
+        assertEquals(null, searchInsteadFor(kept, "https://example.cmo/", NetFailure.NOT_FOUND))
+        assertEquals(null, typedAddressAfterCommit(typed, null))
+        assertEquals(null, typedAddressAfterCommit(null, "https://example.cmo/"))
+    }
+
+    @Test
     fun `page offers search instead, escaped, after Try again`() {
         val typed = TypedAddress("https://a.cmo", "a\"<b>.cmo", "https://s.example/?q=a%22&x=<b>")
         val html = netErrorPageHtml("https://a.cmo", "a.cmo", NetFailure.NOT_FOUND, null, searchInstead = typed)

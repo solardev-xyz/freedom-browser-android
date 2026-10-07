@@ -50,7 +50,7 @@ import org.junit.runner.RunWith
  * #287 R5-M1, #419: the site-permission prompt's "Allow every visit",
  * which stores a standing grant: neither an obscured tap nor one before
  * the prompt armed answers the prompt; a clean armed tap does, and
- * "Allow while visiting" is not remembered.
+ * "Allow this session" is not remembered.
  */
 @RunWith(AndroidJUnit4::class)
 class StandingGrantTapjackDeviceTest {
@@ -206,11 +206,11 @@ class StandingGrantTapjackDeviceTest {
     }
 
     @Test
-    fun allowWhileVisitingIsNotRememberedOnASitePermissionPrompt() {
+    fun allowThisSessionIsNotRememberedOnASitePermissionPrompt() {
         ActivityScenario.launch(ComponentActivity::class.java).use { scenario ->
             val prompt = cameraPrompt
             scenario.onActivity { it.setContent { FreedomTheme { SitePermissionPrompt(prompt) } } }
-            val button = findStableText(ALLOW_WHILE_VISITING)
+            val button = findStableText(ALLOW_THIS_SESSION)
             SystemClock.sleep(1_000)
             tap(button)
             assertEquals(PromptAnswer.Allow(remember = false), awaitAnswer(prompt))
@@ -362,6 +362,6 @@ class StandingGrantTapjackDeviceTest {
 
     private companion object {
         const val ALLOW_EVERY_VISIT = "Allow every visit"
-        const val ALLOW_WHILE_VISITING = "Allow while visiting"
+        const val ALLOW_THIS_SESSION = "Allow this session"
     }
 }

@@ -2957,6 +2957,9 @@ private fun buildRefreshableWebView(
                 state.showsErrorPage = ErrorPage.isErrorPage(url) ||
                     nameRefusal.isRefused(url) ||
                     certRefusal.isServed(url)
+                // Another page: what was typed no longer stands behind a
+                // later load of that address (#419).
+                state.typedAddress = typedAddressAfterCommit(state.typedAddress, url)
                 mainFrameChain.committed()
                 (view as? PageWebView)?.historyStepCommitted()
                 // A Hard reload's load committed: its finish ends the

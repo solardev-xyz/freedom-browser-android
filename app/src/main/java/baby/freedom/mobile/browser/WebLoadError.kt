@@ -134,6 +134,16 @@ internal fun typedAddressFor(input: String, url: String, searchTemplate: String)
 }
 
 /**
+ * What's left of the tab's [typed] address once a document for [committedUrl]
+ * starts: kept while the tab is still on that address (its own load, its
+ * error page, a Reload or Try again), dropped as soon as anything else
+ * commits — so a link or bookmark followed later in the same tab to the
+ * same dead address isn't mistaken for what was typed (#419).
+ */
+internal fun typedAddressAfterCommit(typed: TypedAddress?, committedUrl: String?): TypedAddress? =
+    typed?.takeIf { committedUrl != null && it.isFor(committedUrl) }
+
+/**
  * The "Search for … instead" offer for a failed load of [failedUrl]: only
  * when the address couldn't be found ([NetFailure.NOT_FOUND]) and it is
  * the one the user typed ([typed]) — a link or a bookmark to a dead host

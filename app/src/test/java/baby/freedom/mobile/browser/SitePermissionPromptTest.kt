@@ -9,7 +9,7 @@ class SitePermissionPromptTest {
     @Test
     fun `a normal tab offers three choices, the standing grant never first`() {
         assertEquals(
-            listOf(PermissionChoice.ALLOW_WHILE_VISITING, PermissionChoice.ALLOW_EVERY_VISIT, PermissionChoice.DONT_ALLOW),
+            listOf(PermissionChoice.ALLOW_THIS_SESSION, PermissionChoice.ALLOW_EVERY_VISIT, PermissionChoice.DONT_ALLOW),
             permissionChoices(private = false),
         )
     }
@@ -17,14 +17,14 @@ class SitePermissionPromptTest {
     @Test
     fun `a private tab has nothing to remember, so no every-visit choice`() {
         assertEquals(
-            listOf(PermissionChoice.ALLOW_WHILE_VISITING, PermissionChoice.DONT_ALLOW),
+            listOf(PermissionChoice.ALLOW_THIS_SESSION, PermissionChoice.DONT_ALLOW),
             permissionChoices(private = true),
         )
     }
 
     @Test
     fun `only Allow every visit is a remembered allow`() {
-        assertEquals(PromptAnswer.Allow(remember = false), permissionAnswer(PermissionChoice.ALLOW_WHILE_VISITING, private = false))
+        assertEquals(PromptAnswer.Allow(remember = false), permissionAnswer(PermissionChoice.ALLOW_THIS_SESSION, private = false))
         assertEquals(PromptAnswer.Allow(remember = true), permissionAnswer(PermissionChoice.ALLOW_EVERY_VISIT, private = false))
         assertEquals(PromptAnswer.Block(remember = true), permissionAnswer(PermissionChoice.DONT_ALLOW, private = false))
     }

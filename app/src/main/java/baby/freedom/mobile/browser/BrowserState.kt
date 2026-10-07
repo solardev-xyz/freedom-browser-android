@@ -844,7 +844,8 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * The address the user last typed into this tab's address bar and
      * the web URL it became ([typedAddressFor]), so that URL's "address
      * not found" page can offer to search for it instead (#419).
-     * Replaced on every submit.
+     * Replaced on every submit, and dropped once a document for any
+     * other address commits ([typedAddressAfterCommit]).
      */
     @Volatile
     internal var typedAddress: TypedAddress? = null
