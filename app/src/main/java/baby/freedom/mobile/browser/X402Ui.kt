@@ -207,14 +207,19 @@ private fun Field(label: String, value: String) {
 
 /**
  * Revoke [a] in [store] and offer Undo on [notices], which puts it back as
- * it was ([X402Store.restore]: not after the wallet's removal cleared the
- * store, nor once its window ended). Says so when it couldn't be saved.
+ * it was when revoked ([X402Store.restore]: not after the wallet's removal
+ * cleared the store, nor once its window ended). What comes back is the
+ * allowance as stored at the revoke ([X402Store.take]), not [a] as the list
+ * last showed it — a payment counted since then stays counted (#431 R3-M2).
+ * Says so when it couldn't be saved; no Undo when nothing was there to take.
  */
 internal suspend fun revokeWithUndo(store: X402Store, a: X402Store.Allowance, notices: UndoNotices) {
     val era = store.clearEra
-    if (!store.revoke(a.origin, a.chainId, a.asset, a.account)) {
+    val taken = store.take(a.origin, a.chainId, a.asset, a.account)
+    if (!taken.saved) {
         notices.say(Strings.get(R.string.signing_x402_revoke_failed))
         return
     }
-    notices.show(Strings.get(R.string.signing_x402_undo_revoked, permissionOriginDisplay(a.origin))) { store.restore(a, era) }
+    val was = taken.was ?: return
+    notices.show(Strings.get(R.string.signing_x402_undo_revoked, permissionOriginDisplay(a.origin))) { store.restore(was, era) }
 }

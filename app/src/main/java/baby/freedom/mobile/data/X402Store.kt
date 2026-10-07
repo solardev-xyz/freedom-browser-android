@@ -361,7 +361,29 @@ class X402Store internal constructor(
 
     /** Take away [origin]'s allowance for [asset] on [chainId] from [account]; `false` if it couldn't be written. */
     suspend fun revoke(origin: String, chainId: Long, asset: String, account: String): Boolean =
-        write { it.remove(allowKey(origin, chainId, asset, account)) }
+        take(origin, chainId, asset, account).saved
+
+    /**
+     * What [take] did: [saved] whether the removal was written; [was] the
+     * allowance it removed, as stored at that moment (null if none was).
+     */
+    data class Taken(val saved: Boolean, val was: Allowance?)
+
+    /**
+     * [revoke], also handing back the allowance removed, read in the same
+     * write — so an Undo puts back what was really stored, with every
+     * payment counted against it up to the revoke, not a copy the UI read
+     * earlier that a payment since has overtaken (#431 R3-M2).
+     */
+    suspend fun take(origin: String, chainId: Long, asset: String, account: String): Taken {
+        var was: Allowance? = null
+        val written = write { prefs ->
+            val key = allowKey(origin, chainId, asset, account)
+            was = prefs[key]?.let { decodeAllowance(key.name.removePrefix(ALLOW), it) }
+            prefs.remove(key)
+        }
+        return Taken(written, was.takeIf { written })
+    }
 
     /**
      * Put back [a], as it was, after the user revoked it and tapped Undo

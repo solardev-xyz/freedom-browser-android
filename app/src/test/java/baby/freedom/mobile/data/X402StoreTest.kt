@@ -482,4 +482,25 @@ class X402StoreTest {
         assertFalse(s.restore(a, era))
         assertTrue(s.allowances.first().isEmpty())
     }
+
+    @Test
+    fun `Undo puts back the allowance as revoked, with a payment counted after the list was read`() = runBlocking {
+        val s = store()
+        s.grant(cap = 100, spent = 30)
+        // What the wallet list last showed.
+        val shown = s.allowances.first().single()
+        val era = s.clearEra
+        // An auto-pay in another tab, after that read but before Revoke.
+        assertTrue(s.consume(site, 8453, usdc, me, payee, BigInteger.valueOf(20)))
+        val taken = s.take(shown.origin, shown.chainId, shown.asset, shown.account)
+        assertTrue(taken.saved)
+        assertEquals(BigInteger.valueOf(50), taken.was?.spent)
+        assertTrue(s.allowances.first().isEmpty())
+        assertTrue(s.restore(taken.was!!, era))
+        // Not the older snapshot's 30: the site can't spend that payment twice.
+        assertEquals(BigInteger.valueOf(50), s.allowances.first().single().spent)
+        // Nothing there: nothing taken, nothing to Undo.
+        assertTrue(s.revoke(site, 8453, usdc, me))
+        assertEquals(X402Store.Taken(true, null), s.take(site, 8453, usdc, me))
+    }
 }

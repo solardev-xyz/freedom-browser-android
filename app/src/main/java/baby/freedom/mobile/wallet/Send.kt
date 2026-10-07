@@ -1921,10 +1921,34 @@ class WalletSender internal constructor(
             }.getOrNull()
         }
 
-        /** A node's or contract's words, for one line of the page: no control or bidi characters, at most 160 characters. */
+        /**
+         * A node's or contract's words — untrusted, and quoted on the
+         * wallet's own can't-send sheet as well as to the page — as one
+         * line: every line break, line/paragraph separator (U+2028/U+2029)
+         * or other space run becomes a single space, so the text can't
+         * start a line of its own that reads like the wallet's copy; every
+         * code point [MessageSigning.hides] (controls, bidi and other
+         * format characters, blank and supplementary-plane invisibles,
+         * stacked marks) is dropped. Judged per code point, never per
+         * UTF-16 `Char`, and cut at 160 code points without splitting a
+         * surrogate pair (#431 R3-M1).
+         */
         internal fun clip(text: String): String {
-            val clean = text.filter { !it.isISOControl() && Character.getType(it) != Character.FORMAT.toInt() }.trim()
-            return if (clean.length > 160) clean.take(159) + "…" else clean
+            val out = StringBuilder()
+            val scan = MessageSigning.Scan()
+            var space = false
+            text.codePoints().forEach { cp ->
+                if (Character.isWhitespace(cp) || Character.isSpaceChar(cp) || cp == 0x85) {
+                    scan.hides(' '.code)
+                    space = out.isNotEmpty()
+                } else if (!scan.hides(cp)) {
+                    if (space) out.append(' ')
+                    space = false
+                    out.appendCodePoint(cp)
+                }
+            }
+            if (out.codePointCount(0, out.length) <= 160) return out.toString()
+            return out.substring(0, out.offsetByCodePoints(0, 159)) + "…"
         }
 
         private val REVERTED = Regex("execution reverted", RegexOption.IGNORE_CASE)
