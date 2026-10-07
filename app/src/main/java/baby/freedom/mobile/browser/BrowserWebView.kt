@@ -465,6 +465,13 @@ private fun HttpURLConnection.applySwarmRequestHeaders() {
  * grantee list) — which a page's request mustn't carry through to the
  * gateway (#358)? Pages publish through `window.swarm`, which asks the
  * user.
+ *
+ * This applies to reads too, the virtual-origin GET proxy included: a
+ * page can't download ACT content shared with this node by sending
+ * `Swarm-Act`, `Swarm-Act-Publisher` and `Swarm-Act-History-Address` on a
+ * GET, because decrypting it would use the node's own key without the
+ * user being asked. Such a request reaches the node without those headers
+ * and gets the encrypted reference's plain (undecryptable) answer.
  */
 internal fun isNodeAuthorityHeader(name: String): Boolean =
     name.lowercase().let { it == "swarm-postage-batch-id" || it.startsWith("swarm-act") }
@@ -5868,7 +5875,9 @@ internal fun interceptVirtualRequest(
     TorRouting.refusalFor(req)?.let { return it }
     // A page's request to the Swarm node's own API — buying stamps,
     // funding the chequebook, reading its wallet or addresses — is refused
-    // outright; only the dapp surface stays open (#114, #283, fail closed).
+    // outright; the dapp surface stays open to reads only, and every write
+    // (any method but GET/HEAD) is refused on any host (#114, #283, #358,
+    // fail closed).
     NodeApiGuard.refusalFor(req)?.let { return it }
     val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
     // A contract-hosted app's origin (#123) is answered by its own rules.

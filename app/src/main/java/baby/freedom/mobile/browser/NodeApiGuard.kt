@@ -226,8 +226,8 @@ internal object NodeApiGuard {
     }
 
     /**
-     * Is [url] the external Swarm node's: on its origin (scheme, host as the
-     * WHATWG parser reads it, and port) *and* under its path? Settings keep
+     * Is [url] the external Swarm node's: on its host (as the WHATWG parser
+     * reads it) and port *and* under its path? Settings keep
      * a path ([ExternalEndpoints.normalize]), so a node behind a reverse
      * proxy at `https://me.example/bee` is only `/bee` and what's under
      * it; the rest of `me.example` (a login form, another app) is some
@@ -242,12 +242,26 @@ internal object NodeApiGuard {
      * resolved. A reading the proxy doesn't share can only refuse a write
      * to some other path on that origin, never let one through to the
      * node. Not for `""` (no external node).
+     *
+     * The scheme isn't compared, and the two web ports count as one
+     * ([WEB_PORTS]): a proxy that serves the same `/bee` location on 80
+     * and 443 in one server block hands the node an `http` page's write
+     * just as well, so a node set as `https://me.example/bee` covers
+     * `http://me.example/bee/…` too (R3-M3, fail closed). A non-web port
+     * is matched exactly — another port on that host is another server.
+     *
+     * Not covered: a proxy whose location has no trailing slash
+     * (`location /bee` with `proxy_pass http://node/`) also forwards
+     * `/beehive/…` to the node as `/hive/…`; a sibling path that merely
+     * starts with the node's is taken to be another app on that origin,
+     * as a correctly configured proxy treats it. Like a redirect hop, a
+     * misconfigured proxy is past what this page-facing check can see.
      */
     private fun isExternalNode(url: String, externalSwarm: String): Boolean {
         if (externalSwarm.isEmpty()) return false
         val port = effectivePort(url) ?: return false
-        if (port != effectivePort(externalSwarm)) return false
-        if (!url.substringBefore("://").equals(externalSwarm.substringBefore("://"), ignoreCase = true)) return false
+        val nodePort = effectivePort(externalSwarm) ?: return false
+        if (port != nodePort && !(port in WEB_PORTS && nodePort in WEB_PORTS)) return false
         val host = WhatwgHost.parse(url)?.hostname?.trimEnd('.') ?: return false
         if (host != WhatwgHost.parse(externalSwarm)?.hostname?.trimEnd('.')) return false
         val base = resolvedSegments(pathOf(externalSwarm), decode = true)
@@ -334,6 +348,9 @@ internal object NodeApiGuard {
         val first = segments.firstOrNull()
         return first in CHAIN_PATHS || (first == "v0" && segments.getOrNull(1) in V0_CHAIN_PATHS)
     }
+
+    /** http's and https's default ports: one proxy server block often listens on both. */
+    private val WEB_PORTS = setOf(80, 443)
 
     private fun isWrite(method: String): Boolean = method.uppercase().let { it != "GET" && it != "HEAD" }
 

@@ -72,9 +72,10 @@ No page writes through a Swarm node directly (#358, as on desktop's
 with a method other than GET or HEAD — on any host: the embedded node,
 a Bee node on the LAN (`http://192.168.1.20:1633`), any name — and every
 such request to the external Swarm node set in Settings (on its own
-origin and port, under its path: a node at `https://me.example/bee` is
-only `/bee` and what's under it, the rest of `me.example` being some
-other site) is answered `403` by the app and never reaches the node:
+host and port — `http` and `https` on the default ports 80/443 count as
+one, since one proxy server block often listens on both — under its
+path: a node at `https://me.example/bee` is only `/bee` and what's under
+it, the rest of `me.example` being some other site) is answered `403` by the app and never reaches the node:
 
 ```js
 await fetch('http://127.0.0.1:1633/bzz', { method: 'POST', body, headers }) // 403
@@ -89,7 +90,10 @@ LAN node. A CORS preflight is judged as the request it asks for: the app
 answers a read's preflight to the embedded gateway (`GET, HEAD` only)
 and refuses a write's. Page-supplied `Swarm-Postage-Batch-Id` and
 `Swarm-Act*` headers are dropped from requests the interceptor forwards
-to the gateway.
+to the gateway — reads included: a page can't have the node decrypt ACT
+content shared with it (`Swarm-Act`, `Swarm-Act-Publisher`,
+`Swarm-Act-History-Address` on a GET through a virtual origin), since
+that would use the node's own key without asking the user.
 
 Reads keep working: dweb pages load their content through the virtual
 origins, a page can still read `/bzz`, `/bytes`, `/chunks`, `/soc`,
@@ -126,7 +130,11 @@ chain transport): an on-chain write that gets past the interceptor
 fails at the node instead. An upload a page sneaks past that way (a form
 POST that a redirector answers with a 307 to `/bzz`) does reach the
 node, as it does from another browser on the device; that's a limit of
-the interceptor, not something it allows. Nor does a WebSocket
+the interceptor, not something it allows. Nor can it see a reverse
+proxy's own path mapping: one whose location for the external node has
+no trailing slash (`location /bee` proxied to the node's root) also
+hands the node `/beehive/…`, which the app takes to be another app on
+that origin. Nor does a WebSocket
 handshake ever reach the interceptor, and ant checks no `Origin` on an
 upgrade: a page can still push chunks through
 `ws://127.0.0.1:1633/chunks/stream`, each with a postage stamp it signed

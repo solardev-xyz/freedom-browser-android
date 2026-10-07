@@ -197,14 +197,25 @@ class NodeApiGuardTest {
         // Its reads aren't the device's API and pass as before.
         assertFalse(refused("GET", "https://bee.example:8443/bzz/ab/", externalSwarm = external))
         assertFalse(refused("GET", "https://bee.example:8443/wallet", externalSwarm = external))
-        // Another port, scheme or host is another server.
+        // Another port or host is another server; the scheme alone isn't (R3-M3).
         assertFalse(refused("POST", "https://bee.example/bzz", externalSwarm = external))
-        assertFalse(refused("POST", "http://bee.example:8443/bzz", externalSwarm = external))
+        assertFalse(refused("POST", "http://bee.example/bzz", externalSwarm = external))
+        assertTrue(refused("POST", "http://bee.example:8443/bzz", externalSwarm = external))
         assertFalse(refused("POST", "https://other.example:8443/bzz", externalSwarm = external))
         assertFalse(refused("POST", "https://bee.example.evil.example:8443/bzz", externalSwarm = external))
         // A default port matches the external node's implicit one.
         assertTrue(refused("POST", "https://gw.example:443/bzz", externalSwarm = "https://gw.example"))
         assertTrue(refused("POST", "https://gw.example/feeds/a/b", externalSwarm = "https://gw.example/"))
+        // One proxy server block on 80 and 443: an http page's write reaches the same node (R3-M3).
+        for (url in listOf(
+            "http://me.example/bee/bzz", "http://me.example:80/bee/pins/ab", "https://me.example/bee/bzz",
+            "http://gw.example/bzz",
+        )) {
+            assertTrue(url, refused("POST", url, externalSwarm = if ("gw." in url) "https://gw.example" else "https://me.example/bee"))
+        }
+        assertFalse(refused("POST", "http://me.example/login", externalSwarm = "https://me.example/bee"))
+        assertFalse(refused("POST", "http://me.example:8080/bee/bzz", externalSwarm = "https://me.example/bee"))
+        assertTrue(refused("POST", "https://bee.example/bzz", externalSwarm = "http://bee.example"))
         // No external node: nothing off the gateway port.
         assertFalse(refused("POST", "https://bee.example:8443/bzz"))
     }
