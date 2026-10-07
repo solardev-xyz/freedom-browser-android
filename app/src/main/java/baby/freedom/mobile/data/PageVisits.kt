@@ -52,8 +52,15 @@ internal object PageVisits {
      * back-to-back visits of the same page ([pageKey]) as one row
      * ([representative]). A visit of the page later on, after another
      * page in between, is a row of its own, as every visit is.
+     *
+     * Two neighbours [apart] says belong apart (on different days, or
+     * any two in a search's results, where the visits between them may
+     * be filtered out) stay separate rows even if they're of one page.
      */
-    fun mergeRuns(entries: List<HistoryEntry>): Merged {
+    fun mergeRuns(
+        entries: List<HistoryEntry>,
+        apart: (newer: HistoryEntry, older: HistoryEntry) -> Boolean = { _, _ -> false },
+    ): Merged {
         val rows = ArrayList<HistoryEntry>()
         val ids = HashMap<Long, List<Long>>()
         var run = ArrayList<HistoryEntry>()
@@ -64,7 +71,9 @@ internal object PageVisits {
             ids[row.id] = run.map { it.id }
         }
         for (entry in entries) {
-            if (run.isNotEmpty() && pageKey(run.last().url) != pageKey(entry.url)) {
+            if (run.isNotEmpty() &&
+                (pageKey(run.last().url) != pageKey(entry.url) || apart(run.last(), entry))
+            ) {
                 flush()
                 run = ArrayList()
             }

@@ -685,7 +685,8 @@ fun BrowserScreen(
     val downloadNotices = remember { DownloadNotices() }
     // The switcher's pane (#418): it opens on the active tab's kind, and
     // only its Private pane shows private tabs' cards.
-    var switcherPrivatePane by remember(showTabSwitcher) { mutableStateOf(tabs.active.private) }
+    // Saveable like [showTabSwitcher], so a rotation keeps the pane.
+    var switcherPrivatePane by rememberSaveable(showTabSwitcher) { mutableStateOf(tabs.active.private) }
     // Is anything from a private session (#86) on screen? A private
     // download's notice (negative id) names its file, so it's only shown
     // while that's the case, and withdrawn when the screen goes back to

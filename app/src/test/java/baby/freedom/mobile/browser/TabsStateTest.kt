@@ -707,7 +707,10 @@ class TabsStateTest {
         tabs.switchTo(1) // b
         val closed = tabs.closeRegularTabs()
         assertEquals(3, closed.count)
-        assertEquals(listOf("p1"), tabs.titles)
+        // A blank normal tab takes their place: the active tab doesn't
+        // turn into the private one.
+        assertEquals(listOf("", "p1"), tabs.titles)
+        assertFalse(tabs.active.private)
         assertTrue(tabs.reopenClosed(closed.undo!!))
         assertEquals(listOf("a", "b", "c", "p1"), tabs.titles)
         assertEquals("b", tabs.active.title)
@@ -750,5 +753,59 @@ class TabsStateTest {
         assertTrue(switcherHasPanes(privateTabsOffered = true, anyPrivate = false))
         assertTrue(switcherHasPanes(privateTabsOffered = false, anyPrivate = true))
         assertFalse(switcherHasPanes(privateTabsOffered = false, anyPrivate = false))
+    }
+
+    @Test
+    fun `closing a private pane's active tab passes to another private tab`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        tabs.active.visit("a")
+        tabs.newTab(private = true).visit("p1")
+        tabs.newTab().visit("b")
+        tabs.newTab(private = true).visit("p2")
+        tabs.switchTo(1) // p1
+        tabs.closeTab(1, offerUndo = true)
+        assertEquals("p2", tabs.active.title)
+        assertTrue(tabs.active.private)
+        // Nearest before, when none follows.
+        tabs.newTab(private = true).visit("p3")
+        tabs.closeTab(tabs.tabs.lastIndex, offerUndo = true)
+        assertEquals("p2", tabs.active.title)
+    }
+
+    @Test
+    fun `closing a tabs pane's active tab passes to another normal tab`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        tabs.active.visit("a")
+        tabs.newTab().visit("b")
+        tabs.newTab(private = true).visit("p")
+        tabs.switchTo(1) // b
+        tabs.closeTab(1, offerUndo = true)
+        assertEquals("a", tabs.active.title)
+        assertFalse(tabs.active.private)
+    }
+
+    @Test
+    fun `closing the last normal tab with private tabs open leaves a blank normal tab`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        tabs.active.visit("a")
+        tabs.newTab(private = true).visit("p")
+        tabs.switchTo(0)
+        val closed = tabs.closeTab(0, offerUndo = true)
+        assertEquals(listOf("", "p"), tabs.titles)
+        assertFalse(tabs.active.private)
+        // Undo takes the blank tab's place again.
+        assertTrue(tabs.reopenClosed(closed.undo!!))
+        assertEquals(listOf("a", "p"), tabs.titles)
+        assertEquals("a", tabs.active.title)
+    }
+
+    @Test
+    fun `closing the last private tab hands over to a normal tab`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        tabs.active.visit("a")
+        tabs.newTab(private = true).visit("p")
+        tabs.closeTab(1)
+        assertEquals(listOf("a"), tabs.titles)
+        assertEquals("a", tabs.active.title)
     }
 }

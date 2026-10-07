@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.style.TextOverflow
 import baby.freedom.mobile.data.PageVisits
 import androidx.compose.foundation.background
@@ -86,6 +87,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeoutOrNull
 import java.text.DateFormat
 import java.time.Duration
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZonedDateTime
@@ -106,9 +108,10 @@ import java.util.Date
  * opened from a private tab; see [entryOpenTargets]).
  *
  * Rows are flat (#418): favicon, title and site; the full address is in
- * the long-press menu. Back-to-back visits of one page that differ only
- * in their `#section` are one row ([PageVisits.mergeRuns]), whose × removes
- * all of them. The first row opens Delete browsing data
+ * the long-press menu (and read by TalkBack). Back-to-back visits of one
+ * page on one day that differ only in their `#section` are one row
+ * ([PageVisits.mergeRuns]), whose × removes all of them; a search's
+ * results aren't merged, as the visits between them may not be shown. The first row opens Delete browsing data
  * ([DeleteBrowsingDataPage]) over this page, which hands the choice to
  * [onDeleteBrowsingData] as Settings' does.
  */
@@ -137,7 +140,16 @@ fun HistoryScreen(
         repo.searchHistory(q).collect { value = q to it }
     }
     val calendar = rememberCalendarDay()
-    val merged = remember(results) { PageVisits.mergeRuns(results?.second.orEmpty()) }
+    // Merged only in the whole, unfiltered list and within a day: a
+    // search's results leave out the visits between two of its rows, so
+    // there two visits of one page needn't be back to back, and a row's
+    // × must remove only the visits it stands for.
+    val merged = remember(results, calendar.zone) {
+        val searching = results?.first.orEmpty().isNotEmpty()
+        PageVisits.mergeRuns(results?.second.orEmpty()) { newer, older ->
+            searching || !sameDay(newer.visitedAt, older.visitedAt, calendar.zone)
+        }
+    }
     val days = remember(merged, calendar) {
         historyDays(merged.rows, calendar.date, calendar.zone)
     }
@@ -202,6 +214,10 @@ fun HistoryScreen(
         )
     }
 }
+
+/** [a] and [b] (epoch millis) fall on the same calendar day in [zone]. */
+internal fun sameDay(a: Long, b: Long, zone: ZoneId): Boolean =
+    Instant.ofEpochMilli(a).atZone(zone).toLocalDate() == Instant.ofEpochMilli(b).atZone(zone).toLocalDate()
 
 /** History's first row (#418): opens Delete browsing data. */
 @Composable
@@ -437,7 +453,14 @@ private fun EntryRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp),
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        // The row shows the site; TalkBack reads the full
+                        // address, which a sighted user has in the
+                        // long-press menu — not among the row's actions —
+                        // so two visits of one site can be told apart.
+                        .semantics { contentDescription = url }
+                        .padding(end = 8.dp),
                 )
                 Text(
                     timestamp,

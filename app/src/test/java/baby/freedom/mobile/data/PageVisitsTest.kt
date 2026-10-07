@@ -95,4 +95,19 @@ class PageVisitsTest {
         assertEquals(0, PageVisits.mergeRuns(emptyList()).rows.size)
         assertEquals(0, PageVisits.distinctPages(emptyList(), 8).size)
     }
+
+    @Test
+    fun `neighbours kept apart stay separate rows`() {
+        // A search for "page" over page#a, other, page#b: the other page
+        // is filtered out, so the two visits look back to back.
+        val results = listOf(
+            visit(3, "https://x.org/page#b", 300),
+            visit(1, "https://x.org/page#a", 100),
+        )
+        assertEquals(1, PageVisits.mergeRuns(results).rows.size)
+        val searched = PageVisits.mergeRuns(results) { _, _ -> true }
+        assertEquals(2, searched.rows.size)
+        assertEquals(listOf(3L), searched.idsOf(3))
+        assertEquals(listOf(1L), searched.idsOf(1))
+    }
 }
