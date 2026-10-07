@@ -752,7 +752,10 @@ fun BrowserScreen(
     // down, which lets that tab's next ask through (#446 R1-F1); taken
     // down too if the user leaves the tab, so it never sits over another
     // one. On the screen's scope, so the next notice arriving can't cancel
-    // an Undo already running.
+    // an Undo already running. Closed by the bridge instead (the page
+    // started a new document, or the notice ran past its longest hold), it
+    // comes down too: no Undo is left for a page or turn that's gone (#446
+    // R2-M1, R2-M2).
     var chainSwitchNotice by remember { mutableStateOf<Pair<EthereumProviders.SwitchNotice, Job>?>(null) }
     LaunchedEffect(Unit) {
         EthereumProviders.chainSwitches.collect { notice ->
@@ -778,6 +781,10 @@ fun BrowserScreen(
                 } finally {
                     notice.close(undo = false)
                 }
+            }
+            scope.launch {
+                notice.awaitClosed()
+                job.cancel()
             }
             chainSwitchNotice = notice to job
         }

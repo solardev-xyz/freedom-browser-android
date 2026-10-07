@@ -710,14 +710,27 @@ class EthereumProvider(
      * paused. The site's chain is read again and written under
      * [chainMoves] (R1-M1, R1-M2), and the switch made — null if none —
      * goes to [EthAsk.SwitchNotice.switched], always, for its notice.
+     *
+     * Whether the site is connected was decided when the request came in,
+     * and the turn can be a long wait: it's checked again under
+     * [siteLinks], as [disconnect] holds, at the write (#446 R2-F1). A site
+     * disconnected meanwhile gets the Switch network sheet instead, as any
+     * site that isn't connected does.
      */
     private suspend fun switchWithNotice(origin: String, current: Chain, target: Chain, ask: suspend (EthAsk) -> EthAnswer): Reply {
         val turn = EthAsk.SwitchNotice(origin, current, target)
         var made: ChainSwitched? = null
-        try {
+        var disconnected = false
+        val saved = try {
             ask(turn).let { if (it !is EthAnswer.Approved) return refused(it) }
-            val saved = withContext(NonCancellable) {
-                chainMoves.withLock {
+            withContext(NonCancellable) {
+                // [siteLinks] first, then [chainMoves]: nothing takes them the other way round.
+                siteLinks.withLock { chainMoves.withLock {
+                    // Still connected now that it's the tab's turn (R2-F1)?
+                    if (connectedAccount(origin) == null) {
+                        disconnected = true
+                        return@withLock true
+                    }
                     // Where it is now, not where it was before the wait: another tab of the site
                     // may have switched it meanwhile, and Undo must go back to that (R1-M2).
                     val now = storedChain(origin) ?: DEFAULT_CHAIN_ID
@@ -732,12 +745,19 @@ class EthereumProvider(
                     events.emit(origin, "chainChanged", target.hexId)
                     made = ChainSwitched(origin, from, target)
                     true
-                }
+                } }
             }
-            return if (saved) Reply.Ok(JSONObject.NULL) else Reply.Err(INTERNAL, "Couldn't save the change")
         } finally {
             turn.switched.complete(made)
         }
+        if (disconnected) {
+            // The turn is given back above, with no notice; the sheet takes a turn of its own,
+            // from wherever the site is by now.
+            val now = switchingFrom(origin)
+            if (now.id == target.id) return Reply.Ok(JSONObject.NULL)
+            return switchTo(origin, connected = false, now, target, ask)
+        }
+        return if (saved) Reply.Ok(JSONObject.NULL) else Reply.Err(INTERNAL, "Couldn't save the change")
     }
 
     /**

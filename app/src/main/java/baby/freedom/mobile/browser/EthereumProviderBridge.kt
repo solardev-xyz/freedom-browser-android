@@ -217,6 +217,17 @@ object EthereumProviders {
         fun close(undo: Boolean) {
             closed.complete(undo)
         }
+
+        /**
+         * Returns once the notice is closed, from here or by the bridge —
+         * its tab started a new document or closed, or [NOTICE_MAX_MS] ran
+         * out — so the browser takes its snackbar down with it: an Undo
+         * offered past that point would act on a page that's gone and could
+         * no longer pause its tab (#446 R2-M1, R2-M2).
+         */
+        suspend fun awaitClosed() {
+            closed.await()
+        }
     }
 
     private val switchedFlow = MutableSharedFlow<SwitchNotice>(
@@ -593,9 +604,12 @@ object EthereumProviders {
 
     /**
      * The longest a switch notice holds its tab's next ask: past a
-     * snackbar's long duration, and its accessibility-extended one.
+     * snackbar's long duration, and its accessibility-extended one — up to
+     * 2 minutes with Android's "Time to take action" (#446 R2-M1). Should a
+     * notice still be up when this runs out, closing it takes it down
+     * ([SwitchNotice.awaitClosed]), so no Undo outlives the turn it holds.
      */
-    private const val NOTICE_MAX_MS = 60_000L
+    private const val NOTICE_MAX_MS = 150_000L
 
     /** The longest an Add network sheet waits for the chain catalog. */
     private const val CATALOG_WAIT_MS = 4_000L

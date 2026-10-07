@@ -570,6 +570,31 @@ class EthereumProviderTest {
     }
 
     @Test
+    fun `a site disconnected while its no-sheet switch waited gets the sheet instead (#446 R2-F1)`() {
+        connect()
+        // Disconnected (another tab's wallet_revokePermissions, Settings) before the tab's turn came.
+        turnAnswer = { runBlocking { assertTrue(provider.disconnect(site)) }; EthAnswer.Approved() }
+        events.clear()
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(switchTo("0x1")))
+        // No switch, no notice: the Switch network sheet was asked, from where the site is.
+        assertNull(grants.grants[site])
+        assertEquals(listOf<EthAsk>(EthAsk.SwitchChain(site, BuiltInChains.GNOSIS, BuiltInChains.ETHEREUM)), asks)
+        assertTrue(switched.isEmpty())
+        assertNull(runBlocking { turns.single().switched.await() })
+        assertEquals("0x64", ok(call("eth_chainId")))
+        assertTrue(events.none { it.second == "chainChanged" })
+        // Approving that sheet does switch it, as for any site that isn't connected.
+        connect()
+        asks.clear()
+        answer = { EthAnswer.Approved() }
+        ok(switchTo("0x1"))
+        assertEquals("0x1", ok(call("eth_chainId")))
+        assertEquals(1, asks.filterIsInstance<EthAsk.SwitchChain>().size)
+        assertTrue(switched.isEmpty())
+    }
+
+    @Test
     fun `a rejected signature is 4001`() {
         connect()
         answer = { EthAnswer.Rejected }
