@@ -175,7 +175,9 @@ sealed interface EthAnswer {
  *  - Anyone: `eth_chainId`, `net_version`, `eth_accounts` (empty until
  *    connected), the chain reads ([ChainDataRouter.READ_METHODS], through
  *    the chain-data router as the page's reads), and the chain switch
- *    requests, which ask the user.
+ *    requests, which ask the user — except a connected site's switch to a
+ *    built-in chain, which happens at once with an Undo notice
+ *    ([switchesWithoutSheet], #440).
  *  - `eth_requestAccounts` asks once and remembers the site with the
  *    account the user chose ([Grants]).
  *  - Connected sites only: `personal_sign`, `eth_signTypedData_v4` and
@@ -325,6 +327,21 @@ class EthereumProvider(
     @Volatile
     var events: Events = Events { _, _, _ -> }
 
+    /**
+     * A connected site moved itself from [from] to [to], a built-in chain,
+     * with no sheet ([switchesWithoutSheet], #440): what the "switched to"
+     * notice names, and what its Undo ([undoSwitch]) puts back.
+     */
+    data class ChainSwitched(val origin: String, val from: Chain, val to: Chain)
+
+    /** Receives every [ChainSwitched], for the notice with Undo. */
+    fun interface Switches {
+        fun switched(switch: ChainSwitched)
+    }
+
+    @Volatile
+    var switches: Switches = Switches { }
+
     /** Chains picked by sites that aren't connected: for this process only, never written down. */
     private val sessionChains = HashMap<String, Long>()
 
@@ -368,8 +385,8 @@ class EthereumProvider(
             "personal_sign" -> personalSign(origin, connected ?: return notConnected(), params, ask)
             "eth_signTypedData_v4" -> signTypedData(origin, connected ?: return notConnected(), params, ask)
             "eth_sendTransaction" -> sendTransaction(origin, connected ?: return notConnected(), params, ask)
-            "wallet_switchEthereumChain" -> switchChain(origin, params, ask)
-            "wallet_addEthereumChain" -> addChain(origin, params, ask)
+            "wallet_switchEthereumChain" -> switchChain(origin, connected != null, params, ask)
+            "wallet_addEthereumChain" -> addChain(origin, connected != null, params, ask)
             "eth_sign", "eth_signTransaction", "eth_sendRawTransaction", "eth_signTypedData", "eth_signTypedData_v1",
             "eth_signTypedData_v3",
             -> Reply.Err(UNSUPPORTED, "Method not supported: $method")
@@ -645,7 +662,7 @@ class EthereumProvider(
         Chain(id = e.id, name = Strings.get(R.string.send_eth_custom_network), symbol = "", rpcUrls = emptyList())
     }
 
-    private suspend fun switchChain(origin: String, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
+    private suspend fun switchChain(origin: String, connected: Boolean, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
         val id = chainIdParam(params)
         val current = switchingFrom(origin)
         if (current.id == id) return Reply.Ok(JSONObject.NULL)
@@ -654,17 +671,51 @@ class EthereumProvider(
         val target = (list ?: BuiltInChains.ALL).firstOrNull { it.id == id }
             // Unreadable list: the chain may well be set up, so 4902 ("add it first") would be a lie.
             ?: return if (list == null) chainListUnreadable() else Reply.Err(UNRECOGNIZED_CHAIN, "Unrecognized chain ID ${hex(id)}. Try adding the chain using wallet_addEthereumChain first.")
-        return switchTo(origin, current, target, ask)
+        return switchTo(origin, connected, current, target, ask)
     }
 
-    private suspend fun switchTo(origin: String, current: Chain, target: Chain, ask: suspend (EthAsk) -> EthAnswer): Reply {
-        ask(EthAsk.SwitchChain(origin, current, target)).let { if (it !is EthAnswer.Approved) return refused(it) }
+    /**
+     * Move [origin] from [current] to [target], a chain the wallet has: with
+     * the Switch network sheet, or — for a connected site going to a
+     * built-in chain ([switchesWithoutSheet]) — at once, the user told by a
+     * notice with Undo ([switches], [undoSwitch]).
+     */
+    private suspend fun switchTo(origin: String, connected: Boolean, current: Chain, target: Chain, ask: suspend (EthAsk) -> EthAnswer): Reply {
+        val silent = switchesWithoutSheet(connected, target)
+        if (!silent) ask(EthAsk.SwitchChain(origin, current, target)).let { if (it !is EthAnswer.Approved) return refused(it) }
         if (!setChainFor(origin, target.id)) return Reply.Err(INTERNAL, "Couldn't save the change")
         events.emit(origin, "chainChanged", target.hexId)
+        if (silent) switches.switched(ChainSwitched(origin, current, target))
         return Reply.Ok(JSONObject.NULL)
     }
 
-    private suspend fun addChain(origin: String, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
+    /**
+     * Undo a [ChainSwitched] (#440): [switch]'s site back on the chain it
+     * left, and its pages told with `chainChanged` again — only while it's
+     * still on the chain it switched to (it hasn't switched again, been
+     * moved, …) and the chain it left is still on the wallet's list. False
+     * if it wasn't put back. Not cancellable, as [disconnect]: the Undo runs
+     * on a notice's job, and a write that commits must also tell the pages.
+     */
+    suspend fun undoSwitch(switch: ChainSwitched): Boolean = withContext(NonCancellable) {
+        chainMoves.withLock {
+            val origin = switch.origin
+            if (pinnedChain(origin) != null) return@withLock false
+            val now = try {
+                storedChain(origin) ?: DEFAULT_CHAIN_ID
+            } catch (e: GrantsUnreadable) {
+                return@withLock false
+            }
+            if (now != switch.to.id) return@withLock false
+            val list = runCatching { chains() }.getOrNull()
+            val back = (list ?: BuiltInChains.ALL).firstOrNull { it.id == switch.from.id } ?: return@withLock false
+            if (!setChainFor(origin, back.id)) return@withLock false
+            events.emit(origin, "chainChanged", back.hexId)
+            true
+        }
+    }
+
+    private suspend fun addChain(origin: String, connected: Boolean, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
         val p = params.opt(0) as? JSONObject ?: throw BadParams("Expected [{chainId, chainName, nativeCurrency, rpcUrls}]")
         val id = chainIdOf(p.opt("chainId"))
         val current = switchingFrom(origin)
@@ -672,7 +723,7 @@ class EthereumProvider(
         pinnedChain(origin)?.let { return pinnedRefusal(current) }
         // A chain the wallet has keeps its own settings: this only switches to it.
         val list = runCatching { chains() }.getOrNull()
-        (list ?: BuiltInChains.ALL).firstOrNull { it.id == id }?.let { return switchTo(origin, current, it, ask) }
+        (list ?: BuiltInChains.ALL).firstOrNull { it.id == id }?.let { return switchTo(origin, connected, current, it, ask) }
         // Unreadable list: whether the wallet already has this chain is unknown, and if it
         // does, approving an Add sheet showing the site's name and RPCs would keep the stored
         // ones instead (#215 R5-M1). Refuse rather than show a sheet that may not be true.
@@ -1052,6 +1103,17 @@ class EthereumProvider(
 
         /** Desktop's default: Gnosis Chain. */
         val DEFAULT_CHAIN_ID = BuiltInChains.GNOSIS.id
+
+        /**
+         * Whether a switch to [target] goes through without the Switch
+         * network sheet (#440, audit W26): only for a [connected] site, and
+         * only to a chain built into the app — one whose name, ID and
+         * verified reads (light client or RPC quorum) are Freedom's, never a
+         * site's. Any other chain, and any site that isn't connected, still
+         * asks. Which chain the site left doesn't matter: Undo puts it back.
+         */
+        internal fun switchesWithoutSheet(connected: Boolean, target: Chain): Boolean =
+            connected && BuiltInChains.isBuiltIn(target.id)
 
         /** How many times a send is priced again after the user took too long to confirm. */
         private const val MAX_REPRICES = 3

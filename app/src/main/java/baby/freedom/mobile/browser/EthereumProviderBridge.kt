@@ -34,6 +34,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -195,11 +199,28 @@ object EthereumProviders {
             },
         )
         p.events = EthereumProvider.Events { origin, event, data -> scope.launch { emit(origin, event, data) } }
+        p.switches = EthereumProvider.Switches { switchedFlow.tryEmit(it) }
         provider = p
         // A chain removed in Settings → Chains moves the sites on it off it, and tells their pages (#215 R3-F2).
         // A list that couldn't be read (null) moves nobody: that's a read error, not a removal (#215 R4-F1).
         scope.launch { chainStore.chainsOrUnreadable.collect { list -> list?.let { p.chainsChanged(it) } } }
     }
+
+    private val switchedFlow = MutableSharedFlow<EthereumProvider.ChainSwitched>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /**
+     * A connected site switched itself to a built-in chain with no sheet
+     * (#440): the browser shows "<site> switched to <chain>" with Undo
+     * ([undoSwitch]). Only the latest is kept for a collector that's
+     * behind — a page switching back and forth leaves one notice, its last.
+     */
+    val chainSwitches: SharedFlow<EthereumProvider.ChainSwitched> = switchedFlow.asSharedFlow()
+
+    /** The Undo of a [chainSwitches] notice ([EthereumProvider.undoSwitch]); false if it wasn't undone. */
+    suspend fun undoSwitch(switch: EthereumProvider.ChainSwitched): Boolean = provider?.undoSwitch(switch) ?: false
 
     /**
      * Signs and broadcasts [quote] through the wallet's own send flow and

@@ -746,6 +746,33 @@ fun BrowserScreen(
         }
     }
 
+    // A connected site switched itself to a built-in network, no sheet
+    // (#440): say so, with Undo. One at a time — a newer switch replaces
+    // the notice (its Undo is then gone, the switch stays) — on the
+    // screen's scope, so the next switch arriving can't cancel an Undo
+    // already running.
+    var chainSwitchNotice by remember { mutableStateOf<Job?>(null) }
+    LaunchedEffect(Unit) {
+        EthereumProviders.chainSwitches.collect { switch ->
+            chainSwitchNotice?.cancel()
+            chainSwitchNotice = scope.launch {
+                val result = snackbarHostState.showSnackbar(
+                    Strings.get(R.string.send_eth_switched, permissionOriginDisplay(switch.origin), switch.to.name),
+                    actionLabel = Strings.get(R.string.send_undo),
+                    withDismissAction = true,
+                    duration = SnackbarDuration.Long,
+                )
+                if (result == SnackbarResult.ActionPerformed) {
+                    scope.launch {
+                        if (!EthereumProviders.undoSwitch(switch)) {
+                            snackbarHostState.showSnackbar(Strings.get(R.string.send_undo_failed), duration = SnackbarDuration.Long)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // The node identity switched with the wallet (#77, decision 10: the
     // user sees a notice and the node restarts). Names no page, so it
     // needs no private-tab handling.

@@ -462,6 +462,8 @@
 
     <string name="send_undo">Undo</string>
     <string name="send_undo_failed">Couldn\'t undo: it changed in the meantime.</string>
+    <!-- A connected site moved itself to a built-in network, no sheet (#440); Undo follows. %1$s: the site; %2$s: the network, e.g. "Ethereum". -->
+    <string name="send_eth_switched">%1$s switched to %2$s</string>
     <!-- %1$s: the site. -->
     <string name="send_undo_disconnected">Disconnected %1$s</string>
     <!-- %1$s: what the rule covers, e.g. "Token transfers". -->
