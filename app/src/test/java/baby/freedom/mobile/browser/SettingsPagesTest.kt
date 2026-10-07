@@ -221,4 +221,32 @@ class SettingsPagesTest {
             nodesPageSummary("", "https://gw.example", "Off"),
         )
     }
+
+    @Test
+    fun `a second section request keeps the first one's way back under it`() {
+        // Nodes › Node status › Gateways (request 1, Nodes → Nodes), then
+        // Node status › Tor › Turn on in Settings (request 2, Nodes → Privacy).
+        val first = SettingsRequestedPage(SettingsPage.Nodes, from = SettingsPage.Nodes)
+        val second = SettingsRequestedPage(SettingsPage.Privacy, from = SettingsPage.Nodes)
+        val stack = listOf(first, second)
+        // Back from Privacy: request 2's way back, request 1's still held.
+        assertEquals(listOf(first) to second, requestedPageUp(stack, SettingsPage.Privacy))
+        // Back from Nodes after that: request 1's way back (the overview).
+        assertEquals(emptyList<SettingsRequestedPage>() to first, requestedPageUp(listOf(first), SettingsPage.Nodes))
+    }
+
+    @Test
+    fun `a requested page left another way no longer answers Back`() {
+        val first = SettingsRequestedPage(SettingsPage.Nodes, from = null)
+        val second = SettingsRequestedPage(SettingsPage.Privacy, from = SettingsPage.Nodes)
+        // Privacy was left another way and Nodes is open: request 2 drops,
+        // request 1 answers.
+        assertEquals(emptyList<SettingsRequestedPage>() to first, requestedPageUp(listOf(first, second), SettingsPage.Nodes))
+        // A page no request moved to: nothing answers, the stack empties.
+        assertEquals(
+            emptyList<SettingsRequestedPage>() to null,
+            requestedPageUp(listOf(first, second), SettingsPage.Wallet),
+        )
+        assertEquals(emptyList<SettingsRequestedPage>() to null, requestedPageUp(emptyList(), null))
+    }
 }

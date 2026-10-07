@@ -68,6 +68,12 @@ import java.text.NumberFormat
  */
 
 /** Where a row of the overview leads. */
+/**
+ * What a Settings section request (#416) brings back on Back from the
+ * card's page: the overview, and the node page over it, if any.
+ */
+internal data class NodeReturn(val nodes: Boolean, val detail: NodeDestination?) : java.io.Serializable
+
 enum class NodeDestination {
     Swarm,
     Ipfs,

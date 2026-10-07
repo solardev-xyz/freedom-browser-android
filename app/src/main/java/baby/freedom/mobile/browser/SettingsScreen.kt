@@ -187,13 +187,16 @@ internal fun SettingsScreen(
     /**
      * A card to go to while already open (the overview was opened from
      * this Settings' Node status row, over it); [onSectionRequestTaken]
-     * says it's been taken. Back from its page goes back to the page
-     * Settings was on and calls [onRequestedPageLeft], so what asked
-     * (the overview, a node page) can come back over it.
+     * says it's been taken, with its depth among the requests still
+     * open (0 for the first; a request made from the page an earlier
+     * one moved to stacks on it). Back from its page goes back to the
+     * page Settings was on and calls [onRequestedPageLeft] with that
+     * depth, so what asked (the overview, a node page) can come back
+     * over it.
      */
     sectionRequest: SettingsSection? = null,
-    onSectionRequestTaken: () -> Unit = {},
-    onRequestedPageLeft: () -> Unit = {},
+    onSectionRequestTaken: (depth: Int) -> Unit = {},
+    onRequestedPageLeft: (depth: Int) -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     // Settings search (#93). Registered after the dismiss handler so it
@@ -208,20 +211,22 @@ internal fun SettingsScreen(
     val initialPage = initialSection?.page(isDefaultBrowser = false)
     var page by rememberSaveable { mutableStateOf(initialPage) }
     // The card a page opened from a search result (or from outside) starts scrolled to.
-    var scrollTo by remember { mutableStateOf(initialSection) }
-    // A page [sectionRequest] moved to, and the page (or top level) it
-    // moved from, which Back from it goes back to.
-    var requestedPage by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
-    var requestedFrom by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
+    // Saveable, and cleared once scrolled to, so a recreated Activity
+    // keeps the page where it was instead of jumping back to the card.
+    var scrollTo by rememberSaveable { mutableStateOf(initialSection) }
+    // The pages [sectionRequest]s moved to, each with the page (or top
+    // level) it moved from, which Back from it goes back to; a stack, so
+    // a request made from an earlier one's page keeps that one's way back.
+    var requested by rememberSaveable { mutableStateOf(emptyList<SettingsRequestedPage>()) }
     // Up from a sub-page: back to where a request moved it from, out of
     // Settings when it was opened straight at that page, else the top level.
     val pageUp = {
+        val (rest, left) = requestedPageUp(requested, page)
+        requested = rest
         when {
-            requestedPage != null && page == requestedPage -> {
-                page = requestedFrom
-                requestedPage = null
-                requestedFrom = null
-                onRequestedPageLeft()
+            left != null -> {
+                page = left.from
+                onRequestedPageLeft(rest.size)
             }
             initialPage != null && page == initialPage -> onDismiss()
             else -> page = null
@@ -233,11 +238,12 @@ internal fun SettingsScreen(
         if (sectionRequest != null) {
             val target = sectionRequest.page(isDefaultBrowser = false)
             query = ""
-            requestedFrom = page
-            requestedPage = target
+            // Requests whose page was since left another way are done with.
+            val live = requested.dropLastWhile { it.page != page }
+            requested = live + SettingsRequestedPage(target, from = page)
             page = target
             scrollTo = sectionRequest
-            onSectionRequestTaken()
+            onSectionRequestTaken(live.size)
         }
     }
 
@@ -580,8 +586,9 @@ internal fun SettingsScreen(
     // Held out here, not inside the scaffold: a Chains, Connected-site or
     // Licences page replaces the whole scaffold while open, and Back must
     // land on the sub-page scrolled where it was left. A new page (or the
-    // same one opened again from the top level) starts at the top.
-    val pageState = remember(openPage) { LazyListState() }
+    // same one opened again from the top level) starts at the top. Saveable,
+    // so a recreated Activity keeps the position too.
+    val pageState = rememberSaveable(openPage, saver = LazyListState.Saver) { LazyListState() }
     if (chainPage == null && site == null && !licencesOpen && !deleteDataOpen) FullScreenScaffold(
         title = openPage?.title ?: stringResource(R.string.settings_title),
         // On a sub-page the ← goes up to the top level, as Back does.

@@ -531,8 +531,11 @@ fun BrowserScreen(
     var settingsBackToDetail by rememberSaveable { mutableStateOf<NodeDestination?>(null) }
     // The same, for a Settings already open under the overview that a
     // node page moved to a card: Back from that card's page comes here.
-    var settingsRequestBackToNodes by rememberSaveable { mutableStateOf(false) }
-    var settingsRequestBackToDetail by rememberSaveable { mutableStateOf<NodeDestination?>(null) }
+    // One per request Settings holds, by depth (a request made from an
+    // earlier one's page stacks on it); [settingsRequestPending] is the
+    // one asked for, until Settings says at which depth it took it.
+    var settingsRequestBackTo by rememberSaveable { mutableStateOf(emptyList<NodeReturn>()) }
+    var settingsRequestPending by remember { mutableStateOf<NodeReturn?>(null) }
     // The node logs page (#276), at this node's; over whichever node card opened it.
     var showLogs by rememberSaveable { mutableStateOf<NodeLogSource?>(null) }
     var showWallet by rememberSaveable { mutableStateOf(false) }
@@ -2680,14 +2683,20 @@ fun BrowserScreen(
             },
             initialSection = settingsInitialSection,
             sectionRequest = settingsSectionRequest,
-            onSectionRequestTaken = { settingsSectionRequest = null },
+            onSectionRequestTaken = { depth ->
+                settingsSectionRequest = null
+                settingsRequestBackTo = settingsRequestBackTo.take(depth) +
+                    listOfNotNull(settingsRequestPending)
+                settingsRequestPending = null
+            },
             // Back from the card a node page moved this Settings to: the
             // overview and node page come back over it.
-            onRequestedPageLeft = {
-                showNodes = settingsRequestBackToNodes
-                nodeDetail = settingsRequestBackToDetail
-                settingsRequestBackToNodes = false
-                settingsRequestBackToDetail = null
+            onRequestedPageLeft = { depth ->
+                settingsRequestBackTo.getOrNull(depth)?.let {
+                    showNodes = it.nodes
+                    nodeDetail = it.detail
+                }
+                settingsRequestBackTo = settingsRequestBackTo.take(depth)
             },
         )
     }
@@ -2699,8 +2708,7 @@ fun BrowserScreen(
     // Settings goes to the card and they come back on Back from its page.
     val openSettingsAt: (SettingsSection) -> Unit = { target ->
         if (showSettings) {
-            settingsRequestBackToNodes = showNodes
-            settingsRequestBackToDetail = nodeDetail
+            settingsRequestPending = NodeReturn(showNodes, nodeDetail)
             settingsSectionRequest = target
         } else {
             settingsBackToNodes = showNodes
@@ -2719,8 +2727,8 @@ fun BrowserScreen(
             settingsSectionRequest = null
             settingsBackToNodes = false
             settingsBackToDetail = null
-            settingsRequestBackToNodes = false
-            settingsRequestBackToDetail = null
+            settingsRequestBackTo = emptyList()
+            settingsRequestPending = null
         }
     }
 
