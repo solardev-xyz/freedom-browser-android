@@ -98,6 +98,25 @@ class WalletRpc(
             agreeOn = { it != null && it != JSONObject.NULL },
         ) { it == true }
 
+    /**
+     * Block [block]'s own `timestamp`, from its header. The quorum compares
+     * only the block's number and timestamp: providers shape the rest of a
+     * block object differently. (An `eth_call` reading `block.timestamp`
+     * is no substitute: Colibri's proven EVM answers it 0.)
+     */
+    suspend fun blockTimestamp(chainId: Long, block: Long): Reading<Long> {
+        val tag = "0x" + block.toString(16)
+        return read(
+            chainId, "eth_getBlockByNumber", JSONArray().put(tag).put(false),
+            agreeOn = { (it as? JSONObject)?.let { b -> JSONObject().put("number", b.opt("number")).put("timestamp", b.opt("timestamp")) } ?: it },
+        ) {
+            val b = it as? JSONObject ?: throw invalid("eth_getBlockByNumber", it)
+            // The block asked for, not another the RPCs happen to agree on.
+            if (b.opt("number") != tag) throw invalid("eth_getBlockByNumber", it)
+            quantity(b.opt("timestamp")).toLong().takeIf { t -> t > 0 } ?: throw invalid("eth_getBlockByNumber", it)
+        }
+    }
+
     /** Gas for the call object [tx] (`from`, `to`, `value`, `data`, …). */
     suspend fun estimateGas(chainId: Long, tx: JSONObject): Reading<BigInteger> =
         read(chainId, "eth_estimateGas", JSONArray().put(tx), ::quantity)

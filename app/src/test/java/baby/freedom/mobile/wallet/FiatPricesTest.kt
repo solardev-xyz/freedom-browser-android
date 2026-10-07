@@ -26,8 +26,10 @@ import org.junit.Test
 class FiatPricesTest {
     private val ethUrls = listOf("https://e1.example", "https://e2.example", "https://e3.example")
     private val gnoUrls = listOf("https://g1.example", "https://g2.example", "https://g3.example")
-    private val chains = listOf<Chain>(
-        BuiltInChains.ETHEREUM.copy(rpcUrls = ethUrls),
+    /** The user's own Ethereum RPCs (seated first); none unless a test adds one. */
+    private var userEthUrls = emptyList<String>()
+    private val chains get() = listOf<Chain>(
+        BuiltInChains.ETHEREUM.copy(rpcUrls = userEthUrls + ethUrls, userRpcUrls = userEthUrls),
         BuiltInChains.GNOSIS.copy(rpcUrls = gnoUrls),
     )
     private val now = 1_800_000_000L
@@ -77,6 +79,10 @@ class FiatPricesTest {
     private fun answer(url: String, req: JSONObject): String {
         val method = req.getString("method")
         if (method == "eth_blockNumber") return "\"result\":\"0x100\""
+        if (method == "eth_getBlockByNumber") {
+            val tag = req.getJSONArray("params").getString(0)
+            return "\"result\":{\"number\":\"$tag\",\"timestamp\":\"0x${blockTime.toString(16)}\",\"hash\":\"0x$tag\"}"
+        }
         if (method != "eth_call") return "\"error\":{\"code\":-32601,\"message\":\"no\"}"
         val call = req.getJSONArray("params").getJSONObject(0)
         val to = call.getString("to")
@@ -87,8 +93,9 @@ class FiatPricesTest {
             return "\"result\":\"0x" + word(7) + word(raw) + word(v.second) + word(v.second) + word(7) + "\""
         }
         val data = call.getString("data")
-        if (to.equals(PriceFeeds.MULTICALL3, true) && data == PriceFeeds.BLOCK_TIMESTAMP) {
-            return "\"result\":\"0x" + word(blockTime) + "\""
+        if (to.equals(MULTICALL3, true) && data == GET_CURRENT_BLOCK_TIMESTAMP) {
+            // As Colibri's proven EVM answers `block.timestamp`: 0. The block's header is the one to ask.
+            return "\"result\":\"0x" + word(0) + "\""
         }
         ticks.entries.firstOrNull { it.key.equals(to, true) }?.let { (pool, tick) ->
             val back = reach[pool] ?: 86_400L
@@ -112,6 +119,11 @@ class FiatPricesTest {
             return "\"result\":\"0x" + word(64) + word(192) + word(2) + word(c0) + word(c1) + word(2) + word(1) + word(2) + "\""
         }
         return "\"result\":\"0x\""
+    }
+
+    private companion object {
+        const val MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
+        const val GET_CURRENT_BLOCK_TIMESTAMP = "0x0f28c97d"
     }
 
     private var setting = FiatCurrency.OFF
@@ -237,6 +249,25 @@ class FiatPricesTest {
     }
 
     @Test
+    fun `the user's own rpc prices alone, but not against public rpcs that answered differently`() = runBlocking {
+        setting = FiatCurrency.USD
+        userEthUrls = listOf("https://mine.example")
+        // Everyone agrees with it: priced.
+        val alone = prices()
+        alone.refresh()
+        assertEquals(0, BigDecimal("2500").compareTo(alone.quotes.value!!.perToken[eth.key]))
+        // Every public RPC answers something else: no quorum, and the user RPC's
+        // answer comes back USER_CONFIGURED with dissenters. That prices nothing.
+        liars = setOf("mine", "e1", "e2", "e3")
+        val disputed = prices()
+        disputed.refresh()
+        val q = disputed.quotes.value!!
+        assertNull(q.perToken[eth.key])
+        assertNull(q.perToken[token("BZZ").key])
+        assertEquals(0, BigDecimal("0.999").compareTo(q.perToken[xdai.key]))
+    }
+
+    @Test
     fun `a feed's age is judged by its block's time, not the phone's clock`() = runBlocking {
         setting = FiatCurrency.EUR
         // Updated a minute before the pinned block; the phone's clock is a quarter of an hour slow.
@@ -251,9 +282,9 @@ class FiatPricesTest {
         p.refresh()
         assertEquals(0, BigDecimal("2000").compareTo(p.quotes.value!!.perToken[eth.key]))
         // Every block-time read pinned to the same block as the rest.
-        val stamps = sent.filter { it.second.optJSONArray("params")?.optJSONObject(0)?.optString("data") == PriceFeeds.BLOCK_TIMESTAMP }
+        val stamps = sent.filter { it.second.getString("method") == "eth_getBlockByNumber" }
         assertTrue(stamps.isNotEmpty())
-        assertTrue(stamps.all { it.second.getJSONArray("params").getString(1) == "0xfe" })
+        assertTrue(stamps.all { it.second.getJSONArray("params").getString(0) == "0xfe" })
     }
 
     @Test

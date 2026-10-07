@@ -8,6 +8,7 @@ import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
+import baby.freedom.mobile.chains.rpc.undisputed
 import baby.freedom.mobile.data.FiatSettingStore
 import baby.freedom.mobile.l10n.Strings
 import java.math.BigDecimal
@@ -137,15 +138,6 @@ internal object PriceFeeds {
 
     /** A Uniswap v3 pool's `observations(uint256 [index])`. */
     fun observations(index: Int): String = "0x252c09d7" + word(index.toLong())
-
-    /**
-     * Multicall3 (the same address on every chain it's deployed to), for
-     * its `getCurrentBlockTimestamp()`: the pinned block's own time.
-     */
-    const val MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
-
-    /** `getCurrentBlockTimestamp()`. */
-    const val BLOCK_TIMESTAMP = "0x0f28c97d"
 
     private fun word(n: Long) = n.toString(16).padStart(64, '0')
 }
@@ -456,10 +448,14 @@ class FiatPrices internal constructor(
         "0x" + maxOf(0L, head - PINNED_BEHIND).toString(16)
     }
 
-    /** [block]'s own timestamp (Multicall3 `getCurrentBlockTimestamp()` at it), or null unless trusted. */
+    /**
+     * [block]'s own timestamp, from its header, or null unless trusted. Not
+     * an `eth_call` to Multicall3's `getCurrentBlockTimestamp()`: Colibri's
+     * proven EVM answers `block.timestamp` with 0.
+     */
     private suspend fun blockTime(rpc: WalletRpc, chainId: Long, block: String): Long? = guarded {
-        val r = rpc.call(chainId, JSONObject().put("to", PriceFeeds.MULTICALL3).put("data", PriceFeeds.BLOCK_TIMESTAMP), block)
-        if (trusted(r.trust)) FiatMath.uint(r.value) else null
+        val r = rpc.blockTimestamp(chainId, block.removePrefix("0x").toLong(16))
+        if (trusted(r.trust)) r.value else null
     }
 
     /**
@@ -546,8 +542,12 @@ class FiatPrices internal constructor(
         /** Blocks behind the head the reads are pinned to, so every RPC has the block. */
         private const val PINNED_BEHIND = 2L
 
-        /** Only a verified answer, or the user's own RPC's, prices anything. */
-        internal fun trusted(trust: ChainTrust): Boolean = trust.level != ChainTrust.Level.UNVERIFIED
+        /**
+         * Only a verified answer, or the user's own RPC's when no other RPC
+         * answered differently ([undisputed]), prices anything. Every read is
+         * pinned to one block, so a dissent is a real contradiction, not lag.
+         */
+        internal fun trusted(trust: ChainTrust): Boolean = trust.undisputed
 
         @Volatile
         private var instance: FiatPrices? = null
