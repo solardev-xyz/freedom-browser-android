@@ -101,7 +101,7 @@
     <string name="stamps_yes">Yes</string>
     <string name="stamps_no">No</string>
     <string name="stamps_extend">Add time</string>
-    <string name="stamps_checking_connected">Checking which stamp the node uploads with…</string>
+    <string name="stamps_checking_connected">Checking which storage the node uploads with…</string>
     <string name="stamps_extend_other_active">Only the storage the node uploads with can get more time in this version of Freedom, and that\'s another one.</string>
     <string name="stamps_extend_intro">Add time before it runs out: once it expires, what was published with it is no longer paid for.</string>
     <string name="stamps_size">All sizes</string>
@@ -140,7 +140,7 @@
     <string name="stamps_add">Add</string>
     <string name="stamps_extend_confirm_title">Add time to this storage?</string>
     <!-- %1$s: duration; %2$s: short batch id; %3$s: cost; %4$s: the xDAI sentence (stamps_spend_cost). -->
-    <string name="stamps_extend_confirm_body">%1$s more for %2$s, for %3$s. %4$s These are real transactions on Gnosis Chain and can\'t be undone.</string>
+    <string name="stamps_extend_confirm_body">%1$s more for your storage (%2$s), for %3$s. %4$s These are real transactions on Gnosis Chain and can\'t be undone.</string>
     <string name="stamps_price_unreadable">The node\'s price couldn\'t be read</string>
     <string name="stamps_estimated_cost">Estimated cost</string>
     <string name="stamps_asking_price">Asking the node for today\'s price…</string>
@@ -260,7 +260,7 @@
     <string name="stamps_deposit_intro">Moves xBZZ from the node\'s account into its credit.</string>
     <!-- %1$s: a duration ("40 minutes", "3 hours"). -->
     <string name="stamps_deposit_preset_video">About %1$s of HD video</string>
-    <string name="stamps_deposit_preset_under_a_minute">A top-up of the minimum</string>
+    <string name="stamps_deposit_preset_under_a_minute">Less than a minute of HD video</string>
     <string name="stamps_chequebook_intro">Credit pays other nodes for faster downloads, like video, and for storing what you publish. It never spends more than you deposit; when it runs out, downloads carry on at the free tier.</string>
     <string name="stamps_chequebook_address">Address</string>
     <string name="stamps_checking">Checking…</string>

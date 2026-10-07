@@ -38,9 +38,11 @@ internal val DEPOSIT_PRESETS_PLUR: List<BigInteger> =
 
 /**
  * The preset picked until the user picks one (#425, W44): 0.1 xBZZ (about
- * 40 minutes of HD video), or, when the node's account holds less
+ * 38 minutes of HD video), or, when the node's account holds less
  * ([walletPlur]), the largest preset it can pay; with none it can pay, 0.1
- * still, and the page says how much the node holds.
+ * still, and the page says how much the node holds. The page picks it
+ * once, when the balance is first known, and keeps it: a balance read
+ * later doesn't move the highlighted row.
  */
 internal fun defaultDepositPreset(walletPlur: BigInteger?): BigInteger {
     val preferred = DEPOSIT_PRESETS_PLUR[2]
@@ -49,14 +51,24 @@ internal fun defaultDepositPreset(walletPlur: BigInteger?): BigInteger {
 }
 
 /**
+ * The deposit page's pick after a balance read: the one already made
+ * ([current], the user's or an earlier default) stays; with none yet, the
+ * default for [walletPlur] once it's known; null (nothing highlighted)
+ * while it isn't.
+ */
+internal fun depositPick(current: String?, walletPlur: BigInteger?): String? =
+    current ?: walletPlur?.let { defaultDepositPreset(it).toString() }
+
+/**
  * What the credit pays for, as the cost note measures it: about 0.16 xBZZ
  * per hour of HD video when the free tier carries most of it.
  */
 internal val HD_VIDEO_HOUR_PLUR: BigInteger = BigDecimal("0.16").movePointRight(16).toBigIntegerExact()
 
 /**
- * A deposit preset named by what it buys (#425, W44): "About 40 minutes
- * of HD video", "About 3 hours of HD video"; the amount is its sub-line.
+ * A deposit preset named by what it buys (#425, W44): "About 38 minutes
+ * of HD video", "About 3 hours of HD video" ("Less than a minute of HD
+ * video" for 0.001 xBZZ); the amount is its sub-line.
  */
 internal fun depositPresetLabel(plur: BigInteger): String {
     val minutes = BigDecimal(plur).multiply(BigDecimal(60)).divide(BigDecimal(HD_VIDEO_HOUR_PLUR), 0, RoundingMode.HALF_UP).toLong()

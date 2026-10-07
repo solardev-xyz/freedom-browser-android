@@ -137,9 +137,16 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
     // The lost-ledger confirmation: open, and how the last one went.
     var confirmingLiability by remember { mutableStateOf<String?>(null) }
     var liabilityOutcome by remember { mutableStateOf<String?>(null) }
-    // The user's pick; until there is one, the preset that suits what the node holds (#425, W44).
+    // The user's pick, or the preset that suits what the node holds (#425,
+    // W44), picked once when the balance is first known and kept from then
+    // on, so a later balance read never moves the highlight by itself.
+    // Nothing is highlighted before that; Deposit waits for the balance anyway.
     var amount by rememberSaveable { mutableStateOf<String?>(null) }
-    val amountPlur = amount?.let(::BigInteger) ?: defaultDepositPreset(state.walletPlur)
+    val walletKnown = state.walletPlur != null
+    LaunchedEffect(amount == null, walletKnown) {
+        if (amount == null) amount = depositPick(null, state.walletPlur)
+    }
+    val amountPlur = amount?.let(::BigInteger)
     // What the confirmation shows, captured when it opens: that's what's sent.
     var confirming by remember { mutableStateOf<Pair<String, BigInteger>?>(null) }
 

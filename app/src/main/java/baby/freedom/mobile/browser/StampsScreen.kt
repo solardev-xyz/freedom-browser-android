@@ -188,13 +188,16 @@ internal enum class ExtendAvailability {
     Offered,
     /** Hidden, with a line saying why: another batch is the one the node uploads with. */
     OtherActive,
-    /** Hidden: the node can't spend now, or which batch it uploads with isn't known yet. */
-    Hidden,
+    /** Hidden, with the node's reason: it can't spend now. */
+    CantSpend,
+    /** Hidden, with "Checking…": which batch the node uploads with isn't known yet. */
+    Checking,
 }
 
 /** Extend only where it can apply (#425, W45): [connected] is the batch the node uploads with, if known. */
 internal fun extendAvailability(cantSpend: String?, connected: String?, batchId: String): ExtendAvailability = when {
-    cantSpend != null || connected == null -> ExtendAvailability.Hidden
+    cantSpend != null -> ExtendAvailability.CantSpend
+    connected == null -> ExtendAvailability.Checking
     connected != batchId -> ExtendAvailability.OtherActive
     else -> ExtendAvailability.Offered
 }
@@ -419,9 +422,16 @@ private fun DetailPage(
             DetailRow(stringResource(R.string.stamps_used), usedText(batch))
             DetailRow(stringResource(R.string.stamps_time_left), batch.ttlSeconds?.let(::formatStampTtl) ?: stringResource(R.string.stamps_unknown))
             batch.ttlSeconds?.let { SubLine(stringResource(R.string.stamps_until, expiryText(it))) }
-            if (extend == ExtendAvailability.OtherActive) {
+            // Wherever Add time is hidden, a line says why.
+            val whyNoExtend = when (extend) {
+                ExtendAvailability.Offered -> null
+                ExtendAvailability.OtherActive -> stringResource(R.string.stamps_extend_other_active)
+                ExtendAvailability.CantSpend -> cantSpend
+                ExtendAvailability.Checking -> stringResource(R.string.stamps_checking_connected)
+            }
+            whyNoExtend?.let {
                 Spacer(Modifier.height(4.dp))
-                SubLine(stringResource(R.string.stamps_extend_other_active))
+                SubLine(it)
             }
             DetailsExpander {
                 Text(
@@ -636,7 +646,7 @@ private fun ExtendPage(
             title = stringResource(R.string.stamps_extend_confirm_title),
             body = stringResource(
                 R.string.stamps_extend_confirm_body,
-                daysLabel(q.days), shortBatchId(batch.id), withUnit(q.totalCostBzz, "xBZZ"), spendCostText(q, buy = false),
+                daysLabel(q.days), batchTitle(batch), withUnit(q.totalCostBzz, "xBZZ"), spendCostText(q, buy = false),
             ),
             confirmLabel = stringResource(R.string.stamps_extend),
             onConfirm = {

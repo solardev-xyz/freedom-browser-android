@@ -50,8 +50,9 @@ class StorageUxTest {
     fun `Extend shows only on the batch the node uploads with, on a node that can spend (W45)`() {
         assertEquals(ExtendAvailability.Offered, extendAvailability(null, id, id))
         assertEquals(ExtendAvailability.OtherActive, extendAvailability(null, "cd".repeat(32), id))
-        assertEquals(ExtendAvailability.Hidden, extendAvailability(null, null, id))
-        assertEquals(ExtendAvailability.Hidden, extendAvailability("node off", id, id))
+        assertEquals(ExtendAvailability.Checking, extendAvailability(null, null, id))
+        assertEquals(ExtendAvailability.CantSpend, extendAvailability("node off", id, id))
+        assertEquals(ExtendAvailability.CantSpend, extendAvailability("node off", null, id))
     }
 
     @Test
@@ -74,7 +75,7 @@ class StorageUxTest {
     fun `deposit presets are named by what they buy (W44)`() {
         assertEquals(
             listOf(
-                "A top-up of the minimum",
+                "Less than a minute of HD video",
                 "About 4 minutes of HD video",
                 "About 38 minutes of HD video",
                 "About 3 hours of HD video",
@@ -93,6 +94,18 @@ class StorageUxTest {
         // Can't pay any: still 0.1, and the page says what the node holds.
         assertEquals(xbzz("0.1"), defaultDepositPreset(BigInteger.ZERO))
         assertTrue(defaultDepositPreset(xbzz("0.05")) in DEPOSIT_PRESETS_PLUR)
+    }
+
+    @Test
+    fun `the deposit pick waits for the balance, then stays put when the balance changes (W44)`() {
+        // Balance not read yet: nothing highlighted.
+        assertEquals(null, depositPick(null, null))
+        // First read: the default for it, picked once.
+        val first = depositPick(null, xbzz("3"))
+        assertEquals(xbzz("0.1").toString(), first)
+        // A later, smaller read doesn't move it; neither does the user's own pick.
+        assertEquals(first, depositPick(first, xbzz("0.05")))
+        assertEquals(xbzz("1").toString(), depositPick(xbzz("1").toString(), xbzz("0.05")))
     }
 
     @Test
