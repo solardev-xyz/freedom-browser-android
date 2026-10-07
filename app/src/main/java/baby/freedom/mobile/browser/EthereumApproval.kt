@@ -121,6 +121,8 @@ internal fun ethApprovalCopy(ask: EthAsk): EthApprovalCopy {
         is EthAsk.Payment -> Triple(R.string.send_eth_pay_title, R.string.send_eth_pay_request, R.string.send_eth_pay_action)
         // Never a sheet: BrowserScreen opens the Send page for it instead.
         is EthAsk.SendLink -> Triple(R.string.send_title, R.string.send_eth_pay_request, R.string.send_eth_pay_action)
+        // Never a sheet either: BrowserScreen answers its turn and shows a notice (#440).
+        is EthAsk.SwitchNotice -> Triple(R.string.send_eth_switch_title, R.string.send_eth_switch_request, R.string.send_eth_switch_action)
     }
     return EthApprovalCopy(Strings.get(title), Strings.get(request), Strings.get(approve))
 }
@@ -155,7 +157,7 @@ internal fun sheetWarnings(ask: EthAsk, nowSeconds: Long, siteRpcs: Boolean = fa
             "add-chain",
         ),
     )
-    is EthAsk.Payment, is EthAsk.SendLink -> emptyList()
+    is EthAsk.Payment, is EthAsk.SendLink, is EthAsk.SwitchNotice -> emptyList()
 }
 
 /**
@@ -402,7 +404,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                         locked = vaultState is Vault.State.Locked,
                         onSetUp = request.setUpWallet,
                     )
-                    is EthAsk.SendLink -> Unit
+                    is EthAsk.SendLink, is EthAsk.SwitchNotice -> Unit
                 }
             }
             ledger?.let {

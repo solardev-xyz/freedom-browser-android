@@ -747,30 +747,43 @@ fun BrowserScreen(
     }
 
     // A connected site switched itself to a built-in network, no sheet
-    // (#440): say so, with Undo. One at a time — a newer switch replaces
-    // the notice (its Undo is then gone, the switch stays) — on the
-    // screen's scope, so the next switch arriving can't cancel an Undo
-    // already running.
-    var chainSwitchNotice by remember { mutableStateOf<Job?>(null) }
+    // (#440), while its tab had the turn on screen: say so, with Undo. One
+    // at a time — a newer notice replaces this one — and closed when it's
+    // down, which lets that tab's next ask through (#446 R1-F1); taken
+    // down too if the user leaves the tab, so it never sits over another
+    // one. On the screen's scope, so the next notice arriving can't cancel
+    // an Undo already running.
+    var chainSwitchNotice by remember { mutableStateOf<Pair<EthereumProviders.SwitchNotice, Job>?>(null) }
     LaunchedEffect(Unit) {
-        EthereumProviders.chainSwitches.collect { switch ->
-            chainSwitchNotice?.cancel()
-            chainSwitchNotice = scope.launch {
-                val result = snackbarHostState.showSnackbar(
-                    Strings.get(R.string.send_eth_switched, permissionOriginDisplay(switch.origin), switch.to.name),
-                    actionLabel = Strings.get(R.string.send_undo),
-                    withDismissAction = true,
-                    duration = SnackbarDuration.Long,
-                )
-                if (result == SnackbarResult.ActionPerformed) {
-                    scope.launch {
-                        if (!EthereumProviders.undoSwitch(switch)) {
-                            snackbarHostState.showSnackbar(Strings.get(R.string.send_undo_failed), duration = SnackbarDuration.Long)
+        EthereumProviders.chainSwitches.collect { notice ->
+            chainSwitchNotice?.second?.cancel()
+            val job = scope.launch {
+                try {
+                    if (tabs.active.id != notice.tabId) return@launch
+                    val switch = notice.switch
+                    val result = snackbarHostState.showSnackbar(
+                        Strings.get(R.string.send_eth_switched, permissionOriginDisplay(switch.origin), switch.to.name),
+                        actionLabel = Strings.get(R.string.send_undo),
+                        withDismissAction = true,
+                        duration = SnackbarDuration.Long,
+                    )
+                    if (result == SnackbarResult.ActionPerformed) {
+                        notice.close(undo = true)
+                        scope.launch {
+                            if (!EthereumProviders.undoSwitch(notice)) {
+                                snackbarHostState.showSnackbar(Strings.get(R.string.send_undo_failed), duration = SnackbarDuration.Long)
+                            }
                         }
                     }
+                } finally {
+                    notice.close(undo = false)
                 }
             }
+            chainSwitchNotice = notice to job
         }
+    }
+    LaunchedEffect(tabs.active.id) {
+        chainSwitchNotice?.let { (notice, job) -> if (notice.tabId != tabs.active.id) job.cancel() }
     }
 
     // The node identity switched with the wallet (#77, decision 10: the
@@ -3321,7 +3334,12 @@ fun BrowserScreen(
     }
     state.ethereumPrompt?.takeIf { promptTurn == PromptTurn.Ethereum }?.let { prompt ->
         val ask = prompt.ask
-        if (ask is EthAsk.SendLink) {
+        if (ask is EthAsk.SwitchNotice) {
+            // A built-in network switch with no sheet (#440): its turn is
+            // the tab on screen, uncovered, with no sheet before it — the
+            // switch goes ahead and its notice comes up (#446 R1-F1).
+            LaunchedEffect(prompt) { prompt.respond(EthAnswer.Approved()) }
+        } else if (ask is EthAsk.SendLink) {
             // A payment link (#317) isn't a sheet: its turn opens the Send
             // page, filled in, which answers the ask when it's left.
             LaunchedEffect(prompt) {

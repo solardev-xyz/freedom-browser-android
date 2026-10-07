@@ -199,28 +199,52 @@ object EthereumProviders {
             },
         )
         p.events = EthereumProvider.Events { origin, event, data -> scope.launch { emit(origin, event, data) } }
-        p.switches = EthereumProvider.Switches { switchedFlow.tryEmit(it) }
         provider = p
         // A chain removed in Settings → Chains moves the sites on it off it, and tells their pages (#215 R3-F2).
         // A list that couldn't be read (null) moves nobody: that's a read error, not a removal (#215 R4-F1).
         scope.launch { chainStore.chainsOrUnreadable.collect { list -> list?.let { p.chainsChanged(it) } } }
     }
 
-    private val switchedFlow = MutableSharedFlow<EthereumProvider.ChainSwitched>(
-        extraBufferCapacity = 1,
+    /**
+     * One "<site> switched to <chain>" notice with Undo (#440), on [tabId]:
+     * that tab's next ask waits until it's [close]d (#446 R1-F1), and an
+     * Undo pauses the tab's asks as a refused sheet does.
+     */
+    class SwitchNotice internal constructor(val tabId: Long, val switch: EthereumProvider.ChainSwitched) {
+        internal val closed = CompletableDeferred<Boolean>()
+
+        /** The notice is down: [undo] if the user tapped Undo. Only the first call counts. */
+        fun close(undo: Boolean) {
+            closed.complete(undo)
+        }
+    }
+
+    private val switchedFlow = MutableSharedFlow<SwitchNotice>(
+        extraBufferCapacity = 8,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
 
     /**
      * A connected site switched itself to a built-in chain with no sheet
-     * (#440): the browser shows "<site> switched to <chain>" with Undo
-     * ([undoSwitch]). Only the latest is kept for a collector that's
-     * behind — a page switching back and forth leaves one notice, its last.
+     * (#440), while its tab was on screen: the browser shows "<site>
+     * switched to <chain>" with Undo ([undoSwitch]) and [SwitchNotice.close]s
+     * it when it's down — a newer notice replacing it, the user leaving the
+     * tab, or the notice timing out all count as no Undo.
      */
-    val chainSwitches: SharedFlow<EthereumProvider.ChainSwitched> = switchedFlow.asSharedFlow()
+    val chainSwitches: SharedFlow<SwitchNotice> = switchedFlow.asSharedFlow()
 
-    /** The Undo of a [chainSwitches] notice ([EthereumProvider.undoSwitch]); false if it wasn't undone. */
-    suspend fun undoSwitch(switch: EthereumProvider.ChainSwitched): Boolean = provider?.undoSwitch(switch) ?: false
+    /**
+     * The Undo of a [chainSwitches] notice: closes it as undone (pausing
+     * its tab's asks) and puts the site back ([EthereumProvider.undoSwitch]);
+     * false if it wasn't put back.
+     */
+    suspend fun undoSwitch(notice: SwitchNotice): Boolean {
+        notice.close(undo = true)
+        return provider?.undoSwitch(notice.switch) ?: false
+    }
+
+    /** Notices up, by tab: closed (no Undo) when their tab starts a new document or closes. */
+    private val notices = HashMap<Long, SwitchNotice>()
 
     /**
      * Signs and broadcasts [quote] through the wallet's own send flow and
@@ -433,6 +457,7 @@ object EthereumProviders {
         if (!live()) return EthAnswer.Rejected
         if (ask is EthAsk.CantSend && tab.id in cantSendClosed) return EthAnswer.Unseen
         val lock = promptLocks.getOrPut(tab.id) { Mutex() }
+        if (ask is EthAsk.SwitchNotice) return switchTurn(tab, doc, ask, lock)
         return lock.withLock {
             if (!live()) return@withLock EthAnswer.Rejected
             // Checked again here: asks that queued behind the one the user closed must not each come up in turn.
@@ -456,6 +481,64 @@ object EthereumProviders {
                 answer !is EthAnswer.Approved && answer != EthAnswer.Unseen -> blockedTabs += tab.id
             }
             if (live()) answer else EthAnswer.Rejected
+        }
+    }
+
+    /**
+     * A no-sheet chain switch's turn on [tab] (#440, #446 R1-F1): taken in
+     * the same line as the tab's sheets ([lock]) and put up as its prompt,
+     * which the browser answers [EthAnswer.Approved] at once — but only
+     * when it's the prompt's turn, so the tab is on screen and uncovered.
+     * A background tab's switch waits there like its sheet would, and a
+     * paused tab's is refused. Once approved, [lock] stays held through
+     * the switch and its notice ([showNotice]), so a page switching in a
+     * loop gets one switch per notice, each named rightly, and its Undo
+     * pauses the tab.
+     */
+    private suspend fun switchTurn(tab: BrowserState, doc: Int, ask: EthAsk.SwitchNotice, lock: Mutex): EthAnswer {
+        fun live() = (documents[tab.id] ?: 0) == doc && tab.id !in blockedTabs
+        lock.lock()
+        var handedOn = false
+        try {
+            if (!live()) return EthAnswer.Rejected
+            val request = EthereumPromptRequest(ask) { }
+            pending.getOrPut(tab.id) { mutableSetOf() }.add(request)
+            tab.ethereumPrompt = request
+            val answer = try {
+                request.answer.await()
+            } finally {
+                pending[tab.id]?.remove(request)
+                if (tab.ethereumPrompt === request) tab.ethereumPrompt = null
+            }
+            // Never shown (withdrawn, or the tab moved on): nothing was turned down, so no pause.
+            if (answer !is EthAnswer.Approved || !live()) return EthAnswer.Rejected
+            handedOn = true
+            scope.launch {
+                try {
+                    showNotice(tab.id, doc, ask)
+                } finally {
+                    lock.unlock()
+                }
+            }
+            return answer
+        } finally {
+            if (!handedOn) lock.unlock()
+        }
+    }
+
+    /** The notice for [ask]'s switch, once made, until it's closed — bounded either way. */
+    private suspend fun showNotice(tabId: Long, doc: Int, ask: EthAsk.SwitchNotice) {
+        val switch = withTimeoutOrNull(SWITCH_WAIT_MS) { ask.switched.await() } ?: return
+        if ((documents[tabId] ?: 0) != doc) return
+        val notice = SwitchNotice(tabId, switch)
+        notices[tabId] = notice
+        try {
+            switchedFlow.tryEmit(notice)
+            val undone = withTimeoutOrNull(NOTICE_MAX_MS) { notice.closed.await() } ?: false
+            if (undone && (documents[tabId] ?: 0) == doc) blockedTabs += tabId
+        } finally {
+            notice.close(undo = false)
+            if (notices[tabId] === notice) notices.remove(tabId)
         }
     }
 
@@ -496,6 +579,7 @@ object EthereumProviders {
 
     private fun withdraw(tabId: Long) {
         pending[tabId]?.toList()?.forEach { it.respond(EthAnswer.Rejected) }
+        notices[tabId]?.close(undo = false)
     }
 
     private const val TAG = "EthereumProvider"
@@ -503,6 +587,15 @@ object EthereumProviders {
 
     /** How long a request waits for the account list to be read back after a launch. */
     private const val ACCOUNTS_WAIT_MS = 3_000L
+
+    /** The longest a no-sheet switch's turn waits for the provider to have switched (one store write). */
+    private const val SWITCH_WAIT_MS = 30_000L
+
+    /**
+     * The longest a switch notice holds its tab's next ask: past a
+     * snackbar's long duration, and its accessibility-extended one.
+     */
+    private const val NOTICE_MAX_MS = 60_000L
 
     /** The longest an Add network sheet waits for the chain catalog. */
     private const val CATALOG_WAIT_MS = 4_000L
