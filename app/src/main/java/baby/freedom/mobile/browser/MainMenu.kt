@@ -135,10 +135,12 @@ internal data class MainMenuIcons(
     val shareUrl: String?,
     val reload: MainMenuReload,
     /**
-     * A long-press on Reload reloads past the caches (#262, #417). Only
-     * while the button is Reload (not Stop) and there is a live page to
-     * reload — a tab whose renderer went away rebuilds the page on a
-     * plain Reload (#260).
+     * A long-press on Reload — or on Stop, mid-load — reloads past the
+     * caches (#262, #417), wherever there is a live page to reload, as
+     * the old Hard reload row was enabled on that alone: a page stuck
+     * loading behind a stalling gateway is exactly when it's wanted, and
+     * it shouldn't take a Stop first. Not on home, nor for a tab whose
+     * renderer went away, which rebuilds the page on a plain Reload (#260).
      */
     val hardReload: Boolean = false,
 ) {
@@ -178,7 +180,7 @@ internal fun mainMenuIconsFor(
         bookmarked = isBookmarked,
         shareUrl = urlActionTarget(addressBarText, url),
         reload = reload,
-        hardReload = reload == MainMenuReload.Reload && hasPageToActOn,
+        hardReload = reload != MainMenuReload.None && hasPageToActOn,
     )
 }
 

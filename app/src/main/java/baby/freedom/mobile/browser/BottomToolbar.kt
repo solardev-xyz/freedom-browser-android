@@ -3179,7 +3179,11 @@ private fun MainMenuIconRow(
         )
         val stop = icons.reload == MainMenuReload.Stop
         if (icons.hardReload) {
-            ReloadIconButton(onReload = onReload, onHardReload = onHardReload)
+            ReloadIconButton(
+                stop = stop,
+                onClick = if (stop) onStop else onReload,
+                onHardReload = onHardReload,
+            )
         } else {
             MainMenuIconButton(
                 icon = if (stop) Icons.Filled.Close else Icons.Filled.Refresh,
@@ -3192,9 +3196,10 @@ private fun MainMenuIconRow(
 }
 
 /**
- * The icon row's Reload where a hard reload can follow it (#417): a tap
- * reloads, a long-press reloads past the caches (#262) — the menu row
- * Hard reload used to be. The long-press is taken, so this button has no
+ * The icon row's Reload (or, mid-load, Stop) where a hard reload can
+ * follow it (#417): a tap reloads (or stops), a long-press reloads past
+ * the caches (#262) — the menu row Hard reload used to be, and which
+ * worked mid-load too. The long-press is taken, so this button has no
  * name tooltip like its neighbours; instead its long-press is labelled
  * where it can be: TalkBack says "double-tap and hold to hard reload"
  * ([onLongClickLabel]) and offers Hard reload as a custom action, and a
@@ -3202,9 +3207,9 @@ private fun MainMenuIconRow(
  * from a keyboard.
  */
 @Composable
-private fun ReloadIconButton(onReload: () -> Unit, onHardReload: () -> Unit) {
+private fun ReloadIconButton(stop: Boolean, onClick: () -> Unit, onHardReload: () -> Unit) {
     val haptics = LocalHapticFeedback.current
-    val label = stringResource(R.string.browser_reload)
+    val label = stringResource(if (stop) R.string.browser_stop_loading else R.string.browser_reload)
     val hardLabel = stringResource(R.string.browser_menu_hard_reload)
     Box(
         contentAlignment = Alignment.Center,
@@ -3219,7 +3224,7 @@ private fun ReloadIconButton(onReload: () -> Unit, onHardReload: () -> Unit) {
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                     onHardReload()
                 },
-                onClick = onReload,
+                onClick = onClick,
             )
             .semantics {
                 customActions = listOf(
@@ -3230,7 +3235,10 @@ private fun ReloadIconButton(onReload: () -> Unit, onHardReload: () -> Unit) {
                 )
             },
     ) {
-        Icon(imageVector = Icons.Filled.Refresh, contentDescription = label)
+        Icon(
+            imageVector = if (stop) Icons.Filled.Close else Icons.Filled.Refresh,
+            contentDescription = label,
+        )
     }
 }
 

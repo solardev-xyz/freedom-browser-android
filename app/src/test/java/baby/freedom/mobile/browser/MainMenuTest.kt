@@ -119,12 +119,17 @@ class MainMenuTest {
     }
 
     @Test
-    fun `a long-press on Reload hard-reloads only where Reload can act on a live page`() {
+    fun `a long-press on Reload or Stop hard-reloads wherever there is a live page`() {
         assertTrue(icons().hardReload)
-        // Stop, not Reload, while loading: no hard reload on the long-press.
-        assertFalse(icons(loading = true).hardReload)
+        // Mid-load the button is Stop, and its long-press still hard-reloads,
+        // as the old row did (R1-M2): a page stuck on a stalling gateway.
+        assertEquals(MainMenuReload.Stop, icons(loading = true).reload)
+        assertTrue(icons(loading = true).hardReload)
         // Nothing to reload on home.
         assertFalse(icons(url = "", addressBarText = "").hardReload)
+        // A typed address loading from home: Stop, but no page yet to hard-reload.
+        assertEquals(MainMenuReload.Stop, icons(url = "", addressBarText = "example.org", loading = true, hasPageToActOn = false).reload)
+        assertFalse(icons(url = "", addressBarText = "example.org", loading = true, hasPageToActOn = false).hardReload)
         // A tab whose renderer went away rebuilds on a plain Reload (#260).
         assertFalse(icons(hasPageToActOn = false).hardReload)
         assertEquals(MainMenuReload.Reload, icons(hasPageToActOn = false).reload)
