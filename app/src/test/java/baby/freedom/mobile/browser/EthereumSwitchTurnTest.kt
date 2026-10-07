@@ -10,6 +10,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
@@ -71,26 +73,31 @@ class EthereumSwitchTurnTest {
     }
 
     @Test
-    fun `a sheet asked right after a switch comes up at once and takes the notice down (#446 R4-F1)`() = runBlocking<Unit> {
+    fun `a sheet asked right after a switch comes up at once and leaves the notice up (#446 R4-F1, R5-M2)`() = runBlocking<Unit> {
         val tab = tab()
         val (turn, notice) = switched(tab)
         assertTrue(turn.await() is EthAnswer.Approved)
+        notice.received()
         notice.shown()
         settle()
         val signed = async { EthereumProviders.askOnDocument(tab, EthereumProviders.currentDocument(tab.id), sign) }
         // No waiting out the notice: the sign sheet is up straight away.
         settle()
         assertSame(sign, tab.ethereumPrompt?.ask)
-        assertTrue(notice.closed.isCompleted)
-        assertFalse(notice.closed.await())
+        // The notice, and its Undo, stay up.
+        assertFalse(notice.closed.isCompleted)
         tab.ethereumPrompt!!.respond(EthAnswer.Approved())
         assertTrue(signed.await() is EthAnswer.Approved)
+        notice.close(undo = true)
+        settle()
+        assertEquals(EthAnswer.Paused, EthereumProviders.askOnDocument(tab, EthereumProviders.currentDocument(tab.id), sign))
     }
 
     @Test
     fun `the next no-sheet switch still waits for the notice to be down (#446 R1-F1)`() = runBlocking<Unit> {
         val tab = tab()
         val (_, notice) = switched(tab)
+        notice.received()
         notice.shown()
         settle()
         val next = EthAsk.SwitchNotice(site, BuiltInChains.ETHEREUM, BuiltInChains.BASE)
@@ -105,7 +112,7 @@ class EthereumSwitchTurnTest {
     }
 
     @Test
-    fun `a sheet asked while the switch is still being made gets the turn, with no notice in its way (#446 R4-F1)`() = runBlocking<Unit> {
+    fun `a sheet asked while the switch is still being made gets the turn, and the switch is still named (#446 R4-F1, R5-M2)`() = runBlocking<Unit> {
         val tab = tab()
         val notices = mutableListOf<EthereumProviders.SwitchNotice>()
         val watch = async { EthereumProviders.chainSwitches.collect { notices += it } }
@@ -119,8 +126,73 @@ class EthereumSwitchTurnTest {
         turn.switched.complete(toEthereum)
         assertSame(sign, answerNext(tab, EthAnswer.Approved()).ask)
         assertTrue(signed.await() is EthAnswer.Approved)
-        assertTrue(notices.isEmpty())
+        assertEquals(listOf(toEthereum), notices.map { it.switch })
+        assertFalse(notices.single().closed.isCompleted)
+        notices.single().close(undo = false)
         watch.cancel()
+    }
+
+    @Test
+    fun `a switch queued behind a notice a sheet ends is announced, ahead of the sheet (#446 R5-M2)`() = runBlocking<Unit> {
+        val tab = tab()
+        val notices = mutableListOf<EthereumProviders.SwitchNotice>()
+        val watch = async { EthereumProviders.chainSwitches.collect { it.received(); notices += it } }
+        settle()
+        val first = EthAsk.SwitchNotice(site, BuiltInChains.GNOSIS, BuiltInChains.ETHEREUM)
+        async { EthereumProviders.askOnDocument(tab, EthereumProviders.currentDocument(tab.id), first) }
+        answerNext(tab, EthAnswer.Approved())
+        first.switched.complete(toEthereum)
+        settle()
+        notices.single().shown()
+        // Base waits behind the Ethereum notice; then the page asks to sign.
+        val toBase = EthAsk.SwitchNotice(site, BuiltInChains.ETHEREUM, BuiltInChains.BASE)
+        async { EthereumProviders.askOnDocument(tab, EthereumProviders.currentDocument(tab.id), toBase) }
+        settle()
+        assertNull(tab.ethereumPrompt)
+        val signed = async { EthereumProviders.askOnDocument(tab, EthereumProviders.currentDocument(tab.id), sign) }
+        // The sign ends the Ethereum notice's hold; Base had the line first.
+        assertSame(toBase, answerNext(tab, EthAnswer.Approved()).ask)
+        toBase.switched.complete(EthereumProvider.ChainSwitched(site, BuiltInChains.ETHEREUM, BuiltInChains.BASE))
+        settle()
+        assertSame(sign, answerNext(tab, EthAnswer.Approved()).ask)
+        assertTrue(signed.await() is EthAnswer.Approved)
+        // The user's last notice names Base.
+        assertEquals(listOf(BuiltInChains.ETHEREUM, BuiltInChains.BASE), notices.map { it.switch.to })
+        notices.forEach { it.close(undo = false) }
+        watch.cancel()
+    }
+
+    @Test
+    fun `a notice already up stays up when its page starts a new document (#446 R5-M1)`() = runBlocking<Unit> {
+        val tab = tab()
+        val (_, notice) = switched(tab)
+        notice.received()
+        settle()
+        // The page sets location.href right after its switch.
+        EthereumProviders.onDocumentStarted(tab, site)
+        settle()
+        assertFalse(notice.closed.isCompleted)
+        notice.shown()
+        settle()
+        assertFalse(notice.closed.isCompleted)
+        notice.close(undo = true)
+        settle()
+        // The new document isn't paused by the old one's Undo.
+        val signed = async { EthereumProviders.askOnDocument(tab, EthereumProviders.currentDocument(tab.id), sign) }
+        assertSame(sign, answerNext(tab, EthAnswer.Approved()).ask)
+        assertTrue(signed.await() is EthAnswer.Approved)
+    }
+
+    @Test
+    fun `closing its tab closes the notice (#446 R2-M2)`() = runBlocking<Unit> {
+        val tab = tab()
+        val (_, notice) = switched(tab)
+        notice.received()
+        notice.shown()
+        settle()
+        EthereumProviders.onTabClosed(tab.id)
+        settle()
+        assertTrue(notice.closed.isCompleted)
     }
 
     @Test
@@ -137,6 +209,7 @@ class EthereumSwitchTurnTest {
         turn.switched.complete(toEthereum)
         val shown = withTimeout(5_000) { notice.await() }
         assertEquals(toEthereum, shown.switch)
+        shown.received()
         shown.shown()
         shown.close(undo = true)
         settle()
@@ -150,9 +223,33 @@ class EthereumSwitchTurnTest {
     fun `Undo still pauses the page that switched (#440)`() = runBlocking<Unit> {
         val tab = tab()
         val (_, notice) = switched(tab)
+        notice.received()
         notice.shown()
         notice.close(undo = true)
         settle()
         assertEquals(EthAnswer.Paused, EthereumProviders.askOnDocument(tab, EthereumProviders.currentDocument(tab.id), sign))
+    }
+
+    @Test
+    fun `a notice the browser has waits for its tab with no limit, and one it never took is dropped (#446 R5-M3)`() {
+        val main = UnconfinedTestDispatcher()
+        Dispatchers.setMain(main)
+        runTest(main) {
+            val tab = tab()
+            val (_, notice) = switched(tab)
+            notice.received()
+            // The user is on another tab for ten minutes: the notice still waits to be shown.
+            advanceTimeBy(600_000)
+            assertFalse(notice.closed.isCompleted)
+            notice.shown()
+            // Once on screen, its hold runs out.
+            advanceTimeBy(151_000)
+            assertTrue(notice.closed.isCompleted)
+
+            // A notice nobody took (the screen was being rebuilt) doesn't hold the tab for ever.
+            val (_, lost) = switched(tab)
+            advanceTimeBy(151_000)
+            assertTrue(lost.closed.isCompleted)
+        }
     }
 }

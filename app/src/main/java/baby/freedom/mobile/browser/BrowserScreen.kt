@@ -106,11 +106,14 @@ import baby.freedom.swarm.RadicleStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -750,39 +753,57 @@ fun BrowserScreen(
     // A connected site switched itself to a built-in network, no sheet
     // (#440), while its tab had the turn on screen: say so, with Undo. One
     // at a time — a newer notice replaces this one — and closed when it's
-    // down, which lets that tab's next switch through (#446 R1-F1); taken
-    // down too if the user leaves the tab once it's up, so it never sits
-    // over another one. On the screen's scope, so the next notice arriving
-    // can't cancel an Undo already running. Closed by the bridge instead
-    // (a sheet asked, the page started a new document, or the notice ran
-    // past its longest hold), it comes down too: no Undo is left for a turn
-    // that's gone (#446 R2-M1, R2-M2, R4-F1).
+    // down, which lets that tab's next switch through (#446 R1-F1). On the
+    // screen's scope, so the next notice arriving can't cancel an Undo
+    // already running. Closed by the bridge instead (its tab closed, or the
+    // notice ran past its longest hold), it comes down too (#446 R2-M1).
     //
-    // A switch it reports is already made, so it isn't dropped (#446
-    // R4-M2): one that arrives just as the user leaves its tab waits for
-    // them to come back to it. It goes ahead of any snackbar already up
-    // (R4-M1), and tells the bridge once it's actually on screen, which is
-    // when its hold starts.
+    // A switch it reports is already made, so it isn't dropped (#446 R4-M2,
+    // R5-M3): it waits for its tab to be the active one, however long that
+    // takes, and if the user leaves the tab before it's on screen it waits
+    // for them to come back again. Once it has been on screen, leaving the
+    // tab takes it down, so it never sits over another one. It takes its
+    // place in the snackbar queue like any other notice: it doesn't push
+    // aside one already up — a Tab closed · Undo, a download's Open — and
+    // with it that notice's action (#446 R5-F1). It tells the bridge once
+    // it's actually on screen, which is when its hold starts (R4-M1).
     var chainSwitchNotice by remember { mutableStateOf<ChainSwitchNoticeUi?>(null) }
     LaunchedEffect(Unit) {
         EthereumProviders.chainSwitches.collect { notice ->
+            notice.received()
             chainSwitchNotice?.job?.cancel()
             val ui = ChainSwitchNoticeUi(notice)
             ui.job = scope.launch {
                 try {
-                    snapshotFlow { tabs.active.id }.first { it == notice.tabId }
-                    ui.onTab = true
                     val switch = notice.switch
                     val visuals = ChainSwitchVisuals(
                         Strings.get(R.string.send_eth_switched, permissionOriginDisplay(switch.origin), switch.to.name),
                         Strings.get(R.string.send_undo),
                     )
-                    launch {
-                        snapshotFlow { snackbarHostState.currentSnackbarData?.visuals }.first { it === visuals }
-                        notice.shown()
+                    var shown = false
+                    var result: SnackbarResult? = null
+                    while (result == null) {
+                        snapshotFlow { tabs.active.id }.first { it == notice.tabId }
+                        result = coroutineScope {
+                            val showing = async { snackbarHostState.showSnackbar(visuals) }
+                            val onScreen = launch {
+                                snapshotFlow { snackbarHostState.currentSnackbarData?.visuals }.first { it === visuals }
+                                shown = true
+                                notice.shown()
+                            }
+                            val left = async { snapshotFlow { tabs.active.id }.first { it != notice.tabId } }
+                            select<SnackbarResult?> {
+                                showing.onAwait { it }
+                                left.onAwait { null }
+                            }.also {
+                                showing.cancel()
+                                onScreen.cancel()
+                                left.cancel()
+                            }
+                        }
+                        // Left after it was seen: down for good, no Undo.
+                        if (result == null && shown) return@launch
                     }
-                    snackbarHostState.currentSnackbarData?.dismiss()
-                    val result = snackbarHostState.showSnackbar(visuals)
                     if (result == SnackbarResult.ActionPerformed) {
                         notice.close(undo = true)
                         scope.launch {
@@ -804,9 +825,6 @@ fun BrowserScreen(
             }
             chainSwitchNotice = ui
         }
-    }
-    LaunchedEffect(tabs.active.id) {
-        chainSwitchNotice?.let { ui -> if (ui.onTab && ui.notice.tabId != tabs.active.id) ui.job?.cancel() }
     }
 
     // The node identity switched with the wallet (#77, decision 10: the
@@ -3455,9 +3473,6 @@ private data class PageSheetTarget(val tabId: Long, val origin: String?, val doc
 /** The "<site> switched to <chain>" notice's job on screen (#440, #446). */
 private class ChainSwitchNoticeUi(val notice: EthereumProviders.SwitchNotice) {
     var job: Job? = null
-
-    /** Its tab has been the active one: leaving it now takes the notice down. */
-    var onTab = false
 }
 
 /** Its own instance per notice, so the screen can tell when that one is the snackbar up. */
