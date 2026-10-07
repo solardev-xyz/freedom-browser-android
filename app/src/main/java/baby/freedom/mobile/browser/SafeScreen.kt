@@ -841,7 +841,9 @@ private fun SafeHeader(
                 TextButton(onClick = { copyToClipboard(context, safe.address) }, modifier = Modifier.heightIn(min = 48.dp)) {
                     Text(stringResource(R.string.common_copy_address))
                 }
-                TextButton(onClick = { shareAddress(context, safe.address) }, modifier = Modifier.heightIn(min = 48.dp)) {
+                val chainName = chain?.name ?: stringResource(R.string.safe_chain_fallback, safe.chainId.toString())
+                // With the "only on <network>" line: the payer sees only what's shared, and the Safe exists on its own network alone.
+                TextButton(onClick = { shareAddress(context, safeShareText(safe.address, chainName)) }, modifier = Modifier.heightIn(min = 48.dp)) {
                     Text(stringResource(R.string.safe_share))
                 }
             }
@@ -1210,7 +1212,9 @@ private fun SafeProposePage(
                                     IconButton(
                                         enabled = !busy,
                                         onClick = {
-                                            when (val pasted = safePastedRecipient(pastedRecipient(context))) {
+                                            val clip = recipientClip(context)
+                                            val pasted = clip?.let { safePastedRecipient(pastedRecipient(it.label, it.sensitive, it.text), it.text?.trim()?.take(MAX_PASTED_RECIPIENT), safe.chainId) }
+                                            when (pasted) {
                                                 is SafePaste.Take -> takeRecipient(pasted.text)
                                                 is SafePaste.Note -> recipientNote = pasted.reason
                                                 null -> Unit
@@ -1233,14 +1237,14 @@ private fun SafeProposePage(
                             QrScanner(
                                 permission = cameraPermission,
                                 onCode = { text ->
-                                    when (ScannedCode.parse(text)) {
-                                        is ScannedCode.Address -> {
+                                    // Read as a pasted one is: an address (or a bare request for one) goes in; any other request is told why.
+                                    when (val read = safeScannedRecipient(text, safe.chainId)) {
+                                        is SafePaste.Take -> {
                                             scanning = false
-                                            takeRecipient(text)
+                                            takeRecipient(read.text)
                                         }
-                                        // Told why, the same as a pasted one: not filled in with its network, token and amount dropped.
-                                        is ScannedCode.Payment -> recipientNote = Strings.get(R.string.safe_paste_payment_request)
-                                        else -> Unit
+                                        is SafePaste.Note -> recipientNote = read.reason
+                                        null -> Unit
                                     }
                                 },
                                 modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)),
@@ -2665,19 +2669,50 @@ internal sealed interface SafePaste {
 }
 
 /**
- * [pasted], as Safe Propose's To field takes it. A plain address or a
- * name goes in; a payment request (EIP-681) doesn't, even when Send
- * could pay it: it names its own network, token and amount, and taking
- * only its address would let the Safe send something else, on its own
- * network, to an address that may only take the request's (an exchange's
- * Ethereum-only deposit address, say). The camera on the same page reads
- * a request the same way. A secret is never shown.
+ * [pasted] — the clip's [text] read by [pastedRecipient] — as Safe
+ * Propose's To field takes it, for a Safe on [chainId]. A plain address
+ * or a name goes in; so does a bare request naming only an address
+ * (`ethereum:0x…`, or `ethereum:0x…@<this Safe's chain>`: a wallet's
+ * receive code), the same as a scanned one ([safeScannedRecipient]).
+ * Any other payment request (EIP-681) doesn't, even when Send could pay
+ * it: it names its own network, token or amount, and taking only its
+ * address would let the Safe send something else, on its own network, to
+ * an address that may only take the request's (an exchange's
+ * Ethereum-only deposit address, say). A secret is never shown.
  */
-internal fun safePastedRecipient(pasted: PastedRecipient?): SafePaste? = when (pasted) {
-    is PastedRecipient.Fill ->
-        if (pasted.fill.prefill == null) SafePaste.Take(pasted.fill.recipient) else SafePaste.Note(Strings.get(R.string.safe_paste_payment_request))
-    is PastedRecipient.Refused -> SafePaste.Note(Strings.get(R.string.safe_paste_payment_request))
+internal fun safePastedRecipient(pasted: PastedRecipient?, text: String?, chainId: Long): SafePaste? = when (pasted) {
+    // Only an address or a request reads as either: [text] is the request itself.
+    is PastedRecipient.Fill, is PastedRecipient.Refused ->
+        text?.let { safeScannedRecipient(it, chainId) } ?: SafePaste.Note(Strings.get(R.string.safe_paste_payment_request))
     is PastedRecipient.Text -> SafePaste.Take(pasted.text)
     PastedRecipient.Secret -> SafePaste.Note(Strings.get(R.string.send_paste_secret))
     null -> null
 }
+
+/**
+ * [text], scanned or pasted into Safe Propose's To field, for a Safe on
+ * [chainId]: an address goes in, and so does a request naming nothing
+ * but an address — no token, no amount, and no network or this Safe's
+ * own — since that is all a receive code says. Any other request is
+ * refused with why ([R.string.safe_paste_payment_request]); null for
+ * anything that's neither (a name, say: the caller decides).
+ */
+internal fun safeScannedRecipient(text: String, chainId: Long): SafePaste? = when (val code = ScannedCode.parse(text)) {
+    is ScannedCode.Address -> SafePaste.Take(code.address)
+    is ScannedCode.Payment ->
+        if (code.token == null && code.amount == null && (code.chainId == null || code.chainId == chainId)) {
+            SafePaste.Take(code.recipient)
+        } else {
+            SafePaste.Note(Strings.get(R.string.safe_paste_payment_request))
+        }
+    else -> null
+}
+
+/**
+ * What Safe Receive's Share sends: the address, then the same "only on
+ * [chainName]" line the page shows under it — unlike an account's
+ * address, a Safe's takes funds on its own network only, and the person
+ * paying sees nothing but what's shared.
+ */
+internal fun safeShareText(address: String, chainName: String): String =
+    "$address\n\n${Strings.get(R.string.safe_receive_hint, chainName)}"

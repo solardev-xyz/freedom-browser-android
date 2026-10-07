@@ -212,21 +212,54 @@ class SendFormTest {
         assertNull(pastedRecipient(null, false, "  "))
     }
 
+    /** Safe Propose's Paste of [text] for a Safe on Gnosis, read the way the page reads the clip. */
+    private fun safePaste(text: String, chainId: Long = 100): SafePaste? =
+        safePastedRecipient(pastedRecipient(null, false, text), text.trim(), chainId)
+
     @Test
     fun `Safe Propose's Paste takes an address or a name, never just a payment request's address`() {
         // Send would pay this one (Gnosis xBZZ); a Safe proposal takes none of its network, token or amount.
         val request = "ethereum:${xbzz.address}@100/transfer?address=$other&uint256=1.5e16"
-        val payment = safePastedRecipient(pastedRecipient(null, false, request))
+        val payment = safePaste(request)
         assertTrue(payment.toString(), payment is SafePaste.Note && payment.reason.contains("payment request"))
         // No chain named, so Ethereum: the case an exchange's deposit request is.
-        assertTrue(safePastedRecipient(pastedRecipient(null, false, "ethereum:$other?value=5e17")) is SafePaste.Note)
+        assertTrue(safePaste("ethereum:$other?value=5e17") is SafePaste.Note)
         // One Send can't pay is refused here the same way, not with Send's reason.
-        val base = safePastedRecipient(pastedRecipient(null, false, "ethereum:$other@8453?value=1e15"))
+        val base = safePaste("ethereum:$other@8453?value=1e15")
         assertTrue(base.toString(), base is SafePaste.Note && base.reason.contains("payment request"))
-        assertEquals(SafePaste.Take(other), safePastedRecipient(pastedRecipient(null, false, other)))
-        assertEquals(SafePaste.Take("vitalik.eth"), safePastedRecipient(pastedRecipient(null, false, " vitalik.eth ")))
-        assertTrue(safePastedRecipient(PastedRecipient.Secret) is SafePaste.Note)
-        assertNull(safePastedRecipient(null))
+        assertEquals(SafePaste.Take(other), safePaste(other))
+        assertEquals(SafePaste.Take("vitalik.eth"), safePaste(" vitalik.eth "))
+        assertTrue(safePastedRecipient(PastedRecipient.Secret, null, 100) is SafePaste.Note)
+        assertNull(safePastedRecipient(null, null, 100))
+    }
+
+    @Test
+    fun `Safe Propose takes a bare request for an address, on no network or the Safe's own, pasted or scanned`() {
+        // A wallet's receive code: nothing but the address, so nothing is dropped by taking it.
+        assertEquals(SafePaste.Take(other), safePaste("ethereum:$other"))
+        assertEquals(SafePaste.Take(other), safePaste(" ethereum:$other@100 "))
+        assertEquals(SafePaste.Take(other), safePaste("ethereum:pay-$other@100"))
+        assertEquals(SafePaste.Take(other), safeScannedRecipient("ethereum:$other@100", 100))
+        assertEquals(SafePaste.Take(other), safeScannedRecipient("ethereum:${other.lowercase()}", 100))
+        assertEquals(SafePaste.Take(other), safeScannedRecipient(other, 100))
+        // A bare request for another network names one of its own: Ethereum (Send pays it), Base (Send doesn't).
+        assertTrue(safePaste("ethereum:$other@1") is SafePaste.Note)
+        assertTrue(safePaste("ethereum:$other@8453") is SafePaste.Note)
+        assertTrue(safeScannedRecipient("ethereum:$other@1", 100) is SafePaste.Note)
+        // The same request on a Safe on Ethereum is its own network.
+        assertEquals(SafePaste.Take(other), safePaste("ethereum:$other@1", chainId = 1))
+        // An amount, even of the native currency on the Safe's own network, or a token, is still the request's own.
+        assertTrue(safeScannedRecipient("ethereum:$other@100?value=1e15", 100) is SafePaste.Note)
+        assertTrue(safeScannedRecipient("ethereum:${xbzz.address}@100/transfer?address=$other", 100) is SafePaste.Note)
+        // Neither an address nor a request: the camera ignores it.
+        assertNull(safeScannedRecipient("hello", 100))
+    }
+
+    @Test
+    fun `Safe Receive's Share says which network the Safe takes funds on`() {
+        val shared = safeShareText(other, "Gnosis")
+        assertTrue(shared, shared.startsWith(other))
+        assertTrue(shared, shared.contains("Send only on Gnosis"))
     }
 
     @Test

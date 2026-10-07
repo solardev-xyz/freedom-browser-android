@@ -567,7 +567,8 @@ private fun LedgerAccountsStep(
                         CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp).semantics { contentDescription = addingLabel })
                     } else {
                         Text(
-                            picked?.let { p -> stringResource(R.string.signing_ledger_add_account_n, found.indexOfFirst { it.first == p.first } + 1) }
+                            // Numbered as its row is ([ledgerAccountNumber]): from the path, not its place in the list.
+                            picked?.let { p -> stringResource(R.string.signing_ledger_add_account_n, ledgerAccountNumber(scheme, p.first, found.indexOfFirst { it.first == p.first }.coerceAtLeast(0))) }
                                 ?: stringResource(R.string.signing_ledger_pick_one),
                         )
                     }
