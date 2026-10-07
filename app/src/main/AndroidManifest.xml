@@ -41,6 +41,8 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <!-- …and none of that hardware is required to install the browser. -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <!-- A Ledger on a USB cable (#319): USB host (OTG), where the phone has it. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
@@ -88,6 +90,30 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          Plugging in a Ledger (#319) opens Freedom only if the user turned
+          that on (Connect a Ledger → "Open Freedom when a Ledger is plugged
+          in", Ledger.openOnPlugIn): off by default, so nothing launches on
+          attach. On, Android offers to open Freedom for a Ledger (vendor
+          0x2c97 only) and, with "always", lets it use that Ledger without
+          asking again. It goes through IncomingLinkActivity like every
+          other intent from outside (#268), which only brings the browser
+          forward in its own task: started by another app, it can't build
+          a second browser in that app's task.
+        -->
+        <activity-alias
+            android:name=".LedgerPlugIn"
+            android:enabled="false"
+            android:exported="true"
+            android:targetActivity=".IncomingLinkActivity">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/ledger_usb_devices" />
+        </activity-alias>
 
         <!--
           Links, shares and searches from other apps (#268) arrive here,

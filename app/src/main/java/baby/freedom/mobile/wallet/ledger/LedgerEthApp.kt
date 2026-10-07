@@ -9,7 +9,7 @@ import java.math.BigInteger
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** A connection to a Ledger that carries APDUs: Bluetooth ([LedgerBleLink]) or, in a debug build, an emulator. */
+/** A connection to a Ledger that carries APDUs: Bluetooth ([LedgerBleLink]), USB ([LedgerUsbLink], #319) or, in a debug build, an emulator. */
 interface LedgerLink : AutoCloseable {
     /**
      * Sends one APDU and returns the answer: its data and the two-byte

@@ -7,6 +7,7 @@ import baby.freedom.mobile.l10n.StringSource
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.ledger.Ledger
+import baby.freedom.mobile.wallet.ledger.LedgerDevice
 import baby.freedom.mobile.wallet.ledger.LedgerKey
 import baby.freedom.mobile.wallet.ledger.LedgerScheme
 import org.junit.Assert.assertEquals
@@ -65,6 +66,7 @@ class LedgerUiTest {
         assertEquals("Unlock your Ledger", text(Ledger.Stage.UNLOCK))
         assertEquals("Open the Ethereum app", text(Ledger.Stage.OPEN_APP))
         assertEquals("Pair with your Ledger", text(Ledger.Stage.PAIRING))
+        assertEquals("Allow USB access", text(Ledger.Stage.USB_PERMISSION))
         assertEquals("Confirm the message on your Ledger", text(Ledger.Stage.CONFIRM))
     }
 
@@ -79,5 +81,16 @@ class LedgerUiTest {
         assertNull(LedgerScheme.LIVE.index(LedgerScheme.LEGACY.path(3)))
         assertNull(LedgerScheme.LIVE.index("44'/60'/01'/0/0"))
         assertEquals(3, ledgerAccountNumber(LedgerScheme.LIVE, "44'/60'/0'/7", row = 2))
+    }
+
+    @Test
+    fun `two same-model USB Ledgers are told apart by their device number (R6-M1)`() {
+        val a = LedgerDevice("usb:/dev/bus/usb/001/005", "Ledger Nano S Plus", paired = true)
+        val b = LedgerDevice("usb:/dev/bus/usb/002/012", "Ledger Nano S Plus", paired = true)
+        val x = LedgerDevice("usb:/dev/bus/usb/001/007", "Ledger Nano X", paired = true)
+        assertEquals(1 to 5, usbDeviceNumber(a, listOf(a, b, x)))
+        assertEquals(2 to 12, usbDeviceNumber(b, listOf(a, b, x)))
+        assertNull(usbDeviceNumber(x, listOf(a, b, x)))
+        assertNull(usbDeviceNumber(a, listOf(a, x)))
     }
 }
