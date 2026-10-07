@@ -12,24 +12,27 @@ import baby.freedom.mobile.wallet.NodeIdentitySync
  * so it's mentioned too — [radicleRestarting] if it's running now. A
  * Radicle node that's off isn't mentioned; it starts as the wallet's
  * identity whenever it's turned on.
+ *
+ * A wallet that has just been set up (W8) is told as only that: "Wallet
+ * created" — [justCreated], a new phrase not shown yet — or "Wallet
+ * ready" (imported, restored). That the nodes now use its identity is
+ * jargon at that moment; the node page says it (Identity: From your
+ * wallet). Only a Radicle-only change of a wallet that was already here
+ * still names the node.
  */
 internal fun nodeIdentityNotice(
     change: NodeIdentitySync.Change,
     restarting: Boolean,
     radicleOn: Boolean = false,
     radicleRestarting: Boolean = false,
+    justCreated: Boolean = false,
 ): String? {
     val parts = when (change) {
         // The same identities, sealed again: nothing to tell.
         NodeIdentitySync.Change.Resealed, NodeIdentitySync.Change.Unchanged -> emptyList()
-        is NodeIdentitySync.Change.Adopted -> listOfNotNull(
-            if (!change.swarmChanged) {
-                null
-            } else if (restarting) {
-                Strings.get(R.string.node_identity_adopted_restarting, shortAddress(change.swarmAddress))
-            } else {
-                Strings.get(R.string.node_identity_adopted_next_start, shortAddress(change.swarmAddress))
-            },
+        is NodeIdentitySync.Change.Adopted -> if (change.swarmChanged) {
+            listOf(Strings.get(if (justCreated) R.string.wallet_created_notice else R.string.wallet_ready_notice))
+        } else listOfNotNull(
             if (!radicleOn || change.radicleDid.isEmpty()) {
                 null
             } else if (radicleRestarting) {

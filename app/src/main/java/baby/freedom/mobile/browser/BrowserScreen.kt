@@ -752,7 +752,9 @@ fun BrowserScreen(
             val radicleRestarting = radicleOn && RadicleClient.state.value.status.let {
                 it != RadicleStatus.Stopped && it != RadicleStatus.Error
             }
-            val notice = nodeIdentityNotice(change, restarting, radicleOn, radicleRestarting) ?: return@collect
+            // A wallet just created, its phrase not shown yet, is "Wallet created" (W8).
+            val justCreated = (Vault.get(context).state.value as? Vault.State.Unlocked)?.info?.phraseKnown == false
+            val notice = nodeIdentityNotice(change, restarting, radicleOn, radicleRestarting, justCreated) ?: return@collect
             snackbarHostState.showSnackbar(notice, duration = SnackbarDuration.Long)
         }
     }

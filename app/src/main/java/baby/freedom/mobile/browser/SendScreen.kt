@@ -1712,19 +1712,25 @@ private fun FieldNote(text: String, error: Boolean) {
 @Composable
 internal fun SendEntrySection(status: SendStatus?, enabled: Boolean, onOpen: () -> Unit) {
     SectionCard(title = stringResource(R.string.send_title)) {
-        PageRow(
-            title = if (status == null) stringResource(R.string.send_title) else sendStatusText(status).first,
-            subtitle = status?.let {
-                val r = it.quote.request
-                val what = stringResource(R.string.send_amount_on_chain, SendAmounts.exact(r.amount, r.token.decimals), r.token.symbol, r.chain.name)
-                r.dapp?.let { d -> stringResource(R.string.send_entry_for, what, dappRequester(d)) } ?: what
-            } ?: stringResource(R.string.send_entry_subtitle),
-            style = PageRowStyle.Inset,
-            leadingIcon = Icons.AutoMirrored.Filled.Send,
-            enabled = enabled,
-            onClick = onOpen,
-        )
+        SendStatusRow(status, enabled, onOpen)
     }
+}
+
+/** [SendEntrySection]'s row on its own: the wallet home shows it over Activity while a send is under way (W1). */
+@Composable
+internal fun SendStatusRow(status: SendStatus?, enabled: Boolean, onOpen: () -> Unit) {
+    PageRow(
+        title = if (status == null) stringResource(R.string.send_title) else sendStatusText(status).first,
+        subtitle = status?.let {
+            val r = it.quote.request
+            val what = stringResource(R.string.send_amount_on_chain, SendAmounts.exact(r.amount, r.token.decimals), r.token.symbol, r.chain.name)
+            r.dapp?.let { d -> stringResource(R.string.send_entry_for, what, dappRequester(d)) } ?: what
+        } ?: stringResource(R.string.send_entry_subtitle),
+        style = PageRowStyle.Inset,
+        leadingIcon = Icons.AutoMirrored.Filled.Send,
+        enabled = enabled,
+        onClick = onOpen,
+    )
 }
 
 /**

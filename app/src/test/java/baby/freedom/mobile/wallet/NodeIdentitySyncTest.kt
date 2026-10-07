@@ -476,14 +476,10 @@ class NodeIdentitySyncTest {
     @Test
     fun `notices say what changed and whether the node restarts`() {
         val adopted = NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", ABANDON_DID)
-        assertEquals(
-            "Your Swarm node now uses your wallet's identity (0x6Fac…b9C0). Restarting it…",
-            nodeIdentityNotice(adopted, restarting = true),
-        )
-        assertEquals(
-            "Your Swarm node will use your wallet's identity (0x6Fac…b9C0) when it next starts.",
-            nodeIdentityNotice(adopted, restarting = false),
-        )
+        // A wallet just set up is told as only that (W8): the node page shows the identity.
+        assertEquals("Wallet created", nodeIdentityNotice(adopted, restarting = true, justCreated = true))
+        assertEquals("Wallet created", nodeIdentityNotice(adopted, restarting = false, justCreated = true))
+        assertEquals("Wallet ready", nodeIdentityNotice(adopted, restarting = true))
         assertEquals(
             "Wallet removed. Your Swarm node is restarting with this device's own identity.",
             nodeIdentityNotice(NodeIdentitySync.Change.Dropped, restarting = true),
@@ -494,16 +490,12 @@ class NodeIdentitySyncTest {
     fun `notices mention the Radicle node only while it's on`() {
         val adopted = NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", ABANDON_DID)
         val kept = "Repositories it seeds stay seeded; what you published before stays signed by this device's own identity."
+        // A new wallet's notice stays "Wallet created" with Radicle on too (W8).
         assertEquals(
-            "Your Swarm node now uses your wallet's identity (0x6Fac…b9C0). Restarting it… " +
-                "Your Radicle node is restarting as your wallet's identity (z6Mkgb…8gAn). $kept",
-            nodeIdentityNotice(adopted, restarting = true, radicleOn = true, radicleRestarting = true),
+            "Wallet created",
+            nodeIdentityNotice(adopted, restarting = true, radicleOn = true, radicleRestarting = true, justCreated = true),
         )
-        assertEquals(
-            "Your Swarm node will use your wallet's identity (0x6Fac…b9C0) when it next starts. " +
-                "Your Radicle node will use your wallet's identity (z6Mkgb…8gAn) when it next starts. $kept",
-            nodeIdentityNotice(adopted, restarting = false, radicleOn = true, radicleRestarting = false),
-        )
+        assertEquals("Wallet ready", nodeIdentityNotice(adopted, restarting = false, radicleOn = true, radicleRestarting = false))
         // A pre-#328 wallet's upgrade: only Radicle changed.
         val radicleOnly = adopted.copy(swarmChanged = false)
         assertEquals(
