@@ -33,7 +33,7 @@
     <string name="node_chequebook">Chequebook</string>
     <string name="node_publish">Publish</string>
     <string name="node_set_up_publishing">Set up publishing</string>
-    <string name="node_postage_stamps">Postage stamps</string>
+    <string name="node_postage_stamps">Storage</string>
     <string name="node_checking">Checking…</string>
     <string name="node_chequebook_none">None yet (comes with the first postage stamp)</string>
     <string name="node_mode_light_running">Connected to Gnosis Chain, so the node can publish</string>

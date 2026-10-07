@@ -694,7 +694,7 @@ class SwarmProviderTest {
         val ask = asked.single() as SwarmAsk.Sign
         assertEquals(SwarmProvider.AutoApprove.Signing, ask.kind)
         assertTrue(ask.grant)
-        assertEquals("Single Owner Chunk $identifier", ask.detail)
+        assertEquals("Signed data $identifier", ask.detail)
         val owner = PublisherKeys.address(ByteArray(32) { 0x11 })
         assertEquals(owner, soc.getString("owner"))
         assertEquals(identifier, soc.getString("identifier"))
@@ -1260,11 +1260,11 @@ class SwarmProviderTest {
         assertEquals("room", send.topic)
         assertEquals(2, send.size)
         assertEquals("Confirm message", swarmPromptCopy(send).title)
-        assertEquals("wants to broadcast a message (GSOC)", swarmPromptCopy(send).request)
+        assertEquals("wants to post a message to a public room", swarmPromptCopy(send).request)
         assertEquals("Always allow this site to send messages without asking", swarmPromptCopy(send).always)
         answer = SwarmProvider.Answer(true, always = true)
         okJson(call("swarm_sendPss", pssParams()))
-        assertEquals("wants to send a private message (PSS)", swarmPromptCopy(asked.last()).request)
+        assertEquals("wants to send a private message", swarmPromptCopy(asked.last()).request)
         assertTrue((site to SwarmProvider.AutoApprove.Messaging) in grants.auto)
         val before = asked.size
         okJson(call("swarm_sendPss", pssParams()))

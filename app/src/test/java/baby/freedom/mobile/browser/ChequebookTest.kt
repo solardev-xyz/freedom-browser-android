@@ -350,7 +350,7 @@ class ChequebookTest {
     fun `the copy says the chequebook also pays for faster downloads, at measured costs, capped by the deposit`() {
         val intro = baby.freedom.mobile.l10n.Strings.get(baby.freedom.mobile.R.string.stamps_chequebook_intro)
         assertTrue(intro.contains("faster downloads"))
-        assertTrue(intro.contains("never goes past what is deposited"))
+        assertTrue(intro.contains("never spends more than you deposit"))
         val cost = baby.freedom.mobile.l10n.Strings.get(baby.freedom.mobile.R.string.stamps_credit_cost_note)
         assertTrue(cost.contains("0.59 xBZZ per GB"))
         assertTrue(depositConfirmText(milli, chequebook).contains("faster downloads"))
