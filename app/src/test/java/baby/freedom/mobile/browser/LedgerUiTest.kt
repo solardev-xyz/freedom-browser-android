@@ -89,22 +89,65 @@ class LedgerUiTest {
     }
 
     @Test
-    fun `an account is enrolled only once the Ledger confirmed its address (#365)`() = runBlocking {
+    fun `an account is enrolled only once the Ledger confirmed its address and the user said it showed it (#365)`() = runBlocking {
         val path = "44'/60'/0'/0/0"
         val address = "0x" + "ab".repeat(20)
         val steps = ArrayList<String>()
-        enrolConfirmed(path, address, confirm = { p, a -> steps += "confirm $p $a" }, enrol = { p, a -> steps += "enrol $p $a" })
-        assertEquals(listOf("confirm $path $address", "enrol $path $address"), steps)
+        enrolConfirmed(
+            path,
+            address,
+            confirm = { p, a -> steps += "confirm $p $a" },
+            attest = { a -> steps += "attest $a"; true },
+            enrol = { p, a -> steps += "enrol $p $a" },
+        )
+        assertEquals(listOf("confirm $path $address", "attest $address", "enrol $path $address"), steps)
         for (kind in listOf(LedgerException.Kind.REJECTED, LedgerException.Kind.TIMEOUT, LedgerException.Kind.CANCELLED, LedgerException.Kind.WRONG_DEVICE)) {
             var enrolled = false
+            var asked = false
             try {
-                enrolConfirmed(path, address, confirm = { _, _ -> throw LedgerException(kind) }, enrol = { _, _ -> enrolled = true })
+                enrolConfirmed(path, address, confirm = { _, _ -> throw LedgerException(kind) }, attest = { asked = true; true }, enrol = { _, _ -> enrolled = true })
                 fail("$kind ended as added")
             } catch (e: LedgerException) {
                 assertEquals(kind, e.kind)
             }
             assertEquals("$kind enrolled the account", false, enrolled)
+            assertEquals("$kind asked the user anyway", false, asked)
         }
+        // An impostor answers "approved" at once with nobody touching it (R1-F1):
+        // a No on the phone still adds nothing.
+        var enrolled = false
+        try {
+            enrolConfirmed(path, address, confirm = { _, _ -> }, attest = { false }, enrol = { _, _ -> enrolled = true })
+            fail("added with no Yes on the phone")
+        } catch (e: AddressNotAttestedException) {
+            assertEquals("You didn’t confirm that your Ledger showed this address, so the account wasn’t added.", ledgerAddFailure(e))
+        }
+        assertEquals(false, enrolled)
+    }
+
+    @Test
+    fun `Verify on Ledger passes only once the user says the Ledger showed the address (#365 R1-F1)`() = runBlocking {
+        val address = "0x" + "ab".repeat(20)
+        val steps = ArrayList<String>()
+        verifyConfirmed(address, verify = { steps += "verify" }, attest = { steps += "attest $it"; true })
+        assertEquals(listOf("verify", "attest $address"), steps)
+        try {
+            verifyConfirmed(address, verify = {}, attest = { false })
+            fail("verified with no Yes on the phone")
+        } catch (e: AddressNotAttestedException) {
+            assertEquals(
+                "Not verified. If your Ledger showed a different address, or showed nothing, don’t use this one to receive.",
+                ledgerVerifyFailure(e),
+            )
+        }
+        var asked = false
+        try {
+            verifyConfirmed(address, verify = { throw LedgerException(LedgerException.Kind.REJECTED) }, attest = { asked = true; true })
+            fail("verified a rejection")
+        } catch (e: LedgerException) {
+            assertEquals(LedgerException.Kind.REJECTED, e.kind)
+        }
+        assertEquals(false, asked)
     }
 
     @Test
@@ -132,6 +175,30 @@ class LedgerUiTest {
             ledgerVerifyFailure(LedgerException(LedgerException.Kind.REJECTED)),
         )
         assertEquals(LedgerException.Kind.WRONG_DEVICE.message, ledgerVerifyFailure(LedgerException(LedgerException.Kind.WRONG_DEVICE)))
+        // The Ledger approved some other address: warn against the stored one (R1-F3).
+        val different = try {
+            Ledger.shownMatches("0x" + "11".repeat(20), "0x" + "ab".repeat(20))
+            null
+        } catch (e: LedgerException) {
+            e
+        }
+        assertEquals(
+            "The Ledger approved a different address from this one. Don’t use this one to receive.",
+            ledgerVerifyFailure(different!!),
+        )
+        assertEquals(
+            "The Ledger didn’t confirm the address in time. Verify again before you share it.",
+            ledgerVerifyFailure(LedgerException(LedgerException.Kind.TIMEOUT)),
+        )
+        assertEquals(
+            "The Ledger couldn’t show the address. Verify again before you share it.",
+            ledgerVerifyFailure(LedgerException(LedgerException.Kind.INVALID_DATA)),
+        )
+        // Nothing is signed by a verify, so no signing line for any kind (R1-F3).
+        for (kind in LedgerException.Kind.entries) {
+            val said = ledgerVerifyFailure(LedgerException(kind)) ?: continue
+            assertTrue(kind.name, !said.contains("Nothing was"))
+        }
     }
 
     @Test

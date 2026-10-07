@@ -268,7 +268,10 @@ class LedgerProtocolTest {
             fail("added an address the device didn't show")
         } catch (e: LedgerException) {
             assertEquals(LedgerException.Kind.WRONG_DEVICE, e.kind)
+            // Told apart from "this Ledger doesn't hold the account", so Receive can warn (#365 R1-F3).
+            assertEquals(true, e.shownDifferent)
         }
+        assertEquals(false, LedgerException(LedgerException.Kind.WRONG_DEVICE).shownDifferent)
     }
 
     @Test

@@ -1226,16 +1226,20 @@ class Ledger internal constructor(private val context: Context) {
             instance ?: Ledger(context.applicationContext).also { instance = it }
         }
 
-        /** A paired device's name that's a Ledger's: "Nano X 1A2B", "Ledger Stax …", "Ledger Flex …". */
         /**
          * The address the device approved on its screen must be the one
          * that's about to be added (or is in the wallet): anything else is
-         * [LedgerException.Kind.WRONG_DEVICE], and nothing is added (#365).
+         * [LedgerException.Kind.WRONG_DEVICE], caused by [LedgerException.ShownDifferent]
+         * so Receive can warn against the stored address, and nothing is
+         * added (#365).
          */
         internal fun shownMatches(shown: String, address: String) {
-            if (!shown.equals(address, ignoreCase = true)) throw LedgerException(LedgerException.Kind.WRONG_DEVICE)
+            if (!shown.equals(address, ignoreCase = true)) {
+                throw LedgerException(LedgerException.Kind.WRONG_DEVICE, cause = LedgerException.ShownDifferent())
+            }
         }
 
+        /** A paired device's name that's a Ledger's: "Nano X 1A2B", "Ledger Stax …", "Ledger Flex …". */
         internal fun isLedgerName(name: String?): Boolean =
             name != null && (name.startsWith("Nano X") || name.startsWith("Ledger"))
 

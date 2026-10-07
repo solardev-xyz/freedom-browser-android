@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Usb
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
@@ -80,6 +81,7 @@ import baby.freedom.mobile.wallet.ledger.LedgerException
 import baby.freedom.mobile.wallet.ledger.LedgerKey
 import baby.freedom.mobile.wallet.ledger.LedgerScheme
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -106,6 +108,7 @@ internal fun LedgerConnectPage(accounts: List<WalletAccount>, onAdded: () -> Uni
     val context = LocalContext.current
     val ledger = remember(context) { Ledger.get(context) }
     val walletAccounts = remember(context) { WalletAccounts.get(context) }
+    val ask = remember { LedgerAddressAsk() }
     var device by remember { mutableStateOf<LedgerDevice?>(null) }
     val back = {
         if (device != null) device = null else onBack()
@@ -130,6 +133,7 @@ internal fun LedgerConnectPage(accounts: List<WalletAccount>, onAdded: () -> Uni
                         path,
                         address,
                         confirm = { p, a -> ledger.confirmAddress(d, p, a) },
+                        attest = ask::ask,
                         enrol = { p, a ->
                             // Saved under the path the Ledger is at now, if it re-enumerated since it was tapped (#350 R6-F1).
                             walletAccounts.addLedger(LedgerKey(p, ledger.followed(d).id, d.name), a, name)
@@ -140,6 +144,7 @@ internal fun LedgerConnectPage(accounts: List<WalletAccount>, onAdded: () -> Uni
             )
         }
     }
+    LedgerAddressAskDialog(ask)
 }
 
 /**
@@ -159,22 +164,47 @@ internal fun usbDeviceNumber(d: LedgerDevice, all: List<LedgerDevice>): Pair<Int
 /**
  * Adds the Ledger account at [path] only once the Ledger has shown
  * [address] on its own screen and the user approved it there (#365):
- * [confirm] throws on a rejection, a timeout or Cancel, and then [enrol]
- * never runs — the address is otherwise only what answered over the link.
+ * [confirm] throws on a rejection, a timeout or Cancel. A Ledger's
+ * "approved" is still only what answered over the link — anything that
+ * advertises as a Ledger can answer it at once with no one touching it —
+ * so the user is then asked on the phone ([attest]) whether their
+ * Ledger's screen showed it; a No is [AddressNotAttestedException].
+ * Only then does [enrol] run.
  */
 internal suspend fun enrolConfirmed(
     path: String,
     address: String,
     confirm: suspend (path: String, address: String) -> Unit,
+    attest: suspend (address: String) -> Boolean,
     enrol: suspend (path: String, address: String) -> Unit,
 ) {
     confirm(path, address)
+    if (!attest(address)) throw AddressNotAttestedException()
     enrol(path, address)
 }
+
+/**
+ * Receive's Verify on Ledger (#365): [verify] has the Ledger show the
+ * address and answer that it was approved, then the user says on the
+ * phone ([attest]) whether its screen really showed it, as for Add
+ * ([enrolConfirmed]). Returns normally only if both did.
+ */
+internal suspend fun verifyConfirmed(
+    address: String,
+    verify: suspend () -> Unit,
+    attest: suspend (address: String) -> Boolean,
+) {
+    verify()
+    if (!attest(address)) throw AddressNotAttestedException()
+}
+
+/** The user said on the phone that their Ledger didn't show the address, or didn't say it did (#365). */
+internal class AddressNotAttestedException : Exception("the address wasn't confirmed on the phone")
 
 /** What the Add bar says when [e] ended Add (#365): the account was not added, and why. */
 internal fun ledgerAddFailure(e: Exception): String = when (e) {
     is DuplicateAccountException -> Strings.get(R.string.signing_ledger_account_already_in_wallet)
+    is AddressNotAttestedException -> Strings.get(R.string.signing_ledger_add_not_attested)
     is LedgerException -> when {
         e.ownWords -> Strings.get(R.string.signing_ledger_add_failed_because, e.message)
         e.kind == LedgerException.Kind.REJECTED -> Strings.get(R.string.signing_ledger_add_rejected)
@@ -188,12 +218,88 @@ internal fun ledgerAddFailure(e: Exception): String = when (e) {
     else -> Strings.get(R.string.signing_ledger_add_failed)
 }
 
-/** What Receive's Verify on Ledger says when [e] ended it (#365); null for Cancel, which the user just did. */
+/**
+ * What Receive's Verify on Ledger says when [e] ended it (#365); null for
+ * Cancel, which the user just did. Never a signing line ("Nothing was
+ * signed."): what's at stake is whether to receive at this address.
+ */
 internal fun ledgerVerifyFailure(e: Exception): String? = when {
+    e is AddressNotAttestedException -> Strings.get(R.string.signing_ledger_verify_not_attested)
     e !is LedgerException -> LedgerException.Kind.UNKNOWN.message
     e.kind == LedgerException.Kind.CANCELLED -> null
-    e.kind == LedgerException.Kind.REJECTED && !e.ownWords -> Strings.get(R.string.signing_ledger_verify_rejected)
+    // The Ledger approved some other address: the stored one isn't what it holds there.
+    e.shownDifferent -> Strings.get(R.string.signing_ledger_verify_shown_different)
+    e.ownWords -> e.message
+    e.kind == LedgerException.Kind.REJECTED -> Strings.get(R.string.signing_ledger_verify_rejected)
+    e.kind == LedgerException.Kind.TIMEOUT -> Strings.get(R.string.signing_ledger_verify_timeout)
+    e.kind.saysNothingSent -> Strings.get(R.string.signing_ledger_verify_not_checked)
     else -> e.message
+}
+
+/**
+ * The phone-side half of an address check (#365): [ask] puts the
+ * question up ([LedgerAddressAskDialog]) and waits for the user's answer.
+ * Held by the page that shows the dialog, so it lives as long as the
+ * coroutine asking.
+ */
+internal class LedgerAddressAsk {
+    class Pending(val address: String, val answer: CompletableDeferred<Boolean>)
+
+    var pending by mutableStateOf<Pending?>(null)
+        private set
+
+    /** True only if the user answered that their Ledger's screen showed [address] and they approved it there. */
+    suspend fun ask(address: String): Boolean {
+        val p = Pending(address, CompletableDeferred())
+        pending = p
+        try {
+            return p.answer.await()
+        } finally {
+            if (pending === p) pending = null
+        }
+    }
+}
+
+/**
+ * "Did your Ledger show this address?", with the address grouped as
+ * Receive shows it (#365). Yes is tap-guarded like any approval, so a
+ * reflex tap as the Ledger dialog closes doesn't answer it; dismissing
+ * it is a No.
+ */
+@Composable
+internal fun LedgerAddressAskDialog(ask: LedgerAddressAsk) {
+    val p = ask.pending ?: return
+    val tap = rememberArmedTapGuard(p)
+    val guard = tap.guard
+    val no = { p.answer.complete(false); Unit }
+    AlertDialog(
+        onDismissRequest = no,
+        title = { Text(stringResource(R.string.signing_ledger_attest_title)) },
+        text = {
+            Column {
+                Text(
+                    groupedAddress(p.address),
+                    style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                    modifier = Modifier.testTag("ledger-attest-address"),
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(stringResource(R.string.signing_ledger_attest_body), style = MaterialTheme.typography.bodyMedium)
+                ObscuredTapNotice(tap)
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { if (guard.accepts()) p.answer.complete(true) },
+                enabled = tap.armed,
+                modifier = Modifier.protectedPress(tap).testTag("ledger-attest-yes"),
+            ) { Text(stringResource(R.string.signing_ledger_attest_yes)) }
+        },
+        dismissButton = {
+            TextButton(onClick = no, modifier = Modifier.testTag("ledger-attest-no")) {
+                Text(stringResource(R.string.signing_ledger_attest_no))
+            }
+        },
+    )
 }
 
 /** A Ledger row's subtitle: [how] it's reached, and that nothing from it is verified yet (#365). */

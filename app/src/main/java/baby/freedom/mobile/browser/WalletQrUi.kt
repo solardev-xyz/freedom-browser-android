@@ -253,6 +253,7 @@ internal fun ReceivePage(account: WalletAccount, onBack: () -> Unit) {
     var verifying by remember(account.address) { mutableStateOf(false) }
     var verified by remember(account.address) { mutableStateOf(false) }
     var verifyError by remember(account.address) { mutableStateOf<String?>(null) }
+    val ask = remember { LedgerAddressAsk() }
     FullScreenScaffold(title = stringResource(R.string.wallet_qr_receive_title), onDismiss = onBack) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -310,13 +311,17 @@ internal fun ReceivePage(account: WalletAccount, onBack: () -> Unit) {
                         verifyError = null
                         scope.launch {
                             try {
-                                ledger.verifyAddress(account)
+                                verifyConfirmed(account.address, verify = { ledger.verifyAddress(account) }, attest = ask::ask)
                                 verified = true
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Exception) {
-                                verified = false
-                                verifyError = ledgerVerifyFailure(e)
+                                // A Cancel says nothing about the address, so an earlier
+                                // verification stands; any other ending replaces it.
+                                ledgerVerifyFailure(e)?.let {
+                                    verified = false
+                                    verifyError = it
+                                }
                             } finally {
                                 verifying = false
                             }
@@ -326,12 +331,14 @@ internal fun ReceivePage(account: WalletAccount, onBack: () -> Unit) {
             }
         }
     }
+    LedgerAddressAskDialog(ask)
 }
 
 /**
  * Receive's Verify on Ledger (#365): asks the Ledger holding the account
  * to show its address on its own screen, so what's shared was checked on
- * the device rather than taken from the phone; then says how that went.
+ * the device rather than taken from the phone, and the user then says on
+ * the phone whether it did ([verifyConfirmed]); then says how that went.
  */
 @Composable
 private fun LedgerVerifyCard(verifying: Boolean, verified: Boolean, error: String?, onVerify: () -> Unit) {

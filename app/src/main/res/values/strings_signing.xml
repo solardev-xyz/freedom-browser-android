@@ -107,6 +107,7 @@
     <string name="signing_ledger_add_timeout">The Ledger didn’t confirm the address in time, so the account wasn’t added.</string>
     <string name="signing_ledger_add_cancelled">Cancelled. The account wasn’t added.</string>
     <string name="signing_ledger_add_wrong_device">This Ledger didn’t show that address, so the account wasn’t added.</string>
+    <string name="signing_ledger_add_not_attested">You didn’t confirm that your Ledger showed this address, so the account wasn’t added.</string>
     <string name="signing_ledger_add_not_checked">The Ledger couldn’t show the address, so the account wasn’t added.</string>
     <!-- %1$s: why the Ledger couldn't be reached, a full sentence (e.g. "Your Ledger is locked. Unlock it with your PIN."). -->
     <string name="signing_ledger_add_failed_because">%1$s The account wasn’t added.</string>
@@ -127,8 +128,17 @@
     <!-- Receive page, Ledger accounts only (#365). -->
     <string name="signing_ledger_verify_on_ledger">Verify on Ledger</string>
     <string name="signing_ledger_verify_hint">Before you share this address, check that your Ledger shows the same one.</string>
-    <string name="signing_ledger_verify_ok">Your Ledger showed this address and you confirmed it.</string>
+    <string name="signing_ledger_verify_ok">You confirmed that your Ledger showed this address.</string>
     <string name="signing_ledger_verify_rejected">Rejected on the Ledger. If it showed a different address, don’t use this one to receive.</string>
+    <string name="signing_ledger_verify_timeout">The Ledger didn’t confirm the address in time. Verify again before you share it.</string>
+    <string name="signing_ledger_verify_not_checked">The Ledger couldn’t show the address. Verify again before you share it.</string>
+    <string name="signing_ledger_verify_shown_different">The Ledger approved a different address from this one. Don’t use this one to receive.</string>
+    <string name="signing_ledger_verify_not_attested">Not verified. If your Ledger showed a different address, or showed nothing, don’t use this one to receive.</string>
+    <!-- Asked on the phone once the Ledger answered that its address was approved (#365): only the user can say the real Ledger's screen showed it. -->
+    <string name="signing_ledger_attest_title">Did your Ledger show this address?</string>
+    <string name="signing_ledger_attest_body">Answer from what you saw on the Ledger’s own screen. Anything nearby can call itself a Ledger and answer “approved” with nobody touching it.</string>
+    <string name="signing_ledger_attest_yes">Yes, I approved it there</string>
+    <string name="signing_ledger_attest_no">No</string>
 
     <!-- wallet/OpenLvEngine.kt -->
     <string name="signing_openlv_connection_failed">The connection failed.</string>
