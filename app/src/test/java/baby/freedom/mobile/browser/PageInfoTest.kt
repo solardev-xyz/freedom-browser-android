@@ -467,6 +467,27 @@ class PageInfoTest {
         assertNull(PrivateProfile.liveProfileName())
         assertFalse(PrivateProfile.isLiveSession("private-0d6e"))
         assertFalse(PrivateProfile.isLiveSession(""))
+        // R3-M1: the case in the name — the Delete's session ended and a
+        // newer one is live. The pinned name doesn't match it, so the wipe
+        // WebView is not attached (attachToLive returns before touching
+        // it), while the newer session's own name still does match.
+        withLivePrivateSession("private-41aa") {
+            assertEquals("private-41aa", PrivateProfile.liveProfileName())
+            assertFalse(PrivateProfile.isLiveSession("private-0d6e"))
+            assertFalse(PrivateProfile.attachToLive(android.webkit.WebView(android.content.ContextWrapper(null)), "private-0d6e"))
+            assertTrue(PrivateProfile.isLiveSession("private-41aa"))
+        }
+        assertNull(PrivateProfile.liveProfileName())
+    }
+
+    /** Run [block] with a fake private session named [name] live, no WebView or ProfileStore involved. */
+    private fun withLivePrivateSession(name: String, block: () -> Unit) {
+        val profile = java.lang.reflect.Proxy.newProxyInstance(
+            androidx.webkit.Profile::class.java.classLoader, arrayOf(androidx.webkit.Profile::class.java),
+        ) { _, m, _ -> if (m.name == "getName") name else throw UnsupportedOperationException(m.name) }
+        val field = PrivateProfile::class.java.getDeclaredField("current").apply { isAccessible = true }
+        field.set(null, profile)
+        try { block() } finally { field.set(null, null) }
     }
 
     @Test
