@@ -177,9 +177,11 @@
     <!-- browser/NodeApiGuard.kt: the 403 page a web page's request to the node's own API gets.
          %1$s lists the API paths pages may use (/bzz, /bytes, …). -->
     <string name="node_api_spend_refusal">Freedom doesn\'t let web pages spend the Swarm node\'s funds. Postage stamps and the chequebook are managed in the app.</string>
-    <string name="node_api_read_refusal">Freedom doesn\'t let web pages use the Swarm node\'s own API. Pages can upload and read content, send messages and check the node is up (%1$s); the node\'s wallet, stamps and addresses are shown in the app.</string>
+    <!-- A web page's upload, message or other write to a Swarm node (#358). window.swarm is the page API, kept as code. -->
+    <string name="node_api_write_refusal">Freedom doesn\'t let web pages upload, send messages or change anything through a Swarm node. Sites publish with window.swarm, which asks you first.</string>
+    <string name="node_api_read_refusal">Freedom doesn\'t let web pages use the Swarm node\'s own API. Pages can read content and check the node is up (%1$s); the node\'s wallet, stamps and addresses are shown in the app.</string>
     <!-- node_api_read_refusal for a host name, which may resolve to the device: how to reach a Bee node on another machine instead. -->
-    <string name="node_api_read_refusal_other_node">Freedom doesn\'t let web pages use the Swarm node\'s own API. Pages can upload and read content, send messages and check the node is up (%1$s); the node\'s wallet, stamps and addresses are shown in the app. If this is a Bee node on another machine, use its IP address, or set it as the external Swarm node in Settings.</string>
+    <string name="node_api_read_refusal_other_node">Freedom doesn\'t let web pages use the Swarm node\'s own API. Pages can read content and check the node is up (%1$s); the node\'s wallet, stamps and addresses are shown in the app. If this is a Bee node on another machine, use its IP address, or set it as the external Swarm node in Settings.</string>
 
     <!-- browser/IpfsProgress.kt: the status line while an IPFS page loads -->
     <string name="node_ipfs_queued">IPFS: Queued request…</string>

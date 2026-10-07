@@ -459,6 +459,17 @@ private fun HttpURLConnection.applySwarmRequestHeaders() {
 }
 
 /**
+ * Is [name] a request header that spends or unlocks with the user's own
+ * node — `Swarm-Postage-Batch-Id` (a batch the user paid for) or any
+ * `Swarm-Act*` (access control: the node's key decrypts, a publisher's
+ * grantee list) — which a page's request mustn't carry through to the
+ * gateway (#358)? Pages publish through `window.swarm`, which asks the
+ * user.
+ */
+internal fun isNodeAuthorityHeader(name: String): Boolean =
+    name.lowercase().let { it == "swarm-postage-batch-id" || it.startsWith("swarm-act") }
+
+/**
  * Copy request headers from [req] onto [this] connection, stripping
  * hop-by-hop / origin-tied headers (`Range` goes through), forcing
  * `Accept-Encoding: identity`, and stamping the Swarm-* retrieval
@@ -474,7 +485,7 @@ private fun HttpURLConnection.forwardProxiedHeaders(
 ) {
     req.requestHeaders?.forEach { (k, v) ->
         val lk = k.lowercase()
-        if (lk in REQUEST_HEADERS_TO_STRIP) return@forEach
+        if (lk in REQUEST_HEADERS_TO_STRIP || isNodeAuthorityHeader(lk)) return@forEach
         // A redirect hop to another origin doesn't get the credentials
         // (HttpURLConnection's own following dropped them too).
         if (crossOrigin && lk == "authorization") return@forEach
@@ -5728,17 +5739,21 @@ internal fun navigationOpensStopLatch(isForMainFrame: Boolean, detoured: Boolean
     isForMainFrame && !detoured
 
 /**
- * Answer a CORS preflight locally. Permissive by policy: content on
- * virtual origins is public and credential-less, and the node API on
- * localhost is only reachable from this device anyway.
+ * Answer a CORS preflight locally. Permissive by policy for virtual
+ * origins: content there is public and credential-less. [methods]
+ * narrows it for the embedded gateways, where a page may only read
+ * (#358).
  */
-private fun corsPreflightResponse(req: WebResourceRequest): WebResourceResponse {
+private fun corsPreflightResponse(
+    req: WebResourceRequest,
+    methods: String = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
+): WebResourceResponse {
     val requestedHeaders = req.requestHeaders?.entries
         ?.firstOrNull { it.key.equals("Access-Control-Request-Headers", ignoreCase = true) }
         ?.value
     val headers = mutableMapOf(
         "Access-Control-Allow-Origin" to "*",
-        "Access-Control-Allow-Methods" to "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
+        "Access-Control-Allow-Methods" to methods,
         "Access-Control-Max-Age" to "600",
     )
     if (!requestedHeaders.isNullOrBlank()) {
@@ -5994,23 +6009,24 @@ private fun interceptVirtualRequestFor(
     val uri = req.url ?: return null
     val url = uri.toString()
 
-    // Sanctioned write path: pages on virtual origins POST/upload to
-    // the node API origin (`http://127.0.0.1:…`) directly. Those
-    // requests pass through to Chromium's network stack (bodies never
-    // reach the interceptor), but their CORS *preflights* are bodyless
-    // — answer them here so the write path works regardless of the
-    // node's own CORS configuration. The request itself then reaches
-    // the node, but by design (#284) the embedded Swarm gateway sends
-    // no `Access-Control-Allow-Origin` on the actual response
-    // (`SwarmNode.GATEWAY_CORS_ORIGINS` is empty), so the page can't
-    // read the reply — that is what keeps `/wallet`, `/addresses` etc.
+    // A read's CORS preflight to an embedded gateway (`http://127.0.0.1:…`)
+    // is answered here, for GET and HEAD only. No page writes through
+    // the node (#358): a Swarm write's preflight never gets this far
+    // ([NodeApiGuard] refuses it with the write itself), and any other
+    // write's preflight isn't answered by the app — it goes to the node,
+    // whose own CORS policy decides. By design (#284) the embedded Swarm
+    // gateway sends no `Access-Control-Allow-Origin` on its answers
+    // (`SwarmNode.GATEWAY_CORS_ORIGINS` is empty), so a page can't read
+    // the reply — that is what keeps `/wallet`, `/addresses` etc.
     // unreadable through a redirect (#283). Don't "fix" the missing
     // header by allowing `*` or `null`; `window.swarm` is the path that
-    // returns results (see docs/virtual-origins-hardening.md). Only the
-    // embedded nodes: an external endpoint
-    // (#125) keeps its own CORS policy, so its preflights go through.
-    if (req.method == "OPTIONS" && Gateways.isEmbeddedGateway(url)) {
-        return corsPreflightResponse(req)
+    // publishes and returns results (see docs/virtual-origins-hardening.md).
+    // Only the embedded nodes: an external endpoint (#125) keeps its
+    // own CORS policy, so its preflights go through.
+    if (req.method == "OPTIONS" && Gateways.isEmbeddedGateway(url) &&
+        NodeApiGuard.pageMethod(req.method, req.requestHeaders).uppercase().let { it == "GET" || it == "HEAD" }
+    ) {
+        return corsPreflightResponse(req, methods = "GET, HEAD, OPTIONS")
     }
 
     val scheme = uri.scheme?.lowercase()

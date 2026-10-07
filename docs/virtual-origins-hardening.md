@@ -54,16 +54,20 @@ requested headers echoed).
 ### To the node API (writes)
 
 `WebResourceRequest` carries no request body, so intercepted origins
-are GET/HEAD-only; the sanctioned write path is calling
-`http://127.0.0.1:1633` (ant) / the freedom-ipfs API directly from
-page JS. Mixed content is fine — Chromium treats `http://127.0.0.1` as
-potentially trustworthy.
+are GET/HEAD-only. Pages don't write through a Swarm node directly
+(#358): `NodeApiGuard` answers `403` to every page request with a
+method other than GET/HEAD to the gateway port on any host, and to the
+external Swarm node set in Settings; pages publish with `window.swarm`,
+which asks the user (see `docs/dapp-compatibility.md`, *The write
+path*).
 
 Status:
 
-- **Preflights**: answered by the interceptor (bodyless `OPTIONS` to a
-  local gateway origin never needs to reach the node), so the
-  preflight leg works today regardless of node configuration.
+- **Preflights**: a CORS preflight is judged as the request it asks
+  for. A read's preflight to an embedded gateway is answered by the
+  interceptor (`GET, HEAD` only); a Swarm write's is refused with the
+  write, and the app answers no other write's preflight (it goes to the
+  node, whose own CORS policy decides).
 - **Actual responses**: the node itself must send
   `Access-Control-Allow-Origin` for the browser to let the page read
   the result, and it doesn't: since #284 the app starts ant's gateway
@@ -88,10 +92,10 @@ Status:
   `Origin: null` after any cross-origin redirect, so an ordinary page
   could too, through a redirector, from a public https site as well
   (Private Network Access doesn't block it in WebView 133).
-  `NodeApiGuard` refuses every page request outside the dapp surface to
+  `NodeApiGuard` refuses every page read outside the dapp surface to
   the gateway port on a host that may be this device (a loopback or
   unspecified literal, `localhost`, or any name other than the external
-  Swarm node set in Settings; chain writes on every host), but WebView
+  Swarm node set in Settings; writes on every host, #358), but WebView
   never asks the interceptor about such a redirect hop, and other
   browsers don't pass through it at all. With the empty allow-list the
   redirected fetch still reaches the node, but its answer carries no

@@ -37,12 +37,24 @@ import java.io.ByteArrayInputStream
  * So every page request to the gateway port on a host that may be this
  * device (see below) — from a tab, a private tab, a worker or a service
  * worker, all of which pass [interceptVirtualRequest] — whose endpoint
- * isn't on the dapp surface ([DAPP_PATHS]) is answered here with a 403
- * before it reaches the network, whatever its method and origin; a chain
- * write is refused on any host. An allowlist, not a list of private endpoints: an endpoint a
- * later ant adds stays closed until it's added here. Spending and the
- * node's details go through the app's own screens, which talk to the
- * node natively.
+ * isn't on the readable dapp surface ([DAPP_PATHS]) is answered here with
+ * a 403 before it reaches the network, whatever its origin. An allowlist,
+ * not a list of private endpoints: an endpoint a later ant adds stays
+ * closed until it's added here. Spending and the node's details go
+ * through the app's own screens, which talk to the node natively.
+ *
+ * And no page writes through a node at all (#358), as on desktop
+ * (`ant-api-guard.js`): every method but GET and HEAD — a CORS preflight
+ * counts as the method it asks for ([pageMethod]) — is refused on the
+ * gateway port on *any* host, a LAN Bee node's included, and on the
+ * external Swarm node set in Settings whatever its port. Otherwise any
+ * site could upload, send pss or write feeds under a postage batch the
+ * user paid for (a `no-cors` POST needs no preflight), or pin, tag and
+ * dial peers on a LAN node. Pages publish with `window.swarm`, which asks
+ * the user first and signs and uploads natively; the app's own
+ * publishing talks to the node natively too. Reads stay as they were:
+ * dweb pages still load `/bzz` content and the error page still probes
+ * `/health`.
  *
  * This is the page-facing, readable refusal, not the whole enforcement:
  * a navigation's redirect is followed inside Chromium without asking
@@ -66,16 +78,18 @@ import java.io.ByteArrayInputStream
  * its reads pass; so does the host of the external Swarm node the user
  * set in Settings ([Gateways.externalSwarmBase]), which they named
  * themselves. Any other name on the port (`http://nas:1633`) is refused,
- * with a refusal that says how to reach such a node. Chain writes stay
- * refused on every host, as they were before the reads were covered.
+ * with a refusal that says how to reach such a node. Writes are refused
+ * on every host (#358), and a chain write's refusal says so in its own
+ * words ([CHAIN_PATHS]).
  */
 internal object NodeApiGuard {
     /**
-     * First path segments a page may use: the content and messaging
-     * surface `docs/dapp-compatibility.md` promises (uploads, downloads,
-     * feeds, chunks, single-owner chunks, pss/gsoc), plus the liveness
-     * probes (`/health` — the error page asks it whether the node is up —
-     * and `/readiness`), which say nothing about the user.
+     * First path segments a page may read (GET/HEAD; no page writes
+     * anywhere on the node, #358): the content surface
+     * `docs/dapp-compatibility.md` promises (downloads, feeds, chunks,
+     * single-owner chunks, pss/gsoc), plus the liveness probes (`/health`
+     * — the error page asks it whether the node is up — and `/readiness`),
+     * which say nothing about the user.
      */
     internal val DAPP_PATHS = setOf(
         "bzz", "bytes", "chunks", "soc", "feeds", "pss", "gsoc", "health", "readiness",
@@ -85,9 +99,8 @@ internal object NodeApiGuard {
      * First path segments of bee's API endpoints that sign transactions:
      * postage batches, the chequebook (deposit, withdraw, cash-out),
      * staking, wallet withdrawals and pending-transaction resend/cancel.
-     * On a host that may be this device they're refused anyway (none is in
-     * [DAPP_PATHS]) and named only to explain a write's refusal; on any
-     * other host, a write to one is still refused.
+     * Every page write is refused anyway (#358); these are named only so
+     * a write to one gets the refusal about the node's funds.
      */
     private val CHAIN_PATHS = setOf("stamps", "chequebook", "stake", "wallet", "transactions")
 
@@ -105,7 +118,7 @@ internal object NodeApiGuard {
     /** The 403 for [request] if it's a page's request to the node's own API, else null. */
     fun refusalFor(request: WebResourceRequest): WebResourceResponse? {
         val url = request.url?.toString() ?: return null
-        val method = request.method.orEmpty()
+        val method = pageMethod(request.method.orEmpty(), request.requestHeaders)
         val text = refusalText(method, url) ?: return null
         // The endpoint only: a query can carry anything.
         Log.w(TAG, "refused a page's request to the Swarm node's API: ${method.uppercase()} /${firstSegment(pathOf(url)).orEmpty()}")
@@ -128,9 +141,9 @@ internal object NodeApiGuard {
      */
     internal fun refusalText(method: String, url: String): String? {
         if (!refuses(method, url)) return null
-        val write = isChainWrite(method, url)
         return when {
-            write -> Strings.english(R.string.node_api_spend_refusal)
+            isChainWrite(method, url) -> Strings.english(R.string.node_api_spend_refusal)
+            isWrite(method) -> Strings.english(R.string.node_api_write_refusal)
             isLoopbackLiteral(WhatwgHost.parse(url)?.hostname) -> READ_REFUSAL
             else -> Strings.english(R.string.node_api_read_refusal_other_node, dappPathList())
         }
@@ -163,20 +176,54 @@ internal object NodeApiGuard {
             refuses(method, url, externalSwarm)
 
     /**
-     * Is a [method] request to [url] one for the node's gateway, outside the
-     * dapp surface? [externalSwarm] is the user's external Swarm node
-     * ([Gateways.externalSwarmBase]; `""` for none).
+     * The method a page's [method] request with [headers] stands for: a
+     * CORS preflight (`OPTIONS` with `Access-Control-Request-Method`) is
+     * judged as the request it asks to send, so a read's preflight passes
+     * and a write's is refused, before the app would answer it
+     * ([corsPreflightResponse]). A page can't set that header itself (it's
+     * a forbidden request header), and a page's own `OPTIONS` request is
+     * preflighted as `OPTIONS`, so neither can pass for a read.
+     */
+    internal fun pageMethod(method: String, headers: Map<String, String>?): String {
+        if (!method.equals("OPTIONS", ignoreCase = true)) return method
+        return headers?.entries
+            ?.firstOrNull { it.key.equals("Access-Control-Request-Method", ignoreCase = true) }
+            ?.value?.trim()?.takeIf { it.isNotEmpty() }
+            ?: method
+    }
+
+    /**
+     * Is a [method] request to [url] one a page may not make to a Swarm
+     * node: any write ([isWrite]) to the gateway port on any host or to
+     * the external node ([externalSwarm], [Gateways.externalSwarmBase];
+     * `""` for none) on its own port (#358), or a read outside the dapp
+     * surface on a host that may be this device?
      */
     internal fun refuses(
         method: String,
         url: String,
         externalSwarm: String = Gateways.externalSwarmBase,
     ): Boolean {
-        if (!onGatewayPort(url)) return false
+        val gatewayPort = onGatewayPort(url)
+        if (!gatewayPort && !isExternalNode(url, externalSwarm)) return false
+        if (isWrite(method)) return true
+        if (!gatewayPort) return false
         val segment = firstSegment(pathOf(url))
         if (segment in DAPP_PATHS) return false
-        if (isChainWrite(method, url)) return true
         return mayBeThisDevice(url, externalSwarm)
+    }
+
+    /**
+     * Is [url] on the external Swarm node's own origin (scheme, host as the
+     * WHATWG parser reads it, and port)? Not for `""` (no external node).
+     */
+    private fun isExternalNode(url: String, externalSwarm: String): Boolean {
+        if (externalSwarm.isEmpty()) return false
+        val port = effectivePort(url) ?: return false
+        if (port != effectivePort(externalSwarm)) return false
+        if (!url.substringBefore("://").equals(externalSwarm.substringBefore("://"), ignoreCase = true)) return false
+        val host = WhatwgHost.parse(url)?.hostname?.trimEnd('.') ?: return false
+        return host == WhatwgHost.parse(externalSwarm)?.hostname?.trimEnd('.')
     }
 
     /**
@@ -235,20 +282,22 @@ internal object NodeApiGuard {
     private fun isWrite(method: String): Boolean = method.uppercase().let { it != "GET" && it != "HEAD" }
 
     /** Does [url] (http or https, any host) name the gateway's port? */
-    private fun onGatewayPort(url: String): Boolean {
+    private fun onGatewayPort(url: String): Boolean = effectivePort(url) == GATEWAY_PORT
+
+    /** [url]'s port, the scheme's default if none; null if it isn't http(s). */
+    private fun effectivePort(url: String): Int? {
         val schemeEnd = url.indexOf("://")
-        if (schemeEnd <= 0) return false
+        if (schemeEnd <= 0) return null
         val scheme = url.substring(0, schemeEnd).lowercase()
         val defaultPort = when (scheme) {
             "http" -> 80
             "https" -> 443
-            else -> return false
+            else -> return null
         }
         val rest = url.substring(schemeEnd + 3)
         val authorityEnd = authorityEnd(rest)
         val hostPort = rest.substring(0, authorityEnd).substringAfterLast('@')
-        val port = portOf(hostPort) ?: defaultPort
-        return port == GATEWAY_PORT
+        return portOf(hostPort) ?: defaultPort
     }
 
     private fun authorityEnd(rest: String): Int =
