@@ -44,6 +44,7 @@
     <string name="signing_ledger_purpose_confirm_transaction">Confirm the transaction on your Ledger</string>
     <string name="signing_ledger_purpose_confirm_message">Confirm the message on your Ledger</string>
     <string name="signing_ledger_purpose_sign_data">Review and sign the data on your Ledger</string>
+    <string name="signing_ledger_purpose_check_address">Check the address on your Ledger and confirm</string>
 
     <!-- browser/LedgerUi.kt -->
     <string name="signing_ledger_connect_title">Connect a Ledger</string>
@@ -67,10 +68,14 @@
     <string name="signing_ledger_device_emulator">Emulator (debug build)</string>
     <string name="signing_ledger_device_paired">Paired with this phone</string>
     <string name="signing_ledger_device_nearby">Nearby · not paired yet</string>
+    <!-- A Ledger row's subtitle (%1$s: paired / nearby / plugged in): no address from it has been confirmed on its own screen yet (#365). -->
+    <string name="signing_ledger_device_unverified">%1$s · not verified yet</string>
+    <string name="signing_ledger_unverified_note">Anything nearby can call itself a Ledger. Before an account is added, your Ledger shows its address on its own screen for you to confirm.</string>
     <string name="signing_ledger_look_again">Look again</string>
     <string name="signing_ledger_layout_explained">Ledger Live makes accounts at m/44\'/60\'/n\'/0/0; wallets like MyEtherWallet used m/44\'/60\'/0\'/n.</string>
     <!-- %1$s: the Ledger's name. -->
     <string name="signing_ledger_accounts_on">Accounts on %1$s</string>
+    <string name="signing_ledger_accounts_unverified">Read from the device, not verified yet. When you add one, your Ledger shows its address: check that it matches, then confirm on the Ledger.</string>
     <!-- An account's number on the Ledger, counting from 1. -->
     <string name="signing_ledger_account_n">Account %1$d</string>
     <string name="signing_ledger_already_added">Already in this wallet</string>
@@ -88,6 +93,8 @@
     <string name="signing_ledger_picked_path">The account picked is at m/%1$s.</string>
     <!-- The Add button, naming the account picked by its number. -->
     <string name="signing_ledger_add_account_n">Add account %1$d</string>
+    <!-- Under the Add button: adding asks the Ledger to show the address first (#365). -->
+    <string name="signing_ledger_add_confirm_hint">Your Ledger will show this address. Confirm it there to add the account.</string>
     <string name="signing_ledger_pick_one">Pick an account to add</string>
     <string name="signing_ledger_reading_accounts">Reading accounts from the Ledger…</string>
     <string name="signing_ledger_show_more">Show more</string>
@@ -96,6 +103,13 @@
     <string name="signing_ledger_account_already_in_wallet">That account is already in this wallet.</string>
     <string name="signing_ledger_add_failed">Couldn’t add the account. The phone may be out of storage.</string>
     <string name="signing_ledger_adding">Adding…</string>
+    <string name="signing_ledger_add_rejected">Rejected on the Ledger, so the account wasn’t added.</string>
+    <string name="signing_ledger_add_timeout">The Ledger didn’t confirm the address in time, so the account wasn’t added.</string>
+    <string name="signing_ledger_add_cancelled">Cancelled. The account wasn’t added.</string>
+    <string name="signing_ledger_add_wrong_device">This Ledger didn’t show that address, so the account wasn’t added.</string>
+    <string name="signing_ledger_add_not_checked">The Ledger couldn’t show the address, so the account wasn’t added.</string>
+    <!-- %1$s: why the Ledger couldn't be reached, a full sentence (e.g. "Your Ledger is locked. Unlock it with your PIN."). -->
+    <string name="signing_ledger_add_failed_because">%1$s The account wasn’t added.</string>
     <string name="signing_ledger_stage_connecting">Connecting to your Ledger…</string>
     <string name="signing_ledger_stage_connecting_detail">Keep it unlocked and close to the phone.</string>
     <string name="signing_ledger_stage_pairing">Pair with your Ledger</string>
@@ -109,6 +123,12 @@
     <string name="signing_ledger_stage_reading">Reading accounts…</string>
     <string name="signing_ledger_stage_reading_detail">Addresses only: nothing is signed.</string>
     <string name="signing_ledger_stage_confirm_detail">Check the details on the Ledger’s screen, then approve or reject them there.</string>
+    <string name="signing_ledger_stage_confirm_address_detail">Your Ledger shows the address below. If it matches, approve it on the Ledger. If it’s different, reject it there.</string>
+    <!-- Receive page, Ledger accounts only (#365). -->
+    <string name="signing_ledger_verify_on_ledger">Verify on Ledger</string>
+    <string name="signing_ledger_verify_hint">Before you share this address, check that your Ledger shows the same one.</string>
+    <string name="signing_ledger_verify_ok">Your Ledger showed this address and you confirmed it.</string>
+    <string name="signing_ledger_verify_rejected">Rejected on the Ledger. If it showed a different address, don’t use this one to receive.</string>
 
     <!-- wallet/OpenLvEngine.kt -->
     <string name="signing_openlv_connection_failed">The connection failed.</string>

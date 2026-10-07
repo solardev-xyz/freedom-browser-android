@@ -126,8 +126,15 @@ internal fun LedgerConnectPage(accounts: List<WalletAccount>, onAdded: () -> Uni
                 device = d,
                 inWallet = accounts.map { it.address.lowercase() }.toSet(),
                 add = { path, address, name ->
-                    // Saved under the path the Ledger is at now, if it re-enumerated since it was tapped (#350 R6-F1).
-                    walletAccounts.addLedger(LedgerKey(path, ledger.followed(d).id, d.name), address, name)
+                    enrolConfirmed(
+                        path,
+                        address,
+                        confirm = { p, a -> ledger.confirmAddress(d, p, a) },
+                        enrol = { p, a ->
+                            // Saved under the path the Ledger is at now, if it re-enumerated since it was tapped (#350 R6-F1).
+                            walletAccounts.addLedger(LedgerKey(p, ledger.followed(d).id, d.name), a, name)
+                        },
+                    )
                     onAdded()
                 },
             )
@@ -148,6 +155,50 @@ internal fun usbDeviceNumber(d: LedgerDevice, all: List<LedgerDevice>): Pair<Int
     val n = parts.lastOrNull()?.toIntOrNull() ?: return null
     return bus to n
 }
+
+/**
+ * Adds the Ledger account at [path] only once the Ledger has shown
+ * [address] on its own screen and the user approved it there (#365):
+ * [confirm] throws on a rejection, a timeout or Cancel, and then [enrol]
+ * never runs — the address is otherwise only what answered over the link.
+ */
+internal suspend fun enrolConfirmed(
+    path: String,
+    address: String,
+    confirm: suspend (path: String, address: String) -> Unit,
+    enrol: suspend (path: String, address: String) -> Unit,
+) {
+    confirm(path, address)
+    enrol(path, address)
+}
+
+/** What the Add bar says when [e] ended Add (#365): the account was not added, and why. */
+internal fun ledgerAddFailure(e: Exception): String = when (e) {
+    is DuplicateAccountException -> Strings.get(R.string.signing_ledger_account_already_in_wallet)
+    is LedgerException -> when {
+        e.ownWords -> Strings.get(R.string.signing_ledger_add_failed_because, e.message)
+        e.kind == LedgerException.Kind.REJECTED -> Strings.get(R.string.signing_ledger_add_rejected)
+        e.kind == LedgerException.Kind.TIMEOUT -> Strings.get(R.string.signing_ledger_add_timeout)
+        e.kind == LedgerException.Kind.CANCELLED -> Strings.get(R.string.signing_ledger_add_cancelled)
+        e.kind == LedgerException.Kind.WRONG_DEVICE -> Strings.get(R.string.signing_ledger_add_wrong_device)
+        // Its own line ends "Nothing was signed.", which isn't what's at stake here.
+        e.kind.saysNothingSent -> Strings.get(R.string.signing_ledger_add_not_checked)
+        else -> Strings.get(R.string.signing_ledger_add_failed_because, e.message)
+    }
+    else -> Strings.get(R.string.signing_ledger_add_failed)
+}
+
+/** What Receive's Verify on Ledger says when [e] ended it (#365); null for Cancel, which the user just did. */
+internal fun ledgerVerifyFailure(e: Exception): String? = when {
+    e !is LedgerException -> LedgerException.Kind.UNKNOWN.message
+    e.kind == LedgerException.Kind.CANCELLED -> null
+    e.kind == LedgerException.Kind.REJECTED && !e.ownWords -> Strings.get(R.string.signing_ledger_verify_rejected)
+    else -> e.message
+}
+
+/** A Ledger row's subtitle: [how] it's reached, and that nothing from it is verified yet (#365). */
+@Composable
+private fun unverified(how: String): String = stringResource(R.string.signing_ledger_device_unverified, how)
 
 /** Ledgers plugged in over USB; Bluetooth, its permission, and the Ledgers in reach. */
 @Composable
@@ -212,9 +263,11 @@ private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
                 usbDevices.forEach { d ->
                     PageRow(
                         title = d.name,
-                        subtitle = usbDeviceNumber(d, usbDevices)?.let { (bus, n) ->
-                            stringResource(R.string.signing_ledger_device_usb_numbered, bus, n)
-                        } ?: stringResource(R.string.signing_ledger_device_usb),
+                        subtitle = unverified(
+                            usbDeviceNumber(d, usbDevices)?.let { (bus, n) ->
+                                stringResource(R.string.signing_ledger_device_usb_numbered, bus, n)
+                            } ?: stringResource(R.string.signing_ledger_device_usb),
+                        ),
                         style = PageRowStyle.Inset,
                         leadingIcon = Icons.Filled.Usb,
                         onClick = { onPick(d) },
@@ -289,15 +342,25 @@ private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
                 devices.forEach { d ->
                     PageRow(
                         title = d.name,
-                        subtitle = when {
-                            d.id.startsWith("dev:") -> stringResource(R.string.signing_ledger_device_emulator)
-                            d.paired -> stringResource(R.string.signing_ledger_device_paired)
-                            else -> stringResource(R.string.signing_ledger_device_nearby)
-                        },
+                        subtitle = unverified(
+                            when {
+                                d.id.startsWith("dev:") -> stringResource(R.string.signing_ledger_device_emulator)
+                                d.paired -> stringResource(R.string.signing_ledger_device_paired)
+                                else -> stringResource(R.string.signing_ledger_device_nearby)
+                            },
+                        ),
                         style = PageRowStyle.Inset,
                         leadingIcon = if (d.id.startsWith("dev:")) Icons.Filled.Usb else Icons.Filled.Bluetooth,
                         onClick = { onPick(d) },
                         modifier = Modifier.testTag("ledger-device"),
+                    )
+                }
+                if (devices.isNotEmpty()) {
+                    Text(
+                        stringResource(R.string.signing_ledger_unverified_note),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
                     )
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
@@ -372,8 +435,6 @@ private fun LedgerAccountsStep(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val alreadyInWallet = stringResource(R.string.signing_ledger_account_already_in_wallet)
-    val addFailed = stringResource(R.string.signing_ledger_add_failed)
     var scheme by remember { mutableStateOf(LedgerScheme.LIVE) }
     var found by remember(scheme) { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
@@ -443,6 +504,12 @@ private fun LedgerAccountsStep(
         ) {
             item("accounts") {
                 SectionCard(title = stringResource(R.string.signing_ledger_accounts_on, device.name)) {
+                    Text(
+                        stringResource(R.string.signing_ledger_accounts_unverified),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
                     found.forEachIndexed { i, (path, address) ->
                         val added = address.lowercase() in inWallet
                         if (i > 0) HorizontalDivider()
@@ -594,6 +661,14 @@ private fun LedgerAccountsStep(
                         modifier = Modifier.padding(bottom = 8.dp).testTag("ledger-add-error").semantics { liveRegion = LiveRegionMode.Polite },
                     )
                 }
+                if (picked != null && addError == null) {
+                    Text(
+                        stringResource(R.string.signing_ledger_add_confirm_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
                 val addingLabel = stringResource(R.string.signing_ledger_adding)
                 Button(
                     onClick = {
@@ -605,10 +680,9 @@ private fun LedgerAccountsStep(
                                 add(path, address, name)
                             } catch (e: CancellationException) {
                                 throw e
-                            } catch (e: DuplicateAccountException) {
-                                addError = alreadyInWallet
                             } catch (e: Exception) {
-                                addError = addFailed
+                                // Rejected, timed out or cancelled on the Ledger: nothing was added (#365).
+                                addError = ledgerAddFailure(e)
                             } finally {
                                 adding = false
                             }
@@ -667,6 +741,15 @@ fun LedgerActivityDialog() {
                 }
                 Spacer(Modifier.height(12.dp))
                 Text(text, style = MaterialTheme.typography.bodyMedium)
+                // The address to compare with the Ledger's screen, grouped as Receive shows it (#365).
+                if (a.stage == Ledger.Stage.CONFIRM && a.address != null) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        groupedAddress(a.address),
+                        style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                        modifier = Modifier.testTag("ledger-activity-address"),
+                    )
+                }
                 Spacer(Modifier.height(4.dp))
                 Text(
                     a.deviceName,
@@ -692,7 +775,9 @@ internal fun ledgerActivityText(a: Ledger.Activity): Pair<String, String> = when
     Ledger.Stage.UNLOCK -> Strings.get(R.string.signing_ledger_stage_unlock) to Strings.get(R.string.signing_ledger_stage_unlock_detail)
     Ledger.Stage.OPEN_APP -> Strings.get(R.string.signing_ledger_stage_open_app) to Strings.get(R.string.signing_ledger_stage_open_app_detail)
     Ledger.Stage.READING -> Strings.get(R.string.signing_ledger_stage_reading) to Strings.get(R.string.signing_ledger_stage_reading_detail)
-    Ledger.Stage.CONFIRM -> a.purpose to Strings.get(R.string.signing_ledger_stage_confirm_detail)
+    Ledger.Stage.CONFIRM -> a.purpose to Strings.get(
+        if (a.address != null) R.string.signing_ledger_stage_confirm_address_detail else R.string.signing_ledger_stage_confirm_detail,
+    )
 }
 
 private tailrec fun android.content.Context.hostActivity(): android.app.Activity? = when (this) {

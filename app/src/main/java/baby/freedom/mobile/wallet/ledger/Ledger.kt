@@ -132,8 +132,12 @@ enum class LedgerScheme(@StringRes private val labelRes: Int) {
  * phone showed, or nothing is used.
  */
 class Ledger internal constructor(private val context: Context) {
-    /** What the Ledger is waiting for, while a conversation is on. */
-    data class Activity(val deviceName: String, val stage: Stage, val purpose: String, val cancel: () -> Unit)
+    /**
+     * What the Ledger is waiting for, while a conversation is on.
+     * [address]: the address the device is asked to show, for the user to
+     * compare with its screen (#365).
+     */
+    data class Activity(val deviceName: String, val stage: Stage, val purpose: String, val address: String? = null, val cancel: () -> Unit)
 
     enum class Stage { CONNECTING, PAIRING, USB_PERMISSION, UNLOCK, OPEN_APP, READING, CONFIRM }
 
@@ -333,6 +337,35 @@ class Ledger internal constructor(private val context: Context) {
         }
 
     /**
+     * Shows [address], read from [device] at [path] on Connect a Ledger,
+     * on the device's own screen and returns once the user approves it
+     * there (#365). Until then the address is only what answered over the
+     * link — any Bluetooth peripheral can advertise as a Ledger and answer
+     * with its own keys — so an account is added only after this returns.
+     * Throws [LedgerException] (REJECTED on the device, CANCELLED,
+     * TIMEOUT…) otherwise.
+     */
+    suspend fun confirmAddress(device: LedgerDevice, path: String, address: String) {
+        session({ deviceRoutes(device) }, Strings.get(R.string.signing_ledger_purpose_check_address), address) { app, turn ->
+            claimHolding(address, turn) { turn.apdu { app.address(path) } }
+            turn.stage(Stage.CONFIRM)
+            shownMatches(app.showAddress(path), address)
+        }
+    }
+
+    /**
+     * Receive's Verify on Ledger (#365): [account]'s address shown on the
+     * Ledger holding it, for the user to compare and approve there.
+     */
+    suspend fun verifyAddress(account: WalletAccount) {
+        val key = account.ledger ?: error("not a Ledger account")
+        session({ routesFor(key) }, Strings.get(R.string.signing_ledger_purpose_check_address), account.address) { app, turn ->
+            verified(app, key, account.address, turn)
+            shownMatches(app.showAddress(key.path), account.address)
+        }
+    }
+
+    /**
      * [tx] signed on the Ledger holding [account], checked to recover to
      * it. [fresh] is asked once the Ledger is connected, unlocked and on
      * the Ethereum app, before it shows [tx]: false ends it with
@@ -479,6 +512,7 @@ class Ledger internal constructor(private val context: Context) {
     private suspend fun <T> session(
         routes: () -> List<Route>,
         purpose: String,
+        address: String? = null,
         block: suspend (LedgerEthApp, Turn) -> T,
     ): T = conversation.withLock {
         try {
@@ -489,7 +523,7 @@ class Ledger internal constructor(private val context: Context) {
                 val work = async(start = CoroutineStart.LAZY) {
                     // Listed only once it's this conversation's turn: one queued behind
                     // another sees the Ledgers plugged in and paired by then (#350 R2-M1).
-                    inTurn(routes(), show = { name, s -> _activity.value = Activity(name, s, purpose, cancel) }) { route, turn ->
+                    inTurn(routes(), show = { name, s -> _activity.value = Activity(name, s, purpose, address, cancel) }) { route, turn ->
                         converse(route, turn, block)
                     }
                 }
@@ -1193,6 +1227,15 @@ class Ledger internal constructor(private val context: Context) {
         }
 
         /** A paired device's name that's a Ledger's: "Nano X 1A2B", "Ledger Stax …", "Ledger Flex …". */
+        /**
+         * The address the device approved on its screen must be the one
+         * that's about to be added (or is in the wallet): anything else is
+         * [LedgerException.Kind.WRONG_DEVICE], and nothing is added (#365).
+         */
+        internal fun shownMatches(shown: String, address: String) {
+            if (!shown.equals(address, ignoreCase = true)) throw LedgerException(LedgerException.Kind.WRONG_DEVICE)
+        }
+
         internal fun isLedgerName(name: String?): Boolean =
             name != null && (name.startsWith("Nano X") || name.startsWith("Ledger"))
 

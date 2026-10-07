@@ -5,13 +5,18 @@ import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.l10n.ResourceXmlStrings
 import baby.freedom.mobile.l10n.StringSource
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.wallet.DuplicateAccountException
 import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.ledger.Ledger
 import baby.freedom.mobile.wallet.ledger.LedgerDevice
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import baby.freedom.mobile.wallet.ledger.LedgerKey
 import baby.freedom.mobile.wallet.ledger.LedgerScheme
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 /** How the wallet names a Ledger account and what the Ledger dialog says (#142). */
@@ -68,6 +73,65 @@ class LedgerUiTest {
         assertEquals("Pair with your Ledger", text(Ledger.Stage.PAIRING))
         assertEquals("Allow USB access", text(Ledger.Stage.USB_PERMISSION))
         assertEquals("Confirm the message on your Ledger", text(Ledger.Stage.CONFIRM))
+    }
+
+    @Test
+    fun `checking an address says to compare it with the Ledger's screen (#365)`() {
+        val a = Ledger.Activity("Nano X", Ledger.Stage.CONFIRM, "Check the address on your Ledger and confirm", "0x" + "ab".repeat(20)) {}
+        val (title, detail) = ledgerActivityText(a)
+        assertEquals("Check the address on your Ledger and confirm", title)
+        assertTrue(detail, detail.contains("If it matches, approve it on the Ledger"))
+        // A signature's confirmation keeps its own line.
+        assertEquals(
+            "Check the details on the Ledger’s screen, then approve or reject them there.",
+            ledgerActivityText(a.copy(address = null)).second,
+        )
+    }
+
+    @Test
+    fun `an account is enrolled only once the Ledger confirmed its address (#365)`() = runBlocking {
+        val path = "44'/60'/0'/0/0"
+        val address = "0x" + "ab".repeat(20)
+        val steps = ArrayList<String>()
+        enrolConfirmed(path, address, confirm = { p, a -> steps += "confirm $p $a" }, enrol = { p, a -> steps += "enrol $p $a" })
+        assertEquals(listOf("confirm $path $address", "enrol $path $address"), steps)
+        for (kind in listOf(LedgerException.Kind.REJECTED, LedgerException.Kind.TIMEOUT, LedgerException.Kind.CANCELLED, LedgerException.Kind.WRONG_DEVICE)) {
+            var enrolled = false
+            try {
+                enrolConfirmed(path, address, confirm = { _, _ -> throw LedgerException(kind) }, enrol = { _, _ -> enrolled = true })
+                fail("$kind ended as added")
+            } catch (e: LedgerException) {
+                assertEquals(kind, e.kind)
+            }
+            assertEquals("$kind enrolled the account", false, enrolled)
+        }
+    }
+
+    @Test
+    fun `a failed Add says the account wasn't added, and why (#365)`() {
+        fun said(e: Exception) = ledgerAddFailure(e)
+        assertEquals("Rejected on the Ledger, so the account wasn’t added.", said(LedgerException(LedgerException.Kind.REJECTED)))
+        assertEquals("The Ledger didn’t confirm the address in time, so the account wasn’t added.", said(LedgerException(LedgerException.Kind.TIMEOUT)))
+        assertEquals("Cancelled. The account wasn’t added.", said(LedgerException(LedgerException.Kind.CANCELLED)))
+        assertEquals("This Ledger didn’t show that address, so the account wasn’t added.", said(LedgerException(LedgerException.Kind.WRONG_DEVICE)))
+        assertEquals(
+            "Your Ledger is locked. Unlock it with your PIN. The account wasn’t added.",
+            said(LedgerException(LedgerException.Kind.LOCKED)),
+        )
+        // No "Nothing was signed." in an add's failure.
+        for (kind in LedgerException.Kind.entries) assertTrue(kind.name, !said(LedgerException(kind)).contains("Nothing was"))
+        assertEquals("That account is already in this wallet.", said(DuplicateAccountException()))
+        assertEquals("Couldn’t add the account. The phone may be out of storage.", said(java.io.IOException("disk")))
+    }
+
+    @Test
+    fun `Verify on Ledger says nothing for Cancel and warns on a rejection (#365)`() {
+        assertNull(ledgerVerifyFailure(LedgerException(LedgerException.Kind.CANCELLED)))
+        assertEquals(
+            "Rejected on the Ledger. If it showed a different address, don’t use this one to receive.",
+            ledgerVerifyFailure(LedgerException(LedgerException.Kind.REJECTED)),
+        )
+        assertEquals(LedgerException.Kind.WRONG_DEVICE.message, ledgerVerifyFailure(LedgerException(LedgerException.Kind.WRONG_DEVICE)))
     }
 
     @Test
