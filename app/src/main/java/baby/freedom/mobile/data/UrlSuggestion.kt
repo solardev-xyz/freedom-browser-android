@@ -4,15 +4,29 @@ package baby.freedom.mobile.data
  * A single row in the address-bar auto-complete drop-down.
  *
  * The UI decides the icon / styling from [source]; everything else is
- * already in display-ready form (canonical URL + page title).
+ * already in display-ready form (canonical URL + page title). A
+ * [Source.TAB] row is an open tab ([tabId]): picking it switches to
+ * that tab instead of loading [url] again (#443).
  */
 data class UrlSuggestion(
     val url: String,
     val title: String,
     val source: Source,
+    val tabId: Long? = null,
 ) {
-    enum class Source { BOOKMARK, HISTORY }
+    enum class Source { TAB, BOOKMARK, HISTORY }
 }
+
+/**
+ * What the address bar's text matched in the database (#443): the
+ * bookmarks, and the history visits as `(url, title, visitedAt)`,
+ * newest first — ranked against the open tabs by the browser
+ * (`rankSuggestions`).
+ */
+data class LocalMatches(
+    val bookmarks: List<UrlSuggestion>,
+    val visits: List<Triple<String, String, Long>>,
+)
 
 /**
  * SQL `LIKE` treats `%`, `_`, and `\` as wildcards / escape. The

@@ -36,6 +36,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ManageSearch
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.AccountBalanceWallet
@@ -253,6 +254,7 @@ internal fun SettingsScreen(
     val searchEngine by settings.searchEngine
         .collectAsState(initial = SearchEngines.DEFAULT_ID)
     val customSearchTemplate by settings.customSearchTemplate.collectAsState(initial = "")
+    val searchSuggestions by settings.searchSuggestions.collectAsState(initial = false)
     var pickSearchEngine by remember { mutableStateOf(false) }
     val appearance by settings.appearance.collectAsState(initial = Appearance.System)
     var pickAppearance by remember { mutableStateOf(false) }
@@ -321,7 +323,7 @@ internal fun SettingsScreen(
 
     // Each card's rows, as the page shows them right now (see [SettingsRow]).
     val sectionRows: Map<SettingsSection, List<SettingsRow>> = mapOf(
-        SettingsSection.Search to searchSectionRows(searchEngine, customSearchTemplate),
+        SettingsSection.Search to searchSectionRows(searchEngine, customSearchTemplate, searchSuggestions),
         SettingsSection.DefaultBrowser to defaultBrowserRows(isDefaultBrowser),
         SettingsSection.Appearance to appearanceSectionRows(appearance, appLanguage),
         SettingsSection.Downloads to downloadSettingsRows(askWhereToSave),
@@ -440,9 +442,12 @@ internal fun SettingsScreen(
     fun Section(section: SettingsSection, visible: Set<Any>) = when (section) {
         SettingsSection.Wallet -> WalletSection(state = walletState, onOpen = onOpenWallet)
         SettingsSection.Search -> SearchSection(
+            visible = visible,
             engineId = searchEngine,
             customTemplate = customSearchTemplate,
             onClick = { pickSearchEngine = true },
+            suggestions = searchSuggestions,
+            onSuggestions = { on -> scope.launch { settings.setSearchSuggestions(on) } },
         )
         SettingsSection.Appearance -> AppearanceSection(
             visible = visible,
@@ -557,7 +562,10 @@ internal fun SettingsScreen(
 
     /** The one-line state under a top-level row. */
     fun summary(p: SettingsPage): String = when (p) {
-        SettingsPage.SearchEngine -> SearchEngines.labelFor(searchEngine, customSearchTemplate)
+        SettingsPage.SearchEngine -> searchPageSummary(
+            SearchEngines.labelFor(searchEngine, customSearchTemplate),
+            searchSuggestions && SearchSuggestions.supported(SearchEngines.templateFor(searchEngine, customSearchTemplate)),
+        )
         SettingsPage.Appearance -> appearancePageSummary(appearance.label, appLanguage)
         SettingsPage.Downloads -> downloadsPageSummary(askWhereToSave)
         SettingsPage.DefaultBrowser -> DefaultBrowser.ROW_SET_SUBTITLE
@@ -580,7 +588,6 @@ internal fun SettingsScreen(
     }
 
     fun open(p: SettingsPage) = when (p) {
-        SettingsPage.SearchEngine -> pickSearchEngine = true
         SettingsPage.DefaultBrowser -> defaultBrowser.onClick()
         else -> page = p
     }
@@ -875,11 +882,14 @@ private fun SettingsSearchField(
 
 private val ROW_SEARCH_ENGINE: String get() = Strings.get(R.string.settings_search_engine)
 
+private val ROW_SEARCH_SUGGESTIONS: String get() = Strings.get(R.string.settings_search_suggestions)
+
 /**
  * The engine row, findable by the engine in use and by the name of
- * any engine it can be switched to ("google" → the Search engine row).
+ * any engine it can be switched to ("google" → the Search engine row);
+ * and *Search suggestions* (#443).
  */
-private fun searchSectionRows(engineId: String, customTemplate: String) = listOf(
+internal fun searchSectionRows(engineId: String, customTemplate: String, suggestions: Boolean = false) = listOf(
     settingsRow(
         "engine",
         ROW_SEARCH_ENGINE,
@@ -887,7 +897,26 @@ private fun searchSectionRows(engineId: String, customTemplate: String) = listOf
         customSearchTemplateLine(engineId, customTemplate),
         *SearchEngines.BUILT_IN.map { it.label }.toTypedArray(),
     ),
+    settingsRow(
+        "suggestions",
+        ROW_SEARCH_SUGGESTIONS,
+        searchSuggestionsSubtitle(engineId, customTemplate),
+        onOff(suggestions && searchSuggestionsAvailable(engineId, customTemplate)),
+        *searchKeywords(R.string.settings_search_suggestions_keywords),
+    ),
 )
+
+/** Whether the engine in use has a suggestion service ([SearchSuggestions.supported]). */
+private fun searchSuggestionsAvailable(engineId: String, customTemplate: String): Boolean =
+    SearchSuggestions.supported(SearchEngines.templateFor(engineId, customTemplate))
+
+/** The one line under *Search suggestions*: what turning it on sends where. */
+private fun searchSuggestionsSubtitle(engineId: String, customTemplate: String): String =
+    if (searchSuggestionsAvailable(engineId, customTemplate)) {
+        Strings.get(R.string.settings_search_suggestions_subtitle, SearchEngines.labelFor(engineId, customTemplate))
+    } else {
+        Strings.get(R.string.settings_search_suggestions_unavailable)
+    }
 
 /** The custom template, shown under the engine row while it's in use. */
 private fun customSearchTemplateLine(engineId: String, customTemplate: String): String? =
@@ -1010,14 +1039,22 @@ private fun WalletSection(state: Vault.State, onOpen: () -> Unit) {
     }
 }
 
+/**
+ * Settings → Search: the engine, and *Search suggestions* (#443) — off
+ * by default, its line saying that what is typed goes to the engine.
+ * Greyed out for a custom engine, whose suggestion service isn't known.
+ */
 @Composable
 private fun SearchSection(
+    visible: Set<Any>,
     engineId: String,
     customTemplate: String,
     onClick: () -> Unit,
+    suggestions: Boolean,
+    onSuggestions: (Boolean) -> Unit,
 ) {
     SectionCard(title = stringResource(R.string.settings_section_search)) {
-        PageRow(
+        if ("engine" in visible) PageRow(
             title = stringResource(R.string.settings_search_engine),
             subtitle = SearchEngines.labelFor(engineId, customTemplate),
             style = PageRowStyle.Inset,
@@ -1027,6 +1064,20 @@ private fun SearchSection(
             thirdLine = customSearchTemplateLine(engineId, customTemplate),
             onClick = onClick,
         )
+        if ("suggestions" in visible) {
+            val available = searchSuggestionsAvailable(engineId, customTemplate)
+            val on = suggestions && available
+            PageRow(
+                title = ROW_SEARCH_SUGGESTIONS,
+                subtitle = searchSuggestionsSubtitle(engineId, customTemplate),
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.AutoMirrored.Filled.ManageSearch,
+                onClick = { onSuggestions(!suggestions) },
+                enabled = available,
+                checked = on,
+                trailing = { Switch(checked = on, onCheckedChange = null, enabled = available) },
+            )
+        }
     }
 }
 

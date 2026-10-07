@@ -333,6 +333,20 @@ class NodeSettings private constructor(
         )
     }
 
+    /**
+     * Settings → Search → *Search suggestions* (#443): while on, what
+     * is typed into a regular tab's address bar is sent to the selected
+     * engine for suggestions (`SearchSuggestions`). Off by default; never
+     * used in private tabs.
+     */
+    val searchSuggestions: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.SEARCH_SUGGESTIONS] ?: false
+    }
+
+    suspend fun setSearchSuggestions(enabled: Boolean) {
+        store.edit { it[Keys.SEARCH_SUGGESTIONS] = enabled }
+    }
+
     /** Select a built-in engine; the saved custom template is kept. */
     suspend fun setSearchEngine(id: String) {
         require(SearchEngines.BUILT_IN.any { it.id == id }) { "unknown engine $id" }
@@ -790,6 +804,7 @@ class NodeSettings private constructor(
 
     private object Keys {
         val ASK_WHERE_TO_SAVE = booleanPreferencesKey("ask_where_to_save")
+        val SEARCH_SUGGESTIONS = booleanPreferencesKey("search_suggestions")
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SWARM_NODE_MODE = stringPreferencesKey("swarm_node_mode")
         val SWARM_SWAP_ENABLED = booleanPreferencesKey("swarm_swap_enabled")

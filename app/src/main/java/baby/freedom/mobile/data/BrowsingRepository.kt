@@ -128,34 +128,28 @@ class BrowsingRepository internal constructor(
     }
 
     /**
-     * Address-bar auto-complete suggestions.
-     *
-     * Bookmarks come first (since the user asked the browser to remember
-     * them), followed by recent history with bookmarked URLs filtered
-     * out. History is deduped by URL in-memory: we oversample from Room
-     * (`limit * 3`) so that a site visited 20 times in a row doesn't
-     * crowd out other matches from the final list.
-     *
-     * [query] may be empty — in that case we fall back to the most-recent
-     * bookmarks and history, which gives the address bar a useful
-     * "top sites" list the moment it's focused.
+     * What the address bar's text matches (#443): bookmarks and history
+     * visits whose title or URL contains [query]. History is read one
+     * row per visit and oversampled ([visitLimit]), so the browser can
+     * count a page's visits and rank a page visited 20 times above one
+     * visited once (`rankSuggestions`), which also de-duplicates them
+     * against each other and the open tabs. Re-emits when either table
+     * changes.
      */
-    fun suggestions(query: String, limit: Int = 8): Flow<List<UrlSuggestion>> {
+    fun suggestionMatches(
+        query: String,
+        bookmarkLimit: Int = 20,
+        visitLimit: Int = 200,
+    ): Flow<LocalMatches> {
         val pattern = "%" + query.trim().escapeForLike() + "%"
         return combine(
-            db.bookmarks().search(pattern, limit),
-            db.history().search(pattern, limit * 3),
+            db.bookmarks().search(pattern, bookmarkLimit),
+            db.history().search(pattern, visitLimit),
         ) { bookmarks, history ->
-            val bookmarkUrls = bookmarks.mapTo(HashSet()) { it.url }
-            val bookmarkItems = bookmarks.map {
-                UrlSuggestion(it.url, it.title, UrlSuggestion.Source.BOOKMARK)
-            }
-            val historyItems = history.asSequence()
-                .filter { it.url !in bookmarkUrls }
-                .distinctBy { it.url }
-                .map { UrlSuggestion(it.url, it.title, UrlSuggestion.Source.HISTORY) }
-                .toList()
-            (bookmarkItems + historyItems).take(limit)
+            LocalMatches(
+                bookmarks = bookmarks.map { UrlSuggestion(it.url, it.title, UrlSuggestion.Source.BOOKMARK) },
+                visits = history.map { Triple(it.url, it.title, it.visitedAt) },
+            )
         }
     }
 

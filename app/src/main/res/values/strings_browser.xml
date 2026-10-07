@@ -31,6 +31,10 @@
     <string name="browser_suggestions_address">Address</string>
     <string name="browser_suggestions_bookmark">Bookmark</string>
     <string name="browser_suggestions_history">History</string>
+    <string name="browser_suggestions_open_tab">Open tab</string>
+    <string name="browser_suggestions_switch_to_tab">Switch to tab</string>
+    <string name="browser_suggestions_fill">Edit in address bar</string>
+    <string name="browser_suggestions_engine">Suggested by %1$s</string>
 
     <!-- PageContextMenu.kt: the long-press sheet -->
     <string name="browser_menu_image">Image</string>

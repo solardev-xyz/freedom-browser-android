@@ -1,6 +1,18 @@
 package baby.freedom.mobile.browser
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.SouthWest
+import androidx.compose.material.icons.filled.Tab
+import androidx.compose.material3.IconButton
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -108,39 +120,82 @@ internal fun PageWithSuggestions(
 /**
  * Opaque panel that overlays the WebView while the address bar is
  * focused and edited: the action rows for what has been typed (#171 —
- * go to it, or search for it with the Settings engine) and then the
- * bookmarks and history that match it. The list is reversed so the best
- * row sits right above the (bottom) address bar and the thumb, with
- * weaker ones stacking upwards. Picking a row hands its text to the
- * browser's `submit` path — the same one Enter uses — which hides the
- * keyboard and clears focus (and therefore dismisses this panel).
+ * go to it, or search for it with the Settings engine), then the open
+ * tabs, bookmarks and history that match it, best match first (#443,
+ * [rankSuggestions]), and — only while Settings → Search → *Search
+ * suggestions* is on and never in a private tab — the search engine's
+ * own suggestions ([SearchSuggestions]). The list is reversed so the
+ * best row sits right above the (bottom) address bar and the thumb,
+ * with weaker ones stacking upwards. Picking a row hands its text to
+ * the browser's `submit` path — the same one Enter uses — which hides
+ * the keyboard and clears focus (and therefore dismisses this panel);
+ * an open tab's row switches to that tab instead, and each row's arrow
+ * puts its text in the field to keep editing ([onFill]).
  */
 @Composable
 internal fun SuggestionsPanel(
     repo: BrowsingRepository,
     query: String,
     searchTemplate: String,
+    tabs: List<TabCandidate>,
+    currentTabId: Long,
+    private: Boolean,
+    searchSuggestionsOn: Boolean,
     onPick: (String) -> Unit,
+    onSwitchToTab: (Long) -> Unit,
+    onFill: (String) -> Unit,
     bottomContentPadding: Dp,
     modifier: Modifier = Modifier,
 ) {
     // Re-subscribe when the query changes; Room's Flow keeps emitting
     // fresh results if the underlying tables change too.
-    val suggestionsFlow = remember(repo, query) { repo.suggestions(query) }
-    val suggestions by suggestionsFlow.collectAsState(initial = emptyList())
+    val matchesFlow = remember(repo, query) { repo.suggestionMatches(query) }
+    val matches by matchesFlow.collectAsState(initial = null)
+    val history = remember(matches) { historyCandidates(matches?.visits.orEmpty()) }
+    val suggestions = rankSuggestions(
+        query = query,
+        tabs = tabs,
+        currentTabId = currentTabId,
+        private = private,
+        bookmarks = matches?.bookmarks.orEmpty(),
+        history = history,
+    )
     val actions = remember(query, searchTemplate) { addressActions(query, searchTemplate) }
+    // Engine suggestions: debounced, the previous request cancelled by
+    // the next, and none at all — not even asked for — while off, in a
+    // private tab, or for an address ([SearchSuggestions.requestUrl]).
+    val request = SearchSuggestions.requestUrl(searchSuggestionsOn, private, query, searchTemplate)
+        ?.let { SuggestRequest(query.trim(), it) }
+    val latestRequest by rememberUpdatedState(request)
+    val engineFlow = remember { engineSuggestions(snapshotFlow { latestRequest }) }
+    val engine by engineFlow.collectAsState(initial = null)
     SuggestionsList(
         query = query,
         actions = actions,
         suggestions = suggestions,
+        engineSuggestions = if (request == null) emptyList() else engine?.suggestions.orEmpty(),
+        searchTemplate = searchTemplate,
         onPick = onPick,
+        onSwitchToTab = onSwitchToTab,
+        onFill = onFill,
+        favicon = { url -> rememberFavicon(repo, url) },
         bottomContentPadding = bottomContentPadding,
         modifier = modifier,
     )
 }
 
+/**
+ * Text a suggestion row's arrow asks the address field to take (#443).
+ * A new instance each time, so filling the same text twice still
+ * lands: the field's effect is keyed on the instance.
+ */
+internal class AddressFill(val text: String)
+
 /** Test tag of every row in [SuggestionsList]; each row's text is its own. */
 internal const val SUGGESTION_ROW_TAG = "suggestion-row"
+
+/** Test tag of each row's fill arrow ([SuggestionsList]'s `onFill`). */
+internal const val SUGGESTION_FILL_TAG = "suggestion-fill"
 
 /**
  * [SuggestionsPanel]'s content, given the rows. A tap on the panel's
@@ -155,6 +210,11 @@ internal fun SuggestionsList(
     onPick: (String) -> Unit,
     bottomContentPadding: Dp,
     modifier: Modifier = Modifier,
+    engineSuggestions: List<String> = emptyList(),
+    searchTemplate: String = SearchEngines.DEFAULT.template,
+    onSwitchToTab: (Long) -> Unit = {},
+    onFill: (String) -> Unit = {},
+    favicon: @Composable (String) -> ImageBitmap? = { null },
 ) {
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -170,7 +230,7 @@ internal fun SuggestionsList(
                 }
             },
     ) {
-        if (actions.isEmpty() && suggestions.isEmpty()) {
+        if (actions.isEmpty() && suggestions.isEmpty() && engineSuggestions.isEmpty()) {
             Text(
                 text = stringResource(
                     R.string.browser_suggestions_no_matches_for,
@@ -187,6 +247,7 @@ internal fun SuggestionsList(
                     ),
             )
         } else {
+            val engineName = remember(searchTemplate) { SearchEngines.nameForTemplate(searchTemplate) }
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 reverseLayout = true,
@@ -206,12 +267,32 @@ internal fun SuggestionsList(
                 }
                 items(
                     items = suggestions,
-                    key = { s -> s.source.name + "|" + s.url },
+                    key = { s -> s.source.name + "|" + s.url + "|" + s.tabId },
                 ) { s ->
                     SuggestionRow(
                         suggestion = s,
                         highlight = query.trim(),
-                        onClick = { onPick(s.url) },
+                        favicon = favicon(s.url),
+                        onClick = {
+                            val tab = s.tabId
+                            if (s.source == UrlSuggestion.Source.TAB && tab != null) onSwitchToTab(tab)
+                            else onPick(s.url)
+                        },
+                        onFill = { onFill(s.url) },
+                    )
+                }
+                items(
+                    items = engineSuggestions,
+                    key = { term -> "engine|$term" },
+                ) { term ->
+                    RowLayout(
+                        icon = Icons.Filled.Search,
+                        iconDescription = stringResource(R.string.browser_suggestions_search),
+                        iconTint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        title = highlightedText(term, query.trim()),
+                        subtitle = AnnotatedString(stringResource(R.string.browser_suggestions_engine, engineName)),
+                        onClick = { onPick(UrlParser.searchUrl(term, searchTemplate)) },
+                        onFill = { onFill(term) },
                     )
                 }
             }
@@ -259,35 +340,72 @@ internal val AddressAction.shownTitle: String
         },
     )
 
+/**
+ * An open tab, bookmark or history page: its favicon (the source's icon
+ * until one is cached), the title, and under it where it came from and
+ * the address without scheme — "Switch to tab · example.com/a" for a tab.
+ */
 @Composable
 private fun SuggestionRow(
     suggestion: UrlSuggestion,
     highlight: String,
+    favicon: ImageBitmap?,
     onClick: () -> Unit,
+    onFill: () -> Unit,
 ) {
     val displayTitle = suggestion.title.ifBlank { suggestion.url }
+    val address = suggestionAddress(suggestion.url)
+    val switchToTab = stringResource(R.string.browser_suggestions_switch_to_tab)
     RowLayout(
         icon = when (suggestion.source) {
+            UrlSuggestion.Source.TAB -> Icons.Filled.Tab
             UrlSuggestion.Source.BOOKMARK -> Icons.Filled.Bookmark
             UrlSuggestion.Source.HISTORY -> Icons.Filled.History
         },
         iconDescription = when (suggestion.source) {
+            UrlSuggestion.Source.TAB -> stringResource(R.string.browser_suggestions_open_tab)
             UrlSuggestion.Source.BOOKMARK -> stringResource(R.string.browser_suggestions_bookmark)
             UrlSuggestion.Source.HISTORY -> stringResource(R.string.browser_suggestions_history)
         },
         iconTint = when (suggestion.source) {
-            UrlSuggestion.Source.BOOKMARK -> MaterialTheme.colorScheme.primary
             UrlSuggestion.Source.HISTORY -> MaterialTheme.colorScheme.onSurfaceVariant
+            else -> MaterialTheme.colorScheme.primary
         },
+        favicon = favicon,
         title = highlightedText(displayTitle, highlight),
-        subtitle = highlightedText(suggestion.url, highlight),
+        subtitle = if (suggestion.source == UrlSuggestion.Source.TAB) {
+            buildAnnotatedString {
+                withStyle(SpanStyle(color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)) {
+                    append(switchToTab)
+                }
+                append(" · ")
+                append(highlightedText(address, highlight))
+            }
+        } else {
+            highlightedText(address, highlight)
+        },
         onClick = onClick,
+        onFill = onFill,
     )
 }
 
 /**
+ * The address a suggestion row shows under its title: [url] without an
+ * `http(s)://` scheme, which says nothing the host doesn't. Any other
+ * scheme (`bzz://`, `ipfs://`, `ens://`) stays: it says how the page is
+ * reached.
+ */
+internal fun suggestionAddress(url: String): String = when {
+    url.startsWith("https://", ignoreCase = true) -> url.substring(8)
+    url.startsWith("http://", ignoreCase = true) -> url.substring(7)
+    else -> url
+}.ifEmpty { url }
+
+/**
  * One suggestion row: the whole row is the touch target, at least
- * 48 dp tall, with the ripple clipped to its rounded shape.
+ * 48 dp tall, with the ripple clipped to its rounded shape. With
+ * [onFill], a trailing 48 dp arrow puts the row's text in the address
+ * field instead, to keep editing it (Chrome's and Safari's "↖").
  */
 @Composable
 private fun RowLayout(
@@ -297,6 +415,8 @@ private fun RowLayout(
     title: AnnotatedString,
     subtitle: AnnotatedString,
     onClick: () -> Unit,
+    favicon: ImageBitmap? = null,
+    onFill: (() -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier
@@ -306,17 +426,25 @@ private fun RowLayout(
             .clip(MaterialTheme.shapes.medium)
             .clickable(onClick = onClick)
             .heightIn(min = 48.dp)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .padding(start = 16.dp, end = if (onFill == null) 16.dp else 0.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = iconDescription,
-            tint = iconTint,
-            modifier = Modifier.size(18.dp),
-        )
+        if (favicon != null) {
+            Image(
+                bitmap = favicon,
+                contentDescription = iconDescription,
+                modifier = Modifier.size(20.dp).clip(RoundedCornerShape(4.dp)),
+            )
+        } else {
+            Icon(
+                imageVector = icon,
+                contentDescription = iconDescription,
+                tint = iconTint,
+                modifier = Modifier.size(20.dp),
+            )
+        }
         Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
+        Column(modifier = Modifier.weight(1f).padding(vertical = 4.dp)) {
             Text(
                 text = title,
                 maxLines = 1,
@@ -324,13 +452,31 @@ private fun RowLayout(
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onSurface,
             )
+            // Two lines, so "Switch to tab · <address>" keeps its
+            // address readable at a large font scale.
             Text(
                 text = subtitle,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        if (onFill != null) {
+            // The arrow points at the field: down towards the bottom
+            // capsule, and towards its start edge.
+            val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+            IconButton(
+                onClick = onFill,
+                modifier = Modifier.testTag(SUGGESTION_FILL_TAG),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.SouthWest,
+                    contentDescription = stringResource(R.string.browser_suggestions_fill),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp).graphicsLayer { if (rtl) scaleX = -1f },
+                )
+            }
         }
     }
 }
