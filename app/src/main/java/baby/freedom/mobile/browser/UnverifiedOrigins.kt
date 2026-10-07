@@ -58,7 +58,18 @@ import android.webkit.WebStorage
  * private session's own storage outlives the process anyway (its
  * profile is deleted at the next start). Such an origin is swept like
  * any other while this process lasts, in the private profile's storage
- * too ([wipeWebData]). Recorded from the interceptor's IO threads, swept on the
+ * too ([wipeWebData]).
+ *
+ * Profiles (#351, #360): a private tab's storage is its own profile's,
+ * which neither the default profile's `WebStorage` nor a cleanup page
+ * run in a normal tab reaches, and the other way round. So the pending
+ * cleanups and the holds are kept per profile: a [sweep] queues one for
+ * the default profile and, while a private session is live
+ * ([privateSessionStarted]), one for the private profile; [takeClearFor]
+ * only takes the requester's own profile's; a tab's hold is on its own
+ * profile's storage. The private profile's are memory only, and go when
+ * its session ends ([privateSessionEnded]) — its storage goes with it.
+ * Recorded from the interceptor's IO threads, swept on the
  * main thread; a request that recorded against a gateway a sweep has
  * since replaced is told so ([record], [isCurrent]) and re-resolved.
  */
@@ -72,29 +83,29 @@ object UnverifiedOrigins {
     private var prefs: SharedPreferences? = null
     private var gateway = ""
     private val origins = LinkedHashSet<String>()
+
+    /** Origins whose next document in the default profile clears their site data. */
     private val toClear = LinkedHashSet<String>()
+
+    /**
+     * The same for the live private session's profile (#351, #360):
+     * queued by a [sweep] or a private tab's [release] only while that
+     * session is live, and dropped when it ends. Memory only.
+     */
+    private val privateToClear = LinkedHashSet<String>()
+
+    /** A private session is live: a private tab has been put on its profile since it started. */
+    private var privateLive = false
 
     /**
      * Origins only a private tab was served, wherever they are now
      * ([origins], [toClear], a hold that [release] puts back into
      * [toClear]): kept in memory, never persisted (see the class doc).
      * Left only when a normal tab is served one ([record]); never
-     * entered by an origin already pending a cleanup from a normal tab's
-     * earlier gateway, nor by one whose such cleanup a private tab
-     * consumed ([owedToNormal]).
+     * entered by an origin a normal tab's earlier gateway left a
+     * default-profile cleanup pending on.
      */
     private val privateOnly = HashSet<String>()
-
-    /**
-     * Origins whose persisted, one-shot cleanup ([toClear]) a private
-     * tab's document took ([takeClearFor] with `private`): that page
-     * cleared the private profile, so the normal profile's cleanup is
-     * still owed (#360). Such an origin is never made [privateOnly], so
-     * the cleanup a later [sweep] or [release] queues there is persisted
-     * again, as it was before #86 — the CID was on disk already. Left
-     * when a normal tab takes a cleanup there. Memory only.
-     */
-    private val owedToNormal = HashSet<String>()
 
     /** The IPFS gateway [sweep] last saw in use; `null` until the first sweep. */
     private var current: String? = null
@@ -102,15 +113,18 @@ object UnverifiedOrigins {
     /** Bumped whenever [current] changes: a [record] token from an earlier one is stale. */
     private var generation = 0L
 
-    /** Origins held for cleanup, by holder ([hold]). */
-    private val holds = HashMap<Any, Set<String>>()
+    /** Origins held for cleanup, by holder, in the holder's profile ([hold]). */
+    private class Hold(val private: Boolean, val origins: Set<String>)
+
+    private val holds = HashMap<Any, Hold>()
 
     /**
-     * Requesters (a tab, or `null` for a service worker) already served
-     * the cleanup page on an origin because another tab held it
-     * ([takeClearFor]); emptied whenever [holds] change.
+     * Requesters (a tab, or `null` for a profile's service workers)
+     * already served the cleanup page on an origin because another tab
+     * of the same profile held it ([takeClearFor]), as (profile,
+     * requester, origin); emptied whenever [holds] change.
      */
-    private val clearedWhileHeld = HashSet<Pair<Any?, String>>()
+    private val clearedWhileHeld = HashSet<Triple<Boolean, Any?, String>>()
 
     /**
      * Recorded origins a service worker fetched a document on, with the
@@ -161,11 +175,9 @@ object UnverifiedOrigins {
             // else of: one a normal tab's earlier gateway left a cleanup
             // pending on ([toClear], or a [hold] that [release] puts back
             // there) keeps that cleanup on disk — filtering it out of the
-            // persisted list would lose the normal profile's (R1-F1). So
-            // does one whose pending cleanup a private tab took first
-            // ([owedToNormal], R2-M1).
-            if (origins.add(origin) && private && origin !in toClear && origin !in owedToNormal &&
-                holds.values.none { origin in it }
+            // persisted list would lose the normal profile's (R1-F1).
+            if (origins.add(origin) && private && origin !in toClear &&
+                holds.values.none { !it.private && origin in it.origins }
             ) {
                 privateOnly.add(origin)
             }
@@ -188,7 +200,9 @@ object UnverifiedOrigins {
      * resolve against: a request can't record against the old gateway
      * after this sweep, nor re-resolve to it. If the recorded origins
      * came from a different gateway, hand them to [wipe] and then
-     * [onSweep], and forget them. Returns what was swept.
+     * [onSweep], and forget them, queuing each one's cleanup page in the
+     * default profile and, while one is live, the private session's
+     * ([takeClearFor]). Returns what was swept.
      */
     fun sweep(
         currentExternal: String,
@@ -205,6 +219,7 @@ object UnverifiedOrigins {
             val all = origins.toSet()
             origins.clear()
             toClear.addAll(all)
+            if (privateLive) privateToClear.addAll(all)
             gateway = ""
             persist()
             all
@@ -229,11 +244,17 @@ object UnverifiedOrigins {
      * Adds to a hold [holder] already has (two sweeps in a row, say
      * external A → external B → embedded, before the tab commits): the
      * first sweep's origins still get their cleanup page at [release].
+     *
+     * [private]: [holder] is a private tab (#351). Its stale document
+     * writes to the private profile's storage only, so the hold serves
+     * the cleanup page to that profile's requests, and [release] queues
+     * it there; a normal tab's hold, the default profile's.
      */
-    fun hold(holder: Any, origins: Set<String>) {
+    fun hold(holder: Any, origins: Set<String>, private: Boolean = false) {
         if (origins.isEmpty()) return
         synchronized(lock) {
-            holds[holder] = holds[holder].orEmpty() + origins
+            val had = holds[holder]
+            holds[holder] = Hold(had?.private ?: private, had?.origins.orEmpty() + origins)
             clearedWhileHeld.clear()
         }
     }
@@ -242,8 +263,10 @@ object UnverifiedOrigins {
      * [holder]'s stale document is gone (see [hold]). What it wrote
      * before going may postdate every cleanup page run so far — another
      * tab can have consumed the one-shot clear first — so each held
-     * origin's next document is the cleanup page once more, whichever
-     * tab or frame requests it.
+     * origin's next document in the holder's profile is the cleanup page
+     * once more, whichever tab or frame requests it (a private holder's
+     * only while its session is live: once it ends, there's no storage
+     * left to clear).
      *
      * Also called for a holder that went away rather than committed —
      * its tab closed, or the tab host disposed — and it re-queues the
@@ -256,7 +279,32 @@ object UnverifiedOrigins {
         synchronized(lock) {
             val held = holds.remove(holder) ?: return
             clearedWhileHeld.clear()
-            if (toClear.addAll(held)) persist()
+            if (!held.private) {
+                if (toClear.addAll(held.origins)) persist()
+            } else if (privateLive) {
+                privateToClear.addAll(held.origins)
+            }
+        }
+    }
+
+    /**
+     * A private session (#86) has started: from now on a [sweep] queues
+     * a cleanup in its profile too (#351). Main thread.
+     */
+    fun privateSessionStarted() {
+        synchronized(lock) { privateLive = true }
+    }
+
+    /**
+     * The private session has ended, its profile wiped: what was pending
+     * for it — cleanups, holds — goes with its storage. Main thread.
+     */
+    fun privateSessionEnded() {
+        synchronized(lock) {
+            privateLive = false
+            privateToClear.clear()
+            holds.values.removeAll { it.private }
+            clearedWhileHeld.removeAll { it.first }
         }
     }
 
@@ -304,19 +352,24 @@ object UnverifiedOrigins {
      * (`SITE_DATA_CLEANUP_HTML`) — the only way to reach the DOM storage
      * and service workers [wipeWebData] can't.
      *
-     * [private]: the requester is a private tab (#86). Its cleanup page
-     * runs in the private profile, so taking a cleanup a normal tab's
-     * gateway left leaves that one owed ([owedToNormal]).
+     * [private]: the requester is a private tab (#86), or the private
+     * profile's service workers. The cleanup page runs in the
+     * requester's profile and clears that profile's storage only, so
+     * each profile's pending cleanup and holds are its own (#351, #360):
+     * a private tab taking its cleanup leaves the default profile's
+     * pending, and the other way round.
      */
     fun takeClearFor(origin: String, requester: Any? = null, private: Boolean = false): Boolean = synchronized(lock) {
-        if (toClear.remove(origin)) {
-            if (!private) owedToNormal.remove(origin)
-            else if (origin !in privateOnly) owedToNormal.add(origin)
+        if (private) {
+            if (privateToClear.remove(origin)) return true
+        } else if (toClear.remove(origin)) {
             persist()
             return true
         }
-        if (holds[requester]?.contains(origin) == true) return true
-        holds.values.any { origin in it } && clearedWhileHeld.add(requester to origin)
+        val own = holds[requester]
+        if (own != null && own.private == private && origin in own.origins) return true
+        holds.values.any { it.private == private && origin in it.origins } &&
+            clearedWhileHeld.add(Triple(private, requester, origin))
     }
 
     /**
@@ -355,8 +408,9 @@ object UnverifiedOrigins {
             gateway = ""
             origins.clear()
             toClear.clear()
+            privateToClear.clear()
+            privateLive = false
             privateOnly.clear()
-            owedToNormal.clear()
             holds.clear()
             clearedWhileHeld.clear()
             workerDocuments.clear()
@@ -369,8 +423,9 @@ object UnverifiedOrigins {
     /** Is [holder] holding any origin (tests)? */
     internal fun isHeld(holder: Any): Boolean = synchronized(lock) { holder in holds }
 
-    /** Origins whose next document clears their site data (tests). */
-    internal fun pendingClears(): Set<String> = synchronized(lock) { toClear.toSet() }
+    /** Origins whose next document in the default, or the private, profile clears their site data (tests). */
+    internal fun pendingClears(private: Boolean = false): Set<String> =
+        synchronized(lock) { (if (private) privateToClear else toClear).toSet() }
 
     /** What [persist] writes: [origins] and [toClear] without [privateOnly]. Under [lock]. */
     private fun persisted(): Pair<Set<String>, Set<String>> =

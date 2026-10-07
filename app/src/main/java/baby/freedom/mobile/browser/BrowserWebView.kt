@@ -1368,10 +1368,11 @@ fun BrowserWebViewHost(
             // tab: every tab whose document predates the fetch counts as
             // having them.
             val anyTab = UnverifiedOrigins.takeWorkerDocuments(swept)
-            for (wv in webViews.values) {
+            for ((id, wv) in webViews) {
                 val stale = sweptDocuments(wv, swept, anyTab)
                 if (stale.isEmpty()) continue
-                UnverifiedOrigins.hold(wv, stale)
+                // On the tab's own profile's storage (#351).
+                UnverifiedOrigins.hold(wv, stale, private = tabs.tabs.any { it.id == id && it.private })
                 if (wv is PageWebView) wv.sweptReload.swept(wv.url) else wv.reload()
             }
         }
