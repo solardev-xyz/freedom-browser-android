@@ -85,17 +85,51 @@ class FiatPricesTest {
         }
         if (method != "eth_call") return "\"error\":{\"code\":-32601,\"message\":\"no\"}"
         val call = req.getJSONArray("params").getJSONObject(0)
-        val to = call.getString("to")
+        return evm(url, call.getString("to"), call.getString("data"))
+    }
+
+    /**
+     * The `block.timestamp` the answering RPC's EVM runs calls with: the
+     * block's own, unless a test sets it as Colibri's proven EVM has it (0).
+     */
+    private var evmTime = blockTime
+
+    /** Multicall3 `aggregate((address,bytes)[])`'s calls, decoded. */
+    private fun subCalls(data: String): List<Pair<String, String>> {
+        val w = data.removePrefix("0x252dba42").chunked(64).map { BigInteger(it, 16) }
+        val array = w[0].toInt() / 32
+        return (0 until w[array].toInt()).map { i ->
+            val at = array + 1 + w[array + 1 + i].toInt() / 32
+            val target = "0x" + w[at].toString(16).padStart(40, '0')
+            val bytes = at + w[at + 1].toInt() / 32
+            val len = w[bytes].toInt()
+            target to "0x" + w.subList(bytes + 1, w.size).joinToString("") { it.toString(16).padStart(64, '0') }.take(len * 2)
+        }
+    }
+
+    private fun evm(url: String, to: String, data: String): String {
+        if (to.equals(MULTICALL3, true) && data.startsWith("0x252dba42")) {
+            val results = subCalls(data).map { (t, d) ->
+                val r = evm(url, t, d)
+                if (!r.startsWith("\"result\"")) {
+                    return "\"error\":{\"code\":3,\"message\":\"execution reverted: Multicall3: call failed\",\"data\":\"0x08c379a0" +
+                        word(32) + word(23) + "4d756c746963616c6c333a2063616c6c206661696c6564".padEnd(64, '0') + "\"}"
+                }
+                r.substringAfter("\"0x").substringBefore("\"")
+            }
+            var offset = 64L
+            val heads = results.map { r -> word(offset).also { offset += 32 + r.length / 2 } }
+            return "\"result\":\"0x" + word(0xfe) + word(64) + word(results.size.toLong()) + heads.joinToString("") +
+                results.joinToString("") { word(it.length / 2L) + it } + "\""
+        }
         // Each liar a different lie, so no two of them agree either.
         val lie = liars.indexOfFirst { url.contains(it) }.let { if (it < 0) 0L else it + 1L }
         feeds.entries.firstOrNull { it.key.equals(to, true) }?.let { (_, v) ->
             val raw = v.first.movePointRight(8).toBigInteger() + BigInteger.valueOf(lie)
             return "\"result\":\"0x" + word(7) + word(raw) + word(v.second) + word(v.second) + word(7) + "\""
         }
-        val data = call.getString("data")
         if (to.equals(MULTICALL3, true) && data == GET_CURRENT_BLOCK_TIMESTAMP) {
-            // As Colibri's proven EVM answers `block.timestamp`: 0. The block's header is the one to ask.
-            return "\"result\":\"0x" + word(0) + "\""
+            return "\"result\":\"0x" + word(evmTime) + "\""
         }
         ticks.entries.firstOrNull { it.key.equals(to, true) }?.let { (pool, tick) ->
             val back = reach[pool] ?: 86_400L
@@ -109,6 +143,12 @@ class FiatPricesTest {
                     return "\"result\":\"0x" + word(blockTime - 60) + word(5) + word(0) + word(1) + "\""
             }
             val seconds = BigInteger(data.substring(data.length - 128, data.length - 64), 16).toLong()
+            // At time 0 (Colibri), "seconds ago" wraps to the future: Uniswap's
+            // oracle doesn't revert OLD but answers the spot tick (here: 40 off).
+            if (evmTime != blockTime) {
+                val c1 = 1_000_000L + (tick + 40) * seconds
+                return "\"result\":\"0x" + word(64) + word(192) + word(2) + word(1_000_000L) + word(c1) + word(2) + word(1) + word(2) + "\""
+            }
             if (seconds > back) {
                 // Error("OLD")
                 return "\"error\":{\"code\":3,\"message\":\"execution reverted: OLD\",\"data\":\"0x08c379a0" +
@@ -243,7 +283,7 @@ class FiatPricesTest {
         // Gnosis' own feed was agreed on: xDAI still has its value.
         assertEquals(0, BigDecimal("0.999").compareTo(q.perToken[xdai.key]))
         // An unverified observe([1800, 0]) is no price, not a revert: no fallback reads follow it.
-        val poolReads = sent.mapNotNull { it.second.optJSONArray("params")?.optJSONObject(0)?.optString("data") }
+        val poolReads = poolCalls().map { it.second }
         assertTrue(poolReads.none { it == PriceFeeds.SLOT0 || it.startsWith("0x252c09d7") })
         assertTrue(poolReads.none { it.startsWith("0x883bdbfd") && it != PriceFeeds.OBSERVE })
     }
@@ -351,10 +391,16 @@ class FiatPricesTest {
         assertNull(q.value(token("EURe").key, BigInteger.ONE, 18))
     }
 
-    private fun observeWindows(pool: String) = sent.mapNotNull { (_, req) ->
-        val call = req.optJSONArray("params")?.optJSONObject(0) ?: return@mapNotNull null
+    /** The pool calls sent, as (pool, data): each `observe()` inside its Multicall3 `aggregate`. */
+    private fun poolCalls() = sent.flatMap { (_, req) ->
+        val call = req.optJSONArray("params")?.optJSONObject(0) ?: return@flatMap emptyList()
         val data = call.getString("data")
-        if (!call.getString("to").equals(pool, true) || !data.startsWith("0x883bdbfd")) return@mapNotNull null
+        if (call.getString("to").equals(MULTICALL3, true) && data.startsWith("0x252dba42")) subCalls(data)
+        else listOf(call.getString("to") to data)
+    }
+
+    private fun observeWindows(pool: String) = poolCalls().mapNotNull { (to, data) ->
+        if (!to.equals(pool, true) || !data.startsWith("0x883bdbfd")) return@mapNotNull null
         BigInteger(data.substring(data.length - 128, data.length - 64), 16).toLong()
     }.toSet()
 
@@ -375,6 +421,48 @@ class FiatPricesTest {
         assertEquals(setOf(1800L), observeWindows(PriceFeeds.EURC_USDC.pool))
         val all = sent.filter { it.second.getString("method") == "eth_call" }
         assertTrue(all.all { it.second.getJSONArray("params").getString(1) == "0xfe" })
+    }
+
+    @Test
+    fun `an observe run at another time than the block's, as Colibri's EVM at 0, is no price`() = runBlocking {
+        setting = FiatCurrency.USD
+        // Colibri's proven EVM runs with block.timestamp 0: observe([1800, 0])
+        // doesn't revert OLD but answers the spot tick as the average.
+        evmTime = 0
+        val p = prices()
+        p.refresh()
+        val q = p.quotes.value!!
+        assertNull(q.perToken[token("BZZ").key])
+        assertNull(q.perToken[token("xBZZ").key])
+        assertNull(q.perToken[token("EURC").key])
+        assertEquals(0, BigDecimal("2500").compareTo(q.perToken[eth.key]))
+        // Every observe() went with a block.timestamp read in the same call.
+        val observes = sent.mapNotNull { it.second.optJSONArray("params")?.optJSONObject(0) }
+            .filter { it.optString("data").contains("883bdbfd") }
+        assertTrue(observes.isNotEmpty())
+        assertTrue(observes.all { it.getString("to").equals(MULTICALL3, true) && subCalls(it.getString("data"))[0] == (MULTICALL3.lowercase() to GET_CURRENT_BLOCK_TIMESTAMP) })
+        // The same pool, its EVM on the block's time: priced.
+        evmTime = blockTime
+        clock += FiatPrices.TTL_MS
+        p.refresh()
+        assertEquals(0.04484, p.quotes.value!!.perToken[token("BZZ").key]!!.toDouble(), 0.0001)
+    }
+
+    @Test
+    fun `timed results are checked for the block's time and shape`() {
+        fun agg(time: Long, inner: String) =
+            "0x" + word(1) + word(64) + word(2) + word(64) + word(128) + word(32) + word(time) + word(inner.length / 2L) + inner
+        val inner = word(5) + word(6)
+        assertEquals("0x$inner", FiatMath.timedResult(agg(blockTime, inner), blockTime))
+        assertNull(FiatMath.timedResult(agg(0, inner), blockTime))
+        assertNull(FiatMath.timedResult(agg(blockTime + 1, inner), blockTime))
+        assertNull(FiatMath.timedResult(agg(blockTime, inner).dropLast(64), blockTime))
+        assertNull(FiatMath.timedResult("0x" + word(1), blockTime))
+        // Round trip through the encoder and the fake Multicall3's decoder.
+        assertEquals(
+            listOf(MULTICALL3.lowercase() to GET_CURRENT_BLOCK_TIMESTAMP, PriceFeeds.BZZ_WETH.pool to PriceFeeds.OBSERVE),
+            subCalls(PriceFeeds.timed(PriceFeeds.BZZ_WETH.pool, PriceFeeds.OBSERVE)),
+        )
     }
 
     @Test

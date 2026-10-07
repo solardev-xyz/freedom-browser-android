@@ -133,6 +133,29 @@ internal object PriceFeeds {
     /** `observe(uint32[] [seconds, 0])`. */
     fun observe(seconds: Int): String = "0x883bdbfd" + word(32) + word(2) + word(seconds.toLong()) + word(0)
 
+    /** Multicall3, at the same address on every chain. */
+    const val MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
+
+    /** Multicall3's `getCurrentBlockTimestamp()`: the EVM's `block.timestamp`. */
+    const val GET_CURRENT_BLOCK_TIMESTAMP = "0x0f28c97d"
+
+    /**
+     * Multicall3 `aggregate([(MULTICALL3, getCurrentBlockTimestamp()), ([to], [data])])`:
+     * [data] run in the same EVM as a read of the `block.timestamp` it ran
+     * with, for [FiatMath.timedResult] to check against the block's header.
+     * A revert of [data] reverts the whole call.
+     */
+    fun timed(to: String, data: String): String {
+        fun element(target: String, call: String): String {
+            val bytes = call.removePrefix("0x")
+            val padded = bytes.padEnd((bytes.length + 63) / 64 * 64, '0')
+            return address(target) + word(64) + word(bytes.length / 2L) + padded
+        }
+        val first = element(MULTICALL3, GET_CURRENT_BLOCK_TIMESTAMP)
+        val second = element(to, data)
+        return "0x252dba42" + word(32) + word(2) + word(64) + word(64 + first.length / 2L) + first + second
+    }
+
     /** A Uniswap v3 pool's `slot0()`. */
     const val SLOT0 = "0x3850c7bd"
 
@@ -140,6 +163,8 @@ internal object PriceFeeds {
     fun observations(index: Int): String = "0x252c09d7" + word(index.toLong())
 
     private fun word(n: Long) = n.toString(16).padStart(64, '0')
+
+    private fun address(a: String) = a.removePrefix("0x").lowercase().padStart(64, '0')
 }
 
 /** The arithmetic behind [FiatPrices], kept pure for tests. */
@@ -206,6 +231,37 @@ internal object FiatMath {
         if (words.size != 4 || words[3] != BigInteger.ONE) return null
         if (words[0].bitLength() > 32) return null
         return words[0].toLong()
+    }
+
+    /**
+     * The second call's return data from a [PriceFeeds.timed] answer
+     * (Multicall3 `aggregate`'s `(uint256, bytes[])`), or null unless the
+     * `block.timestamp` its EVM ran with is [blockTimestamp], the block's
+     * own time from its header — or the answer is the wrong shape. A
+     * Uniswap v3 `observe()` run at another time answers for that time:
+     * at 0 (Colibri's proven EVM) its "30 minutes ago" wraps to the far
+     * future and both ends come out as the current tick, the spot price.
+     */
+    fun timedResult(hex: String, blockTimestamp: Long): String? {
+        val w = words(hex) ?: return null
+        fun index(at: Int, base: Int): Int? {
+            val off = w.getOrNull(at) ?: return null
+            if (off.bitLength() > 20 || off.toInt() % 32 != 0) return null
+            return base + off.toInt() / 32
+        }
+        val array = index(1, 0) ?: return null
+        if (w.getOrNull(array) != BIG_TWO) return null
+        val results = (0 until 2).map { i ->
+            val at = index(array + 1 + i, array + 1) ?: return null
+            val len = w.getOrNull(at) ?: return null
+            if (len.bitLength() > 20 || len.toInt() % 32 != 0 || len.signum() == 0) return null
+            val end = at + 1 + len.toInt() / 32
+            if (end > w.size) return null
+            w.subList(at + 1, end)
+        }
+        val time = results[0].singleOrNull() ?: return null
+        if (time != BigInteger.valueOf(blockTimestamp)) return null
+        return "0x" + results[1].joinToString("") { it.toString(16).padStart(64, '0') }
     }
 
     /** A single uint word (a block timestamp), or null. */
@@ -478,22 +534,30 @@ class FiatPrices internal constructor(
      * down to [PriceFeeds.MIN_TWAP_SECONDS]. Only a revert takes that
      * second path: a full-window answer that came back unverified is no
      * price, not a reason to ask three more questions.
+     *
+     * Every `observe()` goes through [PriceFeeds.timed], and counts only
+     * if the EVM that ran it had [blockTime], the block header's time: a
+     * proof covers the pool's storage, not the time an EVM is given, and
+     * Colibri's runs at 0 — where `observe()` doesn't revert `OLD` but
+     * answers the spot tick as the average. That answer is no price.
+     * Without the header's time, nothing is asked.
      */
     private suspend fun twap(rpc: WalletRpc, t: PriceFeeds.Twap, block: String?, blockTime: Long?): BigDecimal? = guarded {
-        if (block == null) return@guarded null
+        if (block == null || blockTime == null) return@guarded null
         val full = try {
-            rpc.call(t.chainId, JSONObject().put("to", t.pool).put("data", PriceFeeds.OBSERVE), block)
+            rpc.call(t.chainId, JSONObject().put("to", PriceFeeds.MULTICALL3).put("data", PriceFeeds.timed(t.pool, PriceFeeds.OBSERVE)), block)
         } catch (e: ChainRpcException.Rpc) {
             if (!e.deterministic) throw e
             null
         }
         val tick = if (full != null) {
             if (!trusted(full.trust)) return@guarded null
-            FiatMath.twapTick(full.value, PriceFeeds.TWAP_SECONDS)
+            FiatMath.timedResult(full.value, blockTime)?.let { FiatMath.twapTick(it, PriceFeeds.TWAP_SECONDS) }
         } else {
-            val time = blockTime ?: return@guarded null
-            val window = fallbackWindow(rpc, t, block, time) ?: return@guarded null
-            poolCall(rpc, t, t.pool, PriceFeeds.observe(window), block)?.let { FiatMath.twapTick(it, window) }
+            val window = fallbackWindow(rpc, t, block, blockTime) ?: return@guarded null
+            poolCall(rpc, t, PriceFeeds.MULTICALL3, PriceFeeds.timed(t.pool, PriceFeeds.observe(window)), block)
+                ?.let { FiatMath.timedResult(it, blockTime) }
+                ?.let { FiatMath.twapTick(it, window) }
         }
         tick?.let { FiatMath.tickPrice(it, t.baseDecimals, t.quoteDecimals) }
     }
