@@ -52,11 +52,27 @@
     <string name="signing_ledger_device_paired">Paired with this phone</string>
     <string name="signing_ledger_device_nearby">Nearby · not paired yet</string>
     <string name="signing_ledger_look_again">Look again</string>
-    <string name="signing_ledger_layout">Layout</string>
     <string name="signing_ledger_layout_explained">Ledger Live makes accounts at m/44\'/60\'/n\'/0/0; wallets like MyEtherWallet used m/44\'/60\'/0\'/n.</string>
-    <string name="signing_ledger_accounts_on_ledger">Accounts on this Ledger</string>
+    <!-- %1$s: the Ledger's name. -->
+    <string name="signing_ledger_accounts_on">Accounts on %1$s</string>
+    <!-- An account's number on the Ledger, counting from 1. -->
+    <string name="signing_ledger_account_n">Account %1$d</string>
+    <string name="signing_ledger_already_added">Already in this wallet</string>
+    <!-- %1$s: an amount with its symbol, %2$s: the network. -->
+    <string name="signing_ledger_balance">%1$s on %2$s</string>
+    <!-- A button on each Ledger account row: reads that one address's balance only when tapped. %1$s is the network. -->
+    <string name="signing_ledger_balance_check">Check balance on %1$s</string>
+    <string name="signing_ledger_balance_reading">Reading balance…</string>
+    <!-- %1$s: the network. -->
+    <string name="signing_ledger_balance_unknown">Couldn’t read its balance on %1$s</string>
+    <string name="signing_ledger_advanced">Advanced</string>
+    <!-- The derivation layout chooser's heading; %1$s is the layout in use (Ledger Live or Legacy). -->
+    <string name="signing_ledger_layout_with">Account layout: %1$s</string>
     <!-- %1$s: the derivation path, e.g. 44'/60'/0'/0/0 -->
-    <string name="signing_ledger_path_already_added">m/%1$s · already in this wallet</string>
+    <string name="signing_ledger_picked_path">The account picked is at m/%1$s.</string>
+    <!-- The Add button, naming the account picked by its number. -->
+    <string name="signing_ledger_add_account_n">Add account %1$d</string>
+    <string name="signing_ledger_pick_one">Pick an account to add</string>
     <string name="signing_ledger_reading_accounts">Reading accounts from the Ledger…</string>
     <string name="signing_ledger_show_more">Show more</string>
     <string name="signing_ledger_add_to_wallet">Add to the wallet</string>
@@ -64,7 +80,6 @@
     <string name="signing_ledger_account_already_in_wallet">That account is already in this wallet.</string>
     <string name="signing_ledger_add_failed">Couldn’t add the account. The phone may be out of storage.</string>
     <string name="signing_ledger_adding">Adding…</string>
-    <string name="signing_ledger_add_account">Add account</string>
     <string name="signing_ledger_stage_connecting">Connecting to your Ledger…</string>
     <string name="signing_ledger_stage_connecting_detail">Keep it unlocked and close to the phone.</string>
     <string name="signing_ledger_stage_pairing">Pair with your Ledger</string>
@@ -120,6 +135,8 @@
     <string name="signing_remote_title_sign_typed_data">Sign typed data</string>
     <string name="signing_remote_title_send_transaction">Send a transaction</string>
     <string name="signing_remote_action_confirm_send">Confirm and send</string>
+    <!-- Read by TalkBack on the approve button while it works. -->
+    <string name="signing_remote_working">Working…</string>
     <string name="signing_remote_pricing">Working out the network fee and nonce… Nothing is signed or sent until you confirm on the next screen.</string>
     <string name="signing_remote_title_cant_send">Can’t send this transaction</string>
     <string name="signing_remote_cant_send_explained">Nothing was signed or sent. The code you scanned is told why once you close this.</string>
@@ -288,5 +305,4 @@
     <!-- Something the site wrote, quoted as is -->
     <string name="signing_x402_quoted">“%1$s”</string>
     <string name="signing_x402_none">(none)</string>
-    <string name="signing_ledger_path" translatable="false">m/%1$s</string>
 </resources>

@@ -1001,6 +1001,7 @@ fun WalletScreen(
                 auth = auth,
                 phraseBackedUp = phraseBackedUp,
                 onBack = { coSigning = null },
+                onOpenUrl = onOpenUrl,
             )
             return
         }

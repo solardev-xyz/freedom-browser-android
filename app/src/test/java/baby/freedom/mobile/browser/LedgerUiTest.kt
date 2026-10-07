@@ -8,6 +8,7 @@ import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.ledger.Ledger
 import baby.freedom.mobile.wallet.ledger.LedgerKey
+import baby.freedom.mobile.wallet.ledger.LedgerScheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -65,5 +66,18 @@ class LedgerUiTest {
         assertEquals("Open the Ethereum app", text(Ledger.Stage.OPEN_APP))
         assertEquals("Pair with your Ledger", text(Ledger.Stage.PAIRING))
         assertEquals("Confirm the message on your Ledger", text(Ledger.Stage.CONFIRM))
+    }
+
+    @Test
+    fun `a found account is numbered from its path, not its row`() {
+        // Ledger Live numbering: Account N is index N-1 of the layout, wherever the list starts.
+        assertEquals(1, ledgerAccountNumber(LedgerScheme.LIVE, LedgerScheme.LIVE.path(0), row = 0))
+        assertEquals(6, ledgerAccountNumber(LedgerScheme.LIVE, LedgerScheme.LIVE.path(5), row = 0))
+        assertEquals(12, ledgerAccountNumber(LedgerScheme.LEGACY, LedgerScheme.LEGACY.path(11), row = 2))
+        for (scheme in LedgerScheme.entries) for (i in listOf(0, 1, 9, 10, 123)) assertEquals(i, scheme.index(scheme.path(i)))
+        // Not a path of that layout: the row is all there is.
+        assertNull(LedgerScheme.LIVE.index(LedgerScheme.LEGACY.path(3)))
+        assertNull(LedgerScheme.LIVE.index("44'/60'/01'/0/0"))
+        assertEquals(3, ledgerAccountNumber(LedgerScheme.LIVE, "44'/60'/0'/7", row = 2))
     }
 }

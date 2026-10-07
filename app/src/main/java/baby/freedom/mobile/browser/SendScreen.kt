@@ -503,16 +503,27 @@ internal fun pastedRecipient(label: CharSequence?, sensitive: Boolean, text: Str
  * looked at before any item; the item is read as its plain text, never
  * coerced (a `content:` item isn't opened).
  */
-internal fun pastedRecipient(context: Context): PastedRecipient? {
+internal fun pastedRecipient(context: Context): PastedRecipient? =
+    recipientClip(context)?.let { pastedRecipient(it.label, it.sensitive, it.text) }
+
+/** The clipboard as the To field's Paste reads it: [text] is null for a secret, whose item is never read. */
+internal class RecipientClip(val label: CharSequence?, val sensitive: Boolean, val text: String?)
+
+/**
+ * What's on the clipboard now, for a To field's Paste. The description is
+ * looked at before any item; the item is read as its plain text, never
+ * coerced (a `content:` item isn't opened), and a secret's not at all.
+ */
+internal fun recipientClip(context: Context): RecipientClip? {
     val clip = context.getSystemService(ClipboardManager::class.java)?.primaryClip ?: return null
     val description = clip.description
     val sensitive = description?.extras?.getBoolean(PhraseClipboard.EXTRA_IS_SENSITIVE, false) == true
-    if (sensitive || PhraseClipboard.isSecretLabel(description?.label)) return PastedRecipient.Secret
-    return pastedRecipient(description?.label, sensitive = false, text = clip.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString())
+    if (sensitive || PhraseClipboard.isSecretLabel(description?.label)) return RecipientClip(description?.label, sensitive = true, text = null)
+    return RecipientClip(description?.label, sensitive = false, text = clip.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString())
 }
 
 /** More than any address or name: a longer paste is cut rather than kept whole in the field. */
-private const val MAX_PASTED_RECIPIENT = 512
+internal const val MAX_PASTED_RECIPIENT = 512
 
 /**
  * The Send form's own fields — asset, recipient, amount, "all" — held

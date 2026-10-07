@@ -87,6 +87,7 @@ import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.GasOracle
 import baby.freedom.mobile.wallet.SendAmounts
+import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultAuthFailedException
 import baby.freedom.mobile.wallet.VaultKeyLostException
@@ -144,19 +145,7 @@ internal fun sheetWarnings(ask: EthAsk, nowSeconds: Long, siteRpcs: Boolean = fa
             ?: SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_typed_note), "typed-unknown"),
         ask.ledgerHashes?.let { SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_ledger_hashes_only), "ledger-hashes") },
     )
-    is EthAsk.SendTransaction -> {
-        val quote = ask.quote
-        val chain = quote.request.chain
-        listOfNotNull(
-            if (ask.repriced) SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_repriced), "repriced") else null,
-            // A site's transaction can take the nonce of a send the user stopped tracking that's
-            // still waiting in a pool — say so here as the Send page does, or confirming silently
-            // drops that earlier send (#215 R6-F1).
-            quote.replaces?.let { SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_replaces, it), "replaces") },
-            if (!GasOracle.quiet(quote.tx.fees, chain.id)) SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_high_fee), "high-fee") else null,
-            sentCall(ask)?.let(::callWarning),
-        )
-    }
+    is EthAsk.SendTransaction -> sendTxWarnings(ask.quote, ask.repriced)
     is EthAsk.CantSend -> listOf(SheetWarning(WarningLevel.Info, Strings.get(R.string.send_eth_cant_send_note)))
     is EthAsk.SwitchChain -> listOf(SheetWarning(WarningLevel.Info, Strings.get(R.string.send_eth_switch_note)))
     is EthAsk.AddChain -> listOf(
@@ -169,27 +158,68 @@ internal fun sheetWarnings(ask: EthAsk, nowSeconds: Long, siteRpcs: Boolean = fa
     is EthAsk.Payment, is EthAsk.SendLink -> emptyList()
 }
 
-/** The call [ask]'s transaction makes, when it's one [TxDecode.call] reads. */
-internal fun sentCall(ask: EthAsk.SendTransaction): DecodedCall? {
-    val request = ask.quote.request
-    return TxDecode.call(request.to, ask.quote.tx.data, request.chain.id)
+/**
+ * The notes a transaction sheet shows for [quote], at their level: a
+ * repriced fee ([repriced]), a send it replaces, a high fee, and what a
+ * decoded call grants (an unlimited approval is Danger). The site's sheet
+ * and desktop's over OpenLV (#434 R3-M1) show the same list, so a call
+ * reads the same whoever asked for it.
+ */
+internal fun sendTxWarnings(quote: SendQuote, repriced: Boolean = false): List<SheetWarning> {
+    val request = quote.request
+    val chain = request.chain
+    return listOfNotNull(
+        if (repriced) SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_repriced), "repriced") else null,
+        // A transaction can take the nonce of a send the user stopped tracking that's still
+        // waiting in a pool — say so here as the Send page does, or confirming silently drops
+        // that earlier send (#215 R6-F1).
+        replacesWarning(quote),
+        if (!GasOracle.quiet(quote.tx.fees, chain.id)) SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_high_fee), "high-fee") else null,
+        TxDecode.call(request.to, quote.tx.data, chain.id)?.let(::callWarning),
+    )
 }
+
+/**
+ * The surface Caution for a [quote] that takes the nonce of a send the user
+ * stopped tracking ([SendQuote.replaces]). Every sheet that can confirm such
+ * a quote — the site's, a remote signer's (OpenLV), a Safe activation or
+ * execution — shows it above the fold, never only inside Details: confirming
+ * silently drops that earlier send (#215 R6-F1, #434 R2-F1).
+ */
+internal fun replacesWarning(quote: SendQuote): SheetWarning? =
+    quote.replaces?.let { SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_replaces, it), "replaces") }
 
 /**
  * The hero line of a site's transaction (W22): what a decoded call does
  * ("Send 20 USDC to 0xd8dA…6045"), a plain send of the native currency,
  * or which contract it calls — never "0 ETH" for a token transfer.
  */
-internal fun sendTxHeadline(ask: EthAsk.SendTransaction): String {
-    val request = ask.quote.request
+internal fun sendTxHeadline(ask: EthAsk.SendTransaction): String = sendTxHeadline(ask.quote)
+
+/** [sendTxHeadline] for any priced transaction: the site's sheet and desktop's over OpenLV (W40) say it alike. */
+internal fun sendTxHeadline(quote: SendQuote): String {
+    val request = quote.request
     val chain = request.chain
-    sentCall(ask)?.let { return callHeadline(it) }
-    if (ask.quote.tx.data.isEmpty()) {
+    TxDecode.call(request.to, quote.tx.data, chain.id)?.let { return callHeadline(it) }
+    if (quote.tx.data.isEmpty()) {
         return sendHeadline(SendAmounts.exact(request.amount, chain.decimals), chain.symbol, request.to, null, chain.name)
     }
-    val function = selectorLabel("0x" + hexOf(ask.quote.tx.data, 4))
+    val function = selectorLabel("0x" + hexOf(quote.tx.data, 4))
     return function?.let { Strings.get(R.string.send_eth_call_named_headline, it, shortAddress(request.to)) }
         ?: Strings.get(R.string.send_eth_call_headline, shortAddress(request.to), chain.name)
+}
+
+/**
+ * "Also sends 1.5 ETH": the native value a contract call carries on top of
+ * what its headline says, so it's named on the sheet's surface, not only
+ * under Details; null for a plain transfer (the headline already names it)
+ * or a call that sends no value. The site's sheet and desktop's over OpenLV
+ * both show it.
+ */
+internal fun alsoSendsLine(quote: SendQuote): String? {
+    val request = quote.request
+    if (quote.tx.data.isEmpty() || request.amount.signum() <= 0) return null
+    return Strings.get(R.string.send_eth_also_sends, SendAmounts.exact(request.amount, request.chain.decimals), request.chain.symbol)
 }
 
 /** The unlock error under a sheet (W20): what to do first, and the raw detail for "Show details"; null when there's nothing to say. */
@@ -798,9 +828,7 @@ private fun SendBody(
         total = quote.nativeTotal?.takeIf { request.amount.signum() > 0 }?.let { stringResource(R.string.send_up_to, feeText(it, chain)) },
     ) {
         SummarySub(stringResource(R.string.send_eth_from_on, accountLabel(request.from), chain.name))
-        if (data.isNotEmpty() && request.amount.signum() > 0) {
-            SummarySub(stringResource(R.string.send_eth_also_sends, SendAmounts.exact(request.amount, chain.decimals), chain.symbol))
-        }
+        alsoSendsLine(quote)?.let { SummarySub(it) }
     }
     Warnings(warnings)
     ask.autoApprove?.let { rule ->
