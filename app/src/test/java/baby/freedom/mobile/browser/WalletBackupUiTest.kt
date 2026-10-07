@@ -24,18 +24,43 @@ class WalletBackupUiTest {
 
     @Test
     fun `status line says where the backup is, or why it can't be on`() {
-        assertTrue(googleBackupStatus(true, Availability.READY, Status.CLOUD).startsWith("On · end-to-end encrypted"))
-        assertTrue(googleBackupStatus(true, Availability.NOT_ENCRYPTED, Status.PAUSED).startsWith("On, paused"))
-        assertTrue(googleBackupStatus(true, Availability.READY, Status.NONE).contains("missing"))
-        assertTrue(googleBackupStatus(true, null, null).contains("isn’t answering"))
-        assertTrue(googleBackupStatus(false, Availability.READY, null).startsWith("Off"))
-        assertTrue(googleBackupStatus(false, Availability.NOT_ENCRYPTED, null).contains("screen lock"))
+        assertEquals("On, if Android’s backup is on", googleBackupStatus(true, Availability.READY, Status.CLOUD))
+        assertEquals("Paused – set a screen lock", googleBackupStatus(true, Availability.NOT_ENCRYPTED, Status.PAUSED, deviceSecure = false))
+        // A screen lock is set: what's missing is the Google account.
+        assertEquals("Paused – add a Google account", googleBackupStatus(true, Availability.NOT_ENCRYPTED, Status.PAUSED, deviceSecure = true))
+        assertTrue(googleBackupStatus(true, Availability.READY, Status.NONE).contains("Missing"))
+        assertTrue(googleBackupStatus(true, null, null).contains("not answering"))
+        assertEquals("Off", googleBackupStatus(false, Availability.READY, null))
+        assertEquals("Unavailable – set a screen lock", googleBackupStatus(false, Availability.NOT_ENCRYPTED, null, deviceSecure = false))
+        assertEquals("Unavailable – add a Google account", googleBackupStatus(false, Availability.NOT_ENCRYPTED, null, deviceSecure = true))
         assertTrue(googleBackupStatus(false, Availability.UNSUPPORTED, null).contains("Google Play services"))
         // #244 R2-M1: not answering isn't "this phone doesn't have it".
-        assertTrue(googleBackupStatus(false, Availability.NO_ANSWER, null).contains("isn’t answering"))
-        assertFalse(googleBackupStatus(false, Availability.NO_ANSWER, null).contains("doesn’t have"))
+        assertTrue(googleBackupStatus(false, Availability.NO_ANSWER, null).contains("not answering"))
+        assertFalse(googleBackupStatus(false, Availability.NO_ANSWER, null).contains("no Google Play services"))
         assertFalse(googleBackupSwitchEnabled(false, Availability.NO_ANSWER, entryKnown = true))
         assertEquals("Checking…", googleBackupStatus(false, null, null))
+    }
+
+    @Test
+    fun `every status line is six words or fewer`() {
+        // #421: the long explanation is behind "How it works", not in the line.
+        val lines = buildList {
+            for (on in listOf(true, false)) {
+                for (availability in Availability.entries.map { it as Availability? } + null) {
+                    for (status in Status.entries.map { it as Status? } + null) {
+                        for (entryKnown in listOf(true, false)) {
+                            for (secure in listOf(true, false)) {
+                                add(googleBackupStatus(on, availability, status, entryKnown, secure))
+                            }
+                        }
+                    }
+                }
+            }
+        }.distinct()
+        for (line in lines) {
+            val words = line.split(Regex("\\s+")).count { word -> word.any { it.isLetterOrDigit() } }
+            assertTrue("\"$line\" has $words words", words <= 6)
+        }
     }
 
     @Test
@@ -204,7 +229,7 @@ class WalletBackupUiTest {
     @Test
     fun `nothing claims a backup written for the cloud is in the Google account`() {
         // #244 R5-F1: every CLOUD line names the phone's own Google backup as the condition.
-        assertTrue(googleBackupStatus(true, Availability.READY, Status.CLOUD).contains("if this phone’s Google backup is on"))
+        assertTrue(googleBackupStatus(true, Availability.READY, Status.CLOUD).contains("if Android’s backup is on"))
         assertTrue(walletBackupDetail(true, Known(Status.CLOUD, A), A).contains("if this phone’s Google backup is on"))
         assertTrue(walletBackupDetail(false, Known(Status.CLOUD, A), A).contains("if this phone’s Google backup is on"))
         val remove = removeWalletKeepsBackupText(BackupHeld.CLOUD)

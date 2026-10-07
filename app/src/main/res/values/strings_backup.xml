@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Guided backup and onboarding (#421): the wallet page's empty state, the
+  backup flow after Create (intro, the words, the three-word check), the
+  recovery phrase page's ⋮ Copy, the home's backup banner and Google
+  backup's "How it works".
+-->
+<resources>
+    <!-- Empty state. -->
+    <string name="wallet_empty_line">One wallet to sign in, publish and pay on the web. You don’t need one to browse.</string>
+    <string name="wallet_create">Create a wallet</string>
+    <string name="wallet_have_one">I already have one</string>
+    <string name="wallet_have_one_title">Bring your wallet</string>
+    <string name="wallet_have_one_google">Restore from Google backup</string>
+    <string name="wallet_have_one_google_no_lock">Restoring needs a screen lock on this phone.</string>
+    <string name="wallet_have_one_phrase">Enter recovery phrase</string>
+
+    <!-- The home's banner until the phrase is backed up. -->
+    <string name="wallet_banner_title">Back up your wallet</string>
+    <string name="wallet_banner_text">Without its recovery phrase, a lost phone means a lost wallet.</string>
+    <string name="wallet_banner_action">Back up</string>
+
+    <!-- The backup flow. -->
+    <string name="wallet_backup_flow_title">Back up your wallet</string>
+    <plurals name="wallet_backup_intro_title">
+        <item quantity="one">Write this %d word on paper</item>
+        <item quantity="other">Write these %d words on paper</item>
+    </plurals>
+    <string name="wallet_backup_intro_title_any">Write your recovery phrase on paper</string>
+    <string name="wallet_backup_intro_paper">Use pen and paper. No screenshot, photo or notes app.</string>
+    <string name="wallet_backup_intro_secret">Anyone who sees them can take everything in the wallet.</string>
+    <string name="wallet_backup_intro_check">Then pick three of them to check you have them right.</string>
+    <string name="wallet_backup_show_words">Show the words</string>
+    <string name="wallet_backup_later">Later</string>
+    <string name="wallet_backup_written_down">I’ve written them down</string>
+
+    <!-- The check. -->
+    <string name="wallet_check_title">Check your words</string>
+    <string name="wallet_check_text">Look at your paper and tap the words with these numbers, in this order.</string>
+    <!-- %d: the word's number in the phrase, 1 to 24. -->
+    <string name="wallet_check_slot">Word %d</string>
+    <!-- TalkBack: a slot still to fill. %d: its number in the phrase. -->
+    <string name="wallet_check_slot_empty">Word %d, not picked yet</string>
+    <!-- TalkBack: a filled slot. %1$d: its number; %2$s: the word. -->
+    <string name="wallet_check_slot_filled">Word %1$d: %2$s</string>
+    <!-- %d: the word's number in the phrase. -->
+    <string name="wallet_check_wrong">That’s not word %d. Check your paper and try again.</string>
+    <string name="wallet_check_words_heading">Pick from these words</string>
+    <string name="wallet_check_see_words">See the words again</string>
+    <string name="wallet_check_saving">Saving…</string>
+    <string name="wallet_check_done_title">Your wallet is backed up</string>
+    <string name="wallet_check_done_text">Keep the paper somewhere safe. You can see the words again under Recovery phrase.</string>
+    <string name="wallet_check_done">Done</string>
+
+    <!-- The recovery phrase page's ⋮ menu. -->
+    <string name="wallet_phrase_more">More options</string>
+    <string name="wallet_phrase_copy_item">Copy to clipboard</string>
+    <string name="wallet_phrase_copy_title">Copy the words?</string>
+    <string name="wallet_phrase_copy_risk">Writing them on paper is safer.</string>
+    <string name="wallet_phrase_copied_line">Copied to the clipboard</string>
+
+    <!-- Google backup. -->
+    <string name="wallet_backup_how_it_works">How it works</string>
+    <string name="wallet_backup_how_it_works_hide">Hide how it works</string>
+</resources>
