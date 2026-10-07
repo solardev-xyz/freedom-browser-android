@@ -93,6 +93,7 @@ import baby.freedom.mobile.wallet.SafeAccount
 import baby.freedom.mobile.wallet.SafeAccounts
 import baby.freedom.mobile.wallet.SafeCallLabel
 import baby.freedom.mobile.wallet.SafeChain
+import baby.freedom.mobile.wallet.SafePolicyChange
 import baby.freedom.mobile.wallet.SafeException
 import baby.freedom.mobile.wallet.SafePending
 import baby.freedom.mobile.wallet.SafeProtocol
@@ -126,9 +127,27 @@ internal const val SAFE_QR_MAX = 1_800
 internal fun safeOwnerName(address: String, accounts: List<WalletAccount>): String =
     accounts.firstOrNull { it.address.equals(address, ignoreCase = true) }?.name ?: Strings.get(R.string.safe_owner_another_device)
 
-/** "2 of 3 owners" — how many must sign, of how many. */
+/** "2 of 3 owners" — how many must sign, of how many (as the Safe has it now, as far as this phone knows). */
 internal fun safePolicy(safe: SafeAccount): String =
-    Strings.plural(R.plurals.safe_policy, safe.owners.size, safe.threshold, safe.owners.size)
+    Strings.plural(R.plurals.safe_policy, safe.ownersNow.size, safe.thresholdNow, safe.ownersNow.size)
+
+/** What a request page's read of the Safe's owners and threshold found (#341). */
+internal sealed interface SafePolicyCheck {
+    data object Checking : SafePolicyCheck
+
+    /** Confirmed on chain, and the record brought in line with it. */
+    data object Confirmed : SafePolicyCheck
+
+    /** Not read or not confirmed: Execute and a message's signature stay off, and [reason] says why. */
+    data class Failed(val reason: String) : SafePolicyCheck
+}
+
+/** What to tell the user when the chain's owners or threshold differed from the record (#341), in plain words. */
+internal fun safePolicyChangeNotice(change: SafePolicyChange): String = buildList {
+    if (change.thresholdChanged) add(Strings.plural(R.plurals.safe_policy_now_needs, change.thresholdNow, change.thresholdNow))
+    if (change.ownersChanged) add(Strings.get(R.string.safe_policy_owners_changed))
+    if (change.droppedSignatures > 0) add(Strings.plural(R.plurals.safe_policy_signatures_dropped, change.droppedSignatures, change.droppedSignatures))
+}.joinToString(" ")
 
 /** What a pending item is, for its row and heading: the payment, or the message's words. */
 internal fun safePendingTitle(p: SafePending): String = when (p.kind) {
@@ -666,7 +685,7 @@ internal fun SafePage(
                     )
                     Spacer(Modifier.height(4.dp))
                     HorizontalDivider()
-                    safe.owners.forEach { owner ->
+                    safe.ownersNow.forEach { owner ->
                         CopyableAddressRow(
                             label = stringResource(R.string.safe_owner_label),
                             address = owner,
@@ -719,7 +738,7 @@ internal data class SafePendingGroups(val needsYou: List<SafePending>, val other
  */
 internal fun safeNeedsYou(p: SafePending, safe: SafeAccount, accounts: List<WalletAccount>): Boolean {
     if (p.superseded) return false
-    val mine = safe.owners.filter { o -> accounts.any { it.address.equals(o, ignoreCase = true) } }
+    val mine = safe.ownersNow.filter { o -> accounts.any { it.address.equals(o, ignoreCase = true) } }
     return when {
         mine.isEmpty() -> false
         p.ready -> p.kind == SafePending.Kind.TX && p.execHash == null
@@ -1119,6 +1138,17 @@ private fun SafeProposePage(
         scope.launch {
             var proposed: SafePending? = null
             try {
+                // The owners and threshold the Safe has now (#341), so the item counts the right signatures and
+                // isn't signed by an owner that's gone. Best effort: the request page checks again before it counts.
+                chain?.let { c ->
+                    try {
+                        chainReads.policy(c.id, safe.address).takeIf { it.confirmed }?.let { safes.applyOnChain(safe.address, it.owners, it.threshold) }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                    }
+                }
+                val current = safes.state.value?.safe(safe.address) ?: safe
                 proposed = if (kind == SafePending.Kind.TX) {
                     val c = chain ?: throw SafeException(Strings.get(R.string.safe_gnosis_not_set_up))
                     val t = token ?: return@launch
@@ -1140,7 +1170,7 @@ private fun SafeProposePage(
                 } else {
                     safes.proposeMessage(safe, text)
                 }
-                signWithLocalOwners(proposed, safe, accounts, safes, vault, auth)
+                signWithLocalOwners(proposed, current, accounts, safes, vault, auth)
                 onProposed(proposed)
             } catch (e: CancellationException) {
                 throw e
@@ -1335,10 +1365,10 @@ private fun SafeProposePage(
             }
             item("go") {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val local = safe.owners.mapNotNull { o -> accounts.firstOrNull { it.address.equals(o, ignoreCase = true) } }
+                    val local = safe.ownersNow.mapNotNull { o -> accounts.firstOrNull { it.address.equals(o, ignoreCase = true) } }
                     val names = local.map { it.name }.reduceOrNull { a, b -> Strings.get(R.string.safe_names_and, a, b) }.orEmpty()
                     FieldText(
-                        stringResource(if (safe.threshold > local.size) R.string.safe_propose_signs_here_then_waits else R.string.safe_propose_signs_here, names),
+                        stringResource(if (safe.thresholdNow > local.size) R.string.safe_propose_signs_here_then_waits else R.string.safe_propose_signs_here, names),
                         error = false,
                     )
                     error?.let { FieldText(it, error = true) }
@@ -1384,7 +1414,7 @@ private suspend fun signWithLocalOwners(
     vault: Vault,
     auth: VaultAuthenticator,
 ) {
-    val local = safe.owners.mapNotNull { o -> accounts.firstOrNull { !it.isLedger && it.address.equals(o, ignoreCase = true) } }.filterNot { p.hasSigned(it.address) }
+    val local = safe.ownersNow.mapNotNull { o -> accounts.firstOrNull { !it.isLedger && it.address.equals(o, ignoreCase = true) } }.filterNot { p.hasSigned(it.address) }
     if (local.isEmpty() || p.ready) return
     if (!vault.unlockedNow()) vault.unlock(auth)
     var current = p
@@ -1427,6 +1457,11 @@ private fun SafeRequestPage(
     var confirmDiscard by remember { mutableStateOf(false) }
     // The abandoned executions Discard warns about: those whose account nonce another send hasn't used yet.
     var liveAbandoned by remember(p.abandonedExecs) { mutableStateOf(p.abandonedExecs) }
+    // The Safe's owners and threshold as its contract has them (#341): Execute and a message's
+    // signature wait for them, and a change since the record was written is said in plain words.
+    var policyCheck by remember(p.id) { mutableStateOf<SafePolicyCheck>(SafePolicyCheck.Checking) }
+    var policyNotice by remember(p.id) { mutableStateOf<String?>(null) }
+    var policyTick by remember(p.id) { mutableStateOf(0) }
     val cameraPermission = rememberCameraPermissionState()
     val share = remember(p.id) { p.shareText() }
     // The owners' Sign buttons produce a signature (maybe the one that completes the threshold):
@@ -1451,10 +1486,38 @@ private fun SafeRequestPage(
         }
     }
 
+    /**
+     * Reads the Safe's owners, threshold and nonce from its contract (#341) and brings the record in
+     * line: pending items take the threshold, signatures from former owners stop counting. Throws
+     * [SafeException] saying why Execute (or a message's signature) stays off when the read fails or
+     * isn't confirmed — a lone server's word isn't enough to count signatures by, or to rewrite the record.
+     */
+    suspend fun checkPolicy(): SafeChain.Policy {
+        policyCheck = SafePolicyCheck.Checking
+        val tx = p.kind == SafePending.Kind.TX
+        try {
+            val c = chain ?: throw SafeException(Strings.get(R.string.safe_gnosis_not_set_up))
+            val policy = try {
+                chainReads.policy(c.id, safe.address)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                throw SafeException(Strings.get(if (tx) R.string.safe_policy_read_failed_tx else R.string.safe_policy_read_failed_message))
+            }
+            if (!policy.confirmed) throw SafeException(Strings.get(if (tx) R.string.safe_policy_unconfirmed_tx else R.string.safe_policy_unconfirmed_message))
+            safes.applyOnChain(safe.address, policy.owners, policy.threshold)?.let { policyNotice = safePolicyChangeNotice(it) }
+            policyCheck = SafePolicyCheck.Confirmed
+            return policy
+        } catch (e: SafeException) {
+            policyCheck = SafePolicyCheck.Failed(e.message.orEmpty())
+            throw e
+        }
+    }
+
     /** The Safe's nonce guard (desktop's): false, and the entry marked, if this transaction can no longer execute. */
-    suspend fun stillExecutable(): Boolean {
+    suspend fun stillExecutable(known: BigInteger? = null): Boolean {
         val c = chain ?: throw SafeException(Strings.get(R.string.safe_gnosis_not_set_up))
-        val onChain = chainReads.nonce(c.id, safe.address)
+        val onChain = known ?: chainReads.nonce(c.id, safe.address)
         val mine = p.safeTx().nonce
         if (onChain > mine) {
             when (safeMovedOn(p) { chainReads.succeeded(c.id, it) }) {
@@ -1490,11 +1553,27 @@ private fun SafeRequestPage(
         if (sender.status.value?.hash != exec) runCatching { safes.clearExecution(p.id, exec, abandoned = true) }
     }
 
+    // Checked on opening, and again with Check again; Execute reads it afresh as well.
+    LaunchedEffect(p.id, policyTick) {
+        if (!p.superseded) runCatching { checkPolicy() }
+    }
+
     fun prepareExecution() = act(Strings.get(R.string.safe_action_price_execution)) {
         val c = chain ?: throw SafeException(Strings.get(R.string.safe_gnosis_not_set_up))
-        val from = SafeChain.executor(safe, accounts) ?: throw SafeException(Strings.get(R.string.safe_no_executor_for_execution))
-        if (!stillExecutable()) return@act
-        val data = SafeProtocol.execTransactionData(p.safeTx(), p.signatures)
+        // Signatures are counted against the Safe's owners and threshold on chain, not the record's (#341):
+        // a stale threshold would offer an execution that reverts (GS020) at the executor's expense.
+        val policy = checkPolicy()
+        if (!stillExecutable(policy.nonce)) return@act
+        // The entry as the read above left it: it may need more signatures now.
+        val entry = safes.state.value?.pending?.firstOrNull { it.id == p.id } ?: throw SafeException(Strings.get(R.string.safe_error_discarded))
+        if (entry.countedBy(policy.owners) < policy.threshold) {
+            // The page now shows it waiting for signatures, and the notice says why.
+            if (policyNotice != null) return@act
+            throw SafeException(Strings.plural(R.plurals.safe_policy_now_needs, policy.threshold, policy.threshold))
+        }
+        val current = safes.state.value?.safe(safe.address) ?: safe
+        val from = SafeChain.executor(current, accounts) ?: throw SafeException(Strings.get(R.string.safe_no_executor_for_execution))
+        val data = SafeProtocol.execTransactionData(entry.safeTx(), entry.signatures)
         quote = sender.prepare(
             SendRequest(c, TokenRegistry.native(c), from, safe.address, BigInteger.ZERO, DappCall(null, data, null, SafeCallLabel(safe.address, safe.name, activates = false))),
         )
@@ -1536,6 +1615,7 @@ private fun SafeRequestPage(
                             announce = false,
                         )
                     }
+                    policyNotice?.let { FieldText(it, error = false, announce = true) }
                     DetailsExpander {
                         CopyableAddressRow(
                             label = stringResource(R.string.safe_label_from),
@@ -1603,7 +1683,7 @@ private fun SafeRequestPage(
             item("owners") {
                 SectionCard(title = pluralText(R.plurals.safe_signature_count, p.threshold, p.collected, p.threshold)) {
                     ObscuredTapNotice(tap)
-                    safe.owners.forEach { owner ->
+                    safe.ownersNow.forEach { owner ->
                         val signed = p.hasSigned(owner)
                         val mine = accounts.firstOrNull { it.address.equals(owner, ignoreCase = true) }
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 4.dp)) {
@@ -1684,9 +1764,24 @@ private fun SafeRequestPage(
                 }
                 p.kind == SafePending.Kind.TX && p.ready && !p.superseded -> item("execute") {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val check = policyCheck
+                        if (check is SafePolicyCheck.Failed) {
+                            // Not offered while the Safe's owners and threshold aren't confirmed (#341).
+                            FieldText(check.reason, error = true)
+                            OutlinedButton(
+                                onClick = { error = null; policyTick++ },
+                                enabled = !busy,
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                            ) { Text(stringResource(R.string.safe_policy_check_again)) }
+                            return@Column
+                        }
                         error?.let { FieldText(it, error = true) }
-                        Button(onClick = { prepareExecution() }, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                            if (busy) BusySpinner(stringResource(R.string.safe_pricing)) else Text(stringResource(R.string.safe_execute))
+                        Button(onClick = { prepareExecution() }, enabled = !busy && check == SafePolicyCheck.Confirmed, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                            when {
+                                busy -> BusySpinner(stringResource(R.string.safe_pricing))
+                                check == SafePolicyCheck.Checking -> Text(stringResource(R.string.safe_policy_checking))
+                                else -> Text(stringResource(R.string.safe_execute))
+                            }
                         }
                         FieldText(
                             SafeChain.executor(safe, accounts)?.name?.let { stringResource(R.string.safe_execute_paid_by, it) }
@@ -1698,13 +1793,31 @@ private fun SafeRequestPage(
             }
             if (p.kind == SafePending.Kind.MESSAGE && p.ready) item("signature") {
                 SectionCard(title = stringResource(R.string.safe_signature_title)) {
-                    SelectionContainer { Text(p.combinedSignature(), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
-                    FieldText(
-                        stringResource(R.string.safe_signature_hint),
-                        error = false,
-                    )
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        TextButton(onClick = { copyToClipboard(context, p.combinedSignature()) }) { Text(stringResource(R.string.safe_copy_signature)) }
+                    // Only once the signatures are counted against the Safe's owners and threshold on
+                    // chain (#341): otherwise the Safe could reject the signature it's given as.
+                    when (val check = policyCheck) {
+                        SafePolicyCheck.Confirmed -> {
+                            SelectionContainer { Text(p.combinedSignature(), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
+                            FieldText(
+                                stringResource(R.string.safe_signature_hint),
+                                error = false,
+                            )
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                TextButton(onClick = { copyToClipboard(context, p.combinedSignature()) }) { Text(stringResource(R.string.safe_copy_signature)) }
+                            }
+                        }
+                        SafePolicyCheck.Checking -> Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.heightIn(min = 48.dp)) {
+                            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Text(stringResource(R.string.safe_policy_checking), style = MaterialTheme.typography.bodyMedium)
+                        }
+                        is SafePolicyCheck.Failed -> {
+                            FieldText(check.reason, error = true)
+                            OutlinedButton(
+                                onClick = { policyTick++ },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                            ) { Text(stringResource(R.string.safe_policy_check_again)) }
+                        }
                     }
                 }
             }
