@@ -4,6 +4,8 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.job
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -40,7 +42,14 @@ class TabsStoreTest {
     @Before
     fun setUp() = Dispatchers.setMain(main)
 
-    /** Every session a test made, stopped before the next test swaps Main. */
+    /**
+     * Every session a test made, stopped before the next test swaps Main —
+     * and waited for (#455): a cancel alone leaves a coroutine that's in
+     * `withContext(Dispatchers.IO)` (a disk read or write) running, and once
+     * that returns it resumes on Main from the IO thread, after
+     * [Dispatchers.resetMain] — a test later in the run then fails with
+     * the exception it left behind.
+     */
     private val sessions = mutableListOf<TabsSession>()
 
     private fun session(store: TabsStore = store()): TabsSession =
@@ -48,7 +57,7 @@ class TabsStoreTest {
 
     @After
     fun tearDown() {
-        sessions.forEach { it.viewModelScope.cancel() }
+        runBlocking { sessions.forEach { it.viewModelScope.coroutineContext.job.cancelAndJoin() } }
         Dispatchers.resetMain()
     }
 
