@@ -220,11 +220,11 @@ private fun ReceivedRow(t: IncomingTransfer, onOpen: (IncomingTransfer) -> Unit)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(receivedTitle(t), fontWeight = FontWeight.Medium)
             Text(receivedSubtitle(t), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(
-                stringResource(R.string.wallet_history_row_from, shortAddress(t.from)),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-            )
+            // The whole sender, not its ends: a look-alike address sending dust
+            // (address poisoning) matches a known one's first and last characters.
+            val dim = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            Text(stringResource(R.string.wallet_history_field_from), style = MaterialTheme.typography.labelSmall, color = dim)
+            AddressText(t.from, style = MaterialTheme.typography.labelSmall, color = dim)
         }
         Spacer(Modifier.width(8.dp))
         Icon(
@@ -513,6 +513,7 @@ internal fun ReceivedDetailPage(t: IncomingTransfer, onOpenUrl: (String) -> Unit
                         address = t.from,
                         explorerUrl = explorerAddressUrl(t.explorerUrl, t.from),
                         onOpenUrl = onOpenUrl,
+                        detail = stringResource(R.string.wallet_history_received_from_caution),
                     )
                     TxField(stringResource(R.string.wallet_history_field_network), t.chainName)
                     TxField(stringResource(R.string.wallet_history_field_received), format.format(Date(t.at)))

@@ -276,6 +276,7 @@ class IncomingTransfersTest {
     private class FakeReads(var head: Long, val logs: MutableList<JSONObject> = mutableListOf()) : IncomingReads {
         var headTrust: ChainTrust? = null
         var receiptTrust: ChainTrust? = null
+        var timeTrust: ChainTrust? = null
         val receipts = mutableMapOf<String, JSONObject?>()
         val asked = java.util.Collections.synchronizedList(mutableListOf<LongRange>())
 
@@ -313,7 +314,7 @@ class IncomingTransfersTest {
             return WalletRpc.Reading(r, receiptTrust ?: ok)
         }
 
-        override suspend fun blockTimestamp(chainId: Long, block: Long) = WalletRpc.Reading(1_700_000_000L + block * 5, ok)
+        override suspend fun blockTimestamp(chainId: Long, block: Long) = WalletRpc.Reading(1_700_000_000L + block * 5, timeTrust ?: ok)
     }
 
     private fun fake(head: Long, vararg logs: JSONObject) = FakeReads(head, logs.toMutableList()).also { it.ok = verified }
@@ -379,6 +380,19 @@ class IncomingTransfersTest {
     }
 
     @Test
+    fun `a proven transfer whose block time only one RPC vouches for waits for a better answer`() = runBlocking {
+        val head = 1_000_000L
+        val reads = fake(head, log(block = head - 100))
+        reads.timeTrust = lone
+        val inc = incoming(reads)
+        inc.scan(account, listOf(gnosis))
+        assertTrue(inc.transfers.value.isEmpty())
+        reads.timeTrust = verified
+        inc.scan(account, listOf(gnosis))
+        assertEquals((1_700_000_000L + (head - 100) * 5) * 1000, inc.transfers.value.single().at)
+    }
+
+    @Test
     fun `a head only one public RPC vouches for isn't scanned to`() = runBlocking {
         val reads = fake(1_000_000L, log(block = 999_000))
         reads.headTrust = lone
@@ -432,6 +446,54 @@ class IncomingTransfersTest {
         assertTrue(inc.transfers.value.isEmpty())
         inc.persistNow()
         assertTrue(store.load().isEmpty())
+    }
+
+    @Test
+    fun `a first scan that read nothing starts over a window under a much later head`() = runBlocking {
+        val head = 3_000_000L
+        val reads = fake(head)
+        reads.down = true
+        val inc = incoming(reads)
+        inc.scan(account, listOf(gnosis))
+        reads.down = false
+        reads.asked.clear()
+        reads.head = head + 5_000_000L
+        // The failures shrank the chunks, so reading back takes a few runs; each stops at the window's floor.
+        repeat(20) { inc.scan(account, listOf(gnosis)) }
+        val safe = reads.head - IncomingScan.margin(gnosis.id)
+        val windowFloor = safe - IncomingScan.windowBlocks(gnosis.id) + 1
+        assertEquals(windowFloor, reads.asked.minOf { r -> r.first })
+        assertTrue(inc.catchingUp.value.isEmpty())
+        // And the rebase on its own: a never-read state's floor is lifted, a recent one's kept.
+        val never = ScanState(account, gnosis.id, floor = 100)
+        assertEquals(windowFloor, IncomingScan.rebase(never, safe).floor)
+        val recent = ScanState(account, gnosis.id, floor = safe - 10)
+        assertEquals(recent, IncomingScan.rebase(recent, safe))
+    }
+
+    @Test
+    fun `a wipe before the file has been read still deletes it`() = runBlocking {
+        val file = tmp.root.resolve("wallet/incoming.json")
+        val reads = fake(1_000_000L)
+        val saved = ScanState(account, gnosis.id, from = 10, to = 20, floor = 5, transfers = listOf(transfer(1_000)))
+        assertTrue(FileIncomingStore(file).save(listOf(saved)))
+        assertTrue(file.exists())
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val slow = object : IncomingStore {
+            val inner = FileIncomingStore(file)
+            override fun save(scans: List<ScanState>) = inner.save(scans)
+            override fun load(): List<ScanState> {
+                gate.await()
+                return inner.load()
+            }
+        }
+        val again = incoming(reads, slow)
+        again.wipe()
+        gate.countDown()
+        again.awaitLoaded()
+        withTimeout(5_000) { while (file.exists()) kotlinx.coroutines.delay(10) }
+        assertTrue(again.transfers.value.isEmpty())
+        assertTrue(FileIncomingStore(file).load().isEmpty())
     }
 
     @Test

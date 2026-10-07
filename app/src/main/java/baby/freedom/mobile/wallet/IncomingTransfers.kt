@@ -211,13 +211,16 @@ internal object IncomingScan {
      * [s], with a head more than a window past what was read treated as
      * a new start: only a first scan's window under the head is read, not
      * the whole time the app went unopened (the blocks before that window
-     * stay unread; the explorer has them). What was found stays.
+     * stay unread; the explorer has them). What was found stays. A state
+     * with nothing read yet (a first scan whose every chunk failed) keeps
+     * its floor only while that's still within a window of the head.
      */
     fun rebase(s: ScanState, head: Long): ScanState {
-        val to = s.to ?: return s
         val window = windowBlocks(s.chainId)
+        val windowFloor = maxOf(0L, head - window + 1)
+        val to = s.to ?: return if (s.floor < windowFloor) s.copy(floor = windowFloor) else s
         if (head - to <= window) return s
-        return s.copy(from = null, to = null, floor = head - window + 1)
+        return s.copy(from = null, to = null, floor = windowFloor)
     }
 
     /** The next chunk to read with the head at [head], or null when there's none. */
@@ -458,6 +461,9 @@ class IncomingTransfers internal constructor(
     private var loaded = false
     private var wipedBeforeLoad = false
 
+    /** A write asked for before the file was read: done once it has been (a wipe's included). */
+    private var writeAfterLoad = false
+
     /** When each (account, chain) last read up to the head, by [uptime]. Under this object's lock. */
     private val lastScan = HashMap<Pair<String, Long>, Long>()
     private val fileRead = CompletableDeferred<Unit>()
@@ -465,11 +471,13 @@ class IncomingTransfers internal constructor(
     init {
         scope.launch(Dispatchers.IO) {
             val saved = store.load()
-            synchronized(this@IncomingTransfers) {
+            val write = synchronized(this@IncomingTransfers) {
                 loaded = true
                 if (!wipedBeforeLoad) publish(saved.associateBy { keyOf(it.account, it.chainId) })
+                writeAfterLoad
             }
             fileRead.complete(Unit)
+            if (write) persistNow()
         }.invokeOnCompletion { fileRead.complete(Unit) }
     }
 
@@ -561,7 +569,10 @@ class IncomingTransfers internal constructor(
                     if (receipt == null || !IncomingLogs.confirms(c, receipt)) {
                         keep = false
                     } else {
-                        val seconds = reads.blockTimestamp(chain.id, c.block).value
+                        // The date orders it against sends: one RPC's word for it isn't enough either.
+                        val time = reads.blockTimestamp(chain.id, c.block)
+                        if (!time.trust.undisputed) continue
+                        val seconds = time.value
                         val token = TokenRegistry.builtins.first { it.chainId == chain.id && it.address.equals(c.tokenAddress, ignoreCase = true) }
                         found = IncomingTransfer(
                             account = s.account,
@@ -636,7 +647,12 @@ class IncomingTransfers internal constructor(
     }
 
     internal fun persistNow(): Boolean = synchronized(writing) {
-        val snapshot = synchronized(this) { scans.value.values.toList().takeIf { loaded } } ?: return true
+        val snapshot = synchronized(this) {
+            // Before the file is read, writing would overwrite what it holds; the
+            // load writes once it's done instead, so a wipe's empty state still lands.
+            if (!loaded) writeAfterLoad = true
+            scans.value.values.toList().takeIf { loaded }
+        } ?: return true
         store.save(snapshot)
     }
 
