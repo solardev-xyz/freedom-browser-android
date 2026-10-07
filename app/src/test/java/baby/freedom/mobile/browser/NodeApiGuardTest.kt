@@ -210,6 +210,32 @@ class NodeApiGuardTest {
     }
 
     @Test
+    fun `an external Swarm node behind a path is only that path, not its whole origin`() {
+        val external = ExternalEndpoints.normalize("https://me.example/bee/")!!
+        assertEquals("https://me.example/bee", external)
+        for (url in listOf(
+            "https://me.example/bee", "https://me.example/bee/", "https://me.example/bee/bzz",
+            "https://me.example/bee/pins/ab", "https://me.example/BEE/bytes", "https://me.example/%62ee/feeds/a/b",
+            "https://me.example//bee/tags",
+        )) {
+            assertTrue(url, refused("POST", url, externalSwarm = external))
+        }
+        // The rest of the origin is another site: its logins and forms aren't the node's.
+        for (url in listOf(
+            "https://me.example/login", "https://me.example/", "https://me.example/beehive/upload",
+            "https://me.example/nextcloud/bee/x", "https://me.example/be",
+        )) {
+            assertFalse(url, refused("POST", url, externalSwarm = external))
+        }
+        // Deeper mounts too.
+        val deep = ExternalEndpoints.normalize("https://me.example/a/b")!!
+        assertTrue(refused("PUT", "https://me.example/a/b/feeds/x", externalSwarm = deep))
+        assertFalse(refused("PUT", "https://me.example/a/feeds/x", externalSwarm = deep))
+        // Reads anywhere on it still pass.
+        assertFalse(refused("GET", "https://me.example/bee/bzz/ab/", externalSwarm = external))
+    }
+
+    @Test
     fun `a CORS preflight is judged as the request it asks for`() {
         fun preflight(asks: String?) =
             NodeApiGuard.pageMethod("OPTIONS", asks?.let { mapOf("Access-Control-Request-Method" to it) } ?: emptyMap())

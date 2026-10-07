@@ -5802,16 +5802,17 @@ private fun syntheticResponse(
  *    the submit flow.)
  *
  * Everything else — external https, and direct `http://127.0.0.1`
- * gateway calls to the dapp surface (the sanctioned write path for
- * dapps; the node's own API is refused, [NodeApiGuard]) — passes through
- * to Chromium's own network stack untouched.
+ * gateway reads of the dapp surface (pages write through no node at
+ * all, and the node's own API is refused, [NodeApiGuard]; dapps publish
+ * with `window.swarm`) — passes through to Chromium's own network stack
+ * untouched.
  *
  * Error contract: the interceptor always answers for virtual hosts. A
  * gateway that's unreachable (node not running) or an ENS name that
  * doesn't resolve synthesizes a clean 502 so the main frame fails fast
  * into [ErrorPage] instead of hanging; non-GET/HEAD methods get a 405
- * (WebView interception can't carry request bodies — writes go to the
- * node API origin directly).
+ * (WebView interception can't carry request bodies, and pages write
+ * through no node anyway — they publish with `window.swarm`).
  *
  * [ensPins] is the requesting tab's (null for service-worker fetches,
  * which belong to no tab): the ENS roots its documents were served from.
@@ -6055,7 +6056,7 @@ private fun interceptVirtualRequestFor(
         return syntheticResponse(
             405, "Method Not Allowed",
             "Virtual dweb origins are read-only (GET/HEAD). " +
-                "Send writes to the node API at ${Gateways.swarmBase}.",
+                "Pages publish with window.swarm, which asks the user first.",
         )
     }
 

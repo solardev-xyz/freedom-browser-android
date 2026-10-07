@@ -124,7 +124,13 @@ chain transport): an on-chain write that gets past the interceptor
 fails at the node instead. An upload a page sneaks past that way (a form
 POST that a redirector answers with a 307 to `/bzz`) does reach the
 node, as it does from another browser on the device; that's a limit of
-the interceptor, not something it allows. And the node lets no page read its answers:
+the interceptor, not something it allows. Nor does a WebSocket
+handshake ever reach the interceptor, and ant checks no `Origin` on an
+upgrade: a page can still push chunks through
+`ws://127.0.0.1:1633/chunks/stream`, each with a postage stamp it signed
+for a batch of its own (it can't sign for the user's batches, whose
+owner key only the node holds). Closing that needs ant to refuse browser
+upgrades on that route. And the node lets no page read its answers:
 up to ant 0.5.48 its gateway answered `Origin: null` — which a fetch
 carries after a cross-origin redirect — with
 `Access-Control-Allow-Origin: null`, so a page could read `/wallet` or

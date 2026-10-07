@@ -26,8 +26,8 @@ import java.io.ByteArrayInputStream
  * addresses), `/wallet` (the address and its balances), `/stamps`,
  * `/chequebook/…`, `/balances`, `/settlements`, `/peers`, `/topology`,
  * `/pins`, `/tags`. The gateway sits on localhost, which pages may reach
- * (it's the documented dapp write path, and the interceptor even answers
- * its CORS preflights), and a `no-cors` POST needs no preflight at all.
+ * (dweb pages read `/bzz` from it, the error page probes `/health`), and
+ * a `no-cors` POST needs no preflight at all.
  * Up to ant 0.5.48 the gateway also answered `Origin: null` with
  * `Access-Control-Allow-Origin: null`, so any page could read those
  * answers from a sandboxed iframe, a `data:` worker or anything else with
@@ -47,7 +47,9 @@ import java.io.ByteArrayInputStream
  * (`ant-api-guard.js`): every method but GET and HEAD — a CORS preflight
  * counts as the method it asks for ([pageMethod]) — is refused on the
  * gateway port on *any* host, a LAN Bee node's included, and on the
- * external Swarm node set in Settings whatever its port. Otherwise any
+ * external Swarm node set in Settings whatever its port (under its
+ * path, if it has one: the rest of that origin is another site,
+ * [isExternalNode]). Otherwise any
  * site could upload, send pss or write feeds under a postage batch the
  * user paid for (a `no-cors` POST needs no preflight), or pin, tag and
  * dial peers on a LAN node. Pages publish with `window.swarm`, which asks
@@ -58,8 +60,17 @@ import java.io.ByteArrayInputStream
  *
  * This is the page-facing, readable refusal, not the whole enforcement:
  * a navigation's redirect is followed inside Chromium without asking
- * the interceptor again, and other apps and browsers reach the port
- * without a WebView at all. What keeps the funds safe from all of them
+ * the interceptor again, a WebSocket handshake never reaches
+ * `shouldInterceptRequest` at all, and other apps and browsers reach the
+ * port without a WebView. The WebSocket gap is a real write path: ant's
+ * `GET /chunks/stream` (bee's chunk-upload stream) takes chunks over a
+ * socket with no header needed — each message carrying its own
+ * pre-signed postage stamp — and ant checks no `Origin` on an upgrade,
+ * so a page can still push chunks it stamped with a batch of its own
+ * through `ws://127.0.0.1:1633/chunks/stream`. It can't spend the
+ * user's batches that way (a stamp is signed by the batch owner's key,
+ * which only the node holds); closing it needs ant to refuse browser
+ * upgrades there, as its `wallet_spend_guard` does for spending routes. What keeps the funds safe from all of them
  * is the node's own chain transport (`ant_jni.c`), which refuses every
  * broadcast but the transactions of a spend the user confirmed in the
  * app ([baby.freedom.swarm.SpendGuard]). What keeps the reads private
@@ -214,8 +225,15 @@ internal object NodeApiGuard {
     }
 
     /**
-     * Is [url] on the external Swarm node's own origin (scheme, host as the
-     * WHATWG parser reads it, and port)? Not for `""` (no external node).
+     * Is [url] the external Swarm node's: on its origin (scheme, host as the
+     * WHATWG parser reads it, and port) *and* under its path? Settings keep
+     * a path ([ExternalEndpoints.normalize]), so a node behind a reverse
+     * proxy at `https://me.example/bee` is only `/bee` and what's under
+     * it; the rest of `me.example` (a login form, another app) is some
+     * other site, whose writes are none of this guard's business (R1-F1).
+     * Segments are compared as [segments] reads them (decoded, lowercased,
+     * dot segments dropped), which can only match more, never less. Not
+     * for `""` (no external node).
      */
     private fun isExternalNode(url: String, externalSwarm: String): Boolean {
         if (externalSwarm.isEmpty()) return false
@@ -223,7 +241,10 @@ internal object NodeApiGuard {
         if (port != effectivePort(externalSwarm)) return false
         if (!url.substringBefore("://").equals(externalSwarm.substringBefore("://"), ignoreCase = true)) return false
         val host = WhatwgHost.parse(url)?.hostname?.trimEnd('.') ?: return false
-        return host == WhatwgHost.parse(externalSwarm)?.hostname?.trimEnd('.')
+        if (host != WhatwgHost.parse(externalSwarm)?.hostname?.trimEnd('.')) return false
+        val base = segments(pathOf(externalSwarm))
+        val path = segments(pathOf(url))
+        return path.size >= base.size && path.subList(0, base.size) == base
     }
 
     /**
