@@ -63,35 +63,56 @@ interceptor answers first. Label encoding (source of truth:
 ## The write path
 
 Intercepted origins are **GET/HEAD-only** — `WebResourceRequest`
-exposes no request body. For uploads/POSTs, talk to the node API
-origin directly:
+exposes no request body. Pages publish with **`window.swarm`**, which
+asks the user, then signs and uploads natively with the user's own
+stamps and returns the result.
+
+No page writes through a Swarm node directly (#358, as on desktop's
+`ant-api-guard.js`). Every request a page makes to the gateway port
+with a method other than GET or HEAD — on any host: the embedded node,
+a Bee node on the LAN (`http://192.168.1.20:1633`), any name — and every
+such request to the external Swarm node set in Settings (on its own
+host and port — `http` and `https` on the default ports 80/443 count as
+one, since one proxy server block often listens on both — under its
+path: a node at `https://me.example/bee` is only `/bee` and what's under
+it, the rest of `me.example` being some other site) is answered `403`
+by the app and never reaches the node:
 
 ```js
-await fetch('http://127.0.0.1:1633/bzz', { method: 'POST', body, headers })
+await fetch('http://127.0.0.1:1633/bzz', { method: 'POST', body, headers }) // 403
 ```
 
-This is sanctioned and reaches the node from https pages: Chromium
-treats `http://127.0.0.1` as potentially trustworthy (no mixed-content
-block). CORS preflights to the node origin are answered by the app, but
-the node sends no CORS headers on its answers (#284), so a page on
-another origin can't read the reply (see
-`docs/virtual-origins-hardening.md`). `window.swarm` is the publishing
-path that returns its result.
+That includes the dapp surface (`/bzz`, `/bytes`, `/chunks`, `/soc`,
+`/feeds`, `/pss`, `/gsoc`) as well as `/pins`, `/tags`, `/connect`,
+`/grantee`, `/stewardship` and everything else. Before, any site could
+upload, write feeds or send pss under a postage batch the user paid for
+(a `no-cors` POST needs no preflight), and pin, tag or dial peers on a
+LAN node. A CORS preflight is judged as the request it asks for: the app
+answers a read's preflight to the embedded gateway (`GET, HEAD` only)
+and refuses a write's. Page-supplied `Swarm-Postage-Batch-Id` and
+`Swarm-Act*` headers are dropped from requests the interceptor forwards
+to the gateway — reads included: a page can't have the node decrypt ACT
+content shared with it (`Swarm-Act`, `Swarm-Act-Publisher`,
+`Swarm-Act-History-Address` on a GET through a virtual origin), since
+that would use the node's own key without asking the user.
 
-Only the dapp surface is part of it: `/bzz`, `/bytes`, `/chunks`,
-`/soc`, `/feeds`, `/pss`, `/gsoc`, plus the `/health` and `/readiness`
-probes. Every other request a page makes to the gateway port (any
-method; any host that could be the device, which means any name, since
-a name can resolve to loopback) is answered `403` by the app and never
-reaches the node (#114, #283,
-`NodeApiGuard`): that's bee's node API, which in light mode signs and
-sends transactions from the user's funded node account with no prompt
-(`/stamps…`, `/chequebook…`, `/stake…`, `/wallet…`, `/transactions…`)
-and otherwise reads what the node knows about the user (`/addresses`,
-`/wallet`, `/stamps`, `/chequebook`, `/balances`, `/settlements`,
-`/peers`, `/topology`, `/node`, `/pins`, `/tags`, …). It's an
-allowlist, so an endpoint a later ant adds stays closed. Buying stamps,
-funding the chequebook and the node's details go through the app.
+Reads keep working: dweb pages load their content through the virtual
+origins, a page can still read `/bzz`, `/bytes`, `/chunks`, `/soc`,
+`/feeds`, `/pss`, `/gsoc` with GET (the node sends no CORS headers on
+its answers, #284, so a page on another origin can't read the reply of
+a CORS `fetch`; see `docs/virtual-origins-hardening.md`), and the
+`/health` and `/readiness` probes stay open. Every other read a page
+makes to the gateway port on any host that could be the device (any
+name, since a name can resolve to loopback) is answered `403` too
+(#114, #283, `NodeApiGuard`): that's bee's node API, which in light mode
+signs and sends transactions from the user's funded node account with
+no prompt (`/stamps…`, `/chequebook…`, `/stake…`, `/wallet…`,
+`/transactions…`) and otherwise reads what the node knows about the
+user (`/addresses`, `/wallet`, `/stamps`, `/chequebook`, `/balances`,
+`/settlements`, `/peers`, `/topology`, `/node`, `/pins`, `/tags`, …).
+It's an allowlist, so an endpoint a later ant adds stays closed. Buying
+stamps, funding the chequebook and the node's details go through the
+app.
 
 A Bee node on another machine isn't the embedded node, which binds
 `127.0.0.1` only. Its reads stay open to pages when the URL names it by
@@ -99,16 +120,28 @@ a non-loopback IP address (`http://192.168.1.20:1633/wallet`), or by
 the host of the external Swarm node set in Settings. Any other name on
 port 1633 (`http://nas:1633`) is refused, since the app can't tell it
 from one that resolves to the device; the refusal says to use the IP
-address or set it as the external node. Chain writes (`/stamps…`,
-`/chequebook…`, `/stake…`, `/wallet…`, `/transactions…` with a method
-other than GET/HEAD) stay refused on every host, as before #283.
+address or set it as the external node. Writes stay refused on every
+host (#358).
 
 The interceptor can't see every such request: a redirect a CORS fetch
 follows after an earlier cross-origin hop, or a navigation's redirect,
 is followed inside Chromium, and other apps reach the port directly. So
 the node itself also refuses to broadcast any transaction (`ant_jni.c`'s
 chain transport): an on-chain write that gets past the interceptor
-fails at the node instead. And the node lets no page read its answers:
+fails at the node instead. An upload a page sneaks past that way (a form
+POST that a redirector answers with a 307 to `/bzz`) does reach the
+node, as it does from another browser on the device; that's a limit of
+the interceptor, not something it allows. Nor can it see a reverse
+proxy's own path mapping: one whose location for the external node has
+no trailing slash (`location /bee` proxied to the node's root) also
+hands the node `/beehive/…`, which the app takes to be another app on
+that origin. Nor does a WebSocket
+handshake ever reach the interceptor, and ant checks no `Origin` on an
+upgrade: a page can still push chunks through
+`ws://127.0.0.1:1633/chunks/stream`, each with a postage stamp it signed
+for a batch of its own (it can't sign for the user's batches, whose
+owner key only the node holds). Closing that needs ant to refuse browser
+upgrades on that route. And the node lets no page read its answers:
 up to ant 0.5.48 its gateway answered `Origin: null` — which a fetch
 carries after a cross-origin redirect — with
 `Access-Control-Allow-Origin: null`, so a page could read `/wallet` or

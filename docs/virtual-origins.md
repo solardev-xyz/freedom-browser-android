@@ -69,9 +69,9 @@ cleared with the usual "Clear browsing data" action.
   rejects CORS-mode fetches to non-http(s) schemes before interception
   can run. Relative URLs and virtual-origin URLs work.
 - `WebResourceRequest` exposes no request body, so virtual origins are
-  effectively GET/HEAD-only. Writes (uploads, POSTs) go directly to the
-  node API at `http://127.0.0.1:1633` — allowed from https pages
-  because localhost is exempt from mixed-content blocking.
+  effectively GET/HEAD-only. Pages publish with `window.swarm`, which
+  asks the user; a page's own write to the node API is refused (#358,
+  `docs/dapp-compatibility.md`).
 
 The full dapp compatibility contract lives in
 `docs/dapp-compatibility.md` (companion issue), and each guarantee is
