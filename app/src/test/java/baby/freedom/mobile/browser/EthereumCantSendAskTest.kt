@@ -60,6 +60,22 @@ class EthereumCantSendAskTest {
     }
 
     @Test
+    fun `can't-send asks queued behind the closed one aren't shown in turn`() = runBlocking {
+        val tab = tab()
+        val doc = EthereumProviders.currentDocument(tab.id)
+        // A page firing five sends at once, none awaited: all wait on the tab's sheet.
+        val asks = List(5) { async { EthereumProviders.askOnDocument(tab, doc, cantSend) } }
+        var shown = 0
+        while (asks.any { !it.isCompleted }) {
+            tab.ethereumPrompt?.let { shown++; it.respond(EthAnswer.Closed) }
+            yield()
+        }
+        assertEquals(1, shown)
+        assertEquals(listOf(EthAnswer.Closed) + List(4) { EthAnswer.Unseen }, asks.map { it.await() })
+        assertNull(tab.ethereumPrompt)
+    }
+
+    @Test
     fun `rejecting a real sheet still pauses the tab`() {
         val tab = tab()
         assertEquals(EthAnswer.Rejected to true, ask(tab, sign, EthAnswer.Rejected))
