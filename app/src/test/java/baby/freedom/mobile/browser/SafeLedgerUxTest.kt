@@ -5,6 +5,7 @@ import baby.freedom.mobile.wallet.Erc20
 import baby.freedom.mobile.wallet.SafeAccount
 import baby.freedom.mobile.wallet.SafePending
 import baby.freedom.mobile.wallet.SafeProtocol
+import baby.freedom.mobile.wallet.TokenBalance
 import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
 import org.json.JSONObject
@@ -195,5 +196,14 @@ class SafeLedgerUxTest {
         assertEquals(found[0], ledgerFirstNew(found, emptySet()))
         assertNull(ledgerFirstNew(found.take(1), setOf(mine1.address.lowercase())))
         assertNull(ledgerFirstNew(emptyList(), emptySet()))
+    }
+
+    @Test fun `a failed balance read offers Try again, a read in flight or a known balance does not`() {
+        assertEquals(LedgerBalanceRow.CHECK, ledgerBalanceRow(balance = null, checking = false))
+        assertEquals(LedgerBalanceRow.READING, ledgerBalanceRow(balance = null, checking = true))
+        val failed = TokenBalance.Failed("", null)
+        assertEquals(LedgerBalanceRow.RETRY, ledgerBalanceRow(failed, checking = false))
+        // While the retry runs, the row reads again rather than offering a second Try again.
+        assertEquals(LedgerBalanceRow.READING, ledgerBalanceRow(failed, checking = true))
     }
 }

@@ -153,7 +153,7 @@ internal fun sheetWarnings(ask: EthAsk, nowSeconds: Long, siteRpcs: Boolean = fa
             // A site's transaction can take the nonce of a send the user stopped tracking that's
             // still waiting in a pool — say so here as the Send page does, or confirming silently
             // drops that earlier send (#215 R6-F1).
-            quote.replaces?.let { SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_replaces, it), "replaces") },
+            replacesWarning(quote),
             if (!GasOracle.quiet(quote.tx.fees, chain.id)) SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_high_fee), "high-fee") else null,
             sentCall(ask)?.let(::callWarning),
         )
@@ -169,6 +169,16 @@ internal fun sheetWarnings(ask: EthAsk, nowSeconds: Long, siteRpcs: Boolean = fa
     )
     is EthAsk.Payment, is EthAsk.SendLink -> emptyList()
 }
+
+/**
+ * The surface Caution for a [quote] that takes the nonce of a send the user
+ * stopped tracking ([SendQuote.replaces]). Every sheet that can confirm such
+ * a quote — the site's, a remote signer's (OpenLV), a Safe activation or
+ * execution — shows it above the fold, never only inside Details: confirming
+ * silently drops that earlier send (#215 R6-F1, #434 R2-F1).
+ */
+internal fun replacesWarning(quote: SendQuote): SheetWarning? =
+    quote.replaces?.let { SheetWarning(WarningLevel.Caution, Strings.get(R.string.send_eth_replaces, it), "replaces") }
 
 /** The call [ask]'s transaction makes, when it's one [TxDecode.call] reads. */
 internal fun sentCall(ask: EthAsk.SendTransaction): DecodedCall? {

@@ -261,6 +261,22 @@ private fun LedgerDevicesStep(ledger: Ledger, onPick: (LedgerDevice) -> Unit) {
 /** What the accounts list offers under its rows (W38). */
 internal enum class LedgerFooter { TRY_AGAIN, SHOW_MORE, NONE }
 
+/** What an account row shows for its Ethereum balance (R1-M4, #434 R2-M1). */
+internal enum class LedgerBalanceRow { CHECK, READING, SHOWN, RETRY }
+
+/**
+ * The row's balance state: Check balance until asked, "Reading balance…"
+ * while [checking], the balance once read — and, when the read failed,
+ * the failure with Try again beside it, so a network blip on the one tap
+ * doesn't leave the row stuck until the page is left (#434 R2-M1).
+ */
+internal fun ledgerBalanceRow(balance: TokenBalance?, checking: Boolean): LedgerBalanceRow = when {
+    checking -> LedgerBalanceRow.READING
+    balance == null -> LedgerBalanceRow.CHECK
+    balance is TokenBalance.Failed -> LedgerBalanceRow.RETRY
+    else -> LedgerBalanceRow.SHOWN
+}
+
 /**
  * The accounts list's footer: Try again only when *reading* the Ledger
  * failed ([loadError]) — that's what it retries. A failed Add keeps its
@@ -338,8 +354,10 @@ private fun LedgerAccountsStep(
     // once would tell the RPC providers that all of this Ledger's addresses belong to one client.
     val checkBalance: (String) -> Unit = { address ->
         val key = address.lowercase()
-        if (key !in balances && key !in checking) {
+        // A failed read may be asked again (Try again); a known balance or a read in flight may not.
+        if (balances[key] !is TokenBalance.Known && key !in checking) {
             checking = checking + key
+            balances = balances - key
             scope.launch {
                 val token = TokenRegistry.native(ethereum)
                 // A balance is a nicety here: no failure of its read may take the page down.
@@ -396,18 +414,35 @@ private fun LedgerAccountsStep(
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
-                                    balance != null || address.lowercase() in checking -> Text(
-                                        ledgerBalanceLine(balance, ethereum),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                    else -> TextButton(
-                                        onClick = { checkBalance(address) },
-                                        enabled = !adding,
-                                        contentPadding = PaddingValues(horizontal = 0.dp),
-                                        modifier = Modifier.heightIn(min = 48.dp).testTag("ledger-check-balance"),
-                                    ) {
-                                        Text(stringResource(R.string.signing_ledger_balance_check, ethereum.name))
+                                    else -> when (ledgerBalanceRow(balance, address.lowercase() in checking)) {
+                                        LedgerBalanceRow.READING, LedgerBalanceRow.SHOWN -> Text(
+                                            ledgerBalanceLine(balance, ethereum),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                        LedgerBalanceRow.RETRY -> Column {
+                                            Text(
+                                                ledgerBalanceLine(balance, ethereum),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                            TextButton(
+                                                onClick = { checkBalance(address) },
+                                                enabled = !adding,
+                                                contentPadding = PaddingValues(horizontal = 0.dp),
+                                                modifier = Modifier.heightIn(min = 48.dp).testTag("ledger-balance-retry"),
+                                            ) {
+                                                Text(stringResource(R.string.common_try_again))
+                                            }
+                                        }
+                                        LedgerBalanceRow.CHECK -> TextButton(
+                                            onClick = { checkBalance(address) },
+                                            enabled = !adding,
+                                            contentPadding = PaddingValues(horizontal = 0.dp),
+                                            modifier = Modifier.heightIn(min = 48.dp).testTag("ledger-check-balance"),
+                                        ) {
+                                            Text(stringResource(R.string.signing_ledger_balance_check, ethereum.name))
+                                        }
                                     }
                                 }
                             }

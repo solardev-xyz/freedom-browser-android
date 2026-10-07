@@ -936,7 +936,7 @@ private fun SafeActivationSection(
  * taps for the first moment it's on screen ([PromptTapGuard]).
  */
 @Composable
-private fun SafeCallReview(
+internal fun SafeCallReview(
     quote: SendQuote,
     headline: String,
     detail: String,
@@ -969,6 +969,7 @@ private fun SafeCallReview(
             explorerUrl = explorerAddressUrl(chain, request.from.address),
             onOpenUrl = onOpenUrl,
         )
+        replacesWarning(quote)?.let { Warning(it) }
         DetailsExpander {
             ReviewRow(stringResource(R.string.safe_review_what), detail)
             ReviewRow(stringResource(R.string.safe_label_network), chain.name)

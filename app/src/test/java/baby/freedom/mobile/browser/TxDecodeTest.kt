@@ -356,6 +356,19 @@ class TxDecodeTest {
     }
 
     @Test
+    fun `a replaced send's caution is the one shared note every confirming sheet shows on its surface`() {
+        val transfer = bytes("a9059cbb" + word(recipient) + word(BigInteger.valueOf(20_000_000)))
+        val hash = "0x" + "ab".repeat(32)
+        val replacing = sendAsk(usdc, transfer, replaces = hash)
+        val warning = replacesWarning(replacing.quote)!!
+        assertEquals(WarningLevel.Caution, warning.level)
+        assertTrue(hash in warning.text)
+        // The remote-signing and Safe sheets show replacesWarning(); the site's sheet lists the identical note.
+        assertEquals(warning, sheetWarnings(replacing, now).single { it.tag == "replaces" })
+        assertNull(replacesWarning(sendAsk(usdc, transfer).quote))
+    }
+
+    @Test
     fun `a send's sheet - a repriced fee and a replaced send are cautions, an unlimited approve a danger, a plain transfer nothing`() {
         val transfer = bytes("a9059cbb" + word(recipient) + word(BigInteger.valueOf(20_000_000)))
         assertTrue(sheetWarnings(sendAsk(usdc, transfer), now).isEmpty())

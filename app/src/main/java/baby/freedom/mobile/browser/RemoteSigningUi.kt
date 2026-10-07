@@ -517,7 +517,7 @@ private fun CantSendBody(request: OpenLvSession.Request.CantSend) {
  * data, nonce and gas under Details.
  */
 @Composable
-private fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) {
+internal fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) {
     val quote = request.quote
     val r = quote.request
     val chain = r.chain
@@ -541,6 +541,7 @@ private fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) 
     HorizontalDivider()
     CopyableAddressRow(stringResource(R.string.signing_review_from), r.from.address, name = r.from.name)
     CopyableAddressRow(stringResource(R.string.signing_review_to), r.to)
+    replacesWarning(quote)?.let { Warning(it) }
     DetailsExpander {
         ReviewRow(stringResource(R.string.signing_review_network), chain.name)
         ReviewRow(stringResource(R.string.signing_review_value), "${SendAmounts.exact(r.amount, chain.decimals)} ${chain.symbol}", mono = true)
