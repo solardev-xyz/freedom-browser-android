@@ -131,7 +131,10 @@ private fun swarmMessagingCopy(ask: SwarmAsk.Message): SwarmPromptCopy = when {
         Strings.get(
             if (ask.send == SwarmAsk.Message.Kind.Pss) R.string.swarm_message_request_pss else R.string.swarm_message_request_gsoc,
         ),
-        Strings.get(R.string.swarm_message_warning),
+        // Only a private message is encrypted (to its recipient's key); a room's is in the clear.
+        Strings.get(
+            if (ask.send == SwarmAsk.Message.Kind.Pss) R.string.swarm_message_warning_pss else R.string.swarm_message_warning_gsoc,
+        ),
         Strings.get(R.string.swarm_message_approve),
         Strings.get(R.string.swarm_message_always),
     )

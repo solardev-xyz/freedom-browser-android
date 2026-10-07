@@ -219,11 +219,19 @@ internal fun formatSpotPrice(sqrtPriceX96: BigInteger): String =
         .toPlainString() + " xDAI"
 
 /**
- * The fund-and-buy page, over publish setup. [onOpenUrl] opens a
- * transaction's explorer page.
+ * The fund-and-buy page, over publish setup or Buy's Add funds. It opens
+ * on [start], the size and duration Buy had picked (the default from
+ * publish setup). [onOpenUrl] opens a transaction's explorer page;
+ * [onSent] runs once the wallet's transaction has started.
  */
 @Composable
-internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onDismiss: () -> Unit) {
+internal fun FundNodeScreen(
+    nodeInfo: NodeInfo,
+    onOpenUrl: (String) -> Unit,
+    onDismiss: () -> Unit,
+    start: StorageChoice = DEFAULT_STORAGE_CHOICE,
+    onSent: () -> Unit = {},
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val vault = remember(context) { Vault.get(context) }
@@ -252,9 +260,9 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
     val liveNode = remember { FundPageNode(StampClient.node) }
     DisposableEffect(liveNode) { onDispose { liveNode.close() } }
 
-    // The same size and duration Buy opens on (#425, W41).
-    var depth by rememberSaveable { mutableIntStateOf(DEFAULT_STORAGE_CHOICE.depth) }
-    var days by rememberSaveable { mutableLongStateOf(DEFAULT_STORAGE_CHOICE.days) }
+    // The same size and duration Buy opens on (#425, W41), or the ones Buy had picked.
+    var depth by rememberSaveable { mutableIntStateOf(start.depth) }
+    var days by rememberSaveable { mutableLongStateOf(start.days) }
     var refresh by remember { mutableIntStateOf(0) }
     var reviewing by remember { mutableStateOf<FundReviewing?>(null) }
     var busy by remember { mutableStateOf(false) }
@@ -416,6 +424,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                                         WalletSender.Submit.STARTED -> {
                                             reviewing = null
                                             notice = null
+                                            onSent()
                                         }
                                         WalletSender.Submit.BUSY -> error = Strings.get(R.string.stamps_fund_send_busy)
                                         WalletSender.Submit.STALE -> {
@@ -536,6 +545,17 @@ private fun FundBreakdown(priced: Priced, plan: SwarmFunder.Plan?, days: Long, c
     }
 }
 
+/**
+ * The Fund review's Nonce row leaves Details when this send replaces one
+ * the user stopped tracking: then it carries [nonceDetail]'s "only one of
+ * the two can go through", which must not wait behind a tap.
+ */
+internal fun fundNonceUpFront(quote: SendQuote): Boolean = quote.replaces != null
+
+/** The Fund review's top warning when [quote] outbids a stopped send, as a site's sheet warns (#215 R6-F1). */
+internal fun fundReplacesWarning(quote: SendQuote): String? =
+    quote.replaces?.let { Strings.get(R.string.stamps_fund_replaces, it) }
+
 @Composable
 private fun FundReview(
     quote: SendQuote,
@@ -558,6 +578,12 @@ private fun FundReview(
     val armed = tap.armed
     Column {
         SectionCard(title = stringResource(R.string.stamps_fund_review)) {
+            // Up front, never under Details: confirming outbids a send the user stopped
+            // tracking that may still go through (#215 R6-F1, as the site's sheet says it).
+            fundReplacesWarning(quote)?.let {
+                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                Spacer(Modifier.height(8.dp))
+            }
             ReviewRow(stringResource(R.string.stamps_fund_what), summary)
             ReviewRow(stringResource(R.string.stamps_fund_node), null, address = node)
             ReviewRow(stringResource(R.string.stamps_fund_network), chain.name)
@@ -575,10 +601,16 @@ private fun FundReview(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // A nonce that replaces a stopped send stays on the surface with the warning above.
+            if (fundNonceUpFront(quote)) {
+                ReviewRow(stringResource(R.string.stamps_fund_nonce), quote.tx.nonce.toString(), detail = nonceDetail(quote))
+            }
             // What only an expert checks, one tap away (#425): the contract called and the nonce.
             DetailsExpander {
                 ReviewRow(stringResource(R.string.stamps_fund_contract), "SwarmNodeFunder", address = request.to)
-                ReviewRow(stringResource(R.string.stamps_fund_nonce), quote.tx.nonce.toString(), detail = nonceDetail(quote))
+                if (!fundNonceUpFront(quote)) {
+                    ReviewRow(stringResource(R.string.stamps_fund_nonce), quote.tx.nonce.toString(), detail = nonceDetail(quote))
+                }
             }
         }
         Spacer(Modifier.height(12.dp))

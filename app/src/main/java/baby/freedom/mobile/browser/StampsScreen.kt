@@ -220,14 +220,15 @@ internal val PUBLISH_RUNNING_NOTE: String get() = Strings.get(R.string.stamps_pu
  * The postage stamps pages (#116), called "Storage" on the surface (#425):
  * the node's batches, one batch's detail, buying one, extending one.
  * [startWithBuy] opens straight on the buy page (publish setup's step).
- * [onAddFunds] opens Fund ([FundNodeScreen]): the way out when the node
- * holds too little xDAI to buy (null: there's none, only Copy node address).
+ * [onAddFunds] opens Fund ([FundNodeScreen]) on the size and duration
+ * picked here: the way out when the node holds too little xDAI to buy
+ * (null: there's none, only Copy node address).
  */
 @Composable
 internal fun StampsScreen(
     nodeInfo: NodeInfo,
     startWithBuy: Boolean = false,
-    onAddFunds: (() -> Unit)? = null,
+    onAddFunds: ((StorageChoice) -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
     // "list", "buy", "detail:<id>" or "extend:<id>".
@@ -466,7 +467,7 @@ private fun BuyPage(
     nodeInfo: NodeInfo,
     canBuyNow: Boolean,
     publishingNote: String?,
-    onAddFunds: (() -> Unit)?,
+    onAddFunds: ((StorageChoice) -> Unit)?,
     onConfirmed: (StampQuote) -> Unit,
 ) {
     var depth by rememberSaveable { mutableIntStateOf(DEFAULT_STORAGE_CHOICE.depth) }
@@ -503,7 +504,7 @@ private fun BuyPage(
             BuyAction.AddFunds -> {
                 // The way out when the node holds too little (#425, W43): pay from the wallet, or send it xDAI.
                 if (onAddFunds != null) {
-                    Button(onClick = onAddFunds, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.stamps_add_funds)) }
+                    Button(onClick = { onAddFunds(StorageChoice(depth, days)) }, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.stamps_add_funds)) }
                 }
                 if (fundTo != null) {
                     OutlinedButton(onClick = { copyNodeAddress(context, fundTo) }, modifier = Modifier.fillMaxWidth()) {
@@ -513,7 +514,8 @@ private fun BuyPage(
             }
             BuyAction.Buy -> Button(
                 onClick = { confirming = q },
-                enabled = q != null && canBuyNow,
+                // Not on a node that can't spend, even though Buy is never the action there's no way out of.
+                enabled = q != null && canBuyNow && cantSpend == null,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(stringResource(R.string.stamps_buy)) }
         }

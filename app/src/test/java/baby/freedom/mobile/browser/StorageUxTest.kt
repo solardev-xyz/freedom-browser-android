@@ -136,6 +136,19 @@ class StorageUxTest {
     }
 
     @Test
+    fun `a public-room message is never called private, its sheet says anyone in the room reads it`() {
+        val room = SwarmAsk.Message("https://a.example", SwarmAsk.Message.Op.Send, SwarmAsk.Message.Kind.Gsoc, "t", 3)
+        val private = room.copy(kind = SwarmAsk.Message.Kind.Pss)
+        // GSOC uploads the payload in the clear under a topic-derived key.
+        val roomWarning = swarmPromptCopy(room).warning
+        assertTrue(roomWarning, roomWarning.startsWith("Anyone who knows this room can read this message"))
+        assertFalse(roomWarning, roomWarning.contains("see that"))
+        // PSS is encrypted to the recipient's key: only that one was sent shows.
+        val privateWarning = swarmPromptCopy(private).warning
+        assertTrue(privateWarning, privateWarning.startsWith("Only the recipient can read this message"))
+    }
+
+    @Test
     fun `the buy page's spend reason still blocks Add funds' way out on a device-only node`() {
         val deviceOnly = NodeInfo(status = NodeStatus.Running, accountAddress = "0xabc", walletIdentity = false, lightMode = true)
         val reason = stampSpendBlockedReason(deviceOnly)

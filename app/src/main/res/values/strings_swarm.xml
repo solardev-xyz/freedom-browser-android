@@ -32,7 +32,8 @@
     <string name="swarm_message_title">Confirm message</string>
     <string name="swarm_message_request_pss">wants to send a private message</string>
     <string name="swarm_message_request_gsoc">wants to post a message to a public room</string>
-    <string name="swarm_message_warning">The Swarm network carries this message, so others can see that it was sent. It uses your storage.</string>
+    <string name="swarm_message_warning_pss">Only the recipient can read this message, but the Swarm network carries it, so others can see that one was sent. It uses your storage.</string>
+    <string name="swarm_message_warning_gsoc">Anyone who knows this room can read this message: it is posted unencrypted. It uses your storage.</string>
     <string name="swarm_message_approve">Send</string>
     <string name="swarm_message_always">Always allow this site to send messages without asking</string>
     <!-- What a publish is: a count of files, the content type, or these -->

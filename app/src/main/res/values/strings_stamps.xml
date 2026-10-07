@@ -208,6 +208,7 @@
     <string name="stamps_fund_network_fee">Network fee</string>
     <string name="stamps_fund_fee_up_to">up to %1$s</string>
     <string name="stamps_fund_nonce">Nonce</string>
+    <string name="stamps_fund_replaces">This payment takes the place of the send you stopped tracking (%1$s): only one of the two can go through, and this one pays the higher fee. If that send still matters, cancel this and settle it on the wallet page first.</string>
     <!-- %1$s: the fee footnote sentence. -->
     <string name="stamps_fund_review_note">A real transaction on Gnosis Chain that can\'t be undone. %1$s If the pool can\'t give at least the xBZZ above, it reverts and only the fee is lost.</string>
     <string name="stamps_fund_confirm_and_send">Confirm and send</string>

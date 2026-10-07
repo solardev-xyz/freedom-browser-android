@@ -56,6 +56,19 @@ class FundNodeReviewTest {
     }
 
     @Test
+    fun `a fund that replaces a stopped send warns up front and keeps its nonce out of Details`() {
+        val plain = quoteFor(plan())
+        assertFalse(fundNonceUpFront(plain))
+        assertNull(fundReplacesWarning(plain))
+        val hash = "0x" + "cd".repeat(32)
+        val replacing = plain.copy(replaces = hash)
+        assertTrue(fundNonceUpFront(replacing))
+        val warning = fundReplacesWarning(replacing)!!
+        assertTrue(warning, warning.contains(hash))
+        assertTrue(warning, warning.contains("only one of the two can go through"))
+    }
+
+    @Test
     fun `the review shows the plan the quote was built from`() {
         val p = plan()
         assertEquals(FundReviewRows(fundNodeSummary(p, days), node), fundReviewRows(quoteFor(p), p, days))
