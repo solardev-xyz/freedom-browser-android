@@ -178,7 +178,7 @@ fun PageSitePermissionsSheet(
 }
 
 @Composable
-private fun PageSitePermissionRow(
+internal fun PageSitePermissionRow(
     entry: SitePermissionEntry,
     inUse: Boolean,
     private: Boolean,

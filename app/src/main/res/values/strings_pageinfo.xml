@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Page info (#442): the sheet the address bar's badge / lock opens. -->
+<resources>
+    <string name="page_info_title">Page info</string>
+
+    <!-- The badge's content description, for a page that has no protocol badge. -->
+    <string name="page_info_badge_secure">Secure connection</string>
+    <string name="page_info_badge_not_secure">Not secure</string>
+    <string name="page_info_badge_local">Connection on this device</string>
+    <string name="page_info_badge_onion">Onion service</string>
+    <string name="page_info_badge_error">Page didn\'t load</string>
+
+    <string name="page_info_section_name">Name</string>
+    <string name="page_info_name_details">How the name was checked</string>
+
+    <string name="page_info_section_connection">Connection</string>
+    <string name="page_info_secure_title">Connection is secure</string>
+    <string name="page_info_secure_body">What you send to this site, and what it sends back, can\'t be read or changed on the way.</string>
+    <string name="page_info_not_secure_title">Connection is not secure</string>
+    <string name="page_info_not_secure_body">Others on the network can see or change this page. Don\'t enter passwords or payment details here.</string>
+    <string name="page_info_local_title">Connection stays on this device</string>
+    <string name="page_info_local_body">This page comes from a server running on this phone, so it doesn\'t cross the network on its way here.</string>
+    <string name="page_info_onion_title">Connection goes through Tor</string>
+    <string name="page_info_onion_body">This is an onion service. The connection is encrypted all the way to it through Tor, and its address is its own key, so others on the network can\'t see or change this page.</string>
+    <string name="page_info_dweb_swarm_title">Loaded from Swarm</string>
+    <string name="page_info_dweb_ipfs_title">Loaded from IPFS</string>
+    <string name="page_info_dweb_title">Loaded from a peer-to-peer network</string>
+    <string name="page_info_dweb_body">This page comes from a peer-to-peer network, not from one website\'s server, so there is no certificate to show.</string>
+    <string name="page_info_onchain_title">Loaded from a blockchain</string>
+    <string name="page_info_onchain_body">This page is read from a smart contract on a blockchain, not from one website\'s server, so there is no certificate to show.</string>
+    <string name="page_info_radicle_title">Loaded from Radicle</string>
+    <string name="page_info_radicle_body">This repository comes from the Radicle node on this phone, which gets it from peers, not from one website\'s server, so there is no certificate to show.</string>
+    <string name="page_info_error_title">The page didn\'t load</string>
+    <string name="page_info_error_body">Nothing from this site is on screen, so there is no connection to describe.</string>
+
+    <string name="page_info_certificate_details">Certificate details</string>
+    <string name="page_info_cert_issued_to">Issued to</string>
+    <string name="page_info_cert_issued_by">Issued by</string>
+    <string name="page_info_cert_valid_from">Valid from</string>
+    <string name="page_info_cert_valid_until">Valid until</string>
+
+    <string name="page_info_section_permissions">Site permissions</string>
+    <string name="page_info_section_adblock">Ad blocking</string>
+
+    <string name="page_info_section_site_data">Cookies and site data</string>
+    <string name="page_info_site_data_counting">Counting…</string>
+    <string name="page_info_site_data_none">No cookies</string>
+    <plurals name="page_info_site_data_cookies">
+        <item quantity="one">%d cookie</item>
+        <item quantity="other">%d cookies</item>
+    </plurals>
+    <!-- "3 cookies · 1.2 MB stored" -->
+    <string name="page_info_site_data_with_storage">%1$s · %2$s stored</string>
+    <string name="page_info_delete_data">Delete data for this site</string>
+    <string name="page_info_delete_confirm_title">Delete data for %1$s?</string>
+    <string name="page_info_delete_confirm_body">Its cookies and the data it stored on this phone are removed, so you\'ll be signed out of it. The page reloads.</string>
+    <string name="page_info_delete_confirm_body_private">Its cookies and the data it stored in this private session are removed, so you\'ll be signed out of it. The page reloads.</string>
+    <string name="page_info_delete_confirm">Delete</string>
+
+    <string name="page_info_expanded">Shown</string>
+    <string name="page_info_collapsed">Hidden</string>
+</resources>

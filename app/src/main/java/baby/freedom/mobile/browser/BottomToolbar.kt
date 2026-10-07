@@ -25,6 +25,7 @@ import androidx.compose.material3.TooltipAnchorPosition
 import androidx.compose.material3.TooltipBox
 import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberTooltipState
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -70,7 +71,6 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
-import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ColorScheme
@@ -84,6 +84,7 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.ripple
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -889,6 +890,25 @@ internal fun addressLabelRestingCenter(navPillProgress: Float, hasBadge: Boolean
 internal fun addressBadgeCenterOffset(labelCenter: Dp, labelWidth: Dp): Dp =
     labelCenter - labelWidth / 2f - AddressPillBadgeGap - AddressPillBadgeSize / 2f
 
+/** The badge's tap target (#442): the Page info button around the mark. */
+internal val AddressBadgeTouchSize = 48.dp
+
+/**
+ * Where the badge's [AddressBadgeTouchSize] tap target is centred, in
+ * the same terms as [badgeCenter] ([addressBadgeCenterOffset]): on the
+ * mark, unless that would reach into the field's leading control slot
+ * (the menu's ≡, [AddressPillControlInset] + [CapsuleTrailingSlotSize]
+ * in from [fieldLeadingEdge]) — then moved towards the label by as much
+ * as it would have overlapped, so the target keeps its full size and
+ * the menu keeps every tap aimed at it. Only a name long enough to fill
+ * the field gets there; the target then covers the label's first glyphs.
+ */
+internal fun addressBadgeTouchCenter(badgeCenter: Dp, fieldLeadingEdge: Dp): Dp {
+    val slotEnd = fieldLeadingEdge + AddressPillControlInset + CapsuleTrailingSlotSize
+    val reachStart = badgeCenter - AddressBadgeTouchSize / 2f
+    return badgeCenter + (slotEnd - reachStart).coerceAtLeast(0.dp)
+}
+
 /**
  * **The** domain label's horizontal geometry: how far the centre of the
  * label's layout box sits from the bar's own centre line, at a given
@@ -1477,12 +1497,10 @@ internal fun BottomToolbar(
     adblockState: AdblockSiteState? = null,
     onToggleAdblock: () -> Unit = {},
     /**
-     * The page menu's **Site permissions** row (#266): what the site on
-     * screen holds, as its sub-line ("Camera · Location"), or null when
-     * it holds nothing and the row is left out.
+     * The address bar's badge / lock was tapped (#442): open Page info
+     * for the page on screen.
      */
-    sitePermissionsSummary: String? = null,
-    onOpenSitePermissions: () -> Unit = {},
+    onOpenPageInfo: () -> Unit = {},
     /** The menu's Wallet row (#400): the wallet page Settings → Wallet opens. */
     onOpenWallet: () -> Unit = {},
     /** The Wallet row's sub-line ([walletMenuNote]), or null for none. */
@@ -1609,7 +1627,7 @@ internal fun BottomToolbar(
     // are known here: the navigation pill (which decides where the field is)
     // and the protocol badge (which shares the field's content box with
     // the label). See [addressLabelRestingCenter].
-    val badge = protocolBadgeFor(state)
+    val badge = addressBadgeFor(state)
     val labelRestingCenter = addressLabelRestingCenter(navPill, badge != null)
 
     // Each control states its own ink (`onSurface`) rather than
@@ -1818,8 +1836,6 @@ internal fun BottomToolbar(
                     onPrint = onPrint,
                     adblockState = adblockState,
                     onToggleAdblock = onToggleAdblock,
-                    sitePermissionsSummary = sitePermissionsSummary,
-                    onOpenSitePermissions = onOpenSitePermissions,
                     onAddToHomeScreen = onAddToHomeScreen,
                 )
             },
@@ -1868,8 +1884,10 @@ internal fun BottomToolbar(
             // edge, half a bar from the domain it marks (see
             // [addressBadgeCenterOffset]).
             //
-            // Drawn, not laid out, like the label: no pointer input, so
-            // the tap still lands on the field beneath it. While the
+            // Drawn, not laid out, like the label. A tap on it opens
+            // Page info (#442) — through the touch target below, which
+            // only takes taps while the bar is at rest; mid-collapse the
+            // tap lands on the field beneath, as on the label. While the
             // field has focus the badge goes back into the row, where the
             // full URL it marks starts at the leading edge — see
             // [AddressField].
@@ -1879,7 +1897,46 @@ internal fun BottomToolbar(
                     labelCenter = labelOffset,
                     labelWidth = labelDrawnWidth,
                 )
-                ProtocolBadgeMark(
+                // The Page info button: a 48 dp target around the 16 dp
+                // mark, carrying what the mark says and its own action.
+                // It reaches into the field's leading control slot only
+                // as far as the menu's ≡ leaves room, and makes up the
+                // rest on the label's side ([addressBadgeTouchCenter]),
+                // so it never takes a tap meant for the menu.
+                val touchCenter = addressBadgeTouchCenter(
+                    badgeCenter = badgeOffset,
+                    fieldLeadingEdge = fieldCenter - fieldWidth / 2f,
+                )
+                val description = addressBadgeDescription(badge, state.nameTrust)
+                val pageInfoLabel = stringResource(R.string.page_info_title)
+                val atRest = pillSlotScale >= 1f
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(AddressBadgeTouchSize)
+                        .graphicsLayer {
+                            translationX = touchCenter.toPx() * direction
+                            translationY = bottomAnchor.toPx()
+                        }
+                        .then(
+                            if (atRest) {
+                                Modifier.clickable(
+                                    onClickLabel = pageInfoLabel,
+                                    role = Role.Button,
+                                    interactionSource = null,
+                                    indication = ripple(bounded = false, radius = AddressBadgeTouchSize / 2f - 4.dp),
+                                    onClick = onOpenPageInfo,
+                                )
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .semantics {
+                            contentDescription = description
+                            traversalIndex = CapsuleOrderBadge
+                        },
+                )
+                AddressBadgeMark(
                     badge = badge,
                     // The trust shield on its corner (#97).
                     trust = state.nameTrust,
@@ -1901,7 +1958,8 @@ internal fun BottomToolbar(
                             translationX = badgeOffset.toPx() * direction
                             translationY = bottomAnchor.toPx()
                         }
-                        .semantics { traversalIndex = CapsuleOrderBadge },
+                        // Said by the button around it.
+                        .clearAndSetSemantics {},
                 )
             }
             Text(
@@ -2945,8 +3003,6 @@ private fun OverflowMenuButton(
     onPrint: () -> Unit,
     adblockState: AdblockSiteState?,
     onToggleAdblock: () -> Unit,
-    sitePermissionsSummary: String?,
-    onOpenSitePermissions: () -> Unit,
     onAddToHomeScreen: (() -> Unit)?,
 ) {
     val context = LocalContext.current
@@ -3007,7 +3063,6 @@ private fun OverflowMenuButton(
                     hasNameTrust = nameTrust != null,
                     canOpenPrivateTab = onNewPrivateTab != null,
                     hasAdblock = adblockState != null,
-                    hasSitePermissions = sitePermissionsSummary != null,
                     canAddToHomeScreen = onAddToHomeScreen != null && pinSupported,
                 ),
             )
@@ -3105,8 +3160,6 @@ private fun OverflowMenuButton(
                                         onPrint = onPrint,
                                         adblockState = adblockState,
                                         onToggleAdblock = onToggleAdblock,
-                                        sitePermissionsSummary = sitePermissionsSummary,
-                                        onOpenSitePermissions = onOpenSitePermissions,
                                         onAddToHomeScreen = onAddToHomeScreen,
                                         onOpenHistory = onOpenHistory,
                                         onOpenBookmarks = onOpenBookmarks,
@@ -3319,8 +3372,6 @@ private fun MainMenuRowItem(
     onPrint: () -> Unit,
     adblockState: AdblockSiteState?,
     onToggleAdblock: () -> Unit,
-    sitePermissionsSummary: String?,
-    onOpenSitePermissions: () -> Unit,
     onAddToHomeScreen: (() -> Unit)?,
     onOpenHistory: () -> Unit,
     onOpenBookmarks: () -> Unit,
@@ -3332,9 +3383,8 @@ private fun MainMenuRowItem(
 ) {
     when (row) {
         // How the page's name was checked (#97) — the shield on the
-        // protocol badge, in words, and the way to its evidence. The
-        // badge itself is no hit target (a tap there edits the address),
-        // so this row is where the shield opens.
+        // protocol badge, in words, and the way to its evidence. A tap
+        // on the badge opens the same evidence in Page info (#442).
         MainMenuRow.NameTrust -> state.nameTrust?.let { trust ->
             DropdownMenuItem(
                 text = { MenuItemLabel(trust.tier.title) },
@@ -3430,20 +3480,6 @@ private fun MainMenuRowItem(
                     role = Role.Switch
                     toggleableState = ToggleableState(ads.checked)
                 },
-            )
-        }
-        // What the site on screen is allowed or blocked from (#266),
-        // listed and removable in a sheet; only while it holds something.
-        MainMenuRow.SitePermissions -> sitePermissionsSummary?.let { summary ->
-            DropdownMenuItem(
-                text = {
-                    Column(modifier = Modifier.padding(end = 32.dp)) {
-                        Text(stringResource(R.string.browser_menu_site_permissions))
-                        MenuItemNote(summary)
-                    }
-                },
-                leadingIcon = { Icon(Icons.Filled.Tune, contentDescription = null) },
-                onClick = { close(onOpenSitePermissions) },
             )
         }
         // A launcher shortcut to the page (#400); never in a private tab.

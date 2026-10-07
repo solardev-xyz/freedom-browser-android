@@ -193,4 +193,25 @@ class SweptReloadTest {
         timers.last()()
         assertEquals(listOf(Step.RELOAD, Step.RELOAD, Step.GET), navigations)
     }
+
+    @Test
+    fun `Delete data's reload moves on to a GET only when a POST page refuses it`() {
+        // PageWebView.siteDataReload (#442, R3-F3): no deadlines — a slow
+        // reload is waited for — but a refused one (a page a form POST
+        // answered) goes on to a GET of the same address.
+        val navigations = mutableListOf<Step>()
+        val reload = SweptReload(navigate = { navigations += it }, schedule = { _, _ -> })
+        reload.swept(page)
+        assertEquals(listOf(Step.RELOAD), navigations)
+        assertTrue(reload.refused())
+        assertEquals(listOf(Step.RELOAD, Step.GET), navigations)
+        assertEquals(page, reload.address)
+        reload.committed()
+        assertNull(reload.step)
+        // A reload that commits is never followed by anything.
+        reload.swept(page)
+        reload.committed()
+        assertFalse(reload.refused())
+        assertEquals(listOf(Step.RELOAD, Step.GET, Step.RELOAD), navigations)
+    }
 }

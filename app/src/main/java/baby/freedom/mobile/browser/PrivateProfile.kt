@@ -70,6 +70,27 @@ object PrivateProfile {
         WebViewCompat.setProfile(webView, profile.name)
     }
 
+    /**
+     * Put [webView] on the private session's profile if [session] is
+     * still the live one, and never start one: for a WebView that only
+     * works on what that session holds (Page info's site-data wipe, #442
+     * R1-M1), whose last private tab may have closed meanwhile — and a
+     * new session started since, which is not the one asked for (R2-M2).
+     * Whether it was attached.
+     */
+    @MainThread
+    fun attachToLive(webView: WebView, session: String): Boolean {
+        if (!isLiveSession(session)) return false
+        WebViewCompat.setProfile(webView, session)
+        return true
+    }
+
+    /** Whether [session] names the live private session; false once it ended, even if another started. */
+    internal fun isLiveSession(session: String): Boolean = liveProfileName() == session
+
+    /** The live private session's profile name, or null; never starts one. */
+    internal fun liveProfileName(): String? = current?.name
+
     private fun startSession(): Profile {
         val profile = ProfileStore.getInstance().getOrCreateProfile(PREFIX + UUID.randomUUID())
         current = profile
