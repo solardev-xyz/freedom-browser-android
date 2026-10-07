@@ -1165,14 +1165,24 @@ class Ledger internal constructor(private val context: Context) {
         internal fun monotonicMs(): Long = System.nanoTime() / 1_000_000
 
         /**
+         * A tapped USB Ledger replugged between accounts reads, before
+         * anything was read from it, next to another of its model
+         * ([replugRoutes]): the two can't be told apart (#350 R1-F1).
+         */
+        internal fun replugCannotTell() = LedgerException(LedgerException.Kind.DISCONNECTED, Strings.said(R.string.signing_ledger_usb_replug_cannot_tell))
+
+        /**
+         * The Ledger an accounts read reached gives another address at a
+         * path the tapped one was read at ([checkSeen]): it's another
+         * Ledger (#350 R1-F1).
+         */
+        internal fun notTheTappedOne() = LedgerException(LedgerException.Kind.WRONG_DEVICE, Strings.said(R.string.signing_ledger_usb_not_the_tapped_one))
+
+        /**
          * A USB Ledger that came back under a new path that may as well be
          * another same-model Ledger's, so it wasn't followed there
          * (#350 R4-M1): not "unplugged", which it wasn't.
          */
-        internal fun replugCannotTell() = LedgerException(LedgerException.Kind.DISCONNECTED, Strings.said(R.string.signing_ledger_usb_replug_cannot_tell))
-
-        internal fun notTheTappedOne() = LedgerException(LedgerException.Kind.WRONG_DEVICE, Strings.said(R.string.signing_ledger_usb_not_the_tapped_one))
-
         internal fun cannotTell() = LedgerException(LedgerException.Kind.DISCONNECTED, Strings.said(R.string.signing_ledger_usb_cannot_tell))
 
         @Volatile
