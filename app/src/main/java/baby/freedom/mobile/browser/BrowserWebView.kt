@@ -3666,9 +3666,18 @@ private fun buildRefreshableWebView(
                 // other than one they refused a client certificate for
                 // in this tab asks for one again (#333 R6-M1). Not a
                 // page's own navigation: that would let a page reopen
-                // the chooser it was refused.
+                // the chooser it was refused. Nor more than one per
+                // input of the user's: the page's script can start any
+                // number of navigations on one tap's activation, and
+                // WebView reports a gesture on each (#333 R1-F1).
                 if (request.isForMainFrame && navigationHadGesture) {
-                    request.url.host?.let { ClientCertificates.onUsersLink(state.id, it) }
+                    val u = request.url
+                    val port = if (u.port != -1) u.port else if (u.scheme.equals("http", ignoreCase = true)) 80 else 443
+                    u.host?.let {
+                        ClientCertificates.onUsersLink(
+                            state.id, it, port, (view as? PageWebView)?.userGestures?.latestInputId, request.isRedirect,
+                        )
+                    }
                 }
                 // Route bzz:// and ens:// through the screen's submit flow
                 // so in-page clicks + error-page "Try Again" go through

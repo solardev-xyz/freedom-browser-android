@@ -84,11 +84,17 @@ internal sealed interface ClientCertPlan {
  * chooser back (#333 R5-F1), and a pop-up it opens meanwhile starts out
  * refused too ([opened]). Other tabs aren't affected: a link to the same
  * server in a tab that never saw that chooser asks (#333 R5-M1). Nor is
- * a link the user taps in that tab to a server they didn't refuse: its
- * server asks ([followed], #333 R6-M1). A page's own connections don't
- * count — only a main-frame navigation with the user's gesture, and its
- * redirects — so a polling page can't use it to reopen the chooser, and
- * the page that kept connecting is gone with that navigation. The
+ * a link the user taps in that tab to a server (host and port) they
+ * didn't refuse: its server asks ([followed], #333 R6-M1). A page's own
+ * connections don't count — only a main-frame navigation with the
+ * user's gesture, and its redirects — and only one such navigation per
+ * input of the user's (a tap, a key, an accessibility click): WebView
+ * reports a gesture on every navigation a page's script starts while
+ * that input's activation lasts, so without that a single tap would let
+ * the refusing page navigate to server after server (each answering
+ * `204`, so it stays) and reopen the chooser for each (#333 R1-F1). The
+ * servers a link exempts are only the latest such navigation's: the
+ * next one replaces them. The
  * tab's next load — a reload, the address bar, Back/Forward — asks
  * again, so installing the certificate, or taking back an accidental
  * Deny, only needs a reload (which also empties WebView's own record of
@@ -109,17 +115,24 @@ internal class ClientCertChoices {
     private val declined = HashMap<Long, Long>()
 
     /**
-     * Per tab with a refusal holding ([declined]): the hosts the user
-     * refused a chooser for there. A link they tap to one of them stays
-     * refused ([followed]).
+     * Per tab with a refusal holding ([declined]): the servers ([key])
+     * the user refused a chooser for there. A link they tap to one of
+     * them stays refused ([followed]).
      */
     private val deniedHosts = HashMap<Long, MutableSet<String>>()
 
     /**
-     * Per tab with a refusal holding: the hosts the user has since
-     * followed a link to ([followed]), which ask again.
+     * Per tab with a refusal holding: the servers ([key]) of the latest
+     * link the user followed there — its first hop and its redirects
+     * ([followed]) — which ask again.
      */
     private val followedHosts = HashMap<Long, MutableSet<String>>()
+
+    /** Per tab, the user's input that bought its latest followed link ([followed]). */
+    private val followInputs = HashMap<Long, Int>()
+
+    /** Tabs whose latest followed link may still add its redirects ([followed]). */
+    private val followChains = HashSet<Long>()
 
     /** The last [ticket] handed out. */
     private var tickets = 0L
@@ -138,21 +151,62 @@ internal class ClientCertChoices {
     fun loaded(tabId: Long) {
         loads[tabId] = ++tickets
         deniedHosts.remove(tabId)
-        followedHosts.remove(tabId)
+        endFollow(tabId)
     }
 
     /**
-     * The user followed a link in tab [tabId] (a main-frame navigation
-     * with their gesture, or one of its redirects) to [host]. If a
-     * refusal holds there for later requests and [host] isn't a server
-     * the user refused in it, [host]'s requests ask again rather than
-     * being refused (#333 R6-M1). Returns whether that changed anything.
+     * A main-frame navigation with the user's gesture in tab [tabId] to
+     * [host]:[port] — a link they followed, or ([redirect]) one of its
+     * redirect hops. [input] is the id of the latest input the user gave
+     * the tab's WebView (`null`: unknown, which counts as none).
+     *
+     * If a refusal holds there for later requests and the server isn't
+     * one the user refused in it, its requests ask again rather than
+     * being refused (#333 R6-M1). Only for one navigation per input: a
+     * second one started on the same input (a page's script running on
+     * from the user's tap, which WebView also reports with a gesture)
+     * exempts nothing, and ends the exemption the first one got, so one
+     * tap can't let the refusing page reopen the chooser for server
+     * after server (#333 R1-F1). The same navigation started again (the
+     * same server on the same input, as when a tapped navigation is
+     * re-issued for its user agent) keeps it. Each new link replaces
+     * the servers the previous one exempted.
+     *
+     * Returns whether that exempted a server not exempted before.
      */
-    fun followed(tabId: Long, host: String): Boolean {
+    fun followed(tabId: Long, host: String, port: Int, input: Int?, redirect: Boolean = false): Boolean {
         if (!refusing(tabId)) return false
-        val h = host.lowercase()
-        if (h in deniedHosts[tabId].orEmpty()) return false
-        return followedHosts.getOrPut(tabId) { HashSet() }.add(h)
+        val k = key(host, port)
+        if (redirect) {
+            if (tabId !in followChains) return false
+        } else {
+            val mine = followedHosts[tabId].orEmpty()
+            if (input == null || followInputs[tabId] == input) {
+                if (input == null || k !in mine) endFollow(tabId, keepInput = true)
+                return false
+            }
+            followInputs[tabId] = input
+            followedHosts.remove(tabId)
+            followChains += tabId
+        }
+        if (k in deniedHosts[tabId].orEmpty()) return false
+        return followedHosts.getOrPut(tabId) { HashSet() }.add(k)
+    }
+
+    /** No link followed in tab [tabId] exempts a server any more. */
+    private fun endFollow(tabId: Long, keepInput: Boolean = false) {
+        followedHosts.remove(tabId)
+        followChains -= tabId
+        if (!keepInput) followInputs.remove(tabId)
+    }
+
+    /**
+     * Tab [tabId]'s WebView went (its page with it) and a new one may
+     * number the user's inputs afresh: an input id remembered from the
+     * old one means nothing to it ([followed]).
+     */
+    fun viewGone(tabId: Long) {
+        followInputs.remove(tabId)
     }
 
     /** A refusal in tab [tabId] answers its later requests ([planFor]). */
@@ -166,7 +220,7 @@ internal class ClientCertChoices {
         loads.remove(tabId)
         declined.remove(tabId)
         deniedHosts.remove(tabId)
-        followedHosts.remove(tabId)
+        endFollow(tabId)
     }
 
     /**
@@ -205,7 +259,7 @@ internal class ClientCertChoices {
         val d = declined[tabId]
         if (d != null) {
             if (ticket <= d) return ClientCertPlan.Refuse
-            if (refusing(tabId) && host.lowercase() !in followedHosts[tabId].orEmpty()) return ClientCertPlan.Refuse
+            if (refusing(tabId) && key(host, port) !in followedHosts[tabId].orEmpty()) return ClientCertPlan.Refuse
         }
         return ClientCertPlan.Ask
     }
@@ -224,12 +278,12 @@ internal class ClientCertChoices {
         // A refusal no longer holding for later requests starts afresh.
         if (!refusing(tabId)) {
             deniedHosts.remove(tabId)
-            followedHosts.remove(tabId)
+            endFollow(tabId, keepInput = true)
         }
         declined[tabId] = tickets
-        val h = host.lowercase()
-        deniedHosts.getOrPut(tabId) { HashSet() }.add(h)
-        followedHosts[tabId]?.remove(h)
+        val k = key(host, port)
+        deniedHosts.getOrPut(tabId) { HashSet() }.add(k)
+        followedHosts[tabId]?.remove(k)
     }
 
     /** The picked certificate can't be read any more (removed from the device): ask again next time. */
@@ -242,6 +296,8 @@ internal class ClientCertChoices {
         declined.clear()
         deniedHosts.clear()
         followedHosts.clear()
+        followChains.clear()
+        followInputs.clear()
         generation++
     }
 
@@ -342,15 +398,17 @@ object ClientCertificates {
     }
 
     /**
-     * The user followed a link in tab [tabId] to [host] (a main-frame
-     * navigation with their gesture, or a redirect of one): a Deny for
-     * another server there doesn't refuse [host] ([ClientCertChoices.followed]).
+     * A main-frame navigation with the user's gesture in tab [tabId] to
+     * [host]:[port] ([redirect]: a redirect hop of one), the user's
+     * latest input there being [input]: a link they followed. A Deny for
+     * another server there doesn't refuse this one — for one such
+     * navigation per input, the latest ([ClientCertChoices.followed]).
      * If WebView may hold a "send none" for it from that Deny, its table
      * is emptied, as at a browser load ([onBrowserLoad]); the server the
      * user did refuse is still refused when it next asks.
      */
-    fun onUsersLink(tabId: Long, host: String) {
-        if (choices.followed(tabId, host) && tableHoldsRefusal) emptyWebViewTable()
+    fun onUsersLink(tabId: Long, host: String, port: Int, input: Int?, redirect: Boolean) {
+        if (choices.followed(tabId, host, port, input, redirect) && tableHoldsRefusal) emptyWebViewTable()
     }
 
     /** Tab [tabId] closed: what it still had waiting for the chooser sends none. */
@@ -368,6 +426,7 @@ object ClientCertificates {
      */
     fun withdraw(tabId: Long) {
         for (p in pending) if (p.tabId == tabId) p.withdrawn.value = true
+        choices.viewGone(tabId)
     }
 
     /** Whether a private tab is open ([onPrivateTab], [onTabClosed]). */

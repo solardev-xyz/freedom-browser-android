@@ -111,33 +111,94 @@ class ClientCertificatesTest {
         val c = ClientCertChoices()
         c.loaded(2L)
         // No refusal holding: a tapped link changes nothing.
-        assertEquals(false, c.followed(2L, "bank.example"))
+        assertEquals(false, c.followed(2L, "bank.example", 443, input = 1))
         c.answered("tracker.example", 443, 2L, null, c.generation)
         // The user taps a link to a site they never refused (R6-M1): it asks.
-        assertEquals(true, c.followed(2L, "Bank.example"))
+        assertEquals(true, c.followed(2L, "Bank.example", 443, input = 2))
         assertEquals(ClientCertPlan.Ask, c.planFor(false, "bank.example", 443, 2L, c.ticket()))
         // Every other server is still refused, the refused one too, even
         // through a tapped link to it.
-        assertEquals(false, c.followed(2L, "tracker.example"))
+        assertEquals(false, c.followed(2L, "tracker.example", 443, input = 3))
         assertEquals(ClientCertPlan.Refuse, c.planFor(false, "tracker.example", 443, 2L, c.ticket()))
         assertEquals(ClientCertPlan.Refuse, c.planFor(false, "a1.tracker.example", 443, 2L, c.ticket()))
         // Denied there too: refused again, and a later tap doesn't lift it.
+        assertEquals(true, c.followed(2L, "bank.example", 443, input = 4))
         c.answered("bank.example", 443, 2L, null, c.generation)
         assertEquals(ClientCertPlan.Refuse, c.planFor(false, "bank.example", 443, 2L, c.ticket()))
-        assertEquals(false, c.followed(2L, "bank.example"))
+        assertEquals(false, c.followed(2L, "bank.example", 443, input = 5))
         // A pop-up the page opens inherits what the user refused, not
         // the links they followed.
         c.opened(11L, 2L)
-        assertEquals(false, c.followed(11L, "tracker.example"))
-        assertEquals(true, c.followed(11L, "shop.example"))
+        assertEquals(false, c.followed(11L, "tracker.example", 443, input = 1))
+        assertEquals(true, c.followed(11L, "shop.example", 443, input = 2))
         // After a load, a new Deny starts afresh: an earlier tap to a
         // host doesn't exempt it.
-        c.followed(2L, "news.example")
+        c.followed(2L, "news.example", 443, input = 6)
         c.loaded(2L)
         c.answered("tracker.example", 443, 2L, null, c.generation)
         assertEquals(ClientCertPlan.Refuse, c.planFor(false, "news.example", 443, 2L, c.ticket()))
         assertEquals(ClientCertPlan.Refuse, c.planFor(false, "bank.example", 443, 2L, c.ticket()))
-        assertEquals(true, c.followed(2L, "bank.example"))
+        assertEquals(true, c.followed(2L, "bank.example", 443, input = 7))
+    }
+
+    @Test
+    fun `one input of the user's exempts one link's servers, not every navigation the page starts on it`() {
+        val c = ClientCertChoices()
+        c.loaded(2L)
+        c.answered("a1.evil.example", 8443, 2L, null, c.generation)
+        // One tap; the page's tap handler then sets `location` to server
+        // after server (each answering 204, so the page stays), all
+        // reported with a gesture (R1-F1). The first is the tap's link.
+        assertEquals(true, c.followed(2L, "a2.evil.example", 443, input = 9))
+        for (n in 3..51) assertEquals(false, c.followed(2L, "a$n.evil.example", 443, input = 9))
+        // None of them asks — not even the first, which the script
+        // replaced on the same tap.
+        for (n in 2..51) {
+            assertEquals(ClientCertPlan.Refuse, c.planFor(false, "a$n.evil.example", 443, 2L, c.ticket()))
+        }
+        // A redirect of a navigation that exempted nothing exempts nothing.
+        assertEquals(false, c.followed(2L, "a60.evil.example", 443, input = 9, redirect = true))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "a60.evil.example", 443, 2L, c.ticket()))
+        // An unknown input exempts nothing either.
+        assertEquals(false, c.followed(2L, "a61.evil.example", 443, input = null))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "a61.evil.example", 443, 2L, c.ticket()))
+        // The user's next tap is a link of its own.
+        assertEquals(true, c.followed(2L, "bank.example", 443, input = 10))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "bank.example", 443, 2L, c.ticket()))
+        // Its redirects ask too…
+        assertEquals(true, c.followed(2L, "login.bank.example", 443, input = 10, redirect = true))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "login.bank.example", 443, 2L, c.ticket()))
+        // …and the same navigation started again on that input keeps them
+        // (a tapped navigation re-issued for its user agent).
+        assertEquals(false, c.followed(2L, "bank.example", 443, input = 10))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "bank.example", 443, 2L, c.ticket()))
+        // The next link replaces them.
+        assertEquals(true, c.followed(2L, "shop.example", 443, input = 11))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "bank.example", 443, 2L, c.ticket()))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "login.bank.example", 443, 2L, c.ticket()))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "shop.example", 443, 2L, c.ticket()))
+        // A new WebView numbers inputs afresh: its first input still counts.
+        c.viewGone(2L)
+        assertEquals(true, c.followed(2L, "news.example", 443, input = 11))
+    }
+
+    @Test
+    fun `a refusal and a followed link are per server, host and port`() {
+        val c = ClientCertChoices()
+        c.loaded(2L)
+        c.answered("portal.example", 8443, 2L, null, c.generation)
+        // A tapped link to the same host on another port is another
+        // server, never refused: it asks (R1-M1).
+        assertEquals(true, c.followed(2L, "portal.example", 443, input = 1))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "portal.example", 443, 2L, c.ticket()))
+        // The refused one stays refused, through a tap too.
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "portal.example", 8443, 2L, c.ticket()))
+        assertEquals(false, c.followed(2L, "Portal.example", 8443, input = 2))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "portal.example", 8443, 2L, c.ticket()))
+        // A followed server asks on its own port only.
+        assertEquals(true, c.followed(2L, "bank.example", 443, input = 3))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "bank.example", 443, 2L, c.ticket()))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "bank.example", 8443, 2L, c.ticket()))
     }
 
     @Test
