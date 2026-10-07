@@ -38,6 +38,7 @@ import android.view.ViewGroup
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityNodeProvider
 import android.view.animation.DecelerateInterpolator
+import android.webkit.ClientCertRequest
 import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
 import android.webkit.GeolocationPermissions
@@ -960,6 +961,7 @@ fun BrowserWebViewHost(
         EthereumProviders.onDocumentStarted(tab, url = null)
         SwarmProviders.onDocumentStarted(tab, url = null)
         X402Payments.onDocumentStarted(tab, view = null, url = null)
+        ClientCertificates.withdraw(tab.id)
         goneIds += tab.id
         refreshLayouts.remove(tab.id)?.let(frame::removeView)
         UnverifiedOrigins.release(wv)
@@ -969,6 +971,9 @@ fun BrowserWebViewHost(
 
     fun attach(tab: BrowserState): WebView {
         webViews[tab.id]?.let { return it }
+        // Before the WebView exists, so its first connection can't be
+        // handed a client certificate a normal tab picked (#316).
+        if (tab.private) ClientCertificates.onPrivateTab(tab.id)
         val (layout, wv) = buildRefreshableWebView(
             context = context,
             state = tab,
@@ -995,7 +1000,10 @@ fun BrowserWebViewHost(
             // the tab under the user (#292 R1-M3).
             onCreateWindow = { isUserGesture ->
                 val activate = isUserGesture || sitePermissions.isOnScreen(tab.id)
-                attach(tabs.adoptPopup(opener = tab, activate = activate).also { it.beginLoad(inWebView = true) })
+                val popup = tabs.adoptPopup(opener = tab, activate = activate)
+                // A client-certificate Deny in the opener holds here too (#333 R5-F1).
+                ClientCertificates.onPopup(popup.id, tab.id)
+                attach(popup.also { it.beginLoad(inWebView = true) })
             },
             onCloseWindow = { tabs.closePopup(tab) },
             popupsAllowed = { origin -> sitePermissions.popupsAllowed(tab, origin) },
@@ -1150,6 +1158,7 @@ fun BrowserWebViewHost(
             // Take down any permission prompt the tab still had up;
             // its request is denied along with the page.
             sitePermissions.onTabClosed(id)
+            ClientCertificates.onTabClosed(id)
             RadicleProviders.onTabClosed(id)
             EthereumProviders.onTabClosed(id)
             SwarmProviders.onTabClosed(id)
@@ -1404,6 +1413,8 @@ fun BrowserWebViewHost(
                 pageZoom.clearAll()
                 // …and so are the sites asked for as desktop sites (#180).
                 desktopSites.clearAll()
+                // …and so are the client certificates picked this run (#316).
+                ClientCertificates.clear()
                 // Unfinished downloads keep partial files in app storage
                 // (#265): they stop, and those files go.
                 DownloadManager.get(context).discardUnfinished()
@@ -1481,6 +1492,7 @@ fun BrowserWebViewHost(
                     EthereumProviders.onDocumentStarted(tab, url = null)
                     SwarmProviders.onDocumentStarted(tab, url = null)
                     X402Payments.onDocumentStarted(tab, view = null, url = null)
+                    ClientCertificates.withdraw(tab.id)
                 }
             } else {
                 // As when the last private tab closes (#86): the private
@@ -1492,6 +1504,11 @@ fun BrowserWebViewHost(
                 // (and keep reconnecting) for as long as the process is
                 // cached, with no page to deliver to.
                 for (tab in tabs.tabs) SwarmProviders.onDocumentStarted(tab, url = null)
+                // The tabs go too, private ones included (#316): the
+                // process can outlive them (the :node service keeps it),
+                // and a private tab still counted would keep emptying
+                // WebView's certificate table after each normal pick.
+                for (tab in tabs.tabs) ClientCertificates.onTabClosed(tab.id)
             }
             for (wv in webViews.values) {
                 UnverifiedOrigins.release(wv)
@@ -1949,6 +1966,7 @@ private fun buildRefreshableWebView(
         // (#86) before anything else touches it: Chromium only takes a
         // profile change on a WebView that has never been used.
         if (state.private) PrivateProfile.attach(this)
+        tabId = state.id
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3644,6 +3662,25 @@ private fun buildRefreshableWebView(
                 // here — the download a navigation turns into has the
                 // final hop's URL.
                 if (request.isForMainFrame) pendingNavigationUrls.add(target)
+                // A link the user tapped to a server other than one they
+                // refused a client certificate for in this tab asks for
+                // one again (#333 R6-M1): its first hop and its current
+                // redirect hop, never earlier hops, and a Deny other than
+                // for its first hop ends it (#333 R2-F1, R3-M2). Not a
+                // page's own navigation: that would let a page reopen
+                // the chooser it was refused. Nor more than one per
+                // input of the user's: the page's script can start any
+                // number of navigations on one tap's activation, and
+                // WebView reports a gesture on each (#333 R1-F1).
+                if (request.isForMainFrame && navigationHadGesture) {
+                    val u = request.url
+                    val port = if (u.port != -1) u.port else if (u.scheme.equals("http", ignoreCase = true)) 80 else 443
+                    u.host?.let {
+                        ClientCertificates.onUsersLink(
+                            state.id, it, port, (view as? PageWebView)?.userGestures?.latestInputId, request.isRedirect,
+                        )
+                    }
+                }
                 // Route bzz:// and ens:// through the screen's submit flow
                 // so in-page clicks + error-page "Try Again" go through
                 // the same GatewayProbe gate the top address bar uses.
@@ -3988,6 +4025,13 @@ private fun buildRefreshableWebView(
                 )
                 state.clearEnsOverride()
                 view?.loadUrl(page)
+            }
+
+            // A site asks for a TLS client certificate (#316): the user
+            // picks one in a normal tab; a private tab sends none.
+            override fun onReceivedClientCertRequest(view: WebView?, request: ClientCertRequest?) {
+                request ?: return
+                ClientCertificates.onRequest(context, state, request, sitePermissions)
             }
 
             // A certificate error (#259). Always refused — there is no
@@ -4458,6 +4502,9 @@ private class GestureArmingNodeProvider(
  * protected: Chromium's unconsumed overscroll, and the scroll range.
  */
 internal class PageWebView(context: Context) : WebView(context) {
+    /** The tab this WebView shows; set by the tab that owns it. */
+    var tabId: Long = -1L
+
     /** [destroy] has been called: nothing may be asked of this WebView any more. */
     var destroyed = false
         private set
@@ -5074,6 +5121,8 @@ internal class PageWebView(context: Context) : WebView(context) {
             // `#fragment` ([hardReload]).
             cacheBypass.loadStarting(bypass = loadingBypassingCache)
         }
+        // A server this run answered "send none" asks again (#316).
+        if (!loadsNothing) ClientCertificates.onBrowserLoad(tabId)
         val usersStep = if (url == null) reloadingByUser else url == HISTORY_BACK_JS || url == HISTORY_FORWARD_JS
         onBrowserInitiatedLoad(url, url != null && loadingNamedByUser, usersStep, url != null && loadingRedirectCorrection)
     }
