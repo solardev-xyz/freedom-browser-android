@@ -52,6 +52,98 @@ class WebLoadErrorTest {
         assertTrue(html.contains("net::ERR_NAME_NOT_RESOLVED"))
     }
 
+    private val ddg = SearchEngines.DEFAULT.template
+
+    @Test
+    fun `a typed bare address is remembered with its search`() {
+        val typed = typedAddressFor(" example.cmo ", "https://example.cmo", ddg)
+        assertEquals(TypedAddress("https://example.cmo", "example.cmo", "https://duckduckgo.com/?q=example.cmo"), typed)
+        assertEquals(
+            "https://duckduckgo.com/?q=localhost%3A8080",
+            typedAddressFor("localhost:8080", "http://localhost:8080", ddg)?.searchUrl,
+        )
+    }
+
+    @Test
+    fun `a search, a full URL or a non-web address is not a typed address`() {
+        // Already a search: there's nothing to offer a search for.
+        assertEquals(null, typedAddressFor("cats and dogs", UrlParser.searchUrl("cats and dogs", ddg), ddg))
+        // Typed with its scheme (or a Reload, a bookmark): meant as written.
+        assertEquals(null, typedAddressFor("https://example.cmo", "https://example.cmo", ddg))
+        assertEquals(null, typedAddressFor("bzz://abc", "bzz://abc", ddg))
+        assertEquals(null, typedAddressFor("", "about:blank", ddg))
+    }
+
+    @Test
+    fun `search instead is offered only when the typed address isn't found`() {
+        val typed = TypedAddress("https://example.cmo", "example.cmo", "https://duckduckgo.com/?q=example.cmo")
+        assertEquals(typed, searchInsteadFor(typed, "https://example.cmo", NetFailure.NOT_FOUND))
+        assertEquals(typed, searchInsteadFor(typed, "https://example.cmo#top", NetFailure.NOT_FOUND))
+        // Chromium reports the typed host back with its empty path as `/`.
+        assertEquals(typed, searchInsteadFor(typed, "https://example.cmo/", NetFailure.NOT_FOUND))
+        assertEquals(null, searchInsteadFor(typed, "https://example.cmo/x", NetFailure.NOT_FOUND))
+        // Found but unreachable: searching for it wouldn't help.
+        assertEquals(null, searchInsteadFor(typed, "https://example.cmo", NetFailure.REFUSED))
+        assertEquals(null, searchInsteadFor(typed, "https://example.cmo", NetFailure.OFFLINE))
+        // A different address failed (a redirect, a link): not what was typed.
+        assertEquals(null, searchInsteadFor(typed, "https://other.example", NetFailure.NOT_FOUND))
+        assertEquals(null, searchInsteadFor(null, "https://example.cmo", NetFailure.NOT_FOUND))
+    }
+
+    @Test
+    fun `page offers search instead, escaped, after Try again`() {
+        val typed = TypedAddress("https://a.cmo", "a\"<b>.cmo", "https://s.example/?q=a%22&x=<b>")
+        val html = netErrorPageHtml("https://a.cmo", "a.cmo", NetFailure.NOT_FOUND, null, searchInstead = typed)
+        val tryAgain = html.indexOf("<a class=\"btn p\" href=\"https://a.cmo\">Try again</a>")
+        val search = html.indexOf(
+            "<a class=\"btn\" href=\"https://s.example/?q=a%22&amp;x=&lt;b&gt;\">" +
+                "Search for “a&quot;&lt;b&gt;.cmo” instead</a>",
+        )
+        assertTrue(tryAgain > 0)
+        assertTrue(search > tryAgain)
+        assertFalse(netErrorPageHtml("https://a.cmo", "a.cmo", NetFailure.NOT_FOUND, null).contains("Search for"))
+    }
+
+    @Test
+    fun `page is neutral and themed, with the raw error collapsed under Details`() {
+        val html = netErrorPageHtml("https://a.example", "a.example", NetFailure.REFUSED, "net::ERR_CONNECTION_REFUSED")
+        assertTrue(html.contains("<style>" + errorPageThemeCss() + ERROR_PAGE_CSS + "</style>"))
+        // Collapsed (no `open`), with the address and Chromium's name inside.
+        assertTrue(
+            html.contains(
+                "<details><summary>Details</summary><div class=\"d\">https://a.example\n\nnet::ERR_CONNECTION_REFUSED</div></details>",
+            ),
+        )
+        // The old all-red palette is gone; the heading takes the text colour.
+        for (red in listOf("#ff5e5e", "#cf222e", "#ff8a8a")) assertFalse(red, html.contains(red))
+        assertTrue(ERROR_PAGE_CSS.contains("h1{font-size:22px;font-weight:600;line-height:1.3;margin:0 0 12px;color:var(--fg)}"))
+    }
+
+    @Test
+    fun `theme colours are the app's own schemes`() {
+        val css = errorPageThemeCss()
+        // Light teal ink and dark wordmark teal as the primary (Try again).
+        assertTrue(css.startsWith(":root{color-scheme:light dark;--bg:#fef7ff;--fg:#1d1b20;"))
+        assertTrue(css.contains("--pri:#00695b;--onpri:#ffffff;"))
+        assertTrue(css.contains("@media (prefers-color-scheme:dark){:root{--bg:#141218;--fg:#e6e0e9;"))
+        assertTrue(css.contains("--pri:#00e9c4;--onpri:#00382f;"))
+    }
+
+    @Test
+    fun `error_html carries the same theme and layout`() {
+        val page = listOf(java.io.File("src/main/assets/error/error.html"), java.io.File("app/src/main/assets/error/error.html"))
+            .first { it.isFile }
+            .readText()
+        val block = Regex("""/\* THEME \*/(.*?)/\* /THEME \*/""", RegexOption.DOT_MATCHES_ALL).find(page)?.groupValues?.get(1)
+        assertEquals("error.html's THEME block must equal errorPageThemeCss() + ERROR_PAGE_CSS", errorPageThemeCss() + ERROR_PAGE_CSS, block)
+        for (red in listOf("#ff5e5e", "#cf222e", "#ff8a8a")) assertFalse(red, page.contains(red))
+        assertTrue(page.contains("<button id=\"retry-btn\" class=\"btn p\"></button>"))
+        assertTrue(page.contains("<summary id=\"details-label\"></summary>"))
+        assertFalse(page.contains("<details open"))
+        // Except on a not-cross-checked warning, which asks the user to judge the address in it.
+        assertTrue(page.contains("if (document.body.classList.contains('warn')) detailsEl.parentElement.open = true;"))
+    }
+
     @Test
     fun `script only replaces chromium's own error document`() {
         val script = netErrorPageScript("<html><head><title>t</title></head><body>'x'</body></html>")

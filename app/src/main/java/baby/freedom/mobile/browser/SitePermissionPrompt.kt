@@ -10,12 +10,10 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.LocationOn
@@ -23,7 +21,6 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarDuration
@@ -33,17 +30,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import baby.freedom.mobile.R
@@ -52,25 +46,63 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 
 /**
+ * One way to answer the site-permission prompt ([SitePermissionPrompt]),
+ * Chrome-style (#419): explicit choices rather than an Allow / Block
+ * pair under a "Remember this decision" box. That box used to be ticked
+ * by default, so a single tap on Allow was a permanent grant.
+ */
+internal enum class PermissionChoice {
+    /** Allowed for this run only ([PermissionSession]): not stored, gone once Freedom is closed. */
+    ALLOW_WHILE_VISITING,
+
+    /** Allowed and remembered: a standing grant, revocable from Settings. */
+    ALLOW_EVERY_VISIT,
+
+    /** Blocked and remembered: the site isn't asked about again until the user removes it in Settings. */
+    DONT_ALLOW,
+}
+
+/**
+ * The choices the prompt offers, top to bottom. A private tab has nothing
+ * to remember a decision in (#86) — its answer lasts the private session
+ * whichever button it is — so there "every visit" isn't offered.
+ */
+internal fun permissionChoices(private: Boolean): List<PermissionChoice> =
+    if (private) {
+        listOf(PermissionChoice.ALLOW_WHILE_VISITING, PermissionChoice.DONT_ALLOW)
+    } else {
+        listOf(PermissionChoice.ALLOW_WHILE_VISITING, PermissionChoice.ALLOW_EVERY_VISIT, PermissionChoice.DONT_ALLOW)
+    }
+
+/** [choice] as the broker's answer; nothing is remembered from a private tab. */
+internal fun permissionAnswer(choice: PermissionChoice, private: Boolean): PromptAnswer = when (choice) {
+    PermissionChoice.ALLOW_WHILE_VISITING -> PromptAnswer.Allow(remember = false)
+    PermissionChoice.ALLOW_EVERY_VISIT -> PromptAnswer.Allow(remember = !private)
+    PermissionChoice.DONT_ALLOW -> PromptAnswer.Block(remember = !private)
+}
+
+/**
  * The site-permission prompt (#81): "<site> wants to use your camera and
- * microphone", a "Remember this decision" box (ticked by default, as on
- * desktop), Block / Allow. Back or a tap outside is a dismissal — a
- * deny-once that counts towards the three-dismissals embargo.
+ * microphone", then one button per [PermissionChoice] (#419) — "Allow
+ * while visiting" (this run only, not remembered), "Allow every visit"
+ * (remembered) and "Don't allow" (a remembered block); in a private tab
+ * just "Allow" and "Don't allow", both lasting the private session. A
+ * standing grant is always its own, explicit tap: no box decides it.
+ * Back or a tap outside is a dismissal — a deny-once that counts towards
+ * the three-dismissals embargo.
  *
  * The site is always named in full: the title wraps rather than
  * ellipsising, since the tail of a host is exactly the part a spoof
  * would hide.
  *
- * Block / Allow — and dismissal (tap outside, Back) — ignore taps for
+ * Every button — and dismissal (tap outside, Back) — ignores taps for
  * the first [PromptTapGuard.PROTECTION_MS] the prompt is on screen (the
  * buttons show as disabled meanwhile), so a page can't time its request
- * to catch a tap meant for the page. So does the "Remember" box, which
- * decides whether Allow is a standing grant; a press on it that Android
+ * to catch a tap meant for the page; a press on a button that Android
  * marks as having passed through another app's window is dropped too.
  */
 @Composable
 fun SitePermissionPrompt(prompt: PermissionPrompt) {
-    var remember by remember(prompt) { mutableStateOf(true) }
     val tap = rememberArmedTapGuard(prompt)
     val guard = tap.guard
     val armed = tap.armed
@@ -98,54 +130,51 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
             Column {
                 Text(stringResource(R.string.library_permission_prompt_wants_to, describePermissionRequest(prompt.permissions)))
                 Spacer(Modifier.height(12.dp))
-                // A private tab's answer lasts the private session only
-                // (#86): there's nothing to remember it in.
-                if (prompt.private) {
-                    Text(
-                        stringResource(R.string.library_permission_prompt_private),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                } else {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            // Decides whether Allow is a standing grant: guarded like
-                            // Allow itself, so an early or obscured tap can't re-tick
-                            // a box the user unticked (#287 R5-M1).
-                            .heightIn(min = 48.dp)
-                            .protectedToggle(tap, value = remember, role = Role.Checkbox) { remember = it },
-                    ) {
-                        Checkbox(checked = remember, onCheckedChange = null, enabled = tap.armed)
-                        Text(
-                            stringResource(R.string.library_permission_prompt_remember),
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(start = 8.dp, end = 8.dp),
-                        )
-                    }
-                }
+                Text(
+                    stringResource(
+                        // A private tab's answer lasts the private session
+                        // only (#86): there's nothing to remember it in.
+                        if (prompt.private) {
+                            R.string.library_permission_prompt_private
+                        } else {
+                            R.string.library_permission_prompt_visiting_hint
+                        },
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 ObscuredTapNotice(tap)
             }
         },
+        // Stacked, full width, in the button row's place: three labels
+        // this long don't fit side by side, and a wrapped row would put
+        // them in no clear order.
         confirmButton = {
-            TextButton(
-                enabled = armed,
-                onClick = { if (guard.accepts()) prompt.respond(PromptAnswer.Allow(remember && !prompt.private)) },
-                modifier = Modifier.protectedPress(tap),
-            ) {
-                Text(stringResource(R.string.common_allow))
-            }
-        },
-        dismissButton = {
-            TextButton(
-                enabled = armed,
-                onClick = { if (guard.accepts()) prompt.respond(PromptAnswer.Block(remember && !prompt.private)) },
-            ) {
-                Text(stringResource(R.string.library_permission_prompt_block))
+            Column(horizontalAlignment = Alignment.End, modifier = Modifier.fillMaxWidth()) {
+                for (choice in permissionChoices(prompt.private)) {
+                    TextButton(
+                        enabled = armed,
+                        onClick = { if (guard.accepts()) prompt.respond(permissionAnswer(choice, prompt.private)) },
+                        modifier = Modifier.heightIn(min = 48.dp).protectedPress(tap),
+                    ) {
+                        Text(
+                            stringResource(permissionChoiceLabel(choice, prompt.private)),
+                            textAlign = TextAlign.End,
+                        )
+                    }
+                }
             }
         },
     )
+}
+
+private fun permissionChoiceLabel(choice: PermissionChoice, private: Boolean): Int = when (choice) {
+    // In a private tab this is the only Allow, and "while visiting" would
+    // undersell it: it lasts the private session (the note above says so).
+    PermissionChoice.ALLOW_WHILE_VISITING ->
+        if (private) R.string.common_allow else R.string.library_permission_prompt_allow_visiting
+    PermissionChoice.ALLOW_EVERY_VISIT -> R.string.library_permission_prompt_allow_always
+    PermissionChoice.DONT_ALLOW -> R.string.library_permission_prompt_dont_allow
 }
 
 /**

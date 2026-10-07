@@ -1,8 +1,13 @@
 package baby.freedom.mobile.browser
 
 import android.webkit.WebViewClient
+import androidx.compose.material3.ColorScheme
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.ui.FreedomDarkColors
+import baby.freedom.mobile.ui.FreedomLightColors
 import org.json.JSONObject
 import java.text.DateFormat
 import java.util.Date
@@ -96,17 +101,116 @@ internal fun netErrorCopy(failure: NetFailure, host: String): Pair<String, Strin
 }
 
 /**
+ * A typed address that the address bar turned into a web URL — `example.org`
+ * as `https://example.org` — kept on the tab ([BrowserState.typedAddress])
+ * so that, if that very URL then fails to resolve, its error page can offer
+ * to search for what was typed instead ([netErrorPageHtml], #419), on the
+ * search engine chosen in Settings when it was submitted ([searchUrl]).
+ */
+internal data class TypedAddress(val url: String, val query: String, val searchUrl: String) {
+    /**
+     * Is [other] this address? Fragments aside, and an empty path as `/`:
+     * `example.org` typed loads `https://example.org`, which Chromium
+     * reports back as `https://example.org/`.
+     */
+    fun isFor(other: String): Boolean = sameAddress(url) == sameAddress(other)
+
+    private fun sameAddress(u: String): String =
+        u.substringBefore('#').let { if (it.substringAfter("://").contains('/')) it else "$it/" }
+}
+
+/**
+ * The [TypedAddress] for [input] typed by the user and loaded as [url]
+ * (`UrlParser.toUrl`), or null when there's nothing a search could stand
+ * in for: a search already, an address typed with its scheme (that one
+ * was meant as written), or anything not on the web.
+ */
+internal fun typedAddressFor(input: String, url: String, searchTemplate: String): TypedAddress? {
+    val typed = input.trim()
+    if (typed.isEmpty() || url == typed || UrlParser.isSearch(typed)) return null
+    val scheme = url.substringBefore("://", "").lowercase(Locale.ROOT)
+    if (scheme != "http" && scheme != "https") return null
+    return TypedAddress(url, typed, UrlParser.searchUrl(typed, searchTemplate))
+}
+
+/**
+ * The "Search for … instead" offer for a failed load of [failedUrl]: only
+ * when the address couldn't be found ([NetFailure.NOT_FOUND]) and it is
+ * the one the user typed ([typed]) — a link or a bookmark to a dead host
+ * wasn't something to search for.
+ */
+internal fun searchInsteadFor(typed: TypedAddress?, failedUrl: String, failure: NetFailure): TypedAddress? =
+    typed?.takeIf { failure == NetFailure.NOT_FOUND && it.isFor(failedUrl) }
+
+/**
  * The page that stands in for Chromium's own on a failed load of [url]:
  * [inPlaceErrorPageHtml] with the address and Chromium's error name in
  * the details box. Try again is a link to [url] itself — a same-URL
  * navigation replaces the failed entry, and it's always a GET, so a
- * failed form POST is retried as a GET rather than resent (#259).
+ * failed form POST is retried as a GET rather than resent (#259). With
+ * [searchInstead] ([searchInsteadFor]), a second link searches for what
+ * the user typed.
  */
-internal fun netErrorPageHtml(url: String, host: String, failure: NetFailure, rawError: String?): String {
+internal fun netErrorPageHtml(
+    url: String,
+    host: String,
+    failure: NetFailure,
+    rawError: String?,
+    searchInstead: TypedAddress? = null,
+): String {
     val (title, description) = netErrorCopy(failure, host)
     val details = escHtml(url) + (rawError?.takeIf { it.isNotBlank() }?.let { "\n\n" + escHtml(it) } ?: "")
-    return inPlaceErrorPageHtml(title, description, details, retryHref = escHtml(url))
+    val search = searchInstead?.let {
+        escHtml(it.searchUrl) to escHtml(Strings.get(R.string.errorpage_net_search_instead, it.query))
+    }
+    return inPlaceErrorPageHtml(title, description, details, retryHref = escHtml(url), secondaryLink = search)
 }
+
+/** `#rrggbb` of [color], alpha dropped (the page's colours are opaque). */
+private fun cssHex(color: Color): String = "#%06x".format(color.toArgb() and 0xFFFFFF)
+
+private fun ColorScheme.cssVars(): String =
+    "--bg:${cssHex(background)};--fg:${cssHex(onSurface)};--mut:${cssHex(onSurfaceVariant)};" +
+        "--box:${cssHex(surfaceContainerHigh)};--line:${cssHex(outlineVariant)};" +
+        "--pri:${cssHex(primary)};--onpri:${cssHex(onPrimary)};--warn:${cssHex(secondary)}"
+
+/**
+ * The error pages' colours (#419): the app's own light and dark schemes
+ * ([FreedomLightColors], [FreedomDarkColors]) as CSS custom properties,
+ * picked by `prefers-color-scheme` — a neutral heading in the scheme's
+ * text colour, the details box on its container colour, Try again in its
+ * primary teal. [inPlaceErrorPageHtml] embeds it; `error.html` carries
+ * the same block between its `THEME` markers (`ErrorPageThemeTest`).
+ */
+internal fun errorPageThemeCss(): String =
+    ":root{color-scheme:light dark;${FreedomLightColors.cssVars()}}" +
+        "@media (prefers-color-scheme:dark){:root{${FreedomDarkColors.cssVars()}}}"
+
+/**
+ * The stylesheet both error pages share, after [errorPageThemeCss]: the
+ * text start-aligned in a readable column, the primary action a filled
+ * button, any second one outlined, the raw error collapsed under
+ * "Details". Buttons are at least 48 px tall; long addresses wrap.
+ */
+internal const val ERROR_PAGE_CSS =
+    "html,body{margin:0;min-height:100%}" +
+        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);" +
+        "color:var(--fg);padding:48px 24px;box-sizing:border-box;overflow-wrap:break-word}" +
+        ".c{max-width:560px;margin:0 auto}" +
+        "h1{font-size:22px;font-weight:600;line-height:1.3;margin:0 0 12px;color:var(--fg)}" +
+        "p{line-height:1.55;margin:0 0 24px;color:var(--mut);font-size:16px}p b{color:var(--fg)}" +
+        ".b{display:flex;flex-wrap:wrap;gap:12px;margin:0 0 28px}" +
+        ".btn{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-height:48px;" +
+        "min-width:0;max-width:100%;" +
+        "padding:12px 24px;border-radius:24px;font:inherit;font-size:15px;font-weight:600;text-decoration:none;" +
+        "cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--pri);text-align:center}" +
+        ".btn.p{background:var(--pri);border-color:var(--pri);color:var(--onpri)}" +
+        ".btn.w{color:var(--warn);border-color:var(--warn)}" +
+        "details{border-top:1px solid var(--line);padding-top:8px}" +
+        "summary{cursor:pointer;color:var(--mut);font-size:14px;line-height:48px;min-height:48px}" +
+        ".d{background:var(--box);padding:14px 16px;border-radius:12px;font-family:ui-monospace,Menlo,monospace;" +
+        "font-size:13px;color:var(--mut);margin:4px 0 0;word-break:break-all;white-space:pre-wrap}" +
+        ".nodes-icon{display:inline-block;width:1.2em;height:1.2em;vertical-align:middle;margin:0 2px}"
 
 /**
  * Script that swaps a failed load's document for [html] — only if the

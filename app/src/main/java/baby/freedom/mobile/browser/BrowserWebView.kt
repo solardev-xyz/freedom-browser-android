@@ -368,13 +368,16 @@ internal fun nameResolutionRefusalHtml(
 
 /**
  * A self-contained error page served *as* a refused document's own
- * response (no script, nothing fetched): [title], [descriptionHtml], and
- * [detailsHtml] in the details box (both already escaped), with a
- * Try again link that reloads the entry — or goes to [retryHref]
- * (escaped) instead; with [refreshSeconds], the entry is asked for again
- * after that long by a meta refresh (a GET of the same address, still no
- * script). [nameResolutionRefusal]'s and [TorRouting]'s refusals, and a
- * failed web load's page ([netErrorPageHtml]).
+ * response (no script, nothing fetched): [title] as a neutral heading,
+ * [descriptionHtml], a primary Try again link that reloads the entry —
+ * or goes to [retryHref] (escaped) instead — and [detailsHtml] collapsed
+ * under "Details" (both already escaped), in the app's own colours
+ * ([errorPageThemeCss], #419). [secondaryLink] (href and label, both
+ * escaped) is a second, outlined action — a failed typed address's
+ * "Search for … instead". With [refreshSeconds], the entry is asked for
+ * again after that long by a meta refresh (a GET of the same address,
+ * still no script). [nameResolutionRefusal]'s and [TorRouting]'s
+ * refusals, and a failed web load's page ([netErrorPageHtml]).
  */
 internal fun inPlaceErrorPageHtml(
     title: String,
@@ -382,26 +385,17 @@ internal fun inPlaceErrorPageHtml(
     detailsHtml: String,
     retryHref: String = "",
     refreshSeconds: Int? = null,
+    secondaryLink: Pair<String, String>? = null,
 ): String {
     val tryAgain = Strings.get(R.string.common_try_again)
+    val details = Strings.get(R.string.errorpage_page_details)
+    val secondary = secondaryLink?.let { (href, label) -> "<a class=\"btn\" href=\"$href\">$label</a>" }.orEmpty()
     return """<!doctype html><html lang="en"><head><meta charset="utf-8">${refreshSeconds?.let { "\n<meta http-equiv=\"refresh\" content=\"$it\">" }.orEmpty()}
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
-<title>$title</title><style>
-html,body{margin:0;min-height:100%}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-background:#141414;color:#f5f5f5;padding:32px 20px;box-sizing:border-box;text-align:center}
-.c{max-width:560px;margin:0 auto}
-h1{font-size:22px;margin:24px 0 12px;color:#ff5e5e}
-p{line-height:1.55;margin:0 0 20px;color:#ccc;font-size:15px}
-.d{background:#1a1a1a;padding:14px 16px;border-radius:8px;font-family:ui-monospace,Menlo,monospace;
-font-size:13px;color:#ff8a8a;margin:0 0 24px;word-break:break-all;white-space:pre-wrap;text-align:left}
-a{display:inline-block;padding:12px 22px;background:#2c2c2c;color:#fff;border:1px solid #444;
-border-radius:8px;font-size:15px;text-decoration:none}
-@media (prefers-color-scheme:light){body{background:#fff;color:#24292f}h1{color:#cf222e}
-p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-color:#d0d7de;color:#24292f}}
-</style></head><body><div class="c"><h1>$title</h1><p>$descriptionHtml</p>
-<div class="d">$detailsHtml</div><a href="$retryHref">$tryAgain</a></div></body></html>"""
+<title>$title</title><style>${errorPageThemeCss()}$ERROR_PAGE_CSS</style></head><body><div class="c"><h1>$title</h1><p>$descriptionHtml</p>
+<div class="b"><a class="btn p" href="$retryHref">$tryAgain</a>$secondary</div>
+<details><summary>$details</summary><div class="d">$detailsHtml</div></details></div></body></html>"""
 }
 
 /** Where [nameWebRecordNavigation] sends a request for [pathAndQuery] on the name's origin. */
@@ -3965,6 +3959,7 @@ private fun buildRefreshableWebView(
                         host = req.url?.host.orEmpty().ifEmpty { failed },
                         failure = failure,
                         rawError = error?.description?.toString(),
+                        searchInstead = searchInsteadFor(state.typedAddress, failed, failure),
                     )
                     failedLoad = FailedLoad(failed, req.method.equals("POST", ignoreCase = true), netErrorPageScript(html))
                     state.showsErrorPage = true

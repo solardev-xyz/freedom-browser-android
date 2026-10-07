@@ -172,7 +172,7 @@
     <string name="browser_intro_title">Welcome to Freedom</string>
     <string name="browser_intro_body_web">Freedom opens the web you know and the decentralized web: sites stored on Swarm (bzz://) and IPFS (ipfs://), and ENS names such as app.swarmit.eth.</string>
     <string name="browser_intro_body_nodes">It reaches them through its own nodes, running on this phone and talking straight to peers. The nodes use data and battery while they run; Nodes &amp; networks in the menu shows how they\'re doing and can switch them off.</string>
-    <string name="browser_intro_body_wallet">You don\'t need a wallet to browse. If you want one later, it\'s in Settings.</string>
+    <string name="browser_intro_body_wallet">You don\'t need a wallet to browse. If you want one later, open Wallet from the menu.</string>
     <string name="browser_intro_got_it">Got it</string>
     <!-- %1$s is the name of a curated site, e.g. "Swarmit". -->
     <string name="browser_intro_try">Try %1$s</string>

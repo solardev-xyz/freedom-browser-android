@@ -846,6 +846,18 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                 isAppearanceLightNavigationBars = lightScheme
             }
         }
+        LaunchedEffect(Unit) {
+            // The window's *theme* nav-bar colour (light on the light theme)
+            // makes Android force light navigation-bar appearance — dark
+            // icons on its light contrast scrim — for as long as the window
+            // lives, whatever the insets controller says. Started on the
+            // light scheme, the band stayed light grey under the dark one
+            // after a live switch (#419); cold-started dark it was right.
+            // Transparent lets [isAppearanceLightNavigationBars] above pick
+            // the scrim, so it follows the scheme like the icons do.
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        }
         LaunchedEffect(panelShown) {
             window.isNavigationBarContrastEnforced = !panelShown
         }
