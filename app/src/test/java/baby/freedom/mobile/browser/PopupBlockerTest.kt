@@ -183,7 +183,7 @@ class PopupBlockerTest {
     @Test
     fun `the popups allow is read from the session tier, and a revoke takes it away`() {
         val s = PermissionSession()
-        val o = "https://a.example"
+        val o = PermissionScope("https://a.example")
         assertNull(s.decisionFor(o, SitePermission.POPUPS))
         s.record(o, SitePermission.POPUPS, PermissionDecision.ALLOW, remembered = false)
         assertEquals(PermissionDecision.ALLOW, s.decisionFor(o, SitePermission.POPUPS))

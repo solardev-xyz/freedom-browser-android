@@ -29,13 +29,24 @@ import kotlinx.coroutines.flow.retryWhen
  * Backed by its own [DataStore] (`freedom_site_permissions`), one
  * string entry per decision:
  *
- *     "<origin>|<permission>" → "allow" | "deny"
+ *     "<origin>|<permission>"        → "allow" | "deny"
+ *     "<origin>|<permission>|<top>"  → "allow" | "deny"
  *
  * where `<origin>` is a normalized `scheme://host[:port]` (see
  * [baby.freedom.mobile.browser.permissionOriginKey]; never contains
  * `|`) and `<permission>` the storage key shared with the desktop
  * browser (`camera`, `microphone`, `geolocation`). Values are kept as
  * plain strings so this layer stays free of browser types.
+ *
+ * Decisions are double-keyed (#363) by the requesting origin and the
+ * top-level site it asked from ([Record.top]). A site's own decision
+ * (`top == origin`) keeps the plain two-part key — so every decision
+ * stored before #363 reads, unchanged, as the pair (origin, origin):
+ * the migration needs no rewrite, and the key stays the one the desktop
+ * browser uses. A frame embedded in another site gets the three-part
+ * key with that site's origin last, which an older build reads as an
+ * unknown permission and ignores rather than applying it to the frame's
+ * origin everywhere.
  *
  * Never throws for storage trouble: a file that can't be read reads as
  * empty (the site is simply asked again) and a failed write reports
@@ -53,11 +64,12 @@ class SitePermissionStore internal constructor(
     /** How the back-off waits; replaced in tests to record the delays. */
     private val backOff: suspend (Long) -> Unit = { delay(it) },
 ) {
-    /** One stored decision. */
-    data class Record(val origin: String, val permission: String, val decision: String)
+    /** One stored decision; [top] is the site it was made on ([origin] for the site's own). */
+    data class Record(val origin: String, val permission: String, val decision: String, val top: String = origin)
 
     /**
-     * Every stored decision, sorted by origin then permission.
+     * Every stored decision, sorted by top-level site, the site's own
+     * first, then by origin and permission.
      *
      * A failed read emits "none" and then re-subscribes (with back-off)
      * instead of completing: DataStore's `data` ends at the first error,
@@ -87,24 +99,28 @@ class SitePermissionStore internal constructor(
         prefs.asMap().mapNotNull { (k, v) ->
             val name = k.name
             if (!name.startsWith(PREFIX)) return@mapNotNull null
-            val body = name.removePrefix(PREFIX)
-            val sep = body.lastIndexOf('|')
-            if (sep <= 0 || sep == body.lastIndex) return@mapNotNull null
-            Record(body.substring(0, sep), body.substring(sep + 1), v as? String ?: return@mapNotNull null)
-        }.sortedWith(compareBy({ it.origin }, { it.permission }))
+            val parts = name.removePrefix(PREFIX).split('|')
+            if (parts.size !in 2..3 || parts.any { it.isEmpty() }) return@mapNotNull null
+            val decision = v as? String ?: return@mapNotNull null
+            Record(parts[0], parts[1], decision, top = parts.getOrElse(2) { parts[0] })
+        }.sortedWith(compareBy({ it.top }, { it.origin != it.top }, { it.origin }, { it.permission }))
     }
 
-    /** Stored decisions for [origin], permission key → decision. */
-    suspend fun decisionsFor(origin: String): Map<String, String> =
-        all.first().filter { it.origin == origin }.associate { it.permission to it.decision }
+    /**
+     * Stored decisions for [origin] on the top-level site [top],
+     * permission key → decision. Only that exact pair: a frame's request
+     * never reads its origin's own decisions, nor the reverse.
+     */
+    suspend fun decisionsFor(origin: String, top: String = origin): Map<String, String> =
+        all.first().filter { it.origin == origin && it.top == top }.associate { it.permission to it.decision }
 
-    /** Store a decision; `false` if it couldn't be written. */
-    suspend fun set(origin: String, permission: String, decision: String): Boolean =
-        write { it[keyOf(origin, permission)] = decision }
+    /** Store a decision for [origin] on [top]; `false` if it couldn't be written. */
+    suspend fun set(origin: String, permission: String, decision: String, top: String = origin): Boolean =
+        write { it[keyOf(origin, permission, top)] = decision }
 
-    /** Forget a decision; `false` if the store couldn't be written. */
-    suspend fun remove(origin: String, permission: String): Boolean =
-        write { it.remove(keyOf(origin, permission)) }
+    /** Forget [origin]'s decision on [top]; `false` if the store couldn't be written. */
+    suspend fun remove(origin: String, permission: String, top: String = origin): Boolean =
+        write { it.remove(keyOf(origin, permission, top)) }
 
     private suspend fun write(
         change: (MutablePreferences) -> Unit,
@@ -116,11 +132,20 @@ class SitePermissionStore internal constructor(
         false
     }
 
-    private fun keyOf(origin: String, permission: String) =
-        stringPreferencesKey("$PREFIX$origin|$permission")
+    private fun keyOf(origin: String, permission: String, top: String) =
+        stringPreferencesKey(storageKey(origin, permission, top))
 
     companion object {
         private const val PREFIX = "perm:"
+
+        /**
+         * The preferences key for [origin]'s decision about [permission]
+         * on [top]: the plain `<origin>|<permission>` one for a site's own
+         * decision (as stored before #363), `<origin>|<permission>|<top>`
+         * for a frame embedded in another site.
+         */
+        internal fun storageKey(origin: String, permission: String, top: String): String =
+            if (top == origin) "$PREFIX$origin|$permission" else "$PREFIX$origin|$permission|$top"
         private const val TAG = "SitePermissionStore"
 
         private val Context.sitePermissionStore by preferencesDataStore(

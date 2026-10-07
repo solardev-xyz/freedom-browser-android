@@ -219,6 +219,8 @@
     <string name="settings_dapp_disconnect">Disconnect %1$s from the wallet</string>
     <!-- %1$s: the permission (Camera, Location, …); %2$s: the site. -->
     <string name="settings_permission_remove">Remove %1$s permission for %2$s</string>
+    <!-- A decision a frame embedded in a site got there (#363). %1$s: the permission; %2$s: the frame's site; %3$s: the site it's embedded in. -->
+    <string name="settings_permission_remove_embedded">Remove %1$s permission for %2$s embedded in %3$s</string>
 
     <!-- SettingsScreen.kt: About -->
     <string name="settings_app_version">%1$s (build %2$s)</string>

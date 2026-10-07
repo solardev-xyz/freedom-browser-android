@@ -210,6 +210,37 @@ fun permissionOriginKey(raw: String?): String? {
 }
 
 /**
+ * Who a site-permission decision is about (#363): the [origin] that asks
+ * (a page, or a frame inside one), on the [top]-level site it asks from —
+ * double-keyed like Chrome. A page asking for itself has `top == origin`
+ * (stored under the plain `<origin>|<permission>` key, which is what
+ * every decision made before #363 already is); a frame from another
+ * origin is its own pair, so a grant `meet.example` was given as a site
+ * never answers `meet.example` framed by `evil.example` — that's asked
+ * about again, in `evil.example`'s name ([PermissionPrompt]), and
+ * remembered for that pair alone.
+ */
+data class PermissionScope(val origin: String, val top: String = origin) {
+    /** A frame from another origin than the page it's in. */
+    val embedded: Boolean get() = origin != top
+}
+
+/**
+ * The [PermissionScope] a request from [requesting] (the frame's origin,
+ * as WebView hands it out) is decided under, inside a page whose
+ * committed origin key is [page] ([BrowserState.permissionOrigin]); `null`
+ * — denied without a prompt — when either can't hold a permission. A
+ * frame in a page with no site of its own (an `about:blank` window a
+ * script wrote into, a `data:` page) has no top-level site to ask in the
+ * name of, so it gets nothing.
+ */
+fun permissionScopeFor(requesting: String?, page: String?): PermissionScope? {
+    val origin = permissionOriginKey(requesting) ?: return null
+    val top = page ?: return null
+    return PermissionScope(origin, top)
+}
+
+/**
  * How an origin key reads to the user: `bzz://<ref>` / `ipfs://<cid>` /
  * `name.eth` for virtual dweb origins (the same form the address bar
  * shows), the bare host for https, and the full origin for plain http
@@ -288,21 +319,21 @@ sealed interface PermissionPlan {
 }
 
 /**
- * Decide [permissions] for [origin] from its remembered decisions
+ * Decide [permissions] for [scope] from its remembered decisions
  * ([stored]) and this run's [session]. A single block anywhere denies
  * the whole request: a `getUserMedia({audio, video})` with one half
  * blocked fails in the page regardless, and prompting for the other
  * half first would only be noise.
  */
 fun planFor(
-    origin: String,
+    scope: PermissionScope,
     permissions: List<SiteCapability>,
     stored: Map<SiteCapability, PermissionDecision>,
     session: PermissionSession,
 ): PermissionPlan {
     val undecided = mutableListOf<SiteCapability>()
     for (p in permissions.distinct()) {
-        when (stored[p] ?: session.decisionFor(origin, p)) {
+        when (stored[p] ?: session.decisionFor(scope, p)) {
             PermissionDecision.DENY -> return PermissionPlan.Deny
             PermissionDecision.ALLOW -> Unit
             null -> undecided += p
@@ -315,6 +346,7 @@ fun planFor(
  * One remembered or this-run decision, as listed in Settings.
  */
 data class SitePermissionEntry(
+    /** The origin that asked: the site, or a frame embedded in [top]. */
     val origin: String,
     val permission: SiteCapability,
     val decision: PermissionDecision,
@@ -322,7 +354,29 @@ data class SitePermissionEntry(
     val remembered: Boolean,
     /** Blocked by the three-dismissals rule rather than by the user. */
     val embargoed: Boolean = false,
-)
+    /** The top-level site it was decided on (#363); [origin] for a site's own decision. */
+    val top: String = origin,
+) {
+    val scope: PermissionScope get() = PermissionScope(origin, top)
+}
+
+/**
+ * The order Settings lists [entries] in (#363): by top-level site, each
+ * site's own decisions first, then those of frames embedded in it — so
+ * an embedded grant sits under the site it was given on — then by
+ * capability ([capabilityOrder]), remembered before this-run.
+ */
+fun sitePermissionListOrder(entries: List<SitePermissionEntry>): List<SitePermissionEntry> =
+    entries.sortedWith(
+        compareBy<SitePermissionEntry>({ it.top }, { it.origin != it.top }, { it.origin })
+            .thenBy { capabilityOrder(it.permission) }
+            .thenBy { it.permission.key }
+            .thenBy { !it.remembered },
+    )
+
+/** Device capabilities in their declared order, then app links. */
+internal fun capabilityOrder(c: SiteCapability): Int =
+    (c as? SitePermission)?.ordinal ?: SitePermission.entries.size
 
 /**
  * This run's unremembered decisions and dismissal counts. Never
@@ -337,7 +391,7 @@ data class SitePermissionEntry(
  * neither seen nor lifted.
  */
 class PermissionSession(private val embargoes: Boolean = true) {
-    private data class Key(val origin: String, val permission: SiteCapability)
+    private data class Key(val scope: PermissionScope, val permission: SiteCapability)
 
     private val decisions = LinkedHashMap<Key, PermissionDecision>()
     private val embargoed = HashSet<Key>()
@@ -349,13 +403,13 @@ class PermissionSession(private val embargoes: Boolean = true) {
     val version = kotlinx.coroutines.flow.MutableStateFlow(0)
 
     @Synchronized
-    fun decisionFor(origin: String, permission: SiteCapability): PermissionDecision? =
-        decisions[Key(origin, permission)]
+    fun decisionFor(scope: PermissionScope, permission: SiteCapability): PermissionDecision? =
+        decisions[Key(scope, permission)]
 
     /** Record an Allow/Block answered without "remember" (or alongside a remembered one). */
     @Synchronized
-    fun record(origin: String, permission: SiteCapability, decision: PermissionDecision, remembered: Boolean) {
-        val k = Key(origin, permission)
+    fun record(scope: PermissionScope, permission: SiteCapability, decision: PermissionDecision, remembered: Boolean) {
+        val k = Key(scope, permission)
         dismissals.remove(k)
         embargoed.remove(k)
         if (remembered) {
@@ -374,9 +428,9 @@ class PermissionSession(private val embargoes: Boolean = true) {
      * embargo threshold and the pair is now blocked for the run.
      */
     @Synchronized
-    fun dismiss(origin: String, permission: SiteCapability): Boolean {
+    fun dismiss(scope: PermissionScope, permission: SiteCapability): Boolean {
         if (!embargoes) return false
-        val k = Key(origin, permission)
+        val k = Key(scope, permission)
         val n = (dismissals[k] ?: 0) + 1
         dismissals[k] = n
         if (n >= DISMISS_EMBARGO_THRESHOLD) {
@@ -391,8 +445,8 @@ class PermissionSession(private val embargoes: Boolean = true) {
 
     /** Forget everything this run knows about the pair (decision, embargo, count). */
     @Synchronized
-    fun revoke(origin: String, permission: SiteCapability) {
-        val k = Key(origin, permission)
+    fun revoke(scope: PermissionScope, permission: SiteCapability) {
+        val k = Key(scope, permission)
         decisions.remove(k)
         embargoed.remove(k)
         dismissals.remove(k)
@@ -401,15 +455,15 @@ class PermissionSession(private val embargoes: Boolean = true) {
     }
 
     /**
-     * How many times any of [permissions] has been removed for [origin]
+     * How many times any of [permissions] has been removed for [scope]
      * ([revoke]) this run. A request that was found allowed and is still
      * on its way to the page (waiting for Android's own dialog, say)
      * compares this with what it read before deciding: a removal in
      * between means the site isn't allowed any more.
      */
     @Synchronized
-    fun removalCount(origin: String, permissions: Collection<SiteCapability>): Int =
-        permissions.distinct().sumOf { removals[Key(origin, it)] ?: 0 }
+    fun removalCount(scope: PermissionScope, permissions: Collection<SiteCapability>): Int =
+        permissions.distinct().sumOf { removals[Key(scope, it)] ?: 0 }
 
     /**
      * The remembered decision for the pair is being removed from the
@@ -419,47 +473,47 @@ class PermissionSession(private val embargoes: Boolean = true) {
      * user has just removed.
      */
     @Synchronized
-    fun removingFromStore(origin: String, permission: SiteCapability) {
-        val k = Key(origin, permission)
+    fun removingFromStore(scope: PermissionScope, permission: SiteCapability) {
+        val k = Key(scope, permission)
         storeRemovals[k] = (storeRemovals[k] ?: 0) + 1
     }
 
     /** The store write [removingFromStore] waited on is done (or failed). */
     @Synchronized
-    fun removedFromStore(origin: String, permission: SiteCapability) {
-        val k = Key(origin, permission)
+    fun removedFromStore(scope: PermissionScope, permission: SiteCapability) {
+        val k = Key(scope, permission)
         val n = (storeRemovals[k] ?: return) - 1
         if (n > 0) storeRemovals[k] = n else storeRemovals.remove(k)
     }
 
     /**
-     * [read] (of the store, for [origin]) minus what's being removed
+     * [read] (of the store, for [scope]) minus what's being removed
      * from it ([removingFromStore]) — as of before the read as well as
      * after: a read that started before the removal landed can return
      * the old value even if the removal is done by the time it returns.
      */
     suspend fun <V> readWithoutStoreRemovals(
-        origin: String,
+        scope: PermissionScope,
         read: suspend () -> Map<SiteCapability, V>,
     ): Map<SiteCapability, V> {
-        val before = beingRemovedFromStore(origin)
+        val before = beingRemovedFromStore(scope)
         val stored = read()
-        val hidden = before + beingRemovedFromStore(origin)
+        val hidden = before + beingRemovedFromStore(scope)
         return if (hidden.isEmpty()) stored else stored.filterKeys { it !in hidden }
     }
 
     @Synchronized
-    private fun beingRemovedFromStore(origin: String): Set<SiteCapability> =
-        storeRemovals.keys.filter { it.origin == origin }.mapTo(HashSet()) { it.permission }
+    private fun beingRemovedFromStore(scope: PermissionScope): Set<SiteCapability> =
+        storeRemovals.keys.filter { it.scope == scope }.mapTo(HashSet()) { it.permission }
 
-    /** Whether [permission]'s remembered decision for [origin] is being removed from the store. */
+    /** Whether [permission]'s remembered decision for [scope] is being removed from the store. */
     @Synchronized
-    fun beingRemovedFromStore(origin: String, permission: SiteCapability): Boolean =
-        Key(origin, permission) in storeRemovals
+    fun beingRemovedFromStore(scope: PermissionScope, permission: SiteCapability): Boolean =
+        Key(scope, permission) in storeRemovals
 
     @Synchronized
     fun entries(): List<SitePermissionEntry> = decisions.map { (k, d) ->
-        SitePermissionEntry(k.origin, k.permission, d, remembered = false, embargoed = k in embargoed)
+        SitePermissionEntry(k.scope.origin, k.permission, d, remembered = false, embargoed = k in embargoed, top = k.scope.top)
     }
 
     companion object {
@@ -469,7 +523,7 @@ class PermissionSession(private val embargoes: Boolean = true) {
 }
 
 /**
- * Suspends until a prompt asking about [undecided] for [origin] no
+ * Suspends until a prompt asking about [undecided] for [scope] no
  * longer asks the right question — some of it was decided elsewhere
  * (another tab's prompt for the same origin answered, or an embargo
  * reached) — and returns. Re-checks on every [PermissionSession]
@@ -478,13 +532,13 @@ class PermissionSession(private val embargoes: Boolean = true) {
  * re-check that only runs after that move must still see it.
  */
 suspend fun awaitPromptSuperseded(
-    origin: String,
+    scope: PermissionScope,
     undecided: List<SiteCapability>,
     session: PermissionSession,
     stored: suspend () -> Map<SiteCapability, PermissionDecision>,
 ) {
     val asked = PermissionPlan.Ask(undecided)
-    session.version.first { planFor(origin, undecided, stored(), session) != asked }
+    session.version.first { planFor(scope, undecided, stored(), session) != asked }
 }
 
 /**
@@ -749,19 +803,18 @@ fun androidPermissionBlockedInSettings(rationale: Boolean, deniedBefore: Boolean
 
 /**
  * What the page's **Site permissions** sheet (#266) lists: every decision
- * in [all] that belongs to the page on screen — its own origin
- * ([pageOrigin]) or an origin that asked for something from inside this
- * document ([documentOrigins]: an embedded frame's camera request is keyed
- * by the frame's origin, not the page's). The page's own come first, in
- * [all]'s order.
+ * in [all] made on the site on screen ([pageOrigin]) — its own, and those
+ * of frames embedded in it, which are keyed by the pair (#363): a frame's
+ * decision on this site is this site's to show and remove, while what the
+ * frame's origin was told as a site of its own, or inside another site,
+ * isn't. The page's own come first, in [all]'s order.
  */
 fun pageSitePermissionEntries(
     pageOrigin: String?,
-    documentOrigins: Set<String>,
     all: List<SitePermissionEntry>,
 ): List<SitePermissionEntry> {
-    val origins = documentOrigins + listOfNotNull(pageOrigin)
-    return all.filter { it.origin in origins }.sortedBy { if (it.origin == pageOrigin) 0 else 1 }
+    pageOrigin ?: return emptyList()
+    return all.filter { it.top == pageOrigin }.sortedBy { if (it.origin == pageOrigin) 0 else 1 }
 }
 
 /**

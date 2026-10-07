@@ -2128,14 +2128,38 @@ internal fun sitePermissionRows(
         } + entries.map { entry ->
             settingsRow(
                 entry,
-                permissionOriginDisplay(entry.origin),
-                sitePermissionDetail(entry),
+                permissionOriginDisplay(entry.top),
+                listOfNotNull(sitePermissionDetail(entry), embeddedSiteLine(entry)).joinToString(" · "),
             )
         }
     }
 
 private fun sitePermissionDetail(entry: SitePermissionEntry) =
     "${entry.permission.label} · ${sitePermissionStateLabel(entry)}"
+
+/**
+ * "Embedded: meet.example" under a decision a frame from another origin
+ * got on the site the row is listed under (#363); null for the site's own.
+ */
+internal fun embeddedSiteLine(entry: SitePermissionEntry): String? =
+    if (entry.scope.embedded) {
+        Strings.get(R.string.library_site_permissions_embedded, permissionOriginDisplay(entry.origin))
+    } else {
+        null
+    }
+
+/** The × button's spoken label: the frame and the site it's on, for an embedded decision (#363). */
+internal fun sitePermissionRemoveLabel(entry: SitePermissionEntry): String =
+    if (entry.scope.embedded) {
+        Strings.get(
+            R.string.settings_permission_remove_embedded,
+            entry.permission.label,
+            permissionOriginDisplay(entry.origin),
+            permissionOriginDisplay(entry.top),
+        )
+    } else {
+        Strings.get(R.string.settings_permission_remove, entry.permission.label, permissionOriginDisplay(entry.origin))
+    }
 
 @Composable
 private fun SitePermissionsSection(
@@ -2202,8 +2226,10 @@ private fun SitePermissionsSection(
                 )
                 Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
+                    // Listed under the site it was decided on (#363): a
+                    // frame's decision is that site's, with the frame below.
                     Text(
-                        permissionOriginDisplay(entry.origin),
+                        permissionOriginDisplay(entry.top),
                         fontWeight = FontWeight.Medium,
                     )
                     Text(
@@ -2211,15 +2237,18 @@ private fun SitePermissionsSection(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    embeddedSiteLine(entry)?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 IconButton(onClick = { onRevoke(entry) }) {
                     Icon(
                         Icons.Filled.Close,
-                        contentDescription = stringResource(
-                            R.string.settings_permission_remove,
-                            entry.permission.label,
-                            permissionOriginDisplay(entry.origin),
-                        ),
+                        contentDescription = sitePermissionRemoveLabel(entry),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }

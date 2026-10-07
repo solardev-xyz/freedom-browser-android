@@ -27,13 +27,30 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * A prompt waiting for the user: "[origin] wants to [permissions]".
- * Shown by [BrowserScreen] while it is its tab's
- * [BrowserState.permissionPrompt] and that tab is active; answered by
- * completing [answer].
+ * What [store] remembers for exactly [scope] (#363): a frame's request
+ * reads its (origin, top-level site) pair only — never the grant its
+ * origin holds as a site of its own, nor one made inside another site.
+ */
+internal suspend fun rememberedDecisions(
+    store: SitePermissionStore,
+    scope: PermissionScope,
+): Map<SiteCapability, PermissionDecision> =
+    store.decisionsFor(scope.origin, scope.top).mapNotNull { (k, v) ->
+        val p = SiteCapability.forKey(k) ?: return@mapNotNull null
+        val d = PermissionDecision.fromStored(v) ?: return@mapNotNull null
+        p to d
+    }.toMap()
+
+/**
+ * A prompt waiting for the user: "[scope]'s top-level site wants to
+ * [permissions]" — and, for a frame from another origin (#363), "… via
+ * [scope]'s origin". Always in the name of the site the user is on: a
+ * frame's answer is for that site alone. Shown by [BrowserScreen] while
+ * it is its tab's [BrowserState.permissionPrompt] and that tab is
+ * active; answered by completing [answer].
  */
 class PermissionPrompt internal constructor(
-    val origin: String,
+    val scope: PermissionScope,
     val permissions: List<SiteCapability>,
     /**
      * Asked from a private tab (#86): the answer lasts for the private
@@ -56,9 +73,11 @@ class PermissionPrompt internal constructor(
  * `onGeolocationPermissionsShowPrompt`, a link to another app via
  * [onExternalLink]):
  *
- *  1. Key it by the requesting origin ([permissionOriginKey]); a
- *     non-http(s) origin or a capability we don't prompt for is denied
- *     — protected media (DRM, #267) with a notice saying why.
+ *  1. Key it by the requesting origin and the top-level site it asks
+ *     from ([permissionScopeFor], #363): a frame from another origin is
+ *     decided on that site, never by its origin's own grant. A
+ *     non-http(s) origin or page, or a capability we don't prompt for,
+ *     is denied — protected media (DRM, #267) with a notice saying why.
  *  2. Look up remembered + session decisions ([planFor]).
  *  3. Undecided → put a [PermissionPrompt] on the tab and wait. One
  *     prompt at a time per tab: requests queue behind a per-tab lock
@@ -183,13 +202,18 @@ class SitePermissionBroker private constructor(
             noteProtectedMediaRefused(tab, origin)
             return
         }
-        if (byPermission.isEmpty() || origin == null) {
+        // Read at arrival, on the main thread: the request comes from the
+        // committed document ([BrowserState.permissionOrigin] is set at
+        // its `onPageStarted`, which also withdraws whatever the outgoing
+        // one asked).
+        val scope = permissionScopeFor(request.origin?.toString(), tab.permissionOrigin)
+        if (byPermission.isEmpty() || scope == null) {
             request.deny()
             return
         }
         handle(
             tab = tab,
-            origin = origin,
+            scope = scope,
             permissions = byPermission.map { it.first },
             token = request,
             grant = { request.grant(byPermission.map { it.second }.toTypedArray()) },
@@ -231,8 +255,8 @@ class SitePermissionBroker private constructor(
         callback: GeolocationPermissions.Callback?,
     ) {
         callback ?: return
-        val origin = permissionOriginKey(rawOrigin)
-        if (origin == null) {
+        val scope = permissionScopeFor(rawOrigin, tab.permissionOrigin)
+        if (scope == null) {
             callback.invoke(rawOrigin, false, false)
             return
         }
@@ -240,7 +264,7 @@ class SitePermissionBroker private constructor(
         // revoke), not WebView's own GeolocationPermissions store.
         handle(
             tab = tab,
-            origin = origin,
+            scope = scope,
             permissions = listOf(SitePermission.LOCATION),
             token = callback,
             grant = { callback.invoke(rawOrigin, true, false) },
@@ -251,14 +275,15 @@ class SitePermissionBroker private constructor(
     /**
      * A page in [tab] asked to hand a link to another app (#85), already
      * vetted by [externalLinkVerdict] (blocked schemes, main frame, user
-     * gesture). [origin] is the page's permission key; [launch] starts
-     * the app, and only runs if the site is allowed [scheme] and the
-     * page that asked is still the tab's document.
+     * gesture). [origin] is the page's permission key — a main-frame
+     * link, so the site's own decision; [launch] starts the app, and only
+     * runs if the site is allowed [scheme] and the page that asked is
+     * still the tab's document.
      */
     fun onExternalLink(tab: BrowserState, origin: String, scheme: ExternalScheme, launch: () -> Unit) {
         handle(
             tab = tab,
-            origin = origin,
+            scope = PermissionScope(origin),
             permissions = listOf(scheme),
             token = Any(),
             grant = launch,
@@ -299,12 +324,12 @@ class SitePermissionBroker private constructor(
 
     /**
      * What a tab's current document has to do with site permissions:
-     * [origins] that asked for something from it (its own, or an
-     * embedded frame's), what each of them was granted ([grants]:
-     * camera, microphone, location, MIDI SysEx — per origin, since a frame's grant
-     * isn't the page's), and which of those the user has since removed
-     * while the document still holds them ([revokedHeld], per origin
-     * too) — from any tab's sheet or Settings, not only this tab's own
+     * the [PermissionScope]s that asked for something from it ([scopes]:
+     * its own, or an embedded frame's on this site), what each of them was
+     * granted ([grants]: camera, microphone, location, MIDI SysEx — per
+     * scope, since a frame's grant isn't the page's), and which of those
+     * the user has since removed while the document still holds them
+     * ([revokedHeld], per scope too) — from any tab's sheet or Settings, not only this tab's own
      * sheet ([noteRemoved]) — until the site is allowed them again, from
      * any tab of the tier ([noteAllowedAgain]). WebView can't take a
      * grant back from a live document — a camera stream runs on, a
@@ -318,44 +343,47 @@ class SitePermissionBroker private constructor(
      */
     data class DocumentPermissions(
         val doc: Int,
-        val origins: Set<String> = emptySet(),
-        val grants: Map<String, Set<SitePermission>> = emptyMap(),
-        val revokedHeld: Map<String, Set<SitePermission>> = emptyMap(),
+        val scopes: Set<PermissionScope> = emptySet(),
+        val grants: Map<PermissionScope, Set<SitePermission>> = emptyMap(),
+        val revokedHeld: Map<PermissionScope, Set<SitePermission>> = emptyMap(),
     ) {
-        /** Everything granted to this document, whichever of its origins got it. */
+        /** Everything granted to this document, whichever of its scopes got it. */
         val granted: Set<SitePermission> get() = grants.values.flatten().toSet()
 
-        /** What [origin] was granted in this document. */
-        fun grantedTo(origin: String): Set<SitePermission> = grants[origin].orEmpty()
+        /** What [scope] was granted in this document. */
+        fun grantedTo(scope: PermissionScope): Set<SitePermission> = grants[scope].orEmpty()
 
-        /** After [origin] gets [more] (again) in this document: no longer revoked. */
-        fun granting(origin: String, more: Collection<SitePermission>): DocumentPermissions =
-            allowedAgain(origin, more).copy(
-                origins = origins + origin,
-                grants = if (more.isEmpty()) grants else grants + (origin to grantedTo(origin) + more),
+        /** After [scope] gets [more] (again) in this document: no longer revoked. */
+        fun granting(scope: PermissionScope, more: Collection<SitePermission>): DocumentPermissions =
+            allowedAgain(scope, more).copy(
+                scopes = scopes + scope,
+                grants = if (more.isEmpty()) grants else grants + (scope to grantedTo(scope) + more),
             )
 
         /**
-         * After [origin] is allowed [again] — from this document or any
+         * After [scope] is allowed [again] — from this document or any
          * other of its tier: what this document still holds of it is no
          * longer "removed" but allowed, so there's nothing a reload would
          * take away. Nothing is granted to this document by it.
          */
-        fun allowedAgain(origin: String, again: Collection<SitePermission>): DocumentPermissions {
-            val held = revokedHeld[origin] ?: return this
+        fun allowedAgain(scope: PermissionScope, again: Collection<SitePermission>): DocumentPermissions {
+            val held = revokedHeld[scope] ?: return this
             val left = held - again.toSet()
             if (left == held) return this
-            return copy(revokedHeld = if (left.isEmpty()) revokedHeld - origin else revokedHeld + (origin to left))
+            return copy(revokedHeld = if (left.isEmpty()) revokedHeld - scope else revokedHeld + (scope to left))
         }
 
         /**
          * After [entry] is removed from the sheet over this document: what
-         * its origin was given here is still held.
+         * its scope was given here is still held. Only that exact pair
+         * (#363): removing `meet.example`'s own camera doesn't touch what
+         * it was given framed by another site, nor the reverse.
          */
         fun revoking(entry: SitePermissionEntry): DocumentPermissions {
             val p = entry.permission
-            return if (p is SitePermission && p in grantedTo(entry.origin)) {
-                copy(revokedHeld = revokedHeld + (entry.origin to revokedHeld[entry.origin].orEmpty() + p))
+            val scope = entry.scope
+            return if (p is SitePermission && p in grantedTo(scope)) {
+                copy(revokedHeld = revokedHeld + (scope to revokedHeld[scope].orEmpty() + p))
             } else {
                 this
             }
@@ -368,10 +396,10 @@ class SitePermissionBroker private constructor(
         fun stillHeld(inUse: Set<SitePermission>): Set<SitePermission> =
             stillHeldAfterRemoval(revokedHeld.values.flatten().toSet(), inUse)
 
-        /** Whether [entry]'s own origin was given it here and it's in use now. */
+        /** Whether [entry]'s own scope was given it here and it's in use now. */
         fun inUse(entry: SitePermissionEntry, inUse: Set<SitePermission>): Boolean =
             entry.decision == PermissionDecision.ALLOW &&
-                entry.permission in inUse && entry.permission in grantedTo(entry.origin)
+                entry.permission in inUse && entry.permission in grantedTo(entry.scope)
     }
 
     private val documentActivity = MutableStateFlow<Map<Long, DocumentPermissions>>(emptyMap())
@@ -380,11 +408,11 @@ class SitePermissionBroker private constructor(
     fun documentPermissions(tabId: Long): Flow<DocumentPermissions> =
         documentActivity.map { it[tabId] ?: DocumentPermissions(documents[tabId] ?: 0) }
 
-    private fun noteDocument(tabId: Long, doc: Int, origin: String, granted: Collection<SitePermission> = emptyList()) {
+    private fun noteDocument(tabId: Long, doc: Int, scope: PermissionScope, granted: Collection<SitePermission> = emptyList()) {
         if ((documents[tabId] ?: 0) != doc) return
         documentActivity.update { all ->
             val cur = all[tabId]?.takeIf { it.doc == doc } ?: DocumentPermissions(doc)
-            all + (tabId to cur.granting(origin, granted))
+            all + (tabId to cur.granting(scope, granted))
         }
     }
 
@@ -428,8 +456,8 @@ class SitePermissionBroker private constructor(
 
     /**
      * The decisions the Site permissions sheet lists for [tab]'s page
-     * ([pageSitePermissionEntries]) — [pageOrigin] plus whatever else
-     * asked from inside its current document — as that tab sees them: a
+     * ([pageSitePermissionEntries]) — [pageOrigin]'s own and those of
+     * frames embedded in it (#363) — as that tab sees them: a
      * normal tab's remembered and this-run decisions, or a private tab's
      * private-session ones only.
      */
@@ -440,9 +468,7 @@ class SitePermissionBroker private constructor(
         } else {
             entries
         }
-        return combine(decisions, documentPermissions(tab.id)) { all, doc ->
-            pageSitePermissionEntries(pageOrigin, doc.origins, all)
-        }
+        return decisions.map { all -> pageSitePermissionEntries(pageOrigin, sitePermissionListOrder(all)) }
     }
 
     /**
@@ -452,7 +478,7 @@ class SitePermissionBroker private constructor(
      */
     fun revokeOnTab(tab: BrowserState, entry: SitePermissionEntry) {
         if (tab.private) {
-            privateSession.revoke(entry.origin, entry.permission)
+            privateSession.revoke(entry.scope, entry.permission)
             noteRemoved(entry, private = true)
         } else {
             revoke(entry)
@@ -461,7 +487,7 @@ class SitePermissionBroker private constructor(
 
     /**
      * [entry] was removed from the [private] tier: every open document of
-     * that tier its origin was given it in still holds it — wherever the
+     * that tier its scope was given it in still holds it — wherever the
      * × was tapped (this tab's sheet, another tab's, Settings) — so each
      * of their sheets and menu rows says so and offers Reload.
      */
@@ -474,15 +500,15 @@ class SitePermissionBroker private constructor(
     }
 
     /**
-     * [origin] was allowed [permissions] again in the [private] tier: no
+     * [scope] was allowed [permissions] again in the [private] tier: no
      * open document of that tier still holds them "removed" — the
      * counterpart of [noteRemoved], so a re-grant from one tab clears the
      * "kept until reload" note in every other.
      */
-    private fun noteAllowedAgain(origin: String, permissions: Collection<SitePermission>, private: Boolean) {
+    private fun noteAllowedAgain(scope: PermissionScope, permissions: Collection<SitePermission>, private: Boolean) {
         if (permissions.isEmpty()) return
         documentActivity.update { all ->
-            allowingAgainInDocuments(all, origin, permissions) { tabId -> (tabId in privateTabs) == private }
+            allowingAgainInDocuments(all, scope, permissions) { tabId -> (tabId in privateTabs) == private }
         }
     }
 
@@ -505,7 +531,11 @@ class SitePermissionBroker private constructor(
             store.all.collect { records ->
                 storedPopupAllows = records
                     .filter {
-                        it.permission == SitePermission.POPUPS.key &&
+                        // Pop-ups are the page's own (a frame's window
+                        // counts as its page's), so only a site's own
+                        // decision applies.
+                        it.top == it.origin &&
+                            it.permission == SitePermission.POPUPS.key &&
                             PermissionDecision.fromStored(it.decision) == PermissionDecision.ALLOW
                     }
                     .mapTo(HashSet()) { it.origin }
@@ -521,11 +551,12 @@ class SitePermissionBroker private constructor(
      */
     fun popupsAllowed(tab: BrowserState, origin: String?): Boolean {
         origin ?: return false
-        return when (sessionFor(tab).decisionFor(origin, SitePermission.POPUPS)) {
+        val scope = PermissionScope(origin)
+        return when (sessionFor(tab).decisionFor(scope, SitePermission.POPUPS)) {
             PermissionDecision.ALLOW -> true
             PermissionDecision.DENY -> false
             null -> !tab.private && origin in storedPopupAllows &&
-                !session.beingRemovedFromStore(origin, SitePermission.POPUPS)
+                !session.beingRemovedFromStore(scope, SitePermission.POPUPS)
         }
     }
 
@@ -537,15 +568,16 @@ class SitePermissionBroker private constructor(
      */
     fun allowPopups(tab: BrowserState, origin: String) {
         val tier = sessionFor(tab)
-        tier.record(origin, SitePermission.POPUPS, PermissionDecision.ALLOW, remembered = false)
+        val site = PermissionScope(origin)
+        tier.record(site, SitePermission.POPUPS, PermissionDecision.ALLOW, remembered = false)
         if (tab.private) return
         scope.launch {
             // A failed write leaves it a session decision, which Settings
             // shows as such — the truth.
             if (!store.set(origin, SitePermission.POPUPS.key, PermissionDecision.ALLOW.stored)) return@launch
-            if (tier.decisionFor(origin, SitePermission.POPUPS) == PermissionDecision.ALLOW) {
+            if (tier.decisionFor(site, SitePermission.POPUPS) == PermissionDecision.ALLOW) {
                 storedPopupAllows = storedPopupAllows + origin
-                tier.record(origin, SitePermission.POPUPS, PermissionDecision.ALLOW, remembered = true)
+                tier.record(site, SitePermission.POPUPS, PermissionDecision.ALLOW, remembered = true)
             }
         }
     }
@@ -561,38 +593,41 @@ class SitePermissionBroker private constructor(
     // ---------------------------------------------------------------
 
     /**
-     * Every decision the user can revoke: remembered ones, then this
-     * run's session-only ones (including dismissal embargoes).
+     * Every decision the user can revoke, remembered and this run's
+     * session-only ones (including dismissal embargoes), grouped by the
+     * top-level site they were made on ([sitePermissionListOrder]): a
+     * frame's decision on a site is listed under that site (#363).
      */
     val entries: Flow<List<SitePermissionEntry>> =
         combine(store.all, session.version) { records, _ ->
             val stored = records.mapNotNull { r ->
                 val p = SiteCapability.forKey(r.permission) ?: return@mapNotNull null
                 val d = PermissionDecision.fromStored(r.decision) ?: return@mapNotNull null
-                SitePermissionEntry(r.origin, p, d, remembered = true)
+                SitePermissionEntry(r.origin, p, d, remembered = true, top = r.top)
             }
-            val storedKeys = stored.map { it.origin to it.permission }.toSet()
-            stored + session.entries()
-                .filter { (it.origin to it.permission) !in storedKeys }
-                .sortedWith(compareBy({ it.origin }, { capabilityOrder(it.permission) }, { it.permission.key }))
+            val storedKeys = stored.map { it.scope to it.permission }.toSet()
+            sitePermissionListOrder(stored + session.entries().filter { (it.scope to it.permission) !in storedKeys })
         }
 
     /** Forget [entry] everywhere, so the site has to ask again. */
     fun revoke(entry: SitePermissionEntry) {
-        session.revoke(entry.origin, entry.permission)
+        val scope = entry.scope
+        session.revoke(scope, entry.permission)
         // Off at once, not only once the store's next read lands.
-        if (entry.permission == SitePermission.POPUPS) storedPopupAllows = storedPopupAllows - entry.origin
+        if (entry.permission == SitePermission.POPUPS && !scope.embedded) {
+            storedPopupAllows = storedPopupAllows - entry.origin
+        }
         noteRemoved(entry, private = false)
         // Until the store write lands, what it's removing is hidden from
         // every read of the store: a request arriving meanwhile would
         // otherwise read the old Allow after the removal count was
         // bumped, and be granted what the user just removed.
-        session.removingFromStore(entry.origin, entry.permission)
-        scope.launch {
+        session.removingFromStore(scope, entry.permission)
+        this.scope.launch {
             try {
-                store.remove(entry.origin, entry.permission.key)
+                store.remove(entry.origin, entry.permission.key, entry.top)
             } finally {
-                session.removedFromStore(entry.origin, entry.permission)
+                session.removedFromStore(scope, entry.permission)
             }
         }
     }
@@ -603,7 +638,7 @@ class SitePermissionBroker private constructor(
 
     private fun handle(
         tab: BrowserState,
-        origin: String,
+        scope: PermissionScope,
         permissions: List<SiteCapability>,
         token: Any,
         grant: () -> Unit,
@@ -614,7 +649,7 @@ class SitePermissionBroker private constructor(
         pending += entry
         // Listed on the page's Site permissions sheet (#266) from now on,
         // whatever the answer: a frame that asks is part of the page.
-        noteDocument(tab.id, doc, origin)
+        noteDocument(tab.id, doc, scope)
         fun live() = !entry.withdrawn.value && (documents[tab.id] ?: 0) == doc
         var finished = false
         fun finish(allowed: Boolean) {
@@ -624,14 +659,14 @@ class SitePermissionBroker private constructor(
             val granting = allowed && live()
             runCatching { if (granting) grant() else deny() }
                 .onFailure { Log.w(TAG, "answering permission request failed", it) }
-            if (granting) noteDocument(tab.id, doc, origin, permissions.filterIsInstance<SitePermission>())
+            if (granting) noteDocument(tab.id, doc, scope, permissions.filterIsInstance<SitePermission>())
         }
-        scope.launch {
+        this.scope.launch {
             // Whatever goes wrong below, the page gets an answer (a deny)
             // instead of a request left hanging — and the app doesn't
             // crash on a main-thread exception.
             try {
-                decide(tab, entry, origin, permissions, ::live, ::finish)
+                decide(tab, entry, scope, permissions, ::live, ::finish)
             } catch (e: CancellationException) {
                 finish(false)
                 throw e
@@ -645,7 +680,7 @@ class SitePermissionBroker private constructor(
     private suspend fun decide(
         tab: BrowserState,
         entry: Pending,
-        origin: String,
+        scope: PermissionScope,
         permissions: List<SiteCapability>,
         live: () -> Boolean,
         finish: (Boolean) -> Unit,
@@ -663,14 +698,14 @@ class SitePermissionBroker private constructor(
             var allowed: Boolean? = null
             while (allowed == null) {
                 if (!live()) return@withLock false
-                removals = tier.removalCount(origin, permissions)
-                val stored = storedDecisionsFor(tab, origin)
+                removals = tier.removalCount(scope, permissions)
+                val stored = storedDecisionsFor(tab, scope)
                 if (!live()) return@withLock false
-                allowed = when (val plan = planFor(origin, permissions, stored, tier)) {
+                allowed = when (val plan = planFor(scope, permissions, stored, tier)) {
                     PermissionPlan.Deny -> false
                     PermissionPlan.Grant -> true
                     // null: settled by another tab's answer meanwhile — re-plan.
-                    is PermissionPlan.Ask -> ask(tab, entry, origin, plan.undecided)
+                    is PermissionPlan.Ask -> ask(tab, entry, scope, plan.undecided)
                 }
             }
             allowed
@@ -680,21 +715,17 @@ class SitePermissionBroker private constructor(
         // above still stands. Checked again once Android's own dialog is
         // done — a request waiting for its tab to come on screen can wait
         // a long time, and a removal made meanwhile must win.
-        fun stillAllowed() = live() && tier.removalCount(origin, permissions) == removals
+        fun stillAllowed() = live() && tier.removalCount(scope, permissions) == removals
         if (!siteAllowed || !stillAllowed()) return finish(false)
         finish(ensureAndroidPermissions(entry, permissions, ::stillAllowed) && stillAllowed())
     }
 
-    /** What's remembered for [origin], as [tab] sees it: nothing, in a private tab. */
-    private suspend fun storedDecisionsFor(tab: BrowserState, origin: String): Map<SiteCapability, PermissionDecision> =
-        if (tab.private) emptyMap() else session.readWithoutStoreRemovals(origin) { storedDecisions(origin) }
+    /** What's remembered for [scope], as [tab] sees it: nothing, in a private tab. */
+    private suspend fun storedDecisionsFor(tab: BrowserState, scope: PermissionScope): Map<SiteCapability, PermissionDecision> =
+        if (tab.private) emptyMap() else session.readWithoutStoreRemovals(scope) { storedDecisions(scope) }
 
-    private suspend fun storedDecisions(origin: String): Map<SiteCapability, PermissionDecision> =
-        store.decisionsFor(origin).mapNotNull { (k, v) ->
-            val p = SiteCapability.forKey(k) ?: return@mapNotNull null
-            val d = PermissionDecision.fromStored(v) ?: return@mapNotNull null
-            p to d
-        }.toMap()
+    private suspend fun storedDecisions(scope: PermissionScope): Map<SiteCapability, PermissionDecision> =
+        rememberedDecisions(store, scope)
 
     /**
      * Show the prompt, record the answer, and say whether the site is
@@ -710,17 +741,17 @@ class SitePermissionBroker private constructor(
     private suspend fun ask(
         tab: BrowserState,
         entry: Pending,
-        origin: String,
+        scope: PermissionScope,
         undecided: List<SiteCapability>,
     ): Boolean? {
-        val prompt = PermissionPrompt(origin, undecided, private = tab.private)
+        val prompt = PermissionPrompt(scope, undecided, private = tab.private)
         val tier = sessionFor(tab)
         entry.prompt = prompt
         tab.permissionPrompt = prompt
         val answer = try {
             coroutineScope {
                 val watcher = launch {
-                    awaitPromptSuperseded(origin, undecided, tier) { storedDecisionsFor(tab, origin) }
+                    awaitPromptSuperseded(scope, undecided, tier) { storedDecisionsFor(tab, scope) }
                     prompt.respond(PromptAnswer.Superseded)
                 }
                 try {
@@ -735,16 +766,16 @@ class SitePermissionBroker private constructor(
         }
         return when (answer) {
             is PromptAnswer.Allow -> {
-                noteAllowedAgain(origin, undecided.filterIsInstance<SitePermission>(), tab.private)
-                record(tier, origin, undecided, PermissionDecision.ALLOW, answer.remember && !tab.private)
+                noteAllowedAgain(scope, undecided.filterIsInstance<SitePermission>(), tab.private)
+                record(tier, scope, undecided, PermissionDecision.ALLOW, answer.remember && !tab.private)
                 true
             }
             is PromptAnswer.Block -> {
-                record(tier, origin, undecided, PermissionDecision.DENY, answer.remember && !tab.private)
+                record(tier, scope, undecided, PermissionDecision.DENY, answer.remember && !tab.private)
                 false
             }
             PromptAnswer.Dismiss -> {
-                for (p in undecided) tier.dismiss(origin, p)
+                for (p in undecided) tier.dismiss(scope, p)
                 false
             }
             PromptAnswer.Withdrawn -> false
@@ -754,7 +785,7 @@ class SitePermissionBroker private constructor(
 
     private suspend fun record(
         tier: PermissionSession,
-        origin: String,
+        scope: PermissionScope,
         permissions: List<SiteCapability>,
         decision: PermissionDecision,
         remember: Boolean,
@@ -764,16 +795,16 @@ class SitePermissionBroker private constructor(
         // one) sees it while the store write is still in flight; a
         // remembered decision only leaves the session tier once the
         // store holds it.
-        for (p in permissions) tier.record(origin, p, decision, remembered = false)
+        for (p in permissions) tier.record(scope, p, decision, remembered = false)
         if (!remember) return
         // A failed write (the store logs it) leaves the decision as a
         // session one: it still applies this run and Settings shows it
         // as "this session", which is the truth.
-        val written = permissions.filter { store.set(origin, it.key, decision.stored) }
+        val written = permissions.filter { store.set(scope.origin, it.key, decision.stored, scope.top) }
         for (p in written) {
             // Unless the user revoked or re-decided it meanwhile.
-            if (tier.decisionFor(origin, p) == decision) {
-                tier.record(origin, p, decision, remembered = true)
+            if (tier.decisionFor(scope, p) == decision) {
+                tier.record(scope, p, decision, remembered = true)
             }
         }
     }
@@ -885,10 +916,6 @@ class SitePermissionBroker private constructor(
         }
     }
 
-    /** Device capabilities in their declared order, then app links. */
-    private fun capabilityOrder(c: SiteCapability): Int =
-        (c as? SitePermission)?.ordinal ?: SitePermission.entries.size
-
     companion object {
         /**
          * [all] after [entry] is removed, for every tab [inScope] — each
@@ -903,16 +930,16 @@ class SitePermissionBroker private constructor(
             all.mapValues { (tabId, d) -> if (inScope(tabId)) d.revoking(entry) else d }
 
         /**
-         * [all] after [origin] is allowed [permissions] again, for every
+         * [all] after [scope] is allowed [permissions] again, for every
          * tab [inScope] ([DocumentPermissions.allowedAgain]).
          */
         internal fun allowingAgainInDocuments(
             all: Map<Long, DocumentPermissions>,
-            origin: String,
+            scope: PermissionScope,
             permissions: Collection<SitePermission>,
             inScope: (Long) -> Boolean,
         ): Map<Long, DocumentPermissions> =
-            all.mapValues { (tabId, d) -> if (inScope(tabId)) d.allowedAgain(origin, permissions) else d }
+            all.mapValues { (tabId, d) -> if (inScope(tabId)) d.allowedAgain(scope, permissions) else d }
 
         private const val TAG = "SitePermissions"
 

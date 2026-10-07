@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.LocationOn
@@ -126,15 +128,27 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
         onDismissRequest = { if (guard.accepts()) prompt.respond(PromptAnswer.Dismiss) },
         icon = { Icon(icon, contentDescription = null) },
         title = {
+            // The site the user is on — for a frame from another origin
+            // too (#363): the answer is that site's to give.
             Text(
-                permissionOriginDisplay(prompt.origin),
+                permissionOriginDisplay(prompt.scope.top),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
         },
         text = {
-            Column {
-                Text(stringResource(R.string.library_permission_prompt_wants_to, describePermissionRequest(prompt.permissions)))
+            // Scrolls: at a large font scale, with a frame's hint (#363),
+            // the text outgrows the dialog and must still be readable.
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(permissionPromptSentence(prompt.scope, prompt.permissions))
+                embeddedPermissionHint(prompt.scope)?.let { hint ->
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        hint,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Spacer(Modifier.height(12.dp))
                 Text(
                     stringResource(
@@ -173,6 +187,32 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
         },
     )
 }
+
+/**
+ * The prompt's sentence under the site's name: "wants to use your
+ * camera", or for a frame from another origin (#363) "wants to use your
+ * camera via meet.example" — the frame named in full, like the title.
+ */
+internal fun permissionPromptSentence(scope: PermissionScope, permissions: List<SiteCapability>): String {
+    val what = describePermissionRequest(permissions)
+    return if (scope.embedded) {
+        Strings.get(R.string.library_permission_prompt_wants_to_via, what, permissionOriginDisplay(scope.origin))
+    } else {
+        Strings.get(R.string.library_permission_prompt_wants_to, what)
+    }
+}
+
+/** For a frame from another origin (#363): whose answer it is and where it counts; null otherwise. */
+internal fun embeddedPermissionHint(scope: PermissionScope): String? =
+    if (scope.embedded) {
+        Strings.get(
+            R.string.library_permission_prompt_embedded_hint,
+            permissionOriginDisplay(scope.origin),
+            permissionOriginDisplay(scope.top),
+        )
+    } else {
+        null
+    }
 
 private fun permissionChoiceLabel(choice: PermissionChoice, private: Boolean): Int = when (choice) {
     // In a private tab this is the only Allow, and "this session" would
