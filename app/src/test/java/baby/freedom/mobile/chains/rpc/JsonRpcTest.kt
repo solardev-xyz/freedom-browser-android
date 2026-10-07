@@ -81,4 +81,62 @@ class JsonRpcTest {
         assertNull(JsonRpc.quantity("1.5"))
         assertEquals(BigInteger.TEN, WalletRpc.quantity("0xa"))
     }
+
+    /**
+     * An answer nested past [JsonRpc.MAX_DEPTH] is malformed before the
+     * parser sees it (the platform's `org.json` overflows the stack a few
+     * thousand levels down; `HostileRpcJsonDeviceTest` runs that one), and
+     * brackets inside strings don't count towards it.
+     */
+    @Test
+    fun deeplyNestedAnswersAreMalformedBeforeTheyAreParsed() {
+        fun nested(n: Int) = """{"jsonrpc":"2.0","id":1,"result":""" + "[".repeat(n) + "]".repeat(n) + "}"
+        // Envelope plus 63 levels: the limit, still an answer.
+        assertTrue(JsonRpc.parse(nested(JsonRpc.MAX_DEPTH - 1)) is JsonRpc.Envelope.Result)
+        for (n in listOf(JsonRpc.MAX_DEPTH, 5_000)) {
+            assertEquals("$n levels", JsonRpc.Envelope.Malformed("nested too deeply"), JsonRpc.parse(nested(n)))
+        }
+        val deepError = """{"error":{"code":3,"message":"x","data":""" + "{\"a\":".repeat(100) + "1" + "}".repeat(100) + "}}"
+        assertEquals(JsonRpc.Envelope.Malformed("nested too deeply"), JsonRpc.parse(deepError))
+        // Brackets in a string (escaped quotes too) aren't nesting.
+        val text = "\\\"" + "[".repeat(500) + "{".repeat(500)
+        assertEquals(JsonRpc.Envelope.Result(text), JsonRpc.parse(JSONObject().put("result", text).toString()))
+        assertEquals(2, JsonRpc.depth("""[{"a":"\\","b":"\"{[[","c":"]"}]"""))
+        // A real block with access lists is far from it.
+        val block = """{"jsonrpc":"2.0","id":1,"result":{"number":"0x1","transactions":[{"hash":"0x00",""" +
+            """"accessList":[{"address":"0x00","storageKeys":["0x00"]}]}]}}"""
+        assertEquals(7, JsonRpc.depth(block))
+        assertTrue(JsonRpc.parse(block) is JsonRpc.Envelope.Result)
+    }
+
+    /**
+     * The platform's `JSONTokener` is lenient — comments, single-quoted
+     * strings, unquoted literals — and the depth count reads the body the
+     * same way: a stray `"` the parser skips mustn't hide the brackets
+     * after it. Past the count, the parsed tree is measured again.
+     */
+    @Test
+    fun lenientSyntaxDoesNotHideNesting() {
+        fun deep(n: Int) = "[".repeat(n) + "]".repeat(n)
+        val n = 3_000
+        for (prefix in listOf("/* \" */", "// \"\n", "# \"\n", "'\"':1,", "a\":1,", "\"x\"=>\"]]]\",", "\"x\"=\"]]]\",")) {
+            val body = """{"jsonrpc":"2.0","id":1,$prefix"result":${deep(n)}}"""
+            assertTrue("$prefix: ${JsonRpc.depth(body)}", JsonRpc.depth(body) > JsonRpc.MAX_DEPTH)
+            assertEquals(prefix, JsonRpc.Envelope.Malformed("nested too deeply"), JsonRpc.parse(body))
+        }
+        // An unquoted literal with a quote in it, in an array: `a"` is one value.
+        assertEquals(4, JsonRpc.depth("""[a",[[[1]]],b"]"""))
+        // What the lexer skips the same way the parser does still doesn't count.
+        assertEquals(1, JsonRpc.depth("""{/* [[ */"a":'[[\'[',// [[
+b:1 # [[
+}"""))
+        assertEquals(1, JsonRpc.depth("{/* [[[ unterminated"))
+
+        // The parsed tree, whatever the lexer read.
+        var tree: Any = JSONArray()
+        repeat(JsonRpc.MAX_DEPTH - 1) { tree = JSONArray().put(tree) }
+        assertFalse(JsonRpc.tooDeep(tree))
+        assertTrue(JsonRpc.tooDeep(JSONObject().put("r", tree)))
+        assertFalse(JsonRpc.tooDeep("0x1"))
+    }
 }

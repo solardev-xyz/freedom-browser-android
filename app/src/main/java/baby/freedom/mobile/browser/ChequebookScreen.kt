@@ -2,12 +2,20 @@ package baby.freedom.mobile.browser
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -17,15 +25,27 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
+import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.NodeInfo
+import baby.freedom.swarm.NodeStatus
 import java.math.BigInteger
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 /**
  * The chequebook as the light node's gateway reports it (#117): its
@@ -45,13 +65,18 @@ internal fun rememberChequebookState(
         if (!light) value = ChequebookState()
         while (light) {
             val address = gatewayGet("/chequebook/address")?.let(::chequebookFrom)
-            val balance = if (address.isNullOrEmpty()) null else gatewayGet("/chequebook/balance")?.let(::chequebookBalanceFrom)
+            val funds = if (address.isNullOrEmpty()) null else gatewayGet("/chequebook/balance")?.let(::chequebookFundsFrom)
             val wallet = if (withWallet) gatewayGet("/wallet", WALLET_TIMEOUT_MS)?.let(::walletBzzFrom) else null
             // A failed read keeps what was last known.
+            val none = address == ""
+            val known = address ?: value.address
             value = ChequebookState(
-                address = address ?: value.address,
-                balancePlur = if (address == "") null else balance ?: value.balancePlur,
+                address = known,
+                balancePlur = if (none) null else funds?.totalPlur ?: value.balancePlur,
                 walletPlur = wallet ?: value.walletPlur,
+                availablePlur = if (none) null else funds?.availablePlur ?: value.availablePlur,
+                availableUpperBound = if (none) false else funds?.availableUpperBound ?: value.availableUpperBound,
+                ledgerLost = if (none) false else funds?.ledgerLost ?: value.ledgerLost,
             )
             delay(pollMs)
         }
@@ -60,8 +85,29 @@ internal fun rememberChequebookState(
 }
 
 /**
+ * ant's `ant_swap_status` while the node runs, read every [SWAP_POLL_MS]
+ * through `:node` (no network: ant answers from memory), and again at once
+ * whenever [refresh] changes; null until the first answer. A failed read
+ * keeps the last answer.
+ */
+@Composable
+internal fun rememberSwapStatus(running: Boolean, refresh: Any = Unit): SwapStatus? {
+    val status by produceState<SwapStatus?>(null, running, refresh) {
+        if (!running) value = null
+        while (running) {
+            val answer = withContext(Dispatchers.IO) { StampClient.call("swapStatus") }
+            (answer as? StampClient.Answer.Ok)?.json?.let(::swapStatusFrom)?.let { value = it }
+            delay(SWAP_POLL_MS)
+        }
+    }
+    return status
+}
+
+/**
  * The chequebook page (#117), over the node page: the node's chequebook,
- * what it holds, and a deposit into it from the node's own xBZZ.
+ * what it holds and what it can still spend, whether downloads pay peers
+ * from it (the "Pay peers from the chequebook" switch, and a lost cheque
+ * ledger to confirm), and a deposit into it from the node's own xBZZ.
  */
 @Composable
 internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
@@ -75,8 +121,34 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
     LaunchedEffect(spend) {
         if (spend is StampClient.Spend.Done || spend is StampClient.Spend.Failed) refresh++
     }
+    val context = LocalContext.current
+    val settings = remember(context) { NodeSettings.get(context) }
+    // Confirmed lost ledgers: their credit stays an upper bound.
+    val confirmedLedgers by remember(settings) { settings.swarmConfirmedLedgers }.collectAsState(initial = emptySet())
     val state = rememberChequebookState(light = blocked == null, refresh = refresh, withWallet = true)
+        .withConfirmedLedgers(confirmedLedgers)
+    // The switch's setting; null until read, so it doesn't flicker.
+    // MainActivity relays it to the node, live and after every init.
+    val swapWanted by remember(settings) { settings.swarmSwapEnabled }.collectAsState(initial = null)
+    val scope = rememberCoroutineScope()
+    // A lost ledger confirmed: read again at once.
+    var swapRefresh by remember { mutableIntStateOf(0) }
+    val swap = rememberSwapStatus(nodeInfo.status == NodeStatus.Running, refresh = swapWanted to swapRefresh)
+    // The lost-ledger confirmation: open, and how the last one went.
+    var confirmingLiability by remember { mutableStateOf<String?>(null) }
+    var liabilityOutcome by remember { mutableStateOf<String?>(null) }
+    // The user's pick, or the preset that suits what the node holds (#425,
+    // W44), picked once when the balance is first known and kept from then
+    // on, so a later balance read never moves the highlight by itself.
+    // Nothing is highlighted before that; Deposit waits for the balance anyway.
+    // depositPick keeps a pick already made, so this only ever fills a
+    // missing one. After a deposit the pick is redone for what the node
+    // will hold once it lands (depositPickAfterDeposit).
     var amount by rememberSaveable { mutableStateOf<String?>(null) }
+    val walletKnown = state.walletPlur != null
+    LaunchedEffect(amount == null, walletKnown) {
+        amount = depositPick(amount, state.walletPlur)
+    }
     val amountPlur = amount?.let(::BigInteger)
     // What the confirmation shows, captured when it opens: that's what's sent.
     var confirming by remember { mutableStateOf<Pair<String, BigInteger>?>(null) }
@@ -96,31 +168,22 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
                 item("blocked") { MutedText(blocked) }
                 return@LazyColumn
             }
-            item("chequebook") {
-                SectionCard(title = stringResource(R.string.stamps_chequebook_title)) {
-                    MutedText(stringResource(R.string.stamps_chequebook_intro))
-                    Spacer(Modifier.height(6.dp))
-                    DetailRow(
-                        stringResource(R.string.stamps_chequebook_address),
-                        when (state.address) {
-                            null -> stringResource(R.string.stamps_checking)
-                            "" -> stringResource(R.string.stamps_chequebook_none_yet)
-                            else -> state.address
-                        },
-                        mono = !state.address.isNullOrEmpty(),
-                        singleLine = false,
-                    )
-                    if (state.address != "") {
-                        DetailRow(stringResource(R.string.stamps_chequebook_balance), state.balancePlur?.let(::formatBzz) ?: stringResource(R.string.stamps_checking))
-                    }
-                    DetailRow(stringResource(R.string.stamps_node_xbzz), state.walletPlur?.let(::formatBzz) ?: stringResource(R.string.stamps_checking))
-                    SubLine(stringResource(R.string.stamps_chequebook_wallet_note))
-                }
+            item("credit") {
+                ChequebookCreditCards(
+                    state = state,
+                    swap = swap,
+                    swapWanted = swapWanted,
+                    liabilityOutcome = liabilityOutcome,
+                    onSwapChange = { on -> scope.launch { settings.setSwarmSwapEnabled(on) } },
+                    onConfirmLost = { liabilityOutcome = null; confirmingLiability = it },
+                )
             }
             item("deposit") {
                 SectionCard(title = stringResource(R.string.stamps_deposit)) {
+                    MutedText(stringResource(R.string.stamps_deposit_intro))
+                    Spacer(Modifier.height(4.dp))
                     DEPOSIT_PRESETS_PLUR.forEach { preset ->
-                        ChoiceRow(selected = preset == amountPlur, label = formatBzzExact(preset)) {
+                        ChoiceRow(selected = preset == amountPlur, label = depositPresetLabel(preset), sub = formatBzzExact(preset)) {
                             amount = preset.toString()
                         }
                     }
@@ -132,6 +195,17 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
                             MutedText(stringResource(R.string.stamps_chequebook_other_payment))
                         running -> MutedText(stringResource(R.string.stamps_chequebook_searching))
                         reason != null -> MutedText(reason)
+                    }
+                    // Short of xBZZ: fund the node first, as publish setup
+                    // does — its address to send xBZZ to on Gnosis Chain.
+                    val fundTo = fundingAddress(nodeInfo)
+                    if (!running && fundTo != null && depositNeedsFunding(state, amountPlur)) {
+                        Spacer(Modifier.height(6.dp))
+                        DetailRow(stringResource(R.string.publish_setup_node_address), fundTo, mono = true, singleLine = false)
+                        SubLine(stringResource(R.string.stamps_credit_fund_node_note))
+                        OutlinedButton(onClick = { copyNodeAddress(context, fundTo) }) {
+                            Text(stringResource(R.string.common_copy_address))
+                        }
                     }
                     Spacer(Modifier.height(8.dp))
                     Button(
@@ -152,14 +226,193 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
             confirmLabel = stringResource(R.string.stamps_deposit),
             onConfirm = {
                 confirming = null
-                if (StampClient.deposit(address, plur)) amount = null
+                if (StampClient.deposit(address, plur)) amount = depositPickAfterDeposit(plur, state.walletPlur)
             },
             onDismiss = { confirming = null },
         )
     }
+    confirmingLiability?.let { chequebook ->
+        SpendConfirmDialog(
+            title = stringResource(R.string.stamps_credit_lost_dialog_title),
+            body = stringResource(R.string.stamps_credit_lost_dialog_body),
+            confirmLabel = stringResource(R.string.stamps_credit_lost_dialog_confirm),
+            onConfirm = {
+                confirmingLiability = null
+                scope.launch {
+                    // Recorded before ant is asked (see confirmLostLedger),
+                    // and the whole thing runs on even if the page is left
+                    // meanwhile: without the record the credit would read
+                    // as exact.
+                    val answer = withContext(NonCancellable + Dispatchers.IO) {
+                        confirmLostLedger(
+                            chequebook,
+                            record = settings::addSwarmConfirmedLedger,
+                            confirm = { StampClient.call("confirmLiability", JSONObject().put("chequebook", it)) },
+                        )
+                    }
+                    liabilityOutcome = liabilityOutcomeText(answer)
+                    swapRefresh++
+                    refresh++
+                }
+            },
+            onDismiss = { confirmingLiability = null },
+        )
+    }
+}
+
+/**
+ * The chequebook page's top: the chequebook with its spendable credit next
+ * to the on-chain balance, whether downloads pay peers from it and why not
+ * (with the "Pay peers from the chequebook" switch), and a lost cheque
+ * ledger to confirm. Stateless: [ChequebookScreen] reads the node.
+ * [swapWanted] is the saved switch (null until read); [swap] is ant's
+ * `ant_swap_status` (null until read); [liabilityOutcome] how the last
+ * lost-ledger confirmation went.
+ */
+@Composable
+internal fun ChequebookCreditCards(
+    state: ChequebookState,
+    swap: SwapStatus?,
+    swapWanted: Boolean?,
+    liabilityOutcome: String?,
+    onSwapChange: (Boolean) -> Unit,
+    onConfirmLost: (chequebook: String) -> Unit,
+) {
+    val credit = creditStatus(swap, state)
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        // One headline figure (#425, W44): what the chequebook can still pay, and whether it pays now.
+        SectionCard(title = stringResource(R.string.stamps_credit_title)) {
+            TotalFigure(creditHeadline(state))
+            Text(creditStatusText(credit), style = MaterialTheme.typography.bodyMedium)
+            if (credit is CreditStatus.Paying && credit.low) {
+                SubLine(stringResource(R.string.stamps_credit_low))
+            } else if (credit is CreditStatus.Paying && credit.uncertain) {
+                SubLine(stringResource(R.string.stamps_credit_maybe_low))
+            }
+            Spacer(Modifier.height(4.dp))
+            MutedText(stringResource(R.string.stamps_chequebook_intro))
+            DetailsExpander {
+                DetailRow(
+                    stringResource(R.string.stamps_chequebook_address),
+                    when (state.address) {
+                        null -> stringResource(R.string.stamps_checking)
+                        "" -> stringResource(R.string.stamps_chequebook_none_yet)
+                        else -> state.address
+                    },
+                    mono = !state.address.isNullOrEmpty(),
+                    singleLine = false,
+                )
+                if (state.address != "") {
+                    // Spendable first: uncashed cheques make the on-chain
+                    // figure read as more than is left.
+                    DetailRow(
+                        stringResource(R.string.stamps_credit_spendable),
+                        spendableText(state),
+                        singleLine = false,
+                    )
+                    SubLine(
+                        stringResource(
+                            when {
+                                state.ledgerConfirmed -> R.string.stamps_credit_spendable_confirmed_note
+                                state.availableUpperBound -> R.string.stamps_credit_spendable_upper_note
+                                else -> R.string.stamps_credit_spendable_note
+                            },
+                        ),
+                    )
+                    DetailRow(
+                        stringResource(R.string.stamps_credit_on_chain),
+                        state.balancePlur?.let(::formatBzz) ?: stringResource(R.string.stamps_checking),
+                        singleLine = false,
+                    )
+                    SubLine(stringResource(R.string.stamps_credit_on_chain_note))
+                }
+                DetailRow(
+                    stringResource(R.string.stamps_node_xbzz),
+                    state.walletPlur?.let(::formatBzz) ?: stringResource(R.string.stamps_checking),
+                    singleLine = false,
+                )
+                SubLine(stringResource(R.string.stamps_chequebook_wallet_note))
+                Spacer(Modifier.height(4.dp))
+                SubLine(stringResource(R.string.stamps_credit_cost_note))
+            }
+        }
+        SectionCard(title = stringResource(R.string.stamps_credit_downloads_title)) {
+            PayPeersSwitch(wanted = swapWanted, running = swap?.swapEnabled, onChange = onSwapChange)
+        }
+        val lostChequebook = state.address
+        if (state.ledgerLost && !lostChequebook.isNullOrEmpty()) {
+            SectionCard(title = stringResource(R.string.stamps_credit_lost_title)) {
+                Text(
+                    stringResource(R.string.stamps_credit_lost_body),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = { onConfirmLost(lostChequebook) }) {
+                    Text(stringResource(R.string.stamps_credit_lost_confirm))
+                }
+            }
+        }
+        liabilityOutcome?.let { MutedText(it) }
+    }
+}
+
+/**
+ * "Pay peers from the chequebook": the saved setting ([wanted], null until
+ * read), with a note while the node still runs the other way ([running]).
+ */
+@Composable
+private fun PayPeersSwitch(wanted: Boolean?, running: Boolean?, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .switchRow(checked = wanted == true, onCheckedChange = onChange, enabled = wanted != null)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(stringResource(R.string.stamps_credit_switch), fontWeight = FontWeight.Medium)
+            Text(
+                stringResource(R.string.stamps_credit_switch_note),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (wanted != null && running != null && wanted != running) {
+                Text(
+                    stringResource(R.string.stamps_credit_switch_applying),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = wanted == true, onCheckedChange = null, enabled = wanted != null)
+    }
+}
+
+/** The spendable credit, "At most …" when it's only an upper bound; "Checking…" until read. */
+internal fun spendableText(state: ChequebookState): String =
+    state.availablePlur?.let { plur ->
+        if (state.availableUpperBound) Strings.get(R.string.stamps_credit_at_most, formatBzz(plur)) else formatBzz(plur)
+    } ?: Strings.get(R.string.stamps_checking)
+
+/** The chequebook page's headline (#425, W44): the spendable credit, or why there's none to show. */
+internal fun creditHeadline(state: ChequebookState): String = when (state.address) {
+    "" -> Strings.get(R.string.stamps_chequebook_none_yet_headline)
+    else -> spendableText(state)
+}
+
+/** How a lost-ledger confirmation went, as the page says it. */
+internal fun liabilityOutcomeText(answer: StampClient.Answer): String = when (answer) {
+    is StampClient.Answer.Ok ->
+        Strings.get(if (answer.json.optBoolean("confirmed")) R.string.stamps_credit_lost_confirmed else R.string.stamps_credit_lost_nothing)
+    is StampClient.Answer.Failed -> Strings.get(R.string.stamps_credit_lost_failed, answer.message)
 }
 
 private const val CHEQUEBOOK_POLL_MS = 10_000L
+
+/** ant answers `ant_swap_status` from memory: cheap to ask often. */
+private const val SWAP_POLL_MS = 5_000L
 
 /** ant reads both balances from the chain for `/wallet`, each under 10 s. */
 private const val WALLET_TIMEOUT_MS = 25_000

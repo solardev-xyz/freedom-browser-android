@@ -190,7 +190,15 @@ class EnsResolver internal constructor(
      * ready, only a verified answer is reused, so an answer cached before
      * it came up doesn't keep it from verifying the next visit.
      */
-    private data class Cached(val result: EnsResult, val expiresAt: Long, val verified: Boolean)
+    private data class Cached(val result: EnsResult, val at: Long, val ttl: Long, val verified: Boolean) {
+        /**
+         * Stored less than [ttl] ago — and not in the future: an answer
+         * cached while the clock ran ahead would otherwise, once the
+         * clock is set right, live on for the whole error on top of its
+         * TTL (a disagreement's 10 s for hours, say).
+         */
+        fun fresh(now: Long): Boolean = now - at in 0 until ttl
+    }
 
     /**
      * The light client's last miss that says it can't serve right now
@@ -733,7 +741,7 @@ class EnsResolver internal constructor(
             cache[cacheKey]?.let {
                 // One server's word (or a disagreement) doesn't stand in the
                 // way of the light client verifying it.
-                if (System.currentTimeMillis() < it.expiresAt && (it.verified || !askLightClient)) return it.result
+                if (it.fresh(clock()) && (it.verified || !askLightClient)) return it.result
             }
         }
 
@@ -777,7 +785,7 @@ class EnsResolver internal constructor(
             )
                 ?.let { verdict ->
                     val ttl = ttlFor(verdict)
-                    if (ttl > 0) cache[cacheKey] = Cached(verdict.result, System.currentTimeMillis() + ttl, verdict.verified)
+                    if (ttl > 0) cache[cacheKey] = Cached(verdict.result, clock(), ttl, verdict.verified)
                     Log.i(TAG, "[$normalized] → ${verdict.result}")
                     return verdict.result
                 }
@@ -797,7 +805,7 @@ class EnsResolver internal constructor(
         val ttl = ttlFor(verdict)
         if (ttl > 0) {
             val verified = verdict.verified && verdict.result !is EnsResult.Conflict
-            cache[cacheKey] = Cached(verdict.result, System.currentTimeMillis() + ttl, verified)
+            cache[cacheKey] = Cached(verdict.result, clock(), ttl, verified)
         }
         Log.i(TAG, "[$normalized] → ${verdict.result}")
         return verdict.result
@@ -2631,15 +2639,16 @@ class EnsResolver internal constructor(
             val callback = body.copyOfRange(96, 100)
             val extraData = decodeDynamicBytesAt(body, pointerSlot = 4) ?: return null
 
-            if (body.size < urlsOffset + 32) return null
+            // In `Long`: the offsets are the sender's, and near 2^31 they'd wrap.
+            if (body.size < urlsOffset.toLong() + 32) return null
             val count = readUint256AsInt(body, urlsOffset) ?: return null
             if (count < 0 || count > 64) return null
             val base = urlsOffset + 32
             val urls = ArrayList<String>(count)
             for (i in 0 until count) {
-                if (body.size < base + (i + 1) * 32) return null
+                if (body.size < base.toLong() + (i + 1) * 32) return null
                 val rel = readUint256AsInt(body, base + i * 32) ?: return null
-                val str = decodeDynamicBytesAtOffset(body, base + rel) ?: return null
+                val str = decodeDynamicBytesAtOffset(body, base.toLong() + rel) ?: return null
                 urls.add(String(str, Charsets.UTF_8))
             }
             return OffchainLookup(sender, urls, callData, callback, extraData)
@@ -2801,7 +2810,9 @@ private fun ByteArray.startsWith(prefix: ByteArray): Boolean {
  */
 private fun decodeDynamicBytesAt(rawHex: String, pointerSlot: Int): ByteArray? {
     val body = if (rawHex.startsWith("0x") || rawHex.startsWith("0X")) rawHex.substring(2) else rawHex
-    if (body.length % 2 != 0) return null
+    // A server's `result` is its own string: anything but hex digits is
+    // malformed, not a reason to throw.
+    if (body.length % 2 != 0 || !isHexBytes("0x$body")) return null
     return decodeDynamicBytesAt(body.hexToBytes(), pointerSlot)
 }
 
@@ -2809,15 +2820,21 @@ private fun decodeDynamicBytesAt(bytes: ByteArray, pointerSlot: Int): ByteArray?
     val pointerOffset = pointerSlot * 32
     if (bytes.size < pointerOffset + 32) return null
     val offset = readUint256AsInt(bytes, pointerOffset) ?: return null
-    return decodeDynamicBytesAtOffset(bytes, offset)
+    return decodeDynamicBytesAtOffset(bytes, offset.toLong())
 }
 
-/** Length-prefixed dynamic bytes / string whose length word sits at [offset]. */
-private fun decodeDynamicBytesAtOffset(bytes: ByteArray, offset: Int): ByteArray? {
+/**
+ * Length-prefixed dynamic bytes / string whose length word sits at
+ * [offset]. The offset and length are the resolver contract's to choose
+ * — any name's owner writes one — so the bounds are checked in `Long`:
+ * in `Int`, an offset or length near 2^31 wraps negative, slips past
+ * the check and throws (or asks for a 2 GB array) instead of `null`.
+ */
+private fun decodeDynamicBytesAtOffset(bytes: ByteArray, offset: Long): ByteArray? {
     if (offset < 0 || bytes.size < offset + 32) return null
-    val len = readUint256AsInt(bytes, offset) ?: return null
+    val len = readUint256AsInt(bytes, offset.toInt()) ?: return null
     if (bytes.size < offset + 32 + len) return null
-    return bytes.copyOfRange(offset + 32, offset + 32 + len)
+    return bytes.copyOfRange(offset.toInt() + 32, offset.toInt() + 32 + len)
 }
 
 // uint256 → Int, returning null if the value doesn't fit. ABI offsets

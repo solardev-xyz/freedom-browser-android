@@ -78,9 +78,12 @@ object ExternalEndpoints {
         } else {
             val m = LENIENT_AUTHORITY.matchEntire(authority) ?: return Validation(null, Rejection.NOT_A_URL)
             val p = m.groupValues[2].takeIf { it.isNotEmpty() }?.toIntOrNull()
-            if (p != null && p > 65535) return Validation(null, Rejection.NOT_A_URL)
             m.groupValues[1] to (p ?: -1)
         }
+        // Either branch: `URI` itself takes any port up to nine digits
+        // (`nas:99999`), and port 0 (`nas:0`), neither of which any
+        // connection can open. (-1 is "no port given".)
+        if (port == 0 || port > 65535) return Validation(null, Rejection.NOT_A_URL)
         // `URI.host` keeps an IPv6 literal's brackets.
         val host = rawHost.lowercase()
         // `http//nas:1633` (colon forgotten) became `http://http//nas…`.

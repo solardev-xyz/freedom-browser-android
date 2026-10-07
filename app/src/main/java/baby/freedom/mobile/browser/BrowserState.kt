@@ -75,6 +75,13 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         val shown: String get() = DisplayUrl.withTransport(prefix)
 
         /**
+         * Is [url] on [baseUrl] — the base itself, or it followed by a
+         * path, query or fragment? Not just a string prefix: the host
+         * `<base host>.evil.com` starts with the base too.
+         */
+        fun covers(url: String): Boolean = startsWithPrefix(url, baseUrl)
+
+        /**
          * `bzz` / `ipfs` / `ipns` when the prefix is a typed-scheme form
          * — the transport this tab's address asserts, which a document
          * re-check holds the name to ([Gateways.reverifyEnsDocument]).
@@ -109,6 +116,13 @@ class BrowserState(val id: Long, val private: Boolean = false) {
 
     /** 0..100, or -1 when idle. */
     var progress by mutableIntStateOf(-1)
+
+    /**
+     * What the capsule's load bar shows for this tab ([CapsuleLoadBar]),
+     * kept with the tab so every bar that shows it — the address field,
+     * the find bar — continues the same curve.
+     */
+    internal val loadMeter = CapsuleLoadMeter()
 
     /**
      * Indicates this tab is in the indeterminate pre-navigation phase:
@@ -170,6 +184,15 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         private set
 
     /**
+     * Like [loadGeneration], but not bumped by a server redirect hop
+     * ([beginLoad]'s `redirect`): one per load the user would call a new
+     * one. The capsule's load bar ([CapsuleLoadMeter]) starts over when it
+     * changes, and a redirect hop mustn't throw the bar back (R3-F1).
+     */
+    var loadStarts by mutableIntStateOf(0)
+        private set
+
+    /**
      * The [loadGeneration] of the navigation the WebView itself was last
      * handed. It trails [loadGeneration] while a submit is still in its
      * probe phase — the WebView is still on (or still fetching) the
@@ -213,9 +236,12 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * Mark the start of a new navigation (see [loadGeneration]).
      * [inWebView]: the WebView is already navigating (a link it follows,
      * a reload) rather than waiting for a probe to hand it the URL.
+     * [redirect]: a server redirect hop of a navigation already under way
+     * — a new generation, but not a new [loadStarts].
      */
-    internal fun beginLoad(inWebView: Boolean = false) {
+    internal fun beginLoad(inWebView: Boolean = false, redirect: Boolean = false) {
         loadGeneration++
+        if (!redirect) loadStarts++
         if (inWebView) webViewGeneration = loadGeneration
     }
 
@@ -387,17 +413,26 @@ class BrowserState(val id: Long, val private: Boolean = false) {
 
     /**
      * Should the interceptor fetch [target] (a gateway URL) for a request
-     * of load [generation] past its own response caches (#262)? True
-     * the first time the Hard-reloaded document asks for it: its media
-     * body is fetched again rather than served from the Range buffer,
-     * and the gateway is asked not to answer from a cache. Later
-     * requests for the same URL (a video's seeks) use what that fetch
-     * buffered. False for every other document, in this tab or any
-     * other.
+     * of load [generation] past the gateway's caches (#262)? True the
+     * first time the Hard-reloaded document asks for it. Its later
+     * requests for the same URL (a streamed video's seeks) go past them
+     * too ([fetchedFresh], R4-M2). False for every other document, in
+     * this tab or any other.
      */
     internal fun takeFreshFetch(generation: Int, target: String): Boolean {
         val doc = freshDocument ?: return false
         return doc.generation == generation && doc.fetched.add(target)
+    }
+
+    /**
+     * Has the Hard-reloaded document of load [generation] already fetched
+     * [target] fresh ([takeFreshFetch])? Its later media requests for it
+     * — a streamed video's seeks — still go past the gateway's cache
+     * (R4-M2). False for every other document.
+     */
+    internal fun fetchedFresh(generation: Int, target: String): Boolean {
+        val doc = freshDocument ?: return false
+        return doc.generation == generation && target in doc.fetched
     }
 
     /**
@@ -520,7 +555,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         /**
          * The same, with the saved back/forward list dropped: the tab
          * comes back on its address alone, as a WebView whose history was
-         * cleared (Clear cookies & site data) would.
+         * cleared (*Delete browsing data*'s *Cookies and site data*) would.
          */
         fun withoutHistory(): PendingRestore = PendingRestore(
             webViewState = null,
@@ -793,6 +828,29 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
+     * The document on screen is one of Freedom's error pages rather than
+     * the page [url] names: [ErrorPage] itself, or a page served in
+     * place in the failed entry — a failed web load (#259), the
+     * certificate page, a name or onion refusal (#99, #143). [url] can't
+     * say so: on all of them it holds the address that failed. Set by
+     * the tab's WebView at navigation commit (and when a failed load's
+     * page goes up); what offers to act on "the page" (Add to Home
+     * screen, Desktop site) reads it.
+     */
+    var showsErrorPage: Boolean by mutableStateOf(false)
+        internal set
+
+    /**
+     * The address the user last typed into this tab's address bar and
+     * the web URL it became ([typedAddressFor]), so that URL's "address
+     * not found" page can offer to search for it instead (#419).
+     * Replaced on every submit, and dropped once a document for any
+     * other address commits ([typedAddressAfterCommit]).
+     */
+    @Volatile
+    internal var typedAddress: TypedAddress? = null
+
+    /**
      * The document on screen's provider origin key ([providerOriginKey]):
      * what the Wallet's publisher identities page offers to set up
      * (#119). Null for home and for anything that isn't a secure origin.
@@ -1059,8 +1117,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
 
     /** Is [url] on the display override's origin (its manifest)? */
     fun isUnderOverride(url: String): Boolean {
-        val o = override ?: return false
-        return startsWithPrefix(url, o.baseUrl)
+        return override?.covers(url) == true
     }
 
     /** Drop any active ENS display override. Call before loading a URL

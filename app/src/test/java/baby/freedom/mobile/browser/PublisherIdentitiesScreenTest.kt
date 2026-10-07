@@ -26,8 +26,14 @@ class PublisherIdentitiesScreenTest {
     }
 
     @Test
-    fun `an identity row gives its kind and key path`() {
-        assertEquals("App-scoped · m/44'/73406'/4'/0/0", publisherIdentityDetail(blog))
-        assertEquals("Ant wallet · m/44'/60'/0'/0/1", publisherIdentityDetail(PublisherIdentity.antWallet()))
+    fun `an identity row gives its kind, not its key path`() {
+        assertEquals("App-scoped", publisherIdentityDetail(blog))
+        assertEquals("Ant wallet", publisherIdentityDetail(PublisherIdentity.antWallet()))
+    }
+
+    @Test
+    fun `site rows open while the wallet is locked, only not mid-action`() {
+        assertEquals(true, publisherSiteRowEnabled(busy = false))
+        assertEquals(false, publisherSiteRowEnabled(busy = true))
     }
 }

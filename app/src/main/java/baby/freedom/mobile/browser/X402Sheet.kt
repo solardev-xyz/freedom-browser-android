@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
@@ -107,7 +108,7 @@ internal class X402SheetState(val ask: X402Ask) {
     fun capProblem(): String? {
         if (!auto || ledger) return null
         val o = option ?: return null
-        val cap = cap() ?: return Strings.get(R.string.signing_x402_cap_enter_amount, o.symbol)
+        val cap = cap() ?: return ambiguousAmountNote(capText) ?: Strings.get(R.string.signing_x402_cap_enter_amount, o.symbol)
         if (cap < o.offer.amount) return Strings.get(R.string.signing_x402_cap_at_least, SendAmounts.exact(o.offer.amount, o.decimals), o.symbol)
         return null
     }
@@ -128,11 +129,21 @@ internal class X402SheetState(val ask: X402Ask) {
     }
 }
 
+/** "Pay 0.01 USDC to view this page": the x402 sheet's headline for [o] (#423, audit W28). */
+internal fun x402Headline(o: X402Option): String =
+    Strings.get(R.string.signing_x402_headline, "${SendAmounts.exact(o.offer.amount, o.decimals)} ${o.symbol}")
+
+/** "You have 3.2 USDC on Base", or that the balance couldn't be read. */
+internal fun x402BalanceLine(o: X402Option): String =
+    o.balance?.let { Strings.get(R.string.signing_x402_you_have, "${TokenAmounts.format(it, o.decimals)} ${o.symbol}", o.chain.name) }
+        ?: Strings.get(R.string.signing_x402_balance_unreadable_line, o.chain.name)
+
 /**
- * The body of the x402 payment sheet (#140): the page, what it costs
- * (exactly, in the token, on the network), whom it pays and from which
- * account, the balance, and the choice to let the site take further
- * payments without asking up to a total, for a while.
+ * The body of the x402 payment sheet (#140): one line saying what it
+ * costs (W28), the balance and the paying account; the choice of offer
+ * when there are several; the choice to let the site take further
+ * payments without asking, as one row; and the page, the network, the
+ * payee and the token contract under Details.
  */
 @Composable
 internal fun X402PaymentBody(
@@ -143,78 +154,76 @@ internal fun X402PaymentBody(
     locked: Boolean,
     onSetUp: () -> Unit,
 ) {
-    Row0(stringResource(R.string.signing_x402_page), sheetText(ask.url, 2048).first, mono = true)
-    ask.description?.let { Row0(stringResource(R.string.signing_x402_site_says), it) }
     if (noWallet || account == null) {
-        Spacer(Modifier.height(8.dp))
         Text(stringResource(R.string.signing_x402_no_wallet))
         Spacer(Modifier.height(12.dp))
         OutlinedButton(onClick = onSetUp, modifier = Modifier.fillMaxWidth().testTag("x402-setup")) { Text(stringResource(R.string.signing_x402_set_up_wallet)) }
+        X402Details(ask, null, null)
         return
     }
     if (ask.options.isEmpty()) {
-        Spacer(Modifier.height(8.dp))
-        Note(stringResource(R.string.signing_x402_no_usable_offers), warn = true)
-        ask.unusable.forEach { Note(stringResource(R.string.signing_x402_bullet, it), warn = true) }
+        Warning(
+            SheetWarning(
+                WarningLevel.Caution,
+                (listOf(stringResource(R.string.signing_x402_no_usable_offers)) + ask.unusable.map { Strings.get(R.string.signing_x402_bullet, it) })
+                    .joinToString("\n"),
+            ),
+        )
+        X402Details(ask, null, account)
         return
+    }
+    val o = state.option ?: return
+    TxReviewSummary(headline = x402Headline(o), fee = null, modifier = Modifier.testTag("x402-headline")) {
+        Text(x402BalanceLine(o), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            stringResource(R.string.send_eth_from_on, accountLabel(account), o.chain.name),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
     if (ask.options.size > 1) {
         Label(stringResource(R.string.signing_x402_pay_with))
-        ask.options.forEachIndexed { i, o ->
+        ask.options.forEachIndexed { i, opt ->
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
                     .selectable(selected = i == state.selected, role = Role.RadioButton, onClick = { state.select(i) })
-                    .padding(vertical = 2.dp)
+                    .heightIn(min = 56.dp)
+                    .padding(vertical = 4.dp)
                     .testTag("x402-option-$i"),
             ) {
                 RadioButton(selected = i == state.selected, onClick = null)
                 Column(Modifier.padding(start = 8.dp)) {
-                    Text(stringResource(R.string.signing_x402_option, SendAmounts.exact(o.offer.amount, o.decimals), o.symbol, o.chain.name))
-                    if (!o.fundable) Note(stringResource(R.string.signing_x402_not_enough, o.symbol))
+                    Text(stringResource(R.string.signing_x402_option, SendAmounts.exact(opt.offer.amount, opt.decimals), opt.symbol, opt.chain.name))
+                    if (!opt.fundable) Note(stringResource(R.string.signing_x402_not_enough, opt.symbol))
                 }
             }
         }
     }
-    val o = state.option ?: return
-    Row0(
-        stringResource(R.string.signing_x402_amount),
-        "${SendAmounts.exact(o.offer.amount, o.decimals)} ${o.symbol}",
-        mono = true,
-        detail = if (o.listed) null else stringResource(R.string.signing_x402_unlisted_token, o.symbol, o.chain.name),
-    )
-    Row0(stringResource(R.string.signing_x402_network), stringResource(R.string.signing_x402_network_value, o.chain.name, o.chain.id.toString()))
-    AddressRow(stringResource(R.string.signing_x402_pay_to), o.offer.payTo)
-    AddressRow(stringResource(R.string.signing_x402_token_contract), o.offer.asset)
-    AccountRow(account, stringResource(R.string.signing_x402_from))
-    Row0(
-        stringResource(R.string.signing_x402_balance),
-        o.balance?.let { "${TokenAmounts.format(it, o.decimals)} ${o.symbol}" } ?: stringResource(R.string.signing_x402_balance_unreadable),
-        detail = if (!o.fundable) stringResource(R.string.signing_x402_not_enough_for_payment, o.symbol) else null,
-    )
-    if (ask.allowanceWaitingOnUnlock && locked) {
-        Spacer(Modifier.height(8.dp))
-        Note(stringResource(R.string.signing_x402_allowance_waiting_unlock))
+    val warnings = buildList {
+        if (!o.fundable) add(SheetWarning(WarningLevel.Caution, Strings.get(R.string.signing_x402_not_enough_for_payment, o.symbol), "x402-short"))
+        if (!o.listed) add(SheetWarning(WarningLevel.Caution, Strings.get(R.string.signing_x402_unlisted_token, o.symbol, o.chain.name), "x402-unlisted"))
+        if (ask.allowanceWaitingOnUnlock && locked) add(SheetWarning(WarningLevel.Info, Strings.get(R.string.signing_x402_allowance_waiting_unlock)))
+        if (state.ledger) {
+            add(SheetWarning(WarningLevel.Info, Strings.get(R.string.signing_x402_ledger_no_auto)))
+            ledgerHurry(o.offer)?.let { add(SheetWarning(WarningLevel.Caution, it, "x402-hurry")) }
+        }
     }
-    if (ask.unusable.isNotEmpty()) {
-        Spacer(Modifier.height(8.dp))
-        Note(stringResource(R.string.signing_x402_other_offers_unusable))
-        ask.unusable.forEach { Note(stringResource(R.string.signing_x402_bullet, it)) }
-    }
-    Spacer(Modifier.height(8.dp))
-    if (state.ledger) {
-        Note(stringResource(R.string.signing_x402_ledger_no_auto))
-        ledgerHurry(o.offer)?.let { Note(it, warn = true) }
-    } else Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .toggleable(value = state.auto, role = Role.Checkbox, onValueChange = { state.auto = it })
-            .testTag("x402-auto"),
-    ) {
-        Checkbox(checked = state.auto, onCheckedChange = null)
-        Text(stringResource(R.string.signing_x402_pay_automatically), modifier = Modifier.padding(start = 8.dp))
+    if (warnings.isNotEmpty()) Spacer(Modifier.height(8.dp))
+    warnings.forEach { Warning(it) }
+    if (!state.ledger) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .toggleable(value = state.auto, role = Role.Checkbox, onValueChange = { state.auto = it })
+                .heightIn(min = 48.dp)
+                .testTag("x402-auto"),
+        ) {
+            Checkbox(checked = state.auto, onCheckedChange = null)
+            Text(stringResource(R.string.signing_x402_pay_automatically), modifier = Modifier.padding(start = 8.dp))
+        }
     }
     if (state.auto && !state.ledger) {
         OutlinedTextField(
@@ -238,8 +247,38 @@ internal fun X402PaymentBody(
                 )
             }
         }
-        Note(allowanceNote(state.window, o, accountLabel(account)))
+        Warning(SheetWarning(WarningLevel.Info, allowanceNote(state.window, o, accountLabel(account))))
     }
-    Spacer(Modifier.height(8.dp))
-    Note(stringResource(R.string.signing_x402_paying_explained))
+    X402Details(ask, o, account)
+}
+
+/** What the x402 sheet keeps one tap away: the page, what the site says, network, payee, token contract and account. */
+@Composable
+private fun X402Details(ask: X402Ask, o: X402Option?, account: WalletAccount?) {
+    DetailsExpander(Modifier.testTag("x402-details")) {
+        Row0(stringResource(R.string.signing_x402_page), sheetText(ask.url, 2048).first, mono = true)
+        ask.description?.let { Row0(stringResource(R.string.signing_x402_site_says), it) }
+        if (o != null) {
+            Row0(
+                stringResource(R.string.signing_x402_amount),
+                "${SendAmounts.exact(o.offer.amount, o.decimals)} ${o.symbol}",
+                mono = true,
+            )
+            Row0(stringResource(R.string.signing_x402_network), stringResource(R.string.signing_x402_network_value, o.chain.name, o.chain.id.toString()))
+            CopyableAddressRow(stringResource(R.string.signing_x402_pay_to), o.offer.payTo)
+            CopyableAddressRow(stringResource(R.string.signing_x402_token_contract), o.offer.asset)
+            Row0(
+                stringResource(R.string.signing_x402_balance),
+                o.balance?.let { "${TokenAmounts.format(it, o.decimals)} ${o.symbol}" } ?: stringResource(R.string.signing_x402_balance_unreadable),
+            )
+        }
+        account?.let { AccountRow(it, stringResource(R.string.signing_x402_from)) }
+        if (o != null && ask.unusable.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Note(stringResource(R.string.signing_x402_other_offers_unusable))
+            ask.unusable.forEach { Note(stringResource(R.string.signing_x402_bullet, it)) }
+        }
+        Spacer(Modifier.height(8.dp))
+        Warning(SheetWarning(WarningLevel.Info, stringResource(R.string.signing_x402_paying_explained)))
+    }
 }

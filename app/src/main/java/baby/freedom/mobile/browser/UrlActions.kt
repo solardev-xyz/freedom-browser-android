@@ -55,9 +55,13 @@ import baby.freedom.mobile.R
  * the loopback gateway URL the WebView actually fetched — which is
  * exactly what another Freedom user can paste back in, and what the
  * desktop browser shares too.
+ *
+ * Bidi controls are marked ([BidiControls.marked]) exactly as the label
+ * marks them: a refused name carrying an RLO must not reach another
+ * app's text field, where it would read as a different address.
  */
 internal fun urlActionTarget(addressBarText: String, url: String): String? =
-    addressBarText.trim().ifEmpty { url.trim() }.ifEmpty { null }
+    addressBarText.trim().ifEmpty { url.trim() }.ifEmpty { null }?.let(BidiControls::marked)
 
 /**
  * What "Paste and go" would submit for a clipboard holding [clip], or
@@ -189,8 +193,9 @@ internal fun CapsuleUrlActionsMenu(
     onDismiss: () -> Unit,
 ) {
     val gapPx = with(LocalDensity.current) { CapsuleMenuGap.roundToPx() }
+    val marginPx = with(LocalDensity.current) { PopupEdgeMargin.roundToPx() }
     Popup(
-        popupPositionProvider = AnchoredAboveProvider(anchor, gapPx, alignToEnd = false),
+        popupPositionProvider = AnchoredAboveProvider(anchor, gapPx, alignToEnd = false, marginPx = marginPx),
         onDismissRequest = onDismiss,
         properties = PopupProperties(focusable = true),
     ) {

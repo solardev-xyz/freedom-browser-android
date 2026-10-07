@@ -223,6 +223,7 @@ internal object SendJournalCodec {
                     .put("block", q.nonceTrust.block ?: JSONObject.NULL),
             )
             .put("replaces", q.replaces ?: JSONObject.NULL)
+            .put("l1Fee", q.l1Fee.toString())
             .put("stage", stage(s.status.stage))
             .put("raw", s.signed.raw)
             .put("hash", s.signed.hash)
@@ -289,6 +290,7 @@ internal object SendJournalCodec {
             preparedAt = o.getLong("preparedAt"),
             nonceTrust = trust,
             replaces = o.optStringOrNull("replaces"),
+            l1Fee = o.optStringOrNull("l1Fee")?.let(::BigInteger) ?: BigInteger.ZERO,
         )
         val raw = o.getString("raw")
         val hash = o.getString("hash")

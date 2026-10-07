@@ -92,6 +92,13 @@ data class SafePending(
 ) {
     enum class Kind { TX, MESSAGE }
 
+    /**
+     * [text] as the pending page and its title show it: what would draw as
+     * nothing or rearrange the words written as a visible escape, as the
+     * co-sign page shows the same message ([SafeProtocol.Request.Message.shownText]).
+     */
+    val shownText: String? get() = text?.let(Eip712::visible)
+
     /** An abandoned execution: its hash, and the account and account nonce that sent it (null when not known). */
     data class AbandonedExec(val hash: String, val from: String? = null, val nonce: BigInteger? = null)
 
@@ -726,13 +733,25 @@ class SafeChain(private val rpc: WalletRpc) {
     suspend fun tokenBalance(chainId: Long, token: String, holder: String): BigInteger =
         Erc20.decodeUint256(call(chainId, token, Erc20.balanceOfData(holder))) ?: throw SafeException(Strings.get(R.string.safe_error_no_token_balance))
 
-    /** What activating [safe] costs at most, paid by [executor], against what [executor] holds. */
+    /**
+     * What activating [safe] costs at most, paid by [executor], against
+     * what [executor] holds: its gas at the fee cap plus, on an OP Stack
+     * rollup, the L1 data fee [WalletSender.prepare] reserves on top
+     * ([WalletSender.l1Fee]) — or the card calls ready an executor that
+     * Activate then refuses for the network fee.
+     */
     suspend fun activation(safe: SafeAccount, executor: String): Activation {
         val data = SafeProtocol.deploymentData(safe.owners, safe.threshold, safe.saltNonce)
         val call = JSONObject().put("from", executor).put("to", SafeProtocol.FACTORY).put("value", "0x0").put("data", "0x" + data.toHex())
         val estimate = rpc.estimateGas(safe.chainId, call).value
         val fees = GasOracle(rpc).fees(safe.chainId)
-        val maxFee = WalletSender.gasLimit(estimate, hasData = true) * fees.maxPerGas
+        val gasLimit = WalletSender.gasLimit(estimate, hasData = true)
+        val l1Fee = if (safe.chainId !in WalletSender.OP_STACK_CHAINS) BigInteger.ZERO else {
+            // The transaction prepare() will price: only its nonce's width can differ, well inside the fee's doubling.
+            val nonce = rpc.transactionCount(safe.chainId, executor, "pending").value
+            WalletSender.l1Fee(rpc, EthTransaction(safe.chainId, nonce, gasLimit, SafeProtocol.FACTORY, BigInteger.ZERO, data, fees))
+        }
+        val maxFee = gasLimit * fees.maxPerGas + l1Fee
         return Activation(executor, maxFee, rpc.balance(safe.chainId, executor).value)
     }
 

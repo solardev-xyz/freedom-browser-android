@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
@@ -30,11 +31,14 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Tab
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.DropdownMenu
@@ -42,7 +46,11 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -91,23 +99,27 @@ import kotlinx.coroutines.launch
 /**
  * Full-screen, Chrome-style tab switcher.
  *
- * A top bar with "+ New tab" and an × to dismiss, followed by a 2-column
- * grid of tab cards. Each card shows its page title, a close (×) button,
- * a speaker to mute / unmute a tab that is playing audio (#91), and a
- * preview thumbnail of the page (or a letter placeholder when no
- * snapshot has been captured yet).
+ * A top bar with a *Tabs | Private* toggle (#418) and an × to dismiss;
+ * under it "+ New tab" (or "+ New private tab" on the private pane),
+ * Reopen and the ⋮ menu; then a 2-column grid of the pane's tab
+ * cards. Each card shows its page title, a close (×) button, a speaker
+ * to mute / unmute a tab that is playing audio (#91), and a preview
+ * thumbnail of the page (or a placeholder when there is no snapshot, or
+ * the tab is on its home page).
+ *
+ * Normal and private tabs (#86) sit in separate panes, as in Chrome and
+ * Safari ([privatePane], [onPrivatePaneChange]; the host holds which is
+ * shown, since its screenshot guard depends on it). The toggle is only
+ * there while private tabs can be opened ([onNewPrivateTab] non-null) or
+ * some are open.
  *
  * Long-press a card and drag it to move the tab ([TabsState.moveTab]);
  * long-press and let go opens the tab's menu (Close other tabs, Close
  * tab; #320), whose items are also the card's accessibility actions.
- * The header's "Reopen" brings back the most recently closed tab
- * ([TabsState.reopenClosedTab]) while there is one, and its ⋮ menu has
- * Close all tabs (and Close private tabs, when there are normal ones
- * too). A bulk close is handed to [onTabsClosed], which offers its Undo.
- *
- * "Private" opens a private tab (#86) — offered only where the WebView
- * can run them ([onNewPrivateTab] non-null) — and private tabs' cards
- * wear the private scheme and mark.
+ * Closing a card is handed to [onTabsClosed] with its Undo (#418), as a
+ * bulk close is. The header's "Reopen" brings back the most recently
+ * closed tab ([TabsState.reopenClosedTab]) while there is one, and its ⋮
+ * menu closes every tab of the pane on screen.
  */
 @Composable
 fun TabSwitcherScreen(
@@ -116,10 +128,17 @@ fun TabSwitcherScreen(
     onNewTab: () -> Unit,
     onNewPrivateTab: (() -> Unit)? = null,
     onTabsClosed: (TabsState.BulkClose) -> Unit = {},
+    privatePane: Boolean = false,
+    onPrivatePaneChange: (Boolean) -> Unit = {},
 ) {
     // Snapshot the currently-active tab right before we render so the
     // user sees an up-to-date preview of whatever they were last reading.
     LaunchedEffect(Unit) { tabs.captureActiveThumbnail?.invoke() }
+
+    val panes = switcherHasPanes(privateTabsOffered = onNewPrivateTab != null, anyPrivate = tabs.hasPrivateTabs)
+    val showPrivate = panes && privatePane
+    val paneTabs = paneTabs(tabs.tabs, showPrivate)
+    val activeId = tabs.active.id
 
     Column(
         modifier = Modifier
@@ -131,49 +150,60 @@ fun TabSwitcherScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp, vertical = 4.dp),
-            // Top: the × stays on the first line when the actions wrap
-            // (every control here is a 48dp touch target, so one line
-            // is centred either way).
-            verticalAlignment = Alignment.Top,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            // The actions wrap onto a second line rather than squeezing
-            // each other (or the ×) when they don't fit — a narrow
-            // screen or a large font with Private and Reopen both shown.
-            // The × sits outside the flow, so it's always there.
-            FlowRow(
-                modifier = Modifier.weight(1f),
-                itemVerticalAlignment = Alignment.CenterVertically,
-            ) {
+            if (panes) {
+                TabPaneToggle(
+                    privatePane = showPrivate,
+                    onChange = onPrivatePaneChange,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 4.dp, end = 4.dp),
+                )
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
+            IconButton(onClick = onDismiss, shapes = IconButtonDefaults.shapes()) {
+                Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.browser_tabs_close_switcher))
+            }
+        }
+        // The actions wrap onto a second line rather than squeezing each
+        // other when they don't fit — a narrow screen or a large font.
+        FlowRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp),
+            itemVerticalAlignment = Alignment.CenterVertically,
+        ) {
+            val newTab: (() -> Unit)? = if (showPrivate) onNewPrivateTab else onNewTab
+            if (newTab != null) {
                 TextButton(onClick = {
-                    onNewTab()
+                    newTab()
                     onDismiss()
                 }) {
                     Icon(Icons.Filled.Add, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
-                    Text(stringResource(R.string.browser_tabs_new_tab), fontWeight = FontWeight.Medium, softWrap = false)
+                    Text(
+                        stringResource(if (showPrivate) R.string.browser_tabs_new_private_tab else R.string.browser_tabs_new_tab),
+                        fontWeight = FontWeight.Medium,
+                    )
                 }
-                if (onNewPrivateTab != null) {
-                    TextButton(onClick = {
-                        onNewPrivateTab()
-                        onDismiss()
-                    }) {
-                        Icon(PrivateTabIcon, contentDescription = null)
-                        Spacer(Modifier.size(8.dp))
-                        Text(stringResource(R.string.browser_tabs_new_private), fontWeight = FontWeight.Medium, softWrap = false)
-                    }
+            }
+            // Closed private tabs aren't kept (#86): Reopen belongs to
+            // the normal pane.
+            if (!showPrivate && tabs.canReopenClosedTab) {
+                // Pushes Reopen (and ⋮) to the end of its line.
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = {
+                    tabs.reopenClosedTab()
+                    onDismiss()
+                }) {
+                    Icon(Icons.Filled.Restore, contentDescription = null)
+                    Spacer(Modifier.size(8.dp))
+                    Text(stringResource(R.string.browser_tabs_reopen), fontWeight = FontWeight.Medium)
                 }
-                if (tabs.canReopenClosedTab) {
-                    // Pushes Reopen to the end of its line.
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = {
-                        tabs.reopenClosedTab()
-                        onDismiss()
-                    }) {
-                        Icon(Icons.Filled.Restore, contentDescription = null)
-                        Spacer(Modifier.size(8.dp))
-                        Text(stringResource(R.string.browser_tabs_reopen), fontWeight = FontWeight.Medium, softWrap = false)
-                    }
-                }
+            } else {
+                Spacer(Modifier.weight(1f))
             }
             Box {
                 var menuOpen by remember { mutableStateOf(false) }
@@ -181,28 +211,38 @@ fun TabSwitcherScreen(
                     Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.browser_tabs_menu))
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(
-                        text = { Text(stringResource(R.string.browser_tabs_close_all)) },
-                        onClick = {
-                            menuOpen = false
-                            onTabsClosed(tabs.closeAllTabs())
-                        },
-                    )
-                    // Only when it's not the same as Close all tabs.
-                    if (tabs.hasPrivateTabs && tabs.tabs.any { !it.private }) {
+                    if (showPrivate) {
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.browser_tabs_close_private)) },
+                            enabled = paneTabs.isNotEmpty(),
                             onClick = {
                                 menuOpen = false
                                 onTabsClosed(tabs.closePrivateTabs())
                             },
                         )
+                    } else {
+                        DropdownMenuItem(
+                            text = { Text(stringResource(closeTabsPaneLabel(anyPrivate = tabs.hasPrivateTabs))) },
+                            enabled = paneTabs.isNotEmpty(),
+                            onClick = {
+                                menuOpen = false
+                                // The private pane's tabs stay (#418);
+                                // with none open this is every tab.
+                                onTabsClosed(tabs.closeRegularTabs())
+                            },
+                        )
                     }
                 }
             }
-            IconButton(onClick = onDismiss, shapes = IconButtonDefaults.shapes()) {
-                Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.browser_tabs_close_switcher))
-            }
+        }
+
+        if (paneTabs.isEmpty()) {
+            EmptyState(
+                icon = if (showPrivate) PrivateTabIcon else Icons.Filled.Add,
+                title = stringResource(if (showPrivate) R.string.browser_tabs_private_empty_title else R.string.browser_tabs_empty_title),
+                hint = stringResource(if (showPrivate) R.string.browser_tabs_private_empty_hint else R.string.browser_tabs_empty_hint),
+            )
+            return@Column
         }
 
         val gridState = rememberLazyGridState()
@@ -210,8 +250,8 @@ fun TabSwitcherScreen(
         val haptics = LocalHapticFeedback.current
         val edgePx = with(LocalDensity.current) { REORDER_EDGE.toPx() }
         val gridStartPx = with(LocalDensity.current) { GRID_PADDING_H.toPx() }
-        val reorder = remember(tabs, gridState, gridStartPx) {
-            TabReorder(tabs, gridState, gridStartPx)
+        val reorder = remember(tabs, gridState, gridStartPx, showPrivate) {
+            TabReorder(tabs, gridState, gridStartPx, showPrivate)
         }
         // The tab whose menu is open: long-pressed and let go in place.
         var menuTabId by remember { mutableStateOf<Long?>(null) }
@@ -238,10 +278,13 @@ fun TabSwitcherScreen(
             horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
         ) {
             itemsIndexed(
-                items = tabs.tabs,
+                items = paneTabs,
                 key = { _, tab -> tab.id },
             ) { index, tab ->
                 val dragged = tab.id == reorder.draggedId
+                // Where the tab is in the whole list, which the tab
+                // state's own calls take.
+                val at = { tabs.tabs.indexOfFirst { it.id == tab.id } }
                 TabCard(
                     modifier = if (dragged) {
                         Modifier
@@ -257,14 +300,15 @@ fun TabSwitcherScreen(
                         Modifier.animateItem()
                     },
                     tab = tab,
-                    isActive = index == tabs.activeIndex,
+                    isActive = tab.id == activeId,
                     onClick = {
-                        tabs.switchTo(index)
+                        tabs.switchTo(at())
                         onDismiss()
                     },
-                    onClose = { tabs.closeTab(index) },
-                    onCloseOthers = if (tabs.tabs.size > 1) {
-                        { onTabsClosed(tabs.closeOtherTabs(tab)) }
+                    // Its Undo goes on screen (#418).
+                    onClose = { onTabsClosed(tabs.closeTab(at(), offerUndo = true)) },
+                    onCloseOthers = if (paneTabs.size > 1) {
+                        { onTabsClosed(tabs.closeOtherTabsOfItsKind(tab)) }
                     } else {
                         null
                     },
@@ -272,13 +316,87 @@ fun TabSwitcherScreen(
                     onMenuDismiss = { menuTabId = null },
                     onToggleMute = tabs.setAudioMuted?.let { set -> { set(tab, !tab.audioMuted) } },
                     // The drag has no TalkBack equivalent, so the same
-                    // moves are offered as accessibility actions.
-                    moveActions = tabMoveTargets(index, tabs.tabs.size).map { (label, to) ->
+                    // moves are offered as accessibility actions — within
+                    // the pane, as the drag moves it.
+                    moveActions = tabMoveTargets(index, paneTabs.size).map { (label, to) ->
                         CustomAccessibilityAction(label) {
-                            tabs.moveTab(index, to)
+                            val target = paneTabs[to].id
+                            tabs.moveTab(at(), tabs.tabs.indexOfFirst { it.id == target })
                             true
                         }
                     },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Whether the switcher splits its tabs into *Tabs* and *Private* panes
+ * (#418): while private tabs can be opened, or any is open (so one
+ * opened before the WebView lost private support still has a place).
+ */
+internal fun switcherHasPanes(privateTabsOffered: Boolean, anyPrivate: Boolean): Boolean =
+    privateTabsOffered || anyPrivate
+
+/**
+ * The *Tabs* pane's close-everything item (#418): *Close all tabs* when
+ * it really is all of them, *Close normal tabs* while private tabs are
+ * open, since [TabsState.closeRegularTabs] leaves those in their pane.
+ */
+internal fun closeTabsPaneLabel(anyPrivate: Boolean): Int =
+    if (anyPrivate) R.string.browser_tabs_close_normal else R.string.browser_tabs_close_all
+
+/** The tabs of the pane on screen, in their order: the private ones or the normal ones. */
+internal fun paneTabs(all: List<BrowserState>, privatePane: Boolean): List<BrowserState> =
+    all.filter { it.private == privatePane }
+
+/**
+ * The *Tabs | Private* toggle at the top of the switcher (#418): two
+ * segments, one selected, each a radio-style choice for TalkBack. The
+ * labels may wrap at a large font rather than be cut.
+ */
+@Composable
+private fun TabPaneToggle(
+    privatePane: Boolean,
+    onChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    SingleChoiceSegmentedButtonRow(modifier = modifier) {
+        val options = listOf(
+            false to stringResource(R.string.browser_tabs_pane_tabs),
+            true to stringResource(R.string.browser_tabs_pane_private),
+        )
+        options.forEachIndexed { i, (isPrivate, label) ->
+            SegmentedButton(
+                selected = privatePane == isPrivate,
+                onClick = { onChange(isPrivate) },
+                shape = SegmentedButtonDefaults.itemShape(index = i, count = options.size),
+                // The app's teal, as the switcher's other actions, rather
+                // than the scheme's (amber) secondary container.
+                colors = SegmentedButtonDefaults.colors(
+                    activeContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                    activeContentColor = MaterialTheme.colorScheme.primary,
+                    activeBorderColor = MaterialTheme.colorScheme.outline,
+                ),
+                icon = {
+                    Icon(
+                        if (isPrivate) PrivateTabIcon else Icons.Outlined.Tab,
+                        contentDescription = null,
+                        modifier = Modifier.size(SegmentedButtonDefaults.IconSize),
+                    )
+                },
+                modifier = Modifier.heightIn(min = 48.dp),
+            ) {
+                // One line, shrinking to fit a narrow screen at a large
+                // font rather than breaking "Private" mid-word.
+                Text(
+                    label,
+                    maxLines = 1,
+                    autoSize = TextAutoSize.StepBased(
+                        minFontSize = 12.sp,
+                        maxFontSize = LocalTextStyle.current.fontSize,
+                    ),
                 )
             }
         }
@@ -331,6 +449,8 @@ private class TabReorder(
     private val tabs: TabsState,
     private val grid: LazyGridState,
     private val startPaddingPx: Float,
+    /** The pane shown (#418): the grid holds only its tabs. */
+    private val privatePane: Boolean,
 ) {
     var draggedId: Long? by mutableStateOf(null)
         private set
@@ -418,8 +538,9 @@ private class TabReorder(
         val from = tabs.tabs.indexOfFirst { it.id == draggedId }
         // The grid hasn't laid out the last move yet: its slots are
         // stale, so neither the target nor the rebase below would be
-        // right. The next move or scroll step asks again.
-        if (item.index != from) return
+        // right. The next move or scroll step asks again. The grid
+        // holds only the pane's tabs, so its index is the pane's.
+        if (item.index != paneTabs(tabs.tabs, privatePane).indexOfFirst { it.id == draggedId }) return
         val centre = cardTopLeft + cardSize / 2f
         val target = grid.layoutInfo.visibleItemsInfo
             .firstOrNull { it.key != draggedId && contains(it, centre) }
@@ -630,7 +751,11 @@ private fun TabCard(
                 .weight(1f)
                 .background(MaterialTheme.colorScheme.background),
         ) {
-            val thumb = tab.thumbnail
+            // A tab with no page yet (its home page, or a first load
+            // still on its way) has a snapshot of the blank document
+            // under the overlay — a white rectangle, not what the user
+            // saw (#418): its placeholder stands in.
+            val thumb = tab.thumbnail?.takeUnless { tab.url.isBlank() }
             if (thumb != null) {
                 Image(
                     bitmap = thumb,
@@ -722,9 +847,10 @@ private fun ThumbnailPlaceholder(tab: BrowserState) {
                 .background(MaterialTheme.colorScheme.primaryContainer),
             contentAlignment = Alignment.Center,
         ) {
-            if (tab.private && letter == "•") {
+            if (letter == "•") {
+                // Nothing to take a letter from: the home page (#418).
                 Icon(
-                    PrivateTabIcon,
+                    if (tab.private) PrivateTabIcon else Icons.Outlined.Home,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onPrimaryContainer,
                 )

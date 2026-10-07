@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import android.content.Context
+import android.os.LocaleList
 import android.os.SystemClock
 import android.util.Log
 import android.webkit.WebResourceResponse
@@ -31,6 +32,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -38,8 +40,12 @@ private const val TAG = "Adblock"
 
 /**
  * The filter-list categories (#126), as on desktop and iOS: ads and
- * trackers on by default, cookie notices and other annoyances opt-in.
- * [file] is the list's name under `assets/adblock/`
+ * trackers on by default, cookie notices and other annoyances opt-in —
+ * plus, Android only so far, EasyList Germany (#405): EasyList covers
+ * English-language sites, and German sites' ads are in the regional
+ * list, on by default where the phone's languages include German or
+ * its region is a German-speaking one ([germanListByDefault]), offered
+ * to everyone else. [file] is the list's name under `assets/adblock/`
  * (`infra/adblock/vendor-lists.py` refreshes them).
  */
 enum class AdblockCategory(
@@ -47,23 +53,106 @@ enum class AdblockCategory(
     val file: String,
     @StringRes private val titleRes: Int,
     val listName: String,
-    val enabledByDefault: Boolean,
+    private val defaultOn: () -> Boolean,
 ) {
-    ADS("ads", "easylist.txt", R.string.settings_adblock_block_ads, "EasyList", true),
-    PRIVACY("privacy", "easyprivacy.txt", R.string.settings_adblock_block_trackers, "EasyPrivacy", true),
+    ADS("ads", "easylist.txt", R.string.settings_adblock_block_ads, "EasyList", { true }),
+    GERMAN(
+        "german", "easylistgermany.txt", R.string.settings_adblock_block_german, "EasyList Germany",
+        { AdblockLocaleDefaults.german.value },
+    ),
+    PRIVACY("privacy", "easyprivacy.txt", R.string.settings_adblock_block_trackers, "EasyPrivacy", { true }),
     COOKIES(
         "cookies", "fanboy-cookiemonster.txt", R.string.settings_adblock_block_cookie_notices,
-        "Fanboy's Cookiemonster", false,
+        "Fanboy's Cookiemonster", { false },
     ),
     ANNOYANCES(
         "annoyances", "fanboy-annoyance.txt", R.string.settings_adblock_block_annoyances,
-        "Fanboy's Annoyances", false,
+        "Fanboy's Annoyances", { false },
     ),
     ;
 
+    /**
+     * On until the user switches it (the stored choice wins); for
+     * [GERMAN], from the phone's locales as [AdblockLocaleDefaults] last
+     * read them — the same value the engine's categories were built from.
+     */
+    val enabledByDefault: Boolean get() = defaultOn()
+
     /** The category's switch in Settings ("Block ads"). */
     val title: String get() = Strings.get(titleRes)
+
+    /**
+     * The bundled-only lists the category also compiles (#318): uBlock
+     * Origin's own filters, under *Block ads* as on desktop, and Freedom's
+     * own fixes (#391). The update channel doesn't carry either: uBlock's
+     * is refreshed by `vendor-lists.py` before each release, Freedom's is
+     * edited by hand in this repository and nothing refreshes it.
+     */
+    val bundledExtras: List<BundledList> get() =
+        if (this == ADS) listOf(BundledList.UBLOCK, BundledList.FREEDOM) else emptyList()
+
+    /** Every list the category compiles, for its Settings line ("EasyList, uBlock filters"). */
+    val listNames: List<String> get() = listOf(listName) + bundledExtras.map { it.listName }
 }
+
+/**
+ * A bundled-only filter list (#318), compiled with its category's
+ * [AdblockCategory.bundledExtras], always from the APK's assets — the
+ * update channel's lists live elsewhere and name categories, not these.
+ * [trustedScriptlets]: it may call the `trusted-*` scriptlets — uBlock
+ * Origin's own list, as in uBlock, and Freedom's, which this repository
+ * maintains.
+ */
+enum class BundledList(val file: String, val listName: String, val trustedScriptlets: Boolean) {
+    UBLOCK("ublock-filters.txt", "uBlock filters", true),
+
+    /**
+     * Freedom's own fixes for sites upstream doesn't handle yet (#391),
+     * maintained by hand: `vendor-lists.py` neither writes nor removes it.
+     */
+    FREEDOM("freedom-filters.txt", "Freedom filters", true),
+}
+
+/** The phone's (or, set per app, the app's) languages, in the user's order; the JVM default where there's no `LocaleList`. */
+private fun systemLocales(): List<Locale> {
+    val list: LocaleList? = runCatching { LocaleList.getDefault() }.getOrNull()
+    if (list == null || list.isEmpty) return listOf(Locale.getDefault())
+    return (0 until list.size()).map { list[it] }
+}
+
+/**
+ * The locale-dependent category defaults (#405 R1-M3): [german] is
+ * [germanListByDefault] for the phone's languages, read once and again
+ * on every configuration change ([refresh], from [baby.freedom.mobile.FreedomApplication]),
+ * so a language switch while the app runs re-emits it and
+ * [baby.freedom.mobile.data.NodeSettings.adblockCategories] — which the
+ * engine and Settings both collect — follows at once, instead of the
+ * engine keeping the old list while a later read in Settings shows the new default.
+ */
+object AdblockLocaleDefaults {
+    private val _german = MutableStateFlow(germanListByDefault(systemLocales()))
+    val german: StateFlow<Boolean> = _german.asStateFlow()
+
+    fun refresh(locales: List<Locale> = systemLocales()) {
+        _german.value = germanListByDefault(locales)
+    }
+}
+
+/** Countries whose sites are largely in German, for [germanListByDefault]. */
+private val GERMAN_SPEAKING_REGIONS = setOf("DE", "AT", "CH", "LI", "LU")
+
+/**
+ * Is EasyList Germany on by default (#405)? Where German is among the
+ * phone's languages (Settings → Languages), or its main locale's region
+ * is a German-speaking country (an English UI in Vienna still reads
+ * Austrian sites).
+ */
+internal fun germanListByDefault(locales: List<Locale>): Boolean =
+    locales.any { it.language == "de" || it.language == "gsw" } ||
+        (locales.firstOrNull()?.country?.uppercase()?.let { it in GERMAN_SPEAKING_REGIONS } ?: false)
+
+/** The uBlock Origin scriptlets the `+js(…)` rules call (#318), under `assets/adblock/`. */
+internal const val SCRIPTLET_RESOURCES_FILE = "resources.json"
 
 /**
  * The allowlist's form of a site: lower-case ASCII host, no scheme,
@@ -340,6 +429,9 @@ internal class FirstBuildGate(
 
     val isReady: Boolean get() = latch.count == 0L
 
+    /** [isReady], or [open] never called (nothing will land). */
+    val landedOrUnstarted: Boolean get() = isReady || deadline == 0L
+
     /**
      * Would a caller wait now: the build started, hasn't landed, and the
      * deadline hasn't passed?
@@ -390,6 +482,8 @@ internal class FirstBuildGate(
 internal data class AdblockStatus(
     val loading: Boolean,
     val filterCount: Int,
+    /** Per enabled category, its lists' rules and how many run (#318); empty while none is built. */
+    val counts: Map<AdblockCategory, FilterListCounts> = emptyMap(),
     val listsVersion: Long? = null,
     val listsGeneratedAt: String? = null,
     val updatedLists: List<String> = emptyList(),
@@ -405,6 +499,7 @@ private data class AdblockListSources(
     val builtIn: List<String>,
     val newerBuiltIn: List<String>,
     val damaged: List<String>,
+    val counts: Map<AdblockCategory, FilterListCounts>,
 )
 
 /** What Settings shows about list updates (#127): a check under way, and how the last one ended. */
@@ -496,10 +591,37 @@ internal object Adblock {
             if (w.add) s.addAdblockAllowlistHost(w.host) else s.removeAdblockAllowlistHost(w.host)
         },
         onChange = { list ->
+            val changed = list != allowlist
             allowlist = list
             _revision.value++
+            if (changed) scriptletsChanged()
         },
     )
+
+    /**
+     * Bumped whenever a tab's scriptlet scripts may have to change (#318):
+     * a new engine, or an allowlist change. [TabScriptlets] rebuilds on it.
+     */
+    @Volatile
+    var scriptletGeneration = 0
+        private set
+
+    /**
+     * Per host, its scriptlet code for the current engine, `""` for none
+     * ([scriptletCode]). Bounded: a long session's hosts don't stay on
+     * the heap until the next engine build; a host dropped is rebuilt on
+     * demand. Its own lock also guards [engine] swaps.
+     */
+    private val scriptletCodes = ScriptletCodeCache()
+
+    /** Loaded once, with the first engine build. */
+    @Volatile
+    private var scriptletCatalog: ScriptletCatalog? = null
+
+    private fun scriptletsChanged() {
+        synchronized(scriptletCodes) { scriptletGeneration++ }
+        TabScriptlets.refreshAll()
+    }
 
     /** Start following Settings. Idempotent; call from the activity's `onCreate`. */
     fun start(context: Context) {
@@ -534,11 +656,16 @@ internal object Adblock {
                     val built = withContext(Dispatchers.IO) { build(app, lists, categories) { ensureActive() } }
                     // An allowlisted site is never blocked while settings load.
                     allowlistRead.await()
-                    engine = built?.first
+                    synchronized(scriptletCodes) {
+                        engine = built?.first
+                        scriptletCodes.clear()
+                    }
+                    scriptletsChanged()
                     val sources = built?.second
                     _status.value = AdblockStatus(
                         loading = false,
                         filterCount = built?.first?.filterCount ?: 0,
+                        counts = sources?.counts.orEmpty(),
                         listsVersion = sources?.applied?.version,
                         listsGeneratedAt = sources?.applied?.generatedAt,
                         updatedLists = sources?.updated.orEmpty(),
@@ -586,36 +713,74 @@ internal object Adblock {
         val fromBundle = ArrayList<String>()
         val bundleNewer = ArrayList<String>()
         val damaged = ArrayList<String>()
-        val texts = AdblockCategory.entries.filter { it in categories }.mapNotNull { category ->
+        val catalog = scriptletCatalog ?: runCatching {
+            context.assets.open("adblock/$SCRIPTLET_RESOURCES_FILE").bufferedReader().use { it.readText() }
+        }.onFailure { Log.w(TAG, "scriptlet resources unreadable", it) }.getOrNull()
+            ?.let(ScriptletCatalog::parse)?.also { scriptletCatalog = it }
+        // Which category each list compiled belongs to, for its counts.
+        val owners = ArrayList<AdblockCategory>()
+        val texts = AdblockCategory.entries.filter { it in categories }.flatMap { category ->
             checkpoint()
-            // A missing or unreadable list costs its own category only.
-            val bundled = runCatching {
-                context.assets.open("adblock/${category.file}").bufferedReader().use { it.readText() }
-            }.onFailure { Log.w(TAG, "list ${category.file} unreadable", it) }.getOrNull()
-            lists.updatedList(category.key)?.let { (text, update) ->
-                // The bundled lists are the floor: an update older than
-                // them (a newer APK, a stalled publisher) doesn't serve.
-                if (bundled == null || updatedListIsNewer(text, bundled)) {
-                    fromUpdate += category.listName
-                    return@mapNotNull text
-                }
-                Log.i(TAG, "bundled ${category.file} is newer than update ${update.version}'s; using it")
-                bundleNewer += category.listName
-            } ?: run {
-                // The update carries it, but its copy failed the hash check.
-                if (applied?.lists?.containsKey(category.key) == true) damaged += category.listName
+            val extras = category.bundledExtras.mapNotNull { extra ->
+                runCatching {
+                    context.assets.open("adblock/${extra.file}").bufferedReader().use { it.readText() }
+                }.onFailure { Log.w(TAG, "list ${extra.file} unreadable", it) }.getOrNull()
+                    ?.let { FilterListText(it, extra.trustedScriptlets) }
             }
-            if (bundled != null) fromBundle += category.listName
-            bundled
+            val main = mainListText(context, lists, category, applied, fromUpdate, fromBundle, bundleNewer, damaged)
+            val out = listOfNotNull(main?.let { FilterListText(it) }) + extras
+            repeat(out.size) { owners += category }
+            out
         }
         if (texts.isEmpty()) return null
-        val built = AdblockEngine.build(texts, checkpoint)
+        val built = AdblockEngine.build(texts, catalog, checkpoint)
+        val counts = HashMap<AdblockCategory, FilterListCounts>()
+        built.listCounts.forEachIndexed { i, c -> counts[owners[i]] = counts[owners[i]]?.plus(c) ?: c }
         Log.i(
             TAG,
             "engine ready: ${categories.joinToString { it.key }}, ${built.filterCount} filters " +
-                "(update ${applied?.version}: $fromUpdate, bundled: $fromBundle) in ${SystemClock.elapsedRealtime() - t0} ms",
+                "(update ${applied?.version}: $fromUpdate, bundled: $fromBundle; " +
+                "scriptlets ${counts.values.sumOf { it.scriptletsUsed }}/${counts.values.sumOf { it.scriptlets }}) " +
+                "in ${SystemClock.elapsedRealtime() - t0} ms",
         )
-        return built to AdblockListSources(applied, fromUpdate, fromBundle, bundleNewer, damaged)
+        return built to AdblockListSources(applied, fromUpdate, fromBundle, bundleNewer, damaged, counts)
+    }
+
+    /**
+     * [category]'s main list: the applied update's copy when it has one
+     * that still matches its hash and isn't older than the bundled asset
+     * ([updatedListIsNewer]), else the bundled asset; noting which in the
+     * lists given.
+     */
+    private fun mainListText(
+        context: Context,
+        lists: AdblockListStore,
+        category: AdblockCategory,
+        applied: AppliedUpdate?,
+        fromUpdate: MutableList<String>,
+        fromBundle: MutableList<String>,
+        bundleNewer: MutableList<String>,
+        damaged: MutableList<String>,
+    ): String? {
+        // A missing or unreadable list costs its own category only.
+        val bundled = runCatching {
+            context.assets.open("adblock/${category.file}").bufferedReader().use { it.readText() }
+        }.onFailure { Log.w(TAG, "list ${category.file} unreadable", it) }.getOrNull()
+        lists.updatedList(category.key)?.let { (text, update) ->
+            // The bundled lists are the floor: an update older than
+            // them (a newer APK, a stalled publisher) doesn't serve.
+            if (bundled == null || updatedListIsNewer(text, bundled)) {
+                fromUpdate += category.listName
+                return text
+            }
+            Log.i(TAG, "bundled ${category.file} is newer than update ${update.version}'s; using it")
+            bundleNewer += category.listName
+        } ?: run {
+            // The update carries it, but its copy failed the hash check.
+            if (applied?.lists?.containsKey(category.key) == true) damaged += category.listName
+        }
+        if (bundled != null) fromBundle += category.listName
+        return bundled
     }
 
     /**
@@ -738,6 +903,7 @@ internal object Adblock {
      */
     fun setAllowlisted(host: String, allowed: Boolean, private: Boolean) {
         val entry = normalizeAllowlistHost(host) ?: return
+        val before = privateAllowlist
         if (allowed) {
             if (private) privateAllowlist = privateAllowlist + entry
             else store.write(add = true, host = entry)
@@ -748,6 +914,7 @@ internal object Adblock {
             covering(allowlist).forEach { store.write(add = false, host = it) }
         }
         _revision.value++
+        if (privateAllowlist != before) scriptletsChanged()
     }
 
     /** Settings' remove button: exactly the saved entry [site], its parents and children kept. */
@@ -758,8 +925,39 @@ internal object Adblock {
 
     /** The last private tab has closed: forget what it allowed. */
     fun onPrivateSessionEnded() {
+        val had = privateAllowlist.isNotEmpty()
         privateAllowlist = emptySet()
         _revision.value++
+        if (had) scriptletsChanged()
+    }
+
+    /**
+     * The scriptlet code (#318) a frame on [host] runs with the current
+     * engine ([ScriptletCatalog.code]), or `null` for none: no engine, a
+     * host never filtered, or no rules for it. Memoised per engine; safe
+     * from any thread.
+     */
+    fun scriptletCode(host: String): String? {
+        if (isExempt(host)) return null
+        val (e, catalog) = synchronized(scriptletCodes) { engine to scriptletCatalog }
+        if (e == null || catalog == null) return null
+        synchronized(scriptletCodes) { scriptletCodes[host] }?.let { return it.ifEmpty { null } }
+        val calls = e.scriptletsFor(host)
+        val code = if (calls.isEmpty()) "" else catalog.code(calls)
+        synchronized(scriptletCodes) { if (engine === e) scriptletCodes.put(host, code) }
+        return code.ifEmpty { null }
+    }
+
+    /**
+     * The document-start script for frames on [host] in a tab that is
+     * [private] or not ([scriptletFrameJs]), or `null` when there's none
+     * to run. The tab's allowlist goes in it: a frame skips its
+     * scriptlets when the page it's on is allowed.
+     */
+    fun scriptletScript(host: String, private: Boolean): String? {
+        val code = scriptletCode(host) ?: return null
+        val allowed = if (private) allowlist + privateAllowlist else allowlist
+        return scriptletFrameJs(host, code, allowed)
     }
 
     /**
@@ -769,15 +967,31 @@ internal object Adblock {
      * main-frame load, the local nodes' gateways, or a virtual origin.
      * Before the first engine build lands, waits for it ([FirstBuildGate]).
      */
-    fun shouldBlock(url: String, headers: Map<String, String>?, pageUrl: String?, private: Boolean): Boolean {
-        if (!url.startsWith("http://") && !url.startsWith("https://")) return false
-        val host = hostOfUrl(url) ?: return false
-        if (isExempt(host) || Gateways.isLocalGateway(url)) return false
+    fun shouldBlock(url: String, headers: Map<String, String>?, pageUrl: String?, private: Boolean): Boolean =
+        blockedResponseFor(url, headers, pageUrl, private) != null
+
+    /**
+     * What a subresource request gets if it is to be blocked — the empty
+     * 403, or the stand-in a `$redirect` filter names (#405) — or `null`
+     * to let it through. As [shouldBlock], which it backs.
+     */
+    fun blockedResponseFor(
+        url: String,
+        headers: Map<String, String>?,
+        pageUrl: String?,
+        private: Boolean,
+    ): WebResourceResponse? {
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return null
+        val host = hostOfUrl(url) ?: return null
+        if (isExempt(host) || Gateways.isLocalGateway(url)) return null
         if (engine == null) firstBuild.await()
-        val e = engine ?: return false
+        val e = engine ?: return null
         val pageHost = pageUrl?.let(::hostOfUrl)
-        if (pageHost != null && isAllowlisted(pageHost, private)) return false
-        return e.shouldBlock(url, host, requestTypes(url, headers), pageUrl, pageHost)
+        if (pageHost != null && isAllowlisted(pageHost, private)) return null
+        val types = requestTypes(url, headers)
+        if (!e.shouldBlock(url, host, types, pageUrl, pageHost)) return null
+        val resource = e.redirectFor(url, host, types, pageHost)?.let { scriptletCatalog?.redirect(it) }
+        return if (resource == null) blockedResponse() else redirectResponse(resource, headers)
     }
 
     /**
@@ -787,6 +1001,18 @@ internal object Adblock {
      * asking for good.
      */
     val firstBuildPending: Boolean get() = firstBuild.pending
+
+    /**
+     * Has the first engine build landed — or was none ever started? Unlike
+     * [firstBuildPending], stays `false` past the wait's deadline, for
+     * work queued until the engine exists ([TabScriptlets]).
+     */
+    val firstBuildLanded: Boolean get() = firstBuild.landedOrUnstarted
+
+    /** Block (a WebView network thread) until the first engine build lands or its deadline passes. */
+    fun awaitFirstBuildBlocking() {
+        if (engine == null) firstBuild.await()
+    }
 
     /** Suspend until the first engine build lands or its deadline passes. */
     suspend fun awaitFirstBuild() {
@@ -819,6 +1045,33 @@ internal object Adblock {
     private fun isExempt(host: String): Boolean =
         host == "localhost" || host == "127.0.0.1" || host == "[::1]" || VirtualOrigin.isVirtualHost(host) ||
             host == RadUrl.HOST
+
+    /**
+     * A blocked request a `$redirect` filter names a stand-in for (#405):
+     * the stand-in, as a 200 the page's element loads (an empty script
+     * runs, a 1×1 GIF decodes) — the point of the filter, where a failed
+     * load would break the page or trip its blocker check. A cross-origin
+     * `fetch` / XHR may read it: it is our own no-op, not the site's.
+     */
+    private fun redirectResponse(resource: RedirectResource, headers: Map<String, String>?): WebResourceResponse {
+        val responseHeaders = HashMap<String, String>()
+        responseHeaders["Cache-Control"] = "no-store"
+        val origin = headers?.entries?.firstOrNull { it.key.equals("Origin", ignoreCase = true) }?.value
+        if (origin != null) {
+            responseHeaders["Access-Control-Allow-Origin"] = origin
+            responseHeaders["Access-Control-Allow-Credentials"] = "true"
+        }
+        val text = resource.mimeType.startsWith("text/") || resource.mimeType.endsWith("javascript") ||
+            resource.mimeType.endsWith("json") || resource.mimeType.endsWith("xml")
+        return WebResourceResponse(
+            resource.mimeType,
+            if (text) "utf-8" else null,
+            200,
+            "OK",
+            responseHeaders,
+            ByteArrayInputStream(resource.body),
+        )
+    }
 
     /**
      * What a blocked request gets: an empty 403, so the page's element

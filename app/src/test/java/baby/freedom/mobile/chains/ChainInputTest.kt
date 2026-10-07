@@ -51,4 +51,57 @@ class ChainInputTest {
         assertNull(without(rpcs = listOf("http://polygon-rpc.com")))
         assertNull(without(rpcs = List(Chain.MAX_RPC_URLS + 1) { "https://r$it.example" }))
     }
+
+    /**
+     * A site names the chain it adds (`wallet_addEthereumChain`) and the
+     * sheets show the name as is: nothing that reorders the row (a bidi
+     * override or isolate), splits it (U+2028/U+2029) or hides (a BOM, a
+     * soft hyphen) gets in — emoji joiners and flag tags still do.
+     */
+    @Test
+    fun namesAndSymbolsCantReorderOrSplitTheSheetsTheyAreShownOn() {
+        fun build(name: String, symbol: String = "TST", currencyName: String? = null) = ChainInput.build(
+            id = "1337", name = name, symbol = symbol, decimals = "18", explorer = "",
+            rpcUrls = listOf("https://rpc.example.org"), currencyName = currencyName,
+        )
+        for (bad in listOf("Ethereum (chain 1)\u2028\u2028Testnet", "Eth\u2029ereum", "\u202Eeroc", "Gnosis\u2066x\u2069", "Base\uFEFF", "Ba\u00ADse")) {
+            assertNull(bad, ChainInput.parseName(bad))
+            assertNull(bad, build(bad))
+            assertNull(bad, ChainInput.parseSymbol(bad.take(10)))
+        }
+        assertNull(build("Test", symbol = "ETH\u202E"))
+        // Nothing that wraps the rest of the row away, draws blank or overprints the rows around it.
+        val spaced = "Ethereum (chain 1)" + " ".repeat(40) + "Net"
+        for (bad in listOf(
+            spaced, "Ethereum  Net", "Ethereum\u00A0Net", "Ethereum\u3000Net", "Ethereum\u2003Net",
+            "Ethereum" + "\u3164".repeat(20) + "Net", "Ethereum\u2800Net", "Eth\u115Fereum", "Eth\uFFA0ereum",
+            "Ethereum" + "\u0301".repeat(40), "Ethereum\u0301\u0301\u0301\u0301", "Eth\u0301\u0301\u200D\u0301\u0301ereum",
+            "Eth\uFE00ereum", "Eth\uDB40\uDD00ereum", "Eth\u2065ereum", "Eth\uFFF0ereum", "Eth\u034Fereum",
+            // Joiners and tag characters draw nothing, so they can't split a run of spaces or start a word.
+            "Ethereum (chain 1)" + " \u200D".repeat(21) + " Net", "Ethereum (chain 1)" + " \uDB40\uDC20".repeat(20) + " Net",
+            "Ethereum \u200C Net", "Ethereum \u200DNet", "\u200DEthereum", "Ethereum \uDB40\uDC67Net",
+        )) {
+            assertNull(bad, ChainInput.parseName(bad))
+            assertNull(bad, build(bad))
+        }
+        assertNull(ChainInput.parseSymbol("E\u3164"))
+        // Real names: single spaces, a few combining marks, an emoji with its presentation selector, a keycap.
+        for (good in listOf("Ethereum Classic Testnet", "Vi\u1EC7t Nam", "Tie\u0302\u0301ng", "Love \u2764\uFE0F", "Chain 1\uFE0F\u20E3")) {
+            assertEquals(good, build(good)!!.name)
+        }
+        // A bad currency name falls back to the symbol, as an invalid one always has.
+        assertEquals("TST", build("Test", currencyName = "Ether\u2028x")!!.currencyName)
+        // Emoji built from joiners and tag characters are names like any other.
+        val family = "Chain \uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67"
+        val scotland = "Chain \uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74\uDB40\uDC7F"
+        assertEquals(family, build(family)!!.name)
+        assertEquals(scotland, build(scotland)!!.name)
+        // A chain stored before this rule still reads back: it mustn't vanish on upgrade.
+        val old = ChainInput.build(
+            id = "1337", name = "Old\u202Ename", symbol = "TST", decimals = "18", explorer = "",
+            rpcUrls = listOf("https://rpc.example.org"), stored = true,
+        )
+        assertEquals("Old\u202Ename", old!!.name)
+    }
 }
+

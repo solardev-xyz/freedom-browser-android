@@ -88,6 +88,59 @@ class ClientCertificatesTest {
     }
 
     @Test
+    fun `a Deny in a tab doesn't refuse a server that tab or any tab picked a certificate for`() {
+        val c = ClientCertChoices()
+        c.loaded(2L)
+        c.answered("portal.example", 8704, 3L, "alice", c.generation)
+        c.answered("portal.example", 8704, 2L, "alice", c.generation)
+        val queued = c.ticket()
+        // An unrelated chooser the user rightly denies (a third-party
+        // iframe): the portal they picked a certificate for keeps it
+        // (R6-F1), even for a request queued behind that chooser.
+        c.answered("tracker.example", 8705, 2L, null, c.generation)
+        assertEquals(ClientCertPlan.Send("alice"), c.planFor(false, "portal.example", 8704, 2L, c.ticket()))
+        assertEquals(ClientCertPlan.Send("alice"), c.planFor(false, "portal.example", 8704, 2L, queued))
+        // Anything without a pick is still refused, so the page can't
+        // reopen the chooser (R5-F1).
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "tracker.example", 8705, 2L, c.ticket()))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "a7.tracker.example", 8705, 2L, c.ticket()))
+    }
+
+    @Test
+    fun `a link the user taps after a Deny asks for its server, unless it is the one they refused`() {
+        val c = ClientCertChoices()
+        c.loaded(2L)
+        // No refusal holding: a tapped link changes nothing.
+        assertEquals(false, c.followed(2L, "bank.example"))
+        c.answered("tracker.example", 443, 2L, null, c.generation)
+        // The user taps a link to a site they never refused (R6-M1): it asks.
+        assertEquals(true, c.followed(2L, "Bank.example"))
+        assertEquals(ClientCertPlan.Ask, c.planFor(false, "bank.example", 443, 2L, c.ticket()))
+        // Every other server is still refused, the refused one too, even
+        // through a tapped link to it.
+        assertEquals(false, c.followed(2L, "tracker.example"))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "tracker.example", 443, 2L, c.ticket()))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "a1.tracker.example", 443, 2L, c.ticket()))
+        // Denied there too: refused again, and a later tap doesn't lift it.
+        c.answered("bank.example", 443, 2L, null, c.generation)
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "bank.example", 443, 2L, c.ticket()))
+        assertEquals(false, c.followed(2L, "bank.example"))
+        // A pop-up the page opens inherits what the user refused, not
+        // the links they followed.
+        c.opened(11L, 2L)
+        assertEquals(false, c.followed(11L, "tracker.example"))
+        assertEquals(true, c.followed(11L, "shop.example"))
+        // After a load, a new Deny starts afresh: an earlier tap to a
+        // host doesn't exempt it.
+        c.followed(2L, "news.example")
+        c.loaded(2L)
+        c.answered("tracker.example", 443, 2L, null, c.generation)
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "news.example", 443, 2L, c.ticket()))
+        assertEquals(ClientCertPlan.Refuse, c.planFor(false, "bank.example", 443, 2L, c.ticket()))
+        assertEquals(true, c.followed(2L, "bank.example"))
+    }
+
+    @Test
     fun `a pop-up opened while its opener's refusal holds starts out refused`() {
         val c = ClientCertChoices()
         c.loaded(2L)

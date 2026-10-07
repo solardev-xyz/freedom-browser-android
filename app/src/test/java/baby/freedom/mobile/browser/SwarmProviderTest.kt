@@ -6,6 +6,7 @@ import baby.freedom.mobile.wallet.SitePublisher
 import baby.freedom.mobile.wallet.VaultLockedException
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -693,7 +694,7 @@ class SwarmProviderTest {
         val ask = asked.single() as SwarmAsk.Sign
         assertEquals(SwarmProvider.AutoApprove.Signing, ask.kind)
         assertTrue(ask.grant)
-        assertEquals("Single Owner Chunk $identifier", ask.detail)
+        assertEquals("Signed data $identifier", ask.detail)
         val owner = PublisherKeys.address(ByteArray(32) { 0x11 })
         assertEquals(owner, soc.getString("owner"))
         assertEquals(identifier, soc.getString("identifier"))
@@ -1021,6 +1022,14 @@ class SwarmProviderTest {
             assertEquals("swarm_publishData", sent.getString("method"))
             assertEquals("1,2,255,", sent.getJSONObject("params").getJSONObject("data").getString("\$b64"))
             assertEquals("a/b", sent.getJSONObject("params").getString("contentType"))
+            // A Node Buffer's JSON form goes as base64 too: as an array it would cost a value per byte (#349 R1-M1).
+            cx.evaluateString(scope, "window.swarm.publishData({ data: { type: 'Buffer', data: [1, 2, 255] } });", "buffer", 1, null)
+            val buffer = JSONObject(cx.evaluateString(scope, "sent[1]", "sent", 1, null).toString())
+            assertEquals("1,2,255,", buffer.getJSONObject("params").getJSONObject("data").getString("\$b64"))
+            // Not bytes: left as the page wrote it, for the app to refuse.
+            cx.evaluateString(scope, "window.swarm.publishData({ data: { type: 'Buffer', data: [1, 256] } });", "bad", 1, null)
+            val bad = JSONObject(cx.evaluateString(scope, "sent[2]", "sent", 1, null).toString())
+            assertEquals(2, bad.getJSONObject("params").getJSONObject("data").getJSONArray("data").length())
             assertEquals("undefined", cx.evaluateString(scope, "typeof window.abcdefghij", "gone", 1, null).toString())
             assertEquals("true", cx.evaluateString(scope, "String(window.swarm.isFreedomBrowser)", "flag", 1, null).toString())
 
@@ -1251,11 +1260,11 @@ class SwarmProviderTest {
         assertEquals("room", send.topic)
         assertEquals(2, send.size)
         assertEquals("Confirm message", swarmPromptCopy(send).title)
-        assertEquals("wants to broadcast a message (GSOC)", swarmPromptCopy(send).request)
+        assertEquals("wants to post a message to a public room", swarmPromptCopy(send).request)
         assertEquals("Always allow this site to send messages without asking", swarmPromptCopy(send).always)
         answer = SwarmProvider.Answer(true, always = true)
         okJson(call("swarm_sendPss", pssParams()))
-        assertEquals("wants to send a private message (PSS)", swarmPromptCopy(asked.last()).request)
+        assertEquals("wants to send a private message", swarmPromptCopy(asked.last()).request)
         assertTrue((site to SwarmProvider.AutoApprove.Messaging) in grants.auto)
         val before = asked.size
         okJson(call("swarm_sendPss", pssParams()))
@@ -1411,6 +1420,22 @@ class SwarmProviderTest {
     }
 
     @Test
+    fun `stacked marks, selectors, fillers and ignorables are written out on the sheet`() {
+        // Past the third combining mark on one letter, each is written out: no ink over the rows around it.
+        assertEquals("x\u0489\u0489\u0489" + "<U+0489>".repeat(1997), swarmShownTopic("x" + "\u0489".repeat(2000)))
+        // Real text keeps its two or three marks.
+        assertEquals("Vi\u1EC7t e\u0301\u0302", swarmShownTopic("Vi\u1EC7t e\u0301\u0302"))
+        // An emoji's own presentation selector stays; a run of selectors, or one smuggled after nothing, doesn't.
+        assertEquals("\u2764\uFE0F", swarmShownTopic("\u2764\uFE0F"))
+        assertEquals("a<U+FE00><U+FE01>", swarmShownTopic("a\uFE00\uFE01"))
+        assertEquals("a<U+E0100>", swarmShownTopic("a\uDB40\uDD00"))
+        // Blank fillers and Braille blank.
+        assertEquals("<U+3164><U+115F><U+2800>", swarmShownTopic("\u3164\u115F\u2800"))
+        // An unassigned default-ignorable is written out, and the text that takes its place splits the stack.
+        assertEquals("x\u0301\u0301<U+2065>\u0301\u0301", swarmShownTopic("x\u0301\u0301\u2065\u0301\u0301"))
+    }
+
+    @Test
     fun `unsubscribe never asks and only closes the site's own subscription`() {
         connect()
         connect(other)
@@ -1497,5 +1522,150 @@ class SwarmProviderTest {
         val OVERLAY = "a1b2" + "cd".repeat(30)
         val PSS_KEY = "03" + "ef".repeat(32)
         val RECIPIENT = "02" + "12".repeat(32)
+    }
+
+    @Test
+    fun `a request whose parse would cost far more memory than its length is refused unparsed`() {
+        // Two characters a value: a 30M-number array ran the app out of memory on the main thread.
+        val numbers = """{"id":4,"method":"swarm_publishData","params":{"data":{"type":"Buffer","data":[""" +
+            List(SwarmProvider.MAX_DATA_BYTES / 8) { "0" }.joinToString(",") + "]}}}"
+        assertTrue(numbers.count { it == ',' } > MAX_SWARM_REQUEST_VALUES)
+        assertNull(parseSwarmRequest(numbers))
+        assertEquals("answered, not left to time out", 4L, unparsedRequestId(numbers))
+        // An object per three characters, costlier still.
+        assertNull(parseSwarmRequest("""{"id":5,"method":"m","params":{"a":[""" + List(MAX_SWARM_REQUEST_CONTAINERS) { "[]" }.joinToString(",") + "]}}"))
+        // Commas and brackets inside strings are text, not values: base64 bytes and paths pass.
+        val text = "[,]{".repeat(MAX_SWARM_REQUEST_VALUES)
+        assertEquals(text, parseSwarmRequest("""{"id":6,"method":"m","params":{"s":"$text"}}""")!!.params.getString("s"))
+        assertTrue(jsonShapeWithin(""""a\",[""", 1, 0))
+        // A megabyte as a Buffer array still goes through.
+        val buffer = """{"id":7,"method":"m","params":{"data":{"type":"Buffer","data":[""" + List(1 shl 20) { "255" }.joinToString(",") + "]}}}"
+        assertEquals(1 shl 20, SwarmProvider.bytesOf(parseSwarmRequest(buffer)!!.params.get("data"))!!.size)
+    }
+
+    @Test
+    fun `a request refused for its size says why, and a malformed one doesn't`() {
+        val numbers = """{"id":4,"method":"m","params":{"a":[""" + List(MAX_SWARM_REQUEST_VALUES + 1) { "0" }.joinToString(",") + "]}}"
+        val big = unparsedSwarmRequestError(numbers)
+        assertEquals(SwarmProvider.INVALID_PARAMS, big.code)
+        assertEquals("request_too_complex", big.reason)
+        assertEquals(MAX_SWARM_REQUEST_VALUES, big.data!!.getInt("maxValues"))
+        val malformed = unparsedSwarmRequestError("""{"id":4,"method":"m","params":"x"}""")
+        assertEquals("Invalid request", malformed.message)
+        assertNull(malformed.reason)
+        // Refused for lenient syntax, not size: malformed, not "too complex".
+        for (lenient in listOf("""{"id":1,"method":"x";}""", """{"id":1,"method":'x'}""", """{"id":1,/**/"method":"x"}""")) {
+            assertEquals(lenient, JsonShape.NOT_STRICT, jsonShape(lenient, MAX_SWARM_REQUEST_VALUES, MAX_SWARM_REQUEST_CONTAINERS))
+            val err = unparsedSwarmRequestError(lenient)
+            assertEquals(lenient, "Invalid request", err.message)
+            assertNull(lenient, err.reason)
+        }
+        assertEquals(JsonShape.TOO_COMPLEX, jsonShape(numbers, MAX_SWARM_REQUEST_VALUES, MAX_SWARM_REQUEST_CONTAINERS))
+    }
+
+    @Test
+    fun `org json's lenient syntax can't hide values from the shape count`() {
+        // Android's org.json takes each of these; every one could hide separators from a strict-JSON count.
+        for (lenient in listOf(
+            """{"a":[0;0;0]}""",
+            """{"a":['x,y']}""",
+            """{"a":[0,/* " */0]}""",
+            """{"a":[0,// """" + "\n0]}",
+            """{"a":[0,# """" + "\n0]}",
+            """{"a":[x",0,0,"]}""",
+        )) {
+            assertFalse(lenient, jsonShapeWithin(lenient, 100, 100))
+        }
+        // What JSON.stringify writes still passes, whatever its strings hold.
+        val strict = JSONObject().put("id", 1).put("s", "a';/#\",\"[{").put("a", org.json.JSONArray(listOf(1, "x", true)))
+            .put("o", JSONObject().put("k", JSONObject.NULL)).toString()
+        assertTrue(strict, jsonShapeWithin(strict, 100, 100))
+        assertTrue(jsonShapeWithin("{ \"a\" : [ \"b\" ,\n\t\"c\" ] }", 100, 100))
+    }
+
+    @Test
+    fun `a content type the node's header can't carry is refused before the sheet`() {
+        connect()
+        for (bad in listOf("text/plain\r\nX-Evil: 1", "text/plän", "t/" + "x".repeat(SwarmProvider.MAX_CONTENT_TYPE_CHARS))) {
+            val e = err(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", bad)))
+            assertEquals(SwarmProvider.INVALID_PARAMS, e.code)
+            assertEquals("invalid_content_type", e.reason)
+        }
+        assertTrue(asked.isEmpty())
+        assertTrue(node.uploads().isEmpty())
+        ok(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", "text/html; charset=utf-8")))
+    }
+
+    @Test
+    fun `a publish name too long for one sheet row is refused before the sheet`() {
+        connect()
+        for (bad in listOf("\u200B".repeat(100), "x".repeat(SwarmProvider.MAX_NAME_BYTES + 1), "\u200B".repeat(10_000_000))) {
+            val e = err(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", "text/plain").put("name", bad)))
+            assertEquals(SwarmProvider.INVALID_PARAMS, e.code)
+            assertEquals("invalid_name", e.reason)
+        }
+        assertTrue(asked.isEmpty())
+        assertTrue(node.uploads().isEmpty())
+        ok(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", "text/plain").put("name", "x".repeat(SwarmProvider.MAX_NAME_BYTES))))
+        ok(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", "text/plain").put("name", "ü".repeat(SwarmProvider.MAX_NAME_BYTES / 2))))
+    }
+
+    @Test
+    fun `an Allow tapped after the user disconnected the site does nothing and gives nothing back`() {
+        connect()
+        // The wallet page's Disconnect while the sheet is up.
+        onApproved = {
+            grants.connected.remove(site)
+            grants.auto.removeAll { it.first == site }
+            feeds.granted.remove(site)
+        }
+        answer = SwarmProvider.Answer(true, always = true)
+        val feed = err(call("swarm_createFeed", JSONObject().put("name", "posts")))
+        assertEquals(4100, feed.code)
+        assertEquals("not_connected", feed.reason)
+        assertFalse("feed access stays taken away", feeds.granted(site))
+        assertTrue("no always-allow comes back", grants.auto.none { it.first == site })
+
+        connect()
+        val publish = err(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", "text/plain")))
+        assertEquals("not_connected", publish.reason)
+        assertTrue(grants.auto.none { it.first == site })
+        assertTrue(node.uploads().isEmpty())
+    }
+
+    @Test
+    fun `a disconnect can't land between the post-sheet check and the grants it lets through`() {
+        connect()
+        val gate = kotlinx.coroutines.sync.Mutex()
+        val gated = SwarmProvider(grants, feeds, publishers, node, clock = { now }, io = Dispatchers.Unconfined, subscriptions = subscriptions, grantGate = gate)
+        val reply = runBlocking {
+            // The app's disconnect holds the gate while it revokes.
+            gate.lock()
+            val r = async {
+                gated.request(site, "swarm_createFeed", JSONObject().put("name", "posts"), {}, page) {
+                    asked += it
+                    SwarmProvider.Answer(true, always = true)
+                }
+            }
+            while (asked.isEmpty()) kotlinx.coroutines.yield()
+            kotlinx.coroutines.yield()
+            grants.connected.remove(site)
+            grants.auto.removeAll { it.first == site }
+            feeds.granted.remove(site)
+            gate.unlock()
+            r.await()
+        }
+        assertEquals("not_connected", err(reply).reason)
+        assertFalse("feed access stays taken away", feeds.granted(site))
+        assertTrue(grants.auto.none { it.first == site })
+    }
+
+    @Test
+    fun `the sheet writes out line breaks and bidi controls in every page string`() {
+        val publish = SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.Data, 5, "text/plain\u2028Cost: free", null, emptyList())
+        assertEquals("text/plain<U+2028>Cost: free", swarmPublishWhat(publish))
+        assertEquals("a<U+202E>txt.exe, b<U+000A>c", swarmPathsPreview(listOf("a\u202Etxt.exe", "b\nc")))
+        val sign = SwarmAsk.Sign(site, "swarm_createFeed", SwarmProvider.AutoApprove.Feeds, true, "prof\u202Eelif", null, null)
+        assertEquals("prof<U+202E>elif", swarmSignRequest(sign))
     }
 }

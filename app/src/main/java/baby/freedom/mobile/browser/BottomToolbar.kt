@@ -13,6 +13,18 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.material.icons.filled.AccountBalanceWallet
+import androidx.compose.material.icons.filled.AddToHomeScreen
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.PlainTooltip
+import androidx.compose.material3.TooltipAnchorPosition
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberTooltipState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -43,7 +55,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.Cached
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Computer
@@ -76,6 +87,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
@@ -112,6 +124,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -123,15 +136,24 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.role
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.semantics.traversalIndex
 import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -142,6 +164,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.sp
@@ -151,9 +174,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
-import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
-import baby.freedom.swarm.NodeInfo
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -1024,8 +1045,36 @@ internal val AddressLabelCompactScale: Float =
  * exactly `bodyMedium`'s own size at every scale rather than only at
  * the default one.
  */
-internal fun Density.addressLabelCompactScale(): Float =
-    AddressLabelCompactFontSize.toPx() / AddressLabelRestingFontSize.toPx()
+internal fun Density.addressLabelCompactScale(
+    restingFontSize: TextUnit = AddressLabelRestingFontSize,
+): Float = (AddressLabelCompactFontSize.toPx() / restingFontSize.toPx()).coerceAtMost(1f)
+
+/**
+ * The type sizes the resting domain label may take, largest first (#417):
+ * the resting [AddressLabelRestingFontSize] down to
+ * [AddressLabelMinFitFontSize] in half-sp steps.
+ */
+internal val AddressLabelFitSizes: List<TextUnit> =
+    (0..6).map { (AddressLabelRestingFontSize.value - it * 0.5f).sp }
+
+/** The smallest the domain label is shrunk to before it is middle-ellipsised. */
+internal val AddressLabelMinFitFontSize: TextUnit = AddressLabelFitSizes.last()
+
+/**
+ * The resting domain label's type size: the largest of
+ * [AddressLabelFitSizes] at which the whole name [fits] the label's
+ * fixed width ([addressLabelMaxWidth]), else the smallest — where the
+ * middle ellipsis then takes over, keeping the name's tail, the part
+ * that says who is being trusted, on screen (#417). Shrinking first is
+ * what lets `app.swarmit.eth` read whole on a 411 dp phone rather than
+ * as `app.sw…mit.eth`.
+ *
+ * The compact capsule never draws the label larger than it rests: a name
+ * fitted below [AddressLabelCompactFontSize] keeps its size as the bar
+ * collapses ([Density.addressLabelCompactScale] is capped at 1).
+ */
+internal fun fitAddressLabelFontSize(fits: (TextUnit) -> Boolean): TextUnit =
+    AddressLabelFitSizes.firstOrNull(fits) ?: AddressLabelMinFitFontSize
 
 /**
  * How much of its resting size the domain label is drawn at — 1 at rest,
@@ -1145,23 +1194,6 @@ internal fun capsuleTapAction(collapse: Float, addressFocused: Boolean): Capsule
  */
 internal fun capsulePillSlotScale(collapse: Float): Float =
     (1f - collapse * CONTROL_COLLAPSE_RATE).coerceIn(0f, 1f)
-
-/**
- * Stroke of the load-progress trace that runs along the capsule's own
- * outline. Thin enough to read as a highlight on the edge rather than a
- * second border; drawn *over* the capsule, so it costs no layout height
- * and nothing shifts when a load starts or ends.
- */
-private val CapsuleProgressStroke = 2.5.dp
-
-/**
- * Fraction of each half-perimeter covered by the travelling segment
- * while the load is indeterminate (ENS resolve / gateway warm-up).
- */
-private const val CAPSULE_SWEEP_WINDOW = 0.4f
-
-/** One full lap of the indeterminate sweep, in milliseconds. */
-private const val CAPSULE_SWEEP_PERIOD_MS = 1400
 
 /**
  * Which control the address pill's trailing slot is showing. The slot
@@ -1396,13 +1428,15 @@ internal fun CapsuleSurface(
  * each shrinks whole into the edge it retreats to, width and scale
  * together, never a cross-fade and never a clipped fragment.
  *
- * **Loading** is drawn *on* the field: a thin trace runs along its
- * outline from the bottom centre out to both sides (see
- * [CapsuleEdgeTrace]). It is measured from whatever outline the field
- * currently has, so it traces the compact and editing shapes just as
- * readily as the resting one. The field's trailing slot turns into a
- * Stop control. Both are overlays on geometry that is already settled,
- * so a load starting or ending moves nothing.
+ * **Loading** is drawn *on* the field, the way Chrome for Android draws
+ * it: a thin bar along the field's bottom edge, clipped to its shape,
+ * that grows from the leading edge, sweeps while a name resolves, and
+ * fills and fades when the load ends (see [CapsuleLoadBar]). It is
+ * sized from whatever outline the field currently has, so it sits on
+ * the compact and editing shapes just as readily as the resting one.
+ * The field's trailing slot turns into a Stop control. Both are overlays
+ * on geometry that is already settled, so a load starting or ending
+ * moves nothing.
  *
  * The caller owns the layout slot (insets, IME padding, max width); this
  * composable only fills whatever width it is given.
@@ -1412,7 +1446,8 @@ internal fun CapsuleSurface(
 internal fun BottomToolbar(
     state: BrowserState,
     tabCount: Int,
-    nodeInfo: NodeInfo,
+    /** The menu's Nodes & networks sub-line: only while a node has failed ([nodesMenuNote]). */
+    nodesNote: String?,
     isBookmarked: Boolean,
     addressFocused: Boolean,
     addressBarEdited: Boolean,
@@ -1448,6 +1483,16 @@ internal fun BottomToolbar(
      */
     sitePermissionsSummary: String? = null,
     onOpenSitePermissions: () -> Unit = {},
+    /** The menu's Wallet row (#400): the wallet page Settings → Wallet opens. */
+    onOpenWallet: () -> Unit = {},
+    /** The Wallet row's sub-line ([walletMenuNote]), or null for none. */
+    walletNote: String? = null,
+    /**
+     * The menu's **Add to Home screen** (#400), or null where it isn't
+     * offered (a private tab, the home surface, an address the
+     * incoming-link path wouldn't open — [homeScreenShortcutTarget]).
+     */
+    onAddToHomeScreen: (() -> Unit)? = null,
     /** "New private tab" (#86); null where private tabs can't run, and the menu doesn't offer it. */
     onNewPrivateTab: (() -> Unit)? = null,
     onExpandCapsule: () -> Unit,
@@ -1566,10 +1611,6 @@ internal fun BottomToolbar(
     // the label). See [addressLabelRestingCenter].
     val badge = protocolBadgeFor(state)
     val labelRestingCenter = addressLabelRestingCenter(navPill, badge != null)
-    // How far the settled compact label is scaled down from the settled
-    // resting one, read off this density rather than assumed to be 14/16
-    // (see [Density.addressLabelCompactScale]).
-    val labelCompactScale = with(density) { addressLabelCompactScale() }
 
     // Each control states its own ink (`onSurface`) rather than
     // inheriting it: the surfaces are drawn by us now, so there is no
@@ -1607,12 +1648,38 @@ internal fun BottomToolbar(
             restingWidth = restingWidth,
             hasBadge = badge != null,
         )
-        val labelWidth = remember(restingLabel, restingLabelStyle, labelMaxWidth, density) {
+        // The type size the label rests at: the resting 16 sp where the
+        // name fits, else the largest step down to 13 sp at which it
+        // does, so a name with only a little too much to it is shown
+        // whole rather than middle-ellipsised (#417). Decided here, off
+        // the one fixed width, for the same reason the ellipsis is.
+        val labelFontSize = remember(restingLabel, restingLabelStyle, labelMaxWidth, density) {
+            if (restingLabel.isEmpty()) AddressLabelRestingFontSize
+            else {
+                val maxPx = with(density) { labelMaxWidth.roundToPx() }
+                fitAddressLabelFontSize { size ->
+                    textMeasurer.measure(
+                        text = restingLabel,
+                        style = restingLabelStyle.copy(fontSize = size),
+                        maxLines = 1,
+                        softWrap = false,
+                    ).size.width <= maxPx
+                }
+            }
+        }
+        val labelLayoutStyle = remember(restingLabelStyle, labelFontSize) {
+            restingLabelStyle.copy(fontSize = labelFontSize)
+        }
+        // How far the settled compact label is scaled down from the
+        // settled resting one, read off this density rather than assumed
+        // to be 14/16 (see [Density.addressLabelCompactScale]).
+        val labelCompactScale = with(density) { addressLabelCompactScale(labelFontSize) }
+        val labelWidth = remember(restingLabel, labelLayoutStyle, labelMaxWidth, density) {
             if (restingLabel.isEmpty()) 0.dp
             else with(density) {
                 textMeasurer.measure(
                     text = restingLabel,
-                    style = restingLabelStyle,
+                    style = labelLayoutStyle,
                     maxLines = 1,
                     softWrap = false,
                     constraints = Constraints(maxWidth = labelMaxWidth.roundToPx()),
@@ -1727,7 +1794,7 @@ internal fun BottomToolbar(
             menu = {
                 OverflowMenuButton(
                     state = state,
-                    nodeInfo = nodeInfo,
+                    nodesNote = nodesNote,
                     isBookmarked = isBookmarked,
                     onHome = onHome,
                     onToggleBookmark = onToggleBookmark,
@@ -1736,7 +1803,10 @@ internal fun BottomToolbar(
                     onOpenHistory = onOpenHistory,
                     onOpenBookmarks = onOpenBookmarks,
                     onOpenDownloads = onOpenDownloads,
+                    onOpenWallet = onOpenWallet,
+                    walletNote = walletNote,
                     onReload = onReload,
+                    onStop = onStop,
                     onHardReload = onHardReload,
                     onNewTab = onNewTab,
                     onNewPrivateTab = onNewPrivateTab,
@@ -1750,6 +1820,7 @@ internal fun BottomToolbar(
                     onToggleAdblock = onToggleAdblock,
                     sitePermissionsSummary = sitePermissionsSummary,
                     onOpenSitePermissions = onOpenSitePermissions,
+                    onAddToHomeScreen = onAddToHomeScreen,
                 )
             },
             modifier = Modifier
@@ -1840,8 +1911,9 @@ internal fun BottomToolbar(
                 // One layout, at the resting type size, at every
                 // fraction of the collapse — the step down to
                 // `bodyMedium` is the scale below, not a re-layout. See
-                // [AddressLabelCompactScale].
-                fontSize = AddressLabelRestingFontSize,
+                // [AddressLabelCompactScale]. Fitted to the name
+                // ([fitAddressLabelFontSize]) at rest only.
+                fontSize = labelFontSize,
                 lineHeight = AddressLabelRestingLineHeight,
                 maxLines = 1,
                 softWrap = false,
@@ -1886,36 +1958,32 @@ internal fun BottomToolbar(
             )
         }
 
-        // Load progress, stroked along the field's *current* outline.
+        // Load progress: Chrome's thin bar along the field's bottom edge.
         //
         // Its own sibling, sized and positioned from the same two numbers
         // the field's surface is ([addressFieldDrawnWidth] /
-        // [addressFieldDrawnCenter]), and last in the Box so it lands
-        // over the finished bar — the trace belongs on the edge, not
-        // half-swallowed by a shape clip. It carries no pointer input, so
-        // it is not a hit target and the controls underneath it still
-        // take every tap.
+        // [addressFieldDrawnCenter]) and carrying the field's own bottom
+        // anchor, so the bar sits on whatever shape the field currently
+        // is — 32 dp compact, 44 dp at rest, 64 dp editing, and every
+        // frame in between. Last in the Box so it lands over the
+        // surface's hairline; it clips itself to the field's pill shape,
+        // and it carries no pointer input, so the controls underneath it
+        // still take every tap.
         //
-        // Because it is measured from `size`, the trace re-traces
-        // whatever shape the field currently is: 32 dp compact, 44 dp
-        // at rest, 64 dp editing, and every frame in between — and it
-        // carries the field's own bottom anchor, so it stays on the
-        // outline rather than beside it.
-        //
-        // `state.progress` is read inside the draw lambda (and only as a
-        // boundary, through `loading` above), so a ticking load
-        // invalidates drawing only — never layout or composition.
-        if (loading) {
-            CapsuleLoadTrace(
-                state = state,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .width(fieldWidth)
-                    .height(drawnHeight)
-                    .offset { IntOffset((fieldCenter.toPx() * direction).roundToInt(), 0) }
-                    .offset(y = bottomAnchor),
-            )
-        }
+        // Composed unconditionally: it draws nothing while idle and has
+        // to outlive the load to fade out. `state.progress` is read on
+        // the frame clock and the result in the draw phase, so a ticking
+        // load invalidates drawing only — never layout or composition.
+        CapsuleLoadBar(
+            state = state,
+            shape = CircleShape,
+            modifier = Modifier
+                .align(Alignment.Center)
+                .width(fieldWidth)
+                .height(drawnHeight)
+                .offset { IntOffset((fieldCenter.toPx() * direction).roundToInt(), 0) }
+                .offset(y = bottomAnchor),
+        )
     }
 }
 
@@ -2119,149 +2187,6 @@ private fun Modifier.capsuleFieldSlot(slotScale: Float, towardsStart: Boolean): 
     collapsingControl(slotScale, towardsStart).size(CapsuleTrailingSlotSize)
 
 /**
- * Phase of the indeterminate edge sweep, 0..1 per lap. Kept in its own
- * composable so the infinite transition is only created while a tab is
- * actually resolving.
- */
-@Composable
-private fun rememberCapsuleSweep(): State<Float> {
-    val transition = rememberInfiniteTransition(label = "capsuleSweep")
-    return transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(CAPSULE_SWEEP_PERIOD_MS, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "capsuleSweepPhase",
-    )
-}
-
-/**
- * The load-progress trace stroked along the outline of whatever capsule
- * [modifier] sizes it to: `0 → progress` for a determinate load, a
- * travelling segment while [BrowserState.resolving] (ENS resolve /
- * gateway warm-up). Shared by the address field and the find bar, which
- * stands in for the capsule while it is open, so a load started with the
- * bar up still shows (#83). Callers compose it only while
- * [isCapsuleLoading]; `state.progress` is read in the draw phase only.
- */
-@Composable
-internal fun CapsuleLoadTrace(state: BrowserState, modifier: Modifier = Modifier) {
-    // The travelling segment only exists while we have no percentage to
-    // show; composing the infinite transition conditionally keeps an
-    // idle capsule off the animation clock entirely.
-    val sweep: State<Float>? = if (state.resolving) rememberCapsuleSweep() else null
-    val progressColor = MaterialTheme.colorScheme.primary
-    val progressStrokePx = with(LocalDensity.current) { CapsuleProgressStroke.toPx() }
-    // No semantics of its own: TalkBack hears the load on the address
-    // bar ([capsuleLoadStateDescription]). A node here, drawn over the
-    // field, would hide the field and its controls from accessibility.
-    Box(
-        modifier = modifier.drawWithCache {
-            // The outline only changes when the capsule's size does, so
-            // it is traced and measured here in the cache block — a frame
-            // of the sweep then costs one `getSegment` per half, not two
-            // fresh paths and a fresh PathMeasure.
-            val trace = CapsuleEdgeTrace(size, progressStrokePx)
-            onDrawBehind {
-                val start: Float
-                val end: Float
-                if (sweep != null) {
-                    val head = sweep.value * (1f + CAPSULE_SWEEP_WINDOW)
-                    start = (head - CAPSULE_SWEEP_WINDOW).coerceIn(0f, 1f)
-                    end = head.coerceIn(0f, 1f)
-                } else {
-                    start = 0f
-                    end = state.progress.coerceIn(0, 100) / 100f
-                }
-                trace.draw(this, start, end, progressColor)
-            }
-        },
-    )
-}
-
-/**
- * The capsule's own outline, pre-split and pre-measured, ready to be
- * traced with the load progress.
- *
- * The perimeter is split into two halves that both start at the bottom
- * centre and end at the top centre, so progress opens outwards from
- * under the domain and closes at the top — symmetric, and unambiguous
- * about where 0 % and 100 % are.
- *
- * The geometry depends on nothing but the capsule's [size] and the
- * stroke width, so one of these is built per size in
- * [Modifier.drawWithCache]'s cache block and reused for every frame of
- * the load. The paths are inset by half the stroke, so the trace's outer
- * edge lands exactly on the capsule's edge, and they are drawn over the
- * finished capsule, so nothing about them participates in layout.
- */
-private class CapsuleEdgeTrace(size: Size, strokeWidth: Float) {
-    private val stroke = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-
-    // Held for the lifetime of the trace: a [PathMeasure] measures the
-    // path it was given rather than a copy of it.
-    private val halves: List<Path> = capsuleHalves(size, strokeWidth)
-    private val measures: List<PathMeasure> =
-        halves.map { half -> PathMeasure().apply { setPath(half, false) } }
-    private val lengths: List<Float> = measures.map { it.length }
-
-    // Rewritten in place each frame; `getSegment` appends, so it is
-    // reset first.
-    private val segment = Path()
-
-    /**
-     * Stroke the [start]..[end] fraction of each half onto [scope]: a
-     * determinate load draws `0 → progress`, an indeterminate one a
-     * short window travelling from bottom to top.
-     */
-    fun draw(scope: DrawScope, start: Float, end: Float, color: Color) {
-        if (end <= start) return
-        for (i in measures.indices) {
-            val length = lengths[i]
-            segment.reset()
-            measures[i].getSegment(start * length, end * length, segment, true)
-            scope.drawPath(segment, color, style = stroke)
-        }
-    }
-}
-
-/**
- * The capsule outline as two half-paths, each running bottom centre →
- * along an edge → around the end cap → back to the top centre. Empty
- * when [size] is not the shape we trace: a capsule needs at least one
- * full cap per side.
- */
-private fun capsuleHalves(size: Size, strokeWidth: Float): List<Path> {
-    val inset = strokeWidth / 2f
-    val width = size.width - strokeWidth
-    val height = size.height - strokeWidth
-    if (height <= 0f || width < height) return emptyList()
-
-    val left = inset
-    val top = inset
-    val right = inset + width
-    val bottom = inset + height
-    val radius = height / 2f
-    val centerX = inset + width / 2f
-
-    val leftHalf = Path().apply {
-        moveTo(centerX, bottom)
-        lineTo(left + radius, bottom)
-        arcTo(Rect(left, top, left + height, bottom), 90f, 180f, false)
-        lineTo(centerX, top)
-    }
-    val rightHalf = Path().apply {
-        moveTo(centerX, bottom)
-        lineTo(right - radius, bottom)
-        arcTo(Rect(right - height, top, right, bottom), 90f, -180f, false)
-        lineTo(centerX, top)
-    }
-    return listOf(leftHalf, rightHalf)
-}
-
-/**
  * The address field — the middle surface of the split bar, and the only
  * one that survives either morph.
  *
@@ -2373,11 +2298,22 @@ private fun AddressField(
     // next composition pass once the `LaunchedEffect` below ran — which
     // briefly rendered the stale URL inside the newly-active tab's
     // pill.
+    //
+    // Seeded with the address itself, bidi controls and all: Go on an
+    // unedited field submits exactly what the tab holds (a refused
+    // `ens://%E2%80%AEmoc.lapyap.eth` re-submitted names U+202E in its
+    // refusal, not U+FFFD), and a typed search keeps the RLM it was
+    // typed with. The marking is drawn, not stored
+    // ([BidiMarkingTransformation]) — tapping the capsule must not
+    // unmask an RLO the resting label just flagged (it read
+    // `hte.paypal.com` in the open field) — and the field's own Copy /
+    // Cut hand on what it shows ([BidiMarkingClipboard]).
+    val shownAddress = state.addressBarText
     var fieldValue by remember(state.id) {
         mutableStateOf(
             TextFieldValue(
-                text = state.addressBarText,
-                selection = TextRange(state.addressBarText.length),
+                text = shownAddress,
+                selection = TextRange(shownAddress.length),
             ),
         )
     }
@@ -2393,14 +2329,14 @@ private fun AddressField(
         // Never clobber an in-progress edit: a page that happens to
         // finish loading while the user is typing updates the committed
         // address, and the buffer picks that up when the edit ends.
-        if (!addressFocused && fieldValue.text != state.addressBarText) {
+        if (!addressFocused && fieldValue.text != shownAddress) {
             // Park the cursor at position 0 so long URLs horizontally
             // scroll to their *start* rather than their tail — the
             // domain is what the user cares about, so keeping e.g.
             // `https://example.com/...` visible beats showing the end
             // of a deep query string with the scheme pushed off-screen.
             fieldValue = TextFieldValue(
-                text = state.addressBarText,
+                text = shownAddress,
                 selection = TextRange.Zero,
             )
         }
@@ -2426,7 +2362,7 @@ private fun AddressField(
             if (fieldValue.text.isEmpty()) fieldValue
             else fieldValue.copy(selection = TextRange(0, fieldValue.text.length))
         } else {
-            TextFieldValue(text = state.addressBarText, selection = TextRange.Zero)
+            TextFieldValue(text = shownAddress, selection = TextRange.Zero)
         }
     }
 
@@ -2511,196 +2447,206 @@ private fun AddressField(
                     .border(1.5.dp, outline, CircleShape),
             )
         }
-        NoSuggestionsTextInput {
-            BasicTextField(
-                value = fieldValue,
-                onValueChange = { newValue ->
-                    val textChanged = newValue.text != fieldValue.text
-                    fieldValue = newValue
-                    if (textChanged) {
-                        // Typing feeds the suggestions query only. The
-                        // tab's committed address stays put until the user
-                        // actually submits (or the WebView navigates).
-                        onAddressQueryChanged(newValue.text)
-                        onAddressEditedChanged(true)
-                    }
-                },
-                singleLine = true,
-                textStyle = textStyle,
-                cursorBrush = SolidColor(colors.primary),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .focusRequester(focusRequester)
-                    .onFocusChanged { onAddressFocusChanged(it.isFocused) },
-                // A URL field, like Chrome's and Safari's (#172): URI
-                // keyboard, no auto-correct / capitals, and — via the
-                // [NoSuggestionsTextInput] wrapper — no IME suggestion strip over our
-                // own suggestion list.
-                keyboardOptions = urlKeyboardOptions(
-                    // Always Go, as in Chrome's omnibox — never switched to
-                    // Search as the text turns into a search term (#171):
-                    // a new action key means restarting input, the IME
-                    // hides for a moment, and [imeDismissalEndsEditing]
-                    // rightly reads that as the user closing the keyboard
-                    // and ends the edit mid-word. The top suggestion row
-                    // says what Enter will do instead.
-                    imeAction = ImeAction.Go,
-                ),
-                keyboardActions = KeyboardActions(
-                    onGo = { onSubmit(fieldValue.text) },
-                ),
-                decorationBox = { innerTextField ->
-                    // Protocol badge: the pill grows a Swarm hex mark or
-                    // the IPFS cube on the left whenever the *loaded*
-                    // page origin is one of our embedded gateways. For
-                    // `ens://` names we look at the active display
-                    // override — its `baseUrl` is the gateway that
-                    // actually served the page, which tells us whether
-                    // the contenthash resolved to Swarm or IPFS.
-                    // Mirrors `.protocol-icon[data-protocol='swarm'|'ipfs'|'ipns']`
-                    // in freedom-browser's desktop address bar.
-                    val badge = protocolBadgeFor(state)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            // Rides the same drawing shift as the surface it
-                            // sits on, so the content stays on the compact
-                            // pill's centre line rather than on the touch
-                            // box's ([addressPillTopShift]).
-                            .offset(y = pillTopShift)
-                            // Symmetric, because the field holds one control
-                            // at each end: 8 dp at rest and while editing,
-                            // [CapsuleCompactSidePadding] when compact, where
-                            // there is nothing left in the pill but the
-                            // domain (see [capsuleLabelInset]).
-                            .padding(horizontal = contentInset),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        // The overflow menu's reservation. Filled outside the
-                        // field for the same reason the trailing slot is (see
-                        // below) — what the row lays out is the empty box.
-                        if (slotScale > 0f) {
-                            Box(
-                                modifier = Modifier
-                                    .capsuleFieldSlot(slotScale, towardsStart = true),
-                            )
+        // The field's own Copy and Cut put on the clipboard what it shows
+        // (bidi controls marked), as the long-press menu's Copy does.
+        val appClipboard = LocalClipboard.current
+        val markingClipboard = remember(appClipboard) { BidiMarkingClipboard(appClipboard) }
+        CompositionLocalProvider(LocalClipboard provides markingClipboard) {
+            NoSuggestionsTextInput {
+                BasicTextField(
+                    value = fieldValue,
+                    onValueChange = { newValue ->
+                        val textChanged = newValue.text != fieldValue.text
+                        fieldValue = newValue
+                        if (textChanged) {
+                            // Typing feeds the suggestions query only. The
+                            // tab's committed address stays put until the user
+                            // actually submits (or the WebView navigates).
+                            onAddressQueryChanged(newValue.text)
+                            onAddressEditedChanged(true)
                         }
-                        // The badge, on the runs where the text it marks is
-                        // this row's: the editor's full URL, which starts at
-                        // the leading edge, and the home tab's placeholder.
-                        // The resting domain is drawn one level up, centred
-                        // in the field, and the badge is drawn up there
-                        // beside it — a mark on the domain has to travel with
-                        // the domain (see [addressBadgeCenterOffset]). The
-                        // two conditions are complements, so the badge is on
-                        // screen exactly once in every state.
-                        //
-                        // Either way it is one slot with the gap after it,
-                        // retreating into the pill's leading edge as the bar
-                        // collapses — the compact pill shows the domain and
-                        // nothing else. Zero-width means not composed, so it
-                        // can't take a tap meant for the label.
-                        if (badge != null && (addressFocused || restingLabel.isEmpty()) &&
-                            slotScale > 0f
+                    },
+                    singleLine = true,
+                    // The seeded address and anything typed or pasted get the
+                    // resting label's marking, drawn only: the buffer keeps
+                    // what the tab holds or the user entered, so Go submits it.
+                    visualTransformation = BidiMarkingTransformation,
+                    textStyle = textStyle,
+                    cursorBrush = SolidColor(colors.primary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester)
+                        .onFocusChanged { onAddressFocusChanged(it.isFocused) },
+                    // A URL field, like Chrome's and Safari's (#172): URI
+                    // keyboard, no auto-correct / capitals, and — via the
+                    // [NoSuggestionsTextInput] wrapper — no IME suggestion strip over our
+                    // own suggestion list.
+                    keyboardOptions = urlKeyboardOptions(
+                        // Always Go, as in Chrome's omnibox — never switched to
+                        // Search as the text turns into a search term (#171):
+                        // a new action key means restarting input, the IME
+                        // hides for a moment, and [imeDismissalEndsEditing]
+                        // rightly reads that as the user closing the keyboard
+                        // and ends the edit mid-word. The top suggestion row
+                        // says what Enter will do instead.
+                        imeAction = ImeAction.Go,
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onGo = { onSubmit(fieldValue.text) },
+                    ),
+                    decorationBox = { innerTextField ->
+                        // Protocol badge: the pill grows a Swarm hex mark or
+                        // the IPFS cube on the left whenever the *loaded*
+                        // page origin is one of our embedded gateways. For
+                        // `ens://` names we look at the active display
+                        // override — its `baseUrl` is the gateway that
+                        // actually served the page, which tells us whether
+                        // the contenthash resolved to Swarm or IPFS.
+                        // Mirrors `.protocol-icon[data-protocol='swarm'|'ipfs'|'ipns']`
+                        // in freedom-browser's desktop address bar.
+                        val badge = protocolBadgeFor(state)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                // Rides the same drawing shift as the surface it
+                                // sits on, so the content stays on the compact
+                                // pill's centre line rather than on the touch
+                                // box's ([addressPillTopShift]).
+                                .offset(y = pillTopShift)
+                                // Symmetric, because the field holds one control
+                                // at each end: 8 dp at rest and while editing,
+                                // [CapsuleCompactSidePadding] when compact, where
+                                // there is nothing left in the pill but the
+                                // domain (see [capsuleLabelInset]).
+                                .padding(horizontal = contentInset),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Row(
-                                modifier = Modifier
-                                    .collapsingControl(slotScale, towardsStart = true),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                ProtocolBadgeMark(
-                                    badge = badge,
-                                    trust = state.nameTrust,
-                                    modifier = Modifier.size(AddressPillBadgeSize),
-                                )
-                                Spacer(Modifier.width(AddressPillBadgeGap))
-                            }
-                        }
-                        // Resting vs editing text. At rest the domain is the
-                        // primary element (see [AddressLabel]); the moment
-                        // the field takes focus the full URL is back, still
-                        // select-alled, so nothing about editing changes.
-                        //
-                        // The text field itself stays composed and laid out
-                        // in both states — it is simply drawn transparent
-                        // under the domain label while resting — so a tap
-                        // anywhere on the pill still lands on it and focuses
-                        // it, exactly as before.
-                        //
-                        // The domain label itself is drawn one level up,
-                        // against the bar rather than against this row, so
-                        // that its geometry can be one function of the
-                        // collapse (#55) — see [BottomToolbar]. What is
-                        // left here is the box it used to share with the
-                        // field: the field, and the placeholder for when
-                        // there is no address to show.
-                        //
-                        // Blank label at rest means a blank address (the
-                        // home tab) — [AddressLabel.resting] passes
-                        // everything else through — so the placeholder is
-                        // the right thing to draw underneath.
-                        val showPlaceholder =
-                            if (addressFocused) fieldValue.text.isEmpty() else restingLabel.isEmpty()
-                        Box(modifier = Modifier.weight(1f)) {
-                            Box(
-                                modifier = Modifier.graphicsLayer {
-                                    alpha = if (addressFocused) 1f else 0f
-                                },
-                            ) {
-                                innerTextField()
-                            }
-                            if (showPlaceholder) {
-                                AddressPlaceholder(
-                                    color = colors.onSurfaceVariant,
-                                    // Centred while resting, for the same
-                                    // reason the domain it stands in for is:
-                                    // the split bar's field is symmetric, and
-                                    // a left-aligned placeholder in it reads
-                                    // as text that failed to centre. Editing
-                                    // hands the box back to the text field,
-                                    // which starts at the leading edge.
-                                    textAlign = if (addressFocused) TextAlign.Start
-                                    else TextAlign.Center,
-                                    modifier = Modifier.fillMaxWidth(),
+                            // The overflow menu's reservation. Filled outside the
+                            // field for the same reason the trailing slot is (see
+                            // below) — what the row lays out is the empty box.
+                            if (slotScale > 0f) {
+                                Box(
+                                    modifier = Modifier
+                                        .capsuleFieldSlot(slotScale, towardsStart = true),
                                 )
                             }
+                            // The badge, on the runs where the text it marks is
+                            // this row's: the editor's full URL, which starts at
+                            // the leading edge, and the home tab's placeholder.
+                            // The resting domain is drawn one level up, centred
+                            // in the field, and the badge is drawn up there
+                            // beside it — a mark on the domain has to travel with
+                            // the domain (see [addressBadgeCenterOffset]). The
+                            // two conditions are complements, so the badge is on
+                            // screen exactly once in every state.
+                            //
+                            // Either way it is one slot with the gap after it,
+                            // retreating into the pill's leading edge as the bar
+                            // collapses — the compact pill shows the domain and
+                            // nothing else. Zero-width means not composed, so it
+                            // can't take a tap meant for the label.
+                            if (badge != null && (addressFocused || restingLabel.isEmpty()) &&
+                                slotScale > 0f
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .collapsingControl(slotScale, towardsStart = true),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    ProtocolBadgeMark(
+                                        badge = badge,
+                                        trust = state.nameTrust,
+                                        modifier = Modifier.size(AddressPillBadgeSize),
+                                    )
+                                    Spacer(Modifier.width(AddressPillBadgeGap))
+                                }
+                            }
+                            // Resting vs editing text. At rest the domain is the
+                            // primary element (see [AddressLabel]); the moment
+                            // the field takes focus the full URL is back, still
+                            // select-alled, so nothing about editing changes.
+                            //
+                            // The text field itself stays composed and laid out
+                            // in both states — it is simply drawn transparent
+                            // under the domain label while resting — so a tap
+                            // anywhere on the pill still lands on it and focuses
+                            // it, exactly as before.
+                            //
+                            // The domain label itself is drawn one level up,
+                            // against the bar rather than against this row, so
+                            // that its geometry can be one function of the
+                            // collapse (#55) — see [BottomToolbar]. What is
+                            // left here is the box it used to share with the
+                            // field: the field, and the placeholder for when
+                            // there is no address to show.
+                            //
+                            // Blank label at rest means a blank address (the
+                            // home tab) — [AddressLabel.resting] passes
+                            // everything else through — so the placeholder is
+                            // the right thing to draw underneath.
+                            val showPlaceholder =
+                                if (addressFocused) fieldValue.text.isEmpty() else restingLabel.isEmpty()
+                            Box(modifier = Modifier.weight(1f)) {
+                                Box(
+                                    modifier = Modifier.graphicsLayer {
+                                        alpha = if (addressFocused) 1f else 0f
+                                    },
+                                ) {
+                                    innerTextField()
+                                }
+                                if (showPlaceholder) {
+                                    AddressPlaceholder(
+                                        color = colors.onSurfaceVariant,
+                                        // Centred while resting, for the same
+                                        // reason the domain it stands in for is:
+                                        // the split bar's field is symmetric, and
+                                        // a left-aligned placeholder in it reads
+                                        // as text that failed to centre. Editing
+                                        // hands the box back to the text field,
+                                        // which starts at the leading edge.
+                                        textAlign = if (addressFocused) TextAlign.Start
+                                        else TextAlign.Center,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+                            }
+                            // Trailing control slot — sized to the pill, never
+                            // pushes it taller, and *always* reserved at the same
+                            // 32 dp whatever it is currently holding. That fixed
+                            // reservation is what makes "no layout shifts" true
+                            // for the loading state: the Stop control appears
+                            // into a slot that was already there, and the URL
+                            // beside it doesn't re-wrap or re-ellipsise when a
+                            // load starts or finishes.
+                            //
+                            // Reserved here, *filled* outside the field: the
+                            // control has to sit above the pill's gesture surface
+                            // to keep its own taps, and that surface has to sit
+                            // above the text field (see below). So what the row
+                            // lays out is the empty slot, and the button is
+                            // composed over it with the same
+                            // [Modifier.capsuleFieldSlot] — one box, laid out
+                            // twice, so the two can't drift apart.
+                            //
+                            // The one thing that moves it is the collapse: the
+                            // slot retreats into the pill's trailing edge along
+                            // with the badge, because a minimised bar that is
+                            // the domain *and a button* is neither minimised nor
+                            // centred. Nothing is lost — the tap that brings the
+                            // bar back brings Reload/Stop back with it, the same
+                            // way it restores Back, the tab counter and the
+                            // menu — and the load's own progress keeps being
+                            // drawn on the compact pill's edge throughout.
+                            if (slotScale > 0f) {
+                                Box(
+                                    modifier = Modifier
+                                        .capsuleFieldSlot(slotScale, towardsStart = false),
+                                )
+                            }
                         }
-                        // Trailing control slot — sized to the pill, never
-                        // pushes it taller, and *always* reserved at the same
-                        // 32 dp whatever it is currently holding. That fixed
-                        // reservation is what makes "no layout shifts" true
-                        // for the loading state: the Stop control appears
-                        // into a slot that was already there, and the URL
-                        // beside it doesn't re-wrap or re-ellipsise when a
-                        // load starts or finishes.
-                        //
-                        // Reserved here, *filled* outside the field: the
-                        // control has to sit above the pill's gesture surface
-                        // to keep its own taps, and that surface has to sit
-                        // above the text field (see below). So what the row
-                        // lays out is the empty slot, and the button is
-                        // composed over it with the same
-                        // [Modifier.capsuleFieldSlot] — one box, laid out
-                        // twice, so the two can't drift apart.
-                        //
-                        // The one thing that moves it is the collapse: the
-                        // slot retreats into the pill's trailing edge along
-                        // with the badge, because a minimised bar that is
-                        // the domain *and a button* is neither minimised nor
-                        // centred. Nothing is lost — the tap that brings the
-                        // bar back brings Reload/Stop back with it, the same
-                        // way it restores Back, the tab counter and the
-                        // menu — and the load's own progress keeps being
-                        // drawn on the compact pill's edge throughout.
-                        if (slotScale > 0f) {
-                            Box(
-                                modifier = Modifier
-                                    .capsuleFieldSlot(slotScale, towardsStart = false),
-                            )
-                        }
-                    }
-                },
-            )
+                    },
+                )
+            }
         }
 
         // The capsule's tap surface: the two-step tap and the long-press
@@ -2965,8 +2911,8 @@ private fun CapsuleTrailingButton(
  * The node-status dot that used to ride the button's corner is gone with
  * the move: a coloured dot on a control *inside* the address field is a
  * badge on the trust surface, which is the one place in the chrome it
- * must not be. The menu's own "N peers" row is where the user goes to
- * act on the node anyway, and the Node screen behind it is unchanged.
+ * must not be. The menu's own Nodes & networks row is where the user
+ * goes to see and act on the nodes (#416).
  *
  * The popup still anchors on the button's own window bounds, so it
  * follows the button to its new position with no arithmetic of its own
@@ -2975,7 +2921,7 @@ private fun CapsuleTrailingButton(
 @Composable
 private fun OverflowMenuButton(
     state: BrowserState,
-    nodeInfo: NodeInfo,
+    nodesNote: String?,
     isBookmarked: Boolean,
     onHome: () -> Unit,
     onToggleBookmark: () -> Unit,
@@ -2984,7 +2930,10 @@ private fun OverflowMenuButton(
     onOpenHistory: () -> Unit,
     onOpenBookmarks: () -> Unit,
     onOpenDownloads: () -> Unit,
+    onOpenWallet: () -> Unit,
+    walletNote: String?,
     onReload: () -> Unit,
+    onStop: () -> Unit,
     onHardReload: () -> Unit,
     onNewTab: () -> Unit,
     onNewPrivateTab: (() -> Unit)?,
@@ -2998,7 +2947,9 @@ private fun OverflowMenuButton(
     onToggleAdblock: () -> Unit,
     sitePermissionsSummary: String?,
     onOpenSitePermissions: () -> Unit,
+    onAddToHomeScreen: (() -> Unit)?,
 ) {
+    val context = LocalContext.current
     var menuExpanded by remember { mutableStateOf(false) }
     // The trust shield's details (#97), opened from the menu's first row.
     var trustShown by remember { mutableStateOf(false) }
@@ -3010,10 +2961,10 @@ private fun OverflowMenuButton(
     // and feeding them to a [Popup] + custom [PopupPositionProvider]
     // produces a stable anchor from the first frame.
     var anchorBounds by remember { mutableStateOf<IntRect?>(null) }
-    val peerCount = nodeInfo.connectedPeers
     // Lift the popup clear of the toolbar's own top padding plus a
     // little air, so it floats above the pill instead of touching it.
     val popupGapPx = with(LocalDensity.current) { 12.dp.roundToPx() }
+    val popupMarginPx = with(LocalDensity.current) { PopupEdgeMargin.roundToPx() }
     val statusBarPx = WindowInsets.statusBars.getTop(LocalDensity.current)
 
     Box(
@@ -3048,8 +2999,39 @@ private fun OverflowMenuButton(
             )
         }
         if (menuExpanded && anchorBounds != null) {
+            // Asked each time the menu opens: the user can change launchers.
+            val pinSupported = remember { HomeScreenShortcuts.isSupported(context) }
+            val groups = mainMenuGroups(
+                MainMenuContext(
+                    isHome = state.isHome,
+                    hasNameTrust = nameTrust != null,
+                    canOpenPrivateTab = onNewPrivateTab != null,
+                    hasAdblock = adblockState != null,
+                    hasSitePermissions = sitePermissionsSummary != null,
+                    canAddToHomeScreen = onAddToHomeScreen != null && pinSupported,
+                ),
+            )
+            val icons = mainMenuIconsFor(
+                url = state.url,
+                addressBarText = state.addressBarText,
+                isBookmarked = isBookmarked,
+                loading = isCapsuleLoading(state),
+                hasPageToActOn = state.hasPageToActOn,
+            )
+            val close: (() -> Unit) -> Unit = { action ->
+                menuExpanded = false
+                action()
+            }
             Popup(
-                popupPositionProvider = AnchoredAboveProvider(anchorBounds!!, popupGapPx),
+                // Hung off the ≡'s leading edge — the button sits at the
+                // capsule's leading end (#415) — and held [PopupEdgeMargin]
+                // clear of the screen's edge (#417).
+                popupPositionProvider = AnchoredAboveProvider(
+                    anchorBounds!!,
+                    popupGapPx,
+                    alignToEnd = false,
+                    marginPx = popupMarginPx,
+                ),
                 onDismissRequest = { menuExpanded = false },
                 properties = PopupProperties(focusable = true),
             ) {
@@ -3074,257 +3056,447 @@ private fun OverflowMenuButton(
                     // Scrolls: at a large font scale and display size
                     // the menu is taller than the space above the bar,
                     // and its last rows (Settings, Nodes) were cut off
-                    // with no way to reach them (#279).
-                    Column(
-                        modifier = Modifier
-                            .width(IntrinsicSize.Max)
-                            .verticalScroll(rememberScrollState())
-                            .padding(vertical = 8.dp),
-                    ) {
-                        // How the page's name was checked (#97) — the
-                        // shield on the protocol badge, in words, and
-                        // the way to its evidence. The badge itself is
-                        // no hit target (a tap there edits the address),
-                        // so this row is where the shield opens.
-                        if (nameTrust != null) {
-                            DropdownMenuItem(
-                                text = { MenuItemLabel(nameTrust.tier.title) },
-                                leadingIcon = { TrustShieldIcon(nameTrust) },
-                                onClick = {
-                                    menuExpanded = false
-                                    trustShown = true
-                                },
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = {
-                                MenuItemLabel(
-                                    if (isBookmarked) stringResource(R.string.browser_menu_remove_bookmark) else stringResource(R.string.browser_menu_add_bookmark),
+                    // with no way to reach them (#279). A page's menu
+                    // runs past the fold even at the default scale, so
+                    // the edge it continues past fades out (#417) —
+                    // the sign that there is more.
+                    val scroll = rememberScrollState()
+                    Box(modifier = Modifier.width(IntrinsicSize.Max)) {
+                        Column(
+                            modifier = Modifier
+                                .width(IntrinsicSize.Max)
+                                .verticalScroll(scroll)
+                                .padding(vertical = 8.dp),
+                        ) {
+                            if (icons.shown) {
+                                MainMenuIconRow(
+                                    icons = icons,
+                                    onToggleBookmark = { close(onToggleBookmark) },
+                                    onShare = {
+                                        close { icons.shareUrl?.let { shareUrl(context, it, state.title) } }
+                                    },
+                                    onReload = { close(onReload) },
+                                    onHardReload = { close(onHardReload) },
+                                    onStop = { close(onStop) },
                                 )
-                            },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = if (isBookmarked) Icons.Filled.Star
-                                    else Icons.Filled.StarBorder,
-                                    contentDescription = null,
-                                    tint = if (isBookmarked) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurface,
-                                )
-                            },
-                            enabled = state.url.isNotBlank(),
-                            onClick = {
-                                menuExpanded = false
-                                onToggleBookmark()
-                            },
-                        )
-                        // Home lives here now that Back owns the
-                        // capsule's left control slot.
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_home)) },
-                            leadingIcon = { Icon(Icons.Filled.Home, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onHome()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_new_tab)) },
-                            leadingIcon = { Icon(Icons.Filled.Add, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onNewTab()
-                            },
-                        )
-                        if (onNewPrivateTab != null) {
-                            DropdownMenuItem(
-                                text = { MenuItemLabel(stringResource(R.string.browser_menu_new_private_tab)) },
-                                leadingIcon = { Icon(PrivateTabIcon, contentDescription = null) },
-                                onClick = {
-                                    menuExpanded = false
-                                    onNewPrivateTab()
-                                },
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_reload)) },
-                            leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onReload()
-                            },
-                        )
-                        // Reload past the caches (#262): what a site that
-                        // just deployed new files, or a gateway that served
-                        // a stale answer, needs. Nothing to reload on the
-                        // home surface, nor in a tab whose renderer went
-                        // away (#260) — its Reload rebuilds the page.
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_hard_reload)) },
-                            leadingIcon = { Icon(Icons.Filled.Cached, contentDescription = null) },
-                            enabled = state.hasPageToActOn,
-                            onClick = {
-                                menuExpanded = false
-                                onHardReload()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_find_in_page)) },
-                            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                            // Nothing to search on the home surface, nor
-                            // on a tab whose renderer went away (#260).
-                            enabled = state.hasPageToActOn,
-                            onClick = {
-                                menuExpanded = false
-                                onFindInPage()
-                            },
-                        )
-                        // − / + and the percentage, which resets. The
-                        // menu stays open across presses so the user
-                        // can watch the page settle between steps.
-                        ZoomMenuRow(level = zoomLevel, onZoom = onZoom)
-                        // Request desktop site (#180), per site, with a
-                        // checkmark. Disabled where there is no site to
-                        // ask as a desktop one (home, an error page, a
-                        // dweb page). The page reloads, so the menu closes.
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_desktop_site)) },
-                            leadingIcon = { Icon(Icons.Filled.Computer, contentDescription = null) },
-                            trailingIcon = {
-                                Checkbox(
-                                    checked = desktopSite == true,
-                                    onCheckedChange = null,
-                                    enabled = desktopSite != null,
-                                )
-                            },
-                            enabled = desktopSite != null,
-                            onClick = {
-                                menuExpanded = false
-                                onToggleDesktopSite()
-                            },
-                            modifier = Modifier.semantics {
-                                role = Role.Checkbox
-                                toggleableState = ToggleableState(desktopSite == true)
-                            },
-                        )
-                        // Print or save as PDF (#89). Same rule as Find
-                        // in page: the home tab is Compose rather than a
-                        // page, so there is no document behind it to print
-                        // (nor is there on a tab whose renderer went away).
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_print)) },
-                            leadingIcon = { Icon(Icons.Filled.Print, contentDescription = null) },
-                            enabled = state.hasPageToActOn,
-                            onClick = {
-                                menuExpanded = false
-                                onPrint()
-                            },
-                        )
-                        // Ad blocking on this site (#126): the switch is on
-                        // only where filters really apply; a tap allowlists
-                        // the site (or lifts that) and reloads the page.
-                        // Where nothing is filtered for another reason (no
-                        // lists on, still loading, a list exempts the page)
-                        // it is off and disabled, and says why in a
-                        // sub-line. Only on a web page.
-                        if (adblockState != null) {
-                            DropdownMenuItem(
-                                text = {
-                                    Column(modifier = Modifier.padding(end = 32.dp)) {
-                                        Text(stringResource(R.string.browser_menu_block_ads))
-                                        adblockState.note?.let { note ->
-                                            Text(
-                                                text = note,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        }
-                                    }
-                                },
-                                leadingIcon = { Icon(Icons.Filled.Shield, contentDescription = null) },
-                                trailingIcon = {
-                                    Switch(
-                                        checked = adblockState.checked,
-                                        onCheckedChange = null,
-                                        enabled = adblockState.toggleable,
-                                        modifier = Modifier.scale(0.8f),
+                            }
+                            for ((index, group) in groups.withIndex()) {
+                                // A divider *between* sections: none above
+                                // the first list group when there's no
+                                // icon row over it.
+                                if (index > 0 || icons.shown) {
+                                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                                }
+                                for (row in group) {
+                                    MainMenuRowItem(
+                                        row = row,
+                                        state = state,
+                                        nodesNote = nodesNote,
+                                        close = close,
+                                        onShowTrust = { trustShown = true },
+                                        onHome = onHome,
+                                        onNewTab = onNewTab,
+                                        onNewPrivateTab = onNewPrivateTab,
+                                        onFindInPage = onFindInPage,
+                                        zoomLevel = zoomLevel,
+                                        onZoom = onZoom,
+                                        desktopSite = desktopSite,
+                                        onToggleDesktopSite = onToggleDesktopSite,
+                                        onPrint = onPrint,
+                                        adblockState = adblockState,
+                                        onToggleAdblock = onToggleAdblock,
+                                        sitePermissionsSummary = sitePermissionsSummary,
+                                        onOpenSitePermissions = onOpenSitePermissions,
+                                        onAddToHomeScreen = onAddToHomeScreen,
+                                        onOpenHistory = onOpenHistory,
+                                        onOpenBookmarks = onOpenBookmarks,
+                                        onOpenDownloads = onOpenDownloads,
+                                        onOpenWallet = onOpenWallet,
+                                        walletNote = walletNote,
+                                        onOpenSettings = onOpenSettings,
+                                        onOpenNode = onOpenNode,
                                     )
-                                },
-                                enabled = adblockState.toggleable,
-                                onClick = {
-                                    menuExpanded = false
-                                    onToggleAdblock()
-                                },
-                                // Read out as the switch it looks like.
-                                modifier = Modifier.semantics {
-                                    role = Role.Switch
-                                    toggleableState = ToggleableState(adblockState.checked)
-                                },
-                            )
+                                }
+                            }
                         }
-                        // What the site on screen is allowed or blocked
-                        // from (#266), listed and removable in a sheet;
-                        // only while it holds something.
-                        if (sitePermissionsSummary != null) {
-                            DropdownMenuItem(
-                                text = {
-                                    Column(modifier = Modifier.padding(end = 32.dp)) {
-                                        Text(stringResource(R.string.browser_menu_site_permissions))
-                                        Text(
-                                            text = sitePermissionsSummary,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                },
-                                leadingIcon = { Icon(Icons.Filled.Tune, contentDescription = null) },
-                                onClick = {
-                                    menuExpanded = false
-                                    onOpenSitePermissions()
-                                },
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_history)) },
-                            leadingIcon = { Icon(Icons.Filled.History, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onOpenHistory()
-                            },
+                        MenuScrollFade(
+                            visible = scroll.canScrollBackward,
+                            top = true,
+                            modifier = Modifier.align(Alignment.TopCenter),
                         )
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_bookmarks)) },
-                            leadingIcon = { Icon(Icons.Filled.Bookmark, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onOpenBookmarks()
-                            },
+                        MenuScrollFade(
+                            visible = scroll.canScrollForward,
+                            top = false,
+                            modifier = Modifier.align(Alignment.BottomCenter),
                         )
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_downloads)) },
-                            leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onOpenDownloads()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { MenuItemLabel(stringResource(R.string.browser_menu_settings)) },
-                            leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onOpenSettings()
-                            },
-                        )
-                        val peersLabel = pluralText(R.plurals.browser_menu_peers, peerCount.toInt(), peerCount)
-                        NodesMenuItem(peersLabel) {
-                            menuExpanded = false
-                            onOpenNode()
-                        }
                     }
                 }
             }
         }
     }
+}
+
+/**
+ * The menu's top row (#400): Bookmark · Share · Reload, the page actions
+ * people reach for most, as Chrome puts them — without Chrome's Forward,
+ * which the capsule's Back + Forward pill already shows whenever it can
+ * act (#415). Each is a full
+ * 48 dp target with its name as its content description, and the same
+ * name in a tooltip on a long press, since an icon alone doesn't say it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MainMenuIconRow(
+    icons: MainMenuIcons,
+    onToggleBookmark: () -> Unit,
+    onShare: () -> Unit,
+    onReload: () -> Unit,
+    onHardReload: () -> Unit,
+    onStop: () -> Unit,
+) {
+    Row(
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp),
+    ) {
+        MainMenuIconButton(
+            icon = if (icons.bookmarked) Icons.Filled.Star else Icons.Filled.StarBorder,
+            label = stringResource(
+                if (icons.bookmarked) R.string.browser_menu_remove_bookmark
+                else R.string.browser_menu_add_bookmark,
+            ),
+            enabled = icons.bookmarkEnabled,
+            tint = if (icons.bookmarked) MaterialTheme.colorScheme.primary else null,
+            onClick = onToggleBookmark,
+        )
+        MainMenuIconButton(
+            icon = Icons.Filled.Share,
+            label = stringResource(R.string.common_share),
+            enabled = icons.shareUrl != null,
+            onClick = onShare,
+        )
+        val stop = icons.reload == MainMenuReload.Stop
+        if (icons.hardReload) {
+            ReloadIconButton(
+                stop = stop,
+                onClick = if (stop) onStop else onReload,
+                onHardReload = onHardReload,
+            )
+        } else {
+            MainMenuIconButton(
+                icon = if (stop) Icons.Filled.Close else Icons.Filled.Refresh,
+                label = stringResource(if (stop) R.string.browser_stop_loading else R.string.browser_reload),
+                enabled = icons.reload != MainMenuReload.None,
+                onClick = if (stop) onStop else onReload,
+            )
+        }
+    }
+}
+
+/**
+ * The icon row's Reload (or, mid-load, Stop) where a hard reload can
+ * follow it (#417): a tap reloads (or stops), a long-press reloads past
+ * the caches (#262) — the menu row Hard reload used to be, and which
+ * worked mid-load too. The long-press is taken, so this button has no
+ * name tooltip like its neighbours; instead its long-press is labelled
+ * where it can be: TalkBack says "double-tap and hold to hard reload"
+ * ([onLongClickLabel]) and offers Hard reload as a custom action, and a
+ * long-press that fired ticks the haptics. Ctrl+Shift+R does the same
+ * from a keyboard.
+ */
+@Composable
+private fun ReloadIconButton(stop: Boolean, onClick: () -> Unit, onHardReload: () -> Unit) {
+    val haptics = LocalHapticFeedback.current
+    val label = stringResource(if (stop) R.string.browser_stop_loading else R.string.browser_reload)
+    val hardLabel = stringResource(R.string.browser_menu_hard_reload)
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .combinedClickable(
+                role = Role.Button,
+                onClickLabel = label,
+                onLongClickLabel = hardLabel,
+                onLongClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onHardReload()
+                },
+                onClick = onClick,
+            )
+            .semantics {
+                customActions = listOf(
+                    CustomAccessibilityAction(hardLabel) {
+                        onHardReload()
+                        true
+                    },
+                )
+            },
+    ) {
+        Icon(
+            imageVector = if (stop) Icons.Filled.Close else Icons.Filled.Refresh,
+            contentDescription = label,
+        )
+    }
+}
+
+/**
+ * The fade over the edge a scrolling menu continues past (#417): the
+ * menu's own surface colour running out to transparent, so the rows cut
+ * by the edge read as going on rather than as the menu's end. Draws
+ * only; it takes no touches.
+ */
+@Composable
+private fun MenuScrollFade(visible: Boolean, top: Boolean, modifier: Modifier = Modifier) {
+    val alpha by animateFloatAsState(if (visible) 1f else 0f, label = "menuScrollFade")
+    val color = MaterialTheme.colorScheme.surfaceContainerHigh
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(MenuScrollFadeHeight)
+            .graphicsLayer { this.alpha = alpha }
+            .background(
+                Brush.verticalGradient(
+                    if (top) listOf(color, color.copy(alpha = 0f))
+                    else listOf(color.copy(alpha = 0f), color),
+                ),
+            ),
+    )
+}
+
+/** How tall [MenuScrollFade] is: most of a row, so a cut row visibly dissolves. */
+private val MenuScrollFadeHeight = 40.dp
+
+/** Air [AnchoredAboveProvider] keeps between a menu and the screen's side edges (#417). */
+internal val PopupEdgeMargin = 8.dp
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MainMenuIconButton(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    tint: Color? = null,
+) {
+    TooltipBox(
+        positionProvider = TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Above),
+        tooltip = { PlainTooltip { Text(label) } },
+        state = rememberTooltipState(),
+    ) {
+        IconButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = Modifier.size(48.dp),
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = if (enabled && tint != null) tint else LocalContentColor.current,
+            )
+        }
+    }
+}
+
+/** One of the menu's list rows ([MainMenuRow]); every row but Zoom closes the menu. */
+@Composable
+private fun MainMenuRowItem(
+    row: MainMenuRow,
+    state: BrowserState,
+    nodesNote: String?,
+    close: (() -> Unit) -> Unit,
+    onShowTrust: () -> Unit,
+    onHome: () -> Unit,
+    onNewTab: () -> Unit,
+    onNewPrivateTab: (() -> Unit)?,
+    onFindInPage: () -> Unit,
+    zoomLevel: Int?,
+    onZoom: (ZoomAction) -> Unit,
+    desktopSite: Boolean?,
+    onToggleDesktopSite: () -> Unit,
+    onPrint: () -> Unit,
+    adblockState: AdblockSiteState?,
+    onToggleAdblock: () -> Unit,
+    sitePermissionsSummary: String?,
+    onOpenSitePermissions: () -> Unit,
+    onAddToHomeScreen: (() -> Unit)?,
+    onOpenHistory: () -> Unit,
+    onOpenBookmarks: () -> Unit,
+    onOpenDownloads: () -> Unit,
+    onOpenWallet: () -> Unit,
+    walletNote: String?,
+    onOpenSettings: () -> Unit,
+    onOpenNode: () -> Unit,
+) {
+    when (row) {
+        // How the page's name was checked (#97) — the shield on the
+        // protocol badge, in words, and the way to its evidence. The
+        // badge itself is no hit target (a tap there edits the address),
+        // so this row is where the shield opens.
+        MainMenuRow.NameTrust -> state.nameTrust?.let { trust ->
+            DropdownMenuItem(
+                text = { MenuItemLabel(trust.tier.title) },
+                leadingIcon = { TrustShieldIcon(trust) },
+                onClick = { close(onShowTrust) },
+            )
+        }
+        // Home lives here now that Back owns the capsule's left control slot.
+        MainMenuRow.Home -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_home)) },
+            leadingIcon = { Icon(Icons.Filled.Home, contentDescription = null) },
+            onClick = { close(onHome) },
+        )
+        MainMenuRow.NewTab -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_new_tab)) },
+            leadingIcon = { Icon(Icons.Filled.Add, contentDescription = null) },
+            onClick = { close(onNewTab) },
+        )
+        MainMenuRow.NewPrivateTab -> onNewPrivateTab?.let { open ->
+            DropdownMenuItem(
+                text = { MenuItemLabel(stringResource(R.string.browser_menu_new_private_tab)) },
+                leadingIcon = { Icon(PrivateTabIcon, contentDescription = null) },
+                onClick = { close(open) },
+            )
+        }
+        MainMenuRow.FindInPage -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_find_in_page)) },
+            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+            // Nothing to search on a tab whose renderer went away (#260).
+            enabled = state.hasPageToActOn,
+            onClick = { close(onFindInPage) },
+        )
+        // − / + and the percentage, which resets. The menu stays open
+        // across presses so the user can watch the page settle between steps.
+        MainMenuRow.Zoom -> ZoomMenuRow(level = zoomLevel, onZoom = onZoom)
+        // Request desktop site (#180), per site, with a checkmark.
+        // Disabled where there is no site to ask as a desktop one (an
+        // error page, a dweb page). The page reloads, so the menu closes.
+        MainMenuRow.DesktopSite -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_desktop_site)) },
+            leadingIcon = { Icon(Icons.Filled.Computer, contentDescription = null) },
+            trailingIcon = {
+                Checkbox(
+                    checked = desktopSite == true,
+                    onCheckedChange = null,
+                    enabled = desktopSite != null,
+                )
+            },
+            enabled = desktopSite != null,
+            onClick = { close(onToggleDesktopSite) },
+            modifier = Modifier.semantics {
+                role = Role.Checkbox
+                toggleableState = ToggleableState(desktopSite == true)
+            },
+        )
+        // Print or save as PDF (#89). Nothing to print on a tab whose
+        // renderer went away.
+        MainMenuRow.Print -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_print)) },
+            leadingIcon = { Icon(Icons.Filled.Print, contentDescription = null) },
+            enabled = state.hasPageToActOn,
+            onClick = { close(onPrint) },
+        )
+        // Ad blocking on this site (#126): the switch is on only where
+        // filters really apply; a tap allowlists the site (or lifts that)
+        // and reloads the page. Where nothing is filtered for another
+        // reason (no lists on, still loading, a list exempts the page) it
+        // is off and disabled, and says why in a sub-line. Only on a web page.
+        MainMenuRow.BlockAds -> adblockState?.let { ads ->
+            DropdownMenuItem(
+                text = {
+                    // Only a little air before the switch: the label is
+                    // short enough for one line (#417), and the switch
+                    // already holds the row's trailing edge.
+                    Column(modifier = Modifier.padding(end = 8.dp)) {
+                        Text(stringResource(R.string.browser_menu_block_ads))
+                        ads.note?.let { note -> MenuItemNote(note) }
+                    }
+                },
+                leadingIcon = { Icon(Icons.Filled.Shield, contentDescription = null) },
+                trailingIcon = {
+                    Switch(
+                        checked = ads.checked,
+                        onCheckedChange = null,
+                        enabled = ads.toggleable,
+                        modifier = Modifier.scale(0.8f),
+                    )
+                },
+                enabled = ads.toggleable,
+                onClick = { close(onToggleAdblock) },
+                // Read out as the switch it looks like.
+                modifier = Modifier.semantics {
+                    role = Role.Switch
+                    toggleableState = ToggleableState(ads.checked)
+                },
+            )
+        }
+        // What the site on screen is allowed or blocked from (#266),
+        // listed and removable in a sheet; only while it holds something.
+        MainMenuRow.SitePermissions -> sitePermissionsSummary?.let { summary ->
+            DropdownMenuItem(
+                text = {
+                    Column(modifier = Modifier.padding(end = 32.dp)) {
+                        Text(stringResource(R.string.browser_menu_site_permissions))
+                        MenuItemNote(summary)
+                    }
+                },
+                leadingIcon = { Icon(Icons.Filled.Tune, contentDescription = null) },
+                onClick = { close(onOpenSitePermissions) },
+            )
+        }
+        // A launcher shortcut to the page (#400); never in a private tab.
+        MainMenuRow.AddToHomeScreen -> onAddToHomeScreen?.let { add ->
+            DropdownMenuItem(
+                text = { MenuItemLabel(stringResource(R.string.browser_menu_add_to_home_screen)) },
+                leadingIcon = { Icon(Icons.Filled.AddToHomeScreen, contentDescription = null) },
+                onClick = { close(add) },
+            )
+        }
+        MainMenuRow.History -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_history)) },
+            leadingIcon = { Icon(Icons.Filled.History, contentDescription = null) },
+            onClick = { close(onOpenHistory) },
+        )
+        MainMenuRow.Bookmarks -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_bookmarks)) },
+            leadingIcon = { Icon(Icons.Filled.Bookmark, contentDescription = null) },
+            onClick = { close(onOpenBookmarks) },
+        )
+        MainMenuRow.Downloads -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_downloads)) },
+            leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null) },
+            onClick = { close(onOpenDownloads) },
+        )
+        // The wallet page (#400), the one Settings → Wallet opens.
+        MainMenuRow.Wallet -> DropdownMenuItem(
+            text = {
+                Column(modifier = Modifier.padding(end = 32.dp)) {
+                    Text(stringResource(R.string.browser_menu_wallet))
+                    walletNote?.let { MenuItemNote(it) }
+                }
+            },
+            leadingIcon = { Icon(Icons.Filled.AccountBalanceWallet, contentDescription = null) },
+            onClick = { close(onOpenWallet) },
+        )
+        MainMenuRow.Settings -> DropdownMenuItem(
+            text = { MenuItemLabel(stringResource(R.string.browser_menu_settings)) },
+            leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+            onClick = { close(onOpenSettings) },
+        )
+        MainMenuRow.Nodes -> NodesMenuItem(nodesNote) { close(onOpenNode) }
+    }
+}
+
+/** A menu row's sub-line, under its label (a summary, a reason it's off). */
+@Composable
+private fun MenuItemNote(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 /**
@@ -3458,10 +3630,12 @@ internal fun MenuItemLabel(text: String) {
 /**
  * Places a [Popup] [gapPx] above an anchor's *top* edge (it opens
  * upwards, since the anchor lives in the bottom toolbar), aligned to the
- * anchor's trailing edge when [alignToEnd] (the overflow menu, hanging
- * off its button) or its leading edge otherwise (the URL-actions menu,
- * hanging off the label that was pressed), clamping to the window so the
- * popup never runs off-screen. The anchor bounds are captured by the
+ * anchor's trailing edge when [alignToEnd] or its leading edge otherwise
+ * (both the overflow menu, hanging off the ≡ at the capsule's leading
+ * end, and the URL-actions menu, hanging off the label that was pressed),
+ * clamping to the window — and [marginPx] inside its side edges (#417),
+ * so a popup whose anchor sits near an edge floats clear of it rather
+ * than touching it. The anchor bounds are captured by the
  * caller via [Modifier.onGloballyPositioned]; we deliberately ignore the
  * [anchorBounds] argument the framework hands in, since that's the
  * very value that mis-fires on the first open for Material3's default
@@ -3471,6 +3645,7 @@ internal class AnchoredAboveProvider(
     private val anchor: IntRect,
     private val gapPx: Int,
     private val alignToEnd: Boolean = true,
+    private val marginPx: Int = 0,
 ) : PopupPositionProvider {
     override fun calculatePosition(
         anchorBounds: IntRect,
@@ -3482,7 +3657,13 @@ internal class AnchoredAboveProvider(
         val x = when (alignToEnd) {
             true -> if (startEdge) anchor.right - popupContentSize.width else anchor.left
             false -> if (startEdge) anchor.left else anchor.right - popupContentSize.width
-        }.coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
+        }.let { wanted ->
+            // A popup too wide for both margins is centred instead, so
+            // what little room there is is shared out evenly.
+            val room = windowSize.width - popupContentSize.width
+            if (room >= 2 * marginPx) wanted.coerceIn(marginPx, room - marginPx)
+            else (room / 2).coerceAtLeast(0)
+        }
         val y = (anchor.top - gapPx - popupContentSize.height)
             .coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))
         return IntOffset(x, y)
@@ -3490,16 +3671,21 @@ internal class AnchoredAboveProvider(
 }
 
 /**
- * The overflow menu's Nodes row: the drawn text is only the peer count,
- * so its TalkBack name says where it goes (#279). The count is replaced
- * in the semantics, not added to, so it is read once.
+ * The overflow menu's last row (#416): "Nodes & networks", opening the
+ * overview of every node. No live count — the menu shouldn't change with
+ * every peer that comes and goes — only a [note] while a node has failed.
  */
 @Composable
-internal fun NodesMenuItem(peersLabel: String, onClick: () -> Unit) {
+internal fun NodesMenuItem(note: String?, onClick: () -> Unit) {
     DropdownMenuItem(
         text = {
-            Box(Modifier.clearAndSetSemantics { contentDescription = nodesMenuDescription(peersLabel) }) {
-                MenuItemLabel(peersLabel)
+            if (note == null) {
+                MenuItemLabel(stringResource(R.string.browser_menu_nodes))
+            } else {
+                Column(modifier = Modifier.padding(end = 32.dp)) {
+                    Text(stringResource(R.string.browser_menu_nodes))
+                    MenuItemNote(note)
+                }
             }
         },
         leadingIcon = {
@@ -3520,10 +3706,6 @@ internal fun NodesMenuItem(peersLabel: String, onClick: () -> Unit) {
  */
 internal fun popupMaxHeightAbove(anchorTop: Int, gapPx: Int, topInsetPx: Int): Int =
     (anchorTop - gapPx - topInsetPx).coerceAtLeast(0)
-
-/** TalkBack's name for the overflow menu's Nodes row (#279): where it goes, then the count it shows. */
-internal fun nodesMenuDescription(peersLabel: String): String =
-    Strings.get(R.string.browser_menu_nodes_description, peersLabel)
 
 /**
  * What TalkBack says of a load on the address bar (#279): the phase the
@@ -3584,20 +3766,78 @@ private fun AddressPlaceholder(
         val largest = if (style.fontSize.isSp) style.fontSize else floor
         val smallest = if (floor.value < largest.value) floor else largest
         val available = constraints.maxWidth
-        val text = remember(available, style, smallest, density) {
-            val atFloor = style.copy(fontSize = smallest)
-            AddressPlaceholders.firstOrNull {
-                measurer.measure(it, atFloor, maxLines = 1, softWrap = false).size.width <= available
-            } ?: AddressPlaceholders.last()
+        val words = AddressPlaceholders
+        val fit = remember(available, style, smallest, largest, density, words) {
+            fitAddressPlaceholder(
+                wordings = words,
+                sizes = placeholderFitSizes(largest.value, smallest.value),
+            ) { text, size ->
+                measurer.measure(
+                    text,
+                    style.copy(fontSize = size.sp),
+                    maxLines = 1,
+                    softWrap = false,
+                ).size.width <= available
+            }
         }
+        // Sized here rather than with `TextAutoSize`: on the AVD at
+        // 308 dp and font scale 1.3, beside the Back + Forward pill, the
+        // auto-size left the type at full size and the wording came out
+        // "Sea…" (#417). Measured against the same width, the chosen
+        // wording and size are known to fit.
         Text(
-            text = text,
+            text = fit.text,
             color = color,
+            fontSize = fit.size.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             textAlign = textAlign,
-            autoSize = TextAutoSize.StepBased(minFontSize = smallest, maxFontSize = largest),
             modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+/** What [AddressPlaceholder] draws: one of [AddressPlaceholders], at [size] sp. */
+internal data class PlaceholderFit(val text: String, val size: Float)
+
+/** The type sizes the placeholder may take, largest first, half an sp apart. */
+internal fun placeholderFitSizes(largest: Float, smallest: Float): List<Float> {
+    if (smallest >= largest) return listOf(largest)
+    val steps = generateSequence(largest) { it - 0.5f }.takeWhile { it > smallest }.toList()
+    return steps + smallest
+}
+
+/**
+ * The placeholder that fits (#279, #417): the longest wording that fits
+ * at some size, at the largest size it fits at — a long wording a little
+ * smaller is worth more than a short one at full size, but no wording is
+ * shrunk past the last of [sizes]. Where not even the shortest wording
+ * fits at the smallest size, that one is drawn at that size and
+ * ellipsised.
+ */
+internal fun fitAddressPlaceholder(
+    wordings: List<String>,
+    sizes: List<Float>,
+    fits: (String, Float) -> Boolean,
+): PlaceholderFit {
+    for (text in wordings) {
+        for (size in sizes) {
+            if (fits(text, size)) return PlaceholderFit(text, size)
+        }
+    }
+    return PlaceholderFit(wordings.last(), sizes.last())
+}
+
+/**
+ * Draws every bidi control in the edit field as U+FFFD
+ * ([BidiControls.marked]) — one character for one, so offsets map 1:1.
+ */
+private object BidiMarkingTransformation : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText {
+        val marked = BidiControls.marked(text.text)
+        return TransformedText(
+            if (marked === text.text) text else AnnotatedString(marked, text.spanStyles, text.paragraphStyles),
+            OffsetMapping.Identity,
         )
     }
 }

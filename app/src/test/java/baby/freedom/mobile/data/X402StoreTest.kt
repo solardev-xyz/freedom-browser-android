@@ -218,7 +218,7 @@ class X402StoreTest {
         s.grant(cap = 30)
         val p = paid("a", 20, auto = true)
         val done = s.commit(p, grant = null) as X402Store.Commit.Done
-        assertTrue(s.withdraw(p, done.allowanceCreated))
+        assertTrue(s.withdraw(p, done))
         assertEquals(BigInteger.ZERO, s.allowances.first().single().spent)
         assertEquals(emptyList<X402Store.Payment>(), s.history.first())
         // Revoked and granted again in between: the new allowance isn't touched.
@@ -226,7 +226,7 @@ class X402StoreTest {
         val again = s.commit(q, grant = null) as X402Store.Commit.Done
         now += 1
         s.grant(cap = 50, spent = 40)
-        assertTrue(s.withdraw(q, again.allowanceCreated))
+        assertTrue(s.withdraw(q, again))
         assertEquals(BigInteger.valueOf(40), s.allowances.first().single().spent)
     }
 
@@ -240,14 +240,14 @@ class X402StoreTest {
         assertEquals(BigInteger.valueOf(10), a.spent)
         assertEquals(BigInteger.valueOf(100), a.cap)
         assertEquals(listOf("a"), s.history.first().map { it.id })
-        assertTrue(s.withdraw(p, done.allowanceCreated))
+        assertTrue(s.withdraw(p, done))
         assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
         assertEquals(emptyList<X402Store.Payment>(), s.history.first())
         // A manual payment with no grant touches no allowance.
         s.grant(cap = 50)
         val plain = s.commit(paid("b", 10, auto = false), grant = null) as X402Store.Commit.Done
         assertNull(plain.allowanceCreated)
-        assertTrue(s.withdraw(paid("b", 10, auto = false), plain.allowanceCreated))
+        assertTrue(s.withdraw(paid("b", 10, auto = false), plain))
         assertEquals(BigInteger.ZERO, s.allowances.first().single().spent)
         // A grant below the payment is refused, nothing written.
         assertEquals(X402Store.Commit.Failed, s.commit(paid("c", 60, auto = false), X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(50), hour)))
@@ -255,10 +255,72 @@ class X402StoreTest {
     }
 
     @Test
+    fun `withdrawing a payment whose grant replaced an allowance puts that allowance back (#346)`() = runBlocking {
+        val s = store()
+        s.grant(cap = 50, spent = 20)
+        val before = s.allowances.first().single()
+        now += 1
+        val p = paid("a", 10, auto = false)
+        val done = s.commit(p, X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) as X402Store.Commit.Done
+        assertEquals(BigInteger.valueOf(100), s.allowances.first().single().cap)
+        assertTrue(s.withdraw(p, done))
+        assertEquals(listOf(before), s.allowances.first())
+        assertEquals(emptyList<X402Store.Payment>(), s.history.first())
+        // The new allowance was revoked before the withdraw: nothing comes back.
+        now += 1
+        val q = paid("b", 10, auto = false)
+        val again = s.commit(q, X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) as X402Store.Commit.Done
+        assertTrue(s.revoke(site, 8453, usdc, me))
+        assertTrue(s.withdraw(q, again))
+        assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
+        // An allowance that had already run out isn't brought back either.
+        s.grant(cap = 50)
+        now += hour + 1
+        val r = paid("c", 10, auto = false)
+        val third = s.commit(r, X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) as X402Store.Commit.Done
+        assertNull(third.replaced)
+        assertTrue(s.withdraw(r, third))
+        assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
+    }
+
+    @Test
+    fun `an allowance put back keeps the spend of a payment the grant made meanwhile (#346 R1-F1)`() = runBlocking {
+        val s = store()
+        s.grant(cap = 50, spent = 20)
+        val before = s.allowances.first().single()
+        now += 1
+        val p2 = paid("p2", 10, auto = false)
+        val done = s.commit(p2, X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) as X402Store.Commit.Done
+        // Another tab's automatic payment is counted against the new allowance, and sent.
+        val p3 = paid("p3", 10, auto = true)
+        assertTrue(s.commit(p3, grant = null) is X402Store.Commit.Done)
+        assertTrue(s.withdraw(p2, done))
+        // The old allowance is back, with p3 counted against it: nothing sent goes uncounted.
+        assertEquals(listOf(before.copy(spent = BigInteger.valueOf(30))), s.allowances.first())
+        assertEquals(listOf("p3"), s.history.first().map { it.id })
+        // Withdrawing p3 later finds the allowance it was counted against gone, and changes nothing:
+        // the restored allowance stays charged for p3 even though p3 was never sent. A deliberate,
+        // conservative over-count — it can only leave the site less to spend, never more (#346 R2-M1).
+        assertTrue(s.withdraw(p3, X402Store.Commit.Done(done.allowanceCreated)))
+        assertEquals(BigInteger.valueOf(30), s.allowances.first().single().spent)
+    }
+
+    @Test
+    fun `a replaced allowance that can't be read isn't put back when the grant paid meanwhile (#346 R1-F1)`() = runBlocking {
+        val s = store()
+        now += 1
+        val p2 = paid("p2", 10, auto = false)
+        val granted = s.commit(p2, X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) as X402Store.Commit.Done
+        assertTrue(s.commit(paid("p3", 10, auto = true), grant = null) is X402Store.Commit.Done)
+        assertTrue(s.withdraw(p2, granted.copy(replaced = "not json")))
+        assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
+    }
+
+    @Test
     fun `a commit that can't be written reports it, and nothing is paid`() = runBlocking {
         val s = X402Store(BrokenStore(IOException("disk"))) { now }
         assertEquals(X402Store.Commit.Failed, s.commit(paid("a", 10, auto = false), grant = null))
-        assertFalse(s.withdraw(paid("a", 10, auto = false), null))
+        assertFalse(s.withdraw(paid("a", 10, auto = false), X402Store.Commit.Done(null)))
     }
 
     @Test
@@ -341,5 +403,104 @@ class X402StoreTest {
         assertEquals(payee.lowercase(), ok.payTo)
         assertEquals(BigInteger.TEN, ok.each)
         assertEquals(ok, X402Store.decodeAllowance(key, X402Store.encodeAllowance(ok)))
+    }
+
+    @Test
+    fun `#347 a hold is kept until lifted, and goes with the wallet`() = runBlocking {
+        val s = store()
+        assertEquals(emptySet<String>(), s.holds())
+        assertTrue(s.grant(cap = 30))
+        assertTrue(s.hold(site))
+        assertTrue(s.hold("https://other.example"))
+        assertEquals(setOf(site, "https://other.example"), s.holds())
+        // Holds aren't allowances, nor history.
+        assertEquals(1, s.allowances.first().size)
+        assertEquals(emptyList<X402Store.Payment>(), s.history.first())
+        assertTrue(s.lift(site))
+        assertTrue(s.lift(site))
+        assertEquals(setOf("https://other.example"), s.holds())
+        assertTrue(s.clear())
+        assertEquals(emptySet<String>(), s.holds())
+    }
+
+    @Test
+    fun `#347 holds that can't be read are unknown, not none`() = runBlocking {
+        val s = X402Store(BrokenStore(IOException("disk"))) { now }
+        assertNull(s.holds())
+        assertFalse(s.hold(site))
+        assertFalse(s.lift(site))
+    }
+
+    @Test
+    fun `#347 R2-M1 only a clear that landed counts as one`() = runBlocking {
+        val broken = X402Store(BrokenStore(IOException("disk"))) { now }
+        val before = broken.clearEra
+        assertFalse(broken.clear())
+        // Failed: what it would have removed is still there, so queued holds aren't stale.
+        assertEquals(false, broken.clearedSince(before))
+        val s = store()
+        val era = s.clearEra
+        assertEquals(false, s.clearedSince(era))
+        assertTrue(s.clear())
+        assertEquals(true, s.clearedSince(era))
+        // A hold queued after the clear isn't stale.
+        assertEquals(false, s.clearedSince(s.clearEra))
+    }
+
+    // ---- Undo after Revoke (#423) ----
+
+    @Test
+    fun `a revoked allowance comes back as it was on Undo`() = runBlocking {
+        val s = store()
+        assertTrue(s.grant(cap = 100, spent = 30))
+        val a = s.allowances.first().single()
+        val era = s.clearEra
+        assertTrue(s.revoke(a.origin, a.chainId, a.asset, a.account))
+        assertTrue(s.allowances.first().isEmpty())
+        assertTrue(s.restore(a, era))
+        assertEquals(listOf(a), s.allowances.first())
+    }
+
+    @Test
+    fun `Undo doesn't overwrite a newer allowance, revive one past its window, or undo a wallet removal`() = runBlocking {
+        val s = store()
+        s.grant(cap = 100, spent = 30)
+        val a = s.allowances.first().single()
+        val era = s.clearEra
+        s.revoke(a.origin, a.chainId, a.asset, a.account)
+        // A new one granted meanwhile stays.
+        s.grant(cap = 50)
+        assertFalse(s.restore(a, era))
+        assertEquals(BigInteger.valueOf(50), s.allowances.first().single().cap)
+        s.revoke(a.origin, a.chainId, a.asset, a.account)
+        // Past its window.
+        now += 2 * hour
+        assertFalse(s.restore(a, era))
+        now -= 2 * hour
+        // The wallet was removed (every allowance cleared) after the revoke.
+        assertTrue(s.clear())
+        assertFalse(s.restore(a, era))
+        assertTrue(s.allowances.first().isEmpty())
+    }
+
+    @Test
+    fun `Undo puts back the allowance as revoked, with a payment counted after the list was read`() = runBlocking {
+        val s = store()
+        s.grant(cap = 100, spent = 30)
+        // What the wallet list last showed.
+        val shown = s.allowances.first().single()
+        val era = s.clearEra
+        // An auto-pay in another tab, after that read but before Revoke.
+        assertTrue(s.consume(site, 8453, usdc, me, payee, BigInteger.valueOf(20)))
+        val taken = s.take(shown.origin, shown.chainId, shown.asset, shown.account)
+        assertTrue(taken.saved)
+        assertEquals(BigInteger.valueOf(50), taken.was?.spent)
+        assertTrue(s.allowances.first().isEmpty())
+        assertTrue(s.restore(taken.was!!, era))
+        // Not the older snapshot's 30: the site can't spend that payment twice.
+        assertEquals(BigInteger.valueOf(50), s.allowances.first().single().spent)
+        // Nothing there: nothing taken, nothing to Undo.
+        assertTrue(s.revoke(site, 8453, usdc, me))
+        assertEquals(X402Store.Taken(true, null), s.take(site, 8453, usdc, me))
     }
 }

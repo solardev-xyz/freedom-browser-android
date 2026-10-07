@@ -7,4 +7,7 @@ plugins {
     id("org.jetbrains.kotlin.jvm") version "2.4.20" apply false
     id("com.google.devtools.ksp") version "2.3.12" apply false
     id("androidx.room") version "2.8.4" apply false
+    // Settings → About → Open-source licences (#325): the Gradle
+    // dependencies' licences, generated at build time.
+    id("com.mikepenz.aboutlibraries.plugin.android") version "15.2.0" apply false
 }

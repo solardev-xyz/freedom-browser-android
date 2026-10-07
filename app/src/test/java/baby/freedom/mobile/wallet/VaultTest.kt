@@ -79,7 +79,16 @@ class VaultTest {
     private val store = FakeStore()
     private val auth = FakeAuth()
 
-    private fun vault() = Vault(store, scope, clock = { now }, io = Dispatchers.Unconfined, compute = Dispatchers.Unconfined)
+    /** Every seed the vault derived, to check none is left unzeroed on a failure path. */
+    private val derivedSeeds = mutableListOf<ByteArray>()
+
+    /** Runs as each seed is derived, after it's made (e.g. to cancel the caller then). */
+    private var onDerive: () -> Unit = {}
+
+    private fun vault() = Vault(
+        store, scope, clock = { now }, io = Dispatchers.Unconfined, compute = Dispatchers.Unconfined,
+        seedOf = { m -> m.seed().also { derivedSeeds += it; onDerive() } },
+    )
 
     private val phrase = Mnemonic.parse(
         "void come effort suffer camp survey warrior heavy shoot primary clutch crush " +
@@ -326,6 +335,70 @@ class VaultTest {
     }
 
     @Test
+    fun `show private key asks every time and gives the key that signs for that account (#323)`() = runBlocking {
+        val v = vault()
+        val abandon = Mnemonic.parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        v.create(abandon, auth, imported = true)
+        // ethers: HDNodeWallet.fromPhrase(abandon…about, "", "m/44'/60'/0'/0/0").privateKey.
+        val first = WalletAccount(0, "Account 1", "0x9858EfFD232B4033E47d90003D41EC34EcaEda94")
+        val key = v.revealPrivateKey(auth, first)
+        assertEquals("0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727", key)
+        assertEquals(first.address, EthAccounts.addressOf(hex(key)))
+        // Another account's key is its own, and derives its own address.
+        val second = WalletAccount(1, "Account 2", "0x78839F6054d7ed13918bAe0473BA31b1Ca9D7265")
+        assertEquals(second.address, EthAccounts.addressOf(hex(v.revealPrivateKey(auth, second))))
+        assertEquals(
+            listOf(VaultAuthPurpose.IMPORT, VaultAuthPurpose.EXPORT_KEY, VaultAuthPurpose.EXPORT_KEY),
+            auth.asked,
+        )
+        assertTrue(VaultAuthPurpose.EXPORT_KEY.confirmationRequired)
+        // Locked, it still asks and still answers; the wallet stays locked.
+        v.lock()
+        assertEquals(key, v.revealPrivateKey(auth, first))
+        assertTrue(v.state.value is Vault.State.Locked)
+        // Cancelled: nothing.
+        auth.cancel = true
+        try {
+            v.revealPrivateKey(auth, first)
+            fail("a cancelled prompt shows no key")
+        } catch (_: VaultAuthCancelledException) {
+        }
+    }
+
+    @Test
+    fun `show private key refuses a Ledger's account and one that isn't this wallet's (#323)`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = true)
+        auth.asked.clear()
+        val ledger = WalletAccount(
+            -1, "Ledger 1", "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+            baby.freedom.mobile.wallet.ledger.LedgerKey("44'/60'/0'/0/0", "AA:BB", "Nano X"),
+        )
+        assertFalse(ledger.hasLocalKey)
+        try {
+            v.revealPrivateKey(auth, ledger)
+            fail("a Ledger's key isn't here")
+        } catch (_: IllegalArgumentException) {
+        }
+        // Not even asked: there's nothing to show.
+        assertTrue(auth.asked.isEmpty())
+        // Index 0 of another phrase: the derived key signs for a different address.
+        val stranger = WalletAccount(0, "Account 1", "0x9858EfFD232B4033E47d90003D41EC34EcaEda94")
+        try {
+            v.revealPrivateKey(auth, stranger)
+            fail("a key for another address must not be shown as this account's")
+        } catch (_: IllegalStateException) {
+        }
+    }
+
+    private fun hex(key: String): ByteArray {
+        assertTrue(key, Regex("0x[0-9a-f]{64}").matches(key))
+        return key.removePrefix("0x").chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+    }
+
+    @Test
     fun `reveal asks every time and markBackedUp clears the reminder`() = runBlocking {
         val v = vault()
         v.create(phrase, auth, imported = false)
@@ -335,6 +408,117 @@ class VaultTest {
         v.markBackedUp()
         assertTrue((v.state.value as Vault.State.Unlocked).info.backedUp)
         assertTrue((vault().state.value as Vault.State.Locked).info.backedUp)
+    }
+
+    @Test
+    fun `revealing the phrase alone leaves the backup reminder up`() = runBlocking {
+        // #421: only the backup flow's passed check calls markBackedUp, never a reveal.
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        assertEquals(phrase, v.revealMnemonic(auth))
+        assertFalse((v.state.value as Vault.State.Unlocked).info.backedUp)
+        assertFalse((vault().state.value as Vault.State.Locked).info.backedUp)
+    }
+
+    @Test
+    fun `a revealed phrase counts as known for the lost-wallet advice, check or not`() = runBlocking {
+        // #421 R1-F1: a reveal without the check leaves the reminder up but means the
+        // user may have the words, so a dead wallet must not be called unrestorable.
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        val fresh = (v.state.value as Vault.State.Unlocked).info
+        assertFalse(fresh.phraseShown)
+        assertFalse(fresh.phraseKnown)
+        v.revealMnemonic(auth)
+        val shown = (v.state.value as Vault.State.Unlocked).info
+        assertTrue(shown.phraseShown)
+        assertTrue(shown.phraseKnown)
+        assertFalse(shown.backedUp)
+        // Persisted, and kept through the check's own write.
+        assertTrue((vault().state.value as Vault.State.Locked).info.phraseKnown)
+        v.markBackedUp()
+        assertTrue(store.record!!.phraseShown)
+    }
+
+    @Test
+    fun `a reveal whose record write fails still shows the phrase`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        store.onWrite = { throw java.io.IOException("disk full") }
+        assertEquals(phrase, v.revealMnemonic(auth))
+        assertFalse((v.state.value as Vault.State.Unlocked).info.phraseKnown)
+    }
+
+    @Test
+    fun `a reveal whose record rename fails still shows the phrase`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        // What writeDurably throws when tmp.renameTo returns false (#429 R2-M1); the file stays as it was.
+        val before = store.record
+        store.onWrite = {
+            store.record = before
+            error("couldn't write vault.json")
+        }
+        assertEquals(phrase, v.revealMnemonic(auth))
+        assertFalse((v.state.value as Vault.State.Unlocked).info.phraseKnown)
+        store.onWrite = {}
+        assertEquals(phrase, v.revealMnemonic(auth))
+        assertTrue((v.state.value as Vault.State.Unlocked).info.phraseKnown)
+    }
+
+    @Test
+    fun `a reveal cancelled mid-write still publishes phraseShown`() = runBlocking {
+        // #429 R4-M1: Back/Hide/Home cancels the reveal's scope after the record write
+        // landed; memory must agree with disk, or the lost-wallet advice says "never shown".
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        store.onWrite = {
+            entered.countDown()
+            release.await()
+        }
+        val job = launch(Dispatchers.Default) { v.revealMnemonic(auth) }
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        job.cancel()
+        release.countDown()
+        job.join()
+        store.onWrite = {}
+        assertTrue(store.record!!.phraseShown)
+        assertTrue((v.state.value as Vault.State.Unlocked).info.phraseKnown)
+    }
+
+    @Test
+    fun `a reveal republishes phraseShown already on disk`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        // Disk already says shown while the published state doesn't.
+        store.record = store.record!!.copy(phraseShown = true)
+        assertFalse((v.state.value as Vault.State.Unlocked).info.phraseKnown)
+        assertEquals(phrase, v.revealMnemonic(auth))
+        assertTrue((v.state.value as Vault.State.Unlocked).info.phraseKnown)
+    }
+
+    @Test
+    fun `imported counts as known, restored and created-unseen don't`() = runBlocking {
+        vault().create(phrase, auth, imported = true)
+        assertTrue((vault().state.value as Vault.State.Locked).info.phraseKnown)
+        store.wipe()
+        vault().create(phrase, auth, imported = true, restored = true)
+        assertFalse((vault().state.value as Vault.State.Locked).info.phraseKnown)
+    }
+
+    @Test
+    fun `a vault file from before phraseShown takes it from backedUp`() {
+        val record = VaultRecord(VaultProtection.DEVICE_ONLY, false, byteArrayOf(1), byteArrayOf(2), backedUp = true)
+        val old = org.json.JSONObject(record.encode()).apply { remove("phraseShown") }.toString()
+        assertTrue(VaultRecord.decode(old)!!.phraseShown)
+        val unseen = org.json.JSONObject(record.withBackedUp(false).copy(phraseShown = false).encode())
+            .apply { remove("phraseShown") }.toString()
+        assertFalse(VaultRecord.decode(unseen)!!.phraseShown)
+        val shownNotChecked = record.withBackedUp(false).copy(phraseShown = true)
+        assertTrue(VaultRecord.decode(shownNotChecked.encode())!!.phraseShown)
+        assertFalse(VaultRecord.decode(shownNotChecked.encode())!!.backedUp)
     }
 
     @Test
@@ -348,6 +532,39 @@ class VaultTest {
         assertTrue(s is Vault.State.Locked)
         assertTrue((s as Vault.State.Locked).info.backedUp)
         assertFalse(v.unlockedNow())
+    }
+
+    @Test
+    fun `a check-page save cancelled mid-write still publishes backedUp`() = runBlocking {
+        // #429 R3-M1: Back/Home cancels the check page's scope after the record write
+        // landed; the state must still say backed up, or the banner stays until relaunch.
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        store.onWrite = {
+            entered.countDown()
+            release.await()
+        }
+        val job = launch(Dispatchers.Default) { v.markBackedUp() }
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        job.cancel()
+        release.countDown()
+        job.join()
+        store.onWrite = {}
+        assertTrue(store.record!!.backedUp)
+        assertTrue((v.state.value as Vault.State.Unlocked).info.backedUp)
+    }
+
+    @Test
+    fun `markBackedUp republishes a backup already on disk`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        // Disk already says checked while the published state doesn't.
+        store.record = store.record!!.withBackedUp(true)
+        assertFalse((v.state.value as Vault.State.Unlocked).info.backedUp)
+        v.markBackedUp()
+        assertTrue((v.state.value as Vault.State.Unlocked).info.backedUp)
     }
 
     @Test
@@ -450,5 +667,50 @@ class VaultTest {
         assertArrayEquals(byteArrayOf(4, 5), back.ciphertext)
         assertNull(VaultRecord.decode(r.encode().replace("\"version\":1", "\"version\":2")))
         assertNull(VaultRecord.decode("not json"))
+    }
+
+    // ---- The seed never outlives a failed open (audit, key custody) ----
+
+    @Test
+    fun `a seed derived for a create whose write fails is zeroed`() = runBlocking {
+        val v = vault()
+        store.onWrite = { throw java.io.IOException("disk full") }
+        try {
+            v.create(phrase, auth, imported = true)
+            fail("the write failed")
+        } catch (_: java.io.IOException) {
+        }
+        assertEquals(Vault.State.Empty, v.state.value)
+        assertTrue(derivedSeeds.all { s -> s.all { it.toInt() == 0 } })
+    }
+
+    @Test
+    fun `a seed derived for an unlock whose caller went away is zeroed, and the vault stays locked`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = true)
+        v.lock()
+        derivedSeeds.clear()
+        lateinit var caller: Job
+        // The caller (the wallet page's scope) is cancelled while the seed is being derived:
+        // withContext then throws on its way back and drops the finished seed.
+        onDerive = { caller.cancel() }
+        caller = launch { v.unlock(auth) }
+        caller.join()
+        assertTrue(caller.isCancelled)
+        assertTrue(v.state.value is Vault.State.Locked)
+        assertEquals(1, derivedSeeds.size)
+        assertTrue(derivedSeeds.single().all { it.toInt() == 0 })
+    }
+
+    @Test
+    fun `a create whose caller went away while its seed was derived leaves nothing behind`() = runBlocking {
+        val v = vault()
+        lateinit var caller: Job
+        onDerive = { caller.cancel() }
+        caller = launch { v.create(phrase, auth, imported = true) }
+        caller.join()
+        assertEquals(Vault.State.Empty, v.state.value)
+        assertNull(store.record)
+        assertTrue(derivedSeeds.all { s -> s.all { it.toInt() == 0 } })
     }
 }

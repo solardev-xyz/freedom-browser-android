@@ -6,6 +6,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.hasScrollToNodeAction
@@ -70,7 +72,8 @@ class SendLinkDraftTest {
         rule.waitForIdle()
         shown = true
         rule.waitForIdle()
-        rule.onNodeWithText(payee).assertExists()
+        // The field and, under it, the address in full (#422).
+        rule.onAllNodesWithText(payee).onFirst().assertExists()
         rule.onNode(hasScrollToNodeAction()).performScrollToNode(hasText("10"))
         rule.onNodeWithText("10").assertExists()
         rule.onNodeWithText("100").assertDoesNotExist()

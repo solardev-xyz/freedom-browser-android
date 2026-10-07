@@ -32,8 +32,9 @@ enum class VaultProtection(val wire: String) {
 /**
  * The vault as stored on disk: the recovery phrase sealed with AES-GCM
  * under the Keystore key, plus what isn't secret — how the key is
- * guarded, whether it sits in StrongBox, and whether the user has seen
- * the phrase since it was made (the backup reminder), and whether the
+ * guarded, whether it sits in StrongBox, whether the backup check has
+ * passed ([backedUp]: the backup reminder shows till then), whether the
+ * phrase has been on screen at all ([phraseShown]), and whether the
  * phrase is in the opt-in Google Block Store backup ([PhraseBackup],
  * #231) and that backup has been offered. There is no
  * plaintext copy of the phrase anywhere; [ciphertext] can only be opened
@@ -49,6 +50,13 @@ class VaultRecord(
     val cloudBackup: Boolean = false,
     /** The one-time "Back up with Google?" offer after create or import has been answered (#231). */
     val cloudBackupOffered: Boolean = false,
+    /**
+     * The phrase has been on screen at least once (or came from the user,
+     * on import), so the user may have it written down even if the backup
+     * check ([backedUp]) never passed. What the lost-wallet advice goes
+     * by: only a phrase never shown can't be restored (#421 R1-F1).
+     */
+    val phraseShown: Boolean = backedUp,
 ) {
     fun withBackedUp(backedUp: Boolean) = copy(backedUp = backedUp)
 
@@ -56,7 +64,8 @@ class VaultRecord(
         backedUp: Boolean = this.backedUp,
         cloudBackup: Boolean = this.cloudBackup,
         cloudBackupOffered: Boolean = this.cloudBackupOffered,
-    ) = VaultRecord(protection, strongBox, iv, ciphertext, backedUp, cloudBackup, cloudBackupOffered)
+        phraseShown: Boolean = this.phraseShown || backedUp,
+    ) = VaultRecord(protection, strongBox, iv, ciphertext, backedUp, cloudBackup, cloudBackupOffered, phraseShown)
 
     fun encode(): String = JSONObject()
         .put("version", VERSION)
@@ -67,6 +76,7 @@ class VaultRecord(
         .put("backedUp", backedUp)
         .put("cloudBackup", cloudBackup)
         .put("cloudBackupOffered", cloudBackupOffered)
+        .put("phraseShown", phraseShown)
         .toString()
 
     companion object {
@@ -87,6 +97,9 @@ class VaultRecord(
                     // Absent in files written before #231: backup off, never offered.
                     cloudBackup = o.optBoolean("cloudBackup", false),
                     cloudBackupOffered = o.optBoolean("cloudBackupOffered", false),
+                    // Absent in files written before #421: until then revealing the phrase
+                    // set backedUp itself, so backedUp is the best answer there is.
+                    phraseShown = o.optBoolean("phraseShown", o.optBoolean("backedUp", false)),
                 ).takeIf { it.iv.isNotEmpty() && it.ciphertext.isNotEmpty() }
             }
         } catch (_: Exception) {

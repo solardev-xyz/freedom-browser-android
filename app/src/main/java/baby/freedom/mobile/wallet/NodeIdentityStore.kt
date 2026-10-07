@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
+import baby.freedom.swarm.RadicleNode
 import java.io.File
 import java.security.KeyStore
 import java.security.MessageDigest
@@ -37,8 +38,8 @@ fun VaultRecord.identityTag(): String {
  * relaunch: the seed only ever lives in memory ([Vault]), but ant has
  * to boot as the same Swarm account every time.
  *
- * Only the two derived 32-byte keys are kept — never the phrase or the
- * seed — sealed with AES-256-GCM under their own Android Keystore key
+ * Only the derived 32-byte keys are kept — Swarm, IPFS and (#328)
+ * Radicle; never the phrase or the seed — sealed with AES-256-GCM under their own Android Keystore key
  * ([KeystoreNodeKeys]: hardware-backed, StrongBox when there is one). That
  * key needs no user authentication, since the node boots in the
  * background; what it protects against is the file being read off the
@@ -47,6 +48,10 @@ fun VaultRecord.identityTag(): String {
  * vault it was derived from ([VaultRecord.identityTag], bound into the
  * GCM tag as associated data), so keys left over from a removed or
  * replaced wallet are never used.
+ *
+ * Version 1 files (#77) hold the Swarm and IPFS keys only; they still
+ * boot Swarm, and [NodeIdentitySync] rewrites them as version 2, with the
+ * Radicle key, at the wallet's next unlock.
  */
 class NodeIdentityStore internal constructor(
     private val file: File,
@@ -66,6 +71,9 @@ class NodeIdentityStore internal constructor(
     /** The vault tag the stored keys were derived from, or null if there are none (or they can't be read). */
     fun storedTag(): String? = readFile()?.optString("vault")?.takeIf { it.isNotEmpty() }
 
+    /** True when the file on disk (readable or not once opened) holds a Radicle key: a version-2 file (#328). */
+    fun storedHasRadicle(): Boolean = readFile()?.optInt("version") == VERSION
+
     /**
      * The stored identity if it was derived from the vault tagged [vaultTag];
      * null if there's none, it belongs to another vault, or it can't be
@@ -83,22 +91,27 @@ class NodeIdentityStore internal constructor(
             cipher.updateAAD(vaultTag.toByteArray())
             val plain = cipher.doFinal(sealed)
             try {
-                if (plain.size != 64) return null
-                NodeIdentity(plain.copyOfRange(0, 32), plain.copyOfRange(32, 64))
+                val radicle = when (o.optInt("version") to plain.size) {
+                    1 to 64 -> null
+                    VERSION to 96 -> plain.copyOfRange(64, 96)
+                    else -> return null
+                }
+                NodeIdentity(plain.copyOfRange(0, 32), plain.copyOfRange(32, 64), radicle)
             } finally {
                 plain.fill(0)
             }
         }.getOrNull()
     }
 
-    /** Seals [identity]'s keys as belonging to the vault tagged [vaultTag], replacing whatever was there. */
+    /** Seals [identity]'s keys (all three) as belonging to the vault tagged [vaultTag], replacing whatever was there. */
     fun write(vaultTag: String, identity: NodeIdentity) {
+        val radicle = requireNotNull(identity.radicleKey) { "no Radicle key" }
         val key = keys.key(create = true) ?: error("no node identity key")
         val cipher = Cipher.getInstance(TRANSFORMATION)
         // The provider picks the IV (the Keystore insists on it).
         cipher.init(Cipher.ENCRYPT_MODE, key)
         cipher.updateAAD(vaultTag.toByteArray())
-        val plain = identity.swarmKey + identity.ipfsKey
+        val plain = identity.swarmKey + identity.ipfsKey + radicle
         val sealed = try {
             cipher.doFinal(plain)
         } finally {
@@ -128,29 +141,79 @@ class NodeIdentityStore internal constructor(
 
     private fun readFile(): JSONObject? {
         if (!file.exists()) return null
-        return runCatching { JSONObject(file.readText()) }.getOrNull()?.takeIf { it.optInt("version") == VERSION }
+        return runCatching { JSONObject(file.readText()) }.getOrNull()?.takeIf { it.optInt("version") in 1..VERSION }
     }
 
     /**
      * What the `:node` process boots ant with (#77): the identity document
      * for the wallet on this device ([NodeIdentity.antIdentityJson], which
-     * the caller zeroes), and its Swarm address — or null when there's no
-     * wallet, or no keys derived from this one yet. Never throws.
+     * the caller zeroes), and its Swarm address.
      */
     class Boot(val antIdentity: ByteArray, val swarmAddress: String)
 
-    fun boot(vault: VaultStore): Boot? = runCatching {
-        val tag = vault.read()?.identityTag() ?: return null
-        val identity = read(tag) ?: return null
+    /**
+     * What ant boots as: the wallet's Swarm identity ([Boot]) — or null
+     * when there's no wallet, or no keys derived from this one yet.
+     *
+     * Throws [IllegalStateException] when it can't tell, as [radicle] does
+     * (#357): the node must not take a failed read for "no wallet" and
+     * restart, or boot, as ant's own device key — a different overlay and
+     * account from the one the wallet's feeds, stamps and funds belong to.
+     */
+    fun boot(vault: VaultStore): Boot? = withWalletIdentity(vault) { identity ->
+        Boot(identity.antIdentityJson(), identity.swarmAddress)
+    }
+
+    /**
+     * What the `:node` process boots the Radicle node as (#328): the
+     * wallet's Radicle identity (its secret seed, which the caller wipes,
+     * and DID) — or null when there's no wallet, no keys derived from this
+     * one yet, or only version-1 keys without a Radicle one.
+     *
+     * Throws [IllegalStateException] when it can't tell: the vault file is
+     * there but unreadable, or the keys on disk are this vault's but can't
+     * be opened (a Keystore or I/O failure). The node must not take that
+     * for "no wallet" and quietly run as the device's own key.
+     */
+    fun radicle(vault: VaultStore): RadicleNode.HostIdentity? = withWalletIdentity(vault) { identity ->
+        val did = identity.radicleDid ?: return@withWalletIdentity null
+        RadicleNode.HostIdentity(identity.radicleSecret() ?: return@withWalletIdentity null, did)
+    }
+
+    /**
+     * [use] on the node keys derived from the wallet on this device, wiped
+     * after; null when there's no wallet or none derived from it yet (keys
+     * from another, removed vault count as none). Shared by [boot] and
+     * [radicle] so the two nodes tell "no wallet" from "couldn't read" alike.
+     *
+     * Throws [IllegalStateException] when it can't tell: the vault file is
+     * there but unreadable, the node identity file is there but unreadable,
+     * or the keys in it are this vault's but can't be opened (a Keystore or
+     * I/O failure).
+     */
+    private fun <T> withWalletIdentity(vault: VaultStore, use: (NodeIdentity) -> T?): T? {
+        val record = runCatching { vault.read() }.getOrNull()
+        if (record == null) {
+            check(!runCatching { vault.exists() }.getOrDefault(true)) { "the wallet can't be read" }
+            return null
+        }
+        val tag = record.identityTag()
+        // Keys from another (removed) vault, or none yet: this wallet has no
+        // node identity on disk.
+        if (storedTag() != tag) {
+            check(isEmpty() || readFile() != null) { "the node identity file can't be read" }
+            return null
+        }
+        val identity = read(tag) ?: error("the wallet's node keys can't be opened")
         try {
-            Boot(identity.antIdentityJson(), identity.swarmAddress)
+            return use(identity)
         } finally {
             identity.wipe()
         }
-    }.getOrNull()
+    }
 
     companion object {
-        private const val VERSION = 1
+        private const val VERSION = 2
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
 

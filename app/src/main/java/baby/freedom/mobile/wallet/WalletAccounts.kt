@@ -42,6 +42,13 @@ data class WalletAccount(val index: Int, val name: String, val address: String, 
 
     val isLedger: Boolean get() = ledger != null
 
+    /**
+     * Whether the key signing for this account is derived on this phone
+     * from the wallet's seed, and so can be shown (#323). Not a Ledger's:
+     * its key never leaves the device.
+     */
+    val hasLocalKey: Boolean get() = ledger == null && index in 0 until EthAccounts.MAX_INDEX
+
     companion object {
         fun pathFor(index: Int) = "m/44'/60'/$index'/0/0"
 
@@ -63,15 +70,23 @@ data class WalletAccountList(val accounts: List<WalletAccount>, val activeIndex:
 internal object EthAccounts {
     /** The checksummed address of account [index] (see [WalletAccount]); the private key is zeroed before returning. */
     fun address(seed: ByteArray, index: Int): String {
-        require(index in 0 until MAX_INDEX) { "account index out of range" }
-        val key = HdKeys.secp256k1(seed, WalletAccount.pathFor(index))
+        val key = privateKey(seed, index)
         return try {
-            val pub = Secp256k1Keys.publicKeyUncompressed(key)
-            NodeIdentity.checksum(Keccak256.digest(pub).copyOfRange(12, 32))
+            addressOf(key)
         } finally {
             key.fill(0)
         }
     }
+
+    /** Account [index]'s secp256k1 private key (32 bytes). The caller zeroes it. */
+    fun privateKey(seed: ByteArray, index: Int): ByteArray {
+        require(index in 0 until MAX_INDEX) { "account index out of range" }
+        return HdKeys.secp256k1(seed, WalletAccount.pathFor(index))
+    }
+
+    /** The checksummed address a secp256k1 private [key] signs for. */
+    fun addressOf(key: ByteArray): String =
+        NodeIdentity.checksum(Keccak256.digest(Secp256k1Keys.publicKeyUncompressed(key)).copyOfRange(12, 32))
 
     /** BIP-44 account indices are hardened, so 31 bits. */
     const val MAX_INDEX = 0x7fffffff
@@ -295,7 +310,7 @@ class WalletAccounts internal constructor(
         if (current.accounts.size >= WalletAccountStore.MAX_ACCOUNTS) throw TooManyAccountsException()
         if (current.accounts.any { it.address.equals(address, ignoreCase = true) }) throw DuplicateAccountException()
         val index = minOf(0, current.accounts.minOf { it.index }) - 1
-        val shown = name.trim().take(WalletAccountStore.MAX_NAME).ifBlank { Strings.get(R.string.wallet_account_default_ledger_name, current.accounts.count { it.ledger != null } + 1) }
+        val shown = name.trim().take(WalletAccountStore.MAX_NAME).ifBlank { defaultLedgerName(current.accounts, index) }
         val added = WalletAccount(index, shown, address, key)
         val list = WalletAccountList(current.accounts + added, index)
         withContext(io) { store.write(tag, list) }
@@ -332,8 +347,85 @@ class WalletAccounts internal constructor(
         _accounts.value = list
     }
 
+    /**
+     * Names account [index] [name] (W6), trimmed and cut to
+     * [WalletAccountStore.MAX_NAME] characters (never mid-character). A
+     * blank name gives it back its default one ("Account 2", "Ledger 1").
+     * Needs no unlock: names are public data, like the list itself. Throws
+     * [IllegalArgumentException] for a name [accountNameProblem] refuses,
+     * and whatever the save throws (the caller reports it; [accounts] is
+     * unchanged).
+     */
+    suspend fun rename(index: Int, name: String) = mutex.withLock {
+        accountNameProblem(name)?.let { throw IllegalArgumentException(it) }
+        val current = _accounts.value ?: return@withLock
+        val account = current.accounts.firstOrNull { it.index == index } ?: return@withLock
+        val shown = cleanAccountName(name) ?: if (account.ledger != null) {
+            defaultLedgerName(current.accounts.filter { it.index != index }, index)
+        } else {
+            WalletAccount.defaultName(index)
+        }
+        if (shown == account.name) return@withLock
+        val tag = withContext(io) { vault.identityTag() } ?: return@withLock
+        val list = current.copy(accounts = current.accounts.map { if (it.index == index) it.copy(name = shown) else it })
+        withContext(io) { store.write(tag, list) }
+        _accounts.value = list
+    }
+
     companion object {
         private const val TAG = "WalletAccounts"
+
+        /**
+         * Why [name] can't be an account's name, or null if it can: a line
+         * break, a control character or an invisible format character
+         * (a bidi override would reorder the account's one-line row) —
+         * [PublisherIdentity.isRefusedInLabel]'s rule, which keeps the
+         * joiners and tag characters emoji are built from. What the rename
+         * field checks as it's typed, and what [rename] enforces.
+         */
+        fun accountNameProblem(name: String): String? =
+            if (name.codePoints().anyMatch(PublisherIdentity::isRefusedInLabel)) {
+                Strings.get(R.string.wallet_account_name_control_chars)
+            } else {
+                null
+            }
+
+        /** [name] trimmed and cut to [WalletAccountStore.MAX_NAME] chars on a code-point boundary; null when blank. */
+        fun cleanAccountName(name: String): String? {
+            val trimmed = name.trim()
+            if (trimmed.isEmpty()) return null
+            return cutAccountName(trimmed).trim()
+        }
+
+        /**
+         * [name] cut to [WalletAccountStore.MAX_NAME] chars, never between
+         * the two halves of a surrogate pair; [name] itself if it fits. What
+         * the rename field keeps of a longer paste (W6), and [cleanAccountName]'s cut.
+         */
+        fun cutAccountName(name: String): String {
+            if (name.length <= WalletAccountStore.MAX_NAME) return name
+            var end = WalletAccountStore.MAX_NAME
+            if (Character.isLowSurrogate(name[end]) && Character.isHighSurrogate(name[end - 1])) end--
+            return name.substring(0, end)
+        }
+
+        /**
+         * The default name of the Ledger account [index] among [others] (the
+         * wallet's other accounts): "Ledger N" from its own index (-1 is
+         * "Ledger 1", -2 "Ledger 2"; each Ledger gets the next one down when
+         * added), so clearing a renamed one's name gives it the same name
+         * each time, however many were added or removed since. If another
+         * account already has that name, the lowest "Ledger N" no other has
+         * — never a second account with the same name.
+         */
+        internal fun defaultLedgerName(others: List<WalletAccount>, index: Int): String {
+            val taken = others.mapTo(HashSet()) { it.name }
+            val own = Strings.get(R.string.wallet_account_default_ledger_name, -index)
+            if (own !in taken) return own
+            return generateSequence(1) { it + 1 }
+                .map { Strings.get(R.string.wallet_account_default_ledger_name, it) }
+                .first { it !in taken }
+        }
 
         @Volatile
         private var instance: WalletAccounts? = null

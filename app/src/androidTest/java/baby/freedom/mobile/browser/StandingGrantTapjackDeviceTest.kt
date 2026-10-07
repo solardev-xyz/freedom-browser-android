@@ -24,6 +24,7 @@ import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.wallet.OpenLvSession
 import baby.freedom.mobile.wallet.WalletAccount
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -46,10 +47,10 @@ import org.junit.runner.RunWith
  * armed nor an obscured one after changes which account is shared; a
  * clean one does.
  *
- * #287 R5-M1: the site-permission prompt's "Remember this decision" box,
- * which decides whether Allow stores a standing grant: once the user has
- * unticked it, neither an obscured tap nor one before the prompt armed
- * ticks it again; a clean armed tap does.
+ * #287 R5-M1, #419: the site-permission prompt's "Allow every visit",
+ * which stores a standing grant: neither an obscured tap nor one before
+ * the prompt armed answers the prompt; a clean armed tap does, and
+ * "Allow this session" is not remembered.
  */
 @RunWith(AndroidJUnit4::class)
 class StandingGrantTapjackDeviceTest {
@@ -72,7 +73,8 @@ class StandingGrantTapjackDeviceTest {
         }
     }
 
-    private fun showing(content: @Composable () -> Unit, label: String) {
+    /** [confirm]: the label of the button on the confirm step a clean tap opens first (#423), if any. */
+    private fun showing(content: @Composable () -> Unit, label: String, confirm: String? = null) {
         ActivityScenario.launch(ComponentActivity::class.java).use { scenario ->
             scenario.onActivity { it.setContent { FreedomTheme { content() } } }
             findToggle(label)
@@ -84,12 +86,21 @@ class StandingGrantTapjackDeviceTest {
             assertTrue(onScreen(OBSCURED_TAP_MESSAGE))
             // The notice grows a bottom sheet upwards: find the switch again where it is now.
             tap(findToggle(label))
+            if (confirm != null) {
+                // Only the confirm turns it on (#423, W25); it arms like any prompt.
+                SystemClock.sleep(500)
+                assertFalse("the row turned the switch on without its confirm", checked(label))
+                val button = findText(confirm)
+                SystemClock.sleep(1_500)
+                tap(button)
+            }
             assertTrue("a clean tap didn't turn the switch on", waitChecked(label))
         }
     }
 
     @Test
-    fun anObscuredTapDoesNotTurnOnAlwaysApprove() = showing({ ethereumSwitch() }, autoApproveSwitchLabel(rule))
+    fun anObscuredTapDoesNotTurnOnAlwaysApprove() =
+        showing({ ethereumSwitch() }, autoApproveSwitchLabel(rule), confirm = InstrumentationRegistry.getInstrumentation().targetContext.getString(baby.freedom.mobile.R.string.send_eth_always_turn_on))
 
     @Test
     fun anObscuredTapDoesNotTurnOnSwarmAlwaysAllow() {
@@ -167,48 +178,66 @@ class StandingGrantTapjackDeviceTest {
     private val cameraPrompt get() = PermissionPrompt("https://game.example", listOf(SitePermission.CAMERA))
 
     @Test
-    fun anObscuredTapDoesNotReTickRememberOnASitePermissionPrompt() {
+    fun anObscuredTapDoesNotAllowEveryVisitOnASitePermissionPrompt() {
         ActivityScenario.launch(ComponentActivity::class.java).use { scenario ->
             val prompt = cameraPrompt
             scenario.onActivity { it.setContent { FreedomTheme { SitePermissionPrompt(prompt) } } }
-            val box = findToggle(REMEMBER)
+            val button = findStableText(ALLOW_EVERY_VISIT)
             SystemClock.sleep(2_000)
-            assertTrue(checked(REMEMBER))
-            tap(box)
-            assertTrue("a clean tap didn't untick Remember", waitChecked(REMEMBER, false))
-            tap(findToggle(REMEMBER), MotionEvent.FLAG_WINDOW_IS_OBSCURED)
+            tap(button, MotionEvent.FLAG_WINDOW_IS_OBSCURED)
             SystemClock.sleep(500)
-            assertFalse("an obscured tap re-ticked Remember", checked(REMEMBER))
+            assertFalse("an obscured tap answered the prompt", prompt.answer.isCompleted)
             assertTrue(onScreen(OBSCURED_TAP_MESSAGE))
-            tap(findToggle(REMEMBER))
-            assertTrue("a clean tap didn't tick Remember again", waitChecked(REMEMBER))
-            assertFalse(prompt.answer.isCompleted)
+            tap(findStableText(ALLOW_EVERY_VISIT))
+            assertEquals(PromptAnswer.Allow(remember = true), awaitAnswer(prompt))
         }
     }
 
     @Test
-    fun aTapBeforeArmingDoesNotUntickRememberOnASitePermissionPrompt() {
+    fun aTapBeforeArmingDoesNotAllowEveryVisitOnASitePermissionPrompt() {
         ActivityScenario.launch(ComponentActivity::class.java).use { scenario ->
-            scenario.onActivity { it.setContent { FreedomTheme { SitePermissionPrompt(cameraPrompt) } } }
-            // Tapped as soon as the box is laid out: inside the prompt's 500 ms guard.
-            val box = firstBounds(REMEMBER)
-            tap(box)
+            val prompt = cameraPrompt
+            scenario.onActivity { it.setContent { FreedomTheme { SitePermissionPrompt(prompt) } } }
+            // Tapped as soon as the button is laid out: inside the prompt's 500 ms guard.
+            tap(findText(ALLOW_EVERY_VISIT))
             SystemClock.sleep(300)
-            assertTrue("a tap before the prompt armed unticked Remember", checked(REMEMBER))
+            assertFalse("a tap before the prompt armed answered it", prompt.answer.isCompleted)
         }
     }
 
-    private fun firstBounds(label: String): Rect {
-        val until = SystemClock.uptimeMillis() + 5_000
-        while (SystemClock.uptimeMillis() < until) {
-            toggle(label)?.let { node ->
-                val r = Rect()
-                node.getBoundsInScreen(r)
-                if (!r.isEmpty) return r
-            }
-            SystemClock.sleep(20)
+    @Test
+    fun allowThisSessionIsNotRememberedOnASitePermissionPrompt() {
+        ActivityScenario.launch(ComponentActivity::class.java).use { scenario ->
+            val prompt = cameraPrompt
+            scenario.onActivity { it.setContent { FreedomTheme { SitePermissionPrompt(prompt) } } }
+            val button = findStableText(ALLOW_THIS_SESSION)
+            SystemClock.sleep(1_000)
+            tap(button)
+            assertEquals(PromptAnswer.Allow(remember = false), awaitAnswer(prompt))
         }
-        throw AssertionError("no \"$label\" box on screen")
+    }
+
+    private fun awaitAnswer(prompt: PermissionPrompt): PromptAnswer? {
+        val until = SystemClock.uptimeMillis() + 2_000
+        while (SystemClock.uptimeMillis() < until) {
+            if (prompt.answer.isCompleted) return runBlocking { prompt.answer.await() }
+            SystemClock.sleep(50)
+        }
+        return null
+    }
+
+    /** Where the text [label] is once it has stopped moving (the dialog can still be animating in). */
+    private fun findStableText(label: String): Rect {
+        val until = SystemClock.uptimeMillis() + 8_000
+        var last: Rect? = null
+        while (SystemClock.uptimeMillis() < until) {
+            val r = roots().firstNotNullOfOrNull { find(it, label) }
+                ?.let { node -> Rect().also { node.getBoundsInScreen(it) } }?.takeUnless { it.isEmpty }
+            if (r != null && r == last) return r
+            last = r
+            SystemClock.sleep(300)
+        }
+        throw AssertionError("no \"$label\" on screen")
     }
 
     /** The radio row whose (merged) text starts with [name]. */
@@ -272,6 +301,19 @@ class StandingGrantTapjackDeviceTest {
 
     private fun checked(label: String): Boolean = toggle(label)?.isChecked == true
 
+    /** Where the text [label] is (a button's label: tapping its middle taps the button). */
+    private fun findText(label: String): Rect {
+        val until = SystemClock.uptimeMillis() + 5_000
+        while (SystemClock.uptimeMillis() < until) {
+            roots().firstNotNullOfOrNull { find(it, label) }?.let { node ->
+                val r = Rect().also { node.getBoundsInScreen(it) }
+                if (!r.isEmpty) return r
+            }
+            SystemClock.sleep(100)
+        }
+        throw AssertionError("no \"$label\" on screen")
+    }
+
     private fun waitChecked(label: String, want: Boolean = true): Boolean {
         val until = SystemClock.uptimeMillis() + 2_000
         while (SystemClock.uptimeMillis() < until) {
@@ -319,6 +361,7 @@ class StandingGrantTapjackDeviceTest {
     }
 
     private companion object {
-        const val REMEMBER = "Remember this decision"
+        const val ALLOW_EVERY_VISIT = "Allow every visit"
+        const val ALLOW_THIS_SESSION = "Allow this session"
     }
 }

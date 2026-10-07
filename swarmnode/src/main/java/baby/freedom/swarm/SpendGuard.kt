@@ -16,8 +16,10 @@ sealed interface SpendPlan {
      * Buying a postage batch (`ant_storage_buy_xdai`): swap the xBZZ
      * shortfall ([maxSwapWei] at most, the xDAI total the confirmation
      * showed), approve `amountPerChunk × 2^depth` to the postage contract,
-     * `createBatch` with exactly these parameters, then — first buy only —
-     * deploy the node's chequebook and move its settlement deposit into it.
+     * `createBatch` with exactly these parameters, then settlement: deploy
+     * the node's chequebook if it has none, and bring a new or adopted
+     * chequebook's deposit up to the settlement target (ant 0.5.51+ tops
+     * up an existing one on any buy, not only the first).
      */
     data class BuyStamp(
         override val owner: String,
@@ -82,16 +84,21 @@ sealed interface SpendPlan {
  * One slot doesn't pin its recipient: a buy's (or a batch connect's,
  * #115) chequebook settlement deposit ([SpendPermit.Slot.SettlementDeposit], at most
  * [SpendPermit.MAX_SETTLEMENT_DEPOSIT_PLUR] = 0.001 xBZZ) may be a `transfer` to any
- * address, because the chequebook it funds is created in the same flow
- * and its address can't be known before ant sends the deposit. That is
- * safe only because no ant gateway route transfers xBZZ to an address the
- * caller chooses: the one gateway route that transfers xBZZ at all, `POST
- * /chequebook/deposit` (#117), pays only the chequebook the gateway
- * loaded at start, the node's own. So during a buy or connect the only `transfer`s
- * ant can sign go to the node's chequebooks. If ant ever gains a route
- * that pays a caller-chosen address (a withdraw, a cash-out), pin this
- * slot to the deployed chequebook first — until then a request racing a
- * buy could send up to 0.001 xBZZ to an address of its choice.
+ * address. On a first buy the chequebook it funds is created in the same
+ * flow, so its address can't be known before ant sends the deposit; and
+ * since ant 0.5.51 any buy or connect may also top up the deposit of a
+ * chequebook ant adopted (one deployed earlier, on this device or
+ * another), whose address the app doesn't pin either. That is safe only
+ * because no ant gateway route transfers xBZZ to an address the caller
+ * chooses. Several routes transfer xBZZ — `POST /chequebook/deposit`
+ * (#117), `POST /v0/settlement/deposit`, and `POST /stamps`, whose
+ * after-buy hook deploys or tops up a chequebook — but every one pays
+ * only the node's own chequebook, the one ant loaded or adopted. So
+ * during a buy or connect the only `transfer`s ant can sign go to the
+ * node's chequebooks. Recheck this on every ant bump: if ant ever gains a
+ * route that pays a caller-chosen address (a withdraw, a cash-out), pin
+ * this slot to the node's chequebook first — until then a request racing
+ * a buy could send up to 0.001 xBZZ to an address of its choice.
  */
 object SpendGuard {
     @Volatile

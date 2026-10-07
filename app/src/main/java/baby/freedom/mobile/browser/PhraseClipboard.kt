@@ -66,6 +66,13 @@ import java.security.MessageDigest
  * since. Only a SHA-256 of the phrase is
  * kept to recognise it — never the words — and only in memory; a
  * process that lost it clears outright. Main thread only.
+ *
+ * One account's private key (#323) goes the same way ([copyKey]), under
+ * its own label ([KEY_CLIP_LABEL]) so each page's button follows only
+ * its own secret ([copiedLabel]; a key page also checks it's *this*
+ * account's key, [holdsKey]). Only one secret is owed a clear at a
+ * time: copying another replaces the one before on the clipboard and
+ * takes over its deadline.
  */
 internal object PhraseClipboard {
     const val TTL_MS = 60_000L
@@ -73,27 +80,87 @@ internal object PhraseClipboard {
     /** The label our clip carries; how a readable clipboard is told to be ours without reading it. */
     internal const val CLIP_LABEL = "Recovery phrase"
 
+    /** The label a copied private key (#323) carries. */
+    internal const val KEY_CLIP_LABEL = "Private key"
+
+    private val LABELS = setOf(CLIP_LABEL, KEY_CLIP_LABEL)
+
+    /**
+     * Whether a clip labelled [label] is one of ours — a recovery phrase or
+     * a private key — told from its description alone: a field that pastes
+     * (Send's To, #422) leaves it out rather than show the secret on a page
+     * screenshots and Recents can see.
+     */
+    internal fun isSecretLabel(label: CharSequence?): Boolean = label?.toString() in LABELS
+
     /** `ClipDescription.EXTRA_IS_SENSITIVE`, a plain string key, so it's set on every API level. */
     internal const val EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE"
     private const val PREFS = "phrase_clipboard"
     private const val KEY_DUE_AT = "due_at_elapsed"
     private const val KEY_BOOT = "due_at_boot"
+    private const val KEY_LABEL = "label"
 
     private val main = Handler(Looper.getMainLooper())
-    private var pendingHash: ByteArray? = null
+    private val _copiedHash = MutableStateFlow<ByteArray?>(null)
 
     private val _copied = MutableStateFlow(false)
+    private val _copiedLabel = MutableStateFlow<String?>(null)
 
     /**
-     * Whether a copied phrase is still owed its clear: true from [copy]
+     * Whether *some* copied secret — the phrase or a private key, see
+     * [copiedLabel] for which — is still owed its clear: true from [copy]
      * until the deadline's [clearIfDue] (or a stale deadline) takes it
      * off. A process started while a clear is still pending (the saved
      * deadline) learns it from its first [clearIfDue], which
      * `MainActivity.onWindowFocusChanged` runs as soon as Freedom has
-     * focus. What the page's Copy button shows as "Copied", so it goes
-     * back to "Copy" the moment the words are gone, not later.
+     * focus. No page reads this to show "Copied": each page's Copy button
+     * reads [copiedLabel] and matches its own label, so a pending private
+     * key never reads as a copied phrase (or the reverse).
      */
     val copied: StateFlow<Boolean> = _copied.asStateFlow()
+
+    /**
+     * Which secret [copied] is about: [CLIP_LABEL] (the phrase) or
+     * [KEY_CLIP_LABEL] (a private key); null when nothing is owed a clear.
+     */
+    val copiedLabel: StateFlow<String?> = _copiedLabel.asStateFlow()
+
+    /**
+     * The SHA-256 ([phraseHash]) of the secret owed a clear, while this
+     * process knows it; null otherwise, including in a process started
+     * after the copy. Each page matches it against its own secret —
+     * [holdsKey], [holdsPhrase] — so Account 1's key page never reads
+     * "Copied" while Account 2's key is on the clipboard, and a phrase
+     * page never does for a phrase copied before the wallet was removed
+     * and another imported.
+     */
+    val copiedHash: StateFlow<ByteArray?> = _copiedHash.asStateFlow()
+
+    /**
+     * Whether [key] is the private key owed a clear, given [label] and
+     * [hash] as read from [copiedLabel] and [copiedHash]. False when the
+     * hash was lost with the process that did the copy: a "Copied" that
+     * can't be told to be this key's isn't shown.
+     */
+    internal fun holdsKey(label: String?, hash: ByteArray?, key: String): Boolean =
+        holds(KEY_CLIP_LABEL, label, hash, listOf(key))
+
+    /**
+     * Whether [words] are the recovery phrase owed a clear — [holdsKey]
+     * for the phrase page (#334 R3-M2): a phrase copied, the wallet
+     * removed and another imported within the minute, the new wallet's
+     * page reads Copy while the old phrase is still on the clipboard.
+     */
+    internal fun holdsPhrase(label: String?, hash: ByteArray?, words: List<String>): Boolean =
+        holds(CLIP_LABEL, label, hash, words)
+
+    private fun holds(expected: String, label: String?, hash: ByteArray?, secret: List<String>): Boolean =
+        label == expected && hash != null && MessageDigest.isEqual(hash, phraseHash(secret))
+
+    private fun setCopied(label: String?) {
+        _copied.value = label != null
+        _copiedLabel.value = label
+    }
 
     /**
      * Flags [clip] as sensitive ([EXTRA_IS_SENSITIVE]), keeping whatever
@@ -107,16 +174,26 @@ internal object PhraseClipboard {
         clip.description.extras = extras
     }
 
-    fun copy(context: Context, words: List<String>, now: Long = SystemClock.elapsedRealtime()) {
+    /** One account's private key (#323), `0x…`, with the phrase's protections. */
+    fun copyKey(context: Context, key: String, now: Long = SystemClock.elapsedRealtime()) =
+        copy(context, listOf(key), now, KEY_CLIP_LABEL)
+
+    fun copy(
+        context: Context,
+        words: List<String>,
+        now: Long = SystemClock.elapsedRealtime(),
+        label: String = CLIP_LABEL,
+    ) {
+        require(label in LABELS)
         val app = context.applicationContext
         val clipboard = app.getSystemService(ClipboardManager::class.java) ?: return
-        val clip = ClipData.newPlainText(CLIP_LABEL, words.joinToString(" "))
+        val clip = ClipData.newPlainText(label, words.joinToString(" "))
         markSensitive(clip)
         clipboard.setPrimaryClip(clip)
-        pendingHash = phraseHash(words)
-        _copied.value = true
+        _copiedHash.value = phraseHash(words)
+        setCopied(label)
         val dueAt = now + TTL_MS
-        prefs(app).edit().putLong(KEY_DUE_AT, dueAt).putInt(KEY_BOOT, bootCount(app)).commit()
+        prefs(app).edit().putLong(KEY_DUE_AT, dueAt).putInt(KEY_BOOT, bootCount(app)).putString(KEY_LABEL, label).commit()
         main.removeCallbacksAndMessages(null)
         main.postDelayed({ clearIfDue(app) }, TTL_MS)
         runCatching {
@@ -146,10 +223,12 @@ internal object PhraseClipboard {
             Deadline.STALE -> return forget(app)
             Deadline.PENDING -> {
                 // Still owed, possibly to a new process (swiped from
-                // Recents and reopened within the minute): the button reads
-                // "Copied" again, and this process's own Handler brings it
-                // back to "Copy" on time rather than the inexact alarm.
-                _copied.value = true
+                // Recents and reopened within the minute): [copied] is set
+                // again, and this process's own Handler clears on time
+                // rather than the inexact alarm. A page's button still reads
+                // "Copy" here: without the hash it can't tell the clip is
+                // its own secret ([holdsPhrase], [holdsKey]).
+                setCopied(prefs.getString(KEY_LABEL, null)?.takeIf { it in LABELS } ?: CLIP_LABEL)
                 main.removeCallbacksAndMessages(null)
                 main.postDelayed({ clearIfDue(app) }, dueAt - now)
                 return
@@ -170,7 +249,7 @@ internal object PhraseClipboard {
                         // `text` only — never `coerceToText`, which opens a `content:` URI.
                         clip?.let { c -> (0 until c.itemCount).map { c.getItemAt(it).text } }.orEmpty()
                     },
-                    hash = pendingHash,
+                    hash = _copiedHash.value,
                 )
                 if (clear) clipboard.clearPrimaryClip()
             }
@@ -199,10 +278,10 @@ internal object PhraseClipboard {
         runCatching { Settings.Global.getInt(app.contentResolver, Settings.Global.BOOT_COUNT, -1) }.getOrDefault(-1)
 
     private fun forget(app: Context) {
-        pendingHash = null
-        _copied.value = false
+        _copiedHash.value = null
+        setCopied(null)
         main.removeCallbacksAndMessages(null)
-        prefs(app).edit().remove(KEY_DUE_AT).commit()
+        prefs(app).edit().remove(KEY_DUE_AT).remove(KEY_LABEL).commit()
         runCatching { app.getSystemService(AlarmManager::class.java).cancel(alarmIntent(app)) }
     }
 
@@ -219,7 +298,8 @@ internal object PhraseClipboard {
      * Whether to clear the clipboard at the deadline.
      * - Not [readable] (no focus, which Android can't tell apart from
      *   empty): clear — the words must not outlive the minute.
-     * - Readable, but its [label] isn't our [CLIP_LABEL]: someone else's
+     * - Readable, but its [label] is neither our [CLIP_LABEL] nor
+     *   [KEY_CLIP_LABEL]: someone else's
      *   clip, left alone and never read ([readTexts] isn't called).
      * - Ours, and this process knows the phrase's [hash]: clear only if
      *   an item still hashes to it (the label alone could be a lookalike
@@ -233,7 +313,7 @@ internal object PhraseClipboard {
         hash: ByteArray?,
     ): Boolean {
         if (!readable) return true
-        if (label?.toString() != CLIP_LABEL) return false
+        if (label?.toString() !in LABELS) return false
         if (hash == null) return true
         return readTexts().any { clipIsPhrase(it, hash) }
     }

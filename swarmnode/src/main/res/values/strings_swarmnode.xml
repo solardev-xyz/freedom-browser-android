@@ -58,6 +58,8 @@
     <!-- RadicleNode.kt: the Radicle node's error and the seed line under a fetch -->
     <string name="swarmnode_radicle_start_failed">start failed</string>
     <string name="swarmnode_radicle_unreadable_start">unreadable start response</string>
+    <string name="swarmnode_radicle_identity_unreadable">couldn\'t open your wallet\'s Radicle identity. Unlocking the wallet sets it up again.</string>
+    <string name="swarmnode_radicle_write_still_running">a write as your previous Radicle identity is still running. Try again in a moment.</string>
     <string name="swarmnode_radicle_unreadable_fetch">unreadable fetch response</string>
     <string name="swarmnode_radicle_invalid_rid">Not a valid repository ID</string>
     <string name="swarmnode_radicle_stale_fetch">An earlier fetch of this repository is still winding down. Try again in a moment.</string>
@@ -69,7 +71,6 @@
     <string name="swarmnode_radicle_fetching_from">from %1$s</string>
 
     <!-- SwarmNode.kt: why a stamp or chequebook action failed; shown after "The deposit failed: " and the like -->
-    <string name="swarmnode_gateway_reload_failed">The gateway didn\'t come back after the node set up its chequebook</string>
     <string name="swarmnode_not_running">the Swarm node isn\'t running</string>
     <string name="swarmnode_not_light">the Swarm node isn\'t in light mode</string>
     <string name="swarmnode_no_account">the node has no account</string>

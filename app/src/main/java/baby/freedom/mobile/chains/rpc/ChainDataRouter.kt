@@ -314,11 +314,7 @@ class ChainDataRouter internal constructor(
      */
     private fun pool(chain: Chain): List<String> {
         val now = clock()
-        // One entry per endpoint ([EnsRpcConfig.endpointKey]), the user's
-        // own spelling kept: `https://eth.drpc.org:443` is the listed
-        // `https://eth.drpc.org`, asked once and labelled as the user's.
-        val all = (chain.userRpcUrls + chain.rpcUrls).distinctBy(EnsRpcConfig::endpointKey)
-        return all.sortedWith(
+        return endpoints(chain).sortedWith(
             compareBy<String> { it !in chain.userRpcUrls }
                 .thenBy { url -> failedAt[url]?.let { now - it in 0 until QUARANTINE_MS } == true },
         )
@@ -564,6 +560,17 @@ class ChainDataRouter internal constructor(
         internal const val LOOPBACK_PROVIDER = "loopback"
 
         private val ALREADY_KNOWN = Regex("already ?known|known transaction|already imported", RegexOption.IGNORE_CASE)
+
+        /**
+         * [chain]'s RPCs, the user's first, one entry per endpoint
+         * ([EnsRpcConfig.endpointKey]) with the user's own spelling kept:
+         * `https://eth.drpc.org:443` is the listed `https://eth.drpc.org`,
+         * asked once and labelled as the user's. The pool every tier reads
+         * from, before quarantine ordering — and what the chain page's
+         * wording is computed from, so the two can't disagree.
+         */
+        fun endpoints(chain: Chain): List<String> =
+            (chain.userRpcUrls + chain.rpcUrls).distinctBy(EnsRpcConfig::endpointKey)
 
         /**
          * The first [k] of [pool] run by different providers, in order:

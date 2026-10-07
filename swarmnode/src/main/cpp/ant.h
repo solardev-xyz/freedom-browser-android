@@ -123,6 +123,33 @@ AntHandle *ant_init_with_identity(const char *data_dir,
                                   char **out_err);
 
 /*
+ * The extensible init: every option of ant_init_with_options and
+ * ant_init_with_identity, plus the ones added since, in one JSON
+ * document, so a later option doesn't need yet another entry point.
+ * `config_json` may be NULL or "" (all defaults: exactly ant_init).
+ *
+ *   {"source_root":          "/…/imports" | null,
+ *    "identity_json":        "{\"signing_key\":…}" | null,
+ *    "cache_capacity_bytes": 1073741824 | null}
+ *
+ * source_root: as in ant_init_with_options. identity_json: the
+ * identity document *as a string*, exactly what ant_init_with_identity
+ * takes (host-owned key, same account re-scoping); null means the data
+ * dir's identity.json, created on first run. cache_capacity_bytes: the
+ * disk chunk cache cap, clamped like ant_cache_set_capacity (64 MiB to
+ * 16 GiB); null means the 512 MiB default. Pass the user's saved cache
+ * size here so it applies from start-up.
+ *
+ * Unknown keys are an error, so a typo can't silently fall back to a
+ * default. On success returns a non-NULL handle. On failure returns
+ * NULL and writes an allocated error string to *out_err (free with
+ * ant_free_string).
+ */
+AntHandle *ant_init_with_config(const char *data_dir,
+                                const char *config_json,
+                                char **out_err);
+
+/*
  * Mint a fresh node identity without starting a node, so a host that
  * keeps the key itself can create one on first run and hand it back to
  * ant_init_with_identity.
@@ -169,9 +196,14 @@ unsigned char *ant_download(AntHandle *handle,
                             char **out_err);
 
 /*
- * Number of BZZ peers currently connected (post-handshake). Cheap —
- * reads the last-published status snapshot without blocking. Returns
- * -1 if `handle` is NULL.
+ * Number of connected peers whose connection answers pings (libp2p
+ * connections, including peers still in the BZZ handshake). A connection
+ * that stops answering (a socket reaped during an OS suspension, an
+ * expired NAT mapping) stops being counted within ~20 s of its last pong
+ * and is closed ~10 s later; after the process was frozen, a connection
+ * that doesn't answer within ~12 s of the node running again is
+ * uncounted. Cheap — reads the last-published status snapshot without
+ * blocking. Returns -1 if `handle` is NULL.
  */
 int ant_peer_count(const AntHandle *handle);
 
@@ -181,13 +213,16 @@ int ant_peer_count(const AntHandle *handle);
  * peers, WITHOUT a full ant_shutdown / ant_init. Cheap and idempotent —
  * safe to call on every foreground transition.
  *
- * After a long suspension the in-process node's libp2p connections are
- * half-open (sockets reaped, but the peer counter still looks healthy) and
- * nothing re-dials, so the next bzz:// retrieval hangs and the page renders
- * blank. This re-opens live sockets to the bootnodes in parallel so
- * retrieval has working routes again. It recovers the swarm only — if the
- * gateway's localhost listener was also torn down, rebind it separately
- * with ant_stop_gateway + ant_start_gateway.
+ * After a long suspension the in-process node's libp2p connections can be
+ * half-open (sockets reaped, no FIN seen). The node notices that on its
+ * own: connections that stop answering pings are closed ~20-30 s after
+ * it runs again, and a streak of retrievals failing on the link makes it
+ * do what this call does (at most once a minute). This call skips that
+ * wait: it re-opens live sockets to the bootnodes in parallel at once, so
+ * retrieval has working routes on foreground instead of after a failed
+ * retrieval. It recovers the swarm only — if the gateway's localhost
+ * listener was also torn down, rebind it separately with
+ * ant_stop_gateway + ant_start_gateway.
  *
  * Returns 0 on success, -1 if `handle` is NULL, and -2 if the node loop
  * didn't ack (already shut down) — in which case an allocated error string
@@ -195,6 +230,199 @@ int ant_peer_count(const AntHandle *handle);
  * NULL to opt out of error reporting.
  */
 int ant_resume(const AntHandle *handle, char **out_err);
+
+/*
+ * Bee's swap-enable: switch SWAP settlement on or off for the running
+ * node, for downloads (issue #121) and uploads (issue #127) alike. On
+ * (the default), the node pays peers with SWAP cheques from its
+ * chequebook once the debt to a peer reaches half its payment threshold,
+ * after the free pseudosettle refresh, as bee does: one balance per
+ * peer, cheques worth units x exchange + deduction at bee's oracle rate
+ * (up to ~0.75 xBZZ per GB), never more than the chequebook holds. That
+ * lifts downloads past the free tier's ~5-6 Mbit/s. Off keeps downloads
+ * and uploads on the free tier even with a funded chequebook.
+ *
+ * Payments also need a chequebook with funds the node has read from the
+ * chain: they start after the first settlement setup that has an RPC
+ * (ant_start_gateway's chain init, a storage call,
+ * ant_deploy_chequebook), not at ant_init. The switch is not persisted;
+ * set it after every ant_init.
+ *
+ * Returns 0 on success, -1 if `handle` is NULL, and -2 if the node loop
+ * didn't ack (already shut down) — in which case an allocated error
+ * string is written into *out_err (free with ant_free_string).
+ */
+int ant_set_swap_enabled(const AntHandle *handle, bool enabled, char **out_err);
+
+/*
+ * Give the wallet's transfer scan an explicitly unverified source: one
+ * provider that serves the whole xBZZ history in a single eth_getLogs
+ * (e.g. https://rpc.gnosischain.com), for a host whose transport
+ * (ant_set_chain_transport) is a verified route that can only serve a
+ * few thousand blocks at a time. A span the transport can't serve in a
+ * few requests (a first scan, a long time offline) is read from it once
+ * instead of window by window, which is about an hour of verified
+ * windows for a wallet's whole history. What it finds is still checked
+ * through the transport, batch by batch and chequebook by chequebook;
+ * GET /health's walletScan reads "confirming", and the gateway's chain
+ * init confirms the span in the background through the transport: each
+ * try reads at most 64 windows (one request once the transport serves
+ * the whole span), retried after 1 minute, doubling, at most 30 minutes.
+ * A "no chequebook" it backs never leads to a deploy until it's
+ * confirmed. While the source fails (down, rate-limited), the scan reads
+ * on window by window through the transport — the slow crawl it would
+ * otherwise avoid, about an hour for a whole history — and tries the
+ * source again every 64 windows, so a scan neither stalls nor fails
+ * while it's down. antd's --gnosis-unverified-logs-rpc-url is the same.
+ *
+ * `url` NULL or empty clears it. Call it after ant_init and before
+ * ant_start_gateway: it reaches the chain reads started after it. It is
+ * not persisted; set it after every ant_init.
+ *
+ * Returns 0 on success, -1 if `handle` is NULL, -2 if `url` isn't valid
+ * UTF-8 (an allocated error string is written into *out_err; free with
+ * ant_free_string), and -3 when built without the `chain` feature.
+ */
+int ant_set_unverified_logs_rpc(const AntHandle *handle,
+                                const char *url,
+                                char **out_err);
+
+/*
+ * The node's SWAP settlement state as a JSON object — what the gateway's
+ * GET /v0/settlement/swap and GET /node's "settlement" report, for a host
+ * that doesn't run the gateway:
+ *   {"supported":bool,"swap_switch":true,"swap_enabled":bool,
+ *    "paying":bool,"chequebook":"0x…"|null,"persisted":false}
+ * supported: this build pays peers with SWAP cheques once a funded
+ * chequebook backs settlement (the `chain` feature). swap_switch: the
+ * switch can be changed at runtime (ant_set_swap_enabled). swap_enabled:
+ * bee's swap-enable as the node runs it now, for downloads and uploads
+ * alike. paying: cheques are being paid right now (switch on, chequebook
+ * funds read from the chain and not spent), otherwise the free
+ * pseudosettle tier. persisted: always false, the switch resets at
+ * ant_init. Never blocks on the network. Free with ant_free_string.
+ */
+char *ant_swap_status(const AntHandle *handle, char **out_err);
+
+/*
+ * Chunk cache
+ * -----------
+ * The node caches chunks in two tiers: <data_dir>/chunks.sqlite on disk
+ * (byte-capped, 512 MiB unless the host sets it) and an in-memory LRU
+ * (8192 chunks). Pinned chunks (uploads made with Swarm-Pin: true, and
+ * the gateway's /pins) live in the same database but outside the cap and
+ * are never evicted or cleared here, so don't delete chunks.sqlite
+ * yourself: use these calls. Bee has no cache clear; the gateway's
+ * bee-compatible GET /debugstore reports the same cache in bee's shape
+ * (chunk counts).
+ */
+
+/*
+ * Chunk cache figures, as JSON:
+ *
+ *   {"disk_enabled":true,
+ *    "used_bytes":0, "capacity_bytes":0, "chunks":0,
+ *    "pinned_bytes":0, "pinned_chunks":0,
+ *    "file_bytes":0,
+ *    "memory_chunks":0, "memory_capacity_chunks":8192}
+ *
+ * used_bytes / chunks: unpinned cached chunks, the ones counted against
+ * capacity_bytes (evicted oldest-first past it). pinned_bytes /
+ * pinned_chunks: pinned chunks, outside the cap. file_bytes: the size on
+ * disk of chunks.sqlite plus its -wal and -shm files. memory_chunks /
+ * memory_capacity_chunks: the in-memory cache. disk_enabled: false when
+ * chunks.sqlite couldn't be opened at init (every disk figure is 0).
+ *
+ * Reads counters, never the database: cheap enough to poll every few
+ * seconds from a UI. Right after ant_init on a large cache the disk
+ * counters read 0 for a few seconds, until a background count finishes.
+ * Returns an allocated string (free with ant_free_string), or NULL with
+ * *out_err set on a NULL handle.
+ */
+char *ant_cache_status(const AntHandle *handle, char **out_err);
+
+/*
+ * Remove every unpinned chunk from the disk cache, empty the in-memory
+ * cache, and give the space back to the OS (incremental vacuum; a
+ * database created by an older build is rebuilt once with VACUUM on a
+ * clear, only when the pinned chunks left are at most 64 MiB (the
+ * rebuild's temp copy is held in memory) and the disk has about twice
+ * that free; otherwise the file keeps its size
+ * and later cache writes reuse the freed space). Pinned
+ * chunks and the pin list are never touched. Blocks until done (well
+ * under a second for the default cap, longer for several GB): call it
+ * off the main thread.
+ *
+ * Safe while downloads and uploads run: a read racing the clear gets
+ * the chunk or a cache miss, and a miss is fetched from the network;
+ * cache writes queue behind the clear and land after it. Unpinned
+ * chunks of your own uploads are cache entries like any other, so an
+ * upload's later self-heal re-reads its source file for them.
+ *
+ * Returns JSON:
+ *
+ *   {"freed_bytes":0, "removed_chunks":0,
+ *    "file_bytes_before":0, "file_bytes_after":0,
+ *    "memory_chunks_removed":0,
+ *    "status":{…ant_cache_status after the clear…}}
+ *
+ * freed_bytes: chunk bytes removed (what used_bytes dropped by);
+ * file_bytes_before - file_bytes_after: what the files on disk shrank
+ * by (giving space back is best-effort, so this can be 0 while
+ * freed_bytes isn't; the clear still succeeded). Free with ant_free_string. On failure returns NULL and writes an
+ * allocated error string into *out_err.
+ */
+char *ant_cache_clear(const AntHandle *handle, char **out_err);
+
+/*
+ * Set the disk chunk cache cap to `bytes`, clamped to 64 MiB ..= 16 GiB
+ * (ant_cache_status's capacity_bytes shows the value applied). Lowering
+ * it below used_bytes evicts oldest-first down to ~95% of the new cap
+ * before returning and gives the space back to the OS; pinned chunks
+ * are never evicted and don't count against it. Blocks until done: call
+ * it off the main thread.
+ *
+ * Not persisted: pass the saved value as ant_init_with_config's
+ * cache_capacity_bytes at the next start.
+ *
+ * Returns 0 on success, -1 if `handle` is NULL, -2 if the disk cache is
+ * unavailable (failed to open at init) or the eviction failed; an
+ * allocated error string is written into *out_err (free with
+ * ant_free_string). On an eviction failure the new cap is still applied
+ * (capacity_bytes shows it), part of the eviction may have happened,
+ * and the next cache write evicts down to it again, so don't revert a
+ * saved setting on -2. Giving file space back is best-effort and never
+ * makes this fail.
+ */
+int ant_cache_set_capacity(const AntHandle *handle, uint64_t bytes, char **out_err);
+
+/*
+ * Confirm the outstanding liability of `chequebook` ("0x…" hex) after
+ * its cheque figures were lost, and let the node pay cheques from it
+ * again, for downloads and uploads alike.
+ * When the node's outbound cheque ledger (pushsync_outbound.json) is
+ * found unparseable it is moved aside and a ".lost" marker is left;
+ * while that marker names a loss, the node pays no cheques (downloads
+ * or uploads; both stay on the free pseudosettle tier) from any
+ * chequebook that used the file (logged at warn, and /chequebook/balance
+ * reports chequeLedgerLost). Only this call (or antd
+ * --confirm-cheque-liability) clears it, never time or a restart.
+ * Confirming accepts that peers paid before the loss hold cheques the
+ * node can't see: they may refuse new cheques, and disconnect the node,
+ * until its restarted cumulatives pass what they hold. A running node
+ * picks it up at its next chequebook-funds read (within a minute). A
+ * marker that can't be parsed is replaced by one that confirms only this
+ * chequebook (every other one stays lost), so it never has to be deleted
+ * by hand. A chequebook deployed after the loss, and one whose ledger was
+ * open when the file was lost, aren't affected and need no confirmation.
+ *
+ * Returns 0 once confirmed, 1 when there was nothing to confirm (no loss
+ * on record, or this chequebook already confirmed), -1 if `handle` is
+ * NULL or `chequebook` is malformed, -2 if the marker can't be read (an
+ * I/O error, not a parse error) or written; on -1/-2 an allocated error string is written into *out_err
+ * (free with ant_free_string).
+ */
+int ant_confirm_cheque_liability(const AntHandle *handle, const char *chequebook, char **out_err);
 
 /*
  * System-suspend the upload subsystem — call when the app is moving to
@@ -409,7 +637,10 @@ char *ant_storage_status(const AntHandle *handle, char **out_err);
  *   {"enabled":bool,"chequebook":"0x…"|null}
  * `enabled=true` once a chequebook is deployed, which is what lets
  * uploads actually propagate (bee charges the uploader per pushed chunk
- * and freezes out a node that can't pay). Builds without the `chain`
+ * and freezes out a node that can't pay). A persisted chequebook that a
+ * chain check (gateway start, buy, deploy) found unusable — not
+ * registered with the factory, or issued by another key — reports
+ * `enabled=false`: settlement is switched off for it. Builds without the `chain`
  * feature always report {"enabled":false,"chequebook":null}.
  */
 char *ant_storage_settlement_status(const AntHandle *handle, char **out_err);
@@ -426,7 +657,9 @@ char *ant_storage_settlement_status(const AntHandle *handle, char **out_err);
  * out, then collapses into pushsync timeouts — so the Storage tab reads
  * this to detect that and offer ant_storage_settlement_topup.
  * `enabled=false` (zeroed, needs_top_up=false) when this account has no
- * chequebook yet; buying/connecting a plan deploys one, funded. Reads
+ * chequebook yet (buying/connecting a plan deploys one, funded), or when
+ * this process's chain check disqualified its chequebook (settlement is
+ * off for it, as ant_storage_settlement_status reports). Reads
  * chain (a few light eth_calls) — for an explicit refresh, not every
  * status poll. Requires the `chain` cargo feature.
  */
@@ -441,7 +674,16 @@ char *ant_storage_settlement_deposit(const AntHandle *handle,
  * deposit to the chequebook. The explicit top-up path — a chequebook's
  * deposit is only read at deploy time, so an already-deployed one can be
  * funded no other way. Idempotent (a chequebook at the target is a
- * no-op); errors when this account has no chequebook yet. Returns the
+ * no-op); errors when this account has no chequebook yet, when its
+ * chequebook fails the chain checks (factory registration, issuer())
+ * this call runs before spending (and again right before the transfer)
+ * — it never funds that one — or when those checks can't be read, or a
+ * chequebook deployed moments ago isn't visible to the RPC yet (retry;
+ * nothing spent). On success the node re-reads the chequebook's funds
+ * over `gnosis_rpc` and pays cheques from them at once (ant_swap_status
+ * paying, when the switch is on), and keeps re-reading them every
+ * minute, even after an ant_init that reloaded the chequebook without an
+ * RPC. Returns the
  * refreshed ant_storage_settlement_deposit JSON. SUBMITS REAL
  * TRANSACTIONS AND SPENDS REAL FUNDS, and BLOCKS until they confirm.
  * Requires the `chain` cargo feature.
@@ -449,6 +691,23 @@ char *ant_storage_settlement_deposit(const AntHandle *handle,
 char *ant_storage_settlement_topup(const AntHandle *handle,
                                    const char *gnosis_rpc,
                                    char **out_err);
+
+/*
+ * Like ant_storage_settlement_topup, but deposits `amount_plur` more (a
+ * decimal PLUR string, 1 xBZZ = 10^16 PLUR) whatever the deposit's
+ * target: how a host tops up browsing credit beyond the node's default
+ * deposit. The same product flow and guards: the chain checks run before
+ * anything is spent, and the node swaps xDAI only for the xBZZ the wallet
+ * lacks. Errors on an amount that isn't a positive integer. Mirrors the
+ * gateway's POST /v0/settlement/deposit?amount=. Returns the refreshed
+ * ant_storage_settlement_deposit JSON. SUBMITS REAL TRANSACTIONS AND
+ * SPENDS REAL FUNDS, and BLOCKS until they confirm. Requires the `chain`
+ * cargo feature.
+ */
+char *ant_storage_settlement_topup_amount(const AntHandle *handle,
+                                          const char *gnosis_rpc,
+                                          const char *amount_plur,
+                                          char **out_err);
 
 /*
  * Deep read-back propagation check for an uploaded reference. Resolves
@@ -556,11 +815,27 @@ char *ant_storage_connect_batch(const AntHandle *handle,
  * Auto-discover and connect every funded storage plan this account owns
  * on Gnosis (an on-chain log scan — can take a while). Returns
  *   {"registered":[...ids],"status":<ant_storage_status object>}
- * Requires the `chain` cargo feature.
+ * Continues the scan saved in the data dir, so after the first call only
+ * the blocks since are read. Requires the `chain` cargo feature.
  */
 char *ant_storage_discover(const AntHandle *handle,
                            const char *gnosis_rpc,
                            char **out_err);
+
+/*
+ * ant_storage_discover, but reading the account's whole xBZZ transfer
+ * history again instead of continuing the saved scan, and replacing it.
+ * For a user's explicit "search again" when a plan they own is missing:
+ * an RPC that once answered part of the history incompletely (a backend
+ * far behind the head) leaves a hole the saved scan never revisits. As
+ * slow as the first scan behind a range-capped RPC (minutes), so don't
+ * call it at every start. It reads through the transport only, never
+ * from ant_set_unverified_logs_rpc's unverified source: the scan it
+ * replaces may be confirmed. Same return value; requires `chain`.
+ */
+char *ant_storage_discover_full(const AntHandle *handle,
+                                const char *gnosis_rpc,
+                                char **out_err);
 
 /*
  * Deploy (or return the already-persisted) node-owned chequebook so the
@@ -575,9 +850,11 @@ char *ant_storage_discover(const AntHandle *handle,
  * to the wallet's balance) and BLOCKS until they confirm. Light-mode only (requires the `chain` cargo feature;
  * otherwise returns NULL + an error). Returns
  *   {"chequebookAddress":"0x<40hex>"}
- * (free with ant_free_string), or NULL with an error in *out_err. The
- * caller should restart the gateway (ant_stop_gateway + ant_start_gateway)
- * afterwards so /chequebook/address reflects the deployed chequebook.
+ * (free with ant_free_string), or NULL with an error in *out_err. A
+ * running in-process gateway picks the chequebook up at once:
+ * /chequebook/address and /wallet report it with no gateway restart.
+ * One the on-chain checks disqualify is cleared from them (and the call
+ * returns NULL with the reason).
  */
 char *ant_deploy_chequebook(const AntHandle *handle,
                             const char *gnosis_rpc,
@@ -710,6 +987,31 @@ void ant_free_string(char *ptr);
  * and /stamps postage state (desktop `antd` parity). Honoured only when
  * the library is built with the `chain` feature; ignored otherwise.
  *
+ * A `gnosis_rpc` also triggers, in the background, the chain-derived
+ * startup work ant_init can't do without an RPC (antd's startup chain
+ * block):
+ *
+ *   1. Postage batches ant_init reloaded from postage/<id>.bin that the
+ *      chain reports as missing, expired (remainingBalance 0) or owned by
+ *      another key are unregistered (files stay on disk). "Missing" must
+ *      be read twice, 45 seconds apart, before it counts (an RPC backend
+ *      may not have seen a just-bought batch's creation yet); the first
+ *      such read only schedules a background re-check, and steps 2 and 3
+ *      don't wait for it.
+ *   2. Funded batches the account owns on-chain but not on disk
+ *      (reinstall, restore from key) are registered.
+ *   3. The persisted or on-chain chequebook is adopted and outbound
+ *      settlement switched on. Nothing is deployed or funded.
+ *
+ * A step that fails (e.g. a batch whose read fails stays registered) is
+ * retried by the next call with a `gnosis_rpc` — including one that
+ * finds the gateway already running. Steps that already succeeded are
+ * not repeated. With a `gnosis_rpc`, a batch bought through POST /stamps
+ * also makes sure settlement is on afterwards, as ant_storage_buy does:
+ * it deploys a chequebook if the account has none (xDAI gas) and brings
+ * a new or existing chequebook's deposit up to the settlement target
+ * from the wallet's existing xBZZ (nothing is swapped).
+ *
  * The gateway's chain wiring is captured here, once. A host serving
  * chain reads itself must call ant_set_chain_transport BEFORE this.
  *
@@ -720,13 +1022,31 @@ void ant_free_string(char *ptr);
  * on that must now call ant_set_gateway_cors explicitly.)
  * CORS only stops reads: any page can still send CORS-simple requests,
  * which execute — including the spending routes POST
- * /stamps/{amount}/{depth} and POST /chequebook/deposit (see
- * ant_set_gateway_cors; issue #105).
+ * /stamps/{amount}/{depth} (which, as above, may also deploy a
+ * chequebook for xDAI gas and transfer the wallet's xBZZ into a new or
+ * under-funded one; no swap) and POST /chequebook/deposit (see
+ * ant_set_gateway_cors; issue #105). The gateway also serves the
+ * xDAI-swapping routes POST /v0/storage/buy, POST /v0/storage/extend
+ * and POST /v0/settlement/deposit; those refuse (403) any request from
+ * a web page unless its origin is listed exactly (not "*" or "null")
+ * with ant_set_gateway_cors.
  *
  * Returns true on success (or if a gateway is already running on this
  * handle). On failure returns false and writes an allocated message to
  * *out_err (free with ant_free_string). Idempotent: a second call while
- * one is live is a no-op success. Run off the main thread.
+ * one is live is a success that leaves the gateway untouched; with a
+ * `gnosis_rpc` it re-runs the chain startup work above, retrying only
+ * what hasn't succeeded: a failed or pending batch check is re-read, a
+ * failed rediscovery scan or chequebook adoption is retried. A scan or
+ * adoption that already succeeded is not repeated in this process (a
+ * batch bought on another device needs ant_storage_discover, or a fresh
+ * ant_init followed by ant_start_gateway with a `gnosis_rpc` — ant_init
+ * alone only reloads persisted state and never rescans). A failed
+ * rediscovery is also retried in the background with backoff (15 s,
+ * doubling, at most 5 minutes) until it succeeds, through the latest
+ * start's `gnosis_rpc`, while the gateway runs: it ends at
+ * ant_stop_gateway. /health.walletScan reports where it stands (a stop
+ * drops it unless done or confirming). Run off the main thread.
  */
 bool ant_start_gateway(const AntHandle *handle,
                        const char *api_addr,
@@ -747,6 +1067,26 @@ bool ant_start_gateway(const AntHandle *handle,
  * the default — so the gateway sends no CORS headers and no page from
  * another origin can read its responses. Blank entries are ignored.
  *
+ * Beyond bee, an entry may be a wildcard subdomain: a scheme, then
+ * "://", then "*." and a host (e.g. scheme https with host
+ * "*.bzz.freedom.baby"). It allows every direct-or-deeper
+ * subdomain of host on exactly that scheme with no port
+ * ("https://abc.bzz.freedom.baby", "https://a.b.bzz.freedom.baby"), but
+ * not the apex "https://bzz.freedom.baby", not a lookalike such as
+ * "https://x.bzz.freedom.baby.evil.example", not "http://", and not
+ * "https://x.bzz.freedom.baby:8443". Matching is case-insensitive. The
+ * "*" must be the whole leftmost label and host a plain DNS name of at
+ * least two labels. Any other entry containing "*" is rejected: nothing
+ * after the "*.", "*.host" without a scheme, "https://a.*.host", a bare
+ * TLD such as "*.com" after the scheme, a wildcard with a port or path.
+ * (These examples never write the scheme's "//" next to the "*": in
+ * this header that pair would open a C comment inside this one.)
+ * Use it when each content root is served from its own synthetic origin
+ * (Freedom Android's virtual origins): that set is unbounded, so it
+ * cannot be listed exactly, and a wildcard keeps it to the host's own
+ * namespace, whereas "*" would let any page in any other browser on the
+ * device read the API.
+ *
  * The gateway has no auth: an allowed page can read /wallet, /addresses,
  * /stamps, ... and send preflighted requests (e.g. uploads with Swarm-*
  * headers). "null" matches ANY page whose request was
@@ -758,11 +1098,23 @@ bool ant_start_gateway(const AntHandle *handle,
  * A CORS-simple request needs no preflight, so any page can still
  * fetch(url, {method: "POST", mode: "no-cors"}) against
  * POST /stamps/{amount}/{depth} or POST /chequebook/deposit and the
- * gateway executes it, spending the wallet's xBZZ, even though the page
- * cannot read the reply. Do not rely on this call to protect funds.
+ * gateway executes it, spending the wallet's xBZZ (for /stamps both the
+ * batch and a transfer into a new or under-funded chequebook's deposit)
+ * and xDAI gas for every transaction it sends — the batch purchase and,
+ * for /stamps, deploying a chequebook if there is none yet and the
+ * deposit transfer into a new or under-funded one (nothing is swapped)
+ * — even though the page cannot read the reply. Do not rely on this
+ * call to protect funds.
+ *
+ * The routes that DO swap xDAI (POST /v0/storage/buy, POST
+ * /v0/storage/extend, POST /v0/settlement/deposit) are guarded
+ * separately: they refuse (403) requests from web pages whatever this
+ * list says, except from an origin listed here exactly — "*" and
+ * "null" never unlock them. Listing an exact origin therefore also
+ * lets that site spend the wallet's xDAI.
  *
  * Returns true on success. On failure (NULL handle, gateway running,
- * NULL or non-UTF-8 entry) returns false, leaves the stored list
+ * NULL, non-UTF-8 or malformed-wildcard entry) returns false, leaves the stored list
  * unchanged and writes an allocated message to *out_err (free with
  * ant_free_string).
  */
@@ -774,7 +1126,14 @@ bool ant_set_gateway_cors(const AntHandle *handle,
 /*
  * Stop the in-process HTTP gateway started by ant_start_gateway.
  * Returns true if a gateway was running and was stopped, false if none
- * was running (or `handle` is NULL). Safe to call repeatedly.
+ * was running (or `handle` is NULL). Safe to call repeatedly. A
+ * background rediscovery retry stops with it, before its next attempt;
+ * the next start with a `gnosis_rpc` tries again. An unfinished
+ * /health.walletScan (pending, scanning, retrying) is dropped with it,
+ * so a next start without a `gnosis_rpc` reports none rather than a
+ * status nothing moves on; a finished one (done, or confirming: the
+ * batches are registered and the history read from the unverified source
+ * is still being confirmed, which ant_stop_gateway doesn't stop) is kept.
  */
 bool ant_stop_gateway(const AntHandle *handle);
 
@@ -934,6 +1293,145 @@ char *ant_bench_progress(const AntHandle *handle, char **out_err);
  * the main thread. Safe to call on an already-finished run.
  */
 char *ant_bench_stop(const AntHandle *handle, char **out_err);
+
+/* -------------------------------------------------------------------
+ * AntStream live publisher (issue #67 stage 2)
+ * ------------------------------------------------------------------- */
+
+/*
+ * Start a live broadcast from this node.
+ *
+ * This is the bench loop above with the synthetic generator replaced by
+ * the host's camera pipeline. Per segment: POST /bzz the segment,
+ * rebuild the HLS media playlist over a sliding window, POST /bzz the
+ * playlist, and publish its reference as a sequence-feed update with
+ * POST /soc (bee-js shape: id = keccak256(topic || index_be8), payload
+ * timestamp_be8 || reference) so any bee gateway resolves the channel.
+ * A feed manifest is created once at start with POST /feeds; its
+ * reference is the single thing a viewer needs.
+ *
+ * `config_json` is a PublisherConfig document; "channel" and "batch_id"
+ * are required:
+ *   {
+ *     "channel":         "Kitchen",               // required, names the feed
+ *     "topic":           "0x<64 hex>",            // omit -> derived per broadcast
+ *     "gateway":         "http://127.0.0.1:1633", // ant_start_gateway's address
+ *     "batch_id":        "0x<64 hex>",            // required: the storage plan
+ *     "segment_ms":      2000,                    // nominal segment duration
+ *     "bitrate_kbps":    900,                     // 360p, the stage-1 rendition
+ *     "max_in_flight":   4,                       // measured stable window
+ *     "max_backlog":     4,                       // drop-oldest past this
+ *     "playlist_window": 6,                       // segments in the live playlist
+ *     "notes":           "iPhone 15 Pro / LTE"
+ *   }
+ *
+ * Do NOT raise max_in_flight without re-measuring: stage 1 found
+ * window 4 stable (899/899 segments) and window 8 a connection-layer
+ * collapse (26/316). See crates/ant-ffi/ANTSTREAM_BENCH.md.
+ *
+ * Returns immediately; the loop drives itself on the node's runtime.
+ * Only one broadcast at a time per handle. Returns true on success,
+ * false with an allocated message in *out_err (free with
+ * ant_free_string).
+ */
+bool ant_publisher_start(const AntHandle *handle,
+                         const char *config_json,
+                         char **out_err);
+
+/*
+ * Hand one finished capture segment to the running broadcast.
+ *
+ * `is_init` marks the fMP4 initialization segment (ftyp + moov), which
+ * every following media segment needs to be playable; push a fresh one
+ * whenever the writer restarts (camera flip, interruption recovery,
+ * thermal downshift) and set `discontinuity` on the first media segment
+ * after it. `duration_ms` is the segment's real duration (ignored for
+ * the initialization segment). The bytes are copied; the caller may
+ * free `data` as soon as this returns.
+ *
+ * CALL ORDER IS THE BROADCAST ORDER — segments are numbered as these
+ * calls arrive, and that number fixes both the playlist order and which
+ * EXT-X-MAP a media segment is listed under. Push in capture order,
+ * from one thread or an ordered queue: getting it wrong around a writer
+ * restart lists the old writer's last segment under the new writer's
+ * map, which no player can decode.
+ *
+ * NEVER BLOCKS — a capture pipeline stalled on the uplink drops frames.
+ * When the publisher is already a window behind, the oldest pending
+ * segment is dropped instead (live-edge discipline).
+ *
+ * Returns:
+ *    0  queued
+ *    1  queued, and the oldest pending segment was dropped to stay at
+ *       the live edge (the playlist marks the gap EXT-X-DISCONTINUITY)
+ *    2  refused: the broadcast is stopping
+ *   -1  error, with an allocated message in *out_err
+ */
+int32_t ant_publisher_push_segment(const AntHandle *handle,
+                                   bool is_init,
+                                   const unsigned char *data,
+                                   size_t len,
+                                   uint32_t duration_ms,
+                                   bool discontinuity,
+                                   char **out_err);
+
+/*
+ * Live progress of the broadcast, as an allocated JSON object (free
+ * with ant_free_string):
+ *   {"running":true,"elapsed_s":42.0,"channel":"Kitchen",
+ *    "topic":"<64 hex>","owner":"<40 hex>",
+ *    "channel_reference":"<64 hex>","playlist_reference":"<64 hex>",
+ *    "feed_index":21,"segments_pushed":22,"segments_published":21,
+ *    "segments_listed":21,"segments_failed":0,"segments_dropped":0,
+ *    "bytes_published":4725000,
+ *    "playlists_published":21,"publish_ms_p50":900,"publish_ms_p95":2100,
+ *    "lag_ms":2400,"lag_ms_max":3100,"keeping_up":true,
+ *    "sustained_mbit_s":0.9,"peers":114,"last_error":"","error_count":0}
+ *
+ * "lag_ms" is the live-edge lag the on-screen indicator shows: how far
+ * behind live a viewer is right now, i.e. the age of the newest segment
+ * a landed feed update made playable. It is an age, not the latency of
+ * the last update that landed, so a broadcast whose feed updates stop
+ * landing keeps climbing here (and turns "keeping_up" false) instead of
+ * freezing at its last good figure while segments go on uploading.
+ * "keeping_up" is that lag inside three segment durations, the same
+ * budget the bench verdict uses. Non-blocking; poll it about once a
+ * second. Returns NULL + an error when this node is not broadcasting.
+ */
+char *ant_publisher_progress(const AntHandle *handle, char **out_err);
+
+/*
+ * End the broadcast and return its final report as an allocated JSON
+ * object (free with ant_free_string): the progress fields above plus
+ * duration_s, chunks_published, feed_updates, sustained_chunks_s,
+ * publish_ms_p50|p95|max, lag_ms_p50|p95|max|final, the first few error
+ * strings, and a "kept_up" verdict (at least one feed update landed AND
+ * every captured media segment reached a published playlist AND the
+ * live edge ended inside 3 x segment_ms). "lag_ms_final" is that live
+ * edge — the age of the newest playable segment at stop, frozen there
+ * so a report read later still describes the broadcast rather than how
+ * long the host waited to ask. The count it uses is
+ * "segments_listed", not "segments_published": a segment whose
+ * initialization segment never landed uploads fine and is still
+ * unplayable, so hosts rendering a verdict should key "is there a
+ * verdict at all?" off segments_listed too.
+ *
+ * BLOCKING: stopping is cooperative. Segments already captured are
+ * published — the last seconds of a broadcast are real content — and
+ * the playlist is closed with EXT-X-ENDLIST so viewers see a finished
+ * recording rather than a stream that stopped updating. Returns after
+ * ~130 s at the latest; a worst-case drain (the in-flight window, a
+ * segment the pump had already popped behind it, then the backlog —
+ * up to three rounds of the 60 s per-segment publish deadline) can
+ * still be finishing in the background past that, with the report
+ * returned honestly either way. Call it off the main thread.
+ *
+ * Calling it on a broadcast that already finished on its own returns
+ * that broadcast's report. Once a stop call has returned and released
+ * the slot, a second call fails with "not broadcasting" — keep the
+ * report from the first call rather than re-fetching it.
+ */
+char *ant_publisher_stop(const AntHandle *handle, char **out_err);
 
 /*
  * Shut the embedded node down and free the handle. After this

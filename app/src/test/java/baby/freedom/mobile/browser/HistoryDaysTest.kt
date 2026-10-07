@@ -79,3 +79,15 @@ class HistoryDaysTest {
         assertEquals(false, showsNoMatches("foo" to listOf(at(2026, 9, 30, 9, id = 1)), "foo"))
     }
 }
+
+/** The site a flat History row names (#418). */
+class HistoryHostTest {
+    @Test
+    fun `the host without www, scheme, path or credentials`() {
+        assertEquals("example.org", historyHost("https://www.example.org/a?b#c"))
+        assertEquals("example.org:8080", historyHost("http://user@example.org:8080/"))
+        assertEquals("app.swarmit.eth", historyHost("app.swarmit.eth/path"))
+        assertEquals("abc123", historyHost("bzz://abc123/index.html"))
+        assertEquals("x.org", historyHost("https://x.org"))
+    }
+}

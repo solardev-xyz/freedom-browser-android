@@ -17,11 +17,13 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -50,16 +52,17 @@ import org.json.JSONObject
  *    phone (4902 otherwise). It only picks the chain the next
  *    transaction's sheet is priced on, and names, so it asks nothing
  *    itself; `wallet_addEthereumChain` is refused — chains are added in
- *    Settings → Chains;
+ *    Settings → Wallet & chains;
  *  - `eth_requestAccounts`: a sheet to pick the account to share;
  *  - `personal_sign`, `eth_signTypedData_v4`: a sheet showing exactly
  *    what's signed, for an account of this wallet ([MessageSigning],
  *    [Eip712]);
  *  - `eth_sendTransaction`: priced by the wallet's own send flow
  *    ([WalletSender.prepare] — its nonce, fees and gas estimate, as
- *    desktop asks), reviewed on a sheet, then signed and broadcast by
- *    [WalletSender] like any send of the wallet's, which then follows it
- *    on the wallet page. The answer is the hash once a node took it.
+ *    desktop asks) under a sheet saying so ([Request.Pricing]),
+ *    reviewed on a sheet, then signed and broadcast by [WalletSender]
+ *    like any send of the wallet's, which then follows it on the
+ *    wallet page. The answer is the hash once a node took it.
  *
  * One sheet at a time; a request arriving while one is up is refused
  * (-32002). A new scan replaces the session, and a closed or failed one
@@ -139,8 +142,30 @@ class OpenLvSession internal constructor(
             val ledgerHashes: LedgerTypedDataHashes? = null,
         ) : Request
 
+        /**
+         * `eth_sendTransaction` from [account] to [to] on [chain], while
+         * the wallet prices it: shown the moment the request checks out,
+         * before any of that network work, with only Reject. Until then
+         * a transaction from a wallet account takes no longer, and holds
+         * the one-sheet slot no longer, than a stranger's refusal — so
+         * nothing about it (a -32002 to a second request, a session that
+         * ends with no sheet ever shown) tells the peer the account is
+         * this wallet's before the user has seen a sheet ([accountFor]).
+         */
+        data class Pricing(val account: WalletAccount, val chain: Chain, val to: String, val amount: BigInteger) : Request
+
         /** `eth_sendTransaction`, priced; [notice] says why it's shown again, if it is. */
         data class SendTransaction(val quote: SendQuote, val notice: String? = null) : Request
+
+        /**
+         * `eth_sendTransaction` from [account] that couldn't be priced
+         * ([reason], in the app language): shown before the peer is told,
+         * with only Close. The peer's answer names the account's balance
+         * or what the chain said of it, so it waits for a sheet the user
+         * sees, as every other answer about a wallet account does
+         * ([accountFor]).
+         */
+        data class CantSend(val account: WalletAccount, val chain: Chain, val reason: String) : Request
     }
 
     sealed interface Decision {
@@ -280,7 +305,7 @@ class OpenLvSession internal constructor(
             "wallet_switchEthereumChain" -> switchChain(params)
             "wallet_addEthereumChain" -> OpenLvResponse.Error(
                 UNSUPPORTED,
-                "The phone can’t add chains this way. Add the chain in Freedom’s Settings → Chains on the phone, then try again.",
+                "The phone can’t add chains this way. Add the chain in Freedom’s Settings → Wallet & chains on the phone, then try again.",
             )
             else -> OpenLvResponse.Error(UNSUPPORTED, "The phone doesn’t support $method.")
         }
@@ -315,6 +340,30 @@ class OpenLvSession internal constructor(
         }
     }
 
+    /**
+     * Shows [request] while [work] runs, and gives its result — or null
+     * if the sheet is closed (or the session ends) first; [work] is then
+     * cancelled but not waited for. Whatever [work] throws is thrown. The
+     * sheet is taken down when this returns, unless something already
+     * replaced it.
+     */
+    private suspend fun <T : Any> showWhile(sid: Int, request: Request, work: suspend () -> T): T? {
+        if (sid != this.sid) return null
+        val approval = Approval(request, CompletableDeferred())
+        _approval.value = approval
+        // Not joined once cancelled: a Reject is answered at once, not when a stalled RPC gives up.
+        val result = scope.async { work() }
+        return try {
+            select<T?> {
+                result.onAwait { it }
+                approval.answer.onAwait { null }
+            }
+        } finally {
+            result.cancel()
+            if (_approval.value === approval) _approval.value = null
+        }
+    }
+
     private suspend fun requestAccounts(sid: Int): OpenLvResponse {
         sharedAccount?.let { return OpenLvResponse.Result(JSONArray().put(it.address)) }
         val list = keys.accounts() ?: return NO_WALLET
@@ -330,9 +379,10 @@ class OpenLvSession internal constructor(
 
     private suspend fun personalSign(sid: Int, params: JSONArray): OpenLvResponse {
         val raw = params.opt(0) as? String ?: return invalid("Expected [message, address].")
-        val account = accountFor(params.opt(1)) ?: return notThisWallet(params.opt(1))
         val message = if (HEX.matches(raw)) raw.hexToBytes() else raw.toByteArray(Charsets.UTF_8)
         if (message.size > MAX_MESSAGE) return invalid("The message is too long.")
+        // Last, after everything else is checked ([accountFor]).
+        val account = accountFor(params.opt(1)) ?: return notThisWallet(params.opt(1))
         return when (ask(sid, Request.PersonalSign(account, message, MessageSigning.readableText(message)))) {
             Decision.Reject -> REJECTED
             is Decision.Approve -> signed { keys.signPersonal(account, message) }
@@ -340,17 +390,19 @@ class OpenLvSession internal constructor(
     }
 
     private suspend fun signTypedData(sid: Int, params: JSONArray): OpenLvResponse {
-        val account = accountFor(params.opt(0)) ?: return notThisWallet(params.opt(0))
         // Off the main thread: the payload is the peer's, up to Eip712.MAX_JSON of it.
-        val (typed, digest, lines, ledgerHashes) = try {
+        val (typed, digest, lines) = try {
             withContext(Dispatchers.Default) {
                 val td = Eip712.parseStrict(params.opt(1))
-                // What the peer can make a Ledger show only as hashes, the sheet says so (#239).
-                Parsed(td, Eip712.digest(td), Eip712.lines(td), if (account.isLedger) LedgerApdus.blindHashes(td) else null)
+                Triple(td, Eip712.digest(td), Eip712.lines(td))
             }
         } catch (e: Eip712.Invalid) {
             return invalid(e.english)
         }
+        // Last, after the payload is checked ([accountFor]).
+        val account = accountFor(params.opt(0)) ?: return notThisWallet(params.opt(0))
+        // What the peer can make a Ledger show only as hashes, the sheet says so (#239).
+        val ledgerHashes = if (account.isLedger) withContext(Dispatchers.Default) { LedgerApdus.blindHashes(typed) } else null
         val domainChain = typed.chainId
         val chain = domainChain?.takeIf { it.bitLength() < 63 }?.toLong()?.let { id -> chains().firstOrNull { it.id == id } }
         val request = Request.TypedData(account, typed.primaryType, lines.first, lines.second, domainChain, chain, ledgerHashes)
@@ -360,16 +412,8 @@ class OpenLvSession internal constructor(
         }
     }
 
-    private data class Parsed(
-        val data: Eip712.TypedData,
-        val digest: ByteArray,
-        val lines: Pair<List<Eip712.Line>, List<Eip712.Line>>,
-        val ledgerHashes: LedgerTypedDataHashes?,
-    )
-
     private suspend fun sendTransaction(sid: Int, params: JSONArray): OpenLvResponse {
         val tx = params.opt(0) as? JSONObject ?: return invalid("Expected [transaction].")
-        val account = accountFor(tx.opt("from")) ?: return notThisWallet(tx.opt("from"))
         val asked = if (tx.has("chainId")) quantity(tx.opt("chainId"))?.takeIf { it.bitLength() < 63 }?.toLong() ?: return invalid("Not a chain ID.") else chainId
         if (asked != chainId) {
             return invalid("The transaction is for chain $asked, but this session is on chain $chainId. Switch first.")
@@ -388,6 +432,8 @@ class OpenLvSession internal constructor(
             }
             else -> return invalid("The data isn’t hex.")
         }
+        // Last, after everything else is checked ([accountFor]).
+        val account = accountFor(tx.opt("from")) ?: return notThisWallet(tx.opt("from"))
         val request = SendRequest(
             chain = chain,
             token = TokenRegistry.native(chain),
@@ -398,9 +444,14 @@ class OpenLvSession internal constructor(
         )
         var notice: String? = null
         while (true) {
+            // A sheet first, then the network work (R2-F1): see Request.Pricing.
             val quote = try {
-                sender.prepare(request)
+                showWhile(sid, Request.Pricing(account, chain, request.to, value)) { sender.prepare(request) }
+                    ?: return REJECTED
             } catch (e: SendException) {
+                // Only after the user saw it: what went wrong says the account is this
+                // wallet's, and often its balance ([accountFor]). Closed, not approved.
+                ask(sid, Request.CantSend(account, chain, e.message ?: e.english))
                 // English, whatever the app language: the peer must not learn it (#280).
                 return OpenLvResponse.Error(INTERNAL, e.english)
             }
@@ -437,7 +488,7 @@ class OpenLvSession internal constructor(
         val id = (params.opt(0) as? JSONObject)?.opt("chainId")?.let(::quantity)?.takeIf { it.signum() > 0 && it.bitLength() < 63 }?.toLong()
             ?: return invalid("Expected [{chainId}].")
         if (chains().none { it.id == id }) {
-            return OpenLvResponse.Error(UNKNOWN_CHAIN, "Chain $id isn’t set up on the phone. Add it in Freedom’s Settings → Chains there.")
+            return OpenLvResponse.Error(UNKNOWN_CHAIN, "Chain $id isn’t set up on the phone. Add it in Freedom’s Settings → Wallet & chains there.")
         }
         chainId = id
         return OpenLvResponse.Result(JSONObject.NULL)
@@ -455,7 +506,20 @@ class OpenLvSession internal constructor(
         }
     }
 
-    /** The wallet's account at [address] (any case), or null. */
+    /**
+     * The wallet account [address] names (any case), or null. Each signing
+     * request looks it up only once everything else in it has checked out:
+     * an unknown address is refused at once (4100), and from there on a
+     * known one gets no answer, and holds the one-sheet slot, only once a
+     * sheet has shown — the request's own; for a transaction, the
+     * [Request.Pricing] sheet put up before any network work, then the
+     * priced one or, if it can't be priced (not enough funds, a call that
+     * would revert), [Request.CantSend]. So a request malformed
+     * in some other way is refused alike for both, and a peer can't learn,
+     * with no sheet ever showing, whether an address it likes is one of this
+     * wallet's (Ledger accounts too), none of which it was ever given — nor
+     * what it holds.
+     */
     private fun accountFor(address: Any?): WalletAccount? {
         val a = (address as? String)?.trim() ?: return null
         return keys.accounts()?.accounts?.firstOrNull { it.address.equals(a, ignoreCase = true) }

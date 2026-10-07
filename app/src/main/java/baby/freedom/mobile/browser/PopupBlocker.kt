@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Message
 import android.util.Log
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -316,8 +317,9 @@ internal object PopupProbe {
      * address (or null) to [onResult], once, on the main thread, with
      * `bound` false when Chromium never gave the probe the window at
      * all (logged as "Popup WebView bind failed: no pending content"
-     * when a page opens windows in a burst) — its address then simply
-     * wasn't read, which isn't the same as a blank window. False
+     * when a page opens windows in a burst), or when the renderer went
+     * away before its address came — it then simply wasn't read, which
+     * isn't the same as a blank window. False
      * if the probe couldn't be set up — the window is then dropped
      * ([discard]), so Chromium isn't left holding it (#292 R2-M1).
      * [private]: the opener is a private tab, whose windows Chromium
@@ -375,6 +377,16 @@ internal object PopupProbe {
                     main.post { finish(url, posted = posted) }
                 }
                 return WebResourceResponse("text/plain", "utf-8", 204, "No Content", emptyMap(), ByteArrayInputStream(ByteArray(0)))
+            }
+
+            // The opener's renderer, which the window is bound to, died
+            // (crashed, or killed for memory) while the probe waited. Every
+            // WebView on that renderer must answer true, or WebView kills
+            // the whole app, every tab with it (#260) — this one included.
+            // The window's address was never read.
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                finish(null, bound = false)
+                return true
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {

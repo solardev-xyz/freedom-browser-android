@@ -465,7 +465,7 @@ private fun StepIcon(status: StepStatus) {
 /** A balance read: the last good value, and whether reading has only failed so far. */
 private data class BalanceRead(val wei: BigInteger? = null, val failed: Boolean = false)
 
-private fun copyNodeAddress(context: Context, address: String) {
+internal fun copyNodeAddress(context: Context, address: String) {
     val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
     clipboard.setPrimaryClip(ClipData.newPlainText(Strings.get(R.string.publish_setup_clip_label), address))
     // Android 13+ confirms every copy itself.

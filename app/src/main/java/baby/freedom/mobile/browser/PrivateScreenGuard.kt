@@ -17,13 +17,22 @@ import kotlinx.coroutines.delay
  * is over it, since panels slide in and out over the live page — the tab
  * switcher while it holds a private tab's card (title and thumbnail), or
  * the Downloads list while a private session's downloads are in it.
+ *
+ * The switcher holds private cards only on its Private pane (#418,
+ * [switcherPrivatePane]). It covers the whole screen and comes and goes
+ * without sliding, so while it shows the *Tabs* pane nothing private is
+ * on screen, even with a private tab active under it: closing the
+ * switcher brings that tab back in a composition that turns the flag on
+ * before its first frame, as opening a private tab does.
  */
 internal fun privateContentOnScreen(
     activePrivate: Boolean,
     anyPrivate: Boolean,
     switcherShown: Boolean,
     downloadsShown: Boolean,
-): Boolean = activePrivate || (anyPrivate && (switcherShown || downloadsShown))
+    switcherPrivatePane: Boolean = true,
+): Boolean = (anyPrivate && downloadsShown) ||
+    if (switcherShown) anyPrivate && switcherPrivatePane else activePrivate
 
 /**
  * Keeps private pages out of the Recents snapshot and out of

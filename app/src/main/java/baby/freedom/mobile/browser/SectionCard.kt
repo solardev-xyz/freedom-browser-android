@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -55,6 +56,12 @@ internal fun SectionCard(
  * Label / value row used inside a [SectionCard] for static property
  * listings (version, peer count, gateway URL, etc.). Label is muted
  * on the left; value takes the remaining space on the right.
+ *
+ * A wrapping ([singleLine] false) plain-text value that doesn't fit next
+ * to its label moves under it at the full width instead, so a large font
+ * scale never squeezes it into a narrow column and breaks a figure like
+ * "0.000001 xBZZ" mid-number. A [mono] value (an address, a hash) is one
+ * long token that wraps anywhere anyway, so it keeps the side-by-side row.
  */
 @Composable
 internal fun DetailRow(
@@ -63,17 +70,32 @@ internal fun DetailRow(
     mono: Boolean = false,
     singleLine: Boolean = true,
 ) {
+    val labelText: @Composable () -> Unit = {
+        Text(
+            label,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            modifier = Modifier.padding(end = 12.dp),
+        )
+    }
+    if (!singleLine && !mono) {
+        FlowRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 3.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            labelText()
+            Text(value)
+        }
+        return
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 3.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        Text(
-            label,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-            modifier = Modifier.padding(end = 12.dp),
-        )
+        labelText()
         Text(
             value,
             fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,

@@ -1,0 +1,28 @@
+# cargo-about config for scripts/native-licences.sh (#325): the crates
+# linked into libfreedom_mobile_ffi.so and the licence each is used under.
+#
+# `accepted` is the set of licences the app may ship, in order of
+# preference: for a crate offered under a choice ("MIT OR Apache-2.0")
+# cargo-about takes the first one listed here. A crate whose licence can't
+# be met from this list fails the script, so a new dependency under a
+# licence nobody has looked at (a copyleft one, say) stops the check
+# instead of slipping into the listing.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+]
+
+# Only what ends up in the Android library: both ABIs the app ships, and
+# no build-script or test dependencies.
+targets = ["aarch64-linux-android", "x86_64-linux-android"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true

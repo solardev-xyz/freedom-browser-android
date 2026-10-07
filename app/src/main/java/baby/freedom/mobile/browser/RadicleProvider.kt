@@ -56,10 +56,22 @@ class RadicleProvider(
 ) {
     /** Where grants live: [baby.freedom.mobile.data.RadicleGrantStore] in the app. */
     interface Grants {
-        /** null: not connected; else whether it has the signing tier. */
-        suspend fun signingFor(origin: String): Boolean?
+        /**
+         * null: not connected; else the DID it may sign as (#328), or `""`
+         * for the connection tier only. A signing grant covers only that
+         * identity: the node may since run as another.
+         */
+        suspend fun signingFor(origin: String): String?
         suspend fun connect(origin: String): Boolean
-        suspend fun grantSigning(origin: String): Boolean
+
+        /**
+         * The DID [origin] may sign as, or could before the Radicle identity
+         * changed; null if it never could. Only for the prompt's wording.
+         */
+        suspend fun signedBefore(origin: String): String? = null
+
+        /** Give connected [origin] the signing tier for [did] only. */
+        suspend fun grantSigning(origin: String, did: String): Boolean
         suspend fun revoke(origin: String): Boolean
     }
 
@@ -101,8 +113,21 @@ class RadicleProvider(
 
     private val lock = Any()
 
-    /** Origins that seed / sync / ask seed status: they get `seedStatus` events (desktop's broadcaster model). */
-    private val followers = HashSet<String>()
+    /**
+     * rid → the origins that seeded, synced or asked the status of that
+     * repository: they get its `seedStatus` events, and only its — desktop
+     * keeps a listener per repository (`seed-status.js`), so a site never
+     * hears what another site (or the user) seeds.
+     */
+    private val followers = HashMap<String, MutableSet<String>>()
+
+    /**
+     * origin → the repositories it follows, least recently asked about
+     * first. The cap is per site: a page picks the RIDs it asks about, so
+     * one site asking about thousands of them only ever drops its own
+     * oldest follows, never another site's (#349 R1-F1).
+     */
+    private val followed = HashMap<String, LinkedHashSet<String>>()
     private val tracks = HashMap<String, Track>()
     private val writes = HashMap<String, ArrayDeque<Long>>()
     private var watcher: Job? = null
@@ -134,16 +159,16 @@ class RadicleProvider(
         if (method == "radicle_getCapabilities") return Reply.Ok(capabilities(origin))
         if (method == "radicle_requestAccess") return requestAccess(origin, ask)
 
-        val signing = grants.signingFor(origin)
+        val signingAs = grants.signingFor(origin)
             ?: return Reply.Err(UNAUTHORIZED, "Origin not connected. Call radicle_requestAccess first.", "not_connected")
         if (method == "radicle_disconnect") return disconnect(origin)
-        if (method == "radicle_getNodeStatus") return nodeStatus(signing)
+        if (method == "radicle_getNodeStatus") return nodeStatus(signingAs)
         node.unavailableReason()?.let {
             return Reply.Err(UNAVAILABLE, RadicleClient.unavailableMessage(it), it)
         }
         return when (tier) {
             Tier.Connection -> connectionMethod(origin, method, params, ask)
-            Tier.Signing -> signingMethod(origin, method, params, signing, ask)
+            Tier.Signing -> signingMethod(origin, method, params, signingAs, ask)
             Tier.None -> Reply.Err(UNSUPPORTED, "Unknown method: $method")
         }
     }
@@ -181,12 +206,12 @@ class RadicleProvider(
 
     private suspend fun disconnect(origin: String): Reply {
         if (!grants.revoke(origin)) return Reply.Err(INTERNAL, "Couldn't drop the connection")
-        synchronized(lock) { followers.remove(origin) }
+        unfollowAll(origin)
         events.emit(origin, "disconnect", JSONObject().put("origin", origin))
         return Reply.Ok(JSONObject().put("connected", false))
     }
 
-    private suspend fun nodeStatus(signing: Boolean): Reply {
+    private suspend fun nodeStatus(signingAs: String): Reply {
         val info = node.state.value
         val running = node.unavailableReason() == null
         val result = JSONObject().put("running", running).put("status", info.status.name.lowercase())
@@ -199,7 +224,10 @@ class RadicleProvider(
             // The alias is gossiped network-wide; the NID pins the user to
             // one node, so it waits for the signing tier.
             id?.optString("alias")?.takeIf { it.isNotEmpty() }?.let { result.put("alias", it) }
-            if (signing) id?.optString("nid")?.takeIf { it.isNotEmpty() }?.let { result.put("nid", it) }
+            // Only for the identity the site was allowed to know (#328).
+            if (signingAs.isNotEmpty() && id?.optString("did") == signingAs) {
+                id.optString("nid").takeIf { it.isNotEmpty() }?.let { result.put("nid", it) }
+            }
         }
         return Reply.Ok(result)
     }
@@ -216,13 +244,17 @@ class RadicleProvider(
         }
         "radicle_getSeedStatus" -> {
             val rid = rid(params) ?: return invalidRid()
-            follow(origin)
+            follow(origin, rid)
             Reply.Ok(withContext(io) { status(rid) })
         }
         "radicle_seed" -> {
             val rid = rid(params) ?: return invalidRid()
             busy(rid)?.let { return it }
             if (!ask(RadicleAsk.Seed(origin, rid))) return rejected()
+            // Another fetch may have started while the prompt was up: the
+            // node would skip this one without a word.
+            node.unavailableReason()?.let { return Reply.Err(UNAVAILABLE, RadicleClient.unavailableMessage(it), it) }
+            busy(rid)?.let { return it }
             startFetch(origin, rid)?.let { return it }
             Reply.Ok(JSONObject().put("rid", rid).put("seeded", true).put("status", withContext(io) { status(rid) }))
         }
@@ -251,40 +283,148 @@ class RadicleProvider(
         else -> Reply.Err(UNSUPPORTED, "Unknown method: $method")
     }
 
-    /** A fetch of another repository is running: the node takes one at a time. */
-    private fun busy(rid: String): Reply? {
+    /**
+     * A fetch of another repository is running, or was just asked of the
+     * node and its seed line hasn't reached the app yet: the node takes one
+     * at a time and skips a second seed without a word (#349 R4-M1).
+     */
+    private fun busy(rid: String): Reply? = if (synchronized(lock) { otherFetch(rid) }) busyReply() else null
+
+    /** Caller holds [lock]. */
+    private fun otherFetch(rid: String): Boolean {
         val line = node.state.value.seed
-        if (line != null && line.active && line.rid != rid) {
-            return Reply.Err(INTERNAL, "Another repository is being fetched; try again when it's done", "busy")
-        }
-        return null
+        if (line != null && line.active && line.rid != rid) return true
+        val now = clock()
+        return tracks.any { (other, track) -> other != rid && track.pendingSince?.let { now - it < PENDING_MS } == true }
     }
+
+    private fun busyReply() =
+        Reply.Err(INTERNAL, "Another repository is being fetched; try again when it's done", "busy")
 
     private fun startFetch(origin: String, rid: String): Reply? {
-        follow(origin)
-        val line = node.state.value.seed
-        // Already fetching this one: report on that fetch.
-        if (line != null && line.active && line.rid == rid) return null
-        if (!node.seed(rid)) return Reply.Err(INTERNAL, "seed failed", "seed_failed")
+        follow(origin, rid)
         val now = clock()
-        synchronized(lock) {
-            val track = tracks.getOrPut(rid) { Track(now, 0) }
-            track.startedAt = now
-            track.attemptCount++
-            track.finishedAt = null
-            track.pendingSince = now
-            track.recentAttempts.clear()
+        // Check and claim in one step, so two sites' prompts answered at
+        // once can't both reach the node.
+        val claim = synchronized(lock) {
+            if (otherFetch(rid)) return busyReply()
+            claimLocked(rid, now) ?: return null
         }
+        if (!node.seed(rid)) {
+            synchronized(lock) { claim.giveBack() }
+            return Reply.Err(INTERNAL, "seed failed", "seed_failed")
+        }
+        synchronized(lock) { claim.started() }
         return null
     }
 
-    private fun follow(origin: String) = synchronized(lock) { followers.add(origin) }
+    /**
+     * The user started a seed of [rid] from the Radicle page, which goes to
+     * the node without passing through here: claim it the same way, so a
+     * site's prompt answered before its seed line reaches the app reads the
+     * node as busy instead of being told `{seeded:true}` for a seed the node
+     * skips (#349 R5-M1).
+     *
+     * [ask] hands the seed to the node and says whether it got there. The
+     * user's seed always goes to the node; it only claims when no other
+     * fetch is running or claimed (the node skips it then, so it would be a
+     * claim for nothing), and a seed that never reached the node gives its
+     * claim back, so neither holds other sites' seeds `busy` (#349 R6-M2).
+     */
+    fun userSeeding(rid: String, ask: () -> Boolean) {
+        val now = clock()
+        val claim = synchronized(lock) { if (otherFetch(rid)) null else claimLocked(rid, now) }
+        val asked = try {
+            ask()
+        } catch (t: Throwable) {
+            synchronized(lock) { claim?.giveBack() }
+            throw t
+        }
+        synchronized(lock) { if (asked) claim?.started() else claim?.giveBack() }
+    }
+
+    /** A fetch of [rid] just asked of the node; [giveBack] if the node refused it. */
+    private inner class Claim(
+        val rid: String,
+        val track: Track,
+        val at: Long,
+        val previousPending: Long?,
+        val previousLine: RadicleSeed?,
+        val fresh: Boolean,
+    ) {
+        /** Caller holds [lock]. */
+        fun giveBack() {
+            if (track.pendingSince == at) {
+                track.pendingSince = previousPending
+                track.lastLine = previousLine
+            }
+            if (fresh && tracks[rid] === track) tracks.remove(rid)
+        }
+
+        /** Caller holds [lock]. */
+        fun started() {
+            track.startedAt = at
+            track.attemptCount++
+            track.finishedAt = null
+            track.recentAttempts.clear()
+        }
+    }
+
+    /**
+     * Mark [rid] as asked of the node at [now]; null if its fetch is
+     * already running (report on that one). Caller holds [lock].
+     *
+     * The rid's seed line as it stands — an earlier fetch's finished line,
+     * say — becomes the track's [Track.lastLine]: it says nothing about the
+     * fetch just asked, so only a line that moves after this may clear the
+     * claim. A fresh track's null [Track.lastLine] otherwise let the next
+     * unrelated [RadicleInfo] push, repeating that stale line, clear it at
+     * once (#349 R5-M2).
+     */
+    private fun claimLocked(rid: String, now: Long): Claim? {
+        val line = node.state.value.seed?.takeIf { it.rid == rid }
+        if (line != null && line.active) return null
+        val fresh = rid !in tracks
+        val track = tracks.getOrPut(rid) { Track(now, 0) }
+        val claim = Claim(rid, track, now, track.pendingSince, track.lastLine, fresh)
+        track.pendingSince = now
+        if (line != null) track.lastLine = line
+        return claim
+    }
+
+    private fun follow(origin: String, rid: String) = synchronized(lock) {
+        val mine = followed.getOrPut(origin) { LinkedHashSet() }
+        // Asked again: it moves to the newest end.
+        mine.remove(rid)
+        mine.add(rid)
+        followers.getOrPut(rid) { HashSet() }.add(origin)
+        if (mine.size <= MAX_FOLLOWED_REPOS) return@synchronized
+        // Drop this site's least recently asked-about repository, sparing
+        // one whose fetch is running or about to (and the one just asked).
+        val running = node.state.value.seed?.takeIf { it.active }?.rid
+        val evict = mine.firstOrNull { it != rid && it != running && tracks[it]?.pendingSince == null }
+            ?: mine.first { it != rid }
+        unfollow(origin, evict)
+    }
+
+    /** Caller holds [lock]. */
+    private fun unfollow(origin: String, rid: String) {
+        followed[origin]?.let { if (it.remove(rid) && it.isEmpty()) followed.remove(origin) }
+        followers[rid]?.let { if (it.remove(origin) && it.isEmpty()) followers.remove(rid) }
+    }
+
+    /** [origin] stops hearing every repository's `seedStatus`. */
+    private fun unfollowAll(origin: String) = synchronized(lock) {
+        followed.remove(origin)?.forEach { rid ->
+            followers[rid]?.let { if (it.remove(origin) && it.isEmpty()) followers.remove(rid) }
+        }
+    }
 
     /**
      * [origin]'s grant is gone (the user disconnected it from the Radicle
      * page): it stops hearing `seedStatus` (#201 R1-F2).
      */
-    fun forget(origin: String) = synchronized(lock) { followers.remove(origin) }
+    fun forget(origin: String) = unfollowAll(origin)
 
     /**
      * Where [rid]'s replication stands (desktop's `getSeedStatus` shape).
@@ -358,7 +498,7 @@ class RadicleProvider(
             }
             while (track.recentAttempts.size > 5) track.recentAttempts.removeAt(0)
             if (!line.active) track.finishedAt = now
-            followers.toList()
+            followers[line.rid]?.toList().orEmpty()
         }
         if (targets.isEmpty()) return
         val status = withContext(io) { status(line.rid) }
@@ -381,7 +521,7 @@ class RadicleProvider(
         origin: String,
         method: String,
         params: JSONObject,
-        signing: Boolean,
+        signingAs: String,
         ask: suspend (RadicleAsk) -> Boolean,
     ): Reply {
         // Checked before the prompt: nobody is asked about a write that
@@ -394,20 +534,39 @@ class RadicleProvider(
                 is Validated.Ok -> v
             }
         }
-        if (!signing) {
-            if (!ask(RadicleAsk.Signing(origin))) return rejected()
-            if (!grants.grantSigning(origin)) return Reply.Err(UNAUTHORIZED, "Origin not connected", "not_connected")
+        // The identity the node runs as now. A grant covers only the one it
+        // was given for (#328: the wallet's or the device's own), so a site
+        // allowed to act as the other asks again before it learns this one.
+        var identity = when (val a = callIo("identity", JSONObject())) {
+            is RadicleClient.Answer.Failed -> return nativeError(a, "identity unavailable")
+            is RadicleClient.Answer.Ok -> a.value as? JSONObject
         }
-        if (write == null) {
-            return when (val a = callIo("identity", JSONObject())) {
-                is RadicleClient.Answer.Ok -> Reply.Ok(a.value)
-                is RadicleClient.Answer.Failed -> nativeError(a, "identity unavailable")
+        val did = identity?.optString("did").orEmpty()
+        if (did.isEmpty()) return Reply.Err(INTERNAL, "identity unavailable", "native_failed")
+        if (did != signingAs) {
+            // Name the identity asked about, and say when the site was allowed
+            // another one: allowing this links the two for it.
+            // Whether [did] is the wallet's comes with it from `:node`, not from
+            // the UI's copy of the node state, which lags a restart.
+            val wallet = identity?.optBoolean(RadicleNode.WALLET_IDENTITY) == true
+            val before = previousIdentity(runCatching { grants.signedBefore(origin) }.getOrNull(), did, wallet)
+            if (!ask(RadicleAsk.Signing(origin, did, wallet, before))) return rejected()
+            // The node may have restarted as another identity while the
+            // prompt was up: the grant is for the one the user was asked
+            // about, and only while the node still runs as it.
+            identity = when (val a = callIo("identity", JSONObject())) {
+                is RadicleClient.Answer.Failed -> return nativeError(a, "identity unavailable")
+                is RadicleClient.Answer.Ok -> a.value as? JSONObject
             }
+            if (identity?.optString("did").orEmpty() != did) return identityChanged()
+            if (!grants.grantSigning(origin, did)) return Reply.Err(UNAUTHORIZED, "Origin not connected", "not_connected")
         }
+        if (write == null) return Reply.Ok(JSONObject((identity ?: JSONObject()).toString()).apply { remove(RadicleNode.WALLET_IDENTITY) })
         if (!takeWriteSlot(origin)) {
             return Reply.Err(INTERNAL, "Too many writes; try again in a minute", "rate_limited")
         }
-        val (call, args) = write.call to write.args
+        // `:node` refuses the write if the node has meanwhile restarted as another identity.
+        val (call, args) = write.call to JSONObject(write.args.toString()).put(RadicleNode.AS_DID, did)
         return when (val a = callIo(call, args, RadicleClient.WRITE_TIMEOUT_MS)) {
             is RadicleClient.Answer.Failed -> nativeError(a, "write failed")
             is RadicleClient.Answer.Ok -> {
@@ -415,6 +574,20 @@ class RadicleProvider(
                 if (value?.has("id") == true) Reply.Ok(value) else Reply.Err(INTERNAL, "write failed", "native_failed")
             }
         }
+    }
+
+    /**
+     * What a signing prompt for [did] says the site was allowed before
+     * ([RadicleAsk.Signing.previousDid]), from what it could sign as
+     * ([Grants.signedBefore]): null for nothing, or for [did] itself; `""`
+     * for a grant from before #328 (the device's own identity, DID not
+     * recorded) when [did] is the wallet's — for the device's own it's the
+     * same one again.
+     */
+    private fun previousIdentity(before: String?, did: String, wallet: Boolean): String? = when {
+        before == null || before == did -> null
+        before.isEmpty() -> if (wallet) "" else null
+        else -> before
     }
 
     /** [validateWrite]'s answer: the node call and its arguments, or why the write is refused. */
@@ -539,8 +712,16 @@ class RadicleProvider(
 
     private fun rejected() = Reply.Err(USER_REJECTED, "User rejected the request")
 
+    /**
+     * The node runs as another identity than the one the site was allowed
+     * to act as (#328): nothing was written; the next call asks again.
+     */
+    private fun identityChanged() =
+        Reply.Err(UNAUTHORIZED, "The Radicle identity changed; call again to ask the user", "identity_changed")
+
     /** Desktop's `nativeError`: the node's message, with a reason read off it. */
     private fun nativeError(a: RadicleClient.Answer.Failed, fallback: String): Reply.Err {
+        if (a.reason == RadicleClient.REASON_IDENTITY_CHANGED) return identityChanged()
         if (a.reason == RadicleClient.REASON_STOPPED || a.reason == RadicleClient.REASON_NOT_READY ||
             a.reason == RadicleClient.REASON_DISABLED
         ) {
@@ -579,6 +760,9 @@ class RadicleProvider(
         /** How long a seed just asked of the node reads as starting before its line shows up. */
         const val PENDING_MS = 5_000L
 
+        /** Repositories each site's `seedStatus` follows are kept for ([followed]). */
+        const val MAX_FOLLOWED_REPOS = 512
+
         private val COB_ID = Regex("^[0-9a-f]{6,40}$")
         private val ISSUE_STATES = setOf("open", "closed", "solved")
 
@@ -614,6 +798,17 @@ sealed interface RadicleAsk {
     /** Stop seeding [rid]. */
     data class Unseed(override val origin: String, val rid: String) : RadicleAsk
 
-    /** The user's Radicle identity, and writing as them. */
-    data class Signing(override val origin: String) : RadicleAsk
+    /**
+     * The user's Radicle identity [did] (the wallet's when [wallet], else
+     * the device's own), and writing as it. [previousDid] is the other
+     * identity the site was allowed to act as before (#328), if any: `""`
+     * when that was the device's own identity, from before grants named
+     * one, whose DID wasn't recorded.
+     */
+    data class Signing(
+        override val origin: String,
+        val did: String = "",
+        val wallet: Boolean = false,
+        val previousDid: String? = null,
+    ) : RadicleAsk
 }

@@ -50,11 +50,12 @@ internal sealed interface ClientCertPlan {
 
     /**
      * The user said not to send one in this tab: send none
-     * ([ClientCertRequest.ignore]) without asking, to any server. For the
-     * tab's requests already waiting when they said so, and for every
-     * later one while the browser hasn't started a load in the tab since
-     * ([ClientCertChoices.planFor]); the tab's next load asks again
-     * ([ClientCertificates.onBrowserLoad]).
+     * ([ClientCertRequest.ignore]) without asking, to any server they
+     * haven't picked a certificate for. For the tab's requests already
+     * waiting when they said so, and for every later one while the
+     * browser hasn't started a load in the tab since, except to a server
+     * the user has since followed a link to ([ClientCertChoices.planFor]);
+     * the tab's next load asks again ([ClientCertificates.onBrowserLoad]).
      */
     data object Refuse : ClientCertPlan
 
@@ -67,10 +68,13 @@ internal sealed interface ClientCertPlan {
 
 /**
  * The user's answers for this app run only (#316). Nothing here is
- * written anywhere, and *Clear cookies & site data* empties it ([clear]).
+ * written anywhere, and *Delete browsing data*'s cookies and site data
+ * empties it ([clear]).
  *
  * A picked certificate holds per server (host and port) for the rest of
- * the run. A refusal (Deny, Back, or "no certificates" before one is
+ * the run, in every normal tab, a refusal there included: the refusal
+ * only stops a chooser reopening, and sending a pick never opens one
+ * (#333 R6-F1). A refusal (Deny, Back, or "no certificates" before one is
  * installed) belongs to the tab whose chooser it came from, and covers
  * every server, until the user loads something in that tab: it answers
  * that tab's requests already waiting on the chooser and every later one
@@ -79,7 +83,12 @@ internal sealed interface ClientCertPlan {
  * wildcard DNS record a new host or port each time — doesn't bring the
  * chooser back (#333 R5-F1), and a pop-up it opens meanwhile starts out
  * refused too ([opened]). Other tabs aren't affected: a link to the same
- * server in a tab that never saw that chooser asks (#333 R5-M1). The
+ * server in a tab that never saw that chooser asks (#333 R5-M1). Nor is
+ * a link the user taps in that tab to a server they didn't refuse: its
+ * server asks ([followed], #333 R6-M1). A page's own connections don't
+ * count — only a main-frame navigation with the user's gesture, and its
+ * redirects — so a polling page can't use it to reopen the chooser, and
+ * the page that kept connecting is gone with that navigation. The
  * tab's next load — a reload, the address bar, Back/Forward — asks
  * again, so installing the certificate, or taking back an accidental
  * Deny, only needs a reload (which also empties WebView's own record of
@@ -99,6 +108,19 @@ internal class ClientCertChoices {
      */
     private val declined = HashMap<Long, Long>()
 
+    /**
+     * Per tab with a refusal holding ([declined]): the hosts the user
+     * refused a chooser for there. A link they tap to one of them stays
+     * refused ([followed]).
+     */
+    private val deniedHosts = HashMap<Long, MutableSet<String>>()
+
+    /**
+     * Per tab with a refusal holding: the hosts the user has since
+     * followed a link to ([followed]), which ask again.
+     */
+    private val followedHosts = HashMap<Long, MutableSet<String>>()
+
     /** The last [ticket] handed out. */
     private var tickets = 0L
 
@@ -115,12 +137,36 @@ internal class ClientCertChoices {
      */
     fun loaded(tabId: Long) {
         loads[tabId] = ++tickets
+        deniedHosts.remove(tabId)
+        followedHosts.remove(tabId)
+    }
+
+    /**
+     * The user followed a link in tab [tabId] (a main-frame navigation
+     * with their gesture, or one of its redirects) to [host]. If a
+     * refusal holds there for later requests and [host] isn't a server
+     * the user refused in it, [host]'s requests ask again rather than
+     * being refused (#333 R6-M1). Returns whether that changed anything.
+     */
+    fun followed(tabId: Long, host: String): Boolean {
+        if (!refusing(tabId)) return false
+        val h = host.lowercase()
+        if (h in deniedHosts[tabId].orEmpty()) return false
+        return followedHosts.getOrPut(tabId) { HashSet() }.add(h)
+    }
+
+    /** A refusal in tab [tabId] answers its later requests ([planFor]). */
+    private fun refusing(tabId: Long): Boolean {
+        val d = declined[tabId] ?: return false
+        return (loads[tabId] ?: 0L) <= d
     }
 
     /** Tab [tabId] closed. */
     fun tabClosed(tabId: Long) {
         loads.remove(tabId)
         declined.remove(tabId)
+        deniedHosts.remove(tabId)
+        followedHosts.remove(tabId)
     }
 
     /**
@@ -130,8 +176,9 @@ internal class ClientCertChoices {
      * page round it.
      */
     fun opened(tabId: Long, openerId: Long) {
-        val d = declined[openerId] ?: return
-        if ((loads[openerId] ?: 0L) <= d) declined[tabId] = d
+        if (!refusing(openerId)) return
+        declined[tabId] = declined.getValue(openerId)
+        deniedHosts[tabId] = HashSet(deniedHosts[openerId].orEmpty())
     }
 
     /**
@@ -143,17 +190,24 @@ internal class ClientCertChoices {
 
     /**
      * What to answer a request from tab [tabId] that got [ticket] on
-     * arrival. A refusal in that tab answers its requests that arrived
-     * before it was given (queued behind its chooser) and, whatever the
-     * server, any it makes before the browser next starts a load there
-     * ([loaded]); after that it asks again. A refusal never answers
-     * another tab. Otherwise a server's pick is sent.
+     * arrival. A server the user picked a certificate for gets it, in
+     * any normal tab, whatever was refused there (#333 R6-F1). Otherwise
+     * a refusal in that tab answers its requests that arrived before it
+     * was given (queued behind its chooser) and, whatever the server, any
+     * it makes before the browser next starts a load there ([loaded]),
+     * except to a server the user has since followed a link to
+     * ([followed]); after that it asks again. A refusal never answers
+     * another tab.
      */
     fun planFor(private: Boolean, host: String, port: Int, tabId: Long, ticket: Long = Long.MAX_VALUE): ClientCertPlan {
         if (private) return ClientCertPlan.SendNone
+        picks[key(host, port)]?.let { return ClientCertPlan.Send(it) }
         val d = declined[tabId]
-        if (d != null && (ticket <= d || (loads[tabId] ?: 0L) <= d)) return ClientCertPlan.Refuse
-        return picks[key(host, port)]?.let { ClientCertPlan.Send(it) } ?: ClientCertPlan.Ask
+        if (d != null) {
+            if (ticket <= d) return ClientCertPlan.Refuse
+            if (refusing(tabId) && host.lowercase() !in followedHosts[tabId].orEmpty()) return ClientCertPlan.Refuse
+        }
+        return ClientCertPlan.Ask
     }
 
     /**
@@ -163,7 +217,19 @@ internal class ClientCertChoices {
      */
     fun answered(host: String, port: Int, tabId: Long, alias: String?, asOf: Int) {
         if (asOf != generation) return
-        if (alias == null) declined[tabId] = tickets else picks[key(host, port)] = alias
+        if (alias != null) {
+            picks[key(host, port)] = alias
+            return
+        }
+        // A refusal no longer holding for later requests starts afresh.
+        if (!refusing(tabId)) {
+            deniedHosts.remove(tabId)
+            followedHosts.remove(tabId)
+        }
+        declined[tabId] = tickets
+        val h = host.lowercase()
+        deniedHosts.getOrPut(tabId) { HashSet() }.add(h)
+        followedHosts[tabId]?.remove(h)
     }
 
     /** The picked certificate can't be read any more (removed from the device): ask again next time. */
@@ -174,6 +240,8 @@ internal class ClientCertChoices {
     fun clear() {
         picks.clear()
         declined.clear()
+        deniedHosts.clear()
+        followedHosts.clear()
         generation++
     }
 
@@ -190,9 +258,10 @@ internal class ClientCertChoices {
  *   server (host and port). Picking a certificate sends it, and the pick
  *   holds for that server for the rest of the app run
  *   ([ClientCertChoices]). Dismissing the chooser sends none, to that
- *   request and to every request its tab makes, to any server, until the
- *   browser next starts a load in that tab ([onBrowserLoad]); other tabs
- *   still ask.
+ *   request and to every request its tab makes, to any server without
+ *   a pick, until the browser next starts a load in that tab
+ *   ([onBrowserLoad]) or the user follows a link there to a server
+ *   they didn't refuse ([onUsersLink]); other tabs still ask.
  * - The chooser only opens over the page that asked: a request from a
  *   background tab, from behind a full-screen panel, while Android's
  *   permission dialog is up or while the app isn't in front waits until
@@ -272,6 +341,18 @@ object ClientCertificates {
         choices.opened(tabId, openerId)
     }
 
+    /**
+     * The user followed a link in tab [tabId] to [host] (a main-frame
+     * navigation with their gesture, or a redirect of one): a Deny for
+     * another server there doesn't refuse [host] ([ClientCertChoices.followed]).
+     * If WebView may hold a "send none" for it from that Deny, its table
+     * is emptied, as at a browser load ([onBrowserLoad]); the server the
+     * user did refuse is still refused when it next asks.
+     */
+    fun onUsersLink(tabId: Long, host: String) {
+        if (choices.followed(tabId, host) && tableHoldsRefusal) emptyWebViewTable()
+    }
+
     /** Tab [tabId] closed: what it still had waiting for the chooser sends none. */
     fun onTabClosed(tabId: Long) {
         withdraw(tabId)
@@ -293,7 +374,7 @@ object ClientCertificates {
     internal val privateTabOpen: Boolean get() = privateTabs.isNotEmpty()
 
     /**
-     * Part of *Clear cookies & site data*: forget every answer, ours and
+     * Part of *Delete browsing data*'s cookies and site data: forget every answer, ours and
      * WebView's own (which would otherwise go on re-sending a picked
      * certificate, or refusing, for each server without asking).
      */
@@ -317,7 +398,7 @@ object ClientCertificates {
      * (optional client auth) lets the handshake through, so without this
      * it would never ask again this run: a Deny, a "no certificates"
      * before one is installed, or a private tab's answer would stick
-     * until *Clear cookies & site data*. Emptying it on every refusal
+     * until *Delete browsing data*. Emptying it on every refusal
      * instead (as after `proceed`, [send]) would have such a server ask
      * again on each new connection a page opens, a chooser every few
      * seconds for a page that polls; here it asks again only when the

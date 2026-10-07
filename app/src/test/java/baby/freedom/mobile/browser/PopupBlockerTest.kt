@@ -100,7 +100,7 @@ class PopupBlockerTest {
         val doc = popups.document
         val refused = popups.add("https://a.example", pending = false, unread = true)!!
         assertEquals(
-            "Its address wasn't read (too many pop-ups at once)",
+            "Its address wasn't read (too many pop-ups at once, or the page closed first)",
             blockedPopupLabel(popups.entries.single { it.id == refused }, shown = null),
         )
         val failed = popups.add("https://a.example", pending = true)!!
@@ -272,5 +272,17 @@ class PopupBlockerTest {
         // Out of view entirely: nothing new, nothing lost.
         assertEquals(jumped, FullyInView.Seen.after(jumped, 270f, box(300f)))
         assertEquals(null, FullyInView.Seen.after(null, 270f, box(300f)))
+    }
+
+    @Test
+    fun `the blocked-popup notice waits out a page's fullscreen`() {
+        // Composed under the fullscreen view, its tap guard would arm
+        // unseen and the notice would surface already armed when the page
+        // leaves fullscreen, under a tap meant for the page.
+        assertFalse(blockedPopupNoticeShown(hasEntries = true, addressFocused = false, overlayShown = false, fullscreen = true))
+        assertTrue(blockedPopupNoticeShown(hasEntries = true, addressFocused = false, overlayShown = false, fullscreen = false))
+        assertFalse(blockedPopupNoticeShown(hasEntries = true, addressFocused = true, overlayShown = false, fullscreen = false))
+        assertFalse(blockedPopupNoticeShown(hasEntries = true, addressFocused = false, overlayShown = true, fullscreen = false))
+        assertFalse(blockedPopupNoticeShown(hasEntries = false, addressFocused = false, overlayShown = false, fullscreen = false))
     }
 }

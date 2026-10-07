@@ -9,9 +9,10 @@
 # Jobs (#309): `ffi` builds libfreedom_mobile_ffi.so, one matrix job per
 # ABI, `colibri` builds libc4.so and `unit-tests` runs the JVM tests and
 # the localisation lint (#280), all in parallel; `apk` packages the two
-# libraries as soon as they're there, alongside the tests; `publish`
-# needs both `apk` and `unit-tests`, so nothing is released unless the
-# tests and lint passed. The two native libraries are cached with
+# libraries as soon as they're there, alongside the tests; `licences`
+# checks the open-source licence lists against FFI_REF and COLIBRI_REF
+# (#325); `publish` needs `apk`, `unit-tests` and `licences`, so nothing
+# is released unless the tests, lint and licence lists passed. The two native libraries are cached with
 # actions/cache, keyed on everything that shapes them (see each job's
 # "Cache key" step), and a hit skips their build entirely; the checks
 # after the build run on a hit too (scripts/check-native-libs.sh, and
@@ -91,7 +92,7 @@ permissions:
   contents: read
 
 env:
-  FFI_REF: v0.12.5
+  FFI_REF: v0.12.14
   COLIBRI_REF: v3.0.0
   # Pinned (not "latest") so it can be part of the ffi cache key.
   CARGO_NDK_VERSION: 4.1.2
@@ -287,6 +288,71 @@ jobs:
           # from the original run.
           retention-days: 14
 
+  # Open-source licences (#325): app/licences/native.json lists every crate
+  # in libfreedom_mobile_ffi.so at FFI_REF, and bundled.json what libc4.so
+  # links at COLIBRI_REF. The Gradle build checks the pins offline; this
+  # regenerates the crate list and reads Colibri's own pins, so a list
+  # that's stale for the current refs fails here. See app/licences/README.md.
+  licences:
+    name: open-source licences
+    # Not on the cache-filling runs; ffi-ref.yml runs it on every PR and
+    # push to main.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read the pins
+        id: pins
+        run: |
+          echo "ffi=$(sed -n 's/^  FFI_REF: *//p' .github/workflows/release.yml)" >> "$GITHUB_OUTPUT"
+          echo "colibri=$(sed -n 's/^  COLIBRI_REF: *//p' .github/workflows/release.yml)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout freedom-mobile-ffi
+        uses: actions/checkout@v4
+        with:
+          repository: solardev-xyz/freedom-mobile-ffi
+          ref: ${{ steps.pins.outputs.ffi }}
+          path: freedom-mobile-ffi
+          fetch-depth: 0
+
+      - name: Checkout colibri-stateless
+        uses: actions/checkout@v4
+        with:
+          repository: corpus-core/colibri-stateless
+          ref: ${{ steps.pins.outputs.colibri }}
+          path: colibri-stateless
+          fetch-depth: 0
+
+      # The pinned release binary (scripts/native-licences.sh checks the
+      # version), checked against the hash published with it.
+      - name: Install cargo-about
+        run: |
+          v=0.9.2
+          f="cargo-about-$v-x86_64-unknown-linux-musl"
+          curl -sSfL -o "$RUNNER_TEMP/$f.tar.gz" "https://github.com/EmbarkStudios/cargo-about/releases/download/$v/$f.tar.gz"
+          echo "9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af  $RUNNER_TEMP/$f.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/$f.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$f" >> "$GITHUB_PATH"
+
+      # As in release.yml's ffi job: the ffi crate's node deps are ssh://
+      # git URLs, all public, fetched over https; and the toolchain its
+      # rust-toolchain.toml names.
+      - name: Rust toolchain and git deps over https
+        working-directory: freedom-mobile-ffi
+        run: |
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          channel="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+
+      - name: The native crate list is current
+        run: scripts/native-licences.sh freedom-mobile-ffi --check
+
+      - name: The Colibri list is current
+        if: ${{ !cancelled() }}
+        run: scripts/check-colibri-licences.sh colibri-stateless
+
   unit-tests:
     # Not on the cache-filling runs (push to main, schedule).
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
@@ -434,7 +500,7 @@ jobs:
           retention-days: 14
 
   publish:
-    needs: [apk, unit-tests]
+    needs: [apk, unit-tests, licences]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
