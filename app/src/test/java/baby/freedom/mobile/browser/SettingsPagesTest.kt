@@ -172,7 +172,7 @@ class SettingsPagesTest {
         fun groups(query: String): List<Pair<SettingsPage, List<SettingsSection>>> {
             val rows = mapOf(
                 SettingsSection.Tor to torRows(false, false),
-                SettingsSection.Chains to chainSettingsRows(BuiltInChains.ALL) { ReadAssurance.CrossChecked(3, 2, 0) },
+                SettingsSection.Chains to chainSettingsRows(BuiltInChains.ALL) { ReadAssurance.CrossChecked(3, 2, 0, fallback = true) },
                 SettingsSection.Nodes to nodeRows("", ""),
                 SettingsSection.Ipfs to ipfsRows(IpfsInfo()),
                 SettingsSection.Ens to ensSectionRows(EnsRpcConfig()),

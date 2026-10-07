@@ -121,17 +121,34 @@ private fun builtInLabel(chain: Chain) =
  * and the chain page's reassurance line are worded from ([readAssurance]).
  */
 internal sealed interface ReadAssurance {
+    /**
+     * [fallback]: when every checked tier fails, the router still answers
+     * from a single RPC ([ChainSource.DIRECT]), unverified — so the
+     * wording must say "when available", never promise every read. No
+     * default: an assurance that forgets to say is not silently "always".
+     */
+    val fallback: Boolean
+
     /** A proof checked on this device ([source]: the light client or the prover). */
-    data class Proof(val source: ChainSource) : ReadAssurance
+    data class Proof(val source: ChainSource, override val fallback: Boolean) : ReadAssurance
 
     /**
      * The RPC quorum: [providers] RPCs, each from a different provider, are
      * asked and [needed] must agree; [yours] of those seats are the user's own.
      */
-    data class CrossChecked(val providers: Int, val needed: Int, val yours: Int) : ReadAssurance
+    data class CrossChecked(
+        val providers: Int,
+        val needed: Int,
+        val yours: Int,
+        override val fallback: Boolean,
+    ) : ReadAssurance
 
-    /** No quorum can form: the first RPC that answers, [yours] if the user has one of their own. */
-    data class Single(val yours: Boolean) : ReadAssurance
+    /**
+     * No quorum can form: the first RPC that answers, [yours] if the user
+     * has one of their own. [fallback]: the user's RPCs come first, but a
+     * public one answers (unverified) when theirs don't.
+     */
+    data class Single(val yours: Boolean, override val fallback: Boolean) : ReadAssurance
 }
 
 /**
@@ -142,35 +159,45 @@ internal sealed interface ReadAssurance {
  */
 internal fun readAssurance(chain: Chain, policy: ChainAccessPolicy, wired: (ChainSource) -> Boolean): ReadAssurance {
     val pool = (chain.userRpcUrls + chain.rpcUrls).distinct()
-    for (source in policy.readOrder.filter(wired)) {
+    val order = policy.readOrder.filter(wired)
+    // Whether a later tier is the unverified single-RPC read the router
+    // falls back to once the checked ones fail.
+    fun fallsBackAfter(index: Int) = ChainSource.DIRECT in order.drop(index + 1)
+    for ((index, source) in order.withIndex()) {
         when (source) {
-            ChainSource.MYOTIS, ChainSource.COLIBRI -> return ReadAssurance.Proof(source)
+            ChainSource.MYOTIS, ChainSource.COLIBRI -> return ReadAssurance.Proof(source, fallsBackAfter(index))
             ChainSource.QUORUM -> if (ChainDataRouter.quorumMembers(pool).size >= policy.quorumM) {
                 val members = ChainDataRouter.quorumMembers(pool, policy.quorumK)
                 return ReadAssurance.CrossChecked(
                     providers = members.size,
                     needed = policy.quorumM,
                     yours = members.count { it in chain.userRpcUrls },
+                    fallback = fallsBackAfter(index),
                 )
             }
             ChainSource.DIRECT -> break
         }
     }
-    return ReadAssurance.Single(yours = chain.userRpcUrls.isNotEmpty())
+    val yours = chain.userRpcUrls.isNotEmpty()
+    return ReadAssurance.Single(yours = yours, fallback = yours && pool.any { it !in chain.userRpcUrls })
 }
 
 /** [readAssurance] as [router] reads [chain] right now. */
 internal fun readAssurance(chain: Chain, router: ChainDataRouter): ReadAssurance =
     readAssurance(chain, router.policy(chain)) { router.isWired(it, chain.id) }
 
-/** The list row's status: "Verified reads", "Custom · Not cross-checked", "Verified reads · Testnet", … */
+/** The list row's status: "Verified reads when available", "Custom · Reads not cross-checked", "… · Testnet", … */
 internal fun chainStatus(chain: Chain, assurance: ReadAssurance): String = listOfNotNull(
     Strings.get(R.string.names_chain_custom).takeIf { !chain.builtIn },
     Strings.get(
         when (assurance) {
-            is ReadAssurance.Proof, is ReadAssurance.CrossChecked -> R.string.names_chain_status_verified
-            is ReadAssurance.Single ->
-                if (assurance.yours) R.string.names_chain_status_yours else R.string.names_chain_status_unchecked
+            is ReadAssurance.Proof, is ReadAssurance.CrossChecked ->
+                if (assurance.fallback) R.string.names_chain_status_verified_fallback else R.string.names_chain_status_verified
+            is ReadAssurance.Single -> when {
+                !assurance.yours -> R.string.names_chain_status_unchecked
+                assurance.fallback -> R.string.names_chain_status_yours_fallback
+                else -> R.string.names_chain_status_yours
+            }
         },
     ),
     Strings.get(R.string.names_chain_testnet).takeIf { chain.isTestnet },
@@ -185,8 +212,18 @@ internal fun readAssuranceLine(assurance: ReadAssurance): String = when (assuran
         Strings.plural(R.plurals.names_assurance_cross_checked, assurance.providers, assurance.providers)
     }
     is ReadAssurance.Single -> Strings.get(
-        if (assurance.yours) R.string.names_assurance_single_yours else R.string.names_assurance_single,
+        when {
+            !assurance.yours -> R.string.names_assurance_single
+            assurance.fallback -> R.string.names_assurance_single_yours_fallback
+            else -> R.string.names_assurance_single_yours
+        },
     )
+}.let { line ->
+    // A checked tier's promise holds only while it answers: say what
+    // happens when it doesn't (the Single-yours wording already does).
+    if (assurance.fallback && assurance !is ReadAssurance.Single) {
+        line + " " + Strings.get(R.string.names_assurance_fallback)
+    } else line
 }
 
 /**
@@ -407,6 +444,7 @@ internal fun ChainDetailPage(
     // before there's an RPC in it.
     var addingRpc by rememberSaveable(chain.id) { mutableStateOf(false) }
     val rpcField = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
     // Keyed to the RPC lists too: a result naming an RPC the user has
     // since removed (or read before they added one) no longer describes
     // this chain, and a check still running writes only to the old state.
@@ -525,6 +563,19 @@ internal fun ChainDetailPage(
                         }
                     } else rpcError?.let {
                         Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                    // Opened by "Use my own RPC" with nothing in it yet:
+                    // a way to put it away again without leaving the page.
+                    if (chain.userRpcUrls.isEmpty()) {
+                        TextButton(
+                            onClick = {
+                                addingRpc = false
+                                newRpc = ""
+                                rpcError = null
+                                focusManager.clearFocus()
+                            },
+                            enabled = !saving,
+                        ) { Text(stringResource(R.string.common_cancel)) }
                     }
                 }
             }
