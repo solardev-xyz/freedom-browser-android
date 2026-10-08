@@ -130,6 +130,24 @@ class TabDocumentsTest {
     }
 
     @Test
+    fun `a commit with a fragment or other casing still finds its answer and source (#511 R2-F1)`() {
+        val tab = TabDocuments()
+        // Opened at …/#about, served by this device's node; the address
+        // bar's start and Chromium's commit both carry the fragment, the
+        // interceptor's request URL may not.
+        tab.navigationStarted("HTTPS://BAFYA.ipfs.freedom.baby#about")
+        tab.mainFrameAnswered("$ipfs/", ipfsGateway = null)
+        tab.committed("$ipfs/#about", ipfs)
+        assertEquals(DocumentSource(null), tab.committedSource)
+
+        // The same through an external gateway keeps that gateway named.
+        tab.navigationStarted("$other/#x")
+        tab.mainFrameAnswered("$other#x", ipfsGateway = "https://gw.example")
+        tab.committed("HTTPS://BAFYOTHER.ipfs.freedom.baby/#x", other)
+        assertEquals(DocumentSource("https://gw.example"), tab.committedSource)
+    }
+
+    @Test
     fun `document keys match a started URL to its commit`() {
         assertEquals("http://localhost:8700/", documentKey("HTTP://LocalHost:8700"))
         assertEquals("https://a.example/p?q=%20", documentKey("https://a.example/p?q=%20#f"))

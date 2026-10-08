@@ -255,6 +255,14 @@ class TabsState(
     internal var pageCertificate: ((BrowserState) -> CertFacts?)? = null
 
     /**
+     * Hook installed by the [BrowserWebViewHost]: where the given tab's
+     * document on screen was fetched from ([TabDocuments.committedSource]),
+     * for Page info (#479). `null` when unknown, or with no host.
+     */
+    @Volatile
+    internal var pageSource: ((BrowserState) -> DocumentSource?)? = null
+
+    /**
      * Hook installed by the [BrowserWebViewHost]: have the given tab's
      * document, if it is on the given origin, clear that origin's data
      * and unregister its service workers itself, then reload

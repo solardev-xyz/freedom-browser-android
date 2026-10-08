@@ -124,6 +124,14 @@ class NodeService : Service() {
     @Volatile
     private var relayedGnosis: Chain? = null
 
+    /**
+     * The IPFS start settings as the UI last relayed them with
+     * [INodeService.setIpfsConfig] (#475); null until it has, when
+     * [maybeStartIpfs] reads this process's own copy of the file.
+     */
+    @Volatile
+    private var relayedIpfsConfig: IpfsConfig? = null
+
     @Volatile
     private var storedGnosis: Chain? = null
 
@@ -193,8 +201,18 @@ class NodeService : Service() {
      */
     private val callbacks = RemoteCallbackList<INodeCallback>()
 
+    /** The Swarm state as last broadcast, which [binder] hands out too. */
+    private val swarmBroadcast = LastBroadcast { reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value) }
+
+    /**
+     * The Swarm state the notification's throttle last sent, posted or not
+     * (a demoted service posts nothing): what a re-promotion shows (R4-M1).
+     */
+    private val swarmNotified = LastBroadcast { reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value) }
+
     private val binder = object : INodeService.Stub() {
-        override fun getState(): NodeInfo = reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)
+        // What the throttled broadcast last sent, not the live count (#471).
+        override fun getState(): NodeInfo = swarmBroadcast.current()
 
         override fun getIpfsState(): IpfsInfo = ipfsNode?.state?.value ?: IpfsInfo()
 
@@ -213,8 +231,7 @@ class NodeService : Service() {
 
         override fun registerCallback(cb: INodeCallback?) {
             cb ?: return
-            callbacks.register(cb)
-            runCatching { cb.onStateChanged(reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)) }
+            swarmBroadcast.join({ callbacks.register(cb) }) { runCatching { cb.onStateChanged(it) } }
             runCatching { cb.onIpfsStateChanged(ipfsNode?.state?.value ?: IpfsInfo()) }
             runCatching { cb.onRadicleStateChanged(radicleNode.state.value) }
         }
@@ -231,6 +248,10 @@ class NodeService : Service() {
 
         override fun stopIpfs() {
             scope.launch { maybeStopIpfs() }
+        }
+
+        override fun setIpfsConfig(lowPower: Boolean, routingMode: String?) {
+            IpfsConfig.relayed(lowPower, routingMode)?.let { relayedIpfsConfig = it }
         }
 
         override fun onAppForeground() {
@@ -732,8 +753,13 @@ class NodeService : Service() {
 
     private fun repromoteForegroundIfDemoted() {
         if (!foreground.demoted) return
-        val refusal = foreground.promote {
-            startForeground(NOTIFICATION_ID, buildNotification(reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)), foregroundTypeCompat())
+        // The notification throttle's last value, not the live count: a
+        // held-back count posted here would stick once the count went back
+        // to what the throttle last sent, which it drops as unchanged.
+        val refusal = swarmNotified.withCurrent { info ->
+            foreground.promote {
+                startForeground(NOTIFICATION_ID, buildNotification(info), foregroundTypeCompat())
+            }
         }
         Log.i(TAG, if (refusal == null) "re-promoted to foreground service" else "foreground re-promotion refused: ${refusal.message}")
     }
@@ -844,16 +870,25 @@ class NodeService : Service() {
             )
         }?.let { Log.w(TAG, "foreground status refused at create; running demoted: ${it.message}") }
 
-        swarmObserver = combine(swarmNode.state, bootIdentity.owed, ::Pair)
-            .onEach { (raw, owed) ->
-                // In a doomed process, why the node isn't up yet (#116);
-                // and a restart waiting on an unreadable identity (#357).
-                val info = reportedNodeInfo(raw, doomed, owed)
-                updateNotification(info)
-                broadcastState(info)
-                Log.i(TAG, "swarm → ${info.status}  peers=${info.connectedPeers}")
-            }
-            .launchIn(scope)
+        // In a doomed process, why the node isn't up yet (#116);
+        // and a restart waiting on an unreadable identity (#357).
+        val swarmReported = combine(swarmNode.state, bootIdentity.owed) { raw, owed ->
+            reportedNodeInfo(raw, doomed, owed)
+        }
+        // A new peer count alone (every second while it churns) reaches
+        // the app at most every few seconds and the notification at most
+        // twice a minute (#471); anything else goes out at once.
+        swarmObserver = scope.launch {
+            swarmReported.throttlePeerCount(PEER_BROADCAST_MS)
+                .onEach { info ->
+                    swarmBroadcast.publish(info, ::broadcastState)
+                    Log.i(TAG, "swarm → ${info.status}  peers=${info.connectedPeers}")
+                }
+                .launchIn(this)
+            swarmReported.throttlePeerCount(PEER_NOTIFICATION_MS)
+                .onEach { info -> swarmNotified.publish(info, ::updateNotification) }
+                .launchIn(this)
+        }
 
         if (doomed) {
             // An earlier instance's exit is pending (#116): starting ant
@@ -906,13 +941,16 @@ class NodeService : Service() {
      * `ipfs_low_power` and `ipfs_routing_mode` are snapshotted here
      * and applied on node init; the freedom-ipfs wrapper
      * has no live-reconfig path, so changing them in Settings only
-     * takes effect on the next start cycle (off → on).
+     * takes effect on the next start cycle (off → on). They come from
+     * the UI's relay ([relayedIpfsConfig], #475): this process's own
+     * DataStore read the file once and never sees it change.
      */
     private suspend fun maybeStartIpfs(): Unit = ipfsLifecycle.withLock {
         if (ipfsNode != null) return@withLock
-        val settings = NodeSettings.get(this)
-        val lowPower = settings.ipfsLowPower.first()
-        val routingMode = settings.ipfsRoutingMode.first()
+        val (lowPower, routingMode) = IpfsConfig.forStart(relayedIpfsConfig) {
+            val settings = NodeSettings.get(this)
+            IpfsConfig(settings.ipfsLowPower.first(), settings.ipfsRoutingMode.first())
+        }
 
         val node = IpfsNode(
             IpfsNode.Config(
@@ -1108,6 +1146,12 @@ class NodeService : Service() {
         const val MAX_STAMP_DAYS = 3650L
 
         private const val MAX_RADICLE_CALLS = 4
+
+        /** How often a change in the Swarm peer count alone reaches the app, at most (#471). */
+        private const val PEER_BROADCAST_MS = 5_000L
+
+        /** How often a change in the Swarm peer count alone reposts the notification, at most (#471). */
+        private const val PEER_NOTIFICATION_MS = 30_000L
 
         /**
          * The longest a stop waits for a postage spend still running

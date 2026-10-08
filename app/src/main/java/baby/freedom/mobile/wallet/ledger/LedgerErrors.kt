@@ -93,6 +93,16 @@ class LedgerException(val kind: Kind, private val words: Said? = null, cause: Th
     /** Whether the Ledger approved a different address than the one it was asked to show (#365). */
     val shownDifferent: Boolean get() = cause is ShownDifferent
 
+    /**
+     * Behind a [Kind.UNSUPPORTED] from typed data (#476): the Ledger can
+     * sign it only by [hashes], which the sheet the user approved didn't
+     * show. Nothing was shown on the device.
+     */
+    class HashesOnly(val hashes: LedgerTypedDataHashes) : Exception("can sign only by hashes not shown")
+
+    /** The hashes typed data can be signed by on this Ledger, once shown on the phone ([HashesOnly]); null for any other failure. */
+    val hashesOnly: LedgerTypedDataHashes? get() = (cause as? HashesOnly)?.hashes
+
     /** The status word behind a [LedgerException], for the log (it's never secret). */
     class StatusWord(val sw: Int) : Exception("status 0x%04x".format(sw))
 }

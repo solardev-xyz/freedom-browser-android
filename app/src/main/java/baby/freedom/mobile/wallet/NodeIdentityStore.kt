@@ -111,7 +111,7 @@ class NodeIdentityStore internal constructor(
         // The provider picks the IV (the Keystore insists on it).
         cipher.init(Cipher.ENCRYPT_MODE, key)
         cipher.updateAAD(vaultTag.toByteArray())
-        val plain = identity.swarmKey + identity.ipfsKey + radicle
+        val plain = plaintext(identity.swarmKey, identity.ipfsKey, radicle)
         val sealed = try {
             cipher.doFinal(plain)
         } finally {
@@ -216,6 +216,19 @@ class NodeIdentityStore internal constructor(
         private const val VERSION = 2
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
+
+        /**
+         * `swarm ‖ ipfs ‖ radicle` in one array at its final size, which the
+         * caller zeroes: `ByteArray.plus` would leave an unzeroed
+         * intermediate holding the Swarm and IPFS keys (#477).
+         */
+        private fun plaintext(swarm: ByteArray, ipfs: ByteArray, radicle: ByteArray): ByteArray {
+            val out = HdKeys.scratch(ByteArray(swarm.size + ipfs.size + radicle.size))
+            swarm.copyInto(out)
+            ipfs.copyInto(out, swarm.size)
+            radicle.copyInto(out, swarm.size + ipfs.size)
+            return out
+        }
 
         /** The store on this device. Safe to use from any of the app's processes. */
         fun get(context: Context): NodeIdentityStore {

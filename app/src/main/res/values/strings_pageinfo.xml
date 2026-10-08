@@ -26,6 +26,13 @@
     <string name="page_info_dweb_ipfs_title">Loaded from IPFS</string>
     <string name="page_info_dweb_title">Loaded from a peer-to-peer network</string>
     <string name="page_info_dweb_body">This page comes from a peer-to-peer network, not from one website\'s server, so there is no certificate to show.</string>
+    <!-- %1$s: the external IPFS gateway set in Settings, e.g. https://ipfs.io (#479). -->
+    <string name="page_info_ipfs_gateway_title">Loaded through an IPFS gateway</string>
+    <string name="page_info_ipfs_gateway_body">This page comes from one server, %1$s, not from the peer-to-peer network. Its content isn\'t checked against the page\'s CID, so that server could have changed it.</string>
+    <!-- The page came from this device's IPFS node, and the external gateway %1$s was set after it loaded (#479). -->
+    <string name="page_info_ipfs_gateway_since_body">This page came from the peer-to-peer network through this phone\'s IPFS node, which checked it against the page\'s CID. IPFS now goes through one server, %1$s, so what the page loads from here on comes from that server and isn\'t checked.</string>
+    <!-- Follows the name's trust summary when the page came through an external IPFS gateway; %1$s as above. -->
+    <string name="page_info_name_gateway_note">That only covers where the name points. The page itself came through %1$s and wasn\'t checked.</string>
     <string name="page_info_onchain_title">Loaded from a blockchain</string>
     <string name="page_info_onchain_body">This page is read from a smart contract on a blockchain, not from one website\'s server, so there is no certificate to show.</string>
     <string name="page_info_radicle_title">Loaded from Radicle</string>

@@ -171,9 +171,14 @@ internal object LedgerApdus {
      * [signEip712Full] can't stream it (an array over 255, a name over 255
      * bytes, a missing nested struct): the sheet must say so before the
      * user approves, since the Ledger's screen then no longer backs up what
-     * the phone showed (#239). Null when the device shows it field by field
-     * (or it can't be signed on a Ledger at all). [LedgerEthApp.signTypedData]
-     * takes the hashed path on exactly this condition.
+     * the phone showed (#239). Null when [data] *can* be streamed field by
+     * field (or can't be signed on a Ledger at all), which is not a promise
+     * the device will show it that way: an Ethereum app too old for
+     * field-by-field signing answers `0x6D00`, known only once the device
+     * answers, and [LedgerEthApp.signTypedData] then falls back to hashes
+     * too. Without these hashes shown it refuses with
+     * [LedgerException.hashesOnly] carrying them, so a caller must still
+     * handle that and ask again with them shown (#476).
      */
     fun blindHashes(data: Eip712.TypedData): LedgerTypedDataHashes? = if (streamable(data)) null else eip712Hashes(data)
 
@@ -470,11 +475,16 @@ internal class LedgerEthApp(private val link: LedgerLink) {
     /**
      * Typed data shown field by field; on an Ethereum app too old for that
      * (INS 0x1A unknown: `0x6D00`), or data it can't be streamed as, the
-     * two hashes instead — as desktop falls back. The second case is known
-     * before signing ([LedgerApdus.blindHashes]), and the sheet says the
-     * Ledger will show only these hashes, and which (#239).
+     * two hashes instead — as desktop falls back — but only when they are
+     * [hashesShown]: the hashes the sheet the user approved showed, so the
+     * Ledger's screen can be checked against the phone's (#239). The
+     * second case is known before signing ([LedgerApdus.blindHashes]); the
+     * first only once the device answers, and then, with no hashes shown,
+     * it throws [LedgerException.Kind.UNSUPPORTED] carrying the hashes
+     * ([LedgerException.hashesOnly]) before anything is shown on the
+     * device, so the caller can show them and ask again (#476).
      */
-    suspend fun signTypedData(path: String, data: Eip712.TypedData): LedgerSignature {
+    suspend fun signTypedData(path: String, data: Eip712.TypedData, hashesShown: LedgerTypedDataHashes? = null): LedgerSignature {
         val full = try {
             LedgerApdus.signEip712Full(path, data)
         } catch (e: LedgerApdus.Unencodable) {
@@ -487,8 +497,9 @@ internal class LedgerEthApp(private val link: LedgerLink) {
                 if ((e.cause as? LedgerException.StatusWord)?.sw != 0x6d00) throw e
             }
         }
-        // The same hashes the sheet showed when the data can't be streamed (LedgerApdus.blindHashes, #239).
         val hashes = LedgerApdus.eip712Hashes(data) ?: throw LedgerException(LedgerException.Kind.UNSUPPORTED)
+        // Never hashes the user wasn't shown on the phone (#239, #476).
+        if (hashes != hashesShown) throw LedgerException(LedgerException.Kind.UNSUPPORTED, cause = LedgerException.HashesOnly(hashes))
         return LedgerApdus.parseSignature(sendAll(listOf(LedgerApdus.signEip712Hashed(path, hashes.domain, hashes.message))))
     }
 

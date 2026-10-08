@@ -309,13 +309,37 @@ class LedgerProtocolTest {
     }
 
     @Test
-    fun `an Ethereum app too old for field-by-field typed data signs the hashes instead`() = runBlocking {
+    fun `an Ethereum app too old for field-by-field typed data signs the hashes instead, only once the phone has shown them (#476)`() = runBlocking {
         val data = Eip712.parse(vectors.getJSONObject("eip712").getJSONObject("typed").toString())
+        val hashes = LedgerApdus.eip712Hashes(data)!!
+        // With no hashes shown, the hashed command is never sent: the hashes come back to be shown first.
+        val unshown = Scripted(listOf("e01a" to "6d00"))
+        try {
+            LedgerEthApp(unshown).signTypedData(path, data)
+            fail("signed by hashes the phone never showed")
+        } catch (e: LedgerException) {
+            assertEquals(LedgerException.Kind.UNSUPPORTED, e.kind)
+            assertEquals(hashes, e.hashesOnly)
+        }
+        assertEquals(1, unshown.n)
+        // Nor by hashes other than the ones shown.
+        val other = LedgerTypedDataHashes(ByteArray(32), ByteArray(32))
+        val wrong = Scripted(listOf("e01a" to "6d00"))
+        try {
+            LedgerEthApp(wrong).signTypedData(path, data, other)
+            fail("signed by hashes other than those shown")
+        } catch (e: LedgerException) {
+            assertEquals(hashes, e.hashesOnly)
+        }
+        assertEquals(1, wrong.n)
+        // Shown, they're signed: the very hashes the phone showed.
         val sig = "01".repeat(65)
-        val link = Scripted(listOf("e01a" to "6d00", "e00c0000" to sig + "9000"))
+        val link = Scripted(listOf("e01a" to "6d00", LedgerApdus.signEip712Hashed(path, hashes.domain, hashes.message).toHex() to sig + "9000"))
         val app = LedgerEthApp(link)
-        assertEquals("01".repeat(32), app.signTypedData(path, data).r.toHex())
+        assertEquals("01".repeat(32), app.signTypedData(path, data, hashes).r.toHex())
         assertEquals(2, link.n)
+        // Any other failure carries no hashes: nothing to show and ask again for.
+        assertNull(LedgerException(LedgerException.Kind.REJECTED).hashesOnly)
         // Any other refusal is the answer: nothing is retried behind the user's back.
         val rejected = LedgerEthApp(Scripted(listOf("e01a" to "6985")))
         try {
@@ -348,8 +372,17 @@ class LedgerProtocolTest {
         assertArrayEquals(Eip712.hashStruct(data.types, "Batch", data.message, 0), hashes.message)
         // …and they're the very hashes the device is then given: the phone's warning and the Ledger's screen agree.
         val link = Scripted(listOf(LedgerApdus.signEip712Hashed(path, hashes.domain, hashes.message).toHex() to "01".repeat(65) + "9000"))
-        LedgerEthApp(link).signTypedData(path, data)
+        LedgerEthApp(link).signTypedData(path, data, hashes)
         assertEquals(1, link.n)
+        // Not shown (a caller that never asked blindHashes), nothing goes to the device (#476).
+        val unshown = Scripted(emptyList())
+        try {
+            LedgerEthApp(unshown).signTypedData(path, data)
+            fail("signed by hashes the phone never showed")
+        } catch (e: LedgerException) {
+            assertEquals(hashes, e.hashesOnly)
+        }
+        assertEquals(0, unshown.n)
         // A missing nested struct is the same case.
         val missing = Eip712.parse(
             """{"types":{"EIP712Domain":[{"name":"name","type":"string"}],"A":[{"name":"b","type":"B"}],"B":[{"name":"x","type":"uint8"}]},
@@ -376,7 +409,7 @@ class LedgerProtocolTest {
         )
         assertEquals(
             LedgerException.Kind.BLIND_SIGNING,
-            kind { LedgerEthApp(Scripted(listOf("e01a" to "6d00", "e00c0000" to "6a80"))).signTypedData(path, data) },
+            kind { LedgerEthApp(Scripted(listOf("e01a" to "6d00", "e00c0000" to "6a80"))).signTypedData(path, data, LedgerApdus.eip712Hashes(data)) },
         )
         // Field by field: a struct definition refused is bad data; the first value refused is
         // Blind signing (app-ethereum refuses unfiltered data as it's about to show it), as is the sign step.

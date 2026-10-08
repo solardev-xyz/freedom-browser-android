@@ -13,7 +13,9 @@ import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.Secp256k1
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.wallet.ledger.LedgerApdus
 import baby.freedom.mobile.wallet.ledger.LedgerException
+import baby.freedom.mobile.wallet.ledger.LedgerTypedDataHashes
 import baby.freedom.mobile.wallet.ledger.LedgerKey
 import java.math.BigInteger
 import java.util.concurrent.Executors
@@ -134,9 +136,19 @@ class OpenLvSessionTest {
             if (!account.isLedger) super.signPersonal(account, message)
             else onLedger { MessageSigning.sign(it, account.address, MessageSigning.personalDigest(message)) }
 
-        override suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray): String =
-            if (!account.isLedger) super.signTypedData(account, data, digest)
-            else onLedger { MessageSigning.sign(it, account.address, digest) }
+        /** A Ledger whose Ethereum app can't show typed data field by field (`0x6D00`, #476), when set. */
+        var hashesOnly = false
+        /** The hashes each typed-data signature on "the Ledger" was asked with. */
+        val typedSigned = mutableListOf<LedgerTypedDataHashes?>()
+
+        override suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray, ledgerHashes: LedgerTypedDataHashes?): String {
+            if (!account.isLedger) return super.signTypedData(account, data, digest, ledgerHashes)
+            typedSigned += ledgerHashes
+            if (hashesOnly && ledgerHashes == null) {
+                throw LedgerException(LedgerException.Kind.UNSUPPORTED, cause = LedgerException.HashesOnly(LedgerApdus.eip712Hashes(data)!!))
+            }
+            return onLedger { MessageSigning.sign(it, account.address, digest) }
+        }
 
         override fun transactionSigner(account: WalletAccount, fresh: () -> Boolean): suspend (EthTransaction) -> EthTransaction.Signed =
             if (!account.isLedger) super.transactionSigner(account, fresh)
@@ -432,6 +444,38 @@ class OpenLvSessionTest {
         s.onRequest(1, 4, "eth_signTypedData_v4", JSONArray().put(ledgerAccount.address).put(payload.toString()))
         s.awaitSheet().decide(OpenLvSession.Decision.Approve())
         assertEquals(OpenLvSession.REJECTED_CODE, error(engine.next()))
+    }
+
+    @Test
+    fun `typed data a Ledger can sign only by hashes once it answers is shown again with them before it's signed (#476)`() {
+        val (s, engine, keys) = session(FakeEngine(), LedgerKeys())
+        s.startOnScope()
+        keys.hashesOnly = true
+        val payload = JSONObject()
+            .put("types", JSONObject().put("Hello", JSONArray().put(JSONObject().put("name", "to").put("type", "string"))))
+            .put("domain", JSONObject().put("name", "Shop"))
+            .put("primaryType", "Hello")
+            .put("message", JSONObject().put("to", "desktop"))
+        val hashes = LedgerApdus.eip712Hashes(Eip712.parseStrict(payload.toString()))!!
+        for ((id, second) in listOf(OpenLvSession.Decision.Reject, OpenLvSession.Decision.Approve()).withIndex()) {
+            keys.typedSigned.clear()
+            s.onRequest(1, id + 1, "eth_signTypedData_v4", JSONArray().put(ledgerAccount.address).put(payload.toString()))
+            val first = s.awaitSheet()
+            assertNull((first.request as OpenLvSession.Request.TypedData).ledgerHashes)
+            first.decide(OpenLvSession.Decision.Approve())
+            val again = runBlocking { withTimeout(5_000) { s.approval.first { it != null && it !== first }!! } }
+            assertEquals(hashes, (again.request as OpenLvSession.Request.TypedData).ledgerHashes)
+            again.decide(second)
+            if (second == OpenLvSession.Decision.Reject) {
+                assertEquals(OpenLvSession.REJECTED_CODE, error(engine.next()))
+                assertEquals(listOf<LedgerTypedDataHashes?>(null), keys.typedSigned)
+                assertEquals(0, keys.ledgerSigned)
+            } else {
+                assertTrue((result(engine.next()) as String).startsWith("0x"))
+                assertEquals(listOf(null, hashes), keys.typedSigned)
+                assertEquals(1, keys.ledgerSigned)
+            }
+        }
     }
 
     @Test

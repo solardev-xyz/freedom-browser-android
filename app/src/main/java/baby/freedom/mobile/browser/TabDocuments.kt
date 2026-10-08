@@ -40,8 +40,14 @@ internal object DocumentClock {
 internal class TabDocuments {
     private val origins = ConcurrentHashMap<String, Long>()
 
-    /** Main-frame answers not yet committed: url to tick, oldest first. */
-    private val answers = ArrayDeque<Pair<String, Long>>()
+    /**
+     * A main-frame answer not yet committed: its URL (as [documentKey], the
+     * same key [starts] and the commit are matched by), tick and [ipfsGateway].
+     */
+    private class Answer(val key: String, val tick: Long, val ipfsGateway: String?)
+
+    /** Main-frame answers not yet committed, oldest first. */
+    private val answers = ArrayDeque<Answer>()
 
     /**
      * Main-frame navigations started and not yet committed: URL (as
@@ -54,6 +60,17 @@ internal class TabDocuments {
     var committedAt: Long = 0L
         private set
 
+    /**
+     * Where the document on screen came from, for Page info (#479):
+     * the external IPFS gateway that served its answer, or this device's
+     * node / a non-IPFS source ([DocumentSource.ipfsGateway] null).
+     * `null` when it isn't known — a page a service worker answered, or
+     * nothing committed yet — so the reader goes by the current setting.
+     */
+    @Volatile
+    var committedSource: DocumentSource? = null
+        private set
+
     /** A document (main frame or frame) was requested on [origin]. */
     fun requested(origin: String) {
         origins[origin] = DocumentClock.next()
@@ -61,12 +78,15 @@ internal class TabDocuments {
 
     /**
      * The interceptor handed Chromium the main-frame answer for [url],
-     * one that replaces the document on screen once it commits.
+     * one that replaces the document on screen once it commits;
+     * [ipfsGateway] is the external IPFS gateway it was fetched from
+     * (#125), null for anything else.
      */
-    fun mainFrameAnswered(url: String) {
+    fun mainFrameAnswered(url: String, ipfsGateway: String? = null) {
+        val key = documentKey(url)
         val tick = DocumentClock.next()
         synchronized(answers) {
-            answers.addLast(url to tick)
+            answers.addLast(Answer(key, tick, ipfsGateway))
             while (answers.size > MAX_PENDING_ANSWERS) answers.removeFirst()
         }
     }
@@ -88,7 +108,9 @@ internal class TabDocuments {
 
     /**
      * A main-frame document for [url] committed ([origin]: its virtual
-     * origin, if any). Its answer is the latest one for that URL; with
+     * origin, if any). Its answer is the latest one for that URL — matched
+     * by [documentKey], like a start, so a commit reported with a fragment
+     * or a differently-cased host still finds it (#511 R2-F1); with
      * none (a page a service worker answered), the start of the latest
      * navigation to it; with neither — redirected on the network, where
      * the interceptor sees no new request — the latest answer of all.
@@ -96,12 +118,15 @@ internal class TabDocuments {
     fun committed(url: String?, origin: String?) {
         val since = synchronized(answers) {
             val key = url?.let(::documentKey)
-            val tick = answers.lastOrNull { it.first == url }?.second
-                ?: starts.lastOrNull { it.first == key }?.second
-                ?: answers.lastOrNull()?.second
+            val answer = key?.let { k -> answers.lastOrNull { it.key == k } }
+            val start = if (answer == null) starts.lastOrNull { it.first == key }?.second else null
+            val committedAnswer = answer ?: if (start == null) answers.lastOrNull() else null
+            val tick = committedAnswer?.tick ?: start
+            // A page a service worker answered: who served it is unknown.
+            committedSource = committedAnswer?.let { DocumentSource(it.ipfsGateway) }
             if (tick != null) {
                 // What was answered or started before it can't commit after it.
-                answers.removeAll { it.second <= tick }
+                answers.removeAll { it.tick <= tick }
                 starts.removeAll { it.second <= tick }
             }
             tick
@@ -127,6 +152,13 @@ internal class TabDocuments {
         const val MAX_PENDING_ANSWERS = 8
     }
 }
+
+/**
+ * Where a committed main-frame document was fetched from ([TabDocuments.committedSource]):
+ * [ipfsGateway] is the external IPFS gateway (#125) that served it, or
+ * null for this device's node or anything that isn't IPFS content.
+ */
+internal data class DocumentSource(val ipfsGateway: String?)
 
 /**
  * [url] as a navigation to it commits: scheme and host lower-cased, an

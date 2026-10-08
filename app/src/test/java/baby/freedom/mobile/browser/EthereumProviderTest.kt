@@ -20,7 +20,9 @@ import baby.freedom.mobile.wallet.Mnemonic
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultTest
 import baby.freedom.mobile.wallet.WalletAccount
+import baby.freedom.mobile.wallet.ledger.LedgerApdus
 import baby.freedom.mobile.wallet.ledger.LedgerException
+import baby.freedom.mobile.wallet.ledger.LedgerTypedDataHashes
 import java.math.BigInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -109,7 +111,17 @@ class EthereumProviderTest {
         var ledgerFailure: LedgerException? = null
         override suspend fun signMessage(account: WalletAccount, message: ByteArray) =
             sign(account, MessageSigning.personalDigest(message))
-        override suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray) = sign(account, digest)
+        /** A Ledger whose Ethereum app can't show typed data field by field (`0x6D00`, #476), when set. */
+        var hashesOnlyLedger = false
+        /** The hashes each typed-data signature was asked with. */
+        val typedSigned = mutableListOf<LedgerTypedDataHashes?>()
+        override suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray, ledgerHashes: LedgerTypedDataHashes?): String {
+            typedSigned += ledgerHashes
+            if (hashesOnlyLedger && ledgerHashes == null) {
+                throw LedgerException(LedgerException.Kind.UNSUPPORTED, cause = LedgerException.HashesOnly(LedgerApdus.eip712Hashes(data)!!))
+            }
+            return sign(account, digest)
+        }
         private fun sign(account: WalletAccount, digest: ByteArray): String {
             ledgerFailure?.let { throw it }
             check(account == main) { "only the cow key here" }
@@ -663,6 +675,34 @@ class EthereumProviderTest {
         answer = { EthAnswer.Rejected }
         assertEquals(4001, code(call("eth_signTypedData_v4", JSONArray().put(ledger.address).put(mail))))
         assertNull((asks.single() as EthAsk.SignTypedData).ledgerHashes)
+    }
+
+    @Test
+    fun `typed data a Ledger can sign only by hashes once it answers is shown again with them before it's signed (#476)`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
+        wallet.hashesOnlyLedger = true
+        val hashes = LedgerApdus.eip712Hashes(Eip712.parse(mail))!!
+        // Asked again with the hashes; turned down there, nothing is signed by them.
+        asks.clear()
+        answer = { if ((it as EthAsk.SignTypedData).ledgerHashes == null) EthAnswer.Approved() else EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_signTypedData_v4", JSONArray().put(main.address).put(mail))))
+        assertEquals(listOf(null, hashes), asks.map { (it as EthAsk.SignTypedData).ledgerHashes })
+        assertEquals(listOf<LedgerTypedDataHashes?>(null), wallet.typedSigned)
+        // Approved there too, it's signed by those very hashes.
+        asks.clear()
+        wallet.typedSigned.clear()
+        answer = { EthAnswer.Approved() }
+        assertEquals(
+            "0x4355c47d63924e8a72e509b65029052eb6c299d53a04e167c5775fd466751c9d07299936d304c153f6443dfa05f40ff007d72911b6f72307f996231605b915621c",
+            ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(mail))),
+        )
+        assertEquals(2, asks.size)
+        val again = asks.last() as EthAsk.SignTypedData
+        assertEquals(hashes, again.ledgerHashes)
+        assertEquals("Ether Mail", again.domainName)
+        assertEquals(listOf(null, hashes), wallet.typedSigned)
     }
 
     @Test

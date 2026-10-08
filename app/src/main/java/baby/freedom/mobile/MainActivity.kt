@@ -75,6 +75,7 @@ import baby.freedom.mobile.node.IMyotisCallback
 import baby.freedom.mobile.node.IMyotisService
 import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
+import baby.freedom.mobile.node.IpfsConfig
 import baby.freedom.mobile.node.IpfsStartRequest
 import baby.freedom.mobile.node.NodeLogSource
 import baby.freedom.mobile.node.MyotisChains
@@ -257,6 +258,17 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         runCatching { b?.setSwarmCacheCapacity(bytes) }
     }
 
+    /**
+     * The IPFS node's start settings (#475), relayed to `:node` on every
+     * bind and every change; null until first read. Main thread only.
+     */
+    private var ipfsConfig: IpfsConfig? = null
+
+    private fun relayIpfsConfig(b: INodeService?, config: IpfsConfig?) {
+        config ?: return
+        runCatching { b?.setIpfsConfig(config.lowPower, config.routingMode) }
+    }
+
     private fun relaySwarmMode(b: INodeService?, relay: SwarmRelay?) {
         relay ?: return
         val gnosis = relay.gnosis
@@ -391,6 +403,8 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                 }
             }
             runCatching { b.radicleState?.let { radicleInfoFlow.value = it } }
+            // Before the start below, so it boots with them (#475).
+            relayIpfsConfig(b, ipfsConfig)
             // An `ipfs://` link that cold-started the app asked for IPFS
             // before this bind connected (#373).
             ipfsStart.onConnected { runCatching { b.ensureIpfsStarted() } }
@@ -570,6 +584,18 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                 swapEnabled = enabled
                 relaySwapEnabled(binder, enabled)
             }
+        }
+
+        // IPFS's routing mode and low-power switch (#475): `:node` can't
+        // see them change in its own copy of the settings file, so they're
+        // relayed for its next IPFS start.
+        lifecycleScope.launch {
+            combine(settings.ipfsLowPower, settings.ipfsRoutingMode) { lowPower, mode -> IpfsConfig(lowPower, mode) }
+                .distinctUntilChanged()
+                .collect { config ->
+                    ipfsConfig = config
+                    relayIpfsConfig(binder, config)
+                }
         }
 
         // The Swarm cache size, likewise: `:node` caps the running node's
@@ -768,7 +794,13 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    val info by infoFlow.collectAsState()
+                    // The peer count apart (#471): it changes every few
+                    // seconds while the node runs, and only the pages that
+                    // show it should recompose for it.
+                    val info by remember { infoFlow.map { it.copy(connectedPeers = 0L) } }
+                        .collectAsState(initial = infoFlow.value.copy(connectedPeers = 0L))
+                    val swarmPeers = remember { infoFlow.map { it.connectedPeers } }
+                        .collectAsState(initial = infoFlow.value.connectedPeers)
                     val ipfsInfo by ipfsInfoFlow.collectAsState()
                     val radicleInfo by radicleInfoFlow.collectAsState()
                     val radicleEnabled by settings.radicleEnabled
@@ -786,6 +818,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                     }
                     BrowserScreen(
                         nodeInfo = info,
+                        swarmPeers = swarmPeers,
                         ipfsInfo = ipfsInfo,
                         runNodeEnabled = runNodeEnabled,
                         onToggleRunNode = ::onToggleRunNode,

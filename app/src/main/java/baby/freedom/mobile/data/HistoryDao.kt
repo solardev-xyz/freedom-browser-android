@@ -4,12 +4,40 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface HistoryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entry: HistoryEntry): Long
+
+    /**
+     * Record [entry] and drop every visit but the newest [keep] (#473),
+     * in one transaction, so the table never grows past [keep] rows and
+     * Room's observers re-run once for the two writes. "Newest" is by
+     * row id — the order visits were recorded in — not [HistoryEntry.visitedAt],
+     * so a device clock that's wrong (or later corrected) can't make the
+     * trim throw away the visits the user just made.
+     */
+    @Transaction
+    suspend fun insertKeeping(entry: HistoryEntry, keep: Int): Long {
+        val id = insert(entry)
+        trimTo(keep)
+        return id
+    }
+
+    /**
+     * Delete every visit but the newest [keep] by row id (#473). The
+     * subquery walks the primary key from the top, so it costs [keep]
+     * steps whatever the table's size, and deletes nothing — and so
+     * wakes no observer — while the table holds [keep] rows or fewer.
+     */
+    @Query(
+        "DELETE FROM history WHERE id <= " +
+            "(SELECT id FROM history ORDER BY id DESC LIMIT 1 OFFSET :keep)",
+    )
+    suspend fun trimTo(keep: Int)
 
     @Query("SELECT * FROM history ORDER BY visitedAt DESC LIMIT :limit")
     fun recent(limit: Int = 500): Flow<List<HistoryEntry>>
@@ -39,13 +67,7 @@ interface HistoryDao {
      * `www.` followed by `%`, [word] the text as typed followed by `%`;
      * all three carry no wildcards of their own (`escapeForLike`).
      */
-    @Query(
-        "SELECT url, title, COUNT(*) AS visits, MAX(visitedAt) AS lastVisit FROM history " +
-            "WHERE url LIKE :q OR title LIKE :q " +
-            "GROUP BY url " +
-            "ORDER BY " + SUGGEST_STRENGTH + " DESC, visits DESC, lastVisit DESC " +
-            "LIMIT :limit",
-    )
+    @Query(SUGGEST_HISTORY)
     fun suggest(q: String, prefix: String, word: String, limit: Int): Flow<List<HistoryPage>>
 
     /**
@@ -110,3 +132,18 @@ internal const val SUGGEST_STRENGTH =
         "WHEN url LIKE '%.' || :word THEN 3 " +
         "WHEN title LIKE :word OR title LIKE '% ' || :word THEN 2 " +
         "ELSE 1 END)"
+
+/**
+ * [HistoryDao.suggest]'s SQL, kept here so `HistoryCapDeviceTest` can
+ * check the query plan of the exact statement Room runs. Binds, in order
+ * of first use: `:q`, `:prefix`, `:word`, `:limit`. With
+ * `index_history_url` (#473) the `GROUP BY` walks the index; the
+ * `ORDER BY` sorts on computed values (match strength, the aggregates),
+ * so it still sorts the matched pages in a temp B-tree.
+ */
+internal const val SUGGEST_HISTORY =
+    "SELECT url, title, COUNT(*) AS visits, MAX(visitedAt) AS lastVisit FROM history " +
+        "WHERE url LIKE :q OR title LIKE :q " +
+        "GROUP BY url " +
+        "ORDER BY " + SUGGEST_STRENGTH + " DESC, visits DESC, lastVisit DESC " +
+        "LIMIT :limit"

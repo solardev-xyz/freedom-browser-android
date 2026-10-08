@@ -26,6 +26,8 @@ data class UrlSuggestion(
 data class LocalMatches(
     val bookmarks: List<UrlSuggestion>,
     val pages: List<HistoryPage>,
+    /** The trimmed text these rows were looked up for. */
+    val query: String = "",
 )
 
 /**

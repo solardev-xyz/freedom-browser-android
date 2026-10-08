@@ -34,13 +34,14 @@ internal object HdKeys {
     const val HARDENED = 0x80000000L
 
     /**
-     * Test hook: sees every secret scratch array this object allocates
-     * (HMAC outputs, `I_L`), so a test can check each one was zeroed.
+     * Test hook: sees every secret scratch array key derivation and
+     * signing allocate (HMAC outputs, `I_L`, the Ed25519 scalar, RFC 6979
+     * state and nonces), so a test can check each one was zeroed.
      */
     @Volatile
     internal var scratchSeen: ((ByteArray) -> Unit)? = null
 
-    private fun scratch(b: ByteArray) = b.also { scratchSeen?.invoke(it) }
+    internal fun scratch(b: ByteArray) = b.also { scratchSeen?.invoke(it) }
 
     /** A private key plus the chain code for deriving its children. */
     class Node(val key: ByteArray, val chainCode: ByteArray) {
@@ -264,12 +265,15 @@ internal object Ed25519 {
 
     fun publicKey(privateKey: ByteArray): ByteArray {
         require(privateKey.size == 32) { "an Ed25519 private key is 32 bytes" }
-        val h = HdKeys.sha512(privateKey)
-        val scalarBytes = h.copyOfRange(0, 32)
+        val h = HdKeys.scratch(HdKeys.sha512(privateKey))
+        val scalarBytes = HdKeys.scratch(h.copyOfRange(0, 32))
         h.fill(0)
         scalarBytes[0] = (scalarBytes[0].toInt() and 248).toByte()
         scalarBytes[31] = ((scalarBytes[31].toInt() and 127) or 64).toByte()
-        val a = BigInteger(1, scalarBytes.reversedArray())
+        // Little-endian: reverse in place, since `reversedArray()` would be
+        // an unzeroed copy of the scalar (#477).
+        scalarBytes.reverse()
+        val a = BigInteger(1, scalarBytes)
         scalarBytes.fill(0)
         var r0 = IDENTITY
         var r1 = E(BX, BY, BigInteger.ONE, BX.multiply(BY).mod(P))

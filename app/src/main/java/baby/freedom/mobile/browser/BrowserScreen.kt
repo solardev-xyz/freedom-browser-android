@@ -60,7 +60,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
@@ -73,12 +75,16 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.constrainHeight
+import androidx.compose.ui.unit.constrainWidth
+import androidx.compose.ui.unit.offset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import androidx.lifecycle.Lifecycle
@@ -331,6 +337,36 @@ internal fun imeDismissalEndsEditing(
 ): Boolean = addressFocused && !keyboardVisible && keyboardWasSeen
 
 /**
+ * The part of the IME inset [contentBottomReserve] depends on: none of
+ * it past the navigation inset, since the reserve only tops up a
+ * navigation inset the rising keyboard hasn't covered yet. Clamped so
+ * the value [BrowserScreen] derives from it stops changing as soon as
+ * the keyboard passes the navigation bar, instead of on every frame of
+ * the IME animation (#481).
+ */
+internal fun imeInsetForReserve(imeInsetPx: Int, navInsetPx: Int): Int =
+    imeInsetPx.coerceIn(0, navInsetPx.coerceAtLeast(0))
+
+/**
+ * Padding whose amounts are read at layout time, so a spring driving
+ * them (the editing morph's slot height and side margins) moves what is
+ * padded by relayout alone, without recomposing the caller (#481). Laid
+ * out exactly as [padding] with the same values.
+ */
+private fun Modifier.animatedPadding(
+    horizontal: () -> Dp = { 0.dp },
+    bottom: () -> Dp = { 0.dp },
+): Modifier = layout { measurable, constraints ->
+    val side = horizontal().roundToPx().coerceAtLeast(0)
+    val below = bottom().roundToPx().coerceAtLeast(0)
+    val placeable = measurable.measure(constraints.offset(-2 * side, -below))
+    layout(
+        constraints.constrainWidth(placeable.width + 2 * side),
+        constraints.constrainHeight(placeable.height + below),
+    ) { placeable.placeRelative(side, 0) }
+}
+
+/**
  * Classify a submitted URL as a content-addressed (bzz / ipfs / ipns)
  * destination that should go through the probe-gated navigation path,
  * or return `null` for "treat as a plain URL". Accepts both the
@@ -465,7 +501,14 @@ private suspend fun awaitIpfsRunning(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class, ExperimentalLayoutApi::class)
 @Composable
 fun BrowserScreen(
+    /** The Swarm node's state, its [NodeInfo.connectedPeers] left at 0: see [swarmPeers]. */
     nodeInfo: NodeInfo,
+    /**
+     * The Swarm node's peer count, apart from [nodeInfo] so a new count
+     * (every few seconds while it churns) recomposes only the pages that
+     * show it, through [WithSwarmPeers], not this whole screen (#471).
+     */
+    swarmPeers: State<Long>,
     ipfsInfo: IpfsInfo,
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
@@ -959,8 +1002,12 @@ fun BrowserScreen(
     // serves the load without them moving. Observed, so switching the
     // source mid-load starts / stops the polling straight away.
     val externalIpfsGateway by Gateways.externalIpfsBaseFlow.collectAsState()
+    // Derived, not read straight (#481): `isCapsuleLoading` reads
+    // `state.progress`, which ticks on every progress callback, and a
+    // direct read here would re-run this whole screen for each one.
+    val capsuleLoading by remember(state) { derivedStateOf { isCapsuleLoading(state) } }
     val pollIpfsProgress = state.ipfsLoad &&
-        isCapsuleLoading(state) &&
+        capsuleLoading &&
         ipfsInfo.status == IpfsStatus.Running &&
         externalIpfsGateway.isEmpty()
     val ipfsLoadKey = state.id to state.loadGeneration
@@ -2040,8 +2087,21 @@ fun BrowserScreen(
     // least.
     val density = LocalDensity.current
     val navInsetPx = WindowInsets.systemBars.getBottom(density)
-    val imeInsetPx = WindowInsets.ime.getBottom(density)
-    val keyboardVisible = imeInsetPx > 0
+    // The IME inset moves on every frame of the keyboard's animation, so
+    // it is never read raw at this level (#481): this screen is one big
+    // restart scope, and a raw read re-ran all of it for each frame.
+    // What composition needs is derived — whether the keyboard is up at
+    // all, and the inset only up to the navigation inset, which is all
+    // [contentBottomReserve] uses and which stops changing once the
+    // rising keyboard passes the navigation bar. The strip below reads
+    // the full inset itself, at layout time.
+    val imeInsets = WindowInsets.ime
+    val keyboardVisible by remember(imeInsets, density) {
+        derivedStateOf { imeInsets.getBottom(density) > 0 }
+    }
+    val imeInsetForReservePx by remember(imeInsets, density, navInsetPx) {
+        derivedStateOf { imeInsetForReserve(imeInsets.getBottom(density), navInsetPx) }
+    }
 
     // Dismissing the keyboard is dismissing the editor.
     //
@@ -2113,6 +2173,11 @@ fun BrowserScreen(
     // which is what makes the editor read as the bar transforming rather
     // than a new screen. It drives the capsule's height and the address
     // pill's height inside [BottomToolbar], and its side margins here.
+    //
+    // Both fractions are read only where they're used — in the toolbar's
+    // own scope and in layout-time padding below — never at this level,
+    // which would recompose the whole screen on every frame of the
+    // spring (#481).
     val editProgress by animateFloatAsState(
         targetValue = if (addressFocused) 1f else 0f,
         animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
@@ -2149,9 +2214,9 @@ fun BrowserScreen(
     // strip still sat above the capsule, and it holds more strictly now
     // that the strip is gone and progress is drawn on the capsule's own
     // edge.
-    val capsuleSlot = capsuleSlotHeight(editProgress)
-    val capsuleSideMargin =
-        lerp(CapsuleSideMargin, CapsuleEditingSideMargin, editProgress)
+    // Lambdas, read at layout time (see [animatedPadding]).
+    val capsuleSlot = { capsuleSlotHeight(editProgress) }
+    val capsuleSideMargin = { lerp(CapsuleSideMargin, CapsuleEditingSideMargin, editProgress) }
 
     // Keyed on the *address bar's* focus, not on the keyboard: the IME
     // also comes up for a form field inside the page, and the capsule
@@ -2184,7 +2249,7 @@ fun BrowserScreen(
         state.surfaceArgb = surfaceArgb
     }
     val navInsetDp = with(density) { navInsetPx.toDp() }
-    val imeInsetDp = with(density) { imeInsetPx.toDp() }
+    val imeInsetDp = with(density) { imeInsetForReservePx.toDp() }
     val contentBottomReserve = contentBottomReserve(
         mode = chromeMode,
         keyboardVisible = keyboardVisible,
@@ -2380,19 +2445,21 @@ fun BrowserScreen(
                 }
             } else if (isHomeTab) {
                 val appUpdate by AppUpdates.state.collectAsState()
-                HomeScreen(
-                    repo = repo,
-                    onOpen = { submit(state, it) },
-                    onOpenInNewTab = { url, private -> openInNewTab(url, background = true, private = private) },
-                    nodeInfo = nodeInfo,
-                    runNodeEnabled = runNodeEnabled,
-                    // The warm-up row is about the Swarm node: its page, straight.
-                    onOpenNode = { nodeDetail = NodeDestination.Swarm },
-                    bottomContentPadding = capsuleOverlap,
-                    modifier = Modifier.fillMaxSize(),
-                    update = appUpdate.notice,
-                    onDismissUpdate = AppUpdates::dismiss,
-                )
+                WithSwarmPeers(nodeInfo, swarmPeers) { info ->
+                    HomeScreen(
+                        repo = repo,
+                        onOpen = { submit(state, it) },
+                        onOpenInNewTab = { url, private -> openInNewTab(url, background = true, private = private) },
+                        nodeInfo = info,
+                        runNodeEnabled = runNodeEnabled,
+                        // The warm-up row is about the Swarm node: its page, straight.
+                        onOpenNode = { nodeDetail = NodeDestination.Swarm },
+                        bottomContentPadding = capsuleOverlap,
+                        modifier = Modifier.fillMaxSize(),
+                        update = appUpdate.notice,
+                        onDismissUpdate = AppUpdates::dismiss,
+                    )
+                }
             }
             // The tab's renderer went away (#260) while it was on
             // screen: why, and Reload. (One on the home surface is
@@ -2416,7 +2483,16 @@ fun BrowserScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .height(contentBottomReserve + imeInsetDp)
+                    // The full IME inset, read at layout time (#481).
+                    .layout { measurable, constraints ->
+                        val height = constraints.constrainHeight(
+                            contentBottomReserve.roundToPx() + imeInsets.getBottom(this),
+                        )
+                        val placeable = measurable.measure(
+                            constraints.copy(minHeight = height, maxHeight = height),
+                        )
+                        layout(placeable.width, height) { placeable.place(0, 0) }
+                    }
                     // Until the effect above has caught up with a strip
                     // that just appeared, the target itself: the
                     // Animatable is snapped a frame late, and that frame
@@ -2462,10 +2538,9 @@ fun BrowserScreen(
                     // the capsule *reaches* towards the screen edges as
                     // it opens into the editor instead of a wider bar
                     // being swapped in underneath the old one.
-                    .padding(
-                        start = capsuleSideMargin,
-                        end = capsuleSideMargin,
-                        bottom = CapsuleBottomMargin,
+                    .animatedPadding(
+                        horizontal = capsuleSideMargin,
+                        bottom = { CapsuleBottomMargin },
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -2678,9 +2753,9 @@ fun BrowserScreen(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .windowInsetsPadding(chromeInsets)
-                    .padding(
-                        end = CapsuleSideMargin,
-                        bottom = capsuleSlot + CapsuleBottomMargin + IpfsStatusGap,
+                    .padding(end = CapsuleSideMargin)
+                    .animatedPadding(
+                        bottom = { capsuleSlot() + CapsuleBottomMargin + IpfsStatusGap },
                     )
                     .onSizeChanged { mediaIndicatorHeightPx = it.height },
             )
@@ -2705,10 +2780,9 @@ fun BrowserScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .windowInsetsPadding(chromeInsets)
-                .padding(
-                    start = CapsuleSideMargin,
-                    end = CapsuleSideMargin,
-                    bottom = capsuleSlot + CapsuleBottomMargin + IpfsStatusGap + mediaLift,
+                .padding(horizontal = CapsuleSideMargin)
+                .animatedPadding(
+                    bottom = { capsuleSlot() + CapsuleBottomMargin + IpfsStatusGap + mediaLift },
                 ),
         ) {
             // Keep drawing the last line while it fades out.
@@ -2764,7 +2838,9 @@ fun BrowserScreen(
                         start = CapsuleSideMargin,
                         end = CapsuleSideMargin,
                         top = CapsuleBottomMargin,
-                        bottom = capsuleSlot + CapsuleBottomMargin + IpfsStatusGap + ipfsLift,
+                    )
+                    .animatedPadding(
+                        bottom = { capsuleSlot() + CapsuleBottomMargin + IpfsStatusGap + ipfsLift },
                     )
                     .widthIn(max = CHROME_MAX_WIDTH)
                     .fillMaxWidth()
@@ -2790,7 +2866,7 @@ fun BrowserScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .windowInsetsPadding(chromeInsets)
-                    .padding(bottom = capsuleSlot + CapsuleBottomMargin + snackbarLift),
+                    .animatedPadding(bottom = { capsuleSlot() + CapsuleBottomMargin + snackbarLift }),
             ) { data -> Snackbar(snackbarData = data) }
             if (snackbarHostState.currentSnackbarData == null) {
                 SnackbarHost(
@@ -2798,7 +2874,7 @@ fun BrowserScreen(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .windowInsetsPadding(chromeInsets)
-                        .padding(bottom = capsuleSlot + CapsuleBottomMargin + snackbarLift),
+                        .animatedPadding(bottom = { capsuleSlot() + CapsuleBottomMargin + snackbarLift }),
                 ) { data -> Snackbar(snackbarData = data) }
             }
         }
@@ -2913,60 +2989,64 @@ fun BrowserScreen(
     // status opens it over Settings, and before the node pages, which
     // open over it; Back from each returns to the one below.
     if (showNodes) {
-        NodesOverviewScreen(
-            input = NodeOverviewInput(
-                nodeInfo = nodeInfo,
-                externalSwarm = externalSwarmBase,
-                ipfsInfo = ipfsInfo,
-                externalIpfs = externalIpfsBase,
-                radicleInfo = radicle.info,
-                radicleEnabled = radicle.enabled,
-                tor = tor,
-                myotisInfo = myotisInfo,
-                myotisRunning = myotisRunning,
-            ),
-            onOpen = { destination ->
-                when (destination) {
-                    NodeDestination.Rpc -> openSettingsAt(SettingsSection.Rpc)
-                    NodeDestination.Gateways -> openSettingsAt(SettingsSection.Nodes)
-                    else -> nodeDetail = destination
-                }
-            },
-            onDismiss = { showNodes = false },
-        )
+        WithSwarmPeers(nodeInfo, swarmPeers) { info ->
+            NodesOverviewScreen(
+                input = NodeOverviewInput(
+                    nodeInfo = info,
+                    externalSwarm = externalSwarmBase,
+                    ipfsInfo = ipfsInfo,
+                    externalIpfs = externalIpfsBase,
+                    radicleInfo = radicle.info,
+                    radicleEnabled = radicle.enabled,
+                    tor = tor,
+                    myotisInfo = myotisInfo,
+                    myotisRunning = myotisRunning,
+                ),
+                onOpen = { destination ->
+                    when (destination) {
+                        NodeDestination.Rpc -> openSettingsAt(SettingsSection.Rpc)
+                        NodeDestination.Gateways -> openSettingsAt(SettingsSection.Nodes)
+                        else -> nodeDetail = destination
+                    }
+                },
+                onDismiss = { showNodes = false },
+            )
+        }
     }
 
     // A node's page, over the overview (or Settings, for Radicle); Back /
     // ← dismisses only the node page.
     val detail = nodeDetail
     if (detail == NodeDestination.Swarm || detail == NodeDestination.Tor || detail == NodeDestination.LightClient) {
-        NodeScreen(
-            page = detail,
-            nodeInfo = nodeInfo,
-            runNodeEnabled = runNodeEnabled,
-            onToggleRunNode = onToggleRunNode,
-            myotisInfo = myotisInfo,
-            myotisRunning = myotisRunning,
-            onRunMyotisChain = onRunMyotisChain,
-            tor = tor,
-            onMyotisRecovery = onMyotisRecovery,
-            // Publish setup's identity step (#114): the wallet page opens
-            // over the node page (it's composed after it).
-            onOpenWallet = { showWallet = true },
-            // A published page (#118), or the fund-and-buy transaction's
-            // explorer page (#115): a new tab in front, never a private one,
-            // with the pages the node page was opened over closed too.
-            onOpenUrl = { url ->
-                nodeDetail = null
-                showNodes = false
-                showSettings = false
-                tabs.requestOpenInNewTab?.invoke(url, false, false)
-            },
-            onDismiss = { nodeDetail = null },
-            onOpenLogs = { showLogs = it },
-            // At the Tor card, its switch in view.
-            onOpenTorSettings = { openSettingsAt(SettingsSection.Tor) },
-        )
+        WithSwarmPeers(nodeInfo, swarmPeers) { info ->
+            NodeScreen(
+                page = detail,
+                nodeInfo = info,
+                runNodeEnabled = runNodeEnabled,
+                onToggleRunNode = onToggleRunNode,
+                myotisInfo = myotisInfo,
+                myotisRunning = myotisRunning,
+                onRunMyotisChain = onRunMyotisChain,
+                tor = tor,
+                onMyotisRecovery = onMyotisRecovery,
+                // Publish setup's identity step (#114): the wallet page opens
+                // over the node page (it's composed after it).
+                onOpenWallet = { showWallet = true },
+                // A published page (#118), or the fund-and-buy transaction's
+                // explorer page (#115): a new tab in front, never a private one,
+                // with the pages the node page was opened over closed too.
+                onOpenUrl = { url ->
+                    nodeDetail = null
+                    showNodes = false
+                    showSettings = false
+                    tabs.requestOpenInNewTab?.invoke(url, false, false)
+                },
+                onDismiss = { nodeDetail = null },
+                onOpenLogs = { showLogs = it },
+                // At the Tor card, its switch in view.
+                onOpenTorSettings = { openSettingsAt(SettingsSection.Tor) },
+            )
+        }
     }
 
     if (detail == NodeDestination.Ipfs) {
@@ -3461,6 +3541,9 @@ fun BrowserScreen(
     }
     pageInfoShown?.let { target ->
         val connection = pageConnectionFor(state.url, state.showsErrorPage, protocolBadgeFor(state))
+        val externalIpfs by Gateways.externalIpfsBaseFlow.collectAsState()
+        // Where the document came from, read when the sheet opens over it (#479).
+        val documentSource = remember(target) { tabs.pageSource?.invoke(state) }
         // Read once, when the sheet opens over this document.
         val certificate = remember(target) {
             if (connection?.hasCertificate == true) tabs.pageCertificate?.invoke(state) else null
@@ -3486,6 +3569,7 @@ fun BrowserScreen(
             siteDataOrigin = dataOrigin,
             siteDataUrl = dataUrl,
             siteDataGateway = siteDataGatewayLabel(dataOrigin),
+            ipfsGateway = ipfsGatewayUseFor(connection, state.url, externalIpfs, documentSource),
             onDeleteSiteData = {
                 if (dataOrigin != null && dataUrl != null) {
                     val tab = state
@@ -3714,4 +3798,14 @@ private class ChainSwitchNoticeUi(val notice: EthereumProviders.SwitchNotice) {
 private class ChainSwitchVisuals(override val message: String, override val actionLabel: String) : SnackbarVisuals {
     override val withDismissAction = true
     override val duration = SnackbarDuration.Long
+}
+
+/**
+ * [content] with [info] carrying the Swarm peer count from [peers]. The
+ * count is read here, in a scope of its own, so a new one recomposes only
+ * [content], never the [BrowserScreen] around it (#471).
+ */
+@Composable
+private fun WithSwarmPeers(info: NodeInfo, peers: State<Long>, content: @Composable (NodeInfo) -> Unit) {
+    content(info.copy(connectedPeers = peers.value))
 }
