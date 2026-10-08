@@ -508,8 +508,9 @@ internal fun captureDirFor(cacheDir: File, private: Boolean): File =
 /**
  * Delete the files in the capture directory [dir] and its
  * subdirectories (the private one), except [keep]. A missing directory
- * is fine (nothing captured yet). Returns how many files could not be
- * deleted.
+ * is fine (nothing captured yet). Returns how many entries could not
+ * be deleted: each file that stayed, plus a directory only when it
+ * couldn't be deleted although everything in it was.
  */
 internal fun deleteCaptures(dir: File, keep: File?): Int {
     val keepPath = keep?.absoluteFile
@@ -518,8 +519,10 @@ internal fun deleteCaptures(dir: File, keep: File?): Int {
             f.absoluteFile == keepPath -> 0
             f.isDirectory -> {
                 val failed = deleteCaptures(f, keep)
-                // Left in place while it still holds [keep].
-                if (!f.delete() && keepPath?.startsWith(f.absoluteFile) != true) failed + 1 else failed
+                // A directory left in place because it still holds [keep]
+                // or a file counted in [failed] isn't counted again; only
+                // one that couldn't go once emptied is a failure of its own.
+                if (!f.delete() && failed == 0 && keepPath?.startsWith(f.absoluteFile) != true) 1 else failed
             }
             f.delete() -> 0
             else -> 1

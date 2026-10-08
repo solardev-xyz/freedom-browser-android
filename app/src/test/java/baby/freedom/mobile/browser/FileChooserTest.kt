@@ -180,6 +180,24 @@ class FileChooserTest {
         assertEquals(0, dir.listFiles()!!.size)
     }
 
+    @Test fun `deleteCaptures counts a stuck private file once, not again for its dir`() {
+        val dir = tmp.newFolder("uploads")
+        val privateDir = File(dir, "private").apply { mkdirs() }
+        val stuck = File(privateDir, "IMG_old.jpg").apply { writeText("x") }
+        File(dir, "IMG_a.jpg").writeText("x")
+        // A read-only dir: its file can't be unlinked, so the dir stays non-empty.
+        privateDir.setWritable(false)
+        try {
+            if (stuck.delete()) return // running as root: permissions not enforced
+            assertEquals(1, deleteCaptures(dir, keep = null))
+            assertTrue(stuck.exists())
+        } finally {
+            privateDir.setWritable(true)
+        }
+        assertEquals(0, deleteCaptures(dir, keep = null))
+        assertEquals(0, dir.listFiles()!!.size)
+    }
+
     private val captureUri = "content://baby.freedom.mobile.files/uploads/IMG.jpg"
     private val cameraUri = "content://com.camera/1"
 
