@@ -48,6 +48,29 @@ class FullscreenNoticeTest {
     }
 
     @Test
+    fun `a top-level blob document on the gateway is named by its origin, not as scheme blob-http`() {
+        // R3-M2: `blob:http://127.0.0.1:1633/<uuid>` names no root of its
+        // own; reading "blob:http" as its scheme gave a garbled name.
+        val tabs = TabsState(homepage = "ens://freedom.eth")
+        tabs.active.permissionOrigin = null
+        tabs.active.siteOrigin = "http://127.0.0.1:1633"
+        tabs.active.url = "blob:http://127.0.0.1:1633/0f8e6c1a-2b3d-4e5f-8a9b-0c1d2e3f4a5b"
+        tabs.enterFullscreen(tabs.active, View(null), null)
+        assertEquals("http://127.0.0.1:1633", tabs.fullscreen?.site)
+    }
+
+    @Test
+    fun `addressRoot takes only a plain scheme`() {
+        assertEquals("bzz://abc", addressRoot("bzz://abc/x?y#z"))
+        assertEquals("web+app://host", addressRoot("web+app://host/"))
+        assertNull(addressRoot("blob:http://127.0.0.1:1633/uuid"))
+        assertNull(addressRoot("filesystem:http://127.0.0.1:1633/temporary/f"))
+        assertNull(addressRoot("1bzz://abc"))
+        assertNull(addressRoot("://abc"))
+        assertNull(addressRoot("bzz:///path"))
+    }
+
+    @Test
     fun `a gateway page whose address has no scheme is named by its origin`() {
         val tabs = TabsState(homepage = "ens://freedom.eth")
         tabs.active.permissionOrigin = null

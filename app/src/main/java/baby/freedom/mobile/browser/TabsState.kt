@@ -1125,7 +1125,14 @@ class TabsState(
  * origin ([BrowserState.siteOrigin]); that origin is shared by every
  * root the gateway serves, so it's named by the root the address bar
  * shows (`bzz://<ref>`, or the ENS name it's known by) rather than
- * left anonymous. Null only for a page with no origin at all.
+ * left anonymous. That name is not a site boundary there: a page from
+ * any other root on the same gateway origin can script this one (a
+ * `window.open` popup of another root's path, say), so the notice
+ * claims no more than the address bar already does for the same
+ * document. A document whose address names no root of its own (a
+ * top-level `blob:` URL, which [addressRoot] refuses) is named by
+ * that shared origin instead. Null only for a page with no origin at
+ * all.
  */
 internal fun fullscreenSiteName(tab: BrowserState): String? {
     tab.permissionTop?.let { return permissionOriginDisplay(it) }
@@ -1133,12 +1140,24 @@ internal fun fullscreenSiteName(tab: BrowserState): String? {
     return addressRoot(tab.url) ?: permissionOriginDisplay(origin)
 }
 
-/** `scheme://authority` of a display address, or null if it has no scheme. */
-private fun addressRoot(address: String): String? {
+/**
+ * `scheme://authority` of a display address, or null if it has no
+ * plain scheme. A nested-origin URL (`blob:http://host/<uuid>`,
+ * `filesystem:…`) is refused rather than read as scheme `blob:http`:
+ * its inner origin is the document's origin, which the caller names
+ * anyway.
+ */
+internal fun addressRoot(address: String): String? {
     val schemeEnd = address.indexOf("://")
     if (schemeEnd <= 0) return null
+    val scheme = address.substring(0, schemeEnd)
+    if (!scheme[0].isAsciiLetter() || !scheme.all { it.isAsciiLetter() || it in '0'..'9' || it in "+-." }) {
+        return null
+    }
     val rest = address.substring(schemeEnd + 3)
     val authority = rest.substringBefore('/').substringBefore('?').substringBefore('#')
     if (authority.isEmpty()) return null
     return address.substring(0, schemeEnd + 3) + authority
 }
+
+private fun Char.isAsciiLetter(): Boolean = this in 'a'..'z' || this in 'A'..'Z'
