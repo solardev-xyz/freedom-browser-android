@@ -65,6 +65,12 @@ import java.util.Locale
  * refused the camera for good, the picker opens and, once it closes,
  * the user is told where to turn the camera back on.
  *
+ * A private tab's (#86) capture goes in a directory of its own
+ * ([PRIVATE_CAPTURE_DIR]), which [discardPrivateCaptures] empties when
+ * the private session ends and at the next start (#468): a photo taken
+ * for a private page's upload form must not stay in the app's storage
+ * after it.
+ *
  * Nothing opens unless the requesting tab's page is on screen
  * ([SitePermissionBroker.isOnScreen]): a page's delayed `click()` on
  * its input must not pop a picker, camera or system dialog over
@@ -82,6 +88,7 @@ internal class FileChooser(
     private class AwaitingCamera(
         val callback: ValueCallback<Array<Uri>>,
         val kind: CaptureKind,
+        val private: Boolean,
         val pickerTypes: List<String>,
         val multiple: Boolean,
     )
@@ -95,6 +102,8 @@ internal class FileChooser(
         /** Camera output target, or null for the document picker. */
         val captureFile: File?,
         val captureUri: Uri?,
+        /** [captureFile] is a private tab's ([PRIVATE_CAPTURE_DIR]). */
+        val private: Boolean = false,
         /**
          * The picker stands in for a capture Android refused `CAMERA`
          * for; say so once the picker closes.
@@ -104,8 +113,11 @@ internal class FileChooser(
 
     private var pending: Pending? = null
 
-    /** Entry point for `WebChromeClient.onShowFileChooser`. */
-    fun show(tabId: Long, callback: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean {
+    /**
+     * Entry point for `WebChromeClient.onShowFileChooser`; [private] is
+     * whether the requesting tab is a private one (#86).
+     */
+    fun show(tabId: Long, private: Boolean, callback: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean {
         val launcher = launcher ?: return false
         // Only over the page that asked (returning false frees the input).
         if (!permissions.isOnScreen(tabId)) return false
@@ -127,9 +139,9 @@ internal class FileChooser(
                     PackageManager.PERMISSION_GRANTED,
             )
             when (gate) {
-                CameraGate.LAUNCH -> if (tryCapture(launcher, callback, capture)) return true
+                CameraGate.LAUNCH -> if (tryCapture(launcher, callback, capture, private)) return true
                 CameraGate.ASK -> {
-                    val ask = AwaitingCamera(callback, capture, accept.pickerTypes, multiple)
+                    val ask = AwaitingCamera(callback, capture, private, accept.pickerTypes, multiple)
                     awaitingCamera = ask
                     permissions.requestUploadCamera(tabId) { onCameraPermission(ask, it) }
                     return true
@@ -152,7 +164,7 @@ internal class FileChooser(
         val launcher = launcher
         val refused = outcome == AndroidPermissionAsk.REFUSED
         val started = launcher != null && outcome != AndroidPermissionAsk.OFF_SCREEN && (
-            (outcome == AndroidPermissionAsk.GRANTED && tryCapture(launcher, ask.callback, ask.kind)) ||
+            (outcome == AndroidPermissionAsk.GRANTED && tryCapture(launcher, ask.callback, ask.kind, ask.private)) ||
                 launchPicker(launcher, ask.callback, ask.pickerTypes, ask.multiple, cameraRefused = refused)
             )
         // show() already told WebView the callback is ours, so it must be answered.
@@ -177,7 +189,8 @@ internal class FileChooser(
         launcher: ActivityResultLauncher<Intent>,
         callback: ValueCallback<Array<Uri>>,
         kind: CaptureKind,
-    ): Boolean = runCatching { launchCapture(launcher, callback, kind) }
+        private: Boolean,
+    ): Boolean = runCatching { launchCapture(launcher, callback, kind, private) }
         .onFailure { Log.w(LOG_TAG, "camera capture unavailable, using picker", it) }
         .getOrDefault(false)
 
@@ -206,10 +219,11 @@ internal class FileChooser(
         launcher: ActivityResultLauncher<Intent>,
         callback: ValueCallback<Array<Uri>>,
         kind: CaptureKind,
+        private: Boolean,
     ): Boolean {
-        val file = newCaptureFile(kind) ?: return false
+        val file = newCaptureFile(kind, private) ?: return false
         try {
-            return launchCaptureInto(launcher, callback, kind, file)
+            return launchCaptureInto(launcher, callback, kind, file, private)
         } catch (e: Exception) {
             // Whatever the failure (no camera app, a camera that throws
             // SecurityException, a FileProvider mismatch), don't leave
@@ -231,6 +245,7 @@ internal class FileChooser(
         callback: ValueCallback<Array<Uri>>,
         kind: CaptureKind,
         file: File,
+        private: Boolean,
     ): Boolean {
         val uri = FileProvider.getUriForFile(context, authority(context), file)
         val action = when (kind) {
@@ -244,7 +259,7 @@ internal class FileChooser(
             )
         // The grant flags only reach the camera app through ClipData.
         intent.clipData = ClipData.newRawUri(null, uri)
-        pending = Pending(callback, multiple = false, captureFile = file, captureUri = uri)
+        pending = Pending(callback, multiple = false, captureFile = file, captureUri = uri, private = private)
         launcher.launch(intent)
         return true
     }
@@ -348,15 +363,30 @@ internal class FileChooser(
         deleteCaptures(File(context.cacheDir, CAPTURE_DIR), keep = pending?.captureFile)
     }
 
-    private fun newCaptureFile(kind: CaptureKind): File? {
-        val dir = File(context.cacheDir, CAPTURE_DIR)
+    /**
+     * Delete every capture a private tab took (#468): the private
+     * session has ended, or an earlier process died with one open. A
+     * private capture still in progress is cancelled first (its input
+     * answered "nothing selected", the camera app's grant taken back),
+     * so the camera can't write it after the delete. On the main
+     * thread, like the capture files are made, so the two can't
+     * interleave; it's a handful of files at most.
+     */
+    fun discardPrivateCaptures() {
+        if (pending?.private == true || awaitingCamera?.private == true) cancelPending()
+        if (!deletePrivateCaptures(context.cacheDir)) Log.w(LOG_TAG, "can't delete every private capture")
+    }
+
+    private fun newCaptureFile(kind: CaptureKind, private: Boolean): File? {
+        val dir = captureDirFor(context.cacheDir, private)
         if (!dir.isDirectory && !dir.mkdirs()) return null
         // A page reads an uploaded file lazily (on submit, or whenever
         // its script gets to it), so a capture can't be deleted as soon
         // as it's been handed over. Anything from a previous day is
         // long done with; cacheDir is also reclaimable by the system.
+        // (Files only: the private directory is emptied with its session.)
         val cutoff = System.currentTimeMillis() - CAPTURE_MAX_AGE_MS
-        dir.listFiles()?.forEach { if (it.lastModified() < cutoff) it.delete() }
+        dir.listFiles()?.forEach { if (it.isFile && it.lastModified() < cutoff) it.delete() }
         // The name is what the page (and the site's server) sees, so
         // make it the familiar camera-style one, not temp-file digits.
         val (prefix, ext) = if (kind == CaptureKind.IMAGE) "IMG" to "jpg" else "VID" to "mp4"
@@ -376,6 +406,9 @@ internal class FileChooser(
 
         /** Subdirectory of `cacheDir`; must match `res/xml/file_paths.xml`. */
         const val CAPTURE_DIR = "uploads"
+
+        /** Private tabs' captures (#468), inside [CAPTURE_DIR] so the FileProvider serves them. */
+        const val PRIVATE_CAPTURE_DIR = "private"
         private const val CAPTURE_MAX_AGE_MS = 24L * 60 * 60 * 1000
 
         fun authority(context: Context) = "${context.packageName}.files"
@@ -457,16 +490,41 @@ internal fun <U : Any> finishCapture(
     return null
 }
 
+/** Where private tabs' captures go under [cacheDir] (#468). */
+internal fun privateCaptureDir(cacheDir: File): File =
+    File(File(cacheDir, FileChooser.CAPTURE_DIR), FileChooser.PRIVATE_CAPTURE_DIR)
+
 /**
- * Delete the files in the capture directory [dir], except [keep]. A
- * missing directory is fine (nothing captured yet). Returns how many
- * files could not be deleted.
+ * Delete every private tab's capture under [cacheDir] (#468), leaving
+ * the other captures alone. False if something could not be deleted.
+ */
+internal fun deletePrivateCaptures(cacheDir: File): Boolean =
+    runCatching { privateCaptureDir(cacheDir).deleteRecursively() }.getOrDefault(false)
+
+/** Where a capture goes: [privateCaptureDir] for a private tab's, else cache/uploads. */
+internal fun captureDirFor(cacheDir: File, private: Boolean): File =
+    if (private) privateCaptureDir(cacheDir) else File(cacheDir, FileChooser.CAPTURE_DIR)
+
+/**
+ * Delete the files in the capture directory [dir] and its
+ * subdirectories (the private one), except [keep]. A missing directory
+ * is fine (nothing captured yet). Returns how many files could not be
+ * deleted.
  */
 internal fun deleteCaptures(dir: File, keep: File?): Int {
     val keepPath = keep?.absoluteFile
-    return dir.listFiles().orEmpty()
-        .filter { it.absoluteFile != keepPath }
-        .count { !it.deleteRecursively() }
+    return dir.listFiles().orEmpty().sumOf { f ->
+        when {
+            f.absoluteFile == keepPath -> 0
+            f.isDirectory -> {
+                val failed = deleteCaptures(f, keep)
+                // Left in place while it still holds [keep].
+                if (!f.delete() && keepPath?.startsWith(f.absoluteFile) != true) failed + 1 else failed
+            }
+            f.delete() -> 0
+            else -> 1
+        }
+    }
 }
 
 /**
