@@ -331,11 +331,19 @@ class BrowsingRepository internal constructor(
      * lists every site visited and when, so it is history too. A
      * bookmarked site keeps its icon, without the time. A visit or icon
      * asked for before this call and not yet written is dropped, not
-     * written after it ([HistoryWriteGate], #480 R1-M1).
+     * written after it ([HistoryWriteGate], #480 R1-M1). [onDone] runs
+     * once the rows are gone (on a background thread), for in-memory
+     * copies the UI keeps of them (#516 R1-M2).
      */
-    fun deleteHistorySince(since: Long) {
+    fun deleteHistorySince(since: Long, onDone: () -> Unit = {}) {
         historyGate.revoke()
-        scope.launch { historyGate.forget { forgetHistorySince(since) } }
+        scope.launch {
+            try {
+                historyGate.forget { forgetHistorySince(since) }
+            } finally {
+                onDone()
+            }
+        }
     }
 
     private suspend fun forgetHistorySince(since: Long) {
@@ -431,27 +439,32 @@ class BrowsingRepository internal constructor(
     fun storeFavicon(pageUrl: String, ticket: Long, encode: () -> ByteArray?) {
         val seq = faviconOrder.next()
         scope.launch {
-            // Keyed on the settled spelling, as history rows are
-            // (#490 R3-M3): a `café.tez` page shown `caf%C3%A9.tez`
-            // before warm-up must still file its icon under the name its
-            // history row carries. settledName may decode the ENSIP-15
-            // tables, so off the main thread.
-            val origin = FaviconOrigin.from(DisplayUrl.settledName(pageUrl)) ?: return@launch
-            val data = withContext(Dispatchers.Default) { encode() }
-            if (data == null || data.isEmpty()) return@launch
-            // Not for a page loaded before a history delete (#480 R1-M1).
-            historyGate.write(ticket) {
-                if (!faviconOrder.admit(origin, seq)) return@write
-                db.withTransaction {
-                    storeFaviconRow(
-                        db.favicons(),
-                        FaviconEntry(
-                            origin = origin,
-                            data = data,
-                            updatedAt = System.currentTimeMillis(),
-                        ),
-                    )
+            try {
+                // Keyed on the settled spelling, as history rows are
+                // (#490 R3-M3): a `café.tez` page shown `caf%C3%A9.tez`
+                // before warm-up must still file its icon under the name its
+                // history row carries. settledName may decode the ENSIP-15
+                // tables, so off the main thread.
+                val origin = FaviconOrigin.from(DisplayUrl.settledName(pageUrl)) ?: return@launch
+                val data = withContext(Dispatchers.Default) { encode() }
+                if (data == null || data.isEmpty()) return@launch
+                // Not for a page loaded before a history delete (#480 R1-M1).
+                historyGate.write(ticket) {
+                    if (!faviconOrder.admit(origin, seq)) return@write
+                    db.withTransaction {
+                        storeFaviconRow(
+                            db.favicons(),
+                            FaviconEntry(
+                                origin = origin,
+                                data = data,
+                                updatedAt = System.currentTimeMillis(),
+                            ),
+                        )
+                    }
                 }
+            } finally {
+                // Nothing left racing it: the per-origin order can go (#516 R1-M1).
+                faviconOrder.done()
             }
         }
     }

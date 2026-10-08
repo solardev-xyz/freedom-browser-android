@@ -87,6 +87,23 @@ class FaviconDecodeCacheTest {
     }
 
     @Test
+    fun `a decode that began before clear is not kept after it (#516 R1-M2)`() {
+        var decodes = 0
+        lateinit var cache: DecodeCache<List<Byte>>
+        cache = DecodeCache(maxSize = 4) { data ->
+            decodes++
+            // Delete browsing data lands while this deleted site's icon decodes.
+            if (decodes == 1) cache.clear()
+            data.toList()
+        }
+        assertEquals(listOf<Byte>(5), cache.get(byteArrayOf(5))) // still shown to the row that asked
+        cache.get(byteArrayOf(5))
+        assertEquals(2, decodes) // but it wasn't kept
+        cache.get(byteArrayOf(5))
+        assertEquals(2, decodes) // a decode after the clear is
+    }
+
+    @Test
     fun `decoded icons go once the UI is hidden or memory runs low`() {
         @Suppress("DEPRECATION")
         val clears = listOf(

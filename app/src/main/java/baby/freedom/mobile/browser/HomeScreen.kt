@@ -691,6 +691,13 @@ internal object FaviconImages {
     fun get(data: ByteArray): ImageBitmap? = cache.get(data)
 
     /**
+     * Drop every decoded icon: Delete browsing data calls this once the
+     * rows are gone (#516 R1-M2), so a deleted site's icon doesn't stay
+     * in memory either. Rows still showing an icon decode it anew.
+     */
+    fun clear() = cache.clear()
+
+    /**
      * Drop every decoded icon once the UI is hidden or memory runs low:
      * a row shown again decodes its icon anew, off the main thread.
      */
@@ -726,15 +733,22 @@ internal class DecodeCache<T : Any>(
     private val entries = LinkedHashMap<Key, T>(16, 0.75f, true)
     private var size = 0
 
+    /** Bumped by [clear], so a decode that began before it isn't kept after it. */
+    private var cleared = 0L
+
     fun get(data: ByteArray): T? {
         val key = Key(data)
-        synchronized(entries) { entries[key]?.let { return it } }
+        val since = synchronized(entries) {
+            entries[key]?.let { return it }
+            cleared
+        }
         // Decoded outside the lock: two rows racing on a new icon may both
         // decode it once, which beats one waiting on the other.
         val image = decode(data) ?: return null
         val cost = sizeOf(image)
         if (cost > maxSize) return image
         synchronized(entries) {
+            if (cleared != since) return image
             entries.put(key, image)?.let { size -= sizeOf(it) }
             size += cost
             val eldest = entries.entries.iterator()
@@ -749,6 +763,7 @@ internal class DecodeCache<T : Any>(
     fun clear() = synchronized(entries) {
         entries.clear()
         size = 0
+        cleared++
     }
 }
 

@@ -4,7 +4,6 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
-import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 
@@ -77,13 +76,25 @@ internal fun Flow<ByteArray?>.distinctIcons(): Flow<ByteArray?> =
  * encode finished late can't overwrite a newer icon for the same origin
  * (#516 R1-F2). [next] is taken on the caller's thread, when the WebView
  * reports the icon; [admit] is asked just before the write, under the
- * repository's write gate.
+ * repository's write gate; [done] once that write has landed or been
+ * dropped, whatever the way.
+ *
+ * The per-origin record only matters while a write is still on its way,
+ * so it is emptied whenever none is (#516 R1-M1): it never grows into a
+ * list of every site visited this session, and none of it outlives
+ * Delete browsing data. That can't let an old write through — every
+ * number handed out later is bigger than any recorded.
  */
 internal class FaviconWriteOrder {
-    private val counter = AtomicLong()
+    private var counter = 0L
+    private var inFlight = 0
     private val latest = HashMap<String, Long>()
 
-    fun next(): Long = counter.incrementAndGet()
+    @Synchronized
+    fun next(): Long {
+        inFlight++
+        return ++counter
+    }
 
     /** Whether write [seq] for [origin] is newer than every one let through for it; records it if so. */
     @Synchronized
@@ -93,6 +104,19 @@ internal class FaviconWriteOrder {
         latest[origin] = seq
         return true
     }
+
+    /** A write numbered by [next] is over (stored, dropped or failed). */
+    @Synchronized
+    fun done() {
+        if (--inFlight <= 0) {
+            inFlight = 0
+            latest.clear()
+        }
+    }
+
+    /** How many origins are on record, for tests. */
+    @get:Synchronized
+    internal val tracked: Int get() = latest.size
 }
 
 /** A favicon row without its bytes: which origin, stored when. */

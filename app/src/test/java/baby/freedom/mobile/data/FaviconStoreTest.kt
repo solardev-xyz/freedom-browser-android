@@ -85,4 +85,36 @@ class FaviconStoreTest {
         // A later icon still replaces it.
         assertTrue(order.admit("https://a.example", order.next()))
     }
+
+    @Test
+    fun `the per-origin order is forgotten once no write is in flight (#516 R1-M1)`() {
+        val order = FaviconWriteOrder()
+        val a = order.next()
+        val b = order.next()
+        assertTrue(order.admit("https://a.example", b))
+        order.done()
+        // a is still on its way: b's record must still hold it back.
+        assertEquals(1, order.tracked)
+        assertFalse(order.admit("https://a.example", a))
+        order.done()
+        assertEquals(0, order.tracked)
+        // Whatever comes next is newer than anything forgotten.
+        val c = order.next()
+        assertTrue(order.admit("https://a.example", c))
+        order.done()
+        assertEquals(0, order.tracked)
+    }
+
+    @Test
+    fun `a write still in flight across the clear keeps its order (#516 R1-M1)`() {
+        val order = FaviconWriteOrder()
+        val old = order.next()
+        val new = order.next()
+        assertTrue(order.admit("https://a.example", new))
+        order.done() // new landed
+        // old never finished yet, so nothing was cleared and old stays blocked.
+        assertFalse(order.admit("https://a.example", old))
+        order.done()
+        assertEquals(0, order.tracked)
+    }
 }
