@@ -17,7 +17,6 @@ import baby.freedom.mobile.wallet.Token
 import baby.freedom.mobile.wallet.TokenBalance
 import java.math.BigDecimal
 import java.math.BigInteger
-import kotlinx.coroutines.delay
 
 /*
  * Approximate values in euros or dollars (#439), only with Wallet
@@ -27,8 +26,9 @@ import kotlinx.coroutines.delay
 
 /**
  * The prices to show values with, or null: Show prices off (then nothing
- * is read at all), or nothing read yet. While on screen, reads them
- * again once they're older than [FiatPrices.TTL_MS].
+ * is read at all), or nothing read yet. While on screen with the app in
+ * the foreground, reads them again once they're older than
+ * [FiatPrices.TTL_MS].
  */
 @Composable
 internal fun rememberFiatQuotes(): FiatQuotes? {
@@ -37,13 +37,11 @@ internal fun rememberFiatQuotes(): FiatQuotes? {
     val currency by prices.currency.collectAsState()
     val quotes by prices.quotes.collectAsState()
     LaunchedEffect(prices) { prices.load() }
-    LaunchedEffect(prices, currency) {
+    val lifecycle = currentLifecycle()
+    LaunchedEffect(prices, currency, lifecycle) {
         if (currency == FiatCurrency.OFF) return@LaunchedEffect
-        while (true) {
-            // A no-op until the last read is old enough: every screen asking shares one read.
-            prices.refresh()
-            delay(FiatPrices.RETRY_MS)
-        }
+        // A no-op until the last read is old enough: every screen asking shares one read.
+        lifecycle.pollWhileStarted(FiatPrices.RETRY_MS) { prices.refresh() }
     }
     return quotes?.takeIf { currency != FiatCurrency.OFF && it.currency == currency }
 }

@@ -81,6 +81,7 @@
     <string name="browser_js_leave_page_message">Changes you made may not be saved.</string>
     <string name="browser_js_leave">Leave</string>
     <string name="browser_js_stay">Stay</string>
+    <string name="browser_js_block_more">Don\'t let this page show more dialogs</string>
 
     <!-- TapProtection.kt -->
     <string name="browser_obscured_tap">Another app is drawing over the screen, so that tap was ignored. Close it (a chat bubble or a screen filter) and try again.</string>

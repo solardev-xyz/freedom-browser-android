@@ -417,7 +417,7 @@ internal fun FundNodeScreen(
                                     if (!q.request.from.isLedger && !vault.unlockedNow()) vault.unlock(auth)
                                     // The node may have restarted (or funding been blocked) while the prompt was up.
                                     if (heldNow() != null) return@launch
-                                    when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from, fundLedgerFresh(heldNow) { sender.isStale(q) }))) {
+                                    when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from, fresh = fundLedgerFresh(heldNow) { sender.isStale(q) }))) {
                                         WalletSender.Submit.STARTED -> {
                                             reviewing = null
                                             notice = null

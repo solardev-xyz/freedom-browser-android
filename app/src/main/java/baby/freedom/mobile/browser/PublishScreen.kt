@@ -66,7 +66,6 @@ import baby.freedom.swarm.NodeStatus
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -147,10 +146,11 @@ internal fun PublishScreen(
 
     var refresh by remember { mutableIntStateOf(0) }
     LaunchedEffect(publishing) { if (publishing is Publisher.State.Finished) refresh++ }
-    val batches by produceState<List<PostageBatch>?>(null, blocked == null, refresh) {
-        while (blocked == null) {
+    val lifecycle = currentLifecycle()
+    val batches by produceState<List<PostageBatch>?>(null, blocked == null, refresh, lifecycle) {
+        if (blocked != null) return@produceState
+        lifecycle.pollWhileStarted(STAMPS_POLL_MS) {
             gatewayGet("/stamps", STAMPS_READ_TIMEOUT_MS)?.let(::stampsFrom)?.let { value = it }
-            delay(STAMPS_POLL_MS)
         }
     }
 

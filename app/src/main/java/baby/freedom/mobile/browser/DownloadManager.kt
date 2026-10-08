@@ -20,6 +20,7 @@ import baby.freedom.mobile.data.AppDatabase
 import baby.freedom.mobile.data.DownloadDao
 import baby.freedom.mobile.data.DownloadEntry
 import baby.freedom.mobile.data.DownloadStatus
+import baby.freedom.mobile.ens.EnsNormalize
 import baby.freedom.mobile.l10n.Strings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -487,7 +488,8 @@ class DownloadManager private constructor(context: Context) {
                 ?: downloadFileName(contentDisposition, url, guessedMime, ::extensionForMime)
             val row = DownloadEntry(
                     fileName = initialName,
-                    displayUrl = storedDisplayUrl(target.displayUrl),
+                    // Spelled the same whenever it is saved (#490 R1-M2).
+                    displayUrl = storedDisplayUrl(DisplayUrl.settledName(target.displayUrl)),
                     // A data: URI *is* the file — possibly megabytes — and
                     // doesn't belong in a history row (Room's cursor window
                     // is 2 MB); nor does any other address over 8 KiB
@@ -1355,7 +1357,11 @@ class DownloadManager private constructor(context: Context) {
         is DownloadTarget.Dweb -> {
             val gatewayUrl = Gateways.gatewayUrlFor(target.root, target.pathAndQuery, private = private)
                 ?: throw DownloadFailure(
-                    if (target.root is ContentRoot.Ens) DownloadNote.of(R.string.library_download_ens_unresolved, target.root.name)
+                    if (target.root is ContentRoot.Ens) DownloadNote.of(
+                        R.string.library_download_ens_unresolved,
+                        // As the row's address shows it (#490 R2-M1).
+                        EnsNormalize.tezosDisplay(target.root.name),
+                    )
                     else DownloadNote.of(R.string.library_download_node_not_running),
                     retriable = true,
                 )

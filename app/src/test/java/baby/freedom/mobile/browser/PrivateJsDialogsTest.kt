@@ -86,4 +86,22 @@ class PrivateJsDialogsTest {
         assertEquals(listOf(false), answers)
         assertEquals(5, settled.size)
     }
+
+    @Test
+    fun blockMoreOnlyWhenOfferedAndBeforeTheAnswer() {
+        var blocks = 0
+        fun req(offer: Boolean) = JsDialogRequest(
+            kind = JsDialogKind.ALERT, url = "https://example.com", message = "hi", defaultValue = null,
+            secure = false, answer = { _, _ -> }, offerBlock = offer, onBlock = { blocks++ },
+        )
+        req(offer = false).blockMore()
+        assertEquals(0, blocks)
+        val offered = req(offer = true)
+        offered.blockMore()
+        offered.confirm()
+        assertEquals(1, blocks)
+        // Too late once answered.
+        offered.blockMore()
+        assertEquals(1, blocks)
+    }
 }

@@ -59,7 +59,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -291,12 +290,15 @@ internal fun PublishSetupScreen(
     val light = running && nodeInfo.lightMode
 
     // The node account's xDAI, read through the app's own chain-data
-    // router — so it's there in ultra-light mode too — every 15 s. A
-    // failed read keeps the last good value, or says it's unavailable.
-    val balance by produceState(BalanceRead(), address) {
+    // router — so it's there in ultra-light mode too — every 15 s while
+    // the app is in the foreground. A failed read keeps the last good
+    // value, or says it's unavailable.
+    val lifecycle = currentLifecycle()
+    val balance by produceState(BalanceRead(), address, lifecycle) {
         value = BalanceRead()
+        if (address == null) return@produceState
         val rpc = WalletRpc(ChainDataRouter.get(context))
-        while (address != null) {
+        lifecycle.pollWhileStarted(BALANCE_POLL_MS) {
             value = try {
                 BalanceRead(wei = rpc.balance(BuiltInChains.GNOSIS.id, address).value)
             } catch (e: CancellationException) {
@@ -305,18 +307,17 @@ internal fun PublishSetupScreen(
                 Log.i(TAG, "reading the node's xDAI balance failed (${e.javaClass.simpleName})")
                 value.copy(failed = value.wei == null)
             }
-            delay(BALANCE_POLL_MS)
         }
     }
     val xdai = balance.wei
     // What only a light node's gateway knows, every 5 s while it runs, as
     // before the deposit (#117): the checklist waits on the chequebook.
     val chequebook = rememberChequebookState(light, pollMs = GATEWAY_POLL_MS)
-    val usableStamps by produceState<Int?>(null, light) {
+    val usableStamps by produceState<Int?>(null, light, lifecycle) {
         value = null
-        while (light) {
+        if (!light) return@produceState
+        lifecycle.pollWhileStarted(GATEWAY_POLL_MS) {
             gatewayGet("/stamps")?.let(::usableStampsFrom)?.let { value = it }
-            delay(GATEWAY_POLL_MS)
         }
     }
 

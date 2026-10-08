@@ -138,7 +138,6 @@ import baby.freedom.mobile.wallet.VaultProtection
 import baby.freedom.mobile.wallet.VaultUnreadableException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -823,13 +822,12 @@ fun WalletScreen(
     // that never went out doesn't keep the page reading the chain every few seconds.
     // refresh() waits for the history file to be read, so the first answer here already
     // covers a replaced record the file brings back, even with nothing pending to restart this.
+    // Only while the app is in the foreground (#472): Home stops the reads, coming back
+    // reads again at once.
     val pendingCount = txRecords.count { it.pending }
-    LaunchedEffect(refreshTick, pendingCount) {
-        var wait = TX_HISTORY_POLL_MS
-        while (history.refresh()) {
-            delay(wait)
-            wait = minOf(wait * 2, TX_HISTORY_POLL_MAX_MS)
-        }
+    val lifecycle = currentLifecycle()
+    LaunchedEffect(refreshTick, pendingCount, lifecycle) {
+        lifecycle.pollWhileStartedBackingOff(TX_HISTORY_POLL_MS, TX_HISTORY_POLL_MAX_MS) { history.refresh() }
     }
 
     // A send that went through (or failed on chain) changed the balances: read them again.

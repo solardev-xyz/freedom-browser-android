@@ -79,8 +79,23 @@ object EnsNormalize {
      * with a character UTS-46 disallows outright stays lowercased as
      * typed (less any U+FE0F) — either way the registry answers "not
      * found".
+     *
+     * A `%XX`-escaped name is read as its UTF-8 bytes first: that is how
+     * [tezosDisplay] spells a lookalike (`p%D0%B0ypal.tez` is
+     * `pаypal.tez`), so the shown form reloads, edits and copies as the
+     * same name. Only escapes of bytes 0x80 and above are read; an ASCII
+     * escape (`%2F`, `%25`) stays as written (#490 R3-M1), so no decoded
+     * name holds a `/`, `%` or control character it didn't already, and
+     * decoding twice gives what decoding once did. `%` is never part of a registrable label, so this can't
+     * take a name from anyone. An ASCII `xn--` label is *not* mapped
+     * (#490 R2-F1): the registry keys the literal ASCII name
+     * (`xn--rh8hs4h.tez`) apart from its Unicode reading (`🌮🥷.tez`),
+     * and either can be registered on its own.
      */
-    fun tezosForm(name: String): String? {
+    fun tezosForm(name: String): String? =
+        tezosFormOf(if (name.lowercase().endsWith(TEZ)) percentDecoded(name) ?: name else name)
+
+    private fun tezosFormOf(name: String): String? {
         val lower = name.lowercase()
         if (lower.all { it.code < 0x80 }) return lower.takeIf { it.endsWith(TEZ) }
         val mapped = try {
@@ -92,7 +107,142 @@ object EnsNormalize {
             ?: lower.replace("\uFE0F", "").takeIf { it.endsWith(TEZ) }
     }
 
+    /**
+     * [name] with its `%XX` escapes of bytes 0x80 and above read as
+     * UTF-8, or `null` if it has none, an escape is malformed, or the
+     * bytes aren't valid UTF-8. An escape of an ASCII byte (`%2F`, `%25`,
+     * `%0A`) is left as written: [escaped] only ever escapes non-ASCII,
+     * so only those escapes are a shown form being read back.
+     */
+    private fun percentDecoded(name: String): String? {
+        if ('%' !in name) return null
+        val bytes = java.io.ByteArrayOutputStream(name.length)
+        var decodedAny = false
+        var i = 0
+        while (i < name.length) {
+            val c = name[i]
+            if (c == '%') {
+                if (i + 2 >= name.length) return null
+                val hi = Character.digit(name[i + 1], 16)
+                val lo = Character.digit(name[i + 2], 16)
+                if (hi < 0 || lo < 0) return null
+                val b = hi * 16 + lo
+                if (b < 0x80) {
+                    // An ASCII escape stays as written (#490 R3-M1):
+                    // [escaped] never makes one, and decoding it would
+                    // put `/`, `%` or a control character into the name
+                    // (`paypal.com%2F.tez`, or `x%2561.tez` decoded again
+                    // wherever the name was already decoded once).
+                    for (k in 0..2) bytes.write(name[i + k].code)
+                } else {
+                    bytes.write(b)
+                    decodedAny = true
+                }
+                i += 3
+            } else {
+                if (c.code >= 0x80) return null
+                bytes.write(c.code)
+                i++
+            }
+        }
+        if (!decodedAny) return null
+        return try {
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                .decode(java.nio.ByteBuffer.wrap(bytes.toByteArray()))
+                .toString()
+        } catch (_: java.nio.charset.CharacterCodingException) {
+            null
+        }
+    }
+
     private const val TEZ = ".tez"
+
+    /**
+     * How [name] may be *shown* (#465): a `.tez` name with a non-ASCII
+     * label `%XX`-escaped unless ENSIP-15 accepts it unchanged.
+     *
+     * Tezos Domains registers any IDNA2008 name ([tezosForm] never
+     * refuses), so `pаypal.tez` (Cyrillic а) is a real, resolvable name
+     * that reads exactly like `paypal.tez` — next to a Verified shield.
+     * ENS-family names don't need this: they only resolve once ENSIP-15
+     * has passed them, and ENSIP-15 refuses mixed scripts and whole-script
+     * confusables. For display only, a `.tez` name gets the same test:
+     * a name ENSIP-15 leaves as it is (U+FE0F aside, which [tezosForm]
+     * drops) is shown in Unicode (`café.tez`, `❤.tez`, `σοφος.tez`); any
+     * other — refused, or one ENSIP-15 would spell differently — shows
+     * each non-ASCII character as its UTF-8 `%XX` bytes
+     * (`p%D0%B0ypal.tez`), the way a browser shows a non-ASCII URL path.
+     *
+     * Not `xn--` Punycode, as Chromium shows a DNS host that fails its
+     * IDN spoof check (#490 R2-F1): in Tezos Domains the ASCII
+     * `xn--pypal-4ve.tez` is a separate name anyone can register, so
+     * that spelling would name — and send a reload, copy or bookmark
+     * to — someone else. A `%` is never part of a registrable label,
+     * and [tezosForm] reads the escapes back, so the shown form is still
+     * this name and no other.
+     *
+     * Fails closed: before [warm] has decoded the spec tables (never
+     * decoded here, on what is often the main thread) the name is shown
+     * escaped. Anything that isn't a non-ASCII `.tez` name comes back
+     * unchanged.
+     */
+    fun tezosDisplay(name: String): String {
+        if (name.all { it.code < 0x80 } || tezosForm(name) == null) return name
+        if (!isWarm) return escaped(name)
+        // Memoized (#490 R2-M2): the capsule asks again on every
+        // recomposition, and ENSIP-15 isn't free.
+        synchronized(shownCache) { shownCache[name] }?.let { return it }
+        val clean = try {
+            normalize(name).replace("\uFE0F", "") == name.replace("\uFE0F", "")
+        } catch (_: InvalidNameException) {
+            false
+        } catch (_: RuntimeException) {
+            false
+        }
+        val shown = if (clean) name else escaped(name)
+        synchronized(shownCache) { shownCache[name] = shown }
+        return shown
+    }
+
+    /** [tezosDisplay]'s answers once warm, the most recent [SHOWN_CACHE_SIZE]. */
+    private val shownCache = object : LinkedHashMap<String, String>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) =
+            size > SHOWN_CACHE_SIZE
+    }
+    private const val SHOWN_CACHE_SIZE = 64
+
+    /**
+     * Drop [tezosDisplay]'s memo (#490 R4-M2): it holds the names it was
+     * asked about, private tabs' included, so the private session's end
+     * clears it like the app's other in-memory traces of those tabs.
+     * Only a memo — the next ask works the answer out again.
+     */
+    fun forgetShown() {
+        synchronized(shownCache) { shownCache.clear() }
+    }
+
+    /** How many names [tezosDisplay]'s memo holds (for tests). */
+    internal val shownCount: Int get() = synchronized(shownCache) { shownCache.size }
+
+    /** [name] with each non-ASCII code point as its UTF-8 bytes, `%XX` (upper-case hex). */
+    private fun escaped(name: String): String = buildString {
+        var i = 0
+        while (i < name.length) {
+            val cp = name.codePointAt(i)
+            if (cp < 0x80) {
+                append(cp.toChar())
+            } else {
+                // A lone surrogate has no UTF-8; U+FFFD stands in for it.
+                val ch = if (cp in 0xD800..0xDFFF) "\uFFFD" else String(Character.toChars(cp))
+                for (b in ch.toByteArray(Charsets.UTF_8)) {
+                    append('%').append("%02X".format(b.toInt() and 0xFF))
+                }
+            }
+            i += Character.charCount(cp)
+        }
+    }
 
     /**
      * Desktop's `fastNormalize` (`src/main/ens-resolver.js`): a name that
@@ -111,8 +261,9 @@ object EnsNormalize {
     fun isFastPath(name: String): Boolean =
         pureAsciiHost.matches(name.lowercase()) || !appliesTo(name)
 
+    /** Set by [warm]; tests put it back to `false` to act out startup. */
     @Volatile
-    private var warmed = false
+    internal var warmed = false
 
     /** Have the spec tables been decoded ([warm] has returned)? */
     val isWarm: Boolean get() = warmed

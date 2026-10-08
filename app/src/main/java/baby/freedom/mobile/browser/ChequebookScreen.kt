@@ -42,7 +42,6 @@ import baby.freedom.swarm.NodeStatus
 import java.math.BigInteger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -50,7 +49,8 @@ import org.json.JSONObject
 /**
  * The chequebook as the light node's gateway reports it (#117): its
  * address and what it holds, and with [withWallet] the account's own
- * xBZZ, read every [pollMs] while [light], and again at once whenever
+ * xBZZ, read every [pollMs] while [light] and the app is in the
+ * foreground, and again at once whenever
  * [refresh] changes (a spend just ended). `/wallet` costs the gateway two
  * chain reads, so only the page that offers a deposit asks for it.
  */
@@ -61,9 +61,13 @@ internal fun rememberChequebookState(
     withWallet: Boolean = false,
     pollMs: Long = CHEQUEBOOK_POLL_MS,
 ): ChequebookState {
-    val state by produceState(ChequebookState(), light, refresh, withWallet, pollMs) {
-        if (!light) value = ChequebookState()
-        while (light) {
+    val lifecycle = currentLifecycle()
+    val state by produceState(ChequebookState(), light, refresh, withWallet, pollMs, lifecycle) {
+        if (!light) {
+            value = ChequebookState()
+            return@produceState
+        }
+        lifecycle.pollWhileStarted(pollMs) {
             val address = gatewayGet("/chequebook/address")?.let(::chequebookFrom)
             val funds = if (address.isNullOrEmpty()) null else gatewayGet("/chequebook/balance")?.let(::chequebookFundsFrom)
             val wallet = if (withWallet) gatewayGet("/wallet", WALLET_TIMEOUT_MS)?.let(::walletBzzFrom) else null
@@ -78,26 +82,29 @@ internal fun rememberChequebookState(
                 availableUpperBound = if (none) false else funds?.availableUpperBound ?: value.availableUpperBound,
                 ledgerLost = if (none) false else funds?.ledgerLost ?: value.ledgerLost,
             )
-            delay(pollMs)
         }
     }
     return state
 }
 
 /**
- * ant's `ant_swap_status` while the node runs, read every [SWAP_POLL_MS]
+ * ant's `ant_swap_status` while the node runs and the app is in the
+ * foreground, read every [SWAP_POLL_MS]
  * through `:node` (no network: ant answers from memory), and again at once
  * whenever [refresh] changes; null until the first answer. A failed read
  * keeps the last answer.
  */
 @Composable
 internal fun rememberSwapStatus(running: Boolean, refresh: Any = Unit): SwapStatus? {
-    val status by produceState<SwapStatus?>(null, running, refresh) {
-        if (!running) value = null
-        while (running) {
+    val lifecycle = currentLifecycle()
+    val status by produceState<SwapStatus?>(null, running, refresh, lifecycle) {
+        if (!running) {
+            value = null
+            return@produceState
+        }
+        lifecycle.pollWhileStarted(SWAP_POLL_MS) {
             val answer = withContext(Dispatchers.IO) { StampClient.call("swapStatus") }
             (answer as? StampClient.Answer.Ok)?.json?.let(::swapStatusFrom)?.let { value = it }
-            delay(SWAP_POLL_MS)
         }
     }
     return status

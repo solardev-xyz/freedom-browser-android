@@ -528,10 +528,12 @@ class SwarmProvider(
         // user allowed, like a publish (#236's scope). It need not spend new
         // postage — rewriting the same SOC identifier can reuse the chunk's
         // stamp slot — so a page with Signing on "always allow" can still hold
-        // the lock off by rewriting one SOC; that rule is the user's to revoke.
-        // A read "always allow" answers with no sheet and no write (the signing
-        // identity, an existing feed) doesn't count, or a page could keep the
-        // wallet open just by polling it.
+        // the lock off by rewriting one SOC. That disagrees with a site's
+        // eth_sendTransaction under an auto-approve rule, which doesn't count
+        // (#474, EthereumProviderBridge.submitAndWait); bringing sheetless Swarm
+        // writes into line is tracked in #508. A read "always allow" answers
+        // with no sheet and no write (the signing identity, an existing feed)
+        // doesn't count, or a page could keep the wallet open just by polling it.
         if (signed.writes && reply is Reply.Ok) publishers.noteActivity()
         return reply
     }
