@@ -23,8 +23,8 @@ android {
         applicationId = "baby.freedom.mobile"
         minSdk = 30
         targetSdk = 37
-        versionCode = 45
-        versionName = "0.6.28"
+        versionCode = 46
+        versionName = "0.6.29"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Filter-list update trust anchor overrides (#127), for a build
