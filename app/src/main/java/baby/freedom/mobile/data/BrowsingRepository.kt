@@ -167,6 +167,7 @@ class BrowsingRepository internal constructor(
             LocalMatches(
                 bookmarks = bookmarks.map { UrlSuggestion(it.url, it.title, UrlSuggestion.Source.BOOKMARK) },
                 pages = pages,
+                query = text,
             )
         }
     }

@@ -65,6 +65,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.data.LocalMatches
 import baby.freedom.mobile.data.UrlSuggestion
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
@@ -133,8 +134,8 @@ internal const val LOCAL_MATCHES_DEBOUNCE_MS = 100L
  * no newer one has come for [debounceMs] — typing "github" quickly runs
  * one database search, not six. A newer query cancels the older one's
  * flow, so its late results never show. While waiting, the previous
- * results stay; the browser ranks them against the text now typed
- * ([rankSuggestions]), which drops any that no longer match.
+ * results stay, but only the rows that still contain the text now typed
+ * ([stillMatching]).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal fun <T> debouncedLookup(
@@ -149,6 +150,30 @@ internal fun <T> debouncedLookup(
             if (i > 0) delay(debounceMs)
             emitAll(lookup(query))
         }
+
+/**
+ * [matches], looked up for an earlier text while the lookup for [query]
+ * waits out the debounce (#473 R1-F1), cut down to the rows the database
+ * would also return for [query]: those whose URL or title contains it
+ * (the `LIKE '%q%'` of [BrowsingRepository.suggestionMatches]).
+ * [rankSuggestions] counts every database row as at least a
+ * [MatchStrength.CONTAINS] match, so a row left in from "g" would
+ * otherwise be offered under "github". Rows for the current text pass
+ * through untouched. Typing more thus shows a correct subset at once;
+ * deleting characters can show fewer rows than it should until the new
+ * lookup lands.
+ */
+internal fun stillMatching(matches: LocalMatches, query: String): LocalMatches {
+    val text = query.trim()
+    if (matches.query == text) return matches
+    fun has(url: String, title: String) =
+        url.contains(text, ignoreCase = true) || title.contains(text, ignoreCase = true)
+    return LocalMatches(
+        bookmarks = matches.bookmarks.filter { has(it.url, it.title) },
+        pages = matches.pages.filter { has(it.url, it.title) },
+        query = matches.query,
+    )
+}
 
 /**
  * Opaque panel that overlays the WebView while the address bar is
@@ -184,7 +209,8 @@ internal fun SuggestionsPanel(
     // fresh results if the underlying tables change too.
     val latestQuery by rememberUpdatedState(query)
     val matchesFlow = remember(repo) { debouncedLookup(snapshotFlow { latestQuery }) { repo.suggestionMatches(it) } }
-    val matches by matchesFlow.collectAsState(initial = null)
+    val answered by matchesFlow.collectAsState(initial = null)
+    val matches = remember(answered, query) { answered?.let { stillMatching(it, query) } }
     val history = remember(matches) {
         matches?.pages.orEmpty().map { HistoryCandidate(it.url, it.title, it.visits, it.lastVisit) }
     }
