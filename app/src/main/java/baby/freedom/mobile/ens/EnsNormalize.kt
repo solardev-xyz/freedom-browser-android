@@ -2,6 +2,7 @@ package baby.freedom.mobile.ens
 
 import baby.freedom.mobile.R
 import baby.freedom.mobile.browser.BidiControls
+import baby.freedom.mobile.browser.Punycode
 import baby.freedom.mobile.browser.WhatwgHost
 import baby.freedom.mobile.l10n.Strings
 import io.github.adraffy.ens.ENSNormalize
@@ -79,10 +80,24 @@ object EnsNormalize {
      * with a character UTS-46 disallows outright stays lowercased as
      * typed (less any U+FE0F) — either way the registry answers "not
      * found".
+     *
+     * An `xn--` label is ToUnicode'd too, as the registry's rule has it:
+     * `xn--pypal-4ve.tez` is `pаypal.tez`. That is the form [tezosDisplay]
+     * shows a lookalike name in, so the address bar's text reloads, edits
+     * and copies as the same name.
      */
     fun tezosForm(name: String): String? {
         val lower = name.lowercase()
-        if (lower.all { it.code < 0x80 }) return lower.takeIf { it.endsWith(TEZ) }
+        if (lower.all { it.code < 0x80 }) {
+            if (!lower.endsWith(TEZ)) return null
+            if (lower.split('.').none { it.startsWith("xn--") }) return lower
+            val mapped = try {
+                WhatwgHost.uts46.map(lower)
+            } catch (_: RuntimeException) {
+                null
+            }
+            return mapped?.takeIf { it.endsWith(TEZ) } ?: lower
+        }
         val mapped = try {
             WhatwgHost.uts46.map(name)
         } catch (_: RuntimeException) {
@@ -93,6 +108,43 @@ object EnsNormalize {
     }
 
     private const val TEZ = ".tez"
+
+    /**
+     * How [name] may be *shown* (#465): a `.tez` name with a non-ASCII
+     * label in `xn--` Punycode unless ENSIP-15 accepts it unchanged.
+     *
+     * Tezos Domains registers any IDNA2008 name ([tezosForm] never
+     * refuses), so `pаypal.tez` (Cyrillic а) is a real, resolvable name
+     * that reads exactly like `paypal.tez` — next to a Verified shield.
+     * ENS-family names don't need this: they only resolve once ENSIP-15
+     * has passed them, and ENSIP-15 refuses mixed scripts and whole-script
+     * confusables. For display only, a `.tez` name gets the same test:
+     * a name ENSIP-15 leaves as it is (U+FE0F aside, which [tezosForm]
+     * drops) is shown in Unicode (`café.tez`, `❤.tez`, `σοφος.tez`); any
+     * other — refused, or one ENSIP-15 would spell differently — shows
+     * its non-ASCII labels as `xn--`, the way Chromium shows a DNS host
+     * that fails its IDN spoof check. [tezosForm] maps that back, so
+     * the shown form is still the name.
+     *
+     * Fails closed: before [warm] has decoded the spec tables (never
+     * decoded here, on what is often the main thread) the name is shown
+     * as Punycode. Anything that isn't a non-ASCII `.tez` name comes back
+     * unchanged.
+     */
+    fun tezosDisplay(name: String): String {
+        if (name.all { it.code < 0x80 } || tezosForm(name) == null) return name
+        val clean = isWarm && try {
+            normalize(name).replace("\uFE0F", "") == name.replace("\uFE0F", "")
+        } catch (_: InvalidNameException) {
+            false
+        } catch (_: RuntimeException) {
+            false
+        }
+        if (clean) return name
+        return name.split('.').joinToString(".") { label ->
+            if (label.all { it.code < 0x80 }) label else "xn--" + Punycode.encode(label)
+        }
+    }
 
     /**
      * Desktop's `fastNormalize` (`src/main/ens-resolver.js`): a name that

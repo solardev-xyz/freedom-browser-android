@@ -1393,7 +1393,7 @@ fun BrowserScreen(
             // resolve as a relative path.
             val displayPrefix =
                 if (requiredProtocol != null) "$requiredProtocol://$name" else name
-            val ensDisplay = "$displayPrefix$suffix"
+            val ensDisplay = DisplayUrl.shownName("$displayPrefix$suffix")
             val retryDisplay =
                 if (requiredProtocol != null) ensDisplay else "ens://$name$suffix"
             // Only a destination the *user* named earns the pill before

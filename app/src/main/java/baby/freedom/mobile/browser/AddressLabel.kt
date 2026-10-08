@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ens.EnsNormalize
 import baby.freedom.mobile.ens.NameSystem
 
 /**
@@ -117,7 +118,9 @@ object AddressLabel {
      */
     private fun hostLabel(host: String): String {
         val h = hostOnly(host).lowercase().trimEnd('.')
-        if (h.substringAfterLast('.', "") in ENS_TLDS) return h
+        // A lookalike `.tez` name rests as `xn--` (#465), whatever
+        // string the bar was handed.
+        if (h.substringAfterLast('.', "") in ENS_TLDS) return EnsNormalize.tezosDisplay(h)
         return registrableHost(h)
     }
 
