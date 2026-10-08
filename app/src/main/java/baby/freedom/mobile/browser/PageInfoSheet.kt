@@ -258,7 +258,6 @@ internal data class SiteDataCount(val cookies: Int, val bytes: Long?)
 internal fun cookieEntries(header: String?): List<String> =
     header.orEmpty().split(';').map { it.trim() }.filter { it.isNotEmpty() }
 
-/** "3 cookies · 1.2 MB stored", "No cookies", or "Counting…" while [count] is null. */
 /**
  * How Page info names [origin]'s data when it's a content gateway's own
  * origin on the device ([isLoopbackGatewayOrigin]), shared by every root
@@ -268,6 +267,7 @@ internal fun cookieEntries(header: String?): List<String> =
 internal fun siteDataGatewayLabel(origin: String?): String? =
     origin?.takeIf(::isLoopbackGatewayOrigin)?.substringAfter("://")
 
+/** "3 cookies · 1.2 MB stored", "No cookies", or "Counting…" while [count] is null. */
 internal fun siteDataLine(count: SiteDataCount?, formatBytes: (Long) -> String): String {
     count ?: return Strings.get(R.string.page_info_site_data_counting)
     val cookies = if (count.cookies == 0) {
