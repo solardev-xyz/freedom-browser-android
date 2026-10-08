@@ -193,8 +193,12 @@ class NodeService : Service() {
      */
     private val callbacks = RemoteCallbackList<INodeCallback>()
 
+    /** The Swarm state as last broadcast, which [binder] hands out too. */
+    private val swarmBroadcast = LastBroadcast { reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value) }
+
     private val binder = object : INodeService.Stub() {
-        override fun getState(): NodeInfo = reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)
+        // What the throttled broadcast last sent, not the live count (#471).
+        override fun getState(): NodeInfo = swarmBroadcast.current()
 
         override fun getIpfsState(): IpfsInfo = ipfsNode?.state?.value ?: IpfsInfo()
 
@@ -213,8 +217,7 @@ class NodeService : Service() {
 
         override fun registerCallback(cb: INodeCallback?) {
             cb ?: return
-            callbacks.register(cb)
-            runCatching { cb.onStateChanged(reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)) }
+            swarmBroadcast.join({ callbacks.register(cb) }) { runCatching { cb.onStateChanged(it) } }
             runCatching { cb.onIpfsStateChanged(ipfsNode?.state?.value ?: IpfsInfo()) }
             runCatching { cb.onRadicleStateChanged(radicleNode.state.value) }
         }
@@ -855,7 +858,7 @@ class NodeService : Service() {
         swarmObserver = scope.launch {
             swarmReported.throttlePeerCount(PEER_BROADCAST_MS)
                 .onEach { info ->
-                    broadcastState(info)
+                    swarmBroadcast.publish(info, ::broadcastState)
                     Log.i(TAG, "swarm → ${info.status}  peers=${info.connectedPeers}")
                 }
                 .launchIn(this)
