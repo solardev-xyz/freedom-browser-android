@@ -95,8 +95,11 @@ class OpenLvSession internal constructor(
         suspend fun signPersonal(account: WalletAccount, message: ByteArray): String =
             withContext(Dispatchers.Default) { withKey(account) { key -> MessageSigning.sign(key, account.address, MessageSigning.personalDigest(message)) } }
 
-        /** `eth_signTypedData_v4` of [data], whose EIP-712 digest is [digest]: as [signPersonal]. */
-        suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray): String =
+        /**
+         * `eth_signTypedData_v4` of [data], whose EIP-712 digest is [digest]: as [signPersonal].
+         * [ledgerHashes]: the hashes the approved sheet showed, which a Ledger may sign by instead (#239, #476).
+         */
+        suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray, ledgerHashes: LedgerTypedDataHashes? = null): String =
             withContext(Dispatchers.Default) { withKey(account) { key -> MessageSigning.sign(key, account.address, digest) } }
 
         /**
@@ -405,11 +408,22 @@ class OpenLvSession internal constructor(
         val ledgerHashes = if (account.isLedger) withContext(Dispatchers.Default) { LedgerApdus.blindHashes(typed) } else null
         val domainChain = typed.chainId
         val chain = domainChain?.takeIf { it.bitLength() < 63 }?.toLong()?.let { id -> chains().firstOrNull { it.id == id } }
-        val request = Request.TypedData(account, typed.primaryType, lines.first, lines.second, domainChain, chain, ledgerHashes)
-        return when (ask(sid, request)) {
-            Decision.Reject -> REJECTED
-            is Decision.Approve -> signed { keys.signTypedData(account, typed, digest) }
+        fun request(hashes: LedgerTypedDataHashes?) = Request.TypedData(account, typed.primaryType, lines.first, lines.second, domainChain, chain, hashes)
+        if (ask(sid, request(ledgerHashes)) == Decision.Reject) return REJECTED
+        var hashesOnly: LedgerTypedDataHashes? = null
+        val response = signed {
+            try {
+                keys.signTypedData(account, typed, digest, ledgerHashes)
+            } catch (e: LedgerException) {
+                // An Ethereum app too old to show it field by field signs only hashes the sheet didn't show (#476).
+                hashesOnly = e.hashesOnly?.takeIf { ledgerHashes == null } ?: throw e
+                ""
+            }
         }
+        val hashes = hashesOnly ?: return response
+        // Shown now, and asked again: the Ledger's screen is checked against them (#239).
+        if (ask(sid, request(hashes)) == Decision.Reject) return REJECTED
+        return signed { keys.signTypedData(account, typed, digest, hashes) }
     }
 
     private suspend fun sendTransaction(sid: Int, params: JSONArray): OpenLvResponse {
@@ -624,8 +638,8 @@ internal class VaultKeys(private val vault: Vault, private val accounts: WalletA
     override suspend fun signPersonal(account: WalletAccount, message: ByteArray): String =
         if (account.isLedger) ledger.signPersonal(account, message) else super.signPersonal(account, message)
 
-    override suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray): String =
-        if (account.isLedger) ledger.signTypedData(account, data, digest) else super.signTypedData(account, data, digest)
+    override suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray, ledgerHashes: LedgerTypedDataHashes?): String =
+        if (account.isLedger) ledger.signTypedData(account, data, digest, ledgerHashes) else super.signTypedData(account, data, digest, ledgerHashes)
 
     override fun transactionSigner(account: WalletAccount, fresh: () -> Boolean): suspend (EthTransaction) -> EthTransaction.Signed =
         if (account.isLedger) { t -> ledger.signTransaction(account, t, fresh) } else super.transactionSigner(account, fresh)

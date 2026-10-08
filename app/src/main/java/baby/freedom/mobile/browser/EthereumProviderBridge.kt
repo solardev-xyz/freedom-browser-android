@@ -27,6 +27,7 @@ import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.Eip712
 import baby.freedom.mobile.wallet.ledger.Ledger
+import baby.freedom.mobile.wallet.ledger.LedgerTypedDataHashes
 import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.WalletSender
 import java.io.IOException
@@ -187,8 +188,8 @@ object EthereumProviders {
                 override suspend fun signMessage(account: WalletAccount, message: ByteArray) =
                     if (account.isLedger) ledger.signPersonal(account, message)
                     else MessageSigning.sign(vault, account, MessageSigning.personalDigest(message))
-                override suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray) =
-                    if (account.isLedger) ledger.signTypedData(account, data, digest)
+                override suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray, ledgerHashes: LedgerTypedDataHashes?) =
+                    if (account.isLedger) ledger.signTypedData(account, data, digest, ledgerHashes)
                     else MessageSigning.sign(vault, account, digest)
             },
             chains = { chainStore.chainsOrUnreadable.first() ?: throw IOException("chain list unreadable") },
