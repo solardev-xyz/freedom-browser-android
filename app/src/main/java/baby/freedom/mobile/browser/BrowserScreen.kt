@@ -3465,6 +3465,7 @@ fun BrowserScreen(
             onToggleAdblock = toggleAdblock,
             siteDataOrigin = dataOrigin,
             siteDataUrl = dataUrl,
+            siteDataGateway = siteDataGatewayLabel(dataOrigin),
             onDeleteSiteData = {
                 if (dataOrigin != null && dataUrl != null) {
                     val tab = state

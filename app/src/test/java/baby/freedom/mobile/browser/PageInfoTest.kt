@@ -563,4 +563,22 @@ class PageInfoTest {
         assertFalse("location.replace" in html)
         assertTrue("location.replace(location.href)" in SITE_DATA_CLEANUP_HTML)
     }
+
+    @Test
+    fun `a content gateway's own origin is named as the gateway, any other site as itself`() {
+        // #457 R6-M1: Delete on a raw gateway page clears data every root loaded
+        // through the gateway shares, so the sheet names the gateway, not the root.
+        try {
+            Gateways.setIpfsBase("")
+            Gateways.setExternalEndpoints("", "")
+            assertEquals("127.0.0.1:1633", siteDataGatewayLabel("http://127.0.0.1:1633"))
+            assertEquals("localhost:1633", siteDataGatewayLabel("http://localhost:1633"))
+            assertNull(siteDataGatewayLabel("http://127.0.0.1:8700"))
+            assertNull(siteDataGatewayLabel("https://example.org"))
+            assertNull(siteDataGatewayLabel(null))
+        } finally {
+            Gateways.setIpfsBase("")
+            Gateways.setExternalEndpoints("", "")
+        }
+    }
 }
