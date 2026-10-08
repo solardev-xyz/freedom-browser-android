@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Single choke-point for reads/writes to [AppDatabase]. Owns a private
@@ -48,6 +49,9 @@ class BrowsingRepository internal constructor(
      * can't bring the site back after Delete browsing data.
      */
     fun historyTicket(): Long = historyGate.ticket()
+
+    /** Keeps an icon from landing over one reported after it (#516 R1-F2). */
+    private val faviconOrder = FaviconWriteOrder()
 
     init {
         // One-time cleanup for installs that predate [isRecordable]
@@ -327,11 +331,19 @@ class BrowsingRepository internal constructor(
      * lists every site visited and when, so it is history too. A
      * bookmarked site keeps its icon, without the time. A visit or icon
      * asked for before this call and not yet written is dropped, not
-     * written after it ([HistoryWriteGate], #480 R1-M1).
+     * written after it ([HistoryWriteGate], #480 R1-M1). [onDone] runs
+     * once the rows are gone (on a background thread), for in-memory
+     * copies the UI keeps of them (#516 R1-M2).
      */
-    fun deleteHistorySince(since: Long) {
+    fun deleteHistorySince(since: Long, onDone: () -> Unit = {}) {
         historyGate.revoke()
-        scope.launch { historyGate.forget { forgetHistorySince(since) } }
+        scope.launch {
+            try {
+                historyGate.forget { forgetHistorySince(since) }
+            } finally {
+                onDone()
+            }
+        }
     }
 
     private suspend fun forgetHistorySince(since: Long) {
@@ -408,22 +420,51 @@ class BrowsingRepository internal constructor(
      */
     fun storeFavicon(pageUrl: String, data: ByteArray, ticket: Long = historyTicket()) {
         if (data.isEmpty()) return
+        storeFavicon(pageUrl, ticket) { data }
+    }
+
+    /**
+     * As above, with the PNG made by [encode] on [Dispatchers.Default]
+     * rather than on the caller's thread (#482): the WebView hands its
+     * icon over on the main thread, and a full-quality PNG encode there
+     * costs a frame on every page load. [encode] returning null or an
+     * empty array stores nothing.
+     *
+     * Encodes for one origin can finish in any order (a big icon takes
+     * longer than the small one a page swaps in right after it), so the
+     * call is numbered here, in the order the WebView reported the icons,
+     * and a write older than one already stored for its origin is dropped
+     * (#516 R1-F2).
+     */
+    fun storeFavicon(pageUrl: String, ticket: Long, encode: () -> ByteArray?) {
+        val seq = faviconOrder.next()
         scope.launch {
-            // Keyed on the settled spelling, as history rows are
-            // (#490 R3-M3): a `café.tez` page shown `caf%C3%A9.tez`
-            // before warm-up must still file its icon under the name its
-            // history row carries. settledName may decode the ENSIP-15
-            // tables, so off the main thread.
-            val origin = FaviconOrigin.from(DisplayUrl.settledName(pageUrl)) ?: return@launch
-            // Not for a page loaded before a history delete (#480 R1-M1).
-            historyGate.write(ticket) {
-                db.favicons().upsert(
-                    FaviconEntry(
-                        origin = origin,
-                        data = data,
-                        updatedAt = System.currentTimeMillis(),
-                    ),
-                )
+            try {
+                // Keyed on the settled spelling, as history rows are
+                // (#490 R3-M3): a `café.tez` page shown `caf%C3%A9.tez`
+                // before warm-up must still file its icon under the name its
+                // history row carries. settledName may decode the ENSIP-15
+                // tables, so off the main thread.
+                val origin = FaviconOrigin.from(DisplayUrl.settledName(pageUrl)) ?: return@launch
+                val data = withContext(Dispatchers.Default) { encode() }
+                if (data == null || data.isEmpty()) return@launch
+                // Not for a page loaded before a history delete (#480 R1-M1).
+                historyGate.write(ticket) {
+                    if (!faviconOrder.admit(origin, seq)) return@write
+                    db.withTransaction {
+                        storeFaviconRow(
+                            db.favicons(),
+                            FaviconEntry(
+                                origin = origin,
+                                data = data,
+                                updatedAt = System.currentTimeMillis(),
+                            ),
+                        )
+                    }
+                }
+            } finally {
+                // Nothing left racing it: the per-origin order can go (#516 R1-M1).
+                faviconOrder.done()
             }
         }
     }
@@ -431,8 +472,9 @@ class BrowsingRepository internal constructor(
     /**
      * Stream the favicon bytes for the given URL's origin. Emits
      * `null` until something is cached (and again if the row is ever
-     * evicted). Caller is responsible for decoding — see
-     * `HomeScreen.kt` for a Compose-side remember/decode pattern.
+     * evicted), and again only when the stored bytes actually change
+     * (#482). Caller is responsible for decoding, off the main thread —
+     * see `rememberFavicon` in `HomeScreen.kt`.
      */
     fun favicon(pageUrl: String): Flow<ByteArray?> {
         // Settled like [storeFavicon]'s key (#490 R3-M3), so a page read
@@ -441,7 +483,7 @@ class BrowsingRepository internal constructor(
         return flow {
             val origin = FaviconOrigin.from(DisplayUrl.settledName(pageUrl))
             if (origin == null) emit(null) else emitAll(db.favicons().get(origin))
-        }.flowOn(Dispatchers.IO)
+        }.distinctIcons().flowOn(Dispatchers.IO)
     }
 
     fun clearFavicons() {

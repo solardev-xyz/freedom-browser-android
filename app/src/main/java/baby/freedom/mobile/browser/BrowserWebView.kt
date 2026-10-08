@@ -1422,10 +1422,13 @@ fun BrowserWebViewHost(
         // On the application, not the Activity, and taken off again
         // below so a finished screen's tabs aren't kept reachable.
         val trimCallbacks = object : ComponentCallbacks2 {
-            override fun onTrimMemory(level: Int) = tabs.trimMemory(level)
+            override fun onTrimMemory(level: Int) {
+                tabs.trimMemory(level)
+                FaviconImages.trimMemory(level)
+            }
             override fun onConfigurationChanged(newConfig: Configuration) = Unit
             @Deprecated("Deprecated in Java")
-            override fun onLowMemory() = tabs.trimMemory(ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
+            override fun onLowMemory() = onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
         }
         context.applicationContext.registerComponentCallbacks(trimCallbacks)
         // Abort whatever the given tab is loading. Chromium answers a
@@ -4607,8 +4610,8 @@ private fun buildRefreshableWebView(
                 // Nor anything from a private tab (#86): the favicon
                 // cache is a list of sites visited.
                 if (state.private) return
-                val bytes = encodePngBytes(icon) ?: return
-                repo.storeFavicon(display, bytes, lastLoadedTicket)
+                // Encoded off the main thread (#482).
+                repo.storeFavicon(display, lastLoadedTicket) { encodePngBytes(icon) }
             }
         }
     }

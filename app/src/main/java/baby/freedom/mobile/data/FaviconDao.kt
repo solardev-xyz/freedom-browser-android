@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 @Dao
 interface FaviconDao {
@@ -21,6 +22,10 @@ interface FaviconDao {
      */
     @Query("SELECT data FROM favicons WHERE origin = :origin LIMIT 1")
     fun get(origin: String): Flow<ByteArray?>
+
+    /** The stored PNG bytes for [origin], read once (null when none). */
+    @Query("SELECT data FROM favicons WHERE origin = :origin LIMIT 1")
+    suspend fun dataOnce(origin: String): ByteArray?
 
     @Query("DELETE FROM favicons")
     suspend fun clear()
@@ -39,6 +44,79 @@ interface FaviconDao {
     /** Say [origin]'s icon was last seen at [at] (epoch ms), its latest visit still in history (#480 R3-M1). */
     @Query("UPDATE favicons SET updatedAt = :at WHERE origin = :origin")
     suspend fun restamp(origin: String, at: Long)
+}
+
+/**
+ * Store [entry], but leave the bytes alone when they're the icon already
+ * on file (#482): a site sends the same favicon on every load, and
+ * rewriting the blob each time wakes every [FaviconDao.get] reader for
+ * nothing. Only the time moves then, so a later Delete browsing data
+ * still sees the visit ([faviconsToForget]). Run it in a transaction.
+ */
+internal suspend fun storeFaviconRow(dao: FaviconDao, entry: FaviconEntry) {
+    val stored = dao.dataOnce(entry.origin)
+    if (stored != null && stored.contentEquals(entry.data)) {
+        dao.restamp(entry.origin, entry.updatedAt)
+    } else {
+        dao.upsert(entry)
+    }
+}
+
+/**
+ * Room re-runs [FaviconDao.get] on any write to the table, and hands back
+ * a new array each time even when the icon is the same (#482): pass on
+ * only an actual change, compared by content, so a row decodes its icon
+ * once rather than on every other site's visit.
+ */
+internal fun Flow<ByteArray?>.distinctIcons(): Flow<ByteArray?> =
+    distinctUntilChanged { old, new -> old contentEquals new }
+
+/**
+ * Numbers favicon writes in the order they were asked for, so one whose
+ * encode finished late can't overwrite a newer icon for the same origin
+ * (#516 R1-F2). [next] is taken on the caller's thread, when the WebView
+ * reports the icon; [admit] is asked just before the write, under the
+ * repository's write gate; [done] once that write has landed or been
+ * dropped, whatever the way.
+ *
+ * The per-origin record only matters while a write is still on its way,
+ * so it is emptied whenever none is (#516 R1-M1): it never grows into a
+ * list of every site visited this session, and none of it outlives
+ * Delete browsing data. That can't let an old write through — every
+ * number handed out later is bigger than any recorded.
+ */
+internal class FaviconWriteOrder {
+    private var counter = 0L
+    private var inFlight = 0
+    private val latest = HashMap<String, Long>()
+
+    @Synchronized
+    fun next(): Long {
+        inFlight++
+        return ++counter
+    }
+
+    /** Whether write [seq] for [origin] is newer than every one let through for it; records it if so. */
+    @Synchronized
+    fun admit(origin: String, seq: Long): Boolean {
+        val newest = latest[origin]
+        if (newest != null && newest > seq) return false
+        latest[origin] = seq
+        return true
+    }
+
+    /** A write numbered by [next] is over (stored, dropped or failed). */
+    @Synchronized
+    fun done() {
+        if (--inFlight <= 0) {
+            inFlight = 0
+            latest.clear()
+        }
+    }
+
+    /** How many origins are on record, for tests. */
+    @get:Synchronized
+    internal val tracked: Int get() = latest.size
 }
 
 /** A favicon row without its bytes: which origin, stored when. */

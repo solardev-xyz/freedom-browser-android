@@ -184,7 +184,8 @@ internal fun afterDeleteBrowsingData(
  * Delete what [choice] names: history in its range from [repo] here, and
  * the Swarm node's cache, all of it whatever the range
  * ([SwarmCache.clearInBackground]: pinned content stays; a failure gets
- * its own toast after the "deleted" one); the rest —
+ * its own toast after the "deleted" one), and with history the decoded
+ * favicons held in memory ([FaviconImages], #516 R1-M2); the rest —
  * closed tabs, WebView state, node logs — through [onDelete], the
  * host's, which owns the tabs and WebViews.
  */
@@ -194,7 +195,13 @@ internal fun deleteBrowsingData(
     repo: BrowsingRepository,
     now: Long,
     onDelete: (DeleteChoice) -> Unit,
-) = deleteBrowsingData(choice, repo::deleteHistorySince, { SwarmCache.clearInBackground(context) }, now, onDelete)
+) = deleteBrowsingData(
+    choice,
+    { since -> repo.deleteHistorySince(since, onDone = FaviconImages::clear) },
+    { SwarmCache.clearInBackground(context) },
+    now,
+    onDelete,
+)
 
 /** [deleteBrowsingData] over its two stores, for tests. */
 internal fun deleteBrowsingData(
